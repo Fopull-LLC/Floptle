@@ -99,7 +99,9 @@ pub(crate) use api::install_handle_api;
 /// it to auto-key changed properties.
 pub use api::{apply_component_field, apply_component_field_str, mirror_components};
 pub use input_api::{SharedDomain, SharedInput};
-pub use net_api::{input_to_net, net_aim, net_to_input, NetCmd, NetRoleState, NetState, RewindScope};
+pub use net_api::{
+    input_to_net, net_aim, net_to_input, NetCmd, NetRoleState, NetState, RewindScope, RollbackInfo,
+};
 pub use assembly_api::{AssemblyCmd, AssemblyImpact, AssemblyInfo};
 pub use space_api::{SpaceBodyInfo, SpaceInfo};
 pub use terrain_api::{TerrainOp, TerrainOpMode};
@@ -3420,6 +3422,82 @@ end
             "the render transform must be left exactly alone"
         );
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    }
+
+    /// `net.random()` (`docs/rollback-netcode-design.md` §3): identical on
+    /// every peer for a tick, identical again when that tick is re-simulated.
+    ///
+    /// The second half is the one a hand-rolled `rng(matchSeed + tick)` gets
+    /// wrong — it re-seeds per tick but not per *draw*, so two calls in one tick
+    /// return the same number, and authors work around that by adding state
+    /// that then has to be rolled back too.
+    #[test]
+    fn net_random_is_identical_per_tick_and_across_a_replay() {
+        let dir = std::env::temp_dir().join("floptle_script_test_net_random");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "roller",
+            "rolls = {}\n\
+             function fixedUpdate(node, dt)\n\
+               rolls[#rolls + 1] = net.random()\n\
+               rolls[#rolls + 1] = net.random()\n\
+               rolls[#rolls + 1] = net.random(1, 6)\n\
+             end\n\
+             function snapshot() return { n = #rolls } end\n\
+             function restore(s) while #rolls > s.n do table.remove(rolls) end end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "roller".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        let info = |tick: u64| RollbackInfo {
+            active: true,
+            tick,
+            seed: 0x0BAD_F00D_1234_5678,
+            ..Default::default()
+        };
+        let read = |h: &ScriptHost| -> Vec<f64> {
+            h.instance_env(e.index(), "roller")
+                .unwrap()
+                .get::<mlua::Table>("rolls")
+                .unwrap()
+                .sequence_values::<f64>()
+                .flatten()
+                .collect()
+        };
+
+        for tick in 1..=3u64 {
+            host.set_rollback_info(info(tick));
+            host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+        }
+        let live = read(&host);
+        assert_eq!(live.len(), 9);
+        assert_ne!(live[0], live[1], "two draws in one tick must differ");
+        assert_ne!(live[0], live[3], "and two ticks must differ");
+        assert!(live.iter().take(2).all(|v| (0.0..1.0).contains(v)), "unit range");
+        assert!(live[2] >= 1.0 && live[2] <= 6.0 && live[2].fract() == 0.0, "a d6: {}", live[2]);
+
+        // Re-simulate ticks 2..=3 — as a correction would. The script keeps
+        // appending, so the replay's draws land after the live ones and the two
+        // stretches can be compared directly.
+        for tick in 2..=3u64 {
+            host.set_rollback_info(info(tick));
+            host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+        }
+        let replayed = read(&host);
+        assert_eq!(&replayed[9..], &live[3..], "a replayed tick must roll the same numbers");
     }
 
     /// A node with no rigidbody has no tick channel, and saying so beats a

@@ -119,10 +119,16 @@ pub struct RollbackDriver {
     pub stalled: bool,
     /// The newest tick a checksum has been published for (§6).
     last_checksum: u64,
+    /// The match's RNG seed (§3), host-chosen and identical on every peer.
+    seed: u64,
     /// Diagnostics: ticks re-simulated since the session started. Divided by
     /// `net.corrections` it is the average rollback depth a player actually
     /// felt.
     pub resimulated_ticks: u64,
+    /// A desync has been reported for this session. Sticky: once two peers
+    /// have disagreed, everything after it is suspect, and a readout that
+    /// flicked back to green would be a lie.
+    pub desynced: bool,
     /// Problems that must reach the Console rather than being swallowed — a
     /// correction reaching past the ring, an input snapshot that no longer
     /// fits, a `Rollback` node with no rollback hooks. Drained by the driver's
@@ -132,15 +138,18 @@ pub struct RollbackDriver {
 
 impl RollbackDriver {
     /// A session where `peers` (including `local`) play in slot order, applying
-    /// local input `delay` ticks after it is sampled.
-    pub fn new(local: PeerId, peers: Vec<PeerId>, delay: u8) -> Self {
+    /// local input `delay` ticks after it is sampled. `seed` is the host's match
+    /// seed — what `net.random()` draws from (§3).
+    pub fn new(local: PeerId, peers: Vec<PeerId>, delay: u8, seed: u64) -> Self {
         Self {
+            seed,
             slots: peers.clone(),
             net: Rollback::new(local, peers, delay),
             nodes: Vec::new(),
             ring: VecDeque::new(),
             pending: None,
             stalled: false,
+            desynced: false,
             last_checksum: 0,
             resimulated_ticks: 0,
             faults: Vec::new(),
@@ -160,6 +169,11 @@ impl RollbackDriver {
     /// How deep the ring currently reaches, in ticks. Diagnostics.
     pub fn ring_depth(&self) -> usize {
         self.ring.len()
+    }
+
+    /// The newest confirmed tick this peer has published a checksum for (§6).
+    pub fn last_checksum(&self) -> u64 {
+        self.last_checksum
     }
 
     /// Roughly how much the state ring occupies, in bytes — so "why is this
@@ -302,8 +316,9 @@ impl RollbackDriver {
     /// Called on `Msg::RollbackStart`, which every peer receives — that shared
     /// moment is what gives the session a shared tick origin, and it is why v1
     /// does not support joining a rollback match in progress.
-    pub fn restart(&mut self, local: PeerId, peers: Vec<PeerId>, delay: u8) {
+    pub fn restart(&mut self, local: PeerId, peers: Vec<PeerId>, delay: u8, seed: u64) {
         let max_depth = self.net.max_depth;
+        self.seed = seed;
         self.slots = peers.clone();
         self.net = Rollback::new(local, peers, delay);
         self.net.max_depth = max_depth;
@@ -432,6 +447,24 @@ impl RollbackDriver {
     /// live and the replay loop runs it again. Two paths would have to agree by
     /// coincidence; one path agrees by construction.
     fn simulate_tick(&mut self, ctx: &mut Ctx, tick: u64, resolved: &[ResolvedInput]) {
+        // Diagnostics + the deterministic RNG seed, before any hook runs. The
+        // draw counter resets with it, which is what makes a replayed tick
+        // draw exactly the numbers the live tick drew (§3).
+        ctx.host.set_rollback_info(floptle_script::RollbackInfo {
+            active: true,
+            tick,
+            seed: self.seed,
+            depth: self.net.last_depth,
+            max_depth: self.net.max_depth_seen,
+            average_depth: if self.net.corrections == 0 {
+                0.0
+            } else {
+                self.resimulated_ticks as f32 / self.net.corrections as f32
+            },
+            mispredict_rate: self.net.mispredict_rate(),
+            input_delay: self.net.delay(),
+            stalled: self.stalled,
+        });
         let sys = ctx.host.input_system().clone();
         let action_count = sys.borrow().map().actions.len();
         // Every peer's input lands in its own slot, once, before any hook runs
@@ -841,7 +874,7 @@ end\n";
 
         // --- the uninterrupted run -----------------------------------------
         let mut clean = Fixture::new("clean");
-        let mut a = RollbackDriver::new(P1, vec![P1, P2], 0);
+        let mut a = RollbackDriver::new(P1, vec![P1, P2], 0, 0);
         a.rebind(&clean.world, &mut clean.sim, &clean.host);
         for (t, p1, p2) in &script {
             a.add_local(*t, p1.clone());
@@ -853,7 +886,7 @@ end\n";
 
         // --- the mispredicted run ------------------------------------------
         let mut rolled = Fixture::new("rolled");
-        let mut b = RollbackDriver::new(P1, vec![P1, P2], 0);
+        let mut b = RollbackDriver::new(P1, vec![P1, P2], 0, 0);
         b.rebind(&rolled.world, &mut rolled.sim, &rolled.host);
         // P2's inputs for ticks 5..=9 are withheld and delivered only after tick
         // 9 has been simulated — right across the tick where P2 throws a punch,
@@ -896,7 +929,7 @@ end\n";
     fn two_corrections_over_the_same_span_still_land_on_the_clean_result() {
         let script = script_of_the_match();
         let mut clean = Fixture::new("clean2");
-        let mut a = RollbackDriver::new(P1, vec![P1, P2], 0);
+        let mut a = RollbackDriver::new(P1, vec![P1, P2], 0, 0);
         a.rebind(&clean.world, &mut clean.sim, &clean.host);
         for (t, p1, p2) in &script {
             a.add_local(*t, p1.clone());
@@ -906,7 +939,7 @@ end\n";
         let expected = clean.fingerprint(&a);
 
         let mut rolled = Fixture::new("rolled2");
-        let mut b = RollbackDriver::new(P1, vec![P1, P2], 0);
+        let mut b = RollbackDriver::new(P1, vec![P1, P2], 0, 0);
         b.rebind(&rolled.world, &mut rolled.sim, &rolled.host);
         let mut ever_stalled = false;
         for (t, p1, p2) in &script {
@@ -946,7 +979,7 @@ end\n";
     #[test]
     fn past_the_depth_cap_the_driver_stalls_instead_of_guessing() {
         let mut f = Fixture::new("stall");
-        let mut d = RollbackDriver::new(P1, vec![P1, P2], 0);
+        let mut d = RollbackDriver::new(P1, vec![P1, P2], 0, 0);
         d.net.max_depth = 4;
         d.rebind(&f.world, &mut f.sim, &f.host);
         // Only P1 is ever heard from, so the confirmed frontier never moves.
@@ -971,7 +1004,7 @@ end\n";
     #[test]
     fn the_state_ring_stays_bounded_and_always_covers_the_depth_cap() {
         let mut f = Fixture::new("ring");
-        let mut d = RollbackDriver::new(P1, vec![P1, P2], 0);
+        let mut d = RollbackDriver::new(P1, vec![P1, P2], 0, 0);
         d.rebind(&f.world, &mut f.sim, &f.host);
         for t in 1..=60u64 {
             d.add_local(t, held(RIGHT));
@@ -1036,15 +1069,16 @@ end\n";
             }
         };
         pump(4, &mut wall, &mut host_net, &mut peer_net);
-        host_net.set_rollback(true, 2);
+        host_net.set_rollback(true, 2, 0x0BAD_F00D_1234_5678);
         pump(8, &mut wall, &mut host_net, &mut peer_net);
-        let (roster, delay) = peer_net.take_rollback_start().expect("the host announces the match");
+        let (roster, delay, seed) =
+            peer_net.take_rollback_start().expect("the host announces the match");
         assert_eq!(roster, vec![SERVER, 1]);
 
         let mut host = Fixture::new("link_host");
         let mut peer = Fixture::new("link_peer");
-        let mut host_d = RollbackDriver::new(SERVER, roster.clone(), delay);
-        let mut peer_d = RollbackDriver::new(1, roster, delay);
+        let mut host_d = RollbackDriver::new(SERVER, roster.clone(), delay, seed);
+        let mut peer_d = RollbackDriver::new(1, roster, delay, seed);
         host_d.rebind(&host.world, &mut host.sim, &host.host);
         peer_d.rebind(&peer.world, &mut peer.sim, &peer.host);
         for (applied, input) in host_d.net.prime_warmup() {
@@ -1130,7 +1164,7 @@ end\n";
         let script = script_of_the_match();
         let run = |tag: &str, tamper: bool| -> (u64, u64) {
             let mut f = Fixture::new(tag);
-            let mut d = RollbackDriver::new(P1, vec![P1, P2], 0);
+            let mut d = RollbackDriver::new(P1, vec![P1, P2], 0, 0);
             d.rebind(&f.world, &mut f.sim, &f.host);
             let mut last = 0;
             for tick in 1..=40u64 {
@@ -1172,7 +1206,7 @@ end\n";
     fn stepping_back_and_forward_again_lands_on_the_same_state() {
         let script = script_of_the_match();
         let mut f = Fixture::new("stepback");
-        let mut d = RollbackDriver::new(P1, vec![P1, P2], 0);
+        let mut d = RollbackDriver::new(P1, vec![P1, P2], 0, 0);
         d.rebind(&f.world, &mut f.sim, &f.host);
         for (t, p1, p2) in &script {
             d.add_local(*t, p1.clone());
@@ -1282,7 +1316,7 @@ end\n";
         let mut sim = Sim::build(&world, &[], GravityField::uniform(Vec3::ZERO), DVec3::ZERO);
         let mut host = ScriptHost::new();
         host.run(&mut world, &dir, STEP, 0.0);
-        let mut d = RollbackDriver::new(P1, vec![P1], 0);
+        let mut d = RollbackDriver::new(P1, vec![P1], 0, 0);
         d.rebind(&world, &mut sim, &host);
         assert_eq!(d.nodes().len(), 1);
         assert!(

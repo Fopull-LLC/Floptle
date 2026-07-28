@@ -1840,9 +1840,30 @@ impl Editor {
                                 "the delay is FIXED for the session — it never changes \
                                  mid-match, because how the game feels must not. These \
                                  numbers are the measurement you choose it from: a healthy \
-                                 match sits at low average depth. Checksums run every 30 \
-                                 confirmed ticks; a mismatch is reported in the Console.",
+                                 match sits at low average depth.",
                             );
+                            // Checksum status. "Never checked" and "checked and
+                            // agreeing" are very different states to be in.
+                            if rb.desynced {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(255, 90, 90),
+                                    "⚠ DESYNCED — the peers no longer agree",
+                                )
+                                .on_hover_text(
+                                    "from the reported tick on, the two machines are playing \
+                                     different matches. The Console names the tick. Usual \
+                                     causes: a gameplay value outside snapshot()/restore(), \
+                                     an unseeded rng() (use net.random()), or reading node.x \
+                                     inside fixedUpdate instead of node.tickPos.",
+                                );
+                            } else if rb.checksum_tick > 0 {
+                                ui.small(format!(
+                                    "✔ checksums agree through tick {}",
+                                    rb.checksum_tick
+                                ));
+                            } else {
+                                ui.small("checksums: none due yet (every 30 confirmed ticks)");
+                            }
                             ui.separator();
                         }
                         if net_as_player {

@@ -277,6 +277,9 @@ pub struct NetSession {
     input_delay: u8,
     /// Peer→slot assignment, index = slot. `slots[0]` is always the host.
     rollback_slots: Vec<PeerId>,
+    /// The match's RNG seed (§3) — host-chosen, carried in `RollbackStart`,
+    /// identical on every peer. What `net.random()` draws from.
+    rollback_seed: u64,
     /// Every peer's recent applied-tick inputs — the redundant window the host
     /// echoes to everyone each tick. On the host this IS the session input log,
     /// which is what makes replays, the referee and (later) spectators nearly
@@ -288,7 +291,7 @@ pub struct NetSession {
     rollback_in: Vec<(PeerId, u64, NetInput)>,
     /// Client: a `RollbackStart` received since the last drain — the cue to
     /// (re)start the local driver at tick 0.
-    rollback_start_in: Option<(Vec<PeerId>, u8)>,
+    rollback_start_in: Option<(Vec<PeerId>, u8, u64)>,
     /// Host: reported checksums per confirmed tick, `(peer, hash)` (§6).
     state_hashes: HashMap<u64, Vec<(PeerId, u64)>>,
     /// Ticks a desync was detected or announced for, for the driver to surface.
@@ -370,6 +373,7 @@ impl NetSession {
             rollback: false,
             input_delay: crate::rollback::DEFAULT_INPUT_DELAY,
             rollback_slots: Vec::new(),
+            rollback_seed: 0,
             rollback_window: VecDeque::new(),
             rollback_in: Vec::new(),
             rollback_start_in: None,
@@ -721,8 +725,9 @@ impl NetSession {
     /// instant everywhere and no stamp translation is needed. Calling it again
     /// (a peer joined or left) restarts the match clock, which is why v1 does
     /// not support joining a rollback match in progress.
-    pub fn set_rollback(&mut self, on: bool, input_delay: u8) {
+    pub fn set_rollback(&mut self, on: bool, input_delay: u8, seed: u64) {
         self.rollback = on;
+        self.rollback_seed = seed;
         self.input_delay = input_delay.min(crate::rollback::MAX_DELAY);
         self.rollback_window.clear();
         self.rollback_in.clear();
@@ -739,6 +744,7 @@ impl NetSession {
             let msg = Msg::RollbackStart {
                 peers: self.rollback_slots.clone(),
                 input_delay: self.input_delay,
+                seed: self.rollback_seed,
             }
             .encode();
             for &p in &self.peers {
@@ -759,6 +765,11 @@ impl NetSession {
     /// The peer→slot roster (index = slot; the host is slot 0).
     pub fn rollback_slots(&self) -> &[PeerId] {
         &self.rollback_slots
+    }
+
+    /// The match's RNG seed (§3).
+    pub fn rollback_seed(&self) -> u64 {
+        self.rollback_seed
     }
 
     /// Client: this tick's local input for its APPLIED tick.
@@ -805,8 +816,9 @@ impl NetSession {
     }
 
     /// Client: a `RollbackStart` received since the last drain — `(roster,
-    /// input delay)`. The driver (re)starts its rollback clock at 0 on it.
-    pub fn take_rollback_start(&mut self) -> Option<(Vec<PeerId>, u8)> {
+    /// input delay, match seed)`. The driver (re)starts its rollback clock at 0
+    /// on it.
+    pub fn take_rollback_start(&mut self) -> Option<(Vec<PeerId>, u8, u64)> {
         self.rollback_start_in.take()
     }
 
@@ -1076,8 +1088,8 @@ impl NetSession {
                 if self.rollback {
                     // A new player means a new roster and a new match clock —
                     // every peer restarts at tick 0 together.
-                    let delay = self.input_delay;
-                    self.set_rollback(true, delay);
+                    let (delay, seed) = (self.input_delay, self.rollback_seed);
+                    self.set_rollback(true, delay, seed);
                 }
             }
             Msg::Rpc { name, args, tick: perceived, .. } => {
@@ -1126,8 +1138,8 @@ impl NetSession {
                 self.transport.send(q, Channel::Reliable, &left);
             }
             if self.rollback {
-                let delay = self.input_delay;
-                self.set_rollback(true, delay);
+                let (delay, seed) = (self.input_delay, self.rollback_seed);
+                self.set_rollback(true, delay, seed);
             }
         }
     }
@@ -1516,12 +1528,13 @@ impl NetSession {
             }
             Msg::PeerJoined { peer } => self.events.push(NetEvent::PeerJoined(peer)),
             Msg::PeerLeft { peer } => self.events.push(NetEvent::PeerLeft(peer)),
-            Msg::RollbackStart { peers, input_delay } => {
+            Msg::RollbackStart { peers, input_delay, seed } => {
                 // The host set the roster and the parameters; this is also the
                 // shared tick origin, so the driver restarts at 0 on it.
                 self.rollback = true;
                 self.input_delay = input_delay.min(crate::rollback::MAX_DELAY);
                 self.rollback_slots = peers.clone();
+                self.rollback_seed = seed;
                 self.rollback_window.clear();
                 self.rollback_in.clear();
                 // The fixed delay replaces the adaptive lead — leaving both on
@@ -1530,7 +1543,7 @@ impl NetSession {
                 self.auto_lead = false;
                 self.stamp_offset = 0;
                 self.input_window.clear();
-                self.rollback_start_in = Some((peers, self.input_delay));
+                self.rollback_start_in = Some((peers, self.input_delay, seed));
             }
             Msg::Inputs { entries } => {
                 let me = self.my_peer;

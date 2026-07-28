@@ -32,13 +32,19 @@ impl Editor {
     /// Called on the host when it announces a match and on a client when
     /// `RollbackStart` arrives — the same moment on both, which is what gives
     /// the session its shared tick origin.
-    pub(crate) fn net_rollback_start(&mut self, local: PeerId, peers: Vec<PeerId>, delay: u8) {
+    pub(crate) fn net_rollback_start(
+        &mut self,
+        local: PeerId,
+        peers: Vec<PeerId>,
+        delay: u8,
+        seed: u64,
+    ) {
         let mut d = match self.net_rollback.take() {
             Some(mut d) => {
-                d.restart(local, peers.clone(), delay);
+                d.restart(local, peers.clone(), delay, seed);
                 d
             }
-            None => RollbackDriver::new(local, peers.clone(), delay),
+            None => RollbackDriver::new(local, peers.clone(), delay, seed),
         };
         let Some(sim) = self.sim.as_mut() else {
             self.console.push(
@@ -90,10 +96,18 @@ impl Editor {
             return;
         }
         let delay = floptle_net::DEFAULT_INPUT_DELAY;
+        // The seed is drawn ONCE, here, from the wall clock — the only place in
+        // the whole feature where a clock is allowed near the simulation. From
+        // this moment it is replicated state like any other, and every draw
+        // comes from (seed, tick, index).
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E37_79B9_7F4A_7C15);
         let Some(s) = self.net_server.as_mut() else { return };
-        s.set_rollback(true, delay);
+        s.set_rollback(true, delay, seed);
         let peers = s.rollback_slots().to_vec();
-        self.net_rollback_start(SERVER, peers, delay);
+        self.net_rollback_start(SERVER, peers, delay, seed);
     }
 
     /// Host: the roster changed (someone joined or left). The session has
@@ -104,8 +118,9 @@ impl Editor {
         if !s.is_rollback() {
             return;
         }
-        let (peers, delay) = (s.rollback_slots().to_vec(), s.input_delay());
-        self.net_rollback_start(SERVER, peers, delay);
+        let (peers, delay, seed) =
+            (s.rollback_slots().to_vec(), s.input_delay(), s.rollback_seed());
+        self.net_rollback_start(SERVER, peers, delay, seed);
     }
 
     /// Hand the bodies back and forget the session (Stop, `net.leave()`, the
@@ -247,6 +262,9 @@ impl Editor {
                 ),
                 None,
             );
+            if let Some(d) = self.net_rollback.as_mut() {
+                d.desynced = true;
+            }
             self.script_host.fire_net_event(&mut self.world, "desync", None, None);
         }
     }
@@ -265,6 +283,11 @@ pub(crate) struct RollbackStats {
     pub ring_bytes: usize,
     pub stalled: bool,
     pub fighters: usize,
+    /// The newest confirmed tick whose checksum this peer has published, and
+    /// whether a desync has ever been reported. "Never checked" and "checked,
+    /// agreeing" are very different states to be in, so the panel says which.
+    pub checksum_tick: u64,
+    pub desynced: bool,
 }
 
 impl RollbackStats {
@@ -290,6 +313,8 @@ impl RollbackStats {
             ring_bytes: d.ring_bytes(),
             stalled: d.stalled,
             fighters: d.nodes().len(),
+            checksum_tick: d.last_checksum(),
+            desynced: d.desynced,
         }
     }
 }

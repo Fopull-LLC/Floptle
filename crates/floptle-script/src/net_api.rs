@@ -45,6 +45,33 @@ pub enum NetRoleState {
     Client,
 }
 
+/// Live ROLLBACK state fed by the driver each tick
+/// (`docs/rollback-netcode-design.md` §7 P6), read by `net.rollbackDepth()` and
+/// friends — and the per-tick seed behind `net.random()`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RollbackInfo {
+    /// Is a rollback session actually driving this scene?
+    pub active: bool,
+    /// The tick being simulated. Identical on every peer for a given tick, and
+    /// identical on a replay of it — which is what makes it safe to seed from.
+    pub tick: u64,
+    /// The session's match seed, chosen once by the host and carried in
+    /// `RollbackStart`.
+    pub seed: u64,
+    /// Ticks re-simulated by the most recent correction, and the worst so far.
+    pub depth: u32,
+    pub max_depth: u32,
+    /// Mean ticks re-simulated per correction — the texture of the connection,
+    /// where `max_depth` is only its worst moment.
+    pub average_depth: f32,
+    /// 0..1 — the fraction of simulated ticks that had to guess something.
+    pub mispredict_rate: f32,
+    /// The session's fixed input delay, ticks.
+    pub input_delay: u8,
+    /// Waiting for input rather than guessing past the depth cap.
+    pub stalled: bool,
+}
+
 /// Live session state fed by the editor each tick, read by `net.role()` /
 /// `net.peers()` / `net.ping()` / `net.isMine()`.
 #[derive(Clone, Debug, Default)]
@@ -100,6 +127,13 @@ pub(crate) struct SharedNet {
     /// in the map aren't networked (local everywhere → always "mine").
     pub owners: Rc<RefCell<std::collections::HashMap<u32, Option<u64>>>>,
     pub logs: Rc<RefCell<Vec<ScriptLog>>>,
+    /// Rollback diagnostics + the `net.random()` seed, refreshed per tick.
+    pub rollback: Rc<std::cell::Cell<RollbackInfo>>,
+    /// How many times `net.random()` has been called during the tick currently
+    /// being simulated. Reset by the driver at the top of every tick — live and
+    /// replayed alike — so a replayed tick draws exactly the same numbers the
+    /// live tick drew.
+    pub random_draws: Rc<std::cell::Cell<u64>>,
 }
 
 impl SharedNet {
@@ -112,12 +146,32 @@ impl SharedNet {
             rewind: Rc::new(RefCell::new(None)),
             owners: Rc::new(RefCell::new(std::collections::HashMap::new())),
             logs,
+            rollback: Rc::new(std::cell::Cell::new(RollbackInfo::default())),
+            random_draws: Rc::new(std::cell::Cell::new(0)),
         }
     }
 
     fn warn(&self, msg: String) {
         self.logs.borrow_mut().push(ScriptLog { level: LogLevel::Warn, msg, source: None });
     }
+}
+
+/// A number in `[0, 1)` from (match seed, tick, draw index), by SplitMix64.
+///
+/// Every input is state every peer already agrees on, so every peer draws the
+/// same value — and a re-simulation of the same tick, drawing in the same order,
+/// draws it again. That last property is what a hand-rolled `rng(matchSeed +
+/// tick)` usually misses: it re-seeds per tick but not per *draw*, so two calls
+/// in one tick return the same number.
+fn deterministic_unit(seed: u64, tick: u64, draw: u64) -> f64 {
+    let mut z = seed
+        .wrapping_add(tick.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        .wrapping_add(draw.wrapping_mul(0xBF58_476D_1CE4_E5B9));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // 53 bits — the whole f64 mantissa, and no rounding to exactly 1.0.
+    (z >> 11) as f64 / (1u64 << 53) as f64
 }
 
 /// A resolved tick of ACTIONS into the wire form — what a predicted node's
@@ -267,6 +321,83 @@ pub(crate) fn install_net_api(
         // is the definition of a desync.
         let r = replaying.clone();
         t.set("replaying", lua.create_function(move |_, ()| Ok(r.get()))?)?;
+    }
+    // The connection-quality readouts a fighting game actually cares about. A
+    // fighter's netplay quality is rollback depth and how often the sim had to
+    // guess — not ping, which says nothing about how the match feels.
+    for (name, pick) in [
+        ("rollbackDepth", 0u8),
+        ("rollbackMax", 1),
+        ("rollbackAverage", 2),
+        ("mispredictRate", 3),
+        ("inputDelay", 4),
+    ] {
+        let rb = net.rollback.clone();
+        t.set(
+            name,
+            lua.create_function(move |_, ()| {
+                let i = rb.get();
+                Ok(match pick {
+                    0 => i.depth as f64,
+                    1 => i.max_depth as f64,
+                    2 => i.average_depth as f64,
+                    3 => i.mispredict_rate as f64,
+                    _ => i.input_delay as f64,
+                })
+            })?,
+        )?;
+    }
+    {
+        // `net.stalled()` — the sim is waiting for input rather than guessing
+        // past the depth cap. A game can show its own "connection trouble"
+        // banner off this instead of leaving the player to wonder why the
+        // match feels slow.
+        let rb = net.rollback.clone();
+        t.set("stalled", lua.create_function(move |_, ()| Ok(rb.get().stalled))?)?;
+    }
+    {
+        // `net.random()` — the deterministic RNG (§3).
+        //
+        // `rng()` with no seed rolls from the clock, which is poison in a
+        // rollback sim: two peers draw different numbers and the match forks.
+        // This is seeded from (match seed, tick, draw index), so every peer
+        // draws the same sequence for a tick, and a REPLAY of that tick draws
+        // it again — which is the part a hand-rolled seed usually gets wrong.
+        //
+        // Shapes match Lua's own `math.random`: `net.random()` → [0,1),
+        // `net.random(n)` → 1..n, `net.random(a, b)` → a..b (integers).
+        let rb = net.rollback.clone();
+        let draws = net.random_draws.clone();
+        let logs = net.logs.clone();
+        t.set(
+            "random",
+            lua.create_function(move |_, (a, b): (Option<f64>, Option<f64>)| {
+                let info = rb.get();
+                if !info.active {
+                    // Offline it still works — a single-player run has nothing
+                    // to agree with — but it is worth saying once that the
+                    // determinism guarantee is not in force.
+                    logs.borrow_mut().push(ScriptLog {
+                        level: LogLevel::Debug,
+                        msg: "net.random() outside a rollback session — deterministic per \
+                              tick, but there is no peer to agree with"
+                            .into(),
+                        source: None,
+                    });
+                }
+                let n = draws.get();
+                draws.set(n + 1);
+                let unit = deterministic_unit(info.seed, info.tick, n);
+                Ok(match (a, b) {
+                    (None, _) => unit,
+                    (Some(hi), None) => (1.0 + unit * hi.max(1.0)).floor().min(hi.max(1.0)),
+                    (Some(lo), Some(hi)) => {
+                        let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+                        (lo + unit * (hi - lo + 1.0)).floor().min(hi)
+                    }
+                })
+            })?,
+        )?;
     }
 
     // --- session control -------------------------------------------------

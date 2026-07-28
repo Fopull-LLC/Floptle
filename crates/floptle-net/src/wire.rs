@@ -223,8 +223,15 @@ pub enum Msg {
     /// already in progress. Spectators and late joiners need the input log plus
     /// a keyframe, which §5 files as future work.
     ///
+    /// `seed` is the match's RNG seed, chosen once by the host: `net.random()`
+    /// draws from (seed, tick, draw index), so every peer rolls the same
+    /// numbers and a re-simulated tick rolls them again (§3). An unseeded
+    /// `rng()` in a rollback sim is poison — two peers draw differently and the
+    /// match quietly forks — so the engine hands out the correct thing rather
+    /// than only documenting it.
+    ///
     /// Re-sent whenever the roster changes, which restarts the match clock.
-    RollbackStart { peers: Vec<PeerId>, input_delay: u8 },
+    RollbackStart { peers: Vec<PeerId>, input_delay: u8, seed: u64 },
     /// Host → clients, every tick: a redundant window of EVERY peer's recent
     /// APPLIED-tick inputs, so one lost packet costs nothing.
     ///
@@ -315,7 +322,7 @@ mod tests {
                 epoch: 1,
                 input_delay: 2,
             },
-            Msg::RollbackStart { peers: vec![0, 3], input_delay: 2 },
+            Msg::RollbackStart { peers: vec![0, 3], input_delay: 2, seed: 0x1234_5678_9abc_def0 },
             Msg::Inputs {
                 entries: vec![
                     (0, InputCmd { tick: 120, input: NetInput { actions: 0b101, ..Default::default() } }),

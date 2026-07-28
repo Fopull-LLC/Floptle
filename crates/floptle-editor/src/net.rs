@@ -1214,8 +1214,8 @@ impl Editor {
         // The host announced a rollback match (or re-announced it on a roster
         // change): start our driver on the same roster, at the same tick 0.
         // Deferred past this borrow — the restart rebinds the world.
-        let rollback_start = cs.take_rollback_start().map(|(peers, delay)| {
-            (cs.my_peer().unwrap_or(floptle_net::SERVER), peers, delay)
+        let rollback_start = cs.take_rollback_start().map(|(peers, delay, seed)| {
+            (cs.my_peer().unwrap_or(floptle_net::SERVER), peers, delay, seed)
         });
         // Synced vars from the server land in our scripts.
         for (e, kind, vars) in cs.take_synced() {
@@ -1524,8 +1524,8 @@ impl Editor {
                 self.net_stop("the server switched to a scene this project doesn't have");
             }
         }
-        if let Some((me, peers, delay)) = rollback_start {
-            self.net_rollback_start(me, peers, delay);
+        if let Some((me, peers, delay, seed)) = rollback_start {
+            self.net_rollback_start(me, peers, delay, seed);
         }
         // Smooth the visual correction.
         if let Some((_, pred)) = self.net_predictor.as_mut() {

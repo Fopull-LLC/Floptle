@@ -2108,6 +2108,18 @@ impl ScriptHost {
         self.replaying.get()
     }
 
+    /// Feed this tick's rollback state — diagnostics for `net.rollbackDepth()`
+    /// and friends, and the seed behind `net.random()`.
+    ///
+    /// The draw counter resets here, which is the whole trick: a re-simulated
+    /// tick starts its random sequence over, so it draws exactly the numbers
+    /// the live tick drew. Call it once per tick, live and replayed alike,
+    /// before any hook runs.
+    pub fn set_rollback_info(&self, info: crate::RollbackInfo) {
+        self.net.rollback.set(info);
+        self.net.random_draws.set(0);
+    }
+
     /// Does any script on `eid` participate in rollback? A `Rollback` node whose
     /// scripts define neither hook is almost always a mistake, and the driver
     /// warns about it once rather than desyncing quietly.

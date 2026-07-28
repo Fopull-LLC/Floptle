@@ -634,6 +634,10 @@ mod tests {
     // Rollback wire (docs/rollback-netcode-design.md §5, §6)
     // -----------------------------------------------------------------------
 
+    /// An arbitrary but fixed match seed — the point is that both peers get
+    /// the same one, not what it is.
+    const MATCH_SEED: u64 = 0x0BAD_F00D_1234_5678;
+
     fn held(actions: u64) -> NetInput {
         NetInput { actions, ..Default::default() }
     }
@@ -648,7 +652,7 @@ mod tests {
         let (mut sw, _) = world_with(1);
         let (mut cw, _) = world_with(1);
         let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 4, |_, _| {});
-        server.set_rollback(true, 2);
+        server.set_rollback(true, 2, MATCH_SEED);
         // `RollbackStart` is the match clock's origin, so a client queues
         // nothing until it lands — anything sampled before it belongs to a tick
         // numbering that no longer exists.
@@ -663,7 +667,8 @@ mod tests {
         let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 6, |_, _| {});
 
         // The client learned the roster + the delay from RollbackStart…
-        let (peers, delay) = start.expect("the host must announce the match");
+        let (peers, delay, seed) = start.expect("the host must announce the match");
+        assert_eq!(seed, MATCH_SEED, "the match seed must reach every peer");
         assert_eq!(peers, vec![SERVER, 1], "host is slot 0, the joiner slot 1");
         assert_eq!(delay, 2);
         assert_eq!(client.input_delay(), 2);
@@ -701,8 +706,11 @@ mod tests {
         let (mut sw, _) = world_with(1);
         let (mut cw, _) = world_with(1);
         let mut t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 8, |_, _| {});
-        server.set_rollback(true, 2);
-        let _ = client.take_rollback_start();
+        server.set_rollback(true, 2, MATCH_SEED);
+        // The announcement is reliable, so it survives the loss — but it still
+        // has to travel, and a client queues nothing until it lands.
+        t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 8, |_, _| {});
+        assert!(client.take_rollback_start().is_some());
 
         let mut seen_at_client = std::collections::HashSet::new();
         let mut seen_at_host = std::collections::HashSet::new();
@@ -733,8 +741,9 @@ mod tests {
         let (mut sw, _) = world_with(1);
         let (mut cw, _) = world_with(1);
         let mut t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 4, |_, _| {});
-        server.set_rollback(true, 2);
-        let _ = client.take_rollback_start();
+        server.set_rollback(true, 2, MATCH_SEED);
+        t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 2, |_, _| {});
+        assert!(client.take_rollback_start().is_some());
 
         // Agreement: nobody hears anything.
         server.send_state_hash(30, 0xAAAA);

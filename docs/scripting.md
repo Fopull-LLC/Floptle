@@ -25,6 +25,7 @@ it up immediately.
 14. [The in-engine IDE](#14-the-in-engine-ide)
 15. [Tips & gotchas](#15-tips--gotchas)
 16. [Networking: `net.*`, `synced`, `onRpc`](#16-networking-net-synced-onrpc)
+16b. [Rollback netcode: `snapshot`, `restore` & `net.random`](#16b-rollback-netcode-snapshot-restore--netrandom)
 17. [Scenes: `scene.load` & the entry scene](#17-scenes-sceneload--the-entry-scene)
 18. [Layers & tags](#18-layers--tags)
 19. [Vectors & math: `vec3`, `vec2`, `distance`](#19-vectors--math-vec3-vec2-distance)
@@ -1413,6 +1414,10 @@ end
 | `net.rewind(peer, fn)` | SERVER: run `fn` against the world as `peer` perceived it (lag compensation) |
 | `net.isMine(node)` | is this node under MY control here? (cameras/HUDs pick the local player; pair with `findScripts`) |
 
+For a **fighting game** — where the whole game is reading your opponent's exact
+state this frame — the mode above is the wrong shape. See
+[§16b, rollback netcode](#16b-rollback-netcode-snapshot-restore--netrandom).
+
 **`synced` rules.** Values can be numbers, booleans, strings, and tables
 (nested up to 4 levels, ≤ 1 KB encoded per var — an oversized write is dropped
 whole with a Console warning, never truncated). Only the **server's** writes
@@ -1556,6 +1561,102 @@ The fine print, so you can reason about fairness:
 - `net.rewind` outside a server-side `onRpc` handler for a `withInput` rpc
   (or with the wrong peer) warns and runs the closure at server time — your
   logic still works, it's just not compensated.
+
+---
+
+## 16b. Rollback netcode: `snapshot`, `restore` & `net.random`
+
+Everything in §16 is *server-authoritative*: one machine simulates, the others
+watch a slightly delayed copy and predict their own avatar. That is the right
+shape for almost every game — and the wrong shape for a fighting game, where
+the decision you make is made against your opponent's exact state *this frame*.
+
+**Rollback** is the third mode. Set a node's Networked component to
+`Rollback (every peer)` and every machine simulates that node, every tick, from
+the session's per-tick inputs. Nothing about a hit ever crosses the wire — only
+inputs do — so hit resolution, hitstop and meter agree because the *simulation*
+agrees. Full design: [`rollback-netcode-design.md`](rollback-netcode-design.md).
+
+### The contract: two hooks
+
+```lua
+function snapshot()   return { hp = hp, meter = meter, frame = frame } end
+function restore(s)   hp, meter, frame = s.hp, s.meter, s.frame end
+```
+
+That is the whole opt-in. When a remote input arrives that contradicts what was
+predicted, the engine restores the last agreed tick and re-simulates every tick
+since, with no rendering in between — and it restores your script's state
+through these two hooks.
+
+> **A script that defines neither hook is not rolled back — right for
+> cosmetics, wrong for gameplay.**
+
+Read that twice, because nothing warns you at runtime: a rolled-back match with
+one un-snapshotted counter keeps playing, and the two machines simply stop
+agreeing about it. If a value affects what happens, it belongs in `snapshot()`.
+
+The engine owns the copy in both directions, so a replay can't corrupt the
+snapshot it restored from. Rollback state holds numbers, strings, booleans and
+nested tables; a node handle or a function is refused with a Console error,
+because those cannot be meaningfully restored and silently dropping them would
+produce a state that *looks* restored and isn't.
+
+### Writing a fighter that stays in sync
+
+| Rule | Why |
+|---|---|
+| Count **frames**, not seconds | `heldSecs` reads 0 on rollback-driven slots (the wire carries actions, not durations). Integer frame counts are exact and re-simulate identically. |
+| Build hurtboxes from `node.tickPos`, never `node.x` | Between ticks the transform holds the *interpolated render pose*. Reading it in `fixedUpdate` is a frame-rate-dependent read that no replay can reproduce. |
+| Move the body with `node.tickX/tickY/tickZ` or velocity, never `node.x = node.x + d` | Same reason, from the other side: that teleports the body onto its **visual** position — the model slides and the hurtbox doesn't. |
+| Use `net.random()`, never an unseeded `rng()` | An unseeded roll comes from the clock. Two peers draw different numbers and the match quietly forks in two. |
+| Put projectiles in rollback **state**, not in `spawn()` | A spawned prefab isn't part of the rollback state and one-shot spawns are suppressed during a replay. A fireball that must exist on both machines is data in your controller's snapshot, rendered by the controller. |
+| Turn on **pushbox only** on the RigidBody | The contact solver is the part least likely to agree bit-for-bit between two machines. With it on, the body integrates its velocity and nothing else — your script owns gravity, the floor and pushout, which is how the genre works anyway. |
+
+### The API
+
+| Call | What it does |
+|---|---|
+| `net.random()` / `net.random(n)` / `net.random(a, b)` | deterministic RNG: `[0,1)`, `1..n`, `a..b`. Drawn from (match seed, tick, draw index), so every peer rolls the same numbers **and a re-simulated tick rolls them again** |
+| `net.replaying()` | true while the engine is re-simulating. For cosmetics it can't see (a material poke, a UI label) — **never** branch simulation on it, that IS a desync |
+| `net.rollbackDepth()` / `net.rollbackMax()` / `net.rollbackAverage()` | ticks re-simulated by the last correction · the worst so far · the mean per correction |
+| `net.mispredictRate()` | 0..1 — the fraction of ticks that had to guess |
+| `net.inputDelay()` | the session's fixed input delay, in ticks |
+| `net.stalled()` | the sim is waiting for input rather than guessing further — show your own "connection trouble" banner off this |
+| `net.on("desync", fn)` | the peers' checksums disagreed. From here the two machines are playing different matches; end the set honestly rather than play it out |
+
+The engine suppresses one-shot side effects during a re-simulation —
+`spawnEffect`, `audio.play`, prefab `spawn()`/`destroy()`, `net.rpc`, console
+output. The honest consequence: a correction can *eat* a cosmetic (the spark
+that only exists on the corrected timeline never fires) or *orphan* one (the
+spark fired for a hit that turned out not to happen). Every rollback game lives
+with this; at the depth cap it reads as network crackle, not wrongness.
+
+### What the engine does not promise
+
+- **Same build, same platform:** determinism is guaranteed for the profile
+  above.
+- **Across platforms** (x64 ↔ Apple Silicon): expected, not proven. IEEE
+  add/mul/div/sqrt are bit-exact everywhere; the risk is `sin`/`cos`/`pow`/
+  `atan2`, which may differ in the last bit between platform math libraries. A
+  fighter's simulation path typically avoids them.
+- **Bodies in solver-resolved contact:** out of scope — that is what
+  `pushboxOnly` is for.
+
+Which is exactly why checksums are **mandatory and always on**: every 30
+confirmed ticks each peer hashes its state and the host compares. A mismatch is
+loud — Console error naming the tick, red in the 🌐 panel, and
+`net.on("desync")`. A rollback implementation without them doesn't fail
+loudly; it plays a subtly different match on each screen until someone notices
+the health bars disagree.
+
+### Frame-stepping backwards
+
+While paused, **⏮ Back (Shift+F3)** puts the simulation back one gameplay tick.
+A simulation isn't invertible, so this reads the rollback state ring rather than
+re-deriving anything: it needs a rollback session running and reaches back about
+a fifth of a second. Stepping back and forward again lands on exactly the state
+that was there — it's a scrubber, not an undo.
 
 ---
 
