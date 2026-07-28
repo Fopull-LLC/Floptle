@@ -88,8 +88,26 @@ impl ShadowSim {
         );
         let mut host = ScriptHost::new();
         host.set_input_map(input_map);
-        // One pass to build the script instances, exactly as Play does. The
-        // driver's own passes fire `start` from here on.
+        // Filter the fighters out BEFORE the build pass, because that is what
+        // the live session does.
+        //
+        // `run` publishes every environment in pass 1 and runs `start`/`update`
+        // in pass 2, and only pass 2 honours the filters — so this gets the
+        // envs built (which `rebind` and the cross-script calls need) without
+        // running a frame of gameplay nobody else ran. Unfiltered, every
+        // fighter script got a full `start` + `update` at t = 0 here and
+        // nowhere else, so any script with state in `update` made the referee
+        // disagree with every honest peer by construction (floptle/0039). A
+        // referee that is wrong on purpose is worse than no referee: its whole
+        // job is to be the one simulation nobody can argue with.
+        let fighters: std::collections::HashSet<u32> = world
+            .query::<floptle_core::Replicated>()
+            .filter(|(_, r)| r.mode.is_rollback())
+            .map(|(e, _)| e.index())
+            .collect();
+        host.extend_filters(fighters);
+        // The driver's own passes fire `start` from here on — tick 1, exactly
+        // as they do live.
         host.run(&mut world, script_dir, step, 0.0);
 
         let mut driver =

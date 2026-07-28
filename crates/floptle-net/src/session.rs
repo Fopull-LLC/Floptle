@@ -12,7 +12,7 @@
 //! v1 scope (phase 2b): server-authoritative replication only — prediction
 //! (2c) and lag compensation (2d) layer on top of exactly these seams.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use floptle_core::math::{DVec3, Quat};
 use floptle_core::transform::Transform;
@@ -139,6 +139,16 @@ const ANIM_TIME_TOLERANCE: f32 = 0.1;
 const INPUT_WINDOW: usize = 10;
 /// Server-side per-peer input backlog cap, ticks.
 const INPUT_BUFFER_CAP: usize = 64;
+/// How many of a peer's unconfirmed applied ticks ride in one rollback fan-out.
+///
+/// Per PEER, so nobody can crowd anybody out, and generous next to what a
+/// healthy session needs: a peer stalls once it is `max_depth` (8) past the
+/// confirmed frontier, so in an ordinary match every ring holds well under this
+/// and the cap never binds. It binds only when a peer has stopped confirming
+/// entirely — where the oldest ticks are the ones that matter and the newest
+/// are speculation nobody can use yet, which is why the fan-out takes from the
+/// FRONT.
+const FANOUT_PER_PEER: usize = 24;
 
 /// What one snapshot entry costs a client's byte budget: a NetId, a position,
 /// a rotation. Approximate on purpose — the budget is a rationing policy, not
@@ -335,11 +345,34 @@ pub struct NetSession {
     /// The match's RNG seed (§3) — host-chosen, carried in `RollbackStart`,
     /// identical on every peer. What `net.random()` draws from.
     rollback_seed: u64,
-    /// Every peer's recent applied-tick inputs — the redundant window the host
-    /// echoes to everyone each tick. On the host this IS the session input log,
-    /// which is what makes replays, the referee and (later) spectators nearly
-    /// free (§5).
-    rollback_window: VecDeque<(PeerId, InputCmd)>,
+    /// Every peer's recent applied-tick inputs, **one ring per peer** — the
+    /// redundant window the host echoes to everyone each tick. On the host this
+    /// IS the session input log, which is what makes replays, the referee and
+    /// (later) spectators nearly free (§5).
+    ///
+    /// Per peer, not one shared FIFO, and the distinction is load-bearing.
+    /// Shared, a peer that resends its window every tick (which every peer
+    /// does, that being the whole loss strategy) evicts OTHER peers' oldest
+    /// entries — and the oldest entry is exactly the tick a starved peer is
+    /// waiting for. That deadlocked a live match permanently off one lost
+    /// datagram (floptle/0039). Per-peer rings make crowding impossible.
+    ///
+    /// `BTreeMap`, not `HashMap`: the fan-out is built by iterating this, and a
+    /// packet whose contents depend on hash order is a packet that differs
+    /// between two runs of the same match.
+    rollback_rings: BTreeMap<PeerId, VecDeque<InputCmd>>,
+    /// What each peer has told us its rollback frontier is — the newest applied
+    /// tick for which THEY hold every peer's real input (`Msg::Input`'s
+    /// `confirmed`; our own entry is set locally by the driver).
+    ///
+    /// The retention floor comes from the MINIMUM of these, never from our own
+    /// frontier alone. "I have everyone's input for T" does not imply "everyone
+    /// has everyone's input for T", and dropping on the former is the bug this
+    /// field exists to make impossible.
+    peer_confirmed: HashMap<PeerId, u64>,
+    /// Our own driver's frontier, as last reported by
+    /// [`Self::set_rollback_confirmed`] — what a client ships to the host.
+    rollback_confirmed: u64,
     /// Applied-tick inputs received for OTHER peers — from a client on the
     /// host, from the host's fan-out on a client. The driver drains these into
     /// `Rollback::add_remote`.
@@ -458,7 +491,9 @@ impl NetSession {
             input_delay: crate::rollback::DEFAULT_INPUT_DELAY,
             rollback_slots: Vec::new(),
             rollback_seed: 0,
-            rollback_window: VecDeque::new(),
+            rollback_rings: BTreeMap::new(),
+            peer_confirmed: HashMap::new(),
+            rollback_confirmed: 0,
             rollback_in: Vec::new(),
             rollback_start_in: None,
             pings_out: HashMap::new(),
@@ -869,8 +904,13 @@ impl NetSession {
         self.rollback = on;
         self.rollback_seed = seed;
         self.input_delay = input_delay.min(crate::rollback::MAX_DELAY);
-        self.rollback_window.clear();
+        self.rollback_rings.clear();
         self.rollback_in.clear();
+        // A new match is a new tick origin: every frontier restarts at 0, or the
+        // retention floor would inherit the LAST match's numbers and immediately
+        // discard the new match's opening ticks.
+        self.peer_confirmed.clear();
+        self.rollback_confirmed = 0;
         self.state_hashes.clear();
         if self.role != NetRole::Server {
             return;
@@ -950,8 +990,10 @@ impl NetSession {
         );
         // Everything already banked this match — the warm-up ticks land before
         // anyone thinks to press record.
-        for (p, cmd) in &self.rollback_window {
-            log.record(*p, cmd.tick, &cmd.input);
+        for (peer, ring) in &self.rollback_rings {
+            for cmd in ring {
+                log.record(*peer, cmd.tick, &cmd.input);
+            }
         }
         self.record = Some(log);
     }
@@ -1038,10 +1080,20 @@ impl NetSession {
     fn note_rollback_input(&mut self, peer: PeerId, cmd: InputCmd) {
         // The redundant window re-carries recent ticks in every packet; the
         // duplicate is free (the driver's `add_remote` ignores it) but the log
-        // must not grow one entry per resend.
-        if self.rollback_window.iter().any(|(p, c)| *p == peer && c.tick == cmd.tick) {
+        // must not grow one entry per resend. Deduped against THIS peer's ring
+        // — a shared one made the answer depend on how chatty everybody else
+        // had been, so an entry could age out of the dedup and be re-admitted
+        // as though it were new.
+        let ring = self.rollback_rings.entry(peer).or_default();
+        if ring.iter().any(|c| c.tick == cmd.tick) {
             return;
         }
+        // Sorted by tick: arrivals are near-ordered but not guaranteed ordered
+        // (the window re-carries, and a resend can overtake), and the fan-out
+        // sends oldest first. A ring that is only nearly sorted would put the
+        // urgent tick in the middle of the packet instead of at its head.
+        let at = ring.iter().position(|c| c.tick > cmd.tick).unwrap_or(ring.len());
+        ring.insert(at, cmd.clone());
         self.rollback_in.push((peer, cmd.tick, cmd.input.clone()));
         // Recorded HERE because this is the one funnel every peer's input
         // passes through exactly once, the host's own included — recording at
@@ -1055,11 +1107,103 @@ impl NetSession {
                 input: cmd.input.clone(),
             });
         }
-        self.rollback_window.push_back((peer, cmd));
-        let cap = INPUT_WINDOW * self.rollback_slots.len().max(2);
-        while self.rollback_window.len() > cap {
-            self.rollback_window.pop_front();
+        self.trim_rollback_rings();
+    }
+
+    /// The oldest applied tick still worth carrying: one past the newest tick
+    /// EVERY peer has confirmed. Below it, everyone already has everything.
+    ///
+    /// Unknown frontiers count as 0, so a peer that has not reported yet holds
+    /// the floor down rather than letting the session drop what it needs.
+    fn rollback_retain_floor(&self) -> u64 {
+        // A client's rings are dedup memory, not a fan-out source: it is the
+        // only consumer of what it holds, so its own frontier is the whole
+        // answer. Asking the roster instead would pin the floor at 0 forever
+        // (nobody reports theirs to a client) and the rings would only ever be
+        // bounded by the hard cap.
+        if self.role != NetRole::Server {
+            return self.rollback_confirmed;
         }
+        self.rollback_rings
+            .keys()
+            .chain(self.rollback_slots.iter())
+            .map(|p| self.peer_confirmed.get(p).copied().unwrap_or(0))
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// Drop what every peer has confirmed, keeping a little history for
+    /// ordinary redundancy — and hard-cap each ring so a peer that never
+    /// confirms costs bounded memory instead of unbounded.
+    fn trim_rollback_rings(&mut self) {
+        let floor = self.rollback_retain_floor().saturating_sub(INPUT_WINDOW as u64);
+        for ring in self.rollback_rings.values_mut() {
+            while ring.front().is_some_and(|c| c.tick <= floor) {
+                ring.pop_front();
+            }
+            // The backstop. A wedged peer means the match is already over one
+            // way or another; it must not also mean unbounded growth.
+            while ring.len() > crate::rollback::INPUT_RING {
+                ring.pop_front();
+            }
+        }
+    }
+
+    /// The fan-out payload: every peer's unconfirmed applied ticks, oldest
+    /// first, capped per peer.
+    ///
+    /// Oldest first is the whole point. A starved peer is waiting on the OLDEST
+    /// tick it is missing, so that tick has to be in the packet — and it has to
+    /// stay in the packet on every resend until it is confirmed, which is what
+    /// the floor guarantees. Capping per peer (rather than in total) is what
+    /// stops one chatty or wedged peer from squeezing everyone else out.
+    fn rollback_fanout(&self) -> Vec<(PeerId, InputCmd)> {
+        let floor = self.rollback_retain_floor();
+        let mut out = Vec::new();
+        for (&peer, ring) in &self.rollback_rings {
+            out.extend(
+                ring.iter()
+                    .filter(|c| c.tick > floor)
+                    .take(FANOUT_PER_PEER)
+                    .map(|c| (peer, c.clone())),
+            );
+        }
+        out
+    }
+
+    /// Record a peer's reported rollback frontier, ignoring a value that would
+    /// move it backwards (a stale resend must not un-confirm anything).
+    fn note_peer_confirmed(&mut self, peer: PeerId, confirmed: u64) {
+        let e = self.peer_confirmed.entry(peer).or_insert(0);
+        if confirmed > *e {
+            *e = confirmed;
+            self.trim_rollback_rings();
+        }
+    }
+
+    /// The local driver's rollback frontier, for retention and for the fan-out.
+    ///
+    /// A client also ships it to the host on the next `Msg::Input`; the host is
+    /// a peer like any other and records its own here.
+    pub fn set_rollback_confirmed(&mut self, confirmed: u64) {
+        let me = if self.role == NetRole::Server { SERVER } else { self.my_peer.unwrap_or(SERVER) };
+        self.rollback_confirmed = confirmed;
+        self.note_peer_confirmed(me, confirmed);
+    }
+
+    /// Every peer's reported rollback frontier — the host's view of who is
+    /// keeping up and who is starved, for the 🌐 panel and the console line.
+    pub fn rollback_frontiers(&self) -> Vec<(PeerId, u64)> {
+        let mut v: Vec<(PeerId, u64)> =
+            self.peer_confirmed.iter().map(|(p, t)| (*p, *t)).collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// How many applied ticks we are still holding for each peer — a ring that
+    /// keeps growing is a peer that has stopped confirming.
+    pub fn rollback_backlog(&self) -> Vec<(PeerId, usize)> {
+        self.rollback_rings.iter().map(|(p, r)| (*p, r.len())).collect()
     }
 
     /// Every peer's applied-tick inputs received since the last drain, for the
@@ -1261,11 +1405,13 @@ impl NetSession {
         // peer, every tick. Sequenced-unreliable because the window is already
         // the redundancy — a lost packet costs nothing, and a retransmit would
         // arrive after the tick it was needed for.
-        if self.rollback && !self.peers.is_empty() && !self.rollback_window.is_empty() {
-            let msg = Msg::Inputs { entries: self.rollback_window.iter().cloned().collect() }
-                .encode();
-            for &p in &self.peers {
-                self.transport.send(p, Channel::UnreliableSequenced, &msg);
+        if self.rollback && !self.peers.is_empty() {
+            let entries = self.rollback_fanout();
+            if !entries.is_empty() {
+                let msg = Msg::Inputs { entries }.encode();
+                for &p in &self.peers {
+                    self.transport.send(p, Channel::UnreliableSequenced, &msg);
+                }
             }
         }
         // Input-timing feedback, a few times a second: each peer learns how
@@ -1560,11 +1706,16 @@ impl NetSession {
                 // perceived tick is clamped at rewind time, not here.
                 self.rpcs_in.push(ReceivedRpc { name, args, sender: from, tick: perceived });
             }
-            Msg::Input { entries } => {
+            Msg::Input { entries, confirmed } => {
                 if self.rollback {
                     // Rollback: the host doesn't CONSUME a peer's input, it
                     // relays it. Everyone simulates everyone, so an input is
                     // only useful once every peer has it.
+                    //
+                    // Their frontier first: it is what tells us we may stop
+                    // re-sending a tick, and applying it before the arrivals
+                    // keeps the ring from being trimmed against a stale floor.
+                    self.note_peer_confirmed(from, confirmed);
                     for cmd in entries {
                         self.note_rollback_input(from, cmd);
                     }
@@ -1603,6 +1754,11 @@ impl NetSession {
             self.interest_sets.drop_peer(p);
             self.interest_stats.remove(&p);
             self.peer_rtt.remove(&p);
+            // A peer that left must stop holding the retention floor down —
+            // otherwise every ring grows to its cap for the rest of the session
+            // waiting on a frontier that will never move again.
+            self.peer_confirmed.remove(&p);
+            self.rollback_rings.remove(&p);
             self.pings_out.retain(|(_, q), _| *q != p);
             self.last_sent.retain(|(a, _), _| *a != Some(p));
             self.last_synced.retain(|(a, _, _, _), _| *a != Some(p));
@@ -1851,7 +2007,10 @@ impl NetSession {
             self.expire_pings(now);
         }
         if self.connected && !self.input_window.is_empty() {
-            let msg = Msg::Input { entries: self.input_window.iter().cloned().collect() };
+            let msg = Msg::Input {
+                entries: self.input_window.iter().cloned().collect(),
+                confirmed: self.rollback_confirmed,
+            };
             self.transport.send(SERVER, Channel::UnreliableSequenced, &msg.encode());
         }
         self.apply_interpolation(world);
@@ -1990,8 +2149,10 @@ impl NetSession {
                 // behind this message, and the session starts again from there.
                 self.rollback = false;
                 self.rollback_slots.clear();
-                self.rollback_window.clear();
+                self.rollback_rings.clear();
                 self.rollback_in.clear();
+                self.peer_confirmed.clear();
+                self.rollback_confirmed = 0;
                 self.state_hashes.clear();
             }
             Msg::Spawn { epoch, id, node_ron, owner } => {
@@ -2118,8 +2279,10 @@ impl NetSession {
                 self.input_delay = input_delay.min(crate::rollback::MAX_DELAY);
                 self.rollback_slots = peers.clone();
                 self.rollback_seed = seed;
-                self.rollback_window.clear();
+                self.rollback_rings.clear();
                 self.rollback_in.clear();
+                self.peer_confirmed.clear();
+                self.rollback_confirmed = 0;
                 // The fixed delay replaces the adaptive lead — leaving both on
                 // has one mechanism shifting the stamps the other assumes are
                 // stable (§0.5.1).

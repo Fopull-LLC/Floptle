@@ -134,6 +134,10 @@ pub struct RollbackDriver {
     /// fits, a `Rollback` node with no rollback hooks. Drained by the driver's
     /// owner.
     pub faults: Vec<String>,
+    /// Has the script-level audit ([`Self::audit`]) run since the last rebind?
+    /// It can only run once the bound nodes' environments exist, which is
+    /// usually a frame or two after the driver engages.
+    audited: bool,
 }
 
 impl RollbackDriver {
@@ -153,6 +157,7 @@ impl RollbackDriver {
             last_checksum: 0,
             resimulated_ticks: 0,
             faults: Vec::new(),
+            audited: false,
         }
     }
 
@@ -208,39 +213,13 @@ impl RollbackDriver {
             let slot = self.nodes.len() as u8;
             self.nodes.push(RollbackNode { entity: e, eid: e.index(), slot });
         }
-        for n in &self.nodes {
-            let synced = host.synced_kinds_on(n.eid);
-            if !synced.is_empty() {
-                let name = world
-                    .get::<floptle_core::Name>(n.entity)
-                    .map(|x| x.0.clone())
-                    .unwrap_or_else(|| format!("#{}", n.eid));
-                self.faults.push(format!(
-                    "\"{name}\" is a Rollback node whose script(s) {} also declare `synced` \
-                     vars. Those are two owners for one value: rollback says this machine \
-                     simulates it and a correction may rewrite it, `synced` says the host \
-                     owns it and ships it. Which one wins comes down to arrival timing. Move \
-                     the value into snapshot()/restore() and drop the `synced`.",
-                    synced.join(", "),
-                ));
-            }
-            if !host.has_rollback_hooks(n.eid) {
-                let name = world
-                    .get::<floptle_core::Name>(n.entity)
-                    .map(|x| x.0.clone())
-                    .unwrap_or_else(|| format!("#{}", n.eid));
-                self.faults.push(format!(
-                    "\"{name}\" is a Rollback node but none of its scripts define \
-                     snapshot()/restore() — it will NOT be rolled back. That is right for \
-                     cosmetics and wrong for gameplay: a correction will leave its state on \
-                     the timeline that didn't happen."
-                ));
-            }
-        }
         // One player slot per fighter, or the extras read neutral forever. It is
         // deterministic (`set_tick_state` no-ops identically on every peer, so
         // checksums stay green) and therefore completely silent: a fighter that
         // simply never moves, in a match that never complains. Say it here.
+        //
+        // Scene data, so it is answerable NOW — unlike the script audit, which
+        // has to wait for environments that may not exist yet ([`Self::audit`]).
         let players = host.input_system().borrow().players();
         if self.nodes.len() > players {
             self.faults.push(format!(
@@ -250,6 +229,7 @@ impl RollbackDriver {
                 self.nodes.len(),
             ));
         }
+        self.audited = false;
         sim.set_driven_bodies(&self.eids());
         // Every peer simulates every rollback node, so every peer's copy of the
         // body has to be awake. On a client the session parks replicated bodies
@@ -265,6 +245,70 @@ impl RollbackDriver {
         // position, and the node list just changed.
         self.ring.clear();
         self.pending = None;
+    }
+
+    /// Audit the bound nodes' SCRIPTS: rollback hooks present, no `synced` vars
+    /// fighting them. Deferred out of [`Self::rebind`] on purpose.
+    ///
+    /// A driver engages on the same frame the scene switches, which is a frame
+    /// or more BEFORE the new scene's script environments have been built. Ask
+    /// then and every answer is "no": no `snapshot()`, no `restore()`, no
+    /// `synced` — because there is nothing to ask. The old code asked then, and
+    /// told people their fighter would not be rolled back while pointing at a
+    /// script that defines both hooks (floptle/0039). A warning that is wrong
+    /// at exactly the moment someone is debugging is worse than no warning.
+    ///
+    /// So: returns `false` while any node is still un-built, and the caller
+    /// tries again next tick. Runs once per rebind, whenever the answer becomes
+    /// knowable.
+    pub fn audit(&mut self, world: &World, host: &ScriptHost) -> bool {
+        if self.audited {
+            return true;
+        }
+        // A node with no scripts AT ALL never becomes knowable, and waiting for
+        // it forever would suppress every other node's audit. It is also worth
+        // reporting in its own right, so it counts as built and falls into the
+        // no-hooks arm below.
+        let unbuilt = self.nodes.iter().any(|n| {
+            let declared = world
+                .get::<floptle_core::Scripts>(n.entity)
+                .is_some_and(|s| !s.0.is_empty());
+            declared && !host.has_env(n.eid)
+        });
+        if unbuilt {
+            return false;
+        }
+        self.audited = true;
+        for n in &self.nodes {
+            let name = || {
+                world
+                    .get::<floptle_core::Name>(n.entity)
+                    .map(|x| x.0.clone())
+                    .unwrap_or_else(|| format!("#{}", n.eid))
+            };
+            let synced = host.synced_kinds_on(n.eid);
+            if !synced.is_empty() {
+                self.faults.push(format!(
+                    "\"{}\" is a Rollback node whose script(s) {} also declare `synced` \
+                     vars. Those are two owners for one value: rollback says this machine \
+                     simulates it and a correction may rewrite it, `synced` says the host \
+                     owns it and ships it. Which one wins comes down to arrival timing. Move \
+                     the value into snapshot()/restore() and drop the `synced`.",
+                    name(),
+                    synced.join(", "),
+                ));
+            }
+            if !host.has_rollback_hooks(n.eid) {
+                self.faults.push(format!(
+                    "\"{}\" is a Rollback node but none of its scripts define \
+                     snapshot()/restore() — it will NOT be rolled back. That is right for \
+                     cosmetics and wrong for gameplay: a correction will leave its state on \
+                     the timeline that didn't happen.",
+                    name(),
+                ));
+            }
+        }
+        true
     }
 
     /// Hand the bodies back to the whole-world step and forget the ring — the
@@ -1595,13 +1639,97 @@ end\n";
         );
         let mut sim = Sim::build(&world, &[], GravityField::uniform(Vec3::ZERO), DVec3::ZERO);
         let mut host = ScriptHost::new();
-        host.run(&mut world, &dir, STEP, 0.0);
         let mut d = RollbackDriver::new(P1, vec![P1], 0, 0);
         d.rebind(&world, &mut sim, &host);
         assert_eq!(d.nodes().len(), 1);
+
+        // FIRST: nothing has loaded the scripts yet, which is the state a driver
+        // engaging on a scene switch finds the world in. The audit must DECLINE
+        // to answer rather than answer "no hooks" — the old code answered, and
+        // told people a fighter defining both hooks would not be rolled back
+        // (floptle/0039).
+        assert!(
+            !d.audit(&world, &host),
+            "the audit must defer while the node's script environments do not exist"
+        );
+        assert!(
+            d.faults.is_empty(),
+            "and must say nothing at all while deferring: {:?}",
+            d.faults
+        );
+
+        // THEN, once the environments are built, the real answer.
+        host.run(&mut world, &dir, STEP, 0.0);
+        assert!(d.audit(&world, &host), "with envs built the audit must resolve");
         assert!(
             d.faults.iter().any(|f| f.contains("Spinner") && f.contains("snapshot()")),
             "the warning must name the node and the missing hooks: {:?}",
+            d.faults
+        );
+
+        // And exactly once — a per-tick caller must not repeat it forever.
+        d.faults.clear();
+        assert!(d.audit(&world, &host));
+        assert!(d.faults.is_empty(), "the audit must not re-report: {:?}", d.faults);
+    }
+
+    /// FIELD REGRESSION (floptle/0039 Symptom B): a restart that binds NOTHING
+    /// must not leave the previous driver's nodes in the script filters.
+    ///
+    /// `net_rollback_start` takes the running driver, rebinds it, and abandons
+    /// it when the new world has no `Rollback` nodes (or no sim yet). Every one
+    /// of those paths used to drop the driver with its eids still in both skip
+    /// sets — so the driver no longer ran those nodes and the global passes
+    /// still refused to. Their scripts sat un-ticked for the whole match, which
+    /// from Lua looks like every cross-script call returning nil forever, with
+    /// nothing in the console. This mirrors that sequence.
+    #[test]
+    fn abandoning_a_driver_hands_its_nodes_back_to_the_global_passes() {
+        let mut f = Fixture::new("filter_leak");
+        let mut d = RollbackDriver::new(P1, vec![P1, P2], 0, 0);
+        d.rebind(&f.world, &mut f.sim, &f.host);
+        assert_eq!(d.nodes().len(), 2);
+        let eids = d.eids();
+        f.host.extend_filters(eids.clone());
+        assert!(eids.iter().all(|e| f.host.is_filtered(*e)), "the driver owns them while running");
+
+        // The scene switches to one with no fighters. `net_rollback_start`'s
+        // order: give the filters back FIRST, then rebind, then re-take only on
+        // success.
+        f.host.shrink_filters(eids.clone());
+        for e in f.world.query::<Replicated>().map(|(e, _)| e).collect::<Vec<_>>() {
+            f.world.insert(e, Replicated { mode: ReplicationMode::Authority, ..Default::default() });
+        }
+        d.rebind(&f.world, &mut f.sim, &f.host);
+        assert!(d.nodes().is_empty(), "nothing left to drive");
+
+        for e in &eids {
+            assert!(
+                !f.host.is_filtered(*e),
+                "node {e} is skipped by the global passes with no driver behind it — its \
+                 scripts would never run again"
+            );
+        }
+    }
+
+    /// A `Rollback` node with NO scripts at all can never become "built", so an
+    /// audit that waited for its environment would wait forever — and suppress
+    /// every other node's report along with it.
+    #[test]
+    fn a_scriptless_rollback_node_does_not_stall_the_audit_forever() {
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Name("Prop".into()));
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Replicated { mode: ReplicationMode::Rollback, ..Default::default() });
+        let mut sim = Sim::build(&world, &[], GravityField::uniform(Vec3::ZERO), DVec3::ZERO);
+        let host = ScriptHost::new();
+        let mut d = RollbackDriver::new(P1, vec![P1], 0, 0);
+        d.rebind(&world, &mut sim, &host);
+        assert!(d.audit(&world, &host), "a node with no scripts is already as built as it gets");
+        assert!(
+            d.faults.iter().any(|f| f.contains("Prop") && f.contains("snapshot()")),
+            "and it genuinely has no hooks, so it is genuinely worth saying: {:?}",
             d.faults
         );
     }

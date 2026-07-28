@@ -541,6 +541,129 @@ mod tests {
         assert!(got[0].tick.is_some());
     }
 
+    /// Rollback inputs must cross a REAL relay in BOTH directions, through the
+    /// field's actual sequence: a long menu/lobby phase on the ordinary
+    /// predicted path, then the scene switch, then the match.
+    ///
+    /// Reapplied from the floptle/0039 field report — this was the one
+    /// transport no rollback test covered, and the report was right that it
+    /// deserved one even though the transport turned out to be innocent. The
+    /// bug was above it (`session.rs`'s shared window), which is exactly why a
+    /// test that pins the transport's honesty is worth keeping: next time the
+    /// symptom looks like this, this test says "not here" in half a second.
+    ///
+    /// `FLOPTLE_RELAY_ADDR=host:port` points it at a deployed relay instead.
+    #[test]
+    fn rollback_inputs_cross_a_relay_in_both_directions() {
+        use floptle_core::World;
+        use crate::{NetInput, NetSession, SERVER};
+
+        let external = std::env::var("FLOPTLE_RELAY_ADDR").ok();
+        let _relay = external.is_none().then(TestRelay::start);
+        let addr = match (&external, &_relay) {
+            (Some(a), _) => a.clone(),
+            (None, Some(r)) => format!("127.0.0.1:{}", r.port),
+            _ => unreachable!(),
+        };
+        let held = |a: u64| NetInput { actions: a, ..Default::default() };
+
+        let (host_t, code) = RelayHost::host(&addr).expect("host via relay");
+        let client_t = RelayClient::join(&addr, &code).expect("join via relay");
+        let mut host = NetSession::server(Box::new(host_t), 0);
+        let mut peer = NetSession::client(Box::new(client_t), 0);
+        let (hw, mut pw) = (World::default(), World::default());
+        host.register_scene(&hw);
+        peer.register_scene(&pw);
+
+        // Real UDP needs wall time, not iterations.
+        let mut wall = 0u64;
+        let pump = |n: u32,
+                    wall: &mut u64,
+                    host: &mut NetSession,
+                    peer: &mut NetSession,
+                    pw: &mut World| {
+            for _ in 0..n {
+                *wall += 1;
+                host.tick_server(&hw, *wall);
+                peer.tick_client(pw);
+                std::thread::sleep(Duration::from_millis(4));
+            }
+        };
+        for _ in 0..100 {
+            pump(1, &mut wall, &mut host, &mut peer, &mut pw);
+            if peer.is_connected() && peer.my_peer().is_some() {
+                break;
+            }
+        }
+        assert!(peer.is_connected(), "the session must handshake through the relay");
+        let me = peer.my_peer().expect("the Welcome must assign the joiner a peer id");
+        assert_ne!(me, SERVER, "a joiner must not believe it is the host");
+
+        // FIELD SHAPE: the lobby is hosted in the MENU scene, so a long stretch
+        // of ordinary predicted traffic — snapshots, acks, pings — runs before
+        // the scene switch flips the session into rollback. Anything that
+        // survives that transition wrongly only shows up if it happened.
+        for _ in 0..60 {
+            peer.send_input(wall, held(7));
+            pump(1, &mut wall, &mut host, &mut peer, &mut pw);
+        }
+        host.switch_scene("first");
+        host.set_rollback(true, 2, 0x0F0F_16A7_D00D_0001);
+        for _ in 0..100 {
+            pump(1, &mut wall, &mut host, &mut peer, &mut pw);
+            if let Some(s) = peer.take_scene_switch() {
+                assert_eq!(s, "first");
+                peer.rebind_scene(&pw);
+            }
+            if peer.take_rollback_start().is_some() {
+                break;
+            }
+        }
+
+        let (mut at_client, mut at_host) =
+            (std::collections::HashSet::new(), std::collections::HashSet::new());
+        let frontier = |seen: &std::collections::HashSet<u64>| {
+            (1..).take_while(|t| seen.contains(t)).last().unwrap_or(0)
+        };
+        for tick in 1..=24u64 {
+            host.push_rollback_input(tick, held(tick));
+            peer.send_rollback_input(tick, held(1000 + tick));
+            host.set_rollback_confirmed(frontier(&at_host));
+            peer.set_rollback_confirmed(frontier(&at_client));
+            pump(1, &mut wall, &mut host, &mut peer, &mut pw);
+            at_client
+                .extend(peer.take_rollback_inputs().iter().filter(|(p, ..)| *p == SERVER).map(
+                    |(_, t, _)| *t,
+                ));
+            at_host.extend(
+                host.take_rollback_inputs().iter().filter(|(p, ..)| *p == me).map(|(_, t, _)| *t),
+            );
+        }
+        for _ in 0..60 {
+            host.set_rollback_confirmed(frontier(&at_host));
+            peer.set_rollback_confirmed(frontier(&at_client));
+            pump(1, &mut wall, &mut host, &mut peer, &mut pw);
+            at_client
+                .extend(peer.take_rollback_inputs().iter().filter(|(p, ..)| *p == SERVER).map(
+                    |(_, t, _)| *t,
+                ));
+            at_host.extend(
+                host.take_rollback_inputs().iter().filter(|(p, ..)| *p == me).map(|(_, t, _)| *t),
+            );
+            if (1..=24).all(|t| at_client.contains(&t) && at_host.contains(&t)) {
+                break;
+            }
+        }
+        for tick in 1..=24u64 {
+            assert!(at_host.contains(&tick), "HOST never got the client's tick {tick}");
+            assert!(
+                at_client.contains(&tick),
+                "CLIENT never got the host's tick {tick} — the joiner would stall at \
+                 warmup+depth with nothing to confirm, which is the shape of the field freeze"
+            );
+        }
+    }
+
     #[test]
     fn bad_codes_refuse_and_lobbies_die_with_their_host() {
         let relay = TestRelay::start();

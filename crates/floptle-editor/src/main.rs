@@ -2013,6 +2013,13 @@ struct Editor {
     net_referee: Option<shadow::ShadowSim>,
     /// The newest tick the referee has published a verdict for.
     net_referee_reported: u64,
+    /// The game tick a rollback stall was last reported to the Console at
+    /// (0 = not stalled). Rate-limits the flow diagnostic to once a second, and
+    /// swallows the first second so ordinary jitter absorption stays silent.
+    net_flow_reported: u64,
+    /// Has this match's "is anything actually running the fighters?" check run?
+    /// Structural, so it is answered once per session rather than per tick.
+    net_rollback_orphans_checked: bool,
     /// The most recently played-back replay, kept so its world can be inspected
     /// after the run (and so it isn't dropped mid-frame).
     net_replay: Option<shadow::ShadowSim>,

@@ -212,6 +212,20 @@ The 🌐 panel is your instrument:
 - **✔ checksums agree through tick N** — the thing you want to see. Checksums
   are mandatory and always on: every 30 confirmed ticks each peer hashes its
   state and the host compares.
+- **frontier · confirmed C of S simulated (N ahead)** — `confirmed` is the
+  newest tick every peer's *real* input is known for; everything past it was
+  simulated from a guess and can still be corrected. When the gap reaches the
+  depth cap the sim stalls, so **a gap pinned at the cap means somebody's input
+  has stopped arriving**.
+- **per-peer lines** (`host · frontier 412 · 3 tick(s) held`) — what each peer
+  has confirmed, and how many of its inputs the host is still holding for it.
+  Healthy peers hold a handful. **A peer whose frontier has stopped moving while
+  its held count climbs is the starved one** — that is the readout that names
+  the machine, and it turns orange when it happens.
+
+If a match stalls for more than a second the Console says the same thing in
+words, on both machines, once a second — so a two-machine test does not need
+anybody watching the panel.
 
 ### When it says DESYNCED
 

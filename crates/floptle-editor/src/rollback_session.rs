@@ -64,6 +64,14 @@ impl Editor {
             }
             None => RollbackDriver::new(local, peers.clone(), delay, seed),
         };
+        // Give back the filters the OUTGOING driver held, before anything can
+        // abandon it. Every `return` below drops `d`, and a dropped driver whose
+        // eids are still in the script filters is a node nothing runs: not the
+        // driver (gone) and not the global passes (skipping it). Its scripts
+        // then sit un-ticked for the life of the match, silently, which is
+        // exactly what a joiner and a local bot match both did (floptle/0039).
+        // Re-added below only once the driver is actually installed.
+        self.script_host.shrink_filters(d.eids());
         let Some(sim) = self.sim.as_mut() else {
             self.console.push(
                 floptle_script::LogLevel::Warn,
@@ -72,9 +80,30 @@ impl Editor {
             );
             return;
         };
+        // Hand the bodies back too. `rebind` re-takes whatever it binds, but on
+        // the abandon paths nothing does, and a body left driven by a driver
+        // that no longer exists never steps again.
+        sim.set_driven_bodies(&std::collections::HashSet::new());
         d.rebind(&self.world, sim, &self.script_host);
         if d.nodes().is_empty() {
-            return; // nothing to drive; the session is an ordinary one
+            // Nothing to drive; the session is an ordinary one. Not silent —
+            // the host announced a match, so a scene with no Rollback nodes on
+            // THIS machine means the two projects disagree about the scene.
+            for f in d.faults.drain(..) {
+                self.console.push(floptle_script::LogLevel::Warn, f, None);
+            }
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "🥊 a rollback match was announced (peers {peers:?}) but scene \
+                     \"{}\" has no Rollback nodes here — this machine will simulate \
+                     nothing while the others fight. Check the scene loaded, and that its \
+                     fighters carry Replicated with mode Rollback.",
+                    self.scene_name,
+                ),
+                None,
+            );
+            return;
         }
         // The driver runs these nodes' hooks itself, every tick, in its own
         // order — so they leave the global passes entirely. `run_*_for` bypasses
@@ -84,6 +113,9 @@ impl Editor {
         // authority-driven node, and replacing the set would set all of those
         // running again.
         self.script_host.extend_filters(d.eids());
+        // A new match: both once-per-session diagnostics arm again.
+        self.net_flow_reported = 0;
+        self.net_rollback_orphans_checked = false;
         // The warm-up ticks nobody sampled: seeded locally AND shipped, or the
         // confirmed frontier could never leave zero and every peer would stall
         // a few ticks into the match with nothing to wait for.
@@ -338,6 +370,8 @@ impl Editor {
         self.net_save_replay();
         self.net_referee = None;
         self.net_referee_reported = 0;
+        self.net_flow_reported = 0;
+        self.net_rollback_orphans_checked = false;
         let Some(mut d) = self.net_rollback.take() else { return };
         // Take back exactly the half of the filters the driver added. `net_stop`
         // clears both wholesale afterwards and would not have needed this, but a
@@ -438,6 +472,18 @@ impl Editor {
         // left it holding the last fighter's aim.
         self.script_host.set_input(self.last_tick_input.clone());
 
+        // Publish our confirmed frontier. This is what tells the host it may
+        // stop re-sending a tick — and a session where nobody reports one keeps
+        // every unconfirmed tick forever, because the host has no way to know.
+        // It is also half the answer to "which side is starved", which used to
+        // cost a replay-file autopsy (floptle/0039).
+        let confirmed = d.net.confirmed();
+        if let Some(s) = self.net_server.as_mut() {
+            s.set_rollback_confirmed(confirmed);
+        } else if let Some(c) = self.net_play_client.as_mut() {
+            c.set_rollback_confirmed(confirmed);
+        }
+
         // 4. Checksums (§6) and the faults that must not be swallowed.
         if let Some((tick, hash)) = d.due_checksum() {
             if let Some(s) = self.net_server.as_mut() {
@@ -449,9 +495,124 @@ impl Editor {
         for f in d.faults.drain(..) {
             self.console.push(floptle_script::LogLevel::Error, f, None);
         }
-        self.net_rollback = Some(d);
+        // The script-level audit, deferred out of `rebind` until the bound
+        // nodes' environments exist (`RollbackDriver::audit`). A no-op once it
+        // has run.
+        if let Some(mut d) = self.net_rollback.take() {
+            d.audit(&self.world, &self.script_host);
+            for f in d.faults.drain(..) {
+                self.console.push(floptle_script::LogLevel::Warn, f, None);
+            }
+            self.net_rollback = Some(d);
+        }
         self.net_referee_tick();
         self.net_rollback_report_desyncs();
+        self.net_rollback_report_flow();
+        self.net_rollback_check_orphans();
+    }
+
+    /// Every `Rollback` node must be run by SOMETHING each tick: the driver, or
+    /// the global script passes. Say so loudly when neither can.
+    ///
+    /// The failure this guards is invisible from Lua and invisible on screen:
+    /// a node whose eid is in the script filters with no driver holding it
+    /// simply never ticks. Its scripts' state stays at whatever the loader left
+    /// it, cross-script calls into it read `nil` forever, and nothing anywhere
+    /// says why. That is a match that looks frozen with a clean console — the
+    /// state floptle/0039 was reported in.
+    ///
+    /// Checked once per session rather than per tick: the condition is
+    /// structural, so repeating it sixty times a second would only bury it.
+    fn net_rollback_check_orphans(&mut self) {
+        if self.net_rollback_orphans_checked {
+            return;
+        }
+        self.net_rollback_orphans_checked = true;
+        let driven = self.rollback_filter_eids();
+        let orphans: Vec<String> = self
+            .world
+            .query::<floptle_core::Replicated>()
+            .filter(|(_, r)| r.mode.is_rollback())
+            .map(|(e, _)| e)
+            .filter(|e| !driven.contains(&e.index()) && self.script_host.is_filtered(e.index()))
+            .map(|e| {
+                self.world
+                    .get::<floptle_core::Name>(e)
+                    .map(|n| n.0.clone())
+                    .unwrap_or_else(|| format!("#{}", e.index()))
+            })
+            .collect();
+        if orphans.is_empty() {
+            return;
+        }
+        self.console.push(
+            floptle_script::LogLevel::Error,
+            format!(
+                "🥊 {} Rollback node(s) are being run by NOTHING this match — not the \
+                 rollback driver and not the global script passes: {}. Their scripts will \
+                 never tick, so anything asking them a question gets nil for the whole \
+                 match. This is an engine fault, not a project one; please report it with \
+                 the console text.",
+                orphans.len(),
+                orphans.join(", "),
+            ),
+            None,
+        );
+    }
+
+    /// Once a second while a match is stalled, say who we are waiting for.
+    ///
+    /// Silent while the match is healthy — a line per second in a working
+    /// session is noise, and noise is what gets a diagnostic ignored. But a
+    /// frozen match must never again be silent on both screens at once
+    /// (floptle/0039): the whole failure was two machines showing the same
+    /// frozen frame with nothing anywhere saying which one had stopped
+    /// receiving.
+    fn net_rollback_report_flow(&mut self) {
+        let Some(d) = self.net_rollback.as_ref() else { return };
+        if !d.stalled {
+            self.net_flow_reported = 0;
+            return;
+        }
+        // A stall of a few ticks is ordinary jitter absorption, not an event.
+        // ~1 s of continuous waiting is not.
+        let hz = (1.0 / self.game_tick.step).round().max(1.0) as u64;
+        let tick = self.game_tick_no;
+        if self.net_flow_reported != 0 && tick.saturating_sub(self.net_flow_reported) < hz {
+            return;
+        }
+        let first = self.net_flow_reported == 0;
+        self.net_flow_reported = tick;
+        if first {
+            // The first second of a stall is normal on a rough link. Start the
+            // clock, say nothing yet.
+            return;
+        }
+        let (confirmed, current) = (d.net.confirmed(), d.net.current());
+        let session = self.net_server.as_ref().or(self.net_play_client.as_ref());
+        let who = match session.map(|s| s.rollback_frontiers()) {
+            Some(f) if !f.is_empty() => f
+                .iter()
+                .map(|(p, t)| {
+                    let name =
+                        if *p == SERVER { "host".to_string() } else { format!("peer {p}") };
+                    format!("{name} at {t}")
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            _ => "no peer frontiers reported".to_string(),
+        };
+        let role = if self.net_server.is_some() { "host" } else { "client" };
+        self.console.push(
+            floptle_script::LogLevel::Warn,
+            format!(
+                "🥊 rollback STALLED — this machine ({role}) has simulated to tick {current} \
+                 but only tick {confirmed} is confirmed, so it is waiting rather than \
+                 guessing further. Frontiers: {who}. The peer whose frontier has stopped \
+                 moving is the one not receiving."
+            ),
+            None,
+        );
     }
 
     /// This tick's local actions in wire form, sampled without disturbing the
@@ -511,7 +672,7 @@ impl Editor {
 }
 
 /// What the 🌐 panel and `net.rollback*` report about a live rollback session.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct RollbackStats {
     pub corrections: u64,
     pub last_depth: u32,
@@ -528,14 +689,43 @@ pub(crate) struct RollbackStats {
     /// agreeing" are very different states to be in, so the panel says which.
     pub checksum_tick: u64,
     pub desynced: bool,
+    /// This peer's own confirmed frontier, and how far the local simulation has
+    /// run past it. `current − confirmed` IS the stall: at the depth cap the
+    /// driver stops rather than guess further.
+    pub confirmed: u64,
+    pub current: u64,
+    /// Per peer: `(peer, their reported frontier, applied ticks we are still
+    /// holding for them)`. Empty on a client, which only knows about itself.
+    ///
+    /// This is the readout floptle/0039 cost a replay-file autopsy for want of.
+    /// A peer whose frontier has stopped moving while its backlog grows is the
+    /// starved one, and it says so on the host's screen the moment it happens.
+    pub peers: Vec<(floptle_net::PeerId, u64, usize)>,
 }
 
 impl RollbackStats {
-    /// Read a live driver's counters. A free constructor rather than an
+    /// Read a live driver's counters, plus the session's per-peer view of input
+    /// flow when there is a session to ask. A free constructor rather than an
     /// `Editor` method because the panel builds it mid-render, with half the
     /// editor already mutably borrowed for the GPU.
-    pub(crate) fn of(d: &RollbackDriver) -> Self {
+    pub(crate) fn with_session(
+        d: &RollbackDriver,
+        session: Option<&floptle_net::NetSession>,
+    ) -> Self {
+        let peers = session
+            .map(|s| {
+                let backlog: std::collections::HashMap<_, _> =
+                    s.rollback_backlog().into_iter().collect();
+                s.rollback_frontiers()
+                    .into_iter()
+                    .map(|(p, f)| (p, f, backlog.get(&p).copied().unwrap_or(0)))
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
+            confirmed: d.net.confirmed(),
+            current: d.net.current(),
+            peers,
             corrections: d.net.corrections,
             last_depth: d.net.last_depth,
             max_depth_seen: d.net.max_depth_seen,

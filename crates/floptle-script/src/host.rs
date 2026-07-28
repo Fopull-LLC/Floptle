@@ -2120,9 +2120,27 @@ impl ScriptHost {
         self.net.random_draws.set(0);
     }
 
+    /// Has `eid`'s script environment been BUILT yet — i.e. has pass 1 run for
+    /// it and published a table to look things up in?
+    ///
+    /// The distinction matters because every other query here answers "no" for
+    /// a node whose envs do not exist yet, which reads identically to "no, and
+    /// I checked". A rollback driver engaging on the same frame as a scene
+    /// switch asked [`Self::has_rollback_hooks`] before the new scene's scripts
+    /// had been loaded, got `false`, and told the user their fighter would not
+    /// be rolled back — about a script that defines both hooks (floptle/0039).
+    /// Callers that audit a node must gate on this and try again later.
+    pub fn has_env(&self, eid: u32) -> bool {
+        self.envs.borrow().keys().any(|(id, _)| *id == eid)
+    }
+
     /// Does any script on `eid` participate in rollback? A `Rollback` node whose
     /// scripts define neither hook is almost always a mistake, and the driver
     /// warns about it once rather than desyncing quietly.
+    ///
+    /// Answers `false` for a node whose environments have not been built yet —
+    /// check [`Self::has_env`] first if the answer is going to be shown to
+    /// anyone.
     pub fn has_rollback_hooks(&self, eid: u32) -> bool {
         self.script_kinds_on(eid).iter().any(|(_, env)| {
             matches!(env.raw_get::<Option<mlua::Function>>("snapshot"), Ok(Some(_)))
@@ -2368,6 +2386,14 @@ impl ScriptHost {
     /// Skip these entities' scripts in every pass — a networked CLIENT doesn't
     /// run server-authoritative nodes' scripts (their state arrives in
     /// snapshots). Pass an empty set to clear (Stop / role change).
+    /// Is `eid` excluded from the global script passes? True means SOMETHING
+    /// else has taken responsibility for running it (the rollback driver, the
+    /// host's replayed-input pass) — and if nothing has, its scripts never run
+    /// at all, which is a failure with no symptom other than silence.
+    pub fn is_filtered(&self, eid: u32) -> bool {
+        self.script_skip.contains(&eid)
+    }
+
     pub fn set_script_filter(&mut self, skip: std::collections::HashSet<u32>) {
         self.script_skip = skip;
     }

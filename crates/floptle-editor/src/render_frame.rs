@@ -1532,8 +1532,12 @@ impl Editor {
         // ping — and the stall indicator is the one readout a player NEEDS,
         // because a stalled sim looks like the game running slightly slow and
         // is otherwise indistinguishable from a bad frame rate.
-        let net_rollback =
-            self.net_rollback.as_ref().map(crate::rollback_session::RollbackStats::of);
+        let net_rollback = self.net_rollback.as_ref().map(|d| {
+            crate::rollback_session::RollbackStats::with_session(
+                d,
+                self.net_server.as_ref().or(self.net_play_client.as_ref()),
+            )
+        });
         // (referee tick, live tick) — how far behind the authoritative sim is.
         let referee = self
             .net_referee
@@ -1896,7 +1900,7 @@ impl Editor {
                                 }
                             }
                         }
-                        if let Some(rb) = net_rollback {
+                        if let Some(rb) = net_rollback.as_ref() {
                             ui.separator();
                             if rb.stalled {
                                 ui.colored_label(
@@ -1931,6 +1935,47 @@ impl Editor {
                                  numbers are the measurement you choose it from: a healthy \
                                  match sits at low average depth.",
                             );
+                            // WHO is starved, and on what. A frozen match used
+                            // to look identical from both screens; this names
+                            // the side that stopped keeping up (floptle/0039).
+                            ui.small(format!(
+                                "frontier · confirmed {} of {} simulated ({} ahead)",
+                                rb.confirmed,
+                                rb.current,
+                                rb.current.saturating_sub(rb.confirmed),
+                            ))
+                            .on_hover_text(
+                                "\"confirmed\" is the newest tick every peer's REAL input is \
+                                 known for. Everything past it was simulated from a guess and \
+                                 can still be corrected. When the gap reaches the depth cap \
+                                 the sim stalls — so a gap pinned at the cap means someone's \
+                                 input has stopped arriving.",
+                            );
+                            for (peer, frontier, backlog) in &rb.peers {
+                                let who = if *peer == floptle_net::SERVER {
+                                    "host".to_string()
+                                } else {
+                                    format!("peer {peer}")
+                                };
+                                // A backlog past the fan-out window is a peer
+                                // that has stopped confirming — the shape of a
+                                // starved or departed player, not of a slow one.
+                                let stuck = *backlog > 24;
+                                let line =
+                                    format!("   {who} · frontier {frontier} · {backlog} tick(s) held");
+                                if stuck {
+                                    ui.colored_label(egui::Color32::from_rgb(255, 170, 60), line)
+                                        .on_hover_text(
+                                            "this peer has stopped confirming ticks: the host \
+                                             is holding its inputs and re-sending them, and \
+                                             will keep doing so until they land. If it stays \
+                                             here, that peer is the one that fell out of the \
+                                             match.",
+                                        );
+                                } else {
+                                    ui.small(line);
+                                }
+                            }
                             // Checksum status. "Never checked" and "checked and
                             // agreeing" are very different states to be in.
                             if rb.desynced {

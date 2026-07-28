@@ -14,7 +14,7 @@ use crate::PeerId;
 
 /// Bump when the wire format changes incompatibly; mismatched peers are
 /// refused at hello time instead of desyncing mysteriously later.
-pub const PROTO_VERSION: u16 = 11;
+pub const PROTO_VERSION: u16 = 12;
 
 /// Confirmed ticks between rollback state checksums (§6) — twice a second at
 /// 60 Hz. Often enough that a desync is caught within a exchange or two, rare
@@ -200,7 +200,17 @@ pub enum Msg {
     },
     /// Client → server, every tick: the last few ticks' inputs (redundant
     /// window, so one lost packet doesn't lose a tick's input).
-    Input { entries: Vec<InputCmd> },
+    ///
+    /// `confirmed` is the sender's ROLLBACK frontier — the newest applied tick
+    /// for which it holds every peer's real input. Zero, and meaningless, in a
+    /// non-rollback session.
+    ///
+    /// It exists because the host cannot otherwise know when it is safe to stop
+    /// re-sending a tick. Its own frontier says "I have everyone's input for
+    /// T", which is a different claim from "everyone HAS everyone's input for
+    /// T" — and dropping on the former is what let a single lost datagram
+    /// deadlock a match permanently (floptle/0039).
+    Input { entries: Vec<InputCmd>, confirmed: u64 },
     /// Either direction: a named remote call. `sender` is stamped by the
     /// SERVER when relaying/receiving (clients can't spoof it). `tick` is the
     /// sender's PERCEIVED server tick (`{withInput = true}`, client → server
@@ -239,6 +249,11 @@ pub enum Msg {
     /// inputs and it echoes everyone's to everyone. That also means the host
     /// holds the session's input log, which is what makes match replays, the
     /// referee and (later) spectators nearly free (§5).
+    ///
+    /// Ordered **oldest first**, and built from every peer's ring separately,
+    /// so the tick a starved peer is waiting for is always in the packet and no
+    /// peer's traffic can crowd out another's. Both were true only by accident
+    /// before floptle/0039, and stopped being true the moment anyone stalled.
     Inputs { entries: Vec<(PeerId, InputCmd)> },
     /// Any peer → host → all: the state checksum for a confirmed tick (§6).
     ///

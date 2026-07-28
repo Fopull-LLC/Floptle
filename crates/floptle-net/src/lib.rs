@@ -1166,21 +1166,102 @@ mod tests {
 
         let mut seen_at_client = std::collections::HashSet::new();
         let mut seen_at_host = std::collections::HashSet::new();
+        // A driver's confirmed frontier: the newest tick BOTH peers' real
+        // inputs are known for. Our own are 1..=N by construction, so it is the
+        // longest unbroken prefix of what has arrived. Reported every tick,
+        // exactly as `net_rollback_tick` does — the host retains against it, so
+        // a test that never reported would model a session that cannot exist.
+        let frontier = |seen: &std::collections::HashSet<u64>| {
+            (1..).take_while(|t| seen.contains(t)).last().unwrap_or(0)
+        };
         for tick in 1..=40u64 {
             server.push_rollback_input(tick, held(tick));
             client.send_rollback_input(tick, held(1000 + tick));
+            server.set_rollback_confirmed(frontier(&seen_at_host));
+            client.set_rollback_confirmed(frontier(&seen_at_client));
             t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 1, |_, _| {});
             seen_at_client.extend(client.take_rollback_inputs().into_iter().map(|(_, t, _)| t));
             seen_at_host.extend(server.take_rollback_inputs().into_iter().map(|(_, t, _)| t));
         }
         // Let the tail drain: the last few ticks are still riding the window.
-        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 20, |_, _| {});
-        seen_at_client.extend(client.take_rollback_inputs().into_iter().map(|(_, t, _)| t));
-        seen_at_host.extend(server.take_rollback_inputs().into_iter().map(|(_, t, _)| t));
+        for _ in 0..20 {
+            server.set_rollback_confirmed(frontier(&seen_at_host));
+            client.set_rollback_confirmed(frontier(&seen_at_client));
+            t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 1, |_, _| {});
+            seen_at_client.extend(client.take_rollback_inputs().into_iter().map(|(_, t, _)| t));
+            seen_at_host.extend(server.take_rollback_inputs().into_iter().map(|(_, t, _)| t));
+        }
+        let _ = t;
         for tick in 1..=40u64 {
             assert!(seen_at_client.contains(&tick), "client lost tick {tick} at 50% loss");
             assert!(seen_at_host.contains(&tick), "host lost tick {tick} at 50% loss");
         }
+    }
+
+    /// FIELD REGRESSION (floptle/0039 Symptom A): a live relay match froze on
+    /// round one, the joiner stalled at warmup+depth having never received a
+    /// host input, and every layer test passed.
+    ///
+    /// The window was doing two jobs out of one FIFO: **dedup memory** and
+    /// **fan-out payload**, capped at `INPUT_WINDOW × slots` across ALL peers.
+    /// So it carried "the last N admissions", not "everything still
+    /// unconfirmed" — and the host advancing evicted its OWN oldest ticks,
+    /// which are exactly the ticks a starved peer is waiting for. One dropped
+    /// packet early in a match and that tick was gone for good: the client
+    /// could never confirm, so it stopped sending, so the host's frontier froze
+    /// too. A permanent deadlock, from one lost datagram, on a design whose
+    /// entire loss strategy is "say it again next tick".
+    ///
+    /// The invariant is: **an unconfirmed tick keeps riding every packet until
+    /// every peer has it.** That is what makes the redundancy redundant.
+    #[test]
+    fn the_window_keeps_carrying_the_tick_a_starved_peer_is_waiting_for() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(1);
+        let (mut cw, _) = world_with(1);
+        let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 4, |_, _| {});
+        server.set_rollback(true, 2, MATCH_SEED);
+        let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 2, |_, _| {});
+        client.take_rollback_start().expect("the host announces the match");
+
+        // The opening of the match is lost. A burst at the start of a session is
+        // the least surprising loss there is — the link has not settled, the
+        // joiner is still loading the match scene, and the host waits for
+        // neither. Both sides bank their first ten applied ticks into it.
+        hub.set_conditions(0, 1.0);
+        for tick in 1..=10u64 {
+            server.push_rollback_input(tick, held(tick));
+            client.send_rollback_input(tick, held(100 + tick));
+        }
+        let t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 10, |_, _| {});
+        hub.set_conditions(0, 0.0);
+        assert!(
+            client.take_rollback_inputs().is_empty(),
+            "the burst was supposed to swallow the opening — the test proves nothing otherwise"
+        );
+
+        // The link is clean again. Nobody has confirmed anything, and the
+        // client says so on every packet. The host keeps playing while it
+        // waits: ten more of its own ticks, well inside the depth cap.
+        for tick in 11..=20u64 {
+            server.push_rollback_input(tick, held(tick));
+        }
+        let _ = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 10, |_, _| {});
+
+        let at_client = client.take_rollback_inputs();
+        assert!(
+            at_client.iter().any(|(p, tk, _)| *p == SERVER && *tk == 1),
+            "the host's tick 1 is unconfirmed and the client is stalled on it, but the \
+             fan-out stopped carrying it — the client can never confirm, so it stops \
+             sending, so the host freezes too. Ticks the client did get: {:?}",
+            {
+                let mut v: Vec<u64> =
+                    at_client.iter().filter(|(p, ..)| *p == SERVER).map(|(_, t, _)| *t).collect();
+                v.sort_unstable();
+                v
+            }
+        );
     }
 
     /// Desync detection is mandatory (§6). Agreement is silent; disagreement is
