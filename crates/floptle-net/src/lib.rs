@@ -645,6 +645,123 @@ mod tests {
     /// The fan-out: peers send the host their own applied-tick inputs and the
     /// host echoes everyone's to everyone, so every peer can simulate every
     /// fighter. Nothing about a hit ever crosses the wire — only inputs do.
+    /// A world whose node 0 is a `Rollback` fighter and node 1 an ordinary
+    /// authority prop — the mixed scene the guard has to tell apart.
+    fn world_with_a_fighter() -> (World, Vec<floptle_core::Entity>) {
+        let (mut w, ents) = world_with(2);
+        w.insert(
+            ents[0],
+            Replicated {
+                mode: floptle_core::ReplicationMode::Rollback,
+                ..Default::default()
+            },
+        );
+        (w, ents)
+    }
+
+    /// Before `RollbackStart` there is no driver anywhere, so a rollback node
+    /// is snapshot-driven like anything else. This is what puts a joining
+    /// client's fighters where the host has them before the match begins, and
+    /// it must keep working — the guard is about the driver being live, not
+    /// about the mode.
+    #[test]
+    fn before_the_match_starts_a_fighter_still_follows_the_host() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, se) = world_with_a_fighter();
+        let (mut cw, ce) = world_with_a_fighter();
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+
+        run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 60, |w, t| {
+            if let Some(tr) = w.get_mut::<Transform>(se[0]) {
+                tr.translation.x = t as f64 * 0.1;
+            }
+        });
+        let cx = cw.get::<Transform>(ce[0]).unwrap().translation.x;
+        assert!(cx > 0.5, "with no match running the fighter is ordinary synced state, x={cx}");
+    }
+
+    /// Once the match is on, every peer simulates the fighter from the shared
+    /// input stream — so the host's snapshot of it is not authority, it is a
+    /// second opinion a round trip late. Applying it drags the node between the
+    /// driver's tick pose and an interpolated one from the past, every frame,
+    /// while the checksums (which hash body state, not transforms) stay green:
+    /// a match that LOOKS broken and REPORTS healthy.
+    #[test]
+    fn once_the_match_starts_the_host_stops_moving_the_fighter() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, se) = world_with_a_fighter();
+        let (mut cw, ce) = world_with_a_fighter();
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+
+        // Connect, then start the match.
+        let mut t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 8, |_, _| {});
+        server.set_rollback(true, 2, 0xFEED_FACE);
+        t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 8, |_, _| {});
+        assert!(client.take_rollback_start().is_some(), "the match must have been announced");
+
+        // The client's own copies, frozen at whatever the pre-match snapshots
+        // left them at. From here the driver owns the fighter and nothing on
+        // the wire may move it.
+        let fighter_before = cw.get::<Transform>(ce[0]).unwrap().translation.x;
+        let prop_before = cw.get::<Transform>(ce[1]).unwrap().translation.x;
+
+        run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 90, |w, t| {
+            for e in [se[0], se[1]] {
+                if let Some(tr) = w.get_mut::<Transform>(e) {
+                    tr.translation.x = 100.0 + t as f64;
+                }
+            }
+        });
+
+        let fighter_after = cw.get::<Transform>(ce[0]).unwrap().translation.x;
+        let prop_after = cw.get::<Transform>(ce[1]).unwrap().translation.x;
+        assert!(
+            (fighter_after - fighter_before).abs() < 1e-9,
+            "a live driver owns the fighter — the host's snapshot must not touch it \
+             (was {fighter_before}, now {fighter_after})"
+        );
+        assert!(
+            prop_after > prop_before + 50.0,
+            "the ordinary prop in the same scene still replicates normally \
+             (was {prop_before}, now {prop_after})"
+        );
+    }
+
+    /// A scene switch ends the match on every peer, not just the host's.
+    ///
+    /// The state ring is indexed by node position and the slot order comes from
+    /// scene order, so nothing about a match survives the scene it was played
+    /// in. The host restarts its own driver; without this the CLIENT kept
+    /// `rollback` set, went on refusing the new scene's snapshots for nodes its
+    /// dead driver still thought it owned, and waited for a `RollbackStart`
+    /// that had already been and gone.
+    #[test]
+    fn a_scene_switch_ends_the_match_on_the_client_too() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with_a_fighter();
+        let (mut cw, _) = world_with_a_fighter();
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+
+        let mut t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 8, |_, _| {});
+        server.set_rollback(true, 2, 0xC0FF_EE00);
+        t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 8, |_, _| {});
+        assert!(client.take_rollback_start().is_some(), "the match started");
+        assert!(client.is_rollback(), "the client is in a match");
+
+        server.switch_scene("scenes/other.ron");
+        run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 8, |_, _| {});
+        assert!(
+            !client.is_rollback(),
+            "a scene switch ends the match — the next one arrives with its own RollbackStart"
+        );
+    }
+
     #[test]
     fn rollback_inputs_fan_out_from_the_host_to_every_peer() {
         let hub = MemoryHub::new();

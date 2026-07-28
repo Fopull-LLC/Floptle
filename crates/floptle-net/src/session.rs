@@ -1391,6 +1391,58 @@ impl NetSession {
         });
     }
 
+    /// Is this node simulated HERE rather than received?
+    ///
+    /// True only for a `Rollback` node in a live rollback session — every peer
+    /// simulates it from the shared input stream, so the host's snapshot of it
+    /// is not authority, it is a second opinion arriving a round trip late. Let
+    /// it land and the node is tugged between the driver's tick pose and an
+    /// interpolated pose from the past, every single frame.
+    ///
+    /// Deliberately gated on the SESSION's rollback flag rather than on the
+    /// mode alone. Before `RollbackStart` there is no driver yet: the fighters
+    /// are parked and snapshot-driven exactly like anything else, which is what
+    /// puts a joining client's scene in the right place before the match
+    /// begins. The flag flips at the same moment the driver takes over.
+    fn driven_locally(&self, world: &World, id: u64) -> bool {
+        if !self.rollback {
+            return false;
+        }
+        self.net_to_ent
+            .get(&id)
+            .and_then(|&e| world.get::<Replicated>(e))
+            .is_some_and(|rep| rep.mode.is_rollback())
+    }
+
+    /// Drop everything buffered FOR locally-simulated nodes. Called when a
+    /// rollback session starts: samples that arrived a moment before the match
+    /// did are still in the interpolation buffers, and `apply_interpolation`
+    /// keeps applying the newest sample it holds whether or not new ones come —
+    /// so refusing to buffer any more is not enough on its own.
+    fn drop_locally_driven_buffers(&mut self, world: &World) {
+        let ids: Vec<u64> = self
+            .net_to_ent
+            .iter()
+            .filter(|(_, e)| {
+                world.get::<Replicated>(**e).is_some_and(|rep| rep.mode.is_rollback())
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        for id in &ids {
+            // Cleared, not removed: the buffer carries the node's own `interp`
+            // and `interp_delay`, which it would silently lose to defaults if
+            // the session ever stopped being a rollback one.
+            if let Some(buf) = self.interp.get_mut(id) {
+                buf.samples.clear();
+            }
+        }
+        self.anim_bufs.retain(|(id, _), _| !ids.contains(id));
+        self.anim_started.retain(|(id, _)| !ids.contains(id));
+        self.anims_due.retain(|(e, _)| {
+            !world.get::<Replicated>(*e).is_some_and(|rep| rep.mode.is_rollback())
+        });
+    }
+
     fn client_message(&mut self, world: &mut World, msg: Msg) {
         match msg {
             Msg::Welcome { peer, tick, scene, epoch, input_delay, .. } => {
@@ -1424,6 +1476,17 @@ impl NetSession {
                 self.anim_started.clear();
                 self.anims_due.clear();
                 self.predicted_in.clear();
+                // A scene switch ENDS the match. The tick origin, the roster's
+                // slot order and the state ring are all indexed against the
+                // scene that just went away, and the new scene's fighters are
+                // different nodes. If it has any, the host announces a fresh
+                // `RollbackStart` — with a new seed and a new tick 0 — right
+                // behind this message, and the session starts again from there.
+                self.rollback = false;
+                self.rollback_slots.clear();
+                self.rollback_window.clear();
+                self.rollback_in.clear();
+                self.state_hashes.clear();
             }
             Msg::Spawn { epoch, id, node_ron, owner } => {
                 if epoch != self.scene_epoch || self.scene_pending {
@@ -1470,6 +1533,9 @@ impl NetSession {
                 }
                 self.latest_server_tick = self.latest_server_tick.max(tick);
                 for an in anims {
+                    if self.driven_locally(world, an.id) {
+                        continue;
+                    }
                     // OUR OWN predicted node's animator is locally driven (its
                     // scripts run here, ahead of the server) — never overwrite.
                     if let Some(&e) = self.net_to_ent.get(&an.id)
@@ -1487,6 +1553,9 @@ impl NetSession {
                     }
                 }
                 for en in entries {
+                    if self.driven_locally(world, en.id) {
+                        continue;
+                    }
                     // OUR OWN predicted node never interpolates — its
                     // authoritative states go to the reconcile queue instead
                     // (docs/netcode-design.md §6).
@@ -1518,6 +1587,9 @@ impl NetSession {
                     }
                 }
                 for s in synced {
+                    if self.driven_locally(world, s.id) {
+                        continue;
+                    }
                     if let Some(&e) = self.net_to_ent.get(&s.id) {
                         self.synced_in.push((e, s.script, s.vars));
                     }
@@ -1543,6 +1615,7 @@ impl NetSession {
                 self.auto_lead = false;
                 self.stamp_offset = 0;
                 self.input_window.clear();
+                self.drop_locally_driven_buffers(world);
                 self.rollback_start_in = Some((peers, self.input_delay, seed));
             }
             Msg::Inputs { entries } => {
@@ -1574,6 +1647,15 @@ impl NetSession {
         for (id, buf) in &mut self.interp {
             let target = latest.saturating_sub(buf.delay);
             let Some(&e) = self.net_to_ent.get(id) else { continue };
+            // Belt and suspenders over the ingest guard in `client_message`:
+            // this is the line that would actually move a locally-simulated
+            // fighter, so it refuses on its own terms rather than trusting that
+            // nothing upstream ever buffers one.
+            if self.rollback
+                && world.get::<Replicated>(e).is_some_and(|rep| rep.mode.is_rollback())
+            {
+                continue;
+            }
             let Some(last) = buf.samples.back().copied() else { continue };
             let (pos, rot) = if !buf.interp || buf.samples.len() == 1 {
                 (last.1, last.2)

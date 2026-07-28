@@ -684,10 +684,25 @@ impl Editor {
                 s.rebind_scene(&self.world);
             }
             self.net_scene_doc = Some(floptle_scene::to_doc("net-baseline", &self.world));
-            // The ring is indexed by node position and the new scene's fighters
-            // are different nodes — the driver rebinds and the match clock
-            // restarts, on every peer.
-            self.net_rollback_resync();
+            // A scene switch ENDS the match rather than carrying it across. The
+            // state ring is indexed by node position, the slot order comes from
+            // scene order, and the new scene's fighters are different nodes —
+            // none of that survives. `switch_scene` above already told the
+            // clients (their `Msg::Scene` ends their half), so this drops ours
+            // and, if the new scene has fighters at all, starts a genuinely new
+            // match: fresh seed, fresh tick 0, announced to every peer.
+            self.net_rollback_stop();
+            if self.scene_has_rollback() {
+                self.net_rollback_host_setup();
+            } else if let Some(s) = self.net_server.as_mut()
+                && s.is_rollback()
+            {
+                // The new scene has no fighters. Leaving the session claiming a
+                // match would leave every peer waiting on inputs for nodes that
+                // no longer exist.
+                let (delay, seed) = (s.input_delay(), s.rollback_seed());
+                s.set_rollback(false, delay, seed);
+            }
         } else {
             self.net_apply_offline_slots();
         }
@@ -1581,6 +1596,13 @@ impl Editor {
                 Self::net_assign_scene_owners(&mut self.world);
                 // Stale prediction history must not survive into the new scene.
                 self.net_predictor = None;
+                // Neither may a stale DRIVER. Its nodes belong to the world
+                // that just went away: kept, it would drive freed entities and
+                // hold their ids in both script filters, which are recomputed
+                // just below and would otherwise inherit the ghosts. If the new
+                // scene has fighters, a fresh `RollbackStart` is already on its
+                // way — the host sends it right behind the scene message.
+                self.net_rollback_stop();
                 if let Some(cs) = self.net_play_client.as_mut() {
                     cs.rebind_scene(&self.world);
                 }

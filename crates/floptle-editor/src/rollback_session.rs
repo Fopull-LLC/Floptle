@@ -142,6 +142,12 @@ impl Editor {
     /// host going away).
     pub(crate) fn net_rollback_stop(&mut self) {
         let Some(mut d) = self.net_rollback.take() else { return };
+        // Take back exactly the half of the filters the driver added. `net_stop`
+        // clears both wholesale afterwards and would not have needed this, but a
+        // scene switch does NOT — and an entity index left behind here is one
+        // the allocator hands to an unrelated node in the next scene, whose
+        // scripts would then quietly never run.
+        self.script_host.shrink_filters(d.eids());
         if let Some(sim) = self.sim.as_mut() {
             d.release(sim);
         }

@@ -2130,6 +2130,26 @@ impl ScriptHost {
         })
     }
 
+    /// Which of `eid`'s scripts declare `synced` vars, if any.
+    ///
+    /// On a rollback node that is two ownership models fighting over one value:
+    /// `snapshot()`/`restore()` say the local simulation owns it and a
+    /// correction may rewrite it, while `synced` says the host owns it and
+    /// ships it. The driver reports the overlap rather than letting the loser
+    /// be decided by arrival timing.
+    pub fn synced_kinds_on(&self, eid: u32) -> Vec<String> {
+        let stores = self.synced_stores.borrow();
+        let mut out: Vec<String> = stores
+            .iter()
+            .filter(|((e, _), store)| {
+                *e == eid && (*store).clone().pairs::<mlua::Value, mlua::Value>().next().is_some()
+            })
+            .map(|((_, kind), _)| kind.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Feed the physics body state (entity index → vel + grounded) for the frame, so
     /// scripts can read `node.vx/vy/vz/grounded`. Call before [`run`](Self::run).
     pub fn set_bodies(&self, map: HashMap<u32, BodyState>) {
@@ -2365,6 +2385,20 @@ impl ScriptHost {
     pub fn extend_filters(&mut self, skip: impl IntoIterator<Item = u32> + Clone) {
         self.script_skip.extend(skip.clone());
         self.frame_skip.extend(skip);
+    }
+
+    /// Undo an [`Self::extend_filters`] — the same caller taking its own half
+    /// back out. Needed because the whole-set setters do not always run after a
+    /// caller stops owning a set (an entity index left behind here is later
+    /// REUSED by the allocator, and would then silently skip an unrelated
+    /// node's scripts).
+    pub fn shrink_filters(&mut self, drop: impl IntoIterator<Item = u32> + Clone) {
+        for eid in drop.clone() {
+            self.script_skip.remove(&eid);
+        }
+        for eid in drop {
+            self.frame_skip.remove(&eid);
+        }
     }
 
     /// One lifecycle pass over `work`: per-frame (`start`/`update`), per-tick

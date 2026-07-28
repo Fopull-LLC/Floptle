@@ -209,6 +209,21 @@ impl RollbackDriver {
             self.nodes.push(RollbackNode { entity: e, eid: e.index(), slot });
         }
         for n in &self.nodes {
+            let synced = host.synced_kinds_on(n.eid);
+            if !synced.is_empty() {
+                let name = world
+                    .get::<floptle_core::Name>(n.entity)
+                    .map(|x| x.0.clone())
+                    .unwrap_or_else(|| format!("#{}", n.eid));
+                self.faults.push(format!(
+                    "\"{name}\" is a Rollback node whose script(s) {} also declare `synced` \
+                     vars. Those are two owners for one value: rollback says this machine \
+                     simulates it and a correction may rewrite it, `synced` says the host \
+                     owns it and ships it. Which one wins comes down to arrival timing. Move \
+                     the value into snapshot()/restore() and drop the `synced`.",
+                    synced.join(", "),
+                ));
+            }
             if !host.has_rollback_hooks(n.eid) {
                 let name = world
                     .get::<floptle_core::Name>(n.entity)
