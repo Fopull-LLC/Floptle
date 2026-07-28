@@ -92,6 +92,12 @@ pub struct Replicated {
     /// stutters under jitter/loss; higher = smoother on bad links. Ignored
     /// when `interp` is off.
     pub interp_delay: u8,
+    /// Exempt from interest culling: replicated to every client regardless of
+    /// where they are (`docs/netcode-design.md` §5.2). For the handful of
+    /// things every player must agree on wherever they stand — the match
+    /// clock, the objective, the boss. Ignored when interest management is off,
+    /// which is the default.
+    pub always_relevant: bool,
 }
 
 impl Replicated {
@@ -109,6 +115,7 @@ impl Default for Replicated {
             animator: true,
             interp: true,
             interp_delay: Self::DEFAULT_INTERP_DELAY,
+            always_relevant: false,
         }
     }
 }

@@ -2262,6 +2262,16 @@ impl EditorTabViewer<'_> {
                                     cmd.inspector_changed = true;
                                 }
                             }
+                            cmd.inspector_changed |= ui
+                                .checkbox(&mut rep.always_relevant, "always relevant")
+                                .on_hover_text(
+                                    "never interest-culled: replicated to every client wherever \
+                                     they are. For the few things every player must agree on \
+                                     from anywhere — the match clock, the objective, the boss. \
+                                     Does nothing unless the host turned interest management on \
+                                     with net.host{ interest = <metres> }",
+                                )
+                                .changed();
                         }
                     });
                     ui.small("only nodes with this component replicate — everything else stays local. Sessions start via Lua: net.host{} / net.join(...)");

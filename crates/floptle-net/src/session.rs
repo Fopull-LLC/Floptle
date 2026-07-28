@@ -123,6 +123,27 @@ const INPUT_WINDOW: usize = 10;
 /// Server-side per-peer input backlog cap, ticks.
 const INPUT_BUFFER_CAP: usize = 64;
 
+/// What one snapshot entry costs a client's byte budget: a NetId, a position,
+/// a rotation. Approximate on purpose — the budget is a rationing policy, not
+/// an accounting ledger, and encoding every candidate to measure it exactly
+/// would cost more than the rationing saves.
+const SNAP_ENTRY_BYTES: usize = 8 + 3 * 8 + 4 * 4;
+/// A transform baseline: the position and rotation an audience was last told.
+type Pose = ([f64; 3], [f32; 4]);
+/// The extra a physics-synced entry carries: velocity plus a grounded flag.
+const SNAP_BODY_BYTES: usize = 3 * 4 + 1;
+
+/// One replicable node, gathered once per snapshot round and then reused for
+/// every peer — walking the WORLD per peer would put back exactly the
+/// `players × entities` cost interest management exists to remove.
+struct Replicable {
+    id: u64,
+    entity: Entity,
+    rep: Replicated,
+    pos: [f64; 3],
+    rot: [f32; 4],
+}
+
 /// Client-side per-entity snapshot history for interpolation.
 struct InterpBuf {
     samples: VecDeque<(u64, [f64; 3], [f32; 4])>,
@@ -156,8 +177,18 @@ pub struct NetSession {
     next_id: u64,
     // --- server ---
     peers: Vec<PeerId>,
-    last_sent: HashMap<u64, ([f64; 3], [f32; 4])>,
-    last_synced: HashMap<(u64, String, String), NetValue>,
+    /// Last transform sent per (audience, NetId) — the delta baseline.
+    /// `None` is the BROADCAST audience: one baseline shared by every client,
+    /// which is exactly right when every client gets the same snapshot.
+    /// `Some(peer)` is that client's own, which interest management needs
+    /// because no two clients are told the same thing any more.
+    last_sent: HashMap<(Option<PeerId>, u64), Pose>,
+    last_synced: HashMap<(Option<PeerId>, u64, String, String), NetValue>,
+    /// Interest management (`docs/netcode-design.md` §5.2). Off by default.
+    interest: crate::interest::InterestConfig,
+    /// Per-client relevant sets and priority accumulators. Empty and unused
+    /// while `interest.enabled` is false.
+    interest_sets: crate::interest::InterestSets,
     /// Current synced values, refreshed by the driver each tick (diffed here).
     synced_now: SyncedVars,
     /// Runtime spawns alive right now, for late-joiner catch-up.
@@ -184,8 +215,9 @@ pub struct NetSession {
     /// Current animator states, refreshed by the driver each tick (diffed here
     /// against `last_anim`'s time prediction).
     anims_now: AnimStates,
-    /// Per-(NetId, sub) last-sent animator state — the change predictor's base.
-    last_anim: HashMap<(u64, u8), AnimSent>,
+    /// Per-(audience, NetId, sub) last-sent animator state — the change
+    /// predictor's base. Audience as for [`Self::last_sent`].
+    last_anim: HashMap<(Option<PeerId>, u64, u8), AnimSent>,
     /// Gameplay-tick length in seconds (the time predictor's clock); the
     /// driver sets it at session start. Default 60 Hz.
     tick_dt: f32,
@@ -337,6 +369,8 @@ impl NetSession {
             peers: Vec::new(),
             last_sent: HashMap::new(),
             last_synced: HashMap::new(),
+            interest: crate::interest::InterestConfig::default(),
+            interest_sets: crate::interest::InterestSets::default(),
             synced_now: Vec::new(),
             spawned_docs: HashMap::new(),
             snap_count: 0,
@@ -463,6 +497,7 @@ impl NetSession {
         // Server baselines.
         self.last_sent.clear();
         self.last_synced.clear();
+        self.interest_sets.clear();
         self.spawned_docs.clear();
         self.body_states.clear();
         self.anims_now.clear();
@@ -725,6 +760,32 @@ impl NetSession {
     /// instant everywhere and no stamp translation is needed. Calling it again
     /// (a peer joined or left) restarts the match clock, which is why v1 does
     /// not support joining a rollback match in progress.
+    /// Server: turn interest management on or off, and configure it
+    /// (`docs/netcode-design.md` §5.2). Off is the default — below a few dozen
+    /// players broadcasting is cheaper, and a feature that changes what reaches
+    /// the wire should be one a project asks for.
+    ///
+    /// Switching modes drops every delta baseline: the two paths keep different
+    /// ones (shared vs per-client), and carrying one across would leave clients
+    /// diffing against state nobody sent them. The next snapshot is a keyframe
+    /// by construction, because nothing is baselined.
+    pub fn set_interest(&mut self, cfg: crate::interest::InterestConfig) {
+        if cfg == self.interest {
+            return;
+        }
+        self.interest = cfg;
+        self.interest_sets.clear();
+        self.last_sent.clear();
+        self.last_synced.clear();
+        self.last_anim.clear();
+        self.snap_count = 0;
+    }
+
+    /// The interest settings in force.
+    pub fn interest(&self) -> crate::interest::InterestConfig {
+        self.interest
+    }
+
     pub fn set_rollback(&mut self, on: bool, input_delay: u8, seed: u64) {
         self.rollback = on;
         self.rollback_seed = seed;
@@ -935,8 +996,10 @@ impl NetSession {
         let Some(id) = self.ent_to_net.remove(&e) else { return };
         self.net_to_ent.remove(&id);
         self.spawned_docs.remove(&id);
-        self.last_sent.remove(&id);
-        self.last_anim.retain(|(aid, _), _| *aid != id);
+        self.last_sent.retain(|(_, sid), _| *sid != id);
+        self.last_synced.retain(|(_, sid, _, _), _| *sid != id);
+        self.last_anim.retain(|(_, aid, _), _| *aid != id);
+        self.interest_sets.forget_everywhere(id);
         world.despawn(e);
         let msg = Msg::Despawn { epoch: self.scene_epoch, id }.encode();
         for &p in &self.peers {
@@ -1015,6 +1078,13 @@ impl NetSession {
         }
         self.snap_count += 1;
         let keyframe = self.snap_count % KEYFRAME_EVERY == 1;
+        if self.interest.enabled {
+            self.send_interest_snapshots(world, tick, keyframe);
+            return;
+        }
+        // Broadcast: one snapshot, encoded once, identical for everyone. Below
+        // a few dozen players this is both cheaper and simpler than working out
+        // who deserves what, which is why interest management is opt-in.
         let snapshot = self.build_snapshot(world, tick, keyframe);
         if let Some(msg) = snapshot {
             let bytes = msg.encode();
@@ -1022,6 +1092,159 @@ impl NetSession {
                 self.transport.send(p, Channel::UnreliableSequenced, &bytes);
             }
         }
+    }
+
+    /// One snapshot per client, carrying only what that client is near enough
+    /// to care about and only as much of it as its byte budget allows
+    /// (`docs/netcode-design.md` §5.2, [`crate::interest`]).
+    fn send_interest_snapshots(&mut self, world: &World, tick: u64, keyframe: bool) {
+        let snaps_per_sec = if self.tick_dt > 0.0 {
+            1.0 / (self.tick_dt * SNAPSHOT_EVERY as f32)
+        } else {
+            30.0
+        };
+        let budget = self.interest.budget_per_snapshot(snaps_per_sec);
+        let (radius, hyst) = (self.interest.radius, self.interest.hysteresis);
+
+        // Everything replicable this tick, gathered once and reused per peer —
+        // the whole point is to scale with player count, so an O(players ×
+        // entities) walk of the WORLD (rather than of this list) would put the
+        // cost straight back.
+        let mut all: Vec<Replicable> = Vec::new();
+        for (e, rep) in world.query::<Replicated>() {
+            if !rep.transform {
+                continue;
+            }
+            let (Some(&id), Some(tr)) = (self.ent_to_net.get(&e), world.get::<Transform>(e))
+            else {
+                continue;
+            };
+            let pos = [tr.translation.x, tr.translation.y, tr.translation.z];
+            all.push(Replicable { id, entity: e, rep: *rep, pos, rot: tr.rotation.to_array() });
+        }
+
+        for pi in 0..self.peers.len() {
+            let peer = self.peers[pi];
+            // Where this client is standing: its own avatar. A spectator has
+            // none, and then nothing is far away rather than everything being —
+            // it still pays the budget, so it degrades instead of going blind.
+            let eye = all.iter().find(|r| r.rep.owner == Some(peer)).map(|r| r.pos);
+
+            let mut relevant: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            let mut candidates: Vec<crate::interest::Candidate> = Vec::new();
+            for r in &all {
+                let (id, rep, pos, rot) = (&r.id, &r.rep, &r.pos, &r.rot);
+                let owned = rep.owner == Some(peer);
+                let distance = eye.map(|c| {
+                    let (dx, dy, dz) = (pos[0] - c[0], pos[1] - c[1], pos[2] - c[2]);
+                    (dx * dx + dy * dy + dz * dz).sqrt()
+                });
+                let held = self.interest_sets.get_mut(peer).is_live(*id);
+                // Hysteresis applies only on the way OUT. Something already
+                // being tracked gets to drift a little past the edge before it
+                // goes quiet, so a node hovering on the boundary doesn't enter
+                // and leave every single snapshot.
+                let reach = if held { radius + hyst } else { radius };
+                let near = distance.is_none_or(|d| d <= reach);
+                if !(rep.always_relevant || owned || near) {
+                    continue;
+                }
+                relevant.insert(*id);
+                let base = self.last_sent.get(&(Some(peer), *id));
+                let changed = base.is_none_or(|(p, r)| p != pos || r != rot);
+                if !(keyframe || changed || !held) {
+                    continue; // relevant, but this client is already current
+                }
+                candidates.push(crate::interest::Candidate {
+                    id: *id,
+                    distance,
+                    changed,
+                    is_player: rep.owner.is_some(),
+                    is_owned: owned,
+                    always: rep.always_relevant,
+                    cost: SNAP_ENTRY_BYTES + if rep.physics { SNAP_BODY_BYTES } else { 0 },
+                });
+            }
+
+            // What this client holds but may no longer hear about. Runtime
+            // spawns are despawned there (the server can recreate them from
+            // `spawned_docs` on re-entry); scene-authored nodes are only muted,
+            // because the client already has them from the scene file and
+            // nothing could bring one back.
+            let stale = self.interest_sets.get_mut(peer).stale(&relevant);
+            for id in stale {
+                self.interest_sets.get_mut(peer).forget(id);
+                self.last_sent.retain(|(a, sid), _| !(*a == Some(peer) && *sid == id));
+                if self.spawned_docs.contains_key(&id) {
+                    let msg = Msg::Despawn { epoch: self.scene_epoch, id }.encode();
+                    self.transport.send(peer, Channel::Reliable, &msg);
+                }
+            }
+
+            let chosen = self.interest_sets.get_mut(peer).choose(&candidates, radius, budget);
+            let mut entries = Vec::new();
+            for id in &chosen {
+                let Some(r) = all.iter().find(|r| r.id == *id) else { continue };
+                self.last_sent.insert((Some(peer), *id), (r.pos, r.rot));
+                let body =
+                    r.rep.physics.then(|| self.body_states.get(&r.entity).copied()).flatten();
+                entries.push(SnapEntry {
+                    id: *id,
+                    pos: r.pos,
+                    rot: r.rot,
+                    vel: body.map(|(v, _)| v),
+                    grounded: body.map(|(_, g)| g),
+                });
+            }
+
+            // `synced` vars and animators ride the relevant set too, but are
+            // not rationed: they are small, they are usually idle, and a stale
+            // gameplay flag is a correctness problem where a stale position is
+            // only a cosmetic one.
+            let synced = self.build_synced_for(peer, &relevant, keyframe);
+            let anims = self.collect_anim_entries(tick, keyframe, Some(peer), Some(&relevant));
+            if entries.is_empty() && synced.is_empty() && anims.is_empty() && !keyframe {
+                continue;
+            }
+            let msg = Msg::Snapshot {
+                epoch: self.scene_epoch,
+                tick,
+                keyframe,
+                entries,
+                synced,
+                anims,
+            }
+            .encode();
+            self.transport.send(peer, Channel::UnreliableSequenced, &msg);
+        }
+    }
+
+    /// Per-peer `synced` diff, restricted to what that peer can see.
+    fn build_synced_for(
+        &mut self,
+        peer: PeerId,
+        relevant: &std::collections::HashSet<u64>,
+        keyframe: bool,
+    ) -> Vec<SyncedEntry> {
+        let mut out = Vec::new();
+        for (e, script, vars) in &self.synced_now {
+            let Some(&id) = self.ent_to_net.get(e) else { continue };
+            if !relevant.contains(&id) {
+                continue;
+            }
+            let mut changed = Vec::new();
+            for (k, v) in vars {
+                let key = (Some(peer), id, script.clone(), k.clone());
+                if keyframe || self.last_synced.get(&key) != Some(v) {
+                    self.last_synced.insert(key, v.clone());
+                    changed.push((k.clone(), v.clone()));
+                }
+            }
+            if !changed.is_empty() {
+                out.push(SyncedEntry { id, script: script.clone(), vars: changed });
+            }
+        }
+        out
     }
 
     fn server_message(&mut self, world: &World, from: PeerId, msg: Msg, tick: u64) {
@@ -1081,7 +1304,16 @@ impl NetSession {
                 for s in spawns {
                     self.transport.send(from, Channel::Reliable, &s.encode());
                 }
-                if let Some(kf) = self.build_full_snapshot(world, tick) {
+                // The joiner's baseline. Under interest management there is no
+                // such thing as "the whole world's state" to hand someone —
+                // sending it would blast every entity in the map at exactly the
+                // moment the feature exists to stop that. A client with no
+                // interest set yet counts everything relevant as never-seen, so
+                // its neighbourhood arrives in full over the next few
+                // snapshots, budgeted, nearest first.
+                if !self.interest.enabled
+                    && let Some(kf) = self.build_full_snapshot(world, tick)
+                {
                     // Reliable: the joiner MUST get its baseline.
                     self.transport.send(from, Channel::Reliable, &kf.encode());
                 }
@@ -1132,6 +1364,10 @@ impl NetSession {
             self.last_input.remove(&p);
             self.peer_margin.remove(&p);
             self.peer_late.remove(&p);
+            self.interest_sets.drop_peer(p);
+            self.last_sent.retain(|(a, _), _| *a != Some(p));
+            self.last_synced.retain(|(a, _, _, _), _| *a != Some(p));
+            self.last_anim.retain(|(a, _, _), _| *a != Some(p));
             self.events.push(NetEvent::PeerLeft(p));
             let left = Msg::PeerLeft { peer: p }.encode();
             for &q in &self.peers {
@@ -1155,9 +1391,10 @@ impl NetSession {
             let Some(tr) = world.get::<Transform>(e) else { continue };
             let pos = [tr.translation.x, tr.translation.y, tr.translation.z];
             let rot = tr.rotation.to_array();
-            let changed = self.last_sent.get(&id).is_none_or(|(p, r)| *p != pos || *r != rot);
+            let changed =
+                self.last_sent.get(&(None, id)).is_none_or(|(p, r)| *p != pos || *r != rot);
             if keyframe || changed {
-                self.last_sent.insert(id, (pos, rot));
+                self.last_sent.insert((None, id), (pos, rot));
                 let body = rep.physics.then(|| self.body_states.get(&e).copied()).flatten();
                 entries.push(SnapEntry {
                     id,
@@ -1173,7 +1410,7 @@ impl NetSession {
             let Some(&id) = self.ent_to_net.get(e) else { continue };
             let mut changed_vars = Vec::new();
             for (k, v) in vars {
-                let key = (id, script.clone(), k.clone());
+                let key = (None, id, script.clone(), k.clone());
                 if keyframe || self.last_synced.get(&key) != Some(v) {
                     self.last_synced.insert(key, v.clone());
                     changed_vars.push((k.clone(), v.clone()));
@@ -1183,7 +1420,7 @@ impl NetSession {
                 synced.push(SyncedEntry { id, script: script.clone(), vars: changed_vars });
             }
         }
-        let anims = self.collect_anim_entries(tick, keyframe);
+        let anims = self.collect_anim_entries(tick, keyframe, None, None);
         if entries.is_empty() && synced.is_empty() && anims.is_empty() && !keyframe {
             return None;
         }
@@ -1194,17 +1431,26 @@ impl NetSession {
     /// else only the SURPRISED ones — a changed state/weight/speed, or a clock
     /// the time predictor couldn't foresee (a seek, a hitch). An undisturbed
     /// looping animation costs zero bytes here.
-    fn collect_anim_entries(&mut self, tick: u64, keyframe: bool) -> Vec<AnimEntry> {
+    fn collect_anim_entries(
+        &mut self,
+        tick: u64,
+        keyframe: bool,
+        who: Option<PeerId>,
+        relevant: Option<&std::collections::HashSet<u64>>,
+    ) -> Vec<AnimEntry> {
         let mut out = Vec::new();
         for (e, sub, speed, layers) in &self.anims_now {
             let Some(&id) = self.ent_to_net.get(e) else { continue };
+            if relevant.is_some_and(|r| !r.contains(&id)) {
+                continue;
+            }
             let speed_q = AnimEntry::quantize_speed(*speed);
             let wire: Vec<AnimLayerWire> = layers
                 .iter()
                 .take(MAX_ANIM_LAYERS)
                 .map(|l| AnimLayerWire::quantize(l.state, l.t, l.weight))
                 .collect();
-            let dirty = match self.last_anim.get(&(id, *sub)) {
+            let dirty = match self.last_anim.get(&(who, id, *sub)) {
                 None => true,
                 Some(sent) => {
                     sent.speed != speed_q
@@ -1240,7 +1486,7 @@ impl NetSession {
             };
             if keyframe || dirty {
                 self.last_anim.insert(
-                    (id, *sub),
+                    (who, id, *sub),
                     AnimSent {
                         tick,
                         speed: speed_q,

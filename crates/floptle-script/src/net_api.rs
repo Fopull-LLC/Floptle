@@ -21,7 +21,19 @@ pub enum NetCmd {
     /// (lobby code, no port-forwarding); with a `port`, a REAL session on UDP
     /// (QUIC) that other machines join with `net.join("quic://ip:port")`;
     /// with neither, the in-editor loopback harness.
-    Host { max_players: u32, port: Option<u16>, relay: Option<String> },
+    Host {
+        max_players: u32,
+        port: Option<u16>,
+        relay: Option<String>,
+        /// `interest = <metres>` — turn on interest management with that
+        /// radius (`docs/netcode-design.md` §5.2). Absent = broadcast to
+        /// everyone, which is the default and the right answer below a few
+        /// dozen players.
+        interest: Option<f64>,
+        /// `interestBudget = <bytes per second>` — per-client snapshot budget.
+        /// Only meaningful alongside `interest`.
+        interest_budget: Option<u32>,
+    },
     /// `net.join(addr)` — join a session (2b: `local://` only; real transports 2e).
     Join { addr: String },
     /// `net.leave()` — tear the session down.
@@ -411,13 +423,22 @@ pub(crate) fn install_net_api(
             "host",
             lua.create_function(move |_, opts: Option<Table>| {
                 let (mut max_players, mut port, mut relay) = (16, None, None);
+                let (mut interest, mut interest_budget) = (None, None);
                 if let Some(o) = opts {
                     max_players =
                         o.get::<Option<u32>>("maxPlayers").ok().flatten().unwrap_or(16);
                     port = o.get::<Option<u16>>("port").ok().flatten();
                     relay = o.get::<Option<String>>("relay").ok().flatten();
+                    interest = o.get::<Option<f64>>("interest").ok().flatten();
+                    interest_budget = o.get::<Option<u32>>("interestBudget").ok().flatten();
                 }
-                n.cmds.borrow_mut().push(NetCmd::Host { max_players, port, relay });
+                n.cmds.borrow_mut().push(NetCmd::Host {
+                    max_players,
+                    port,
+                    relay,
+                    interest,
+                    interest_budget,
+                });
                 Ok(())
             })?,
         )?;

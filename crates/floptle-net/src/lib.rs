@@ -16,6 +16,7 @@
 //! build on these seams without changing the game-facing API.
 
 pub mod impair;
+pub mod interest;
 pub mod lagcomp;
 pub mod predict;
 pub mod quic;
@@ -27,6 +28,7 @@ pub mod value;
 pub mod wire;
 
 pub use impair::{ImpairHandle, Impaired, Impairment, IMPAIR_ENV};
+pub use interest::{Candidate, InterestConfig, InterestSets, PeerInterest};
 pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
 pub use quic::{QuicClient, QuicServer};
 pub use relay::{RelayClient, RelayHost, RelayServer};
@@ -50,6 +52,7 @@ mod tests {
     use floptle_core::math::DVec3;
     use floptle_core::transform::Transform;
     use floptle_core::{Replicated, World};
+    use crate::interest::InterestConfig;
 
     /// A world with `n` replicated nodes at x = 0, 10, 20, …
     fn world_with(n: usize) -> (World, Vec<floptle_core::Entity>) {
@@ -761,6 +764,244 @@ mod tests {
         assert!(
             !client.is_rollback(),
             "a scene switch ends the match — the next one arrives with its own RollbackStart"
+        );
+    }
+
+    /// Peer 1's avatar at the origin, a neighbour 20 m away, and something
+    /// 500 m away that no radius worth having would include.
+    fn interest_world() -> (World, Vec<floptle_core::Entity>) {
+        let mut w = World::default();
+        let mut ents = Vec::new();
+        for (i, x) in [0.0_f64, 20.0, 500.0].into_iter().enumerate() {
+            let e = w.spawn();
+            w.insert(e, Transform::from_translation(DVec3::new(x, 0.0, 0.0)));
+            w.insert(
+                e,
+                Replicated {
+                    // Node 0 is the joiner's avatar: that is the eye every
+                    // distance here is measured from.
+                    owner: (i == 0).then_some(1),
+                    ..Default::default()
+                },
+            );
+            ents.push(e);
+        }
+        (w, ents)
+    }
+
+    fn interested() -> InterestConfig {
+        InterestConfig { enabled: true, radius: 150.0, ..Default::default() }
+    }
+
+    /// The whole point, stated once: a client pays for its neighbourhood, not
+    /// for the world. What it can't see doesn't reach it.
+    #[test]
+    fn a_client_hears_about_its_neighbourhood_and_not_the_far_side_of_the_map() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        server.set_interest(interested());
+        let (mut sw, se) = interest_world();
+        let (mut cw, ce) = interest_world();
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+
+        run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 90, |w, t| {
+            // Both the neighbour and the distant node move, identically.
+            for e in [se[1], se[2]] {
+                if let Some(tr) = w.get_mut::<Transform>(e) {
+                    tr.translation.z = t as f64 * 0.1;
+                }
+            }
+        });
+
+        let near_z = cw.get::<Transform>(ce[1]).unwrap().translation.z;
+        let far_z = cw.get::<Transform>(ce[2]).unwrap().translation.z;
+        assert!(near_z > 0.5, "the neighbour must replicate normally, z={near_z}");
+        assert!(
+            far_z.abs() < 1e-9,
+            "500 m away is outside a 150 m radius — it must not have cost this client a \
+             single byte, but it moved to z={far_z}"
+        );
+    }
+
+    /// Interest is opt-in, and off it must behave exactly as it always has —
+    /// the same test above, with the feature off, expects the opposite.
+    #[test]
+    fn with_interest_off_everything_still_reaches_everyone() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, se) = interest_world();
+        let (mut cw, ce) = interest_world();
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+
+        run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 90, |w, t| {
+            if let Some(tr) = w.get_mut::<Transform>(se[2]) {
+                tr.translation.z = t as f64 * 0.1;
+            }
+        });
+        assert!(
+            cw.get::<Transform>(ce[2]).unwrap().translation.z > 0.5,
+            "broadcasting is the default and must be untouched by any of this"
+        );
+    }
+
+    /// Walking towards something is how it becomes yours to know about. The
+    /// entity is not despawned and respawned — it is scene-authored, the client
+    /// has had it all along, and it simply starts being updated again.
+    #[test]
+    fn walking_into_range_starts_the_updates() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        server.set_interest(interested());
+        let (mut sw, se) = interest_world();
+        let (mut cw, ce) = interest_world();
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+
+        let mut t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 60, |w, tk| {
+            if let Some(tr) = w.get_mut::<Transform>(se[2]) {
+                tr.translation.z = tk as f64 * 0.1;
+            }
+        });
+        assert!(
+            cw.get::<Transform>(ce[2]).unwrap().translation.z.abs() < 1e-9,
+            "still out of range"
+        );
+
+        // Now walk the avatar most of the way there.
+        if let Some(tr) = sw.get_mut::<Transform>(se[0]) {
+            tr.translation.x = 420.0;
+        }
+        t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 90, |w, tk| {
+            if let Some(tr) = w.get_mut::<Transform>(se[2]) {
+                tr.translation.z = tk as f64 * 0.1;
+            }
+        });
+        let _ = t;
+        assert!(
+            cw.get::<Transform>(ce[2]).unwrap().translation.z > 0.5,
+            "once it is within the radius the client must start hearing about it"
+        );
+    }
+
+    /// Two clients standing in different places are told different things —
+    /// which is the mechanism that makes cost-per-client flat as the world's
+    /// population grows.
+    #[test]
+    fn two_clients_in_different_places_get_different_snapshots() {
+        let hub = MemoryHub::new();
+        let mut server = NetSession::server(Box::new(hub.server_endpoint()), 0);
+        server.set_interest(interested());
+        let mut a = NetSession::client(Box::new(hub.connect()), 0);
+        let mut b = NetSession::client(Box::new(hub.connect()), 0);
+
+        let mut sw = World::default();
+        let mut ents = Vec::new();
+        // 0 = A's avatar at the origin, 1 = B's avatar 1000 m east,
+        // 2 = scenery beside A, 3 = scenery beside B.
+        for (i, x) in [0.0_f64, 1000.0, 10.0, 1010.0].into_iter().enumerate() {
+            let e = sw.spawn();
+            sw.insert(e, Transform::from_translation(DVec3::new(x, 0.0, 0.0)));
+            sw.insert(
+                e,
+                Replicated {
+                    owner: match i {
+                        0 => Some(1),
+                        1 => Some(2),
+                        _ => None,
+                    },
+                    ..Default::default()
+                },
+            );
+            ents.push(e);
+        }
+        let build_client = |w: &mut World| {
+            for x in [0.0_f64, 1000.0, 10.0, 1010.0] {
+                let e = w.spawn();
+                w.insert(e, Transform::from_translation(DVec3::new(x, 0.0, 0.0)));
+                w.insert(e, Replicated::default());
+            }
+        };
+        let (mut aw, mut bw) = (World::default(), World::default());
+        build_client(&mut aw);
+        build_client(&mut bw);
+        server.register_scene(&sw);
+        a.register_scene(&aw);
+        b.register_scene(&bw);
+
+        for t in 1..120u64 {
+            hub.set_now(t);
+            for e in [ents[2], ents[3]] {
+                if let Some(tr) = sw.get_mut::<Transform>(e) {
+                    tr.translation.z = t as f64 * 0.1;
+                }
+            }
+            server.tick_server(&sw, t);
+            a.tick_client(&mut aw);
+            b.tick_client(&mut bw);
+        }
+        let a_ents: Vec<floptle_core::Entity> = aw.query::<Transform>().map(|(e, _)| e).collect();
+        let b_ents: Vec<floptle_core::Entity> = bw.query::<Transform>().map(|(e, _)| e).collect();
+        let az = |i: usize| aw.get::<Transform>(a_ents[i]).unwrap().translation.z;
+        let bz = |i: usize| bw.get::<Transform>(b_ents[i]).unwrap().translation.z;
+        assert!(az(2) > 0.5, "A hears about the scenery next to A");
+        assert!(az(3).abs() < 1e-9, "A does not hear about scenery a kilometre away");
+        assert!(bz(3) > 0.5, "B hears about the scenery next to B");
+        assert!(bz(2).abs() < 1e-9, "B does not hear about A's neighbourhood either");
+    }
+
+    /// A budget too small for the crowd must DEFER, never drop: run long
+    /// enough and every relevant node has had its turn. A design that starves
+    /// the unlucky ones is one you cannot safely turn on.
+    #[test]
+    fn a_tight_budget_defers_everything_and_starves_nothing() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        server.set_interest(InterestConfig {
+            enabled: true,
+            radius: 150.0,
+            // ~2 entries per snapshot for a crowd of 24.
+            budget_bytes_per_sec: 3000,
+            ..Default::default()
+        });
+        let build = |w: &mut World| {
+            for i in 0..25 {
+                let e = w.spawn();
+                w.insert(e, Transform::from_translation(DVec3::new(i as f64, 0.0, 0.0)));
+                w.insert(
+                    e,
+                    Replicated { owner: (i == 0).then_some(1), ..Default::default() },
+                );
+            }
+        };
+        let (mut sw, mut cw) = (World::default(), World::default());
+        build(&mut sw);
+        build(&mut cw);
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+        let se: Vec<floptle_core::Entity> = sw.query::<Transform>().map(|(e, _)| e).collect();
+        let ce: Vec<floptle_core::Entity> = cw.query::<Transform>().map(|(e, _)| e).collect();
+
+        for t in 1..900u64 {
+            hub.set_now(t);
+            for e in &se {
+                if let Some(tr) = sw.get_mut::<Transform>(*e) {
+                    tr.translation.z = t as f64 * 0.01;
+                }
+            }
+            server.tick_server(&sw, t);
+            client.tick_client(&mut cw);
+        }
+        let unheard: Vec<usize> = ce
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| cw.get::<Transform>(**e).unwrap().translation.z.abs() < 1e-9)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            unheard.is_empty(),
+            "every relevant node must eventually get a turn — these never did: {unheard:?}"
         );
     }
 

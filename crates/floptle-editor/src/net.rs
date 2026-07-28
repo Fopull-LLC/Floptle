@@ -81,12 +81,39 @@ impl Editor {
     pub(crate) fn net_tick(&mut self, tick: u64) {
         for cmd in self.script_host.take_net_commands() {
             match cmd {
-                NetCmd::Host { relay: Some(addr), .. } => {
-                    let a = addr.clone();
-                    self.net_host_relay(&a);
+                NetCmd::Host { relay, port, interest, interest_budget, .. } => {
+                    match (relay, port) {
+                        (Some(addr), _) => self.net_host_relay(&addr),
+                        (None, Some(p)) => self.net_host_quic(p),
+                        (None, None) => self.net_start_hosting(),
+                    }
+                    // Applied after the session exists, so it reaches whichever
+                    // of the three transports actually came up — and only when
+                    // the game asked for it (`net.host{ interest = <metres> }`).
+                    if let Some(radius) = interest
+                        && let Some(s) = self.net_server.as_mut()
+                    {
+                        let d = floptle_net::InterestConfig::default();
+                        s.set_interest(floptle_net::InterestConfig {
+                            enabled: true,
+                            radius,
+                            budget_bytes_per_sec: interest_budget
+                                .unwrap_or(d.budget_bytes_per_sec),
+                            ..d
+                        });
+                        self.console.push(
+                            floptle_script::LogLevel::Debug,
+                            format!(
+                                "🌐 interest management ON — {radius:.0} m radius, \
+                                 {} KB/s per client. Clients hear about their neighbourhood \
+                                 only; flag global objects \"always relevant\" on their \
+                                 Networked component.",
+                                interest_budget.unwrap_or(d.budget_bytes_per_sec) / 1024,
+                            ),
+                            None,
+                        );
+                    }
                 }
-                NetCmd::Host { port: Some(p), .. } => self.net_host_quic(p),
-                NetCmd::Host { .. } => self.net_start_hosting(),
                 NetCmd::Join { addr } if addr.starts_with("local") => self.net_join_local(),
                 NetCmd::Join { addr } if addr.starts_with("relay://") => {
                     let rest = addr.trim_start_matches("relay://").to_string();

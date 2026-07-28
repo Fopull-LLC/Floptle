@@ -359,7 +359,7 @@ net = {}
 ---rendezvous relay: you get a LOBBY CODE, friends join with it, nobody
 ---port-forwards. `port = n` hosts directly on UDP (QUIC) for LAN/self-host.
 ---Neither: the in-editor loopback harness.
----@param opts { maxPlayers: integer, port: integer, relay: string }|nil
+---@param opts { maxPlayers: integer, port: integer, relay: string, interest: number, interestBudget: integer }|nil
 function net.host(opts) end
 ---Join a session: `\"relay://relayaddr/CODE\"` = a lobby code through a
 ---relay (no port-forwarding), `\"quic://host:port\"` = a server directly,

@@ -191,6 +191,10 @@ pub struct ReplicatedDoc {
     /// Remote-render delay in gameplay ticks (default 6 ≈ 100 ms @ 60 Hz).
     #[serde(default = "default_interp_delay", skip_serializing_if = "is_default_interp_delay")]
     pub interp_delay: u8,
+    /// Never interest-culled — replicated to every client wherever they are
+    /// (default false).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub always_relevant: bool,
 }
 
 fn default_interp_delay() -> u8 {
@@ -216,6 +220,7 @@ impl ReplicatedDoc {
             animator: self.animator,
             interp: self.interp,
             interp_delay: self.interp_delay,
+            always_relevant: self.always_relevant,
         }
     }
 
@@ -228,6 +233,7 @@ impl ReplicatedDoc {
             animator: r.animator,
             interp: r.interp,
             interp_delay: r.interp_delay,
+            always_relevant: r.always_relevant,
         }
     }
 }
@@ -1819,6 +1825,7 @@ mod tests {
                         animator: false, // exercise the non-default round-trip
                         interp: false,
                         interp_delay: 12, // exercise the non-default round-trip
+                        always_relevant: true, // exercise the non-default round-trip
                     }),
                     ui_layer: Some(floptle_ui::UiLayer { design_height: 1080.0, z: 2, enabled: true, space: floptle_ui::UiSpace::World, canvas_scale: 0.02, ..Default::default() }),
                     ui: Some(floptle_ui::ElementSpec {

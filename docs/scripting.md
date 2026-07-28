@@ -1403,6 +1403,7 @@ end
 | Call | What it does |
 |---|---|
 | `net.host{ maxPlayers = 16, port = 7777, relay = "addr" }` | become the authoritative host — `relay` = get a LOBBY CODE through a rendezvous relay (nobody port-forwards); `port` = direct UDP (QUIC); neither = the in-editor harness |
+| `net.host{ interest = 150, interestBudget = 16384 }` | **interest management** — each client is told about its own neighbourhood (metres) within a per-client byte budget, instead of everything. Absent = broadcast to everyone, which is cheaper below a few dozen players. Tick ⬦ *always relevant* on a node's Networked component to exempt it (the match clock, the objective, the boss) |
 | `net.join(addr)` | join a session (`"relay://relayaddr/CODE"` = by lobby code; `"quic://host:port"` = a server directly; `"local://"` = the in-editor test harness) |
 | `net.leave()` | end the session |
 | `net.role()` / `net.isServer()` / `net.isClient()` | `"offline" \| "server" \| "client"` |
