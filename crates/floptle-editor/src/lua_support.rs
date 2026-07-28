@@ -56,6 +56,10 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field up_z number Physics: body up (−gravity) Z.
 ---@field visible boolean Show / hide this node's geometry (Inspector eye toggle).
 ---@field pos Vec3 The node's position as a vec3 (read/write: `node.pos = node.pos + dir * dt`). Accepts any {x=,y=,z=} value.
+---@field tickX number Physics: the BODY's world X at the start of this tick. Not node.x — that's the INTERPOLATED render pose between ticks, so reading it in fixedUpdate is frame-rate dependent and no rollback replay can reproduce it. Writing this teleports the body without touching the transform.
+---@field tickY number Physics: the body's world Y at the start of this tick (read/write).
+---@field tickZ number Physics: the body's world Z at the start of this tick (read/write).
+---@field tickPos Vec3 Physics: the body's tick pose as a vec3 (read/write). Build hurtboxes from THIS, and move a fighter with `node.tickPos = node.tickPos + vec3(d, 0, 0)` — `node.x = node.x + d` inside fixedUpdate teleports the body onto its VISUAL position, so the model slides and the hitbox doesn't.
 ---@field layer string Collision/query layer, by project-defined NAME (\"Default\" when unset). Assigning a name the project doesn't define is an ERROR — add layers in Project Settings.
 ---@field tags string[] The node's tags (a fresh array each read). Assign a whole array to replace; use addTag/removeTag for single edits.
 ---@field hasTag fun(self: Node, tag: string): boolean Whether the node carries this exact tag.
@@ -410,6 +414,43 @@ function net.spawn(path, opts) end
 ---SERVER ONLY: despawn a replicated runtime object everywhere.
 ---@param node Node
 function net.despawn(node) end
+---Deterministic RNG for a rollback session: drawn from (match seed, tick, draw
+---index), so every peer rolls the same numbers AND a re-simulated tick rolls
+---them again. Use this instead of `rng()` in anything a rollback node reads —
+---an unseeded roll comes from the clock, and two peers drawing differently is
+---a match that quietly forks in two.
+---@param a number|nil Omitted → [0,1). One arg → an integer 1..a. Two → a..b.
+---@param b number|nil
+---@return number
+function net.random(a, b) end
+---True while the engine is RE-SIMULATING ticks it already ran after a rollback
+---correction. For cosmetics the engine can't gate for you (a material poke, a
+---UI label). NEVER branch simulation on it: a replayed tick that computes
+---something different from the live tick is the definition of a desync.
+---@return boolean
+function net.replaying() end
+---Ticks re-simulated by the most recent rollback correction.
+---@return number
+function net.rollbackDepth() end
+---The deepest rollback this session has had to perform.
+---@return number
+function net.rollbackMax() end
+---Mean ticks re-simulated per correction — the texture of the connection,
+---where rollbackMax is only its worst moment.
+---@return number
+function net.rollbackAverage() end
+---0..1 — the fraction of simulated ticks that had to guess a peer's input.
+---@return number
+function net.mispredictRate() end
+---The session's FIXED input delay, in ticks. Never changes mid-match.
+---@return number
+function net.inputDelay() end
+---True while the sim is waiting for input rather than guessing past the depth
+---cap — the game runs slightly slow instead of teleporting the opponent. Show
+---your own \"connection trouble\" banner off this.
+---@return boolean
+function net.stalled() end
+
 ---Is this node under MY control on this machine? Offline / non-networked →
 ---true. Server → true unless a remote peer owns it. Client → true only for
 ---your own predicted node(s). THE way for shared scripts (cameras, HUDs) to
