@@ -23,6 +23,30 @@ const REFEREE_CATCHUP_TICKS: u64 = 8;
 use crate::rollback::{Ctx, RollbackDriver};
 use crate::Editor;
 
+/// Which `Rollback` nodes are being run by NOTHING — not the driver, and not
+/// the global script passes.
+///
+/// `reps` is `(entity, is_a_rollback_node)` for every `Replicated` entity,
+/// `driven` is the live driver's node set, and `filtered` answers "is this
+/// entity excluded from the global passes". A node in neither is a node whose
+/// scripts never tick.
+///
+/// A free function, like [`crate::net::plan_client_side`] and for the same
+/// reason: the sequence that produces this state spans a scene switch, a
+/// client-side setup and a rollback start, and it cannot be driven through an
+/// `Editor` in a test. floptle/0040 is what that costs.
+pub(crate) fn orphaned_rollback_nodes(
+    reps: &[(floptle_core::Entity, bool)],
+    driven: &std::collections::HashSet<u32>,
+    filtered: impl Fn(u32) -> bool,
+) -> Vec<floptle_core::Entity> {
+    reps.iter()
+        .filter(|(_, is_rollback)| *is_rollback)
+        .map(|(e, _)| *e)
+        .filter(|e| !driven.contains(&e.index()) && filtered(e.index()))
+        .collect()
+}
+
 impl Editor {
     /// The live driver's node ids — the set that belongs in BOTH script
     /// filters for as long as it is running those nodes' hooks itself.
@@ -458,13 +482,17 @@ impl Editor {
         }
 
         // 3. Advance — resolving any banked correction first.
+        //
+        // ⚠ From this `take` to the restore at the bottom there is NO early
+        // return, deliberately. An exit that skips the restore DROPS the driver
+        // — and a dropped driver leaves its fighters in the script filters with
+        // nothing running them, for the rest of the match, with no error. That
+        // is floptle/0040: the fighters ticked exactly once, then the driver
+        // fell out of the editor at the end of its own first tick. If you need
+        // to bail below, set a flag and bail after the restore.
         let step = self.game_tick.step;
         let mut d = self.net_rollback.take().expect("checked above");
-        {
-            let Some(sim) = self.sim.as_mut() else {
-                self.net_rollback = Some(d);
-                return;
-            };
+        if let Some(sim) = self.sim.as_mut() {
             let mut ctx = Ctx { world: &mut self.world, sim, host: &mut self.script_host, step };
             d.advance(&mut ctx);
         }
@@ -497,14 +525,13 @@ impl Editor {
         }
         // The script-level audit, deferred out of `rebind` until the bound
         // nodes' environments exist (`RollbackDriver::audit`). A no-op once it
-        // has run.
-        if let Some(mut d) = self.net_rollback.take() {
-            d.audit(&self.world, &self.script_host);
-            for f in d.faults.drain(..) {
-                self.console.push(floptle_script::LogLevel::Warn, f, None);
-            }
-            self.net_rollback = Some(d);
+        // has run. `d` is still the owned driver from step 3 — it is put back
+        // below, on the one path that reaches here.
+        d.audit(&self.world, &self.script_host);
+        for f in d.faults.drain(..) {
+            self.console.push(floptle_script::LogLevel::Warn, f, None);
         }
+        self.net_rollback = Some(d);
         self.net_referee_tick();
         self.net_rollback_report_desyncs();
         self.net_rollback_report_flow();
@@ -529,19 +556,22 @@ impl Editor {
         }
         self.net_rollback_orphans_checked = true;
         let driven = self.rollback_filter_eids();
-        let orphans: Vec<String> = self
+        let reps: Vec<(floptle_core::Entity, bool)> = self
             .world
             .query::<floptle_core::Replicated>()
-            .filter(|(_, r)| r.mode.is_rollback())
-            .map(|(e, _)| e)
-            .filter(|e| !driven.contains(&e.index()) && self.script_host.is_filtered(e.index()))
-            .map(|e| {
-                self.world
-                    .get::<floptle_core::Name>(e)
-                    .map(|n| n.0.clone())
-                    .unwrap_or_else(|| format!("#{}", e.index()))
-            })
+            .map(|(e, r)| (e, r.mode.is_rollback()))
             .collect();
+        let orphans: Vec<String> = orphaned_rollback_nodes(&reps, &driven, |eid| {
+            self.script_host.is_filtered(eid)
+        })
+        .into_iter()
+        .map(|e| {
+            self.world
+                .get::<floptle_core::Name>(e)
+                .map(|n| n.0.clone())
+                .unwrap_or_else(|| format!("#{}", e.index()))
+        })
+        .collect();
         if orphans.is_empty() {
             return;
         }
@@ -751,6 +781,115 @@ impl RollbackStats {
 
 #[cfg(test)]
 mod tests {
+    use super::orphaned_rollback_nodes;
+    use std::collections::HashSet;
+
+    /// FIELD REGRESSION (floptle/0040): the client's join sequence must never
+    /// leave a `Rollback` node filtered with no driver holding it.
+    ///
+    /// The sequence spans three steps that each own part of the answer, and the
+    /// middle one runs while the driver does not exist:
+    ///
+    /// 1. scene switch → `net_rollback_stop()` — the old driver goes
+    /// 2. `net_client_side_setup` → `plan_client_side` with an EMPTY rollback
+    ///    set, which classifies the fighters as ordinary synced nodes and
+    ///    filters them
+    /// 3. `net_rollback_start` → `rebind` + `extend_filters` — the new driver
+    ///    claims them back
+    ///
+    /// Step 2 is a genuine "filtered with no driver" window. It is fine because
+    /// step 3 closes it in the same frame — but only if step 3 actually runs
+    /// AND the driver it installs survives. It stopped surviving, and this is
+    /// the shape that catches it.
+    #[test]
+    fn the_client_join_sequence_leaves_no_rollback_node_unrun() {
+        use floptle_core::{Replicated, ReplicationMode, World};
+        use floptle_core::transform::Transform;
+
+        let mut world = World::default();
+        let mut fighters = Vec::new();
+        for _ in 0..2 {
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(e, Replicated { mode: ReplicationMode::Rollback, ..Default::default() });
+            fighters.push(e);
+        }
+        let reps: Vec<(floptle_core::Entity, bool)> = world
+            .query::<Replicated>()
+            .map(|(e, r)| (e, r.mode.is_rollback()))
+            .collect();
+        let all: Vec<(floptle_core::Entity, Replicated)> =
+            world.query::<Replicated>().map(|(e, r)| (e, *r)).collect();
+
+        // Step 2, with no driver: the fighters ARE filtered and nothing drives
+        // them. The window is real — assert it, so the test is honest about
+        // what it is checking rather than accidentally passing.
+        let plan = crate::net::plan_client_side(&all, None, &HashSet::new());
+        let filters = plan.skip.clone();
+        assert!(
+            !orphaned_rollback_nodes(&reps, &HashSet::new(), |e| filters.contains(&e)).is_empty(),
+            "step 2 is supposed to be the un-driven window; if it isn't, this test proves nothing"
+        );
+
+        // Step 3: the driver binds them and re-adds its half of the filters.
+        let driven: HashSet<u32> = fighters.iter().map(|e| e.index()).collect();
+        let mut filters = filters;
+        filters.extend(driven.iter().copied());
+        assert!(
+            orphaned_rollback_nodes(&reps, &driven, |e| filters.contains(&e)).is_empty(),
+            "after the rollback start every fighter must be driven or unfiltered"
+        );
+
+        // And the failure the field actually hit: the driver was installed and
+        // then dropped at the end of its own first tick, so `driven` went empty
+        // while the filters stayed. Both fighters, both machines, silent.
+        let lost = orphaned_rollback_nodes(&reps, &HashSet::new(), |e| filters.contains(&e));
+        assert_eq!(
+            lost.len(),
+            2,
+            "a driver that disappears must be detectable — that is what the check is for"
+        );
+    }
+
+    /// `net_rollback_tick` takes the driver out of the `Editor` and must put it
+    /// back on every path. A `return` between the two drops it.
+    ///
+    /// This is a source check because the thing it guards cannot be reached
+    /// without a live `Editor`, and the cost of missing it is not a crash but
+    /// silence: the fighters keep their place in the script filters, nothing
+    /// runs them, and the match freezes with a clean console. That is exactly
+    /// how floptle/0040 shipped — a `return` was not added, a re-`take()` was,
+    /// and the single restore that used to follow it went away in the edit.
+    #[test]
+    fn the_rollback_tick_always_puts_its_driver_back() {
+        let src = include_str!("rollback_session.rs");
+        let body = src
+            .split_once("pub(crate) fn net_rollback_tick(")
+            .expect("net_rollback_tick exists")
+            .1;
+        let body = body.split_once("\n    /// ").map_or(body, |(b, _)| b);
+        let take = body.find("self.net_rollback.take()").expect("it takes the driver");
+        let after = &body[take..];
+        assert_eq!(
+            after.matches("self.net_rollback.take()").count(),
+            1,
+            "one take, or the second one finds a None the first one left behind"
+        );
+        assert_eq!(
+            after.matches("self.net_rollback = Some(").count(),
+            1,
+            "exactly one restore — several means several paths, and paths are what get missed"
+        );
+        // A `return` after the take that is not preceded by a restore drops it.
+        let restore = after.find("self.net_rollback = Some(").expect("it restores the driver");
+        assert!(
+            !after[..restore].contains("return"),
+            "there is a `return` between taking the driver and putting it back — that path \
+             drops it, and a dropped driver leaves its fighters filtered with nothing running \
+             them for the rest of the match, silently (floptle/0040)"
+        );
+    }
+
     /// Player-facing sentences must not carry a flattened line continuation.
     ///
     /// A multi-line string in Rust keeps the newline AND the source indentation
