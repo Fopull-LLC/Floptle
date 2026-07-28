@@ -169,8 +169,24 @@ pub fn net_aim(n: &floptle_net::NetInput) -> Option<[f32; 2]> {
 /// the boundary: functions/userdata/threads never replicate, depth ≤ 4, and
 /// the caller validates encoded size. Errors carry a script-friendly message.
 pub(crate) fn lua_to_netvalue(v: &Value, depth: usize) -> Result<NetValue, String> {
-    if depth > floptle_net::MAX_VALUE_DEPTH {
-        return Err(ValueError::TooDeep.to_string());
+    lua_to_netvalue_max(v, depth, floptle_net::MAX_VALUE_DEPTH)
+}
+
+/// The same conversion with an explicit depth ceiling. Rollback state stays in
+/// this process, so it isn't held to the wire's depth-4 rule — a controller's
+/// state table is legitimately deeper than anything you'd replicate — but it
+/// still needs A limit, or a cyclic table recurses until the stack goes.
+pub(crate) fn lua_to_netvalue_max(
+    v: &Value,
+    depth: usize,
+    max_depth: usize,
+) -> Result<NetValue, String> {
+    if depth > max_depth {
+        return Err(if max_depth == floptle_net::MAX_VALUE_DEPTH {
+            ValueError::TooDeep.to_string()
+        } else {
+            format!("value nests deeper than {max_depth} levels (or is cyclic)")
+        });
     }
     match v {
         Value::Nil => Ok(NetValue::Nil),
@@ -182,7 +198,10 @@ pub(crate) fn lua_to_netvalue(v: &Value, depth: usize) -> Result<NetValue, Strin
             let mut pairs = Vec::new();
             for pair in t.clone().pairs::<Value, Value>() {
                 let (k, val) = pair.map_err(|e| e.to_string())?;
-                pairs.push((lua_to_netvalue(&k, depth + 1)?, lua_to_netvalue(&val, depth + 1)?));
+                pairs.push((
+                    lua_to_netvalue_max(&k, depth + 1, max_depth)?,
+                    lua_to_netvalue_max(&val, depth + 1, max_depth)?,
+                ));
             }
             Ok(NetValue::Table(pairs))
         }
@@ -233,8 +252,22 @@ pub(crate) fn install_net_api(
     hulls: &Rc<RefCell<Vec<floptle_physics::BodyHull>>>,
     sim_origin: &Rc<RefCell<glam::DVec3>>,
     synced_stores: &Rc<RefCell<std::collections::HashMap<(u32, String), Table>>>,
+    replaying: &Rc<std::cell::Cell<bool>>,
 ) -> mlua::Result<()> {
     let t = lua.create_table()?;
+
+    // --- rollback --------------------------------------------------------
+    {
+        // `net.replaying()` — true while the rollback driver is re-simulating
+        // ticks it already ran (`docs/rollback-netcode-design.md` §4). The
+        // engine already discards the side-effect queues a replay re-fires;
+        // this is for the cosmetics it cannot see, like a script poking a
+        // material or a UI label. Simulation code must NOT branch on it: a
+        // replayed tick that computes something different from the live tick
+        // is the definition of a desync.
+        let r = replaying.clone();
+        t.set("replaying", lua.create_function(move |_, ()| Ok(r.get()))?)?;
+    }
 
     // --- session control -------------------------------------------------
     {

@@ -381,7 +381,11 @@ impl PhysicsWorld {
         self.kin_contacts.clear();
         self.compound_contacts.clear();
         for bi in 0..self.bodies.len() {
-            self.step_body(bi, dt);
+            // Driver-stepped bodies advance through `Sim::step_body_tick`
+            // instead — see `Body::driven`.
+            if !self.bodies[bi].driven {
+                self.step_body(bi, dt);
+            }
         }
         for ci in 0..self.compounds.len() {
             self.step_compound(ci, dt);

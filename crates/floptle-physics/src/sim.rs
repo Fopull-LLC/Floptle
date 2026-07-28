@@ -1376,6 +1376,23 @@ impl Sim {
         }
     }
 
+    /// Hand these bodies (by entity index) over to an external per-tick driver:
+    /// [`Self::step_tick`] stops stepping them and [`Self::step_body_tick`]
+    /// becomes the only thing that advances them. Bodies not named here are
+    /// handed back.
+    ///
+    /// This is what lets the rollback driver run the SAME integration live and
+    /// during a re-simulation (`docs/rollback-netcode-design.md` §7 P3). If the
+    /// live tick used the whole-world step and the replay used per-body steps,
+    /// the two would have to agree by coincidence rather than by construction —
+    /// and the acceptance test for the whole feature is that they agree bit for
+    /// bit. Pass an empty set on Stop / when the session ends.
+    pub fn set_driven_bodies(&mut self, eids: &std::collections::HashSet<u32>) {
+        for l in &self.map {
+            self.world.bodies[l.body].driven = eids.contains(&l.entity.index());
+        }
+    }
+
     /// Capture a body's full dynamic state by entity index, in absolute world
     /// coordinates — the serializable unit netcode snapshots (`docs/netcode-design.md`).
     pub fn body_snapshot(&self, eid: u32) -> Option<BodySnapshot> {

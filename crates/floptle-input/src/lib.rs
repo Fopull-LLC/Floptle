@@ -54,7 +54,7 @@ pub use map::{
 pub use raw::{PadState, RawInput};
 pub use rebind::{BindFilter, Capture};
 pub use runtime::{ActionRuntime, ActionState};
-pub use system::{Domain, InputSystem, PendingRebind};
+pub use system::{Domain, InputSystem, PendingRebind, TickSnapshot};
 pub use source::{
     Device, Key, KeyGroup, MouseAxis, MouseButton, PadAxis, PadButton, PadControl, PadId,
     Source,

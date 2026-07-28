@@ -39,6 +39,28 @@ pub enum ReplicationMode {
     /// The owner-client ALSO simulates locally, ahead of the server — for the
     /// player's own avatar. Requires an `owner` peer.
     Predicted,
+    /// **Every** peer simulates this node locally, every tick, from the session's
+    /// per-tick input set — never interpolated, never authoritative. When a
+    /// remote input arrives that contradicts what was predicted, the whole tick
+    /// range since is re-simulated (`docs/rollback-netcode-design.md`).
+    ///
+    /// This exists because `Predicted` is the wrong shape for a fighting game.
+    /// There, only your own avatar feels instant and everyone else renders
+    /// `interp_delay` ticks in the past — which is fine when the one moment that
+    /// matters can be reconciled server-side, and fatal when the game is reading
+    /// the opponent's exact state on every frame inside a 5-frame window.
+    ///
+    /// `owner` still names whose inputs drive it, but the mode is symmetric: the
+    /// same simulation runs on every machine, so hit resolution and derived
+    /// state (hitstop, meter) agree without anything being sent about them.
+    Rollback,
+}
+
+impl ReplicationMode {
+    /// Does this node's simulation run locally on every peer?
+    pub fn is_rollback(self) -> bool {
+        matches!(self, ReplicationMode::Rollback)
+    }
 }
 
 /// Marks a node as networked — the Inspector's "Networked" component and the

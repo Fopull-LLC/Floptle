@@ -19,6 +19,7 @@ pub mod lagcomp;
 pub mod predict;
 pub mod quic;
 pub mod relay;
+pub mod rollback;
 pub mod session;
 pub mod transport;
 pub mod value;
@@ -28,6 +29,7 @@ pub use lagcomp::{HistEntry, LagHistory, MAX_REWIND_TICKS};
 pub use quic::{QuicClient, QuicServer};
 pub use relay::{RelayClient, RelayHost, RelayServer};
 pub use predict::{PredictedState, Predictor, DEFAULT_EPSILON};
+pub use rollback::{Correction, ResolvedInput, Rollback, DEFAULT_MAX_DEPTH, MAX_DELAY};
 pub use session::{
     AnimSrcLayer, AnimStates, BodyStates, NetEvent, NetRole, NetSession, ReceivedRpc, RpcTarget,
     SyncedVars,

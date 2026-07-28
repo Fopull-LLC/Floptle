@@ -68,6 +68,16 @@ pub struct Body {
     /// (pair with gravity-off or Kinematic for pickups/zones that stay put).
     /// Sensors are also invisible to raycasts, like static trigger colliders.
     pub sensor: bool,
+    /// DRIVER-STEPPED: the whole-world step skips this body because something
+    /// else advances it one tick at a time — the rollback driver
+    /// (`docs/rollback-netcode-design.md` §7 P3), which must run the identical
+    /// integration live and during re-simulation. Stepping it here as well
+    /// would advance a rollback fighter twice per live tick and once per
+    /// replayed one, so a correction would visibly shorten every jump.
+    ///
+    /// Unlike `active = false`, a driven body is fully live: it collides, it
+    /// raycasts, its transform writes back. Only *who calls the step* differs.
+    pub driven: bool,
 }
 
 impl Body {
@@ -90,6 +100,7 @@ impl Body {
             layer: 0,
             kinematic: false,
             sensor: false,
+            driven: false,
         }
     }
 

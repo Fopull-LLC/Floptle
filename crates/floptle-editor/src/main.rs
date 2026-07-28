@@ -71,6 +71,7 @@ mod map_keys;
 mod prefs;
 mod project;
 mod render_frame;
+mod rollback;
 mod rig_overrides;
 mod scene_ops;
 mod space;

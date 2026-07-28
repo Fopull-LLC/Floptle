@@ -1095,9 +1095,18 @@ impl ScriptHost {
         // session state in, `net.on` handler registry, `net.rewind` (§7).
         let synced_stores: Rc<RefCell<HashMap<(u32, String), Table>>> =
             Rc::new(RefCell::new(HashMap::new()));
-        if let Err(e) =
-            crate::net_api::install_net_api(&lua, &net, &hulls, &sim_origin, &synced_stores)
-        {
+        // The rollback `replaying` flag (§4) — shared so `net.replaying()` can
+        // answer it, which is the escape hatch for any cosmetic the engine's
+        // queue gating can't see (a script writing a material, say).
+        let replaying: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+        if let Err(e) = crate::net_api::install_net_api(
+            &lua,
+            &net,
+            &hulls,
+            &sim_origin,
+            &synced_stores,
+            &replaying,
+        ) {
             eprintln!("[lua] failed to install the net API: {e}");
         }
         // The `terrain.*` API (Terrain 2.0 P6): writes queue TerrainOps the editor
@@ -1269,6 +1278,8 @@ impl ScriptHost {
             synced_warned: std::collections::HashSet::new(),
             script_skip: std::collections::HashSet::new(),
             frame_skip: std::collections::HashSet::new(),
+            replaying,
+            replay_marks: None,
         }
     }
 
@@ -1949,6 +1960,162 @@ impl ScriptHost {
     /// tooling that read a script's state from Rust.
     pub fn instance_env(&self, eid: u32, kind: &str) -> Option<Table> {
         self.envs.borrow().get(&(eid, kind.to_string())).cloned()
+    }
+
+    /// Every script kind on `eid`, in the order the instances run. The rollback
+    /// driver walks this so a captured state and a restore visit the same
+    /// scripts in the same order.
+    fn script_kinds_on(&self, eid: u32) -> Vec<(String, Table)> {
+        let mut v: Vec<(String, Table)> = self
+            .envs
+            .borrow()
+            .iter()
+            .filter(|((id, _), _)| *id == eid)
+            .map(|((_, kind), env)| (kind.clone(), env.clone()))
+            .collect();
+        // `envs` is a HashMap; a rollback must be reproducible, and "which
+        // script's restore ran first" is observable when two scripts on a node
+        // talk to each other. Sort so the order is the same on every machine and
+        // every replay.
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
+    /// Capture `eid`'s rollback state: each script's `snapshot()` return value,
+    /// deep-copied out of Lua (see [`crate::rollback_api`]). Scripts that define
+    /// no `snapshot` contribute nothing and are simply not rolled back.
+    ///
+    /// Runs every tick under rollback, so it must stay cheap; the conversion is
+    /// linear in the size of what the script actually returns.
+    pub fn snapshot_scripts(&mut self, eid: u32) -> crate::rollback_api::ScriptState {
+        let mut out = crate::rollback_api::ScriptState::default();
+        for (kind, env) in self.script_kinds_on(eid) {
+            let Ok(Some(f)) = env.raw_get::<Option<mlua::Function>>("snapshot") else { continue };
+            let v = match f.call::<mlua::Value>(()) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.fail(&kind, format!("{kind}: snapshot() failed — {e}"));
+                    continue;
+                }
+            };
+            match crate::net_api::lua_to_netvalue_max(
+                &v,
+                0,
+                crate::rollback_api::MAX_STATE_DEPTH,
+            ) {
+                Ok(nv) => out.entries.push((kind, nv)),
+                Err(e) => self.fail(
+                    &kind,
+                    format!(
+                        "{kind}: snapshot() returned something that can't be rolled back — \
+                         {e}. Rollback state holds numbers, strings, booleans and nested \
+                         tables; a node handle or a function can't be restored."
+                    ),
+                ),
+            }
+        }
+        out
+    }
+
+    /// Hand `eid`'s scripts a previously captured state through their
+    /// `restore(s)` hooks. Each script sees a FRESH table built from the
+    /// capture, so re-simulating after the restore cannot corrupt the snapshot
+    /// it came from — which would otherwise make the second replay of a tick
+    /// disagree with the first.
+    pub fn restore_scripts(&mut self, eid: u32, state: &crate::rollback_api::ScriptState) {
+        for (kind, env) in self.script_kinds_on(eid) {
+            let Some((_, nv)) = state.entries.iter().find(|(k, _)| *k == kind) else { continue };
+            let Ok(Some(f)) = env.raw_get::<Option<mlua::Function>>("restore") else { continue };
+            let v = match crate::net_api::netvalue_to_lua(&self.lua, nv) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.fail(&kind, format!("{kind}: restore() value rebuild failed — {e}"));
+                    continue;
+                }
+            };
+            if let Err(e) = f.call::<()>(v) {
+                self.fail(&kind, format!("{kind}: restore() failed — {e}"));
+            }
+        }
+    }
+
+    /// Enter re-simulation (`docs/rollback-netcode-design.md` §4).
+    ///
+    /// A re-simulated tick runs the same Lua the live tick ran, so without a
+    /// gate every replay re-fires the cosmetics: `spawnEffect` doubles the hit
+    /// sparks, `audio.play` stutters the same impact, `spawn()` duplicates a
+    /// projectile prefab, `print` floods the Console, `net.rpc` sends again.
+    /// Simulation-relevant writes — body velocity/position, script state,
+    /// component writes — all still land; that is the point of the replay.
+    ///
+    /// Errors are deliberately NOT suppressed. A replay that throws is a
+    /// correctness problem, and hiding it would leave a desync with no
+    /// symptom. The scheduler needs no gating here: it already refuses to
+    /// advance in the targeted passes a replay uses (see [`crate::sched_api`]).
+    pub fn begin_replay(&mut self) {
+        if self.replay_marks.is_some() {
+            return; // already replaying; a nested begin must not move the marks
+        }
+        self.replaying.set(true);
+        self.replay_marks = Some(crate::ReplayMarks {
+            spawn_effects: self.spawn_effects.borrow().len(),
+            audio_commands: self.audio_commands.borrow().len(),
+            spawn_requests: self.spawn_requests.borrow().len(),
+            destroy_queue: self.destroy_queue.borrow().len(),
+            net_cmds: self.net.cmds.borrow().len(),
+            logs: self.logs.borrow().len(),
+        });
+    }
+
+    /// Leave re-simulation, discarding the one-shot side effects it queued.
+    ///
+    /// The honest consequence, which belongs in the docs and not in a comment
+    /// alone: a correction can *eat* a cosmetic (the spark that only exists on
+    /// the corrected timeline never fires) or *orphan* one (the spark fired on
+    /// the mispredicted timeline for a hit that turned out not to happen).
+    /// Every rollback game lives with this; at depth ≤ 8 ticks it reads as
+    /// network crackle. Gameplay-relevant spawns belong in rollback state.
+    pub fn end_replay(&mut self) {
+        let Some(m) = self.replay_marks.take() else { return };
+        self.replaying.set(false);
+        self.spawn_effects.borrow_mut().truncate(m.spawn_effects);
+        self.audio_commands.borrow_mut().truncate(m.audio_commands);
+        self.destroy_queue.borrow_mut().truncate(m.destroy_queue);
+        self.net.cmds.borrow_mut().truncate(m.net_cmds);
+        // Spawn requests carry a Lua registry key for their callback — dropping
+        // the request without releasing it leaks a registry slot per replayed
+        // `spawn()`, which a match-long stream of corrections would grow without
+        // bound.
+        for req in self.spawn_requests.borrow_mut().drain(m.spawn_requests..) {
+            if let Some(cb) = req.cb {
+                let _ = self.lua.remove_registry_value(cb);
+            }
+        }
+        // Console output goes, errors stay.
+        let mut logs = self.logs.borrow_mut();
+        let mut i = m.logs;
+        while i < logs.len() {
+            if logs[i].level == crate::LogLevel::Error {
+                i += 1;
+            } else {
+                logs.remove(i);
+            }
+        }
+    }
+
+    /// Is the driver re-simulating right now? (`net.replaying()` in Lua.)
+    pub fn is_replaying(&self) -> bool {
+        self.replaying.get()
+    }
+
+    /// Does any script on `eid` participate in rollback? A `Rollback` node whose
+    /// scripts define neither hook is almost always a mistake, and the driver
+    /// warns about it once rather than desyncing quietly.
+    pub fn has_rollback_hooks(&self, eid: u32) -> bool {
+        self.script_kinds_on(eid).iter().any(|(_, env)| {
+            matches!(env.raw_get::<Option<mlua::Function>>("snapshot"), Ok(Some(_)))
+                || matches!(env.raw_get::<Option<mlua::Function>>("restore"), Ok(Some(_)))
+        })
     }
 
     /// Feed the physics body state (entity index → vel + grounded) for the frame, so

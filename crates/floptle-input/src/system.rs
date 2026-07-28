@@ -42,11 +42,34 @@ pub struct PendingRebind {
     pub captured: Option<Capture>,
 }
 
+/// The tick domain's whole state, for a rollback's state ring.
+///
+/// Cloned rather than rewound: `History` carries absolute tick cursors plus the
+/// per-action "already consumed" marks, and those cannot be reconstructed by
+/// winding a cursor backwards. It is ~3 KB per player, which is nothing next to
+/// being correct.
+#[derive(Clone)]
+pub struct TickSnapshot {
+    runtimes: Vec<ActionRuntime>,
+    state: Vec<ActionState>,
+    history: Vec<History>,
+    facing: Vec<f32>,
+    contexts: ContextStack,
+}
+
 /// Everything the host owns for input.
 pub struct InputSystem {
     map: InputMap,
     frame: Vec<ActionRuntime>,
     tick: Vec<ActionRuntime>,
+    /// A THIRD runtime set, used only by [`InputSystem::sample_tick`]: in a
+    /// rollback session the tick domain is written entirely by the driver
+    /// ([`InputSystem::set_tick_state`]), so sampling the local devices through
+    /// `tick` would push history twice per tick and desync every motion window.
+    /// This set reads the same devices on the same cadence without touching any
+    /// of that. It is outside the simulation and therefore outside
+    /// [`TickSnapshot`], for the same reason the frame domain is.
+    sample: Vec<ActionRuntime>,
     frame_state: Vec<ActionState>,
     tick_state: Vec<ActionState>,
     history: Vec<History>,
@@ -70,6 +93,7 @@ impl InputSystem {
             map,
             frame: Vec::new(),
             tick: Vec::new(),
+            sample: Vec::new(),
             frame_state: Vec::new(),
             tick_state: Vec::new(),
             history: Vec::new(),
@@ -107,6 +131,7 @@ impl InputSystem {
         let n = self.players();
         self.frame.resize_with(n, ActionRuntime::new);
         self.tick.resize_with(n, ActionRuntime::new);
+        self.sample.resize_with(n, ActionRuntime::new);
         self.frame_state.resize_with(n, ActionState::default);
         self.tick_state.resize_with(n, ActionState::default);
         self.history.resize_with(n, History::new);
@@ -119,6 +144,7 @@ impl InputSystem {
     pub fn reset(&mut self) {
         self.frame.iter_mut().for_each(ActionRuntime::reset);
         self.tick.iter_mut().for_each(ActionRuntime::reset);
+        self.sample.iter_mut().for_each(ActionRuntime::reset);
         self.frame_state.iter_mut().for_each(|s| *s = ActionState::default());
         self.tick_state.iter_mut().for_each(|s| *s = ActionState::default());
         self.history.iter_mut().for_each(History::clear);
@@ -185,6 +211,67 @@ impl InputSystem {
             self.history[slot].push(state.held, state.just_pressed, dir, n_actions);
             self.tick_state[slot] = state;
         }
+    }
+
+    /// Resolve one player's devices for the wire WITHOUT touching the tick
+    /// domain — the local-input sample a rollback session ships to its peers
+    /// (`docs/rollback-netcode-design.md` §2.2).
+    ///
+    /// In a rollback session the tick domain is authored entirely by the
+    /// driver: every peer's input, including the local player's, arrives back
+    /// through [`InputSystem::set_tick_state`] at its *applied* tick, `delay`
+    /// ticks after it was sampled. Sampling through the tick runtimes would
+    /// advance history a second time per tick — silently doubling every motion
+    /// window and buffer answer. Call this exactly once per tick per local
+    /// player, with the same drained edges [`InputSystem::resolve_tick`] would
+    /// have consumed.
+    pub fn sample_tick(&mut self, raw: &RawInput, slot: u8, dt: f32) -> ActionState {
+        let allow = self.contexts.allow_mask(&self.map);
+        let i = (slot as usize).min(self.sample.len().saturating_sub(1));
+        match self.sample.get_mut(i) {
+            Some(rt) => rt.resolve(&self.map, raw, slot, dt, allow),
+            None => ActionState::default(),
+        }
+    }
+
+    /// The whole TICK domain, captured for a rollback.
+    ///
+    /// This is the part of rollback that is easy to forget and impossible to
+    /// skip. `buffered`, `consume` and every motion answer read a per-tick ring
+    /// with **absolute** tick cursors, and `consume` records a decision that
+    /// cannot be recomputed from the ring — it is a choice the script made, not
+    /// a function of the input. Re-simulate a tick without restoring this and a
+    /// buffered punch fires twice, or a quarter-circle that matched once fails
+    /// to match on the replay. Neither shows up as an error; both show up as a
+    /// desync.
+    ///
+    /// The FRAME domain is deliberately excluded. It advances per rendered
+    /// frame, is not part of the simulation, and must not be rewound by one.
+    pub fn snapshot_tick(&self) -> TickSnapshot {
+        TickSnapshot {
+            runtimes: self.tick.clone(),
+            state: self.tick_state.clone(),
+            history: self.history.clone(),
+            facing: self.facing.clone(),
+            contexts: self.contexts.clone(),
+        }
+    }
+
+    /// Put the tick domain back as [`InputSystem::snapshot_tick`] found it.
+    ///
+    /// A player count that changed since the capture (someone joined or left)
+    /// makes the snapshot meaningless, so it is refused rather than applied to
+    /// the wrong slots.
+    pub fn restore_tick(&mut self, s: &TickSnapshot) -> bool {
+        if s.runtimes.len() != self.tick.len() {
+            return false;
+        }
+        self.tick = s.runtimes.clone();
+        self.tick_state = s.state.clone();
+        self.history = s.history.clone();
+        self.facing = s.facing.clone();
+        self.contexts = s.contexts.clone();
+        true
     }
 
     /// Resolved state for a player in a domain.
@@ -462,6 +549,82 @@ mod tests {
         sys.resolve_tick(&keys(&[Key::ArrowRight, Key::Numpad1]), 0.016);
         assert!(sys.buffered(1, "Punch", 4), "P2's punch key");
         assert!(!sys.buffered(0, "Punch", 4), "which is not P1's");
+    }
+
+    /// The buffer/motion state must survive a rollback intact. `consume` is the
+    /// case that proves it: it records a DECISION the script made, which no
+    /// amount of replaying the raw inputs can reconstruct — so a replay that
+    /// didn't restore it would let one buffered press fire the attack twice.
+    #[test]
+    fn a_tick_snapshot_restores_buffers_motions_and_consumption() {
+        let mut sys = InputSystem::new(fighter_map(1));
+        // qcf, then the punch — the state a fighter is actually in mid-special.
+        for k in [vec![Key::KeyS], vec![Key::KeyS, Key::KeyD], vec![Key::KeyD]] {
+            sys.resolve_tick(&keys(&k), 0.016);
+        }
+        sys.resolve_tick(&keys(&[Key::KeyD, Key::KeyJ]), 0.016);
+        sys.set_facing(0, -1.0);
+        let saved = sys.snapshot_tick();
+        assert!(sys.motion(0, "qcf", None) && sys.buffered(0, "Punch", 4));
+
+        // The tick runs: the script spends the buffered press and the motion
+        // window ages out.
+        sys.consume(0, "Punch", 4);
+        assert!(!sys.buffered(0, "Punch", 4), "spent");
+        for _ in 0..30 {
+            sys.resolve_tick(&keys(&[]), 0.016);
+        }
+        sys.set_facing(0, 1.0);
+        assert!(!sys.motion(0, "qcf", None), "window long gone");
+
+        // Roll back to the saved tick: everything comes back, including the fact
+        // that the press had NOT yet been consumed.
+        assert!(sys.restore_tick(&saved));
+        assert!(sys.buffered(0, "Punch", 4), "the press is unspent again");
+        assert!(sys.motion(0, "qcf", None), "and the motion still matches");
+        assert_eq!(sys.facing(0), -1.0, "facing rolls back with everything else");
+
+        // And re-simulating from there reproduces the same answers.
+        assert!(sys.consume(0, "Punch", 4));
+        assert!(!sys.consume(0, "Punch", 4), "still fires exactly once");
+    }
+
+    /// Sampling the local devices for the wire must leave the tick domain
+    /// untouched. A rollback session writes that domain itself, one
+    /// `set_tick_state` per peer per tick; if sampling advanced history too,
+    /// every motion window and buffer would age at twice the rate on the local
+    /// player and at the right rate on the remote one — a desync that looks
+    /// like "my quarter-circles only come out online".
+    #[test]
+    fn sampling_for_the_wire_never_advances_the_tick_domain() {
+        let mut sys = InputSystem::new(fighter_map(1));
+        let down = keys(&[Key::KeyJ]);
+
+        let sampled = sys.sample_tick(&down, 0, 0.016);
+        assert!(sampled.is_just_pressed(0), "the sample sees the press");
+        assert!(!sys.action(Domain::Tick, 0, "Punch"), "…and the tick domain saw nothing");
+        assert_eq!(sys.history(0).tick(), 0, "no history was pushed");
+
+        // Held on the next sample: the sampler carries its own edge state, so a
+        // held button is not re-reported as a fresh press every tick.
+        let again = sys.sample_tick(&down, 0, 0.016);
+        assert!(again.is_held(0) && !again.is_just_pressed(0));
+
+        // The driver then writes the applied tick, and THAT is what history and
+        // the script-facing queries see — exactly once.
+        sys.set_tick_state(0, sampled);
+        assert!(sys.action(Domain::Tick, 0, "Punch"));
+        assert_eq!(sys.history(0).tick(), 1);
+    }
+
+    /// A snapshot taken before the player count changed cannot be applied to the
+    /// wrong slots — it is refused, not silently misapplied.
+    #[test]
+    fn a_tick_snapshot_from_a_different_player_count_is_refused() {
+        let mut sys = InputSystem::new(fighter_map(1));
+        let saved = sys.snapshot_tick();
+        sys.set_map(fighter_map(2));
+        assert!(!sys.restore_tick(&saved));
     }
 
     #[test]

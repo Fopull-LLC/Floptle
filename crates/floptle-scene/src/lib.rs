@@ -166,6 +166,15 @@ pub struct ReplicatedDoc {
     /// false = plain server-authoritative replication (the default).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub predicted: bool,
+    /// true = EVERY peer simulates this node every tick from the session input
+    /// set, rolling back on a mispredict (`ReplicationMode::Rollback`).
+    ///
+    /// A separate flag rather than turning `predicted` into an enum, so every
+    /// scene written before rollback existed still loads unchanged. Rollback
+    /// wins if both are somehow set — it is the stronger claim, and silently
+    /// picking the weaker one would be a desync nobody could see in the file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rollback: bool,
     /// Sync position/rotation (default true).
     #[serde(default = "true_bool")]
     pub transform: bool,
@@ -194,7 +203,9 @@ fn is_default_interp_delay(d: &u8) -> bool {
 impl ReplicatedDoc {
     pub fn to_component(&self) -> floptle_core::Replicated {
         floptle_core::Replicated {
-            mode: if self.predicted {
+            mode: if self.rollback {
+                floptle_core::ReplicationMode::Rollback
+            } else if self.predicted {
                 floptle_core::ReplicationMode::Predicted
             } else {
                 floptle_core::ReplicationMode::Authority
@@ -211,6 +222,7 @@ impl ReplicatedDoc {
     pub fn from_component(r: &floptle_core::Replicated) -> Self {
         Self {
             predicted: r.mode == floptle_core::ReplicationMode::Predicted,
+            rollback: r.mode == floptle_core::ReplicationMode::Rollback,
             transform: r.transform,
             physics: r.physics,
             animator: r.animator,
@@ -1214,6 +1226,31 @@ fn migrate_ron(text: &str) -> String {
 #[cfg(test)]
 mod migrate_tests {
     use super::*;
+    /// Rollback is a THIRD replication mode, added as its own flag so every
+    /// scene written before it existed still loads with the mode it had. A file
+    /// with neither flag is Authority; one with only `predicted` is unchanged.
+    #[test]
+    fn replication_modes_round_trip_and_old_scenes_are_unaffected() {
+        use floptle_core::ReplicationMode;
+        for mode in [ReplicationMode::Authority, ReplicationMode::Predicted, ReplicationMode::Rollback] {
+            let c = floptle_core::Replicated { mode, ..floptle_core::Replicated::default() };
+            let doc = ReplicatedDoc::from_component(&c);
+            let text = ron::to_string(&doc).unwrap();
+            let back: ReplicatedDoc = ron::from_str(&text).unwrap();
+            assert_eq!(back.to_component().mode, mode, "{mode:?} did not survive {text}");
+        }
+        // A doc written before `rollback` existed: no such field at all.
+        let legacy: ReplicatedDoc = ron::from_str("(predicted:true,transform:true)").unwrap();
+        assert_eq!(legacy.to_component().mode, ReplicationMode::Predicted);
+        let plain: ReplicatedDoc = ron::from_str("(transform:true)").unwrap();
+        assert_eq!(plain.to_component().mode, ReplicationMode::Authority);
+        // Neither flag is written when it doesn't apply, so files stay clean.
+        let auth = ReplicatedDoc::from_component(&floptle_core::Replicated::default());
+        let text = ron::to_string(&auth).unwrap();
+        assert!(!text.contains("rollback"), "{text}");
+        assert!(!text.contains("predicted"), "{text}");
+    }
+
     #[test]
     fn legacy_terrain_forms_migrate() {
         for legacy in [
@@ -1767,6 +1804,7 @@ mod tests {
                     attachment: None,
                     net: Some(ReplicatedDoc {
                         predicted: true, // exercise the non-default round-trip
+                        rollback: false,
                         transform: true,
                         physics: true,
                         animator: false, // exercise the non-default round-trip

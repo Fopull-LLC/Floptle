@@ -424,6 +424,52 @@ mod tests {
         assert!((end.y - body.y).abs() < 1e-6, "alpha=1 must land on the tick-end pos");
     }
 
+    /// A driver-stepped body must land BIT-IDENTICALLY where the whole-world
+    /// step would have put it (`docs/rollback-netcode-design.md` §7 P3).
+    ///
+    /// This is the foundation the whole feature stands on: the rollback driver
+    /// runs `step_body_tick` both live and during a re-simulation, so if that
+    /// disagreed with `step_tick` by even an ULP, every correction would nudge
+    /// the fighter and the two machines would drift apart with nothing to
+    /// blame. It holds because the solver has no body-vs-body pass — stepping
+    /// one body IS what the world step does to it.
+    #[test]
+    fn a_driven_body_steps_identically_to_the_whole_world_step() {
+        let build = || {
+            let mut ecs = World::default();
+            let e = ecs.spawn();
+            ecs.insert(e, Transform::from_translation(DVec3::new(0.0, 5.0, 0.0)));
+            ecs.insert(e, RigidBody { radius: 0.5, ..Default::default() });
+            let sim =
+                Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
+            (e, sim)
+        };
+        let (whole_e, mut whole) = build();
+        let (driven_e, mut driven) = build();
+        driven.set_driven_bodies(&std::collections::HashSet::from([driven_e.index()]));
+        for _ in 0..60 {
+            whole.step_tick(1.0 / 60.0, None);
+            // The driven body is invisible to the world step…
+            driven.step_tick(1.0 / 60.0, None);
+            // …and advances only here.
+            driven.step_body_tick(driven_e.index(), 1.0 / 60.0);
+        }
+        let a = whole.body_snapshot(whole_e.index()).unwrap();
+        let b = driven.body_snapshot(driven_e.index()).unwrap();
+        assert!(a.pos.y < 4.0, "the body must actually have fallen, got {}", a.pos.y);
+        assert_eq!(a, b, "driver-stepping must be the same integration, not a similar one");
+
+        // Handing it back re-enables the world step — and then it double-steps
+        // if the driver keeps going, which is exactly what the flag prevents.
+        driven.set_driven_bodies(&std::collections::HashSet::new());
+        driven.step_tick(1.0 / 60.0, None);
+        assert_ne!(
+            driven.body_snapshot(driven_e.index()).unwrap(),
+            b,
+            "cleared, the world step owns it again"
+        );
+    }
+
     #[test]
     fn body_snapshot_round_trips_absolute_world_state() {
         // Capture → mutate → restore must return the body to the captured state, in

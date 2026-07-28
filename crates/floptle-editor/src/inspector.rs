@@ -2185,6 +2185,7 @@ impl EditorTabViewer<'_> {
                                     .selected_text(match rep.mode {
                                         ReplicationMode::Authority => "Server authority",
                                         ReplicationMode::Predicted => "Predicted (owner)",
+                                        ReplicationMode::Rollback => "Rollback (all peers)",
                                     })
                                     .show_ui(ui, |ui| {
                                         cmd.inspector_changed |= ui
@@ -2202,6 +2203,14 @@ impl EditorTabViewer<'_> {
                                                 "Predicted (owner)",
                                             )
                                             .on_hover_text("the owning player's client ALSO simulates it locally, ahead of the server (their own avatar) — the server still has the final word")
+                                            .changed();
+                                        cmd.inspector_changed |= ui
+                                            .selectable_value(
+                                                &mut rep.mode,
+                                                ReplicationMode::Rollback,
+                                                "Rollback (all peers)",
+                                            )
+                                            .on_hover_text("EVERY peer simulates this node every tick from the shared input set and re-simulates on a mispredict — for a fighting game, where the opponent's exact state matters on every frame. Its scripts need snapshot()/restore().")
                                             .changed();
                                     });
                             });

@@ -84,6 +84,7 @@ mod host;
 mod input_api;
 mod math_api;
 mod net_api;
+pub mod rollback_api;
 mod preprocess;
 mod save_api;
 mod sched_api;
@@ -102,6 +103,7 @@ pub use net_api::{input_to_net, net_aim, net_to_input, NetCmd, NetRoleState, Net
 pub use assembly_api::{AssemblyCmd, AssemblyImpact, AssemblyInfo};
 pub use space_api::{SpaceBodyInfo, SpaceInfo};
 pub use terrain_api::{TerrainOp, TerrainOpMode};
+pub use rollback_api::{ScriptState, MAX_STATE_DEPTH};
 pub use view_api::ViewInfo;
 
 /// Severity of a captured script log line (the engine Console colors by this).
@@ -382,6 +384,31 @@ pub struct ScriptHost {
     /// `update` re-runs on the gameplay tick (`run_frame_for`) so client and
     /// server integrate identically.
     frame_skip: std::collections::HashSet<u32>,
+    /// Set while the rollback driver is RE-SIMULATING ticks it already ran
+    /// (`docs/rollback-netcode-design.md` §4). Scripts read it as
+    /// `net.replaying()`; the engine uses it to discard the one-shot side
+    /// effects a replay re-fires. Shared with the Lua closures.
+    replaying: Rc<std::cell::Cell<bool>>,
+    /// Queue lengths captured by [`ScriptHost::begin_replay`] so
+    /// [`ScriptHost::end_replay`] drops exactly what the replay added — and
+    /// nothing the live tick before it queued.
+    replay_marks: Option<ReplayMarks>,
+}
+
+/// Where each suppressed one-shot queue stood when a replay began (§4).
+///
+/// Gating at the DRAIN rather than inside each Lua closure is deliberate: a
+/// closure-side check has to be remembered at every new call site, and the one
+/// that gets forgotten is a doubled hit spark nobody traces back to netcode.
+/// Truncation catches every producer of a gated queue by construction.
+#[derive(Clone, Copy, Debug)]
+struct ReplayMarks {
+    spawn_effects: usize,
+    audio_commands: usize,
+    spawn_requests: usize,
+    destroy_queue: usize,
+    net_cmds: usize,
+    logs: usize,
 }
 
 /// One immediate-mode debug-draw command from a script's `gizmo.*` call.
@@ -3186,6 +3213,254 @@ end
             .and_then(|env| env.get::<f64>("seen").ok())
             .unwrap_or(f64::NAN);
         assert_eq!(seen, 2.0, "the stashed handle must track the body, not freeze at spawn");
+    }
+
+    /// The rollback contract: `snapshot()` captures, re-simulation mutates, and
+    /// `restore(s)` puts it back — with the ENGINE owning the copy in both
+    /// directions, so a replay that mutates its restored state cannot corrupt the
+    /// snapshot it came from. That corruption is the failure mode that would only
+    /// show up under packet loss, on the second replay of the same tick.
+    #[test]
+    fn snapshot_and_restore_round_trip_and_survive_re_simulation() {
+        let dir = std::env::temp_dir().join("floptle_script_test_rollback_hooks");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "fighter",
+            "hp = 100\n\
+             combo = { hits = 0, tags = { \"a\" } }\n\
+             function fixedUpdate(node, dt)\n\
+               hp = hp - 1\n\
+               combo.hits = combo.hits + 1\n\
+               table.insert(combo.tags, \"x\")\n\
+             end\n\
+             function snapshot() return { hp = hp, combo = combo } end\n\
+             function restore(s) hp = s.hp; combo = s.combo end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "fighter".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0); // start()
+        assert!(host.has_rollback_hooks(e.index()), "the hooks must be visible to the driver");
+
+        let read = |h: &ScriptHost| -> (f64, f64, usize) {
+            let env = h.instance_env(e.index(), "fighter").unwrap();
+            let combo: mlua::Table = env.get("combo").unwrap();
+            (
+                env.get::<f64>("hp").unwrap(),
+                combo.get::<f64>("hits").unwrap(),
+                combo.get::<mlua::Table>("tags").unwrap().raw_len(),
+            )
+        };
+
+        // Confirmed tick, then three provisional ones.
+        let saved = host.snapshot_scripts(e.index());
+        for _ in 0..3 {
+            host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+        }
+        assert_eq!(read(&host), (97.0, 3.0, 4));
+
+        // A correction arrives: restore and re-simulate the same three ticks.
+        host.restore_scripts(e.index(), &saved);
+        assert_eq!(read(&host), (100.0, 0.0, 1), "restored to the confirmed tick");
+        for _ in 0..3 {
+            host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+        }
+        assert_eq!(read(&host), (97.0, 3.0, 4), "the replay reproduces the same result");
+
+        // …and the SECOND replay off the same snapshot must too. It won't if the
+        // capture shared its tables with the sim, because the first replay would
+        // have mutated them.
+        host.restore_scripts(e.index(), &saved);
+        assert_eq!(read(&host), (100.0, 0.0, 1), "the snapshot is still pristine");
+        for _ in 0..3 {
+            host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+        }
+        assert_eq!(read(&host), (97.0, 3.0, 4));
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    }
+
+    /// A script with no hooks is not rolled back and must not be an error — that
+    /// is the documented default for cosmetics. And a snapshot holding something
+    /// unrestorable is refused loudly rather than silently dropped, because a
+    /// state that looks restored and isn't is the worst of both.
+    #[test]
+    fn scripts_without_hooks_are_skipped_and_bad_state_is_refused() {
+        let dir = std::env::temp_dir().join("floptle_script_test_rollback_optout");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "cosmetic", "function fixedUpdate(node, dt) end\n");
+        write_script(
+            &dir,
+            "broken",
+            "function snapshot() return { cb = function() end } end\n\
+             function restore(s) end\n\
+             function fixedUpdate(node, dt) end\n",
+        );
+        let mut world = World::default();
+        let plain = world.spawn();
+        world.insert(plain, Transform::IDENTITY);
+        world.insert(
+            plain,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "cosmetic".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let bad = world.spawn();
+        world.insert(bad, Transform::IDENTITY);
+        world.insert(
+            bad,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "broken".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+
+        assert!(!host.has_rollback_hooks(plain.index()));
+        let s = host.snapshot_scripts(plain.index());
+        assert!(s.is_empty(), "no hooks, nothing captured");
+        host.restore_scripts(plain.index(), &s); // and restoring is a no-op
+        assert!(host.errors().is_empty(), "opting out is not an error: {:?}", host.errors());
+
+        let s = host.snapshot_scripts(bad.index());
+        assert!(s.is_empty(), "the unrestorable capture is refused, not stored");
+        let errs = host.errors();
+        assert!(
+            errs.iter().any(|e| e.contains("broken") && e.contains("rolled back")),
+            "the error must name the script and say what's wrong: {errs:?}"
+        );
+    }
+
+    /// The `replaying` gate (`docs/rollback-netcode-design.md` §4): a
+    /// re-simulated tick runs the same Lua the live tick ran, so its one-shot
+    /// cosmetics must not fire a second time — while everything the simulation
+    /// depends on still lands, and a raised error still reaches the Console.
+    #[test]
+    fn a_replay_suppresses_one_shot_side_effects_but_not_simulation_writes() {
+        let dir = std::env::temp_dir().join("floptle_script_test_replay_gate");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "noisy",
+            "hits = 0\n\
+             function fixedUpdate(node, dt)\n\
+               hits = hits + 1\n\
+               node.vx = hits\n\
+               print(\"hit \" .. hits)\n\
+               spawnEffect(\"spark\", 1, 2, 3)\n\
+               audio.play(\"thud\")\n\
+               spawn(\"fireball\", vec3(0, 0, 0))\n\
+               net.rpc(\"scored\", { n = hits })\n\
+             end\n\
+             function snapshot() return { hits = hits } end\n\
+             function restore(s) hits = s.hits end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "noisy".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        let saved = host.snapshot_scripts(e.index());
+
+        // Two LIVE ticks: every queue fills as usual.
+        for _ in 0..2 {
+            host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+        }
+        assert_eq!(host.take_spawn_effects().len(), 2);
+        assert_eq!(host.take_audio_commands().len(), 2);
+        assert_eq!(host.take_spawn_requests().len(), 2);
+        assert_eq!(host.take_net_commands().len(), 2);
+        assert_eq!(host.drain_logs().len(), 2);
+        assert_eq!(host.take_body_changes().get(&e.index()).map(|v| v[0]), Some(2.0));
+
+        // A correction: the SAME two ticks re-simulate under the gate.
+        host.restore_scripts(e.index(), &saved);
+        host.begin_replay();
+        assert!(host.is_replaying());
+        for _ in 0..2 {
+            host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+        }
+        host.end_replay();
+        assert!(!host.is_replaying());
+
+        assert!(host.take_spawn_effects().is_empty(), "the hit spark must not double");
+        assert!(host.take_audio_commands().is_empty(), "nor the impact stutter");
+        assert!(host.take_spawn_requests().is_empty(), "nor the projectile duplicate");
+        assert!(host.take_net_commands().is_empty(), "nor the rpc send twice");
+        assert!(host.drain_logs().is_empty(), "nor the Console flood");
+        // …while the simulation write the replay exists to produce still lands.
+        assert_eq!(
+            host.take_body_changes().get(&e.index()).map(|v| v[0]),
+            Some(2.0),
+            "body writes are the POINT of the replay and must survive the gate"
+        );
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    }
+
+    /// A replay that throws is a correctness problem, not noise: suppressing it
+    /// would leave a desync with no symptom at all.
+    #[test]
+    fn a_replay_never_suppresses_an_error() {
+        let dir = std::env::temp_dir().join("floptle_script_test_replay_errors");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "thrower",
+            "function fixedUpdate(node, dt) print(\"quiet\"); error(\"boom\") end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "thrower".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        host.begin_replay();
+        host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+        host.end_replay();
+        let logs = host.drain_logs();
+        assert!(
+            logs.iter().any(|l| l.level == LogLevel::Error && l.msg.contains("boom")),
+            "the raised error must survive the gate: {logs:?}"
+        );
+        assert!(!logs.iter().any(|l| l.msg.contains("quiet")), "…but the print must not");
     }
 
     /// Physics moving a body between hooks must NOT read as a pending write through the
