@@ -3,6 +3,10 @@
 //! The headless-of-editor game player. An exported game is this runtime plus a
 //! packed project. Also the basis for a future dedicated `server` build.
 //!
+//! `--server <project>` runs it as a **dedicated server** (see [`server`]):
+//! the project's authoritative simulation over QUIC or a relay, no GPU, nobody
+//! at the keyboard.
+//!
 //! **Phase 1.** Opens a window, creates the GPU, and drives the real core loop
 //! (clock + deterministic fixed-step + ECS systems) on every redraw — currently
 //! rendering a clear pass with FPS in the title. Pass `--headless` to run the loop
@@ -10,6 +14,7 @@
 
 mod app;
 mod runner;
+mod server;
 
 use app::App;
 
@@ -25,6 +30,16 @@ fn main() {
         match args.get(i + 1) {
             Some(path) => import_check(path),
             None => eprintln!("usage: floptle-runtime --import <model.glb>"),
+        }
+    } else if args.iter().any(|a| a == "--server") {
+        // The dedicated server: a project's authoritative simulation with no
+        // window and nobody sitting at it.
+        match server::ServerArgs::parse(&args) {
+            Ok(a) => std::process::exit(server::run(a)),
+            Err(e) => {
+                eprintln!("  {e}");
+                std::process::exit(2);
+            }
         }
     } else if args.iter().any(|a| a == "--headless") {
         headless_selfcheck();

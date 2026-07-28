@@ -1483,6 +1483,7 @@ dependencies = [
  "floptle-physics",
  "floptle-render",
  "floptle-rules",
+ "floptle-scene",
  "floptle-script",
  "floptle-shader",
  "floptle-ui",
