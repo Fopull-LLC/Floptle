@@ -361,7 +361,12 @@ impl Transport for RelayHost {
     }
 
     fn stats(&self, _peer: PeerId) -> LinkStats {
-        // v1: the host↔relay leg (per-player RTT needs relay cooperation).
+        // Only the host↔relay leg is visible from here — a relayed packet's
+        // second hop belongs to a connection this endpoint has never seen. The
+        // number a game actually wants is host↔player, and it is measured a
+        // level up by `NetSession::peer_rtt_ms`, which probes end to end and so
+        // works the same over every transport. This stays as the transport's
+        // honest answer about the only link it owns.
         self.inner.stats(SERVER)
     }
 }

@@ -1230,6 +1230,7 @@ impl Editor {
         hs.sim.step_tick(step, None);
         hs.sim.writeback_interpolated(&mut hs.world, 1.0);
         // Server-side session commands from ITS scripts (rpc/spawn/despawn).
+        let mut spawns: Vec<(String, Option<[f64; 3]>, Option<u64>)> = Vec::new();
         for cmd in hs.host.take_net_commands() {
             match cmd {
                 NetCmd::Rpc { name, args, to, .. } => {
@@ -1244,14 +1245,10 @@ impl Editor {
                         hs.sim.remove_body(eid);
                     }
                 }
-                NetCmd::Spawn { path, .. } => self.console.push(
-                    floptle_script::LogLevel::Warn,
-                    format!(
-                        "net.spawn(\"{path}\"): not supported in the local test harness yet — \
-                         test avatar spawning over a real session (🌐 Host on LAN)"
-                    ),
-                    None,
-                ),
+                // Deferred, not handled here: resolving what the path names
+                // needs `self` (the prefab registry, the project root) and the
+                // hidden server is holding a mutable borrow of it.
+                NetCmd::Spawn { path, pos, owner } => spawns.push((path, pos, owner)),
                 _ => {}
             }
         }
@@ -1330,6 +1327,28 @@ impl Editor {
         // Surface server-side script output in the Console, tagged.
         for log in hs.host.drain_logs() {
             self.console.push(log.level, format!("[server] {}", log.msg), log.source);
+        }
+        self.net_hidden_spawn(spawns);
+    }
+
+    /// `net.spawn(...)` from a HIDDEN-SERVER script — the local harness's half
+    /// of runtime spawning, so per-player avatars can be tested with one
+    /// machine and one keyboard instead of two of each.
+    ///
+    /// Runs after the tick rather than inside it because resolving what a path
+    /// names needs `self`, which the hidden server is holding. The delay is
+    /// invisible: the spawn lands before the next tick reads the world, which
+    /// is the same guarantee the real host gives.
+    fn net_hidden_spawn(&mut self, spawns: Vec<(String, Option<[f64; 3]>, Option<u64>)>) {
+        for (path, pos, owner) in spawns {
+            let Some(node) = self.net_spawn_node_doc(&path, pos) else { continue };
+            let Some(hs) = self.net_hidden.as_mut() else { return };
+            let e = hs.session.spawn_doc(&mut hs.world, &node, owner);
+            // A runtime spawn simulates immediately on the server, exactly as
+            // it does in a real session — otherwise a spawned avatar would
+            // stand still here and move over a real link, which is the worst
+            // possible way for a harness to differ.
+            hs.sim.add_body_for(e, &hs.world);
         }
     }
 
@@ -1843,55 +1862,7 @@ impl Editor {
         if self.net_server.is_none() {
             return;
         }
-        // Accepts a scene file (its first node spawns) or a PREFAB — by name
-        // ("bullet") or path ("prefabs/bullet.prefab.ron"). Replication is
-        // single-node, so a multi-node prefab spawns its first root only.
-        let first = if path.ends_with(floptle_scene::PREFAB_EXT)
-            || self.resolve_prefab_request(path).is_some()
-        {
-            let full = self
-                .resolve_prefab_request(path)
-                .unwrap_or_else(|| self.project_root.join(path));
-            match crate::prefab::load_prefab_docs(&full) {
-                Ok(docs) => docs.into_iter().find(|d| d.parent.is_none()),
-                Err(e) => {
-                    self.console.push(
-                        floptle_script::LogLevel::Warn,
-                        format!("net.spawn(\"{path}\"): {e}"),
-                        None,
-                    );
-                    return;
-                }
-            }
-        } else {
-            let full = self.project_root.join(path);
-            match std::fs::read_to_string(&full)
-                .map_err(|e| e.to_string())
-                .and_then(|s| floptle_scene::from_ron(&s).map_err(|e| e.to_string()))
-            {
-                Ok(d) => d.nodes.first().cloned(),
-                Err(e) => {
-                    self.console.push(
-                        floptle_script::LogLevel::Warn,
-                        format!("net.spawn(\"{path}\"): {e}"),
-                        None,
-                    );
-                    return;
-                }
-            }
-        };
-        let Some(mut node) = first else {
-            self.console.push(
-                floptle_script::LogLevel::Warn,
-                format!("net.spawn(\"{path}\"): no nodes in it"),
-                None,
-            );
-            return;
-        };
-        node.parent = None;
-        if let Some(p) = pos {
-            node.transform.translation = p;
-        }
+        let Some(node) = self.net_spawn_node_doc(path, pos) else { return };
         let s = self.net_server.as_mut().unwrap();
         let e = s.spawn_doc(&mut self.world, &node, owner);
         // A spawned mesh needs its GPU import like any script-swapped model.
@@ -1912,6 +1883,66 @@ impl Editor {
             self.net_remote_predicted.push((e, p));
             self.net_apply_host_filters();
         }
+    }
+
+    /// Resolve what `net.spawn(path)` names into the one node that will be
+    /// spawned, positioned. Shared by the real host and the local harness, so
+    /// the two cannot drift about what a path means.
+    fn net_spawn_node_doc(
+        &mut self,
+        path: &str,
+        pos: Option<[f64; 3]>,
+    ) -> Option<floptle_scene::NodeDoc> {
+        // Accepts a scene file (its first node spawns) or a PREFAB — by name
+        // ("bullet") or path ("prefabs/bullet.prefab.ron"). Replication is
+        // single-node, so a multi-node prefab spawns its first root only.
+        let first = if path.ends_with(floptle_scene::PREFAB_EXT)
+            || self.resolve_prefab_request(path).is_some()
+        {
+            let full = self
+                .resolve_prefab_request(path)
+                .unwrap_or_else(|| self.project_root.join(path));
+            match crate::prefab::load_prefab_docs(&full) {
+                Ok(docs) => docs.into_iter().find(|d| d.parent.is_none()),
+                Err(e) => {
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!("net.spawn(\"{path}\"): {e}"),
+                        None,
+                    );
+                    return None;
+                }
+            }
+        } else {
+            let full = self.project_root.join(path);
+            match std::fs::read_to_string(&full)
+                .map_err(|e| e.to_string())
+                .and_then(|s| floptle_scene::from_ron(&s).map_err(|e| e.to_string()))
+            {
+                Ok(d) => d.nodes.first().cloned(),
+                Err(e) => {
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        format!("net.spawn(\"{path}\"): {e}"),
+                        None,
+                    );
+                    return None;
+                }
+            }
+        };
+        let Some(mut node) = first else {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!("net.spawn(\"{path}\"): no nodes in it"),
+                None,
+            );
+            return None;
+        };
+        node.parent = None;
+        if let Some(p) = pos {
+            node.transform.translation = p;
+        }
+        Some(node)
     }
 
     /// Ghost gizmos: CYAN = where a ghost client believes every replicated

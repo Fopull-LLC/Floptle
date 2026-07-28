@@ -14,7 +14,7 @@ use crate::PeerId;
 
 /// Bump when the wire format changes incompatibly; mismatched peers are
 /// refused at hello time instead of desyncing mysteriously later.
-pub const PROTO_VERSION: u16 = 10;
+pub const PROTO_VERSION: u16 = 11;
 
 /// Confirmed ticks between rollback state checksums (§6) — twice a second at
 /// 60 Hz. Often enough that a desync is caught within a exchange or two, rare
@@ -260,6 +260,16 @@ pub enum Msg {
     /// input lead from this, so clock hitches and drift self-heal instead of
     /// turning into permanent correction storms (`docs/netcode-design.md` §6).
     InputAck { margin: i32, late: u64 },
+    /// Round-trip probe. Whoever receives one replies with a [`Msg::Pong`]
+    /// carrying the same `id`, immediately — the point is to measure the link,
+    /// so anything the responder does first is measurement error.
+    ///
+    /// Application level rather than transport level on purpose: through a
+    /// relay the transport can only see its own leg (host↔relay), and the
+    /// number a game actually needs is host↔player. This measures that, and it
+    /// measures it the same way over every transport there will ever be.
+    Ping { id: u32 },
+    Pong { id: u32 },
 }
 
 impl Msg {

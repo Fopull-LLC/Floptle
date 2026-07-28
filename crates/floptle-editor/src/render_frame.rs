@@ -1495,11 +1495,21 @@ impl Editor {
         let net_peer_count = self.net_server.as_ref().map(|s| s.peers().len()).unwrap_or(0);
         let net_has_client = self.net_client.is_some();
         let net_as_player = self.net_play_client.is_some();
+        // The MEASURED round trip, falling back to the transport's own number
+        // until the first probe comes back. Through a relay the transport can
+        // only see its own leg, so it reports host↔relay and calls it the
+        // player's ping — off by a whole hop, and always in the flattering
+        // direction.
         let net_rtt = self
             .net_play_client
             .as_ref()
-            .map(|c| c.stats(floptle_net::SERVER).rtt_ms)
+            .map(|c| {
+                c.peer_rtt_ms(floptle_net::SERVER)
+                    .unwrap_or_else(|| c.stats(floptle_net::SERVER).rtt_ms)
+            })
             .unwrap_or(0.0);
+        // Per-player pings, host side — what a relay could never report.
+        let net_peer_rtts = self.net_server.as_ref().map(|s| s.peer_rtts()).unwrap_or_default();
         let net_predicted_name = self
             .net_predictor
             .as_ref()
@@ -1812,6 +1822,21 @@ impl Editor {
                                  project joins over the network.",
                             );
                             return;
+                        }
+                        if net_hosting && !net_peer_rtts.is_empty() {
+                            ui.small(
+                                net_peer_rtts
+                                    .iter()
+                                    .map(|(p, r)| format!("peer {p}: {r:.0} ms"))
+                                    .collect::<Vec<_>>()
+                                    .join(" · "),
+                            )
+                            .on_hover_text(
+                                "measured host↔player round trip. Probed end to end rather \
+                                 than read off the transport, because through a relay the \
+                                 transport only sees its own leg — it would report host↔relay \
+                                 and call it the player's ping.",
+                            );
                         }
                         if let Some(rb) = net_rollback {
                             ui.separator();

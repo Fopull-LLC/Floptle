@@ -1320,12 +1320,9 @@ end\n";
         let target = script.len() as u64;
         // Generous wall time: latency and loss both cost the peers ticks, and a
         // stall is a legitimate outcome of either.
-        for _ in 0..(target * 4) {
+        for _ in 0..(target * 20) {
             for (peer_side, driver) in [(false, &mut host_d), (true, &mut peer_d)] {
-                let sampled = driver.net.current() + 1;
-                if sampled > target {
-                    continue;
-                }
+                let Some(sampled) = driver.sample_tick() else { continue };
                 let ni = input_for(sampled, !peer_side);
                 let applied = driver.add_local(sampled, ni.clone());
                 if peer_side {
@@ -1351,25 +1348,31 @@ end\n";
                     }
                 }
             }
-            if host_d.net.current() < target {
-                host_d.advance(&mut host.ctx());
-            }
-            if peer_d.net.current() < target {
-                peer_d.advance(&mut peer.ctx());
-            }
-            if host_d.net.current() >= target && peer_d.net.current() >= target {
+            host_d.advance(&mut host.ctx());
+            peer_d.advance(&mut peer.ctx());
+            if host_d.net.confirmed() >= target && peer_d.net.confirmed() >= target {
                 break;
             }
         }
-        assert_eq!(host_d.net.current(), target, "the host never finished the match");
-        assert_eq!(peer_d.net.current(), target, "the peer never finished the match");
+        assert!(
+            host_d.net.confirmed() >= target && peer_d.net.confirmed() >= target,
+            "the match never confirmed {target} ticks (host {}, peer {})",
+            host_d.net.confirmed(),
+            peer_d.net.confirmed(),
+        );
         assert!(
             host_d.net.corrections > 0 || peer_d.net.corrections > 0,
             "a lossy 4-tick link must have produced at least one mispredict"
         );
+        // Compared at a CONFIRMED tick. The newest few ticks on either machine
+        // are still speculation — simulated from guesses whose real inputs are
+        // literally still in the air — so two peers differing THERE is the
+        // system working, not failing. Tick `target` holds every peer's real
+        // input and will never be re-simulated again.
+        let (h, p) = (host_d.state_hash(target), peer_d.state_hash(target));
+        assert!(h.is_some(), "tick {target} fell off the ring before it could be compared");
         assert_eq!(
-            host.fingerprint(&host_d),
-            peer.fingerprint(&peer_d),
+            h, p,
             "two peers fed the same inputs must have simulated the same match"
         );
         assert!(host_d.faults.is_empty(), "host faults: {:?}", host_d.faults);

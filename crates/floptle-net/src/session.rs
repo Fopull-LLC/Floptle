@@ -328,6 +328,16 @@ pub struct NetSession {
     /// replay (`crate::replay`) — and the same log is what the referee
     /// re-simulates from.
     record: Option<crate::replay::InputLog>,
+    /// Round-trip probes in flight: `(id, peer)` ⏵ when it was sent. Cleared
+    /// on reply and aged out, so a peer that stops answering doesn't leak one
+    /// entry per probe.
+    pings_out: HashMap<(u32, PeerId), std::time::Instant>,
+    /// Next probe id.
+    ping_id: u32,
+    /// Smoothed application-level round trip per peer, milliseconds. This is
+    /// the honest number through a relay, where the transport can only see its
+    /// own leg.
+    peer_rtt: HashMap<PeerId, f32>,
     /// Host: newly recorded log entries, drained by whoever is shadowing the
     /// match (the referee). Handed out as they arrive rather than by cloning
     /// the log, which would cost the whole match every tick.
@@ -426,6 +436,9 @@ impl NetSession {
             rollback_window: VecDeque::new(),
             rollback_in: Vec::new(),
             rollback_start_in: None,
+            pings_out: HashMap::new(),
+            ping_id: 0,
+            peer_rtt: HashMap::new(),
             record: None,
             record_out: Vec::new(),
             referee_hashes: HashMap::new(),
@@ -896,6 +909,43 @@ impl NetSession {
         self.record = Some(log);
     }
 
+    /// A probe came back: fold its round trip into the smoothed estimate.
+    fn note_pong(&mut self, id: u32, from: PeerId) {
+        let Some(sent) = self.pings_out.remove(&(id, from)) else {
+            return; // aged out, or never ours
+        };
+        let ms = sent.elapsed().as_secs_f32() * 1000.0;
+        // Smoothed, because one probe is a sample of a jittery link and a
+        // number that jumps is one nobody can act on. Weighted towards the
+        // history at 0.7/0.3 — roughly a two-second memory at this cadence.
+        let e = self.peer_rtt.entry(from).or_insert(ms);
+        *e = *e * 0.7 + ms * 0.3;
+    }
+
+    /// Drop probes nobody answered, so a silent peer costs one entry rather
+    /// than one per probe forever.
+    fn expire_pings(&mut self, now: std::time::Instant) {
+        self.pings_out
+            .retain(|_, sent| now.duration_since(*sent) < std::time::Duration::from_secs(5));
+    }
+
+    /// Measured round trip to a peer in milliseconds, application level.
+    ///
+    /// Prefer this to `Transport::stats().rtt_ms` whenever the answer matters:
+    /// through a relay the transport can only see its own leg, so it reports
+    /// host↔relay and calls it the player's ping. This is host↔player, and it
+    /// is measured the same way over every transport.
+    pub fn peer_rtt_ms(&self, peer: PeerId) -> Option<f32> {
+        self.peer_rtt.get(&peer).copied()
+    }
+
+    /// Every peer's measured round trip, for the panel.
+    pub fn peer_rtts(&self) -> Vec<(PeerId, f32)> {
+        let mut v: Vec<(PeerId, f32)> = self.peer_rtt.iter().map(|(p, r)| (*p, *r)).collect();
+        v.sort_by_key(|(p, _)| *p);
+        v
+    }
+
     /// Log entries recorded since the last drain — what a shadow simulation
     /// feeds on.
     pub fn take_log_entries(&mut self) -> Vec<crate::replay::LogEntry> {
@@ -1174,13 +1224,22 @@ impl NetSession {
         // Input-timing feedback, a few times a second: each peer learns how
         // much runway its inputs have (auto-lead reads this client-side).
         if !self.peers.is_empty() && tick.is_multiple_of(INPUT_ACK_EVERY) {
+            self.ping_id = self.ping_id.wrapping_add(1);
+            let id = self.ping_id;
+            let probe = Msg::Ping { id }.encode();
+            let now = std::time::Instant::now();
             for i in 0..self.peers.len() {
                 let p = self.peers[i];
                 let margin = self.peer_margin.get(&p).map(|m| m.round() as i32).unwrap_or(0);
                 let late = self.peer_late.get(&p).copied().unwrap_or(0);
                 let ack = Msg::InputAck { margin, late }.encode();
                 self.transport.send(p, Channel::UnreliableSequenced, &ack);
+                // Unreliable on purpose: a probe that was retransmitted would
+                // measure the retransmission, not the link.
+                self.transport.send(p, Channel::Unreliable, &probe);
+                self.pings_out.insert((id, p), now);
             }
+            self.expire_pings(now);
         }
         if self.peers.is_empty() || !tick.is_multiple_of(SNAPSHOT_EVERY as u64) {
             return;
@@ -1460,6 +1519,11 @@ impl NetSession {
                     buf.pop_front();
                 }
             }
+            Msg::Ping { id } => {
+                let pong = Msg::Pong { id }.encode();
+                self.transport.send(from, Channel::Unreliable, &pong);
+            }
+            Msg::Pong { id } => self.note_pong(id, from),
             Msg::StateHash { tick, hash } => self.compare_state_hash(from, tick, hash),
             Msg::Bye => self.drop_peer(from),
             _ => { /* clients don't send anything else */ }
@@ -1474,6 +1538,8 @@ impl NetSession {
             self.peer_margin.remove(&p);
             self.peer_late.remove(&p);
             self.interest_sets.drop_peer(p);
+            self.peer_rtt.remove(&p);
+            self.pings_out.retain(|(_, q), _| *q != p);
             self.last_sent.retain(|(a, _), _| *a != Some(p));
             self.last_synced.retain(|(a, _, _, _), _| *a != Some(p));
             self.last_anim.retain(|(a, _, _), _| *a != Some(p));
@@ -1700,6 +1766,16 @@ impl NetSession {
         // next `send_input`).
         self.auto_tune_lead();
         // Ship the input window (this tick + the last few, redundantly).
+        // Probe the host on the same cadence the host probes us, so a client's
+        // own ping display is honest through a relay as well.
+        if self.connected && self.client_ticks.is_multiple_of(INPUT_ACK_EVERY) {
+            self.ping_id = self.ping_id.wrapping_add(1);
+            let id = self.ping_id;
+            self.transport.send(SERVER, Channel::Unreliable, &Msg::Ping { id }.encode());
+            let now = std::time::Instant::now();
+            self.pings_out.insert((id, SERVER), now);
+            self.expire_pings(now);
+        }
         if self.connected && !self.input_window.is_empty() {
             let msg = Msg::Input { entries: self.input_window.iter().cloned().collect() };
             self.transport.send(SERVER, Channel::UnreliableSequenced, &msg.encode());
@@ -1950,6 +2026,11 @@ impl NetSession {
                     }
                 }
             }
+            Msg::Ping { id } => {
+                let pong = Msg::Pong { id }.encode();
+                self.transport.send(SERVER, Channel::Unreliable, &pong);
+            }
+            Msg::Pong { id } => self.note_pong(id, SERVER),
             Msg::Rpc { name, args, sender, tick } => {
                 self.rpcs_in.push(ReceivedRpc { name, args, sender, tick });
             }

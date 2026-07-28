@@ -1007,6 +1007,50 @@ mod tests {
         );
     }
 
+    /// Per-player round trip, measured at the application level.
+    ///
+    /// The transport can only report the link it owns, which through a relay is
+    /// host↔relay — it would call that the player's ping and be wrong by a
+    /// whole hop. This probes host↔player and so reads the same over every
+    /// transport there will ever be.
+    #[test]
+    fn the_host_measures_a_round_trip_to_each_player() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(1);
+        let (mut cw, _) = world_with(1);
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+
+        assert_eq!(server.peer_rtt_ms(1), None, "nothing measured before anything is probed");
+        run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 60, |_, _| {});
+
+        let rtt = server.peer_rtt_ms(1).expect("the host must have probed its player");
+        assert!((0.0..1000.0).contains(&rtt), "implausible round trip {rtt} ms");
+        assert_eq!(server.peer_rtts().len(), 1);
+        // The client measures its own, so its ping display is honest too.
+        assert!(client.peer_rtt_ms(SERVER).is_some(), "a client measures the host as well");
+    }
+
+    /// A peer that leaves takes its measurements with it — otherwise a long
+    /// session accrues a stale ping for everyone who ever connected.
+    #[test]
+    fn a_departed_peer_stops_being_measured() {
+        let hub = MemoryHub::new();
+        let (mut server, mut client) = connect_pair(&hub);
+        let (mut sw, _) = world_with(1);
+        let (mut cw, _) = world_with(1);
+        server.register_scene(&sw);
+        client.register_scene(&cw);
+        let mut t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, 1, 60, |_, _| {});
+        assert!(server.peer_rtt_ms(1).is_some());
+
+        hub.disconnect(1);
+        t = run(&hub, &mut server, &mut sw, &mut client, &mut cw, t, 4, |_, _| {});
+        let _ = t;
+        assert_eq!(server.peer_rtt_ms(1), None, "a peer that left leaves no ping behind");
+    }
+
     #[test]
     fn rollback_inputs_fan_out_from_the_host_to_every_peer() {
         let hub = MemoryHub::new();
