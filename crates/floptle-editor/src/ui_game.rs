@@ -22,6 +22,79 @@ use floptle_ui::{
 
 use crate::Editor;
 
+/// One world canvas as [`Editor::gather_ui_world`] returns it: its draw list,
+/// its solved rects, and the plane it lives on (origin + the two axes).
+pub(crate) type WorldCanvas = (
+    floptle_ui::DrawList,
+    Vec<floptle_ui::Placed>,
+    [f64; 3],
+    [f32; 3],
+    [f32; 3],
+    [f32; 2],
+);
+
+/// Draw world-space UI canvases into `color`/`depth` through `view_proj`.
+///
+/// A free function taking its pieces, not a method, because the two callers
+/// hold the GPU stack differently — and it has to be ONE function: while the
+/// main surface pass was the only place that drew these, a diegetic panel was
+/// invisible in the docked Game tab and still perfectly clickable there.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_ui_world(
+    gpu: &floptle_render::Gpu,
+    raster: &floptle_render::Raster,
+    uir: &mut floptle_render::Ui,
+    textures: &HashMap<String, floptle_render::TexId>,
+    flsl: (&crate::shaders::UiFlslCache, &crate::shaders::UiFlslBinds),
+    color: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
+    cam_world: floptle_core::math::DVec3,
+    view_proj: floptle_core::math::Mat4,
+    canvases: &[WorldCanvas],
+) {
+    let (uic, uib) = flsl;
+    for (dl, _, origin, right, down, _) in canvases {
+        // ADR-0015: the world is drawn relative to the camera.
+        let rel = Vec3::new(
+            (origin[0] - cam_world.x) as f32,
+            (origin[1] - cam_world.y) as f32,
+            (origin[2] - cam_world.z) as f32,
+        );
+        let (mut instances, mut batches) = (Vec::new(), Vec::new());
+        uir.pack(
+            gpu,
+            dl,
+            [0.0, 0.0],
+            1.0,
+            &mut |p| textures.get(p).copied(),
+            &|id| raster.texture_size(id),
+            &mut |p, owner| {
+                let shader = uic.get(p).and_then(|e| e.compiled.as_ref()).map(|(_, id)| *id)?;
+                Some((shader, uib.get(&owner)?.binding))
+            },
+            &mut instances,
+            &mut batches,
+        );
+        // World panels don't use the screen backdrop; ensure no stale capture
+        // leaks in.
+        uir.clear_backdrop();
+        uir.draw_world(
+            gpu,
+            color,
+            depth,
+            view_proj.to_cols_array_2d(),
+            floptle_render::UiPlane {
+                origin: [rel.x, rel.y, rel.z],
+                right: *right,
+                down: *down,
+            },
+            &instances,
+            &batches,
+            raster,
+        );
+    }
+}
+
 /// The camera the game is being viewed through while playing: the scene's
 /// active `Camera` node, or the editor fly-cam if none is marked active. Used
 /// to cast the pointer ray for world-space UI interaction.
@@ -519,13 +592,11 @@ impl Editor {
     ///   layer still shows as a movable hologram you can arrange.
     /// - `false` (in-game): only [`UiSpace::World`] layers — screen-space ones
     ///   are drawn as the flat overlay instead.
-    #[allow(clippy::type_complexity)]
     pub(crate) fn gather_ui_world(
         &mut self,
         window_aspect: f32,
         include_screen: bool,
-    ) -> Vec<(floptle_ui::DrawList, Vec<floptle_ui::Placed>, [f64; 3], [f32; 3], [f32; 3], [f32; 2])>
-    {
+    ) -> Vec<WorldCanvas> {
         let (built, ents) = self.ui_layer_trees(|l| include_screen || l.is_world());
         let Some(uir) = self.ui_render.as_ref() else { return Vec::new() };
         let mut out = Vec::new();
@@ -617,13 +688,21 @@ impl Editor {
     /// the cursor locked away) still needs its menu solved so navigation has
     /// rects to move between.
     fn ui_viewport(&self) -> Option<[f32; 2]> {
-        let gpu = self.gpu.as_ref()?;
-        if self.game_view() || self.player_mode {
-            return Some([gpu.config.width as f32, gpu.config.height.max(1) as f32]);
+        // Keyed on where the game is DRAWN, never on which tab has focus. A
+        // docked Game tab is focused *and* drawn into its own rect, so asking
+        // `game_view()` here sized the UI to the whole window while the player
+        // was looking at a panel a third of that — every click out by the
+        // difference, and worse the further from the top-left.
+        if let Some((_, size)) = self.game_surface_px() {
+            return Some(size);
         }
-        let r = self.game_rect?;
-        let ppp = self.egui.as_ref().map(|e| e.ctx.pixels_per_point()).unwrap_or(1.0);
-        Some([r.width() * ppp, r.height() * ppp])
+        // The game is not on screen (another tab is in front). Menus still get
+        // solved — gamepad navigation and `node:uiRect()` don't stop existing
+        // because you switched tabs — against the size the tab last had.
+        self.game_tab_px().map(|(_, size)| size).or_else(|| {
+            let gpu = self.gpu.as_ref()?;
+            Some([gpu.config.width as f32, gpu.config.height.max(1) as f32])
+        })
     }
 
     /// Pointer position + viewport (physical px, game-view space) for game-UI
@@ -634,16 +713,24 @@ impl Editor {
             return None;
         }
         let cursor = self.cursor?;
-        let size = self.ui_viewport()?;
-        if self.game_view() || self.player_mode {
-            // The UI draws over the whole window here.
-            return Some(([cursor.x, cursor.y], size));
-        }
-        // Docked Game tab: viewport-local coordinates.
-        let r = self.game_rect?;
-        let ppp = self.egui.as_ref().map(|e| e.ctx.pixels_per_point()).unwrap_or(1.0);
-        let p = [cursor.x - r.min.x * ppp, cursor.y - r.min.y * ppp];
+        // No surface = the game isn't on screen, so the cursor isn't over it
+        // whatever it's doing. Otherwise: surface-local coordinates, bounds
+        // checked — a click on the Inspector must not also press a button that
+        // happens to sit under it in window space.
+        let (origin, size) = self.game_surface_px()?;
+        let p = [cursor.x - origin[0], cursor.y - origin[1]];
         if p[0] < 0.0 || p[1] < 0.0 || p[0] > size[0] || p[1] > size[1] {
+            return None;
+        }
+        // …and whatever egui put ON TOP of the tab owns the pointer. A context
+        // menu or a floating window over the Game view is a thing you clicked,
+        // not a hole you clicked through. (Keyboard focus is a separate
+        // question — `game_view()` — so a menu doesn't stop the game reading
+        // keys, only the mouse.)
+        if self.game_offscreen()
+            && let Some(eg) = self.egui.as_ref()
+            && !crate::scene_hit(&eg.ctx, self.cursor, self.game_rect)
+        {
             return None;
         }
         Some((p, size))
@@ -729,6 +816,9 @@ impl Editor {
         let mut nav_layers: Vec<(UiLayer, Vec<floptle_ui::Node>, Vec<floptle_ui::Placed>)> =
             Vec::new();
         let ptr_px = pointer.map(|(p, _)| p);
+        // Where the surface sits in the window, for the rects handed to scripts.
+        // Zero when the game isn't on screen — the rects are stale then anyway.
+        let surface_org = self.game_surface_px().map(|(o, _)| o).unwrap_or([0.0, 0.0]);
         if let Some(viewport) = self.ui_viewport()
             && viewport[0] > 1.0
             && viewport[1] > 1.0
@@ -800,15 +890,21 @@ impl Editor {
                     floptle_ui::place_scrollbars(roots, &mut placed, &bars);
                     let bar_targets: HashMap<u32, u32> = bars.into_iter().collect();
                     nav_layers.push((*layer, roots.clone(), placed.clone()));
-                    // Publish each screen-space element's SOLVED rect in physical
-                    // pixels (design rect × scale) — `node:uiRect()` reads it.
+                    // Publish each screen-space element's SOLVED rect in
+                    // physical pixels — `node:uiRect()` reads it. In WINDOW
+                    // space (design rect × scale, plus the surface's origin),
+                    // because that is the space `input.mouse()` reports in and
+                    // `camera.worldToScreen` returns; hit-testing the mouse
+                    // against a panel is the whole point of the call, and in a
+                    // docked Game tab a surface-local rect is off by wherever
+                    // the tab happens to sit.
                     if let Some(scale) = screen_scale {
                         for pl in &placed {
                             solved_rects.insert(
                                 pl.id,
                                 [
-                                    pl.rect[0] * scale,
-                                    pl.rect[1] * scale,
+                                    surface_org[0] + pl.rect[0] * scale,
+                                    surface_org[1] + pl.rect[1] * scale,
                                     pl.rect[2] * scale,
                                     pl.rect[3] * scale,
                                 ],

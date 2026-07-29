@@ -1478,6 +1478,7 @@ dependencies = [
  "floptle-core",
  "floptle-field",
  "floptle-rules",
+ "floptle-scene",
  "floptle-shader",
  "floptle-ui",
  "fontdue",
@@ -1485,6 +1486,7 @@ dependencies = [
  "log",
  "png",
  "pollster",
+ "ron",
  "wgpu",
  "winit",
 ]

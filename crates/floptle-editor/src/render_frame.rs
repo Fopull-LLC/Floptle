@@ -28,7 +28,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
 use crate::assets::{AssetPayload, build_assets, collect_texture_paths, is_model};
-use crate::dock::{EditorTab, default_dock, focus_scripting_tab, game_tab_active};
+use crate::dock::{EditorTab, default_dock, focus_scripting_tab};
 use crate::gizmo::{build_gizmo, Tool};
 use crate::hierarchy::{node_new_menu};
 use crate::prefs::{DEFAULT_PLAY_TINT, GridConfig, code_theme_path, engine_theme_path, open_external_editor, save_external_editor, save_grid, save_play_tint, save_prefer_external, save_theme_index};
@@ -252,7 +252,14 @@ impl Editor {
         // Game-UI layers: gather + solve on the CPU while `self` is free (the
         // draw core borrows the GPU stack); drawn over the finished frame below.
         // AFTER the animation preview, so scrubbing shows live in every view.
-        let ui_view = self.game_view() || self.player_mode;
+        // Is the game drawn over the whole WINDOW this frame? Not "does the Game
+        // tab have focus" — a docked tab has focus and draws into its own rect,
+        // and asking the focus question here meant the overlay was also packed
+        // and drawn full-window every frame, hidden under the editor's chrome.
+        // In split view it was worse than wasteful: `game_view()` follows the
+        // pointer there, so screen-space canvases blinked out of the Scene view
+        // whenever the mouse crossed into the game.
+        let ui_view = self.game_fullscreen();
         // Screen-space overlay layers (game view only). gather_game_ui skips
         // world-space layers — those live in the scene below.
         let ui_layers = if ui_view {
@@ -275,7 +282,14 @@ impl Editor {
             .as_ref()
             .map(|g| g.config.width as f32 / g.config.height.max(1) as f32)
             .unwrap_or(16.0 / 9.0);
-        let ui_world = self.gather_ui_world(aspect, !ui_view);
+        // …and only when the surface is actually being looked at: a docked Game
+        // tab renders its own world canvases into its own target, so solving
+        // every layer again for a surface hidden behind the dock is pure cost.
+        let ui_world = if ui_view || self.scene_visible() {
+            self.gather_ui_world(aspect, !ui_view)
+        } else {
+            Vec::new()
+        };
 
         // Offscreen previews render LAST (after play_step advanced this frame's poses
         // and particles, and after ensure_vfx_assets registered their textures/meshes):
@@ -310,6 +324,13 @@ impl Editor {
         // resolved before the GPU destructure takes `&mut self` — both draw sites reuse it.
         let sky_active = self.sky_shader.is_some();
         let sky_uniform_vals = self.sky_uniform_values();
+
+        // A docked (non-fullscreen) Game tab paints its own offscreen render this
+        // frame, sized+blit to its rect (single-view or split) so it never spills
+        // behind panels. Read here because the destructure below takes `&mut self`
+        // — and read from the one predicate the input path uses, so where the
+        // pixels go and where clicks are measured cannot disagree.
+        let game_offscreen = self.game_offscreen();
 
         let (
             Some(gpu),
@@ -1462,9 +1483,6 @@ impl Editor {
             .copied()
             .filter(|&e| matches!(world.get::<Matter>(e), Some(Matter::Camera { .. })))
             .and(self.cam_preview.as_ref().map(|p| p.tex_id));
-        // A docked (non-fullscreen) Game tab paints its own offscreen render this frame,
-        // sized+blit to its rect (single-view or split) so it never spills behind panels.
-        let game_offscreen = fullscreen_tab.is_none() && game_tab_active(dock_state);
         let particles_active = crate::dock::tab_is_front(dock_state, EditorTab::Particles);
         let game_tex = self.game_vp.as_ref().map(|p| p.tex_id);
         let game_rect = &mut self.game_rect;
@@ -3364,7 +3382,19 @@ impl Editor {
                     let vp_mat = cam.view_proj(aspect);
                     let (w_px, h_px) = (gpu.config.width as f32, gpu.config.height as f32);
                     let srect = self.scene_rect.unwrap_or(egui::Rect::NOTHING);
-                    for (dl, placed, origin, right, down, design_vp) in &ui_world {
+                    crate::ui_game::draw_ui_world(
+                        gpu,
+                        raster,
+                        uir,
+                        &self.texture_registry,
+                        (&self.ui_flsl_cache, &self.ui_flsl_binds),
+                        color,
+                        depth,
+                        cam.world_position,
+                        vp_mat,
+                        &ui_world,
+                    );
+                    for (_, placed, origin, right, down, design_vp) in &ui_world {
                         let rel = floptle_core::math::Vec3::new(
                             (origin[0] - cam.world_position.x) as f32,
                             (origin[1] - cam.world_position.y) as f32,
@@ -3372,47 +3402,6 @@ impl Editor {
                         );
                         let r3 = floptle_core::math::Vec3::from(*right);
                         let d3 = floptle_core::math::Vec3::from(*down);
-                        let mut ui_instances = Vec::new();
-                        let mut ui_batches = Vec::new();
-                        {
-                            let reg = &self.texture_registry;
-                            let uic = &self.ui_flsl_cache;
-                            let uib = &self.ui_flsl_binds;
-                            uir.pack(
-                                gpu,
-                                dl,
-                                [0.0, 0.0],
-                                1.0,
-                                &mut |p| reg.get(p).copied(),
-                                &|id| raster.texture_size(id),
-                                &mut |p, owner| {
-                                    let shader = uic
-                                        .get(p)
-                                        .and_then(|e| e.compiled.as_ref())
-                                        .map(|(_, id)| *id)?;
-                                    Some((shader, uib.get(&owner)?.binding))
-                                },
-                                &mut ui_instances,
-                                &mut ui_batches,
-                            );
-                        }
-                        // World panels don't use the screen backdrop; ensure no
-                        // stale capture leaks in.
-                        uir.clear_backdrop();
-                        uir.draw_world(
-                            gpu,
-                            color,
-                            depth,
-                            vp_mat.to_cols_array_2d(),
-                            floptle_render::UiPlane {
-                                origin: [rel.x, rel.y, rel.z],
-                                right: *right,
-                                down: *down,
-                            },
-                            &ui_instances,
-                            &ui_batches,
-                            raster,
-                        );
                         // Project element rects → Scene-tab overlay entries
                         // (gizmos — the master Gizmos toggle hides them, the
                         // canvas CONTENT stays since it's your actual UI).
@@ -4790,10 +4779,9 @@ impl Editor {
             && let Some(window) = self.window.as_ref()
         {
             let sz = window.inner_size();
-            let (cx, cy) = match (self.game_trap, self.game_rect) {
-                (true, Some(r)) => {
-                    let ppp = self.egui.as_ref().map(|e| e.ctx.pixels_per_point()).unwrap_or(1.0);
-                    ((r.center().x * ppp) as u32, (r.center().y * ppp) as u32)
+            let (cx, cy) = match self.game_surface_px() {
+                Some((org, size)) if self.game_trap => {
+                    ((org[0] + size[0] * 0.5) as u32, (org[1] + size[1] * 0.5) as u32)
                 }
                 _ => (sz.width / 2, sz.height / 2),
             };

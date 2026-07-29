@@ -372,16 +372,12 @@ impl Editor {
     /// always framed to its panel and never spills the full-window render behind other
     /// tabs. (A FULLSCREEN Game tab renders straight to the surface — it fills the window.)
     pub(crate) fn update_game_viewport(&mut self, elapsed: f32) {
-        let active = self.fullscreen_tab.is_none()
-            && self.dock_state.as_ref().is_some_and(game_tab_active);
-        if !active {
+        if !self.game_offscreen() {
             return;
         }
-        let ppp = self.egui.as_ref().map(|e| e.ctx.pixels_per_point()).unwrap_or(1.0);
-        let (w, h) = match self.game_rect {
-            Some(r) => ((r.width() * ppp).round() as u32, (r.height() * ppp).round() as u32),
-            None => (640, 360),
-        };
+        let (tab_org, tab_px) =
+            self.game_tab_px().unwrap_or(([0.0, 0.0], [640.0, 360.0]));
+        let (w, h) = (tab_px[0] as u32, tab_px[1] as u32);
         self.ensure_game_vp(w, h);
         // The active gameplay camera, or the editor camera if the scene has none.
         let mut cull_mask = u32::MAX;
@@ -410,17 +406,19 @@ impl Editor {
         };
         let aspect = w.max(1) as f32 / h.max(1) as f32;
         // Feed the map's world→screen picker for the DOCKED game tab: its rect in
-        // FULL-WINDOW physical pixels (game_rect is logical → ×ppp), matching the
-        // cursor space `input.mouse()` reports. Fullscreen feeds from render_frame.
-        if let Some(r) = self.game_rect {
+        // FULL-WINDOW physical pixels, matching the cursor space `input.mouse()`
+        // reports. Fullscreen feeds from render_frame. Only once the tab has
+        // actually reported a rect — publishing the placeholder size would have
+        // `camera.exists()` answer yes with numbers off by the whole layout.
+        if self.game_rect.is_some() {
             let vp = cam.view_proj(aspect);
             self.script_host.set_view(floptle_script::ViewInfo {
                 view_proj: vp.to_cols_array(),
                 cam_world: [cam.world_position.x, cam.world_position.y, cam.world_position.z],
-                vp_x: r.min.x * ppp,
-                vp_y: r.min.y * ppp,
-                vp_w: r.width() * ppp,
-                vp_h: r.height() * ppp,
+                vp_x: tab_org[0],
+                vp_y: tab_org[1],
+                vp_w: tab_px[0],
+                vp_h: tab_px[1],
                 valid: true,
             });
         }
@@ -428,17 +426,13 @@ impl Editor {
         // gameplay camera into that tab's own rect (the Scene view's set is projected
         // for a different camera entirely and would land nowhere near).
         self.game_gizmo_lines.clear();
-        if self.game_gizmos
-            && self.gizmo_filter.script
-            && !self.script_gizmos.is_empty()
-            && let Some(r) = self.game_rect
-        {
+        if self.game_gizmos && self.gizmo_filter.script && !self.script_gizmos.is_empty() {
             crate::viz::project_script_gizmos(
                 &self.script_gizmos,
                 cam.world_position,
                 cam.view_proj(aspect),
-                floptle_core::math::Vec2::new(r.min.x * ppp, r.min.y * ppp),
-                floptle_core::math::Vec2::new(r.width() * ppp, r.height() * ppp),
+                floptle_core::math::Vec2::new(tab_org[0], tab_org[1]),
+                floptle_core::math::Vec2::new(tab_px[0], tab_px[1]),
                 &mut self.game_gizmo_lines,
             );
         }
@@ -499,6 +493,29 @@ impl Editor {
         };
         let Some(scene_target) = scene_target else { return };
         self.render_world_into(&scene_target, &depth, &cam, aspect, elapsed, cull_mask, None);
+        // World canvases: real geometry, so they draw into the scene target with
+        // its depth, before post. `include_screen: false` — this tab shows a
+        // BUILD, so screen-space layers belong in the flat overlay below, not
+        // hanging in the world as authoring holograms. Without this the docked
+        // tab drew no diegetic UI at all while still happily hit-testing it.
+        let canvases = self.gather_ui_world(aspect, false);
+        if !canvases.is_empty()
+            && let (Some(gpu), Some(raster), Some(uir)) =
+                (self.gpu.as_ref(), self.raster.as_ref(), self.ui_render.as_mut())
+        {
+            crate::ui_game::draw_ui_world(
+                gpu,
+                raster,
+                uir,
+                &self.texture_registry,
+                (&self.ui_flsl_cache, &self.ui_flsl_binds),
+                &scene_target,
+                &depth,
+                cam.world_position,
+                cam.view_proj(aspect),
+                &canvases,
+            );
+        }
         // Post composites into the retro color (retro) or the game_vp color (non-retro).
         if post_on && let (Some(gpu), Some(post)) = (self.gpu.as_ref(), self.game_post.as_ref()) {
             let proj = cam.proj_matrix(aspect);
@@ -570,6 +587,76 @@ impl Editor {
         } else {
             None
         }
+    }
+
+    /// True when the game is drawn into the DOCKED Game tab's own rect (via an
+    /// offscreen target) rather than over the whole window.
+    ///
+    /// This is "where are the pixels", which is a different question from
+    /// [`Self::game_view`]'s "who owns the keyboard" — and the one every
+    /// pointer→viewport conversion wants. Confusing the two is why clicking in
+    /// a docked Game tab used to hit-test against whole-window coordinates: the
+    /// tab was focused, so `game_view()` said true, so the pointer was never
+    /// moved into the tab's rect. Single source of truth for the render path
+    /// and the input path alike; if they disagree, clicks land somewhere else.
+    pub(crate) fn game_offscreen(&self) -> bool {
+        !self.player_mode
+            && self.fullscreen_tab.is_none()
+            && self.dock_state.as_ref().is_some_and(game_tab_active)
+    }
+
+    /// True when the game owns the WHOLE window: the fullscreen Game tab, or
+    /// the player. The complement of [`Self::game_offscreen`] for the two cases
+    /// where the game is on screen at all.
+    pub(crate) fn game_fullscreen(&self) -> bool {
+        self.player_mode || self.fullscreen_tab == Some(EditorTab::Game)
+    }
+
+    /// True when the Scene (authoring) view is on the window surface this
+    /// frame. The surface's own 3D render is only worth decorating — world
+    /// canvases, element outlines — when someone can see it.
+    pub(crate) fn scene_visible(&self) -> bool {
+        match self.fullscreen_tab {
+            Some(t) => t == EditorTab::Scene,
+            None => self
+                .dock_state
+                .as_ref()
+                .is_some_and(|d| crate::dock::tab_is_front(d, EditorTab::Scene)),
+        }
+    }
+
+    /// Where the game's screen-space UI is drawn this frame, in physical
+    /// pixels: (top-left in window space, size). `None` when the game is not on
+    /// screen at all — a docked layout with some other tab in front.
+    ///
+    /// Every pointer conversion goes through this, so "is the cursor over the
+    /// game" and "where is the game" are one answer instead of two.
+    pub(crate) fn game_surface_px(&self) -> Option<([f32; 2], [f32; 2])> {
+        if self.game_fullscreen() {
+            let gpu = self.gpu.as_ref()?;
+            return Some((
+                [0.0, 0.0],
+                [gpu.config.width as f32, gpu.config.height.max(1) as f32],
+            ));
+        }
+        self.game_offscreen().then(|| self.game_tab_px()).flatten()
+    }
+
+    /// The docked Game tab's drawing surface in PHYSICAL pixels: its top-left
+    /// in window space, and its size.
+    ///
+    /// One `pixels_per_point`, one rounding, one place. The render target, the
+    /// script view info, the gizmo projection and the UI hit test all size and
+    /// offset from this — if any of them did its own `rect * ppp` they could
+    /// disagree, and a disagreement here is a cursor that points at the wrong
+    /// thing.
+    pub(crate) fn game_tab_px(&self) -> Option<([f32; 2], [f32; 2])> {
+        let r = self.game_rect?;
+        let ppp = self.egui.as_ref().map(|e| e.ctx.pixels_per_point()).unwrap_or(1.0);
+        Some((
+            [r.min.x * ppp, r.min.y * ppp],
+            [(r.width() * ppp).round().max(1.0), (r.height() * ppp).round().max(1.0)],
+        ))
     }
 
     /// True when the Game viewport is the FOCUSED viewport — it renders the active-camera
@@ -893,5 +980,134 @@ impl Editor {
         self.ui_design.render_scale = render_scale;
         self.ui_design.placed = placed;
         self.ui_design.rendered_layer = Some(layer_ent.index());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Editor;
+
+    /// A dock with the Game tab pulled to the front of the central leaf.
+    fn dock_showing_game() -> egui_dock::DockState<EditorTab> {
+        let mut dock = crate::dock::default_dock();
+        for node in dock.main_surface_mut().iter_mut() {
+            if let Some(leaf) = node.get_leaf_mut()
+                && let Some(at) = leaf.tabs.iter().position(|t| *t == EditorTab::Game)
+            {
+                leaf.active = egui_dock::TabIndex(at);
+            }
+        }
+        dock
+    }
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
+    }
+
+    /// The bug Ty hit: a docked Game tab is FOCUSED, so the old code asked
+    /// `game_view()`, got true, and measured the pointer against the whole
+    /// window. It has to measure against the tab — offset and all.
+    #[test]
+    fn a_docked_game_tab_is_measured_from_its_own_corner() {
+        let ed = Editor {
+            dock_state: Some(dock_showing_game()),
+            game_rect: Some(rect(300.0, 120.0, 640.0, 360.0)),
+            ..Default::default()
+        };
+        assert!(ed.game_offscreen(), "a docked, front Game tab draws into its own rect");
+        assert!(!ed.game_fullscreen(), "…and does not own the window");
+        let (origin, size) = ed.game_surface_px().expect("a visible tab is a surface");
+        assert_eq!(origin, [300.0, 120.0]);
+        assert_eq!(size, [640.0, 360.0]);
+    }
+
+    /// Scene tab in front: the game is nowhere on screen, so nothing is over
+    /// it. Returning a surface here would arm clicks on invisible buttons.
+    #[test]
+    fn a_hidden_game_tab_is_not_a_surface() {
+        let ed = Editor {
+            dock_state: Some(crate::dock::default_dock()), // Scene is front
+            game_rect: Some(rect(300.0, 120.0, 640.0, 360.0)),
+            ..Default::default()
+        };
+        assert!(!ed.game_offscreen());
+        assert!(ed.game_surface_px().is_none());
+    }
+
+    /// Fullscreening some OTHER tab also takes the game off screen, even
+    /// though the Game tab is still the front tab of its leaf.
+    #[test]
+    fn fullscreening_another_tab_takes_the_game_off_screen() {
+        let ed = Editor {
+            dock_state: Some(dock_showing_game()),
+            fullscreen_tab: Some(EditorTab::Inspector),
+            game_rect: Some(rect(300.0, 120.0, 640.0, 360.0)),
+            ..Default::default()
+        };
+        assert!(!ed.game_offscreen());
+        assert!(!ed.game_fullscreen());
+        assert!(ed.game_surface_px().is_none());
+    }
+
+    /// The fullscreen Game tab and the player own the window. Without a GPU
+    /// there is no window size to report, but the PREDICATE must still say so
+    /// — it is what routes the overlay draw and the pointer.
+    #[test]
+    fn the_fullscreen_game_tab_and_the_player_own_the_window() {
+        let ed = Editor {
+            dock_state: Some(dock_showing_game()),
+            fullscreen_tab: Some(EditorTab::Game),
+            ..Default::default()
+        };
+        assert!(ed.game_fullscreen());
+        assert!(!ed.game_offscreen(), "fullscreen is not the docked offscreen path");
+
+        let player = Editor {
+            player_mode: true,
+            dock_state: Some(dock_showing_game()),
+            ..Default::default()
+        };
+        assert!(player.game_fullscreen());
+        assert!(!player.game_offscreen(), "a built game has no dock to draw into");
+    }
+
+    /// `pixels_per_point` is applied once and the size is rounded to whole
+    /// pixels, matching the offscreen target exactly — a half-pixel
+    /// disagreement between the render size and the hit-test size is a
+    /// half-pixel of drift at the far corner.
+    #[test]
+    fn the_tab_rect_is_scaled_and_rounded_like_the_render_target() {
+        let ed = Editor {
+            dock_state: Some(dock_showing_game()),
+            game_rect: Some(rect(10.5, 20.25, 300.3, 170.7)),
+            ..Default::default()
+        };
+        // No egui context in a test, so ppp falls back to 1.0 — the rounding
+        // is what this pins.
+        let (_, size) = ed.game_surface_px().unwrap();
+        assert_eq!(size, [300.0, 171.0]);
+    }
+    /// The Scene view is what the window surface draws; the Game tab draws its
+    /// own. Getting this backwards costs a wasted solve of every UI layer per
+    /// frame, or a Scene view missing its world canvases.
+    #[test]
+    fn only_the_visible_view_decorates_the_surface() {
+        let scene_front = Editor {
+            dock_state: Some(crate::dock::default_dock()),
+            ..Default::default()
+        };
+        assert!(scene_front.scene_visible());
+
+        let game_front =
+            Editor { dock_state: Some(dock_showing_game()), ..Default::default() };
+        assert!(!game_front.scene_visible(), "the surface is hidden behind the dock");
+
+        let elsewhere = Editor {
+            dock_state: Some(crate::dock::default_dock()),
+            fullscreen_tab: Some(EditorTab::Inspector),
+            ..Default::default()
+        };
+        assert!(!elsewhere.scene_visible());
     }
 }

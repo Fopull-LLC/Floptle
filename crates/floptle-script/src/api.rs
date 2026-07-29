@@ -1537,10 +1537,11 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         methods.set("getcomponent", f)?;
     }
     // node:uiRect() -> x, y, w, h — this UI element's SOLVED screen rect in
-    // game-viewport physical pixels (the same space as input.mouse() /
-    // camera.screenSize()), or 0,0,0,0 when it has no screen-space rect this
-    // frame. Lets a script hit-test the cursor against a panel's ACTUAL
-    // rendered position instead of guessing its geometry.
+    // WINDOW physical pixels: the same space input.mouse() reports and
+    // camera.worldToScreen() returns, so a docked editor Game tab's rects carry
+    // that tab's offset. 0,0,0,0 when it has no screen-space rect this frame.
+    // Lets a script hit-test the cursor against a panel's ACTUAL rendered
+    // position instead of guessing its geometry.
     {
         let ui_rects = shared.ui_rects.clone();
         methods.set(

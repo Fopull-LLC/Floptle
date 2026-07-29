@@ -234,10 +234,11 @@ pub struct ScriptHost {
     /// This frame's physics body state per entity index (velocity + grounded), fed in
     /// before `run` so scripts can read `node.vx/vy/vz/grounded`.
     bodies: Rc<RefCell<HashMap<u32, BodyState>>>,
-    /// This frame's solved UI element rects in game-viewport PHYSICAL pixels
-    /// (entity index → [x, y, w, h]); `node:uiRect()` reads it so scripts can
-    /// hit-test the mouse against a panel's ACTUAL rendered position instead
-    /// of guessing its geometry.
+    /// This frame's solved UI element rects in WINDOW physical pixels (entity
+    /// index → [x, y, w, h]); `node:uiRect()` reads it so scripts can hit-test
+    /// the mouse against a panel's ACTUAL rendered position instead of guessing
+    /// its geometry. Same space as `input.mouse()`, which is the only reason
+    /// the comparison works.
     ui_rects: Rc<RefCell<HashMap<u32, [f32; 4]>>>,
     /// Velocities scripts wrote this frame (entity index → new velocity), drained by
     /// the editor and applied to the physics sim.

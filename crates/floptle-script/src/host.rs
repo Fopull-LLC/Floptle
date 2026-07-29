@@ -1725,8 +1725,9 @@ impl ScriptHost {
         std::mem::take(&mut *self.draw_tris.borrow_mut())
     }
 
-    /// Feed this frame's solved UI element rects in game-viewport PHYSICAL
-    /// pixels (entity index → [x, y, w, h]); `node:uiRect()` reads it.
+    /// Feed this frame's solved UI element rects in WINDOW physical pixels
+    /// (entity index → [x, y, w, h]); `node:uiRect()` reads it. Window, not
+    /// viewport-local, so it lines up with `input.mouse()`.
     pub fn set_ui_rects(&self, map: HashMap<u32, [f32; 4]>) {
         *self.ui_rects.borrow_mut() = map;
     }
