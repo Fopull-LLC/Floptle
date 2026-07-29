@@ -336,6 +336,12 @@ pub struct NetSession {
     /// (fan them out to everyone, rather than consume them itself) and turns
     /// auto input lead off, because the fixed delay replaces it.
     rollback: bool,
+    /// Entity indices a local rollback driver is simulating right now, pushed
+    /// in every frame by whoever owns the driver. See [`Session::set_locally_driven`].
+    locally_driven: std::collections::HashSet<u32>,
+    /// Snapshot samples refused because a driver owns the node, by entity.
+    /// Non-empty means the session flag and the driver disagreed.
+    driven_drops: std::collections::HashMap<u32, u64>,
     /// The session's fixed input delay in ticks (§2.2). Host-set, carried in
     /// `Welcome` + `RollbackStart`, identical on every peer — mismatched delay
     /// is mismatched simulation.
@@ -541,6 +547,8 @@ impl NetSession {
             anims_due: Vec::new(),
             client_ticks: 0,
             rollback: false,
+            locally_driven: std::collections::HashSet::new(),
+            driven_drops: std::collections::HashMap::new(),
             input_delay: crate::rollback::DEFAULT_INPUT_DELAY,
             rollback_slots: Vec::new(),
             rollback_seed: 0,
@@ -953,6 +961,43 @@ impl NetSession {
             .iter()
             .filter_map(|p| self.interest_stats.get(p).map(|s| (*p, *s)))
             .collect()
+    }
+
+    /// The entity indices a local rollback DRIVER is currently simulating.
+    ///
+    /// Published every frame by whoever owns the driver, and the reason it
+    /// exists is that the session's own `rollback` flag is a second source of
+    /// truth for the same question — and the two can get out of step. A
+    /// `Msg::Scene` clears the flag; a `RollbackStart` sets it; the driver is
+    /// installed a frame later from a queued signal. Any ordering that leaves
+    /// the flag off while the driver is on turns every guard here off, and the
+    /// symptom is a stale snapshot pose written over a locally-simulated node
+    /// forever after (floptle/0048).
+    ///
+    /// A set refreshed from the driver itself cannot disagree with the driver.
+    /// Samples already buffered for a newly-driven node are dropped here for
+    /// the same reason `RollbackStart` drops them: `apply_interpolation` keeps
+    /// applying the newest sample it holds whether or not new ones arrive, so
+    /// refusing to buffer more is not enough on its own.
+    pub fn set_locally_driven(&mut self, ids: std::collections::HashSet<u32>) {
+        for (id, &e) in &self.net_to_ent {
+            if ids.contains(&e.index())
+                && !self.locally_driven.contains(&e.index())
+                && let Some(buf) = self.interp.get_mut(id)
+            {
+                buf.samples.clear();
+            }
+        }
+        self.locally_driven = ids;
+    }
+
+    /// Nodes whose snapshots were refused because a driver owns them, and how
+    /// many samples were dropped. Drained by the caller for the Console: a
+    /// count that keeps climbing means the host is still shipping a fighter's
+    /// transform to a peer that simulates it, which is bandwidth spent to
+    /// produce a value that is thrown away.
+    pub fn take_driven_snapshot_drops(&mut self) -> Vec<(u32, u64)> {
+        std::mem::take(&mut self.driven_drops).into_iter().collect()
     }
 
     pub fn set_rollback(&mut self, on: bool, input_delay: u8, seed: u64) {
@@ -2201,13 +2246,17 @@ impl NetSession {
     /// puts a joining client's scene in the right place before the match
     /// begins. The flag flips at the same moment the driver takes over.
     fn driven_locally(&self, world: &World, id: u64) -> bool {
+        let Some(&e) = self.net_to_ent.get(&id) else { return false };
+        // The driver's own answer, which cannot get out of step with the
+        // driver. Checked FIRST and without the session flag, because the two
+        // disagreeing is precisely the failure this is here to survive.
+        if self.locally_driven.contains(&e.index()) {
+            return true;
+        }
         if !self.rollback {
             return false;
         }
-        self.net_to_ent
-            .get(&id)
-            .and_then(|&e| world.get::<Replicated>(e))
-            .is_some_and(|rep| rep.mode.is_rollback())
+        world.get::<Replicated>(e).is_some_and(|rep| rep.mode.is_rollback())
     }
 
     /// Drop everything buffered FOR locally-simulated nodes. Called when a
@@ -2457,9 +2506,25 @@ impl NetSession {
             // this is the line that would actually move a locally-simulated
             // fighter, so it refuses on its own terms rather than trusting that
             // nothing upstream ever buffers one.
-            if self.rollback
-                && world.get::<Replicated>(e).is_some_and(|rep| rep.mode.is_rollback())
-            {
+            //
+            // Two questions, deliberately: the DRIVER's set (which cannot get
+            // out of step with the driver) and the session flag (which can, and
+            // once did — floptle/0048). Either one is enough to refuse.
+            let driven = self.locally_driven.contains(&e.index())
+                || (self.rollback
+                    && world.get::<Replicated>(e).is_some_and(|rep| rep.mode.is_rollback()));
+            if driven {
+                // Anything still buffered here got past the ingest guard, which
+                // means the two answers disagreed at the moment it arrived.
+                // Say so once per node rather than silently dropping it: this
+                // is the only place that can see the disagreement, and the
+                // symptom downstream is a fighter facing the wrong way with a
+                // green checksum.
+                if !buf.samples.is_empty() {
+                    *self.driven_drops.entry(e.index()).or_insert(0) +=
+                        buf.samples.len() as u64;
+                    buf.samples.clear();
+                }
                 continue;
             }
             let Some(last) = buf.samples.back().copied() else { continue };
@@ -2505,5 +2570,109 @@ impl NetSession {
                 buf.samples.pop_front();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floptle_core::transform::Transform;
+
+    /// A client session with one rollback node mapped and one snapshot sample
+    /// already buffered for it.
+    fn client_with_fighter() -> (NetSession, World, floptle_core::Entity) {
+        let hub = crate::MemoryHub::new();
+        let mut s = NetSession::client(Box::new(hub.connect()), 0);
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Replicated {
+                mode: floptle_core::ReplicationMode::Rollback,
+                ..Default::default()
+            },
+        );
+        s.net_to_ent.insert(1, e);
+        s.latest_server_tick = 100;
+        let buf = s.interp.entry(1).or_insert_with(|| InterpBuf::new(&Replicated::default()));
+        buf.delay = 0;
+        // A pose from the past, ninety degrees off whatever the driver computed.
+        buf.samples.push_back((100, [9.0, 9.0, 9.0], [0.0, 0.707, 0.0, 0.707]));
+        (s, world, e)
+    }
+
+    /// FIELD REGRESSION (floptle/0048): a stale snapshot pose must not be
+    /// written over a node the local driver is simulating — **even when the
+    /// session's own `rollback` flag says the match is not running**.
+    ///
+    /// The flag and the driver are two answers to one question and they can
+    /// come apart: `Msg::Scene` clears the flag, `RollbackStart` sets it, and
+    /// the driver is installed a frame later from a queued signal. With the
+    /// flag off, every guard was off, and the client wrote a round-trip-old
+    /// rotation over its own fighter every frame. Nothing detected it: the fight
+    /// was identical on both machines and the checksum does not hash rotation.
+    #[test]
+    fn a_driver_owned_node_is_not_moved_by_a_snapshot_even_with_the_flag_off() {
+        let (mut s, mut world, e) = client_with_fighter();
+        // The flag is off — the exact state the bug needs.
+        assert!(!s.rollback);
+        // Reproduce it first, so the test is honest about what it checks.
+        s.apply_interpolation(&mut world);
+        assert_eq!(
+            world.get::<Transform>(e).unwrap().translation.x,
+            9.0,
+            "with no guard at all the stale pose lands; if it doesn't, this test proves nothing"
+        );
+
+        // The fix: the driver publishes what it owns, and that answer does not
+        // depend on the flag.
+        let (mut s2, mut world2, e2) = client_with_fighter();
+        s2.set_locally_driven(std::collections::HashSet::from([e2.index()]));
+        s2.apply_interpolation(&mut world2);
+        let tr = world2.get::<Transform>(e2).unwrap();
+        assert_eq!(tr.translation.x, 0.0, "the driver's node is left exactly where it was");
+        assert_eq!(tr.rotation, floptle_core::math::Quat::IDENTITY, "…rotation included");
+    }
+
+    /// The samples buffered before the driver arrived are DROPPED, not merely
+    /// skipped. `apply_interpolation` keeps applying the newest sample it
+    /// holds whether or not new ones arrive, so a guard that only refuses to
+    /// buffer more would still be re-applying the last stale one forever.
+    #[test]
+    fn publishing_the_driven_set_clears_what_was_already_buffered() {
+        let (mut s, _world, e) = client_with_fighter();
+        assert_eq!(s.interp[&1].samples.len(), 1);
+        s.set_locally_driven(std::collections::HashSet::from([e.index()]));
+        assert!(s.interp[&1].samples.is_empty());
+    }
+
+    /// A sample that gets past the ingest guard is REPORTED, not silently
+    /// dropped — the detector floptle/0048 asked for. It fires on the machine
+    /// that has the problem, while it has it, naming the node.
+    #[test]
+    fn a_snapshot_that_slips_past_the_guard_is_reported_once() {
+        let (mut s, mut world, e) = client_with_fighter();
+        // The driver owns it, but a sample arrived anyway (which is what
+        // happens when the two answers disagree for a frame).
+        s.locally_driven.insert(e.index());
+        s.apply_interpolation(&mut world);
+        let drops = s.take_driven_snapshot_drops();
+        assert_eq!(drops, vec![(e.index(), 1)]);
+        // Drained, and nothing new arrives, so it does not repeat.
+        s.apply_interpolation(&mut world);
+        assert!(s.take_driven_snapshot_drops().is_empty());
+    }
+
+    /// The ordinary case is untouched: a node no driver owns still interpolates.
+    #[test]
+    fn an_ordinary_synced_node_still_interpolates() {
+        let (mut s, mut world, e) = client_with_fighter();
+        if let Some(r) = world.get_mut::<Replicated>(e) {
+            r.mode = floptle_core::ReplicationMode::Authority;
+        }
+        s.rollback = true;
+        s.apply_interpolation(&mut world);
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 9.0);
     }
 }

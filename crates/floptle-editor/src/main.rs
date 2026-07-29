@@ -1731,6 +1731,25 @@ struct Editor {
     /// Has this match's "is anything actually running the fighters?" check run?
     /// Structural, so it is answered once per session rather than per tick.
     net_rollback_orphans_checked: bool,
+    /// Nodes already reported for "a snapshot got past the ingest guard for a
+    /// driver-owned node" (floptle/0048). Once per node per session: it is a
+    /// structural disagreement, and repeating it every frame would bury the
+    /// Console under the same line.
+    net_driven_drop_reported: std::collections::HashSet<u32>,
+    /// The rollback input delay the GAME chose (`net.host{ inputDelay = n }` or
+    /// `net.setInputDelay(n)`), in ticks. `None` = derive it from the worst
+    /// peer's measured RTT at match start (floptle/0049).
+    ///
+    /// Two ticks was a hard-coded constant, which is right only for peers in
+    /// the same building. Past 33 ms one-way the driver mispredicts on
+    /// essentially every tick and re-simulates six times the work, correctly
+    /// and unplayably.
+    net_input_delay: Option<u8>,
+    /// Values already reported by the replay audit (floptle/0050), once per
+    /// session. A script that reads an un-restored value reads it every
+    /// correction, and the same line sixty times a second is a diagnostic
+    /// nobody reads.
+    net_replay_audit_reported: std::collections::HashSet<String>,
     /// The most recently played-back replay, kept so its world can be inspected
     /// after the run (and so it isn't dropped mid-frame).
     net_replay: Option<shadow::ShadowSim>,

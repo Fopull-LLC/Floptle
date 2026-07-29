@@ -33,7 +33,21 @@ pub enum NetCmd {
         /// `interestBudget = <bytes per second>` — per-client snapshot budget.
         /// Only meaningful alongside `interest`.
         interest_budget: Option<u32>,
+        /// `inputDelay = <ticks>` — the rollback session's fixed input delay,
+        /// clamped to `MAX_DELAY`. Absent = derive it from the worst peer's
+        /// measured RTT at match start.
+        ///
+        /// Fixed for the session and never auto-adjusted mid-match: adaptive
+        /// delay hides a bad connection by changing how the game FEELS while
+        /// you are playing it, which a fighting game cannot tolerate. The
+        /// number is exposed and chosen instead.
+        input_delay: Option<u8>,
     },
+    /// `net.setInputDelay(n)` — change it BETWEEN matches. The roster
+    /// re-announce restarts the driver on a fresh origin, so there is a natural
+    /// seam; a rematch after "that was rough, put it up to 5" should not need
+    /// a new lobby.
+    SetInputDelay { ticks: u8 },
     /// `net.join(addr)` — join a session (2b: `local://` only; real transports 2e).
     Join { addr: String },
     /// `net.leave()` — tear the session down.
@@ -460,6 +474,7 @@ pub(crate) fn install_net_api(
             lua.create_function(move |_, opts: Option<Table>| {
                 let (mut max_players, mut port, mut relay) = (16, None, None);
                 let (mut interest, mut interest_budget) = (None, None);
+                let mut input_delay = None;
                 if let Some(o) = opts {
                     max_players =
                         o.get::<Option<u32>>("maxPlayers").ok().flatten().unwrap_or(16);
@@ -467,6 +482,11 @@ pub(crate) fn install_net_api(
                     relay = o.get::<Option<String>>("relay").ok().flatten();
                     interest = o.get::<Option<f64>>("interest").ok().flatten();
                     interest_budget = o.get::<Option<u32>>("interestBudget").ok().flatten();
+                    input_delay = o
+                        .get::<Option<u32>>("inputDelay")
+                        .ok()
+                        .flatten()
+                        .map(|v| v.min(u32::from(u8::MAX)) as u8);
                 }
                 n.cmds.borrow_mut().push(NetCmd::Host {
                     max_players,
@@ -474,7 +494,20 @@ pub(crate) fn install_net_api(
                     relay,
                     interest,
                     interest_budget,
+                    input_delay,
                 });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let n = net.clone();
+        t.set(
+            "setInputDelay",
+            lua.create_function(move |_, ticks: u32| {
+                n.cmds
+                    .borrow_mut()
+                    .push(NetCmd::SetInputDelay { ticks: ticks.min(u32::from(u8::MAX)) as u8 });
                 Ok(())
             })?,
         )?;

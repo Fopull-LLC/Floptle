@@ -384,8 +384,21 @@ impl RollbackDriver {
         names: &std::collections::HashMap<u32, String>,
     ) -> Vec<(String, u64)> {
         let Some(s) = self.ring.iter().find(|s| s.tick == tick) else { return Vec::new() };
-        let mut out = Vec::new();
-        for (i, node) in self.nodes.iter().enumerate() {
+        breakdown_of(&self.nodes, s, names)
+    }
+}
+
+/// One labelled hash per value in a saved tick — the shared body of
+/// [`RollbackDriver::state_breakdown`] and the replay audit, which needs the
+/// same labels for a state that is NOT in the ring.
+fn breakdown_of(
+    nodes: &[RollbackNode],
+    s: &SavedTick,
+    names: &std::collections::HashMap<u32, String>,
+) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    {
+        for (i, node) in nodes.iter().enumerate() {
             let who = names.get(&node.eid).cloned().unwrap_or_else(|| format!("#{}", node.eid));
             if let Some(Some(b)) = s.bodies.get(i) {
                 let mut h = floptle_net::Fnv::new();
@@ -421,9 +434,11 @@ impl RollbackDriver {
                 }
             }
         }
-        out
     }
+    out
+}
 
+impl RollbackDriver {
     pub fn state_hash(&self, tick: u64) -> Option<u64> {
         let s = self.ring.iter().find(|s| s.tick == tick)?;
         let mut h = floptle_net::Fnv::new();
@@ -585,6 +600,117 @@ impl RollbackDriver {
         let resolved = self.net.inputs_for(next);
         self.simulate_tick(ctx, next, &resolved);
         Some(next)
+    }
+
+    /// Re-simulate the last few ticks from the ring and check they come out the
+    /// same (floptle/0050).
+    ///
+    /// ## What this catches, and why nothing else can
+    ///
+    /// The rollback contract is "put back everything the simulation can read".
+    /// A game that reads something `snapshot()`/`restore()` does not carry
+    /// breaks it — and until now there was **no way to find that out except by
+    /// losing a live match**, because the failure is invisible on one machine
+    /// and silent until the cross-peer checksum fires, minutes later, on the
+    /// other one, about a value that has already been overwritten.
+    ///
+    /// Fofighter shipped one: a node handle cached in a Lua local at the top of
+    /// one script's hook and read by a DIFFERENT script during the correction.
+    /// `restore()` cannot put a Lua local back and the driver never knew it
+    /// existed, so a re-simulated tick computed a hit the original pass did
+    /// not, from byte-identical rollback state. It showed up as 8-to-15
+    /// divergent points in 1500 — under 1%, which is exactly why it survived a
+    /// playtest and then voided a session.
+    ///
+    /// ## Why it is a re-simulation and not a comparison of the live replay
+    ///
+    /// The obvious cheap check — hash a correction's replayed ticks against
+    /// their originals — does not work: a correction changes an input, so the
+    /// state legitimately differs from that tick onward and every later tick
+    /// inherits the difference. There is nothing to compare against.
+    ///
+    /// So this runs its own replay with **provably identical inputs** and the
+    /// same anchor. Same inputs, same start, same code: any difference is the
+    /// simulation reading something the snapshot does not carry. No network
+    /// condition explains it, which is what makes the report unambiguous.
+    ///
+    /// Returns the named values that diverged, `(tick, label, before, after)`.
+    /// Empty is the healthy answer.
+    ///
+    /// Costs one extra state hash and `depth` extra ticks of simulation per
+    /// call, which is why the caller runs it on a slow cadence and only when
+    /// asked for.
+    pub fn audit_replay(
+        &mut self,
+        ctx: &mut Ctx,
+        depth: u64,
+        names: &std::collections::HashMap<u32, String>,
+    ) -> Vec<(u64, String, u64, u64)> {
+        let to = self.net.current();
+        if self.nodes.is_empty() || to <= depth {
+            return Vec::new();
+        }
+        let from = to - depth;
+        // The anchor is the state BEFORE `from` ran, and every tick in
+        // `from..=to` must already be in the ring for the comparison to have
+        // anything to compare against.
+        if !self.ring.iter().any(|s| s.tick == from) {
+            return Vec::new();
+        }
+        // Only audit ticks whose inputs are all REAL. A tick still running on a
+        // guess would be re-guessed here from the same `used` record, so it
+        // would in fact match — but a pending correction could land between the
+        // two passes and turn a clean audit into a false alarm. Waiting costs
+        // nothing: those ticks become real a few frames later.
+        for t in from..=to {
+            if !self.net.replay_inputs_for(t).iter().all(|r| r.real) {
+                return Vec::new();
+            }
+        }
+        let original: Vec<(u64, Vec<(String, u64)>)> =
+            (from..=to).map(|t| (t, self.state_breakdown(t, names))).collect();
+        let Some(anchor) = self.ring.iter().find(|s| s.tick == from).cloned() else {
+            return Vec::new();
+        };
+        // The live present, to put back afterwards — captured from the WORLD,
+        // not read out of the ring. The ring's entry for tick `to` is the state
+        // before `to` ran, so restoring that would leave the game a tick in the
+        // past: a diagnostic that caused the problem it went looking for.
+        let present = self.capture(ctx, to + 1);
+
+        let mut replayed: Vec<(u64, Vec<(String, u64)>)> = Vec::new();
+        ctx.host.begin_replay();
+        self.apply(ctx, &anchor);
+        for t in from..=to {
+            // The ring's entry for tick `t` is the state BEFORE `t` ran
+            // (`advance` captures, then simulates), so capture at the same
+            // moment or the two are a tick apart and everything "diverges".
+            // Tick `from` is therefore the control: it is the anchor we just
+            // applied, and it must match by construction.
+            let s = self.capture(ctx, t);
+            replayed.push((t, breakdown_of(&self.nodes, &s, names)));
+            let resolved = self.net.replay_inputs_for(t);
+            self.simulate_tick(ctx, t, &resolved);
+        }
+        // Put the present back exactly as it was, scripts and bodies both.
+        self.apply(ctx, &present);
+        ctx.host.end_replay();
+
+        let mut out = Vec::new();
+        for ((t, before), (_, after)) in original.iter().zip(&replayed) {
+            let after_map: std::collections::HashMap<&str, u64> =
+                after.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+            for (label, b) in before {
+                match after_map.get(label.as_str()) {
+                    Some(a) if a == b => {}
+                    Some(a) => out.push((*t, label.clone(), *b, *a)),
+                    // A key the replay did not produce at all is a divergence
+                    // in SHAPE, which is worth naming just as loudly.
+                    None => out.push((*t, label.clone(), *b, 0)),
+                }
+            }
+        }
+        out
     }
 
     /// Step the simulation BACKWARDS one tick, from the state ring
@@ -904,6 +1030,40 @@ function restore(s)\n\
   for k, v in pairs(s) do state[k] = v end\n\
 end\n";
 
+    /// The SAME fighter with one line changed: a counter that lives OUTSIDE
+    /// `state`, so `snapshot()` does not carry it and `restore()` cannot put it
+    /// back.
+    ///
+    /// This is a caricature of what Fofighter actually shipped (a node handle
+    /// cached in a Lua local at the top of one script's hook and read by a
+    /// different script during the correction), reduced to the smallest thing
+    /// with the same shape: a value the simulation reads that the snapshot does
+    /// not carry. Nobody stores one deliberately — this one is a `local`
+    /// refreshed every hook, which is itself the recommended fix for a
+    /// different bug (floptle/0027).
+    const LEAKY: &str = "\
+me = nil\n\
+leaked = 0\n\
+state = { frame = 0, hp = 100, vx = 0, atk = 0, hits = 0, taken = 0 }\n\
+function start(node) me = node end\n\
+function fixedUpdate(node, dt)\n\
+  leaked = leaked + 1\n\
+  state.frame = state.frame + 1\n\
+  -- The read that makes it a bug: simulated state derived from a value the\n\
+  -- snapshot does not carry, so a replay computes something different from\n\
+  -- byte-identical rollback state.\n\
+  state.hp = 100 - leaked\n\
+end\n\
+function snapshot()\n\
+  local c = {}\n\
+  for k, v in pairs(state) do c[k] = v end\n\
+  return c\n\
+end\n\
+function restore(s)\n\
+  for k in pairs(state) do state[k] = nil end\n\
+  for k, v in pairs(s) do state[k] = v end\n\
+end\n";
+
     /// `findScript(kind, player)` — the smallest stand-in for the engine's
     /// cross-node lookup that keeps the test independent of scene naming.
     const PRELUDE: &str = "\
@@ -957,9 +1117,15 @@ end\n";
 
     impl Fixture {
         fn new(tag: &str) -> Self {
+            Self::with_script(tag, FIGHTER)
+        }
+
+        /// The same fixture with a different fighter script — for the audit
+        /// test, which needs one that breaks the contract on purpose.
+        fn with_script(tag: &str, script: &str) -> Self {
             let dir = std::env::temp_dir().join(format!("floptle_rollback_{tag}"));
             let _ = std::fs::create_dir_all(&dir);
-            std::fs::write(dir.join("fighter.lua"), format!("{PRELUDE}{FIGHTER}")).unwrap();
+            std::fs::write(dir.join("fighter.lua"), format!("{PRELUDE}{script}")).unwrap();
             let mut world = World::default();
             for (i, name) in ["P1", "P2"].iter().enumerate() {
                 let e = world.spawn();
@@ -1132,6 +1298,62 @@ end\n";
         );
         assert!(rolled.host.errors().is_empty(), "errors: {:?}", rolled.host.errors());
         assert!(b.faults.is_empty(), "faults: {:?}", b.faults);
+    }
+
+    /// FIELD REGRESSION (floptle/0050): a script that reads a value its
+    /// `snapshot()` does not carry must be caught HERE, by the machine that has
+    /// it, while it has it.
+    ///
+    /// Before this, the only way to find out was to lose a live match: the
+    /// failure is invisible on one machine and silent until the cross-peer
+    /// checksum fires, minutes later, on the other one, about a value that has
+    /// already been overwritten. Fofighter shipped one and it voided sessions
+    /// "randomly, after a few matches" — 8 to 15 divergent points in 1500,
+    /// which is why it survived a playtest.
+    #[test]
+    fn a_script_that_reads_un_restored_state_is_caught_by_the_replay_audit() {
+        let names = std::collections::HashMap::from([
+            (0u32, "P1".to_string()),
+            (1u32, "P2".to_string()),
+        ]);
+        let script = script_of_the_match();
+
+        // The honest fighter first — its whole state is in `snapshot()`, so a
+        // re-simulation of the same ticks from the same anchor reproduces it
+        // exactly. If this failed, the audit would flag every game.
+        let mut good = Fixture::new("audit_good");
+        let mut a = RollbackDriver::new(P1, vec![P1, P2], 0, 0);
+        a.rebind(&good.world, &mut good.sim, &good.host);
+        for (t, p1, p2) in &script {
+            a.add_local(*t, p1.clone());
+            a.add_remote(P2, *t, p2.clone());
+            a.advance(&mut good.ctx());
+        }
+        let before = good.fingerprint(&a);
+        let clean = a.audit_replay(&mut good.ctx(), 4, &names);
+        assert!(clean.is_empty(), "a correct fighter must not be accused: {clean:?}");
+        // …and the audit must leave the world exactly where it found it. A
+        // diagnostic that rewinds the game is worse than the bug.
+        assert_eq!(good.fingerprint(&a), before, "the audit put the present back");
+
+        // Now the same match with one value living outside `state`.
+        let mut bad = Fixture::with_script("audit_bad", LEAKY);
+        let mut b = RollbackDriver::new(P1, vec![P1, P2], 0, 0);
+        b.rebind(&bad.world, &mut bad.sim, &bad.host);
+        for (t, p1, p2) in &script {
+            b.add_local(*t, p1.clone());
+            b.add_remote(P2, *t, p2.clone());
+            b.advance(&mut bad.ctx());
+        }
+        let found = b.audit_replay(&mut bad.ctx(), 4, &names);
+        assert!(!found.is_empty(), "the leaked counter must be caught");
+        // And NAMED, which is the difference between a ten-minute fix and a
+        // fortnight: node, script, key.
+        assert!(
+            found.iter().any(|(_, label, ..)| label.contains("fighter") && label.contains("hp")),
+            "the report has to name the value: {found:?}"
+        );
+        assert!(bad.host.errors().is_empty(), "errors: {:?}", bad.host.errors());
     }
 
     /// The same scenario driven twice through the same span: a SECOND

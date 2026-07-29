@@ -81,7 +81,10 @@ impl Editor {
     pub(crate) fn net_tick(&mut self, tick: u64) {
         for cmd in self.script_host.take_net_commands() {
             match cmd {
-                NetCmd::Host { relay, port, interest, interest_budget, .. } => {
+                NetCmd::Host { relay, port, interest, interest_budget, input_delay, .. } => {
+                    // Recorded BEFORE the session comes up: `net_rollback_host_setup`
+                    // runs inside the host call and reads it (floptle/0049).
+                    self.net_input_delay = input_delay;
                     match (relay, port) {
                         (Some(addr), _) => self.net_host_relay(&addr),
                         (None, Some(p)) => self.net_host_quic(p),
@@ -109,6 +112,36 @@ impl Editor {
                                  only; flag global objects \"always relevant\" on their \
                                  Networked component.",
                                 interest_budget.unwrap_or(d.budget_bytes_per_sec) / 1024,
+                            ),
+                            None,
+                        );
+                    }
+                }
+                NetCmd::SetInputDelay { ticks } => {
+                    let n = ticks.min(floptle_net::MAX_DELAY);
+                    self.net_input_delay = Some(n);
+                    // Deliberately NOT applied to a match in flight: the delay
+                    // is fixed for a session because changing it changes how
+                    // the game feels while you are playing it. It takes effect
+                    // at the next `RollbackStart`, which is the roster
+                    // re-announce a rematch already does.
+                    self.console.push(
+                        floptle_script::LogLevel::Debug,
+                        format!(
+                            "🥊 input delay set to {n} tick(s) ({:.0} ms) — takes effect at the \
+                             next match, not this one",
+                            f32::from(n) * 1000.0 / 60.0
+                        ),
+                        None,
+                    );
+                    if ticks > floptle_net::MAX_DELAY {
+                        self.console.push(
+                            floptle_script::LogLevel::Warn,
+                            format!(
+                                "net.setInputDelay({ticks}) clamped to {} — the state ring only \
+                                 holds so many ticks, and a delay past it could not be rolled \
+                                 back to",
+                                floptle_net::MAX_DELAY
                             ),
                             None,
                         );

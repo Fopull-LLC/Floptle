@@ -455,8 +455,21 @@ net = {}
 ---rendezvous relay: you get a LOBBY CODE, friends join with it, nobody
 ---port-forwards. `port = n` hosts directly on UDP (QUIC) for LAN/self-host.
 ---Neither: the in-editor loopback harness.
----@param opts { maxPlayers: integer, port: integer, relay: string, interest: number, interestBudget: integer }|nil
+---@param opts { maxPlayers: integer, port: integer, relay: string, interest: number, interestBudget: integer, inputDelay: integer }|nil
 function net.host(opts) end
+---Set the rollback input delay in TICKS (clamped to 6), for the NEXT match.
+---
+---Rollback holds your own input a few ticks so the opponent's has time to
+---arrive. Too low and theirs lands after the tick that needed it, on every
+---tick, so the driver guesses and re-simulates — correct, and five times the
+---work. Omit it and the host derives one from the worst peer's measured RTT
+---(2 on a LAN, 5 across a country).
+---
+---Fixed for a session on purpose: adaptive delay hides a bad connection by
+---changing how the game feels while you are playing it. Call this between
+---matches — the roster re-announce restarts the driver on a fresh origin.
+---@param ticks integer
+function net.setInputDelay(ticks) end
 ---Join a session: `\"relay://relayaddr/CODE\"` = a lobby code through a
 ---relay (no port-forwarding), `\"quic://host:port\"` = a server directly,
 ---`\"local://\"` = the in-editor test harness.

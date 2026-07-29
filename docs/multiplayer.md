@@ -193,6 +193,31 @@ and wrong for anything else.
 | **`net.random()`**, never `rng()` | An unseeded roll comes from the clock. Two peers drawing different numbers is a match that forks in two. |
 | Projectiles live in **snapshot state**, not `spawn()` | A spawned prefab isn't rollback state, and one-shot spawns are suppressed during re-simulation. A fireball both machines must agree on is data in your controller. |
 
+### Input delay
+
+Rollback holds your own input for a few ticks so the opponent's has time to
+arrive. Too low and their input lands *after* the tick that needed it — on
+every tick, forever — so the driver guesses, is wrong, and re-simulates. The
+fight stays identical on both machines and the checksum stays green; it just
+costs five or six times the simulation work and feels like it.
+
+The host picks it, once, at match start:
+
+```lua
+net.host{ inputDelay = 5 }     -- ticks, clamped to 6
+net.setInputDelay(4)           -- between matches; a rematch, not a new lobby
+```
+
+**If you don't pick one, the host derives it from the worst peer's measured
+RTT** — `ceil(one-way / tick) + 1`, which is 2 on a LAN and 5 across a country.
+That is right far more often than the constant 2 it replaced.
+
+It is **fixed for the session and never auto-adjusted mid-match**, deliberately.
+Adaptive delay hides a bad connection by changing how the game feels while you
+are playing it, and a fighting game cannot tolerate that. Put the number in
+your lobby next to rounds and clock, with the ping on screen while the player
+picks. 2 frames on a LAN, 4–5 between houses.
+
 ### Testing a rollback match
 
 Local first: **⏵ Host + join a local client** with the latency slider at 6–8
@@ -202,8 +227,12 @@ The 🌐 panel is your instrument:
 
 - **corrections / depth last / max / avg** — a healthy match sits at *low average
   depth*. `max` is the worst moment; `avg` is the texture of the connection.
-- **guessed N% of ticks** — the mispredict rate. Rises with latency; it's what
-  you choose the input delay against.
+- **delay N · M% guessed** — the two numbers that only mean something together.
+  A rollback session working perfectly and one badly misconfigured look
+  identical from outside: both are correct, both agree, both pass the checksum.
+  The misconfigured one just does several times the work. The line turns orange
+  past 50% guessed, because that is a delay too low for the link, not a bad
+  connection — see **Input delay** below.
 - **🥊 ROLLBACK · waiting for input** (orange) — a stall. Past the depth cap the
   sim waits rather than guessing further, so the game runs slightly slow instead
   of teleporting the opponent. It recovers on its own. Show your own "connection
@@ -217,6 +246,17 @@ The 🌐 panel is your instrument:
   simulated from a guess and can still be corrected. When the gap reaches the
   depth cap the sim stalls, so **a gap pinned at the cap means somebody's input
   has stopped arriving**.
+- **⚖ replay divergence at tick N — Player2/fighter/st.hitstop** (red) — the
+  most useful line in the panel, and the one you hope never to see. Twice a
+  second the driver re-simulates the last four ticks from its own state ring
+  with *provably identical inputs*, and checks the world comes out the same.
+  Anything that doesn't is a value your simulation reads that `snapshot()` does
+  not carry — a Lua local cached across hooks, a value on another script, a
+  global. No network condition explains it. It is **local**, not a desync:
+  nothing has gone wrong between the peers yet, and this machine is about to be
+  wrong on its own. Handle it with `net.on("replayDiverged", ...)`. On in the
+  editor, off in a shipped build, forced either way with
+  `FLOPTLE_ROLLBACK_AUDIT=1` / `=0`.
 - **per-peer lines** (`host · frontier 412 · 3 tick(s) held`) — what each peer
   has confirmed, and how many of its inputs the host is still holding for it.
   Healthy peers hold a handful. **A peer whose frontier has stopped moving while

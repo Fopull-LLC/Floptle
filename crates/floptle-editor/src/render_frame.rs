@@ -1951,19 +1951,47 @@ impl Editor {
                                      teleporting the opponent. It catches up on its own.",
                                 );
                             } else {
-                                ui.label(format!(
-                                    "🥊 ROLLBACK · {} fighter(s) · {}-tick delay",
-                                    rb.fighters, rb.input_delay
-                                ));
+                                // Delay and mispredict rate on ONE line, because
+                                // neither means anything alone: a rollback
+                                // implementation working perfectly and one badly
+                                // misconfigured look identical from outside, and
+                                // "delay 2 — 99% guessed" is the whole diagnosis
+                                // (floptle/0049).
+                                let line = format!(
+                                    "🥊 ROLLBACK · {} fighter(s) · delay {} · {:.0}% guessed",
+                                    rb.fighters,
+                                    rb.input_delay,
+                                    rb.mispredict_rate * 100.0,
+                                );
+                                // Only once there is enough of a match to judge:
+                                // the opening ticks always guess.
+                                let bad = rb.mispredict_rate > 0.5 && rb.current > 120;
+                                if bad {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(255, 170, 60),
+                                        line,
+                                    )
+                                    .on_hover_text(format!(
+                                        "almost every tick is being guessed and re-simulated. \
+                                         Nothing is broken — the fight is identical on both \
+                                         machines — but this peer is doing several times the \
+                                         work and it feels like it. The delay is too low for \
+                                         this link: raise it between matches with \
+                                         net.setInputDelay(n) (max {}), or set \
+                                         net.host{{ inputDelay = n }}.",
+                                        floptle_net::MAX_DELAY
+                                    ));
+                                } else {
+                                    ui.label(line);
+                                }
                             }
                             ui.small(format!(
                                 "corrections {} · depth last {} / max {} / avg {:.1} · \
-                                 guessed {:.0}% of ticks · ring {} ticks / {} KB",
+                                 ring {} ticks / {} KB",
                                 rb.corrections,
                                 rb.last_depth,
                                 rb.max_depth_seen,
                                 rb.average_depth,
-                                rb.mispredict_rate * 100.0,
                                 rb.ring_ticks,
                                 rb.ring_bytes / 1024,
                             ))

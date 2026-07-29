@@ -20,6 +20,15 @@ use floptle_net::{NetInput, PeerId, SERVER};
 /// late; it is not allowed to be why the game stutters.
 const REFEREE_CATCHUP_TICKS: u64 = 8;
 
+/// How many ticks the replay audit re-simulates (floptle/0050). Four, matching
+/// the offline harness that found the Fofighter instance: deep enough that a
+/// value cached across hooks has been read again, shallow enough that the extra
+/// simulation is a rounding error on the frame.
+const ROLLBACK_AUDIT_DEPTH: u64 = 4;
+/// …and how often. Twice a second: the fault it hunts is structural, so a
+/// script that reads an un-restored value does it in the first exchange.
+const ROLLBACK_AUDIT_EVERY: u64 = 30;
+
 use crate::rollback::{Ctx, RollbackDriver};
 use crate::Editor;
 
@@ -159,7 +168,23 @@ impl Editor {
         // host already uses for remote-owned Predicted nodes. ADDED to the
         // driver filter, never assigned over the session's own: on a client the
         // session is already skipping every authority-driven node.
+        //
+        // …but FIRST take them out of the session's sets. On a client,
+        // `net_client_side_setup` ran at join time and again at Welcome, and
+        // both of those are structurally BEFORE this moment — so
+        // `rollback_filter_eids()` was empty for them and every fighter landed
+        // in `script_skip`. That set gates every pass INCLUDING `lateUpdate`,
+        // which no driver replays, and nothing else ever removes them. The
+        // fight then runs normally (the driver bypasses filters) while the
+        // cosmetic pass is silently dead on the client only — which is why
+        // floptle/0042 looked fixed from the host and was reported three times.
+        self.script_host.shrink_filters(d.eids());
         self.script_host.extend_filters(d.eids());
+        // And tell the SESSION which nodes the driver owns, so its snapshot
+        // guards stop depending on a flag a scene message can clear
+        // (floptle/0048). Refreshed every frame as well; done here too so the
+        // opening frame of a match is already right.
+        self.net_publish_driven(&d.eids());
         // A new match: both once-per-session diagnostics arm again.
         self.net_flow_reported = 0;
         self.net_rollback_orphans_checked = false;
@@ -184,6 +209,161 @@ impl Editor {
         );
     }
 
+    /// Should the replay audit run this tick? (floptle/0050)
+    ///
+    /// **On in the editor, off in a shipped build**, and forced either way by
+    /// `FLOPTLE_ROLLBACK_AUDIT=1` / `=0`. It costs an extra
+    /// [`ROLLBACK_AUDIT_DEPTH`] ticks of simulation each time it fires, which
+    /// is a fine trade while you are building the game and not one to make a
+    /// player pay for.
+    fn net_rollback_audit_due(&self) -> bool {
+        let on = match std::env::var("FLOPTLE_ROLLBACK_AUDIT").ok().as_deref() {
+            Some("1" | "true" | "on") => true,
+            Some(_) => false,
+            None => !self.player_mode,
+        };
+        on && self.game_tick_no.is_multiple_of(ROLLBACK_AUDIT_EVERY)
+    }
+
+    /// Report an audit's findings — LOCAL, and deliberately not a desync.
+    ///
+    /// Nothing has gone wrong between the peers yet: this machine is about to
+    /// be wrong on its own. Ending the match to say so would be the desync
+    /// detector's mistake repeated — it fires on the wrong machine, at the
+    /// wrong time, about a value that has already been overwritten.
+    fn net_rollback_report_replay_divergence(&mut self, diverged: Vec<(u64, String, u64, u64)>) {
+        if diverged.is_empty() {
+            return;
+        }
+        for (tick, label, before, after) in diverged.iter().take(6) {
+            // Once per VALUE per session. The same script reads the same
+            // un-restored thing every correction, and sixty identical lines a
+            // second is a diagnostic nobody reads.
+            if !self.net_replay_audit_reported.insert(label.clone()) {
+                continue;
+            }
+            self.console.push(
+                floptle_script::LogLevel::Error,
+                format!(
+                    "⚖ replay divergence at tick {tick} — {label}: {before:016x} → {after:016x}. \
+                     Re-simulating that tick from the state ring, with the SAME inputs, produced \
+                     a different value. No network condition explains that: something the \
+                     simulation reads is not in this node's snapshot() — a Lua local cached \
+                     across hooks, a value on another script, a global. This peer will desync \
+                     eventually and the other machine will be the one to notice."
+                ),
+                None,
+            );
+        }
+        // The game hears about it too, with the value named — a lobby can put
+        // "this build is broken" on screen rather than voiding a match later.
+        if let Some((tick, label, ..)) = diverged.first() {
+            let reason = format!("{label} (tick {tick})");
+            self.script_host.fire_net_event(
+                &mut self.world,
+                "replayDiverged",
+                None,
+                Some(&reason),
+            );
+        }
+    }
+
+    /// The input delay this match will run at (floptle/0049).
+    ///
+    /// The game's choice if it made one, otherwise derived from the link. Two
+    /// ticks — 33 ms — was the constant, and it is right only for peers in the
+    /// same building: past that the driver mispredicts on essentially every
+    /// tick and re-simulates its way through the frame budget, correctly and
+    /// unplayably. A host that has been up long enough to have pinged its peers
+    /// already knows the number.
+    ///
+    /// Still FIXED for the session and never auto-adjusted mid-match. Adaptive
+    /// delay hides a bad connection by changing how the game feels while you
+    /// are playing it, which a fighting game cannot tolerate. This chooses the
+    /// starting value informed; it does not keep choosing.
+    pub(crate) fn net_choose_input_delay(&self) -> u8 {
+        if let Some(n) = self.net_input_delay {
+            return n.min(floptle_net::MAX_DELAY);
+        }
+        let worst = self
+            .net_server
+            .as_ref()
+            .map(|s| s.peer_rtts().into_iter().map(|(_, ms)| ms).fold(0.0f32, f32::max))
+            .unwrap_or(0.0);
+        Self::delay_for_rtt(worst)
+    }
+
+    /// `ceil(worst one-way / tick) + 1`, clamped.
+    ///
+    /// The `+ 1` is the tick the input still has to wait for after it arrives.
+    /// A LAN (sub-16 ms RTT) comes out at 2, the constant that was there; the
+    /// 112 ms link in the field report comes out at 5.
+    pub(crate) fn delay_for_rtt(rtt_ms: f32) -> u8 {
+        const TICK_MS: f32 = 1000.0 / 60.0;
+        let one_way = (rtt_ms.max(0.0)) * 0.5;
+        let ticks = (one_way / TICK_MS).ceil() as u32 + 1;
+        ticks.clamp(
+            u32::from(floptle_net::DEFAULT_INPUT_DELAY),
+            u32::from(floptle_net::MAX_DELAY),
+        ) as u8
+    }
+
+    /// Tell every play-world session which nodes the local driver simulates.
+    ///
+    /// The session already asks the question a second way (its own `rollback`
+    /// flag plus the node's `Replicated.mode`), and the two answers can come
+    /// apart: a `Msg::Scene` clears the flag, `RollbackStart` sets it, and the
+    /// driver is installed a frame later from a queued signal. Any ordering
+    /// that leaves the flag off while the driver is on turns off every guard
+    /// that stops a snapshot pose landing on a locally-simulated fighter — and
+    /// the symptom is a fighter facing the wrong way with a green checksum,
+    /// because rotation is deliberately not hashed (floptle/0048).
+    ///
+    /// This set comes from the driver, so it cannot disagree with the driver.
+    pub(crate) fn net_publish_driven(&mut self, eids: &std::collections::HashSet<u32>) {
+        for s in [self.net_play_client.as_mut(), self.net_server.as_mut()].into_iter().flatten() {
+            s.set_locally_driven(eids.clone());
+        }
+    }
+
+    /// Drain the "a snapshot was refused because the driver owns this node"
+    /// counter into the Console, once per node per session.
+    ///
+    /// The refusal is correct. Reaching this code at all is not: it means the
+    /// ingest guard let a sample through, which means the two answers to "is
+    /// this node locally driven" disagreed at the moment it arrived. This is
+    /// the detector floptle/0048 asked for, and it fires on the machine that
+    /// has the problem, while it has it.
+    pub(crate) fn net_report_driven_drops(&mut self) {
+        let mut drops: Vec<(u32, u64)> = Vec::new();
+        for s in [self.net_play_client.as_mut(), self.net_server.as_mut()].into_iter().flatten() {
+            drops.extend(s.take_driven_snapshot_drops());
+        }
+        for (eid, n) in drops {
+            if !self.net_driven_drop_reported.insert(eid) {
+                continue;
+            }
+            let name = self
+                .world
+                .query::<floptle_core::Name>()
+                .find(|(e, _)| e.index() == eid)
+                .map(|(_, n)| n.0.clone())
+                .unwrap_or_else(|| format!("#{eid}"));
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "🥊 \"{name}\" is simulated by the rollback driver here, but {n} snapshot \
+                     sample(s) of it got past the ingest guard and would have been written over \
+                     its transform. They were dropped. The session's rollback flag and the \
+                     driver disagreed — the fight is still correct, but this node's rotation \
+                     would have been wrong on this machine only, and the checksum does not \
+                     hash rotation."
+                ),
+                None,
+            );
+        }
+    }
+
     /// Host: engage rollback for this session if the scene calls for it.
     ///
     /// Called right after a session comes up. A scene with no `Rollback` nodes
@@ -193,7 +373,7 @@ impl Editor {
         if !self.scene_has_rollback() {
             return;
         }
-        let delay = floptle_net::DEFAULT_INPUT_DELAY;
+        let delay = self.net_choose_input_delay();
         // The seed is drawn ONCE, here, from the wall clock — the only place in
         // the whole feature where a clock is allowed near the simulation. From
         // this moment it is replicated state like any other, and every draw
@@ -441,6 +621,12 @@ impl Editor {
         self.net_referee_reported = 0;
         self.net_flow_reported = 0;
         self.net_rollback_orphans_checked = false;
+        self.net_driven_drop_reported.clear();
+        // Hand the session's guard set back too, for the same reason the
+        // filters go back: these are entity INDICES, and the allocator reuses
+        // them. A stale one here would make the next scene's unrelated node
+        // silently refuse its snapshots.
+        self.net_publish_driven(&std::collections::HashSet::new());
         let Some(mut d) = self.net_rollback.take() else { return };
         // Take back exactly the half of the filters the driver added. `net_stop`
         // clears both wholesale afterwards and would not have needed this, but a
@@ -473,6 +659,13 @@ impl Editor {
         if self.net_rollback.is_none() {
             return;
         }
+        // Re-publish who the driver owns. Once per tick rather than once per
+        // match, because the driver rebinds when nodes spawn or despawn and
+        // because a session-side flag can be cleared underneath us at any
+        // moment (floptle/0048). It is a set compare in the common case.
+        let driven = self.rollback_filter_eids();
+        self.net_publish_driven(&driven);
+        self.net_report_driven_drops();
         // 0. Hosting: pull whatever arrived since the last tick BEFORE draining,
         //    the same tick-start pump the remote-Predicted path does. Without
         //    it an input that landed during the frame waits a whole tick, and
@@ -575,6 +768,26 @@ impl Editor {
         d.audit(&self.world, &self.script_host);
         for f in d.faults.drain(..) {
             self.console.push(floptle_script::LogLevel::Warn, f, None);
+        }
+        // 5. The replay audit (floptle/0050): re-simulate the last few ticks
+        //    from the ring with provably identical inputs and check the world
+        //    comes out the same. Anything that doesn't is a value the
+        //    simulation reads and `snapshot()` does not carry.
+        //
+        //    On a slow cadence — it is a second simulation of those ticks, and
+        //    the fault it hunts is structural, not intermittent: a script that
+        //    caches an un-restored value does it every match, so twice a second
+        //    finds it inside the first exchange.
+        let audit = self.net_rollback_audit_due();
+        if audit && let Some(sim) = self.sim.as_mut() {
+            let names: std::collections::HashMap<u32, String> = self
+                .world
+                .query::<floptle_core::Name>()
+                .map(|(e, n)| (e.index(), n.0.clone()))
+                .collect();
+            let mut ctx = Ctx { world: &mut self.world, sim, host: &mut self.script_host, step };
+            let diverged = d.audit_replay(&mut ctx, ROLLBACK_AUDIT_DEPTH, &names);
+            self.net_rollback_report_replay_divergence(diverged);
         }
         self.net_rollback = Some(d);
         self.net_referee_tick();
@@ -974,6 +1187,23 @@ mod tests {
             late_starved_rollback_nodes(&reps, &HashSet::new(), |_| true).is_empty(),
             "an undriven node is an orphan, and is reported by the other check"
         );
+    }
+
+    /// FIELD REGRESSION (floptle/0049): a delay derived from the link, not a
+    /// constant. The constant was 2 — right for a LAN, and wrong for anyone
+    /// playing across a country, which is most matches.
+    #[test]
+    fn the_default_delay_comes_from_the_measured_link() {
+        use crate::Editor;
+        // No session yet, or a LAN: the historic constant, unchanged.
+        assert_eq!(Editor::delay_for_rtt(0.0), floptle_net::DEFAULT_INPUT_DELAY);
+        assert_eq!(Editor::delay_for_rtt(8.0), 2, "same room");
+        assert_eq!(Editor::delay_for_rtt(30.0), 2, "same city, still inside one tick each way");
+        // The link two players in different houses actually measured.
+        assert_eq!(Editor::delay_for_rtt(112.0), 5, "the field report's 112 ms");
+        // And it never asks for more than the state ring can roll back to.
+        assert_eq!(Editor::delay_for_rtt(2000.0), floptle_net::MAX_DELAY);
+        const { assert!(floptle_net::MAX_DELAY >= floptle_net::DEFAULT_INPUT_DELAY) };
     }
 
     /// FIELD REGRESSION (floptle/0040): the client's join sequence must never

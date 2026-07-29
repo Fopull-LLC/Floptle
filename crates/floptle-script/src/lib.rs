@@ -2812,6 +2812,84 @@ end
         assert!(host.errors().is_empty(), "…and not again: {:?}", host.errors());
     }
 
+    /// FIELD REGRESSION (floptle/0048): a node in `script_skip` never gets a
+    /// late pass, and a client's join sequence puts every rollback fighter
+    /// there before the driver exists to claim it back.
+    ///
+    /// `script_skip` gates EVERY pass; `driver_skip` gates all but `lateUpdate`,
+    /// because no driver replays the late pass. The join sequence writes the
+    /// first and the rollback start writes the second, and for two releases
+    /// nothing took the fighters back out of the first — so the fight ran and
+    /// the cosmetic pass silently did not, on the client only.
+    #[test]
+    fn a_driver_owned_node_keeps_its_late_pass_after_the_session_filtered_it() {
+        let dir = std::env::temp_dir().join("floptle_script_test_late_filter");
+        let _ = std::fs::create_dir_all(&dir);
+        // `fixedUpdate` writes one value, `lateUpdate` writes another over it —
+        // the same shape the field report measured with (+0.25 on top).
+        write_script(
+            &dir,
+            "facing",
+            concat!(
+                "function fixedUpdate(node, dt)\n  node.y = 1\nend\n",
+                "function lateUpdate(node, dt)\n  node.y = 2\nend\n",
+            ),
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "facing".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+
+        // Step 2 of the join: no driver yet, so the session classifies the
+        // fighter as an ordinary synced node and filters it out of everything.
+        host.set_script_filter(std::collections::HashSet::from([e.index()]));
+        host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+        host.run_late(&mut world, 1.0 / 60.0, 0.0);
+        assert_eq!(
+            world.get::<Transform>(e).unwrap().translation.y,
+            0.0,
+            "the un-driven window is supposed to skip everything; if it doesn't, \
+             this test proves nothing"
+        );
+
+        // Step 3: the driver binds it. `extend_filters` ALONE is the bug —
+        // `script_skip` still holds it, so the late pass stays dead.
+        host.extend_filters([e.index()]);
+        host.run_late(&mut world, 1.0 / 60.0, 0.0);
+        assert_eq!(
+            world.get::<Transform>(e).unwrap().translation.y,
+            0.0,
+            "reproducing the bug: extend_filters does not undo script_skip"
+        );
+
+        // The fix: the rollback start takes the session's half back out first.
+        host.shrink_filters([e.index()]);
+        host.extend_filters([e.index()]);
+        host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+        assert_eq!(
+            world.get::<Transform>(e).unwrap().translation.y,
+            0.0,
+            "the driver still owns the TICK — the global fixedUpdate stays off"
+        );
+        host.run_late(&mut world, 1.0 / 60.0, 0.0);
+        assert_eq!(
+            world.get::<Transform>(e).unwrap().translation.y,
+            2.0,
+            "…and lateUpdate runs again, which is the whole point"
+        );
+    }
+
     #[test]
     fn script_applies_material_preset() {
         // node.material = "<name>" resolves against the lent presets and inserts a Material.

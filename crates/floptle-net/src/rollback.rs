@@ -40,16 +40,34 @@ use crate::wire::NetInput;
 /// playable rollback depth; older entries are confirmed-or-irrelevant.
 pub const INPUT_RING: usize = 256;
 
-/// The largest input delay a session may configure. Beyond a handful of ticks
-/// the added latency costs more than the mispredicts it avoids.
+/// The largest input delay a session may configure — 6 ticks, 100 ms at 60 Hz.
+///
+/// Two ceilings meet here and the lower one wins. Past roughly this much added
+/// latency the delay costs more than the mispredicts it avoids: a fighting
+/// game's whole premise is that the button happens when you press it, and 100 ms
+/// is already at the edge of what a player reads as "the game", not "the link".
+/// It also has to stay inside [`DEFAULT_MAX_DEPTH`]: a delay deeper than the
+/// state ring is a delay whose corrections could not be rolled back to.
+///
+/// Requests above it are clamped, loudly rather than silently — a game asking
+/// for 12 has misunderstood something, and finding that out from a log line
+/// beats finding it out from a match.
 pub const MAX_DELAY: u8 = 6;
 
-/// The default input delay, ticks (~33 ms at 60 Hz).
+/// The FLOOR on input delay, ticks (~33 ms at 60 Hz), and what a LAN session
+/// runs at.
 ///
-/// Fixed per session, never auto-adjusted mid-match: adaptive delay hides bad
-/// connections but changes how the game *feels* while you are playing it, which
-/// a fighting game cannot tolerate. The measurement is exposed instead, so
-/// players choose their delay informed (§2.2).
+/// It was the only delay for two releases, which is right for peers in the same
+/// building and wrong for everyone else: past 33 ms one way the opponent's
+/// input lands after the tick that needed it on every tick, so the driver
+/// guesses and re-simulates forever. Correct, and six times the work
+/// (floptle/0049). The host now derives a starting value from the worst peer's
+/// measured RTT, and a game can name one outright.
+///
+/// Still fixed per session, never auto-adjusted mid-match: adaptive delay hides
+/// a bad connection by changing how the game *feels* while you are playing it,
+/// which a fighting game cannot tolerate. The measurement is exposed instead,
+/// so a delay is chosen informed and then left alone (§2.2).
 pub const DEFAULT_INPUT_DELAY: u8 = 2;
 
 /// The default rollback depth cap. Past roughly this many ticks the correction
@@ -462,6 +480,56 @@ mod tests {
 
     fn rb(delay: u8) -> Rollback {
         Rollback::new(P1, vec![P1, P2], delay)
+    }
+
+    /// FIELD REGRESSION (floptle/0049): the input delay has to be choosable,
+    /// because the constant 2 is right only for peers in the same building.
+    ///
+    /// Both sides of this run the SAME inputs over the same link — one-way
+    /// latency of four ticks, which is the 112 ms RTT two players in different
+    /// houses actually measured. The only difference is the delay. At 2 the
+    /// opponent's input lands two ticks after the tick that needed it, on
+    /// every tick, forever; at 5 it lands before.
+    ///
+    /// Nothing is broken at delay 2 — every peer agrees, the checksum is green
+    /// — it just does several times the work and feels like it. That is the
+    /// whole argument for putting the number next to the measurement.
+    #[test]
+    fn a_delay_that_covers_the_link_stops_guessing_every_tick() {
+        /// One-way trip, in ticks: 56 ms at 60 Hz.
+        const LAG: u64 = 4;
+        const TICKS: u64 = 300;
+
+        fn run(delay: u8) -> f32 {
+            let mut r = rb(delay);
+            for t in 1..=TICKS {
+                // We sample for tick `t` and it applies at `t + delay`.
+                r.add_local(t, held(t));
+                // The opponent sampled the same tick and it applied at
+                // `t + delay` for them too — but it reaches us LAG ticks of
+                // wall clock later, i.e. we only see it once we are simulating
+                // tick `t + LAG`.
+                if t > LAG {
+                    let theirs = t - LAG;
+                    r.add_remote(P2, theirs + u64::from(delay), held(theirs));
+                }
+                // …and then we simulate the tick that is due now.
+                r.inputs_for(t);
+            }
+            r.mispredict_rate()
+        }
+
+        let tight = run(2);
+        let roomy = run(5);
+        // The constant guesses essentially every tick…
+        assert!(tight > 0.9, "delay 2 over a 4-tick link should guess nearly always, got {tight}");
+        // …and one that covers the link essentially never does, once the
+        // opening ticks (which have nothing to go on either way) are behind it.
+        assert!(roomy < 0.09, "delay 5 should cover the same link, got {roomy}");
+        assert!(
+            tight > roomy * 10.0,
+            "an order of magnitude apart on the same inputs: {tight} vs {roomy}"
+        );
     }
 
     #[test]
