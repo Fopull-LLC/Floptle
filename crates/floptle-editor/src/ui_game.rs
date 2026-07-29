@@ -345,9 +345,7 @@ impl Editor {
         let input = floptle_ui::StateInput {
             hovered: self.ui_hover,
             pressed: self.ui_active,
-            // Keyboard/gamepad focus is phase D; until then nothing is focused
-            // and a `focus` block simply never fires.
-            focused: None,
+            focused: self.ui_focus,
         };
         let (sheet, tokens) = (&self.ui_styles, &self.ui_tokens);
         floptle_ui::apply_styles(roots, sheet, tokens, &input, &mut self.ui_style_rt, dt);
@@ -556,6 +554,23 @@ impl Editor {
         layer_masks(&self.world, &ents, roots)
     }
 
+    /// The game view's size in physical pixels — the whole window when the game
+    /// is what's on screen, else the docked Game tab's rect.
+    ///
+    /// Split out from [`Self::ui_pointer`] because the interact pass has to run
+    /// with no pointer at all: a gamepad-only session (or an FPS camera with
+    /// the cursor locked away) still needs its menu solved so navigation has
+    /// rects to move between.
+    fn ui_viewport(&self) -> Option<[f32; 2]> {
+        let gpu = self.gpu.as_ref()?;
+        if self.game_view() || self.player_mode {
+            return Some([gpu.config.width as f32, gpu.config.height.max(1) as f32]);
+        }
+        let r = self.game_rect?;
+        let ppp = self.egui.as_ref().map(|e| e.ctx.pixels_per_point()).unwrap_or(1.0);
+        Some([r.width() * ppp, r.height() * ppp])
+    }
+
     /// Pointer position + viewport (physical px, game-view space) for game-UI
     /// interaction. `None` when the cursor is hidden/locked (FPS look, game
     /// trap) or outside the game viewport.
@@ -564,17 +579,15 @@ impl Editor {
             return None;
         }
         let cursor = self.cursor?;
-        let gpu = self.gpu.as_ref()?;
-        let win = [gpu.config.width as f32, gpu.config.height.max(1) as f32];
+        let size = self.ui_viewport()?;
         if self.game_view() || self.player_mode {
             // The UI draws over the whole window here.
-            return Some(([cursor.x, cursor.y], win));
+            return Some(([cursor.x, cursor.y], size));
         }
         // Docked Game tab: viewport-local coordinates.
         let r = self.game_rect?;
         let ppp = self.egui.as_ref().map(|e| e.ctx.pixels_per_point()).unwrap_or(1.0);
         let p = [cursor.x - r.min.x * ppp, cursor.y - r.min.y * ppp];
-        let size = [r.width() * ppp, r.height() * ppp];
         if p[0] < 0.0 || p[1] < 0.0 || p[0] > size[0] || p[1] > size[1] {
             return None;
         }
@@ -597,6 +610,13 @@ impl Editor {
         if !self.playing {
             self.ui_hover = None;
             self.ui_active = None;
+            // Focus belongs to a running game. Clearing it on Stop means Play
+            // never starts with a ring left over from the last session, and
+            // means the editor's own arrow keys are never fighting a menu.
+            self.ui_focus = None;
+            self.ui_nav_repeat.clear();
+            self.ui_submit_was = false;
+            self.ui_cancel_was = false;
             // Don't let edit-mode clicks bank up and fire as phantom presses
             // on the first playing frame.
             self.ui_lmb_pressed_evt = false;
@@ -623,7 +643,11 @@ impl Editor {
         // this pass (`node:uiRect()`): a script can hit-test the mouse against
         // a panel's real position instead of guessing.
         let mut solved_rects: HashMap<u32, [f32; 4]> = HashMap::new();
-        if let Some((ptr_px, viewport)) = pointer
+        // Every layer's solved rects this frame, for the navigation pass.
+        let mut nav_layers: Vec<(UiLayer, Vec<floptle_ui::Node>, Vec<floptle_ui::Placed>)> =
+            Vec::new();
+        let ptr_px = pointer.map(|(p, _)| p);
+        if let Some(viewport) = self.ui_viewport()
             && viewport[0] > 1.0
             && viewport[1] > 1.0
         {
@@ -651,12 +675,14 @@ impl Editor {
             // the world is offset to the camera, so the ray origin is ~0.
             let cam = play_camera(&self.world, self.camera.render_camera());
             let aspect = viewport[0] / viewport[1];
-            let inv = cam.view_proj(aspect).inverse();
-            let ndc = [ptr_px[0] / viewport[0] * 2.0 - 1.0, 1.0 - ptr_px[1] / viewport[1] * 2.0];
-            let near = inv * Vec4::new(ndc[0], ndc[1], 0.0, 1.0);
-            let far = inv * Vec4::new(ndc[0], ndc[1], 1.0, 1.0);
-            let ro = near.truncate() / near.w;
-            let rd = (far.truncate() / far.w - ro).normalize();
+            let ray = ptr_px.map(|ptr| {
+                let inv = cam.view_proj(aspect).inverse();
+                let ndc = [ptr[0] / viewport[0] * 2.0 - 1.0, 1.0 - ptr[1] / viewport[1] * 2.0];
+                let near = inv * Vec4::new(ndc[0], ndc[1], 0.0, 1.0);
+                let far = inv * Vec4::new(ndc[0], ndc[1], 1.0, 1.0);
+                let ro = near.truncate() / near.w;
+                ((far.truncate() / far.w - ro).normalize(), ro)
+            });
 
             // (z, roots, layer) in draw order.
             let mut layers: Vec<(i32, Vec<floptle_ui::Node>, UiLayer, Entity)> = Vec::new();
@@ -694,33 +720,34 @@ impl Editor {
                             (wt.translation.z - cam.world_position.z) as f32,
                         );
                         let n = right.cross(down);
-                        let denom = rd.dot(n);
-                        let pd = if denom.abs() > 1e-6 {
-                            let t = (origin - ro).dot(n) / denom;
-                            if t > 0.0 {
-                                let hit = ro + rd * t;
-                                let rel = hit - origin;
-                                Some([
-                                    rel.dot(right) / right.length_squared(),
-                                    rel.dot(down) / down.length_squared(),
-                                ])
-                            } else {
-                                None // panel is behind the camera
+                        let pd = ray.and_then(|(rd, ro)| {
+                            let denom = rd.dot(n);
+                            if denom.abs() <= 1e-6 {
+                                return None; // ray parallel to the panel
                             }
-                        } else {
-                            None // ray parallel to the panel
-                        };
+                            let t = (origin - ro).dot(n) / denom;
+                            if t <= 0.0 {
+                                return None; // panel is behind the camera
+                            }
+                            let hit = ro + rd * t;
+                            let rel = hit - origin;
+                            Some([
+                                rel.dot(right) / right.length_squared(),
+                                rel.dot(down) / down.length_squared(),
+                            ])
+                        });
                         (dvp, pd, None)
                     } else {
                         let scale = layer.scale_for(viewport);
                         (
                             [viewport[0] / scale, viewport[1] / scale],
-                            Some([ptr_px[0] / scale, ptr_px[1] / scale]),
+                            ptr_px.map(|p| [p[0] / scale, p[1] / scale]),
                             Some(scale),
                         )
                     };
                     let measure = |t: &TextSpec| uir.measure_spec(t);
                     let placed = floptle_ui::solve(roots, design_vp, &measure);
+                    nav_layers.push((*layer, roots.clone(), placed.clone()));
                     // Publish each screen-space element's SOLVED rect in physical
                     // pixels (design rect × scale) — `node:uiRect()` reads it.
                     if let Some(scale) = screen_scale {
@@ -788,6 +815,9 @@ impl Editor {
             self.input_scroll = 0.0;
             self.tick_scroll = 0.0;
         }
+        // Keyboard / gamepad navigation, BEFORE the pointer pass so a pad press
+        // and a mouse click land in the same queue in the same order.
+        self.ui_navigate(&nav_layers, self.ui_frame_dt);
         let contains = |r: &[f32; 4], p: &[f32; 2]| {
             p[0] >= r[0] && p[1] >= r[1] && p[0] <= r[0] + r[2] && p[1] <= r[1] + r[3]
         };
@@ -811,6 +841,18 @@ impl Editor {
         }
         if pressed_edge && let Some(h) = hover {
             self.ui_active = Some(h);
+            // Clicking a focusable element focuses it, so a player who reaches
+            // for the mouse mid-menu and then goes back to the pad carries on
+            // from where they clicked rather than from where the ring was left.
+            let focusable = nav_layers.iter().any(|(_, roots, _)| {
+                fn has(ns: &[floptle_ui::Node], id: u32) -> bool {
+                    ns.iter().any(|n| (n.id == id && n.spec.focusable) || has(&n.children, id))
+                }
+                has(roots, h)
+            });
+            if focusable {
+                self.ui_focus_set(Some(h));
+            }
             self.ui_events.push((h, "pressed"));
         }
         // A grabbed interactive slider follows the pointer while held —
@@ -853,6 +895,9 @@ impl Editor {
         // here (right before scripts run) so a script's mouse hit-test uses
         // the panel's ACTUAL rendered position.
         self.script_host.set_ui_rects(solved_rects);
+        // …and the focus, so `node.focused` / `ui.focused()` read this frame's
+        // truth rather than last frame's.
+        self.script_host.set_ui_focus(self.ui_focus);
     }
 
     /// Add ⏵ UI: an Empty node carrying the UI components. Elements land
@@ -1272,6 +1317,46 @@ impl Editor {
             c |= ui.add(egui::DragValue::new(&mut spec.max_size[0]).speed(1.0).range(0.0..=8192.0).prefix("W ")).changed();
             c |= ui.add(egui::DragValue::new(&mut spec.max_size[1]).speed(1.0).range(0.0..=8192.0).prefix("H ")).changed();
         });
+        ui.horizontal(|ui| {
+            c |= ui
+                .checkbox(&mut spec.focusable, "focusable")
+                .on_hover_text(
+                    "reachable by keyboard and gamepad: a direction press can move the focus \
+                     here, and a submit press fires this element's `clicked` hook. What focus \
+                     LOOKS like is your style's `focus` block — the engine draws no ring.",
+                )
+                .changed();
+            if spec.focusable {
+                let has_nav = spec.nav.is_some();
+                if ui
+                    .selectable_label(has_nav, "nav ⏵")
+                    .on_hover_text(
+                        "name the element each direction goes to, when the geometry gets it \
+                         wrong (a grid that wraps, a Back button reachable from anywhere). \
+                         Blank = work it out from the solved rects.",
+                    )
+                    .clicked()
+                {
+                    spec.nav = if has_nav { None } else { Some(Default::default()) };
+                    c = true;
+                }
+            }
+        });
+        if spec.focusable && let Some(nav) = spec.nav.as_mut() {
+            ui.indent("ui_nav", |ui| {
+                for (label, field) in [
+                    ("up", &mut nav.up),
+                    ("down", &mut nav.down),
+                    ("left", &mut nav.left),
+                    ("right", &mut nav.right),
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        c |= ui.text_edit_singleline(field).changed();
+                    });
+                }
+            });
+        }
         ui.horizontal(|ui| {
             ui.label("depth").on_hover_text(
                 "sort key among siblings — lower draws first (further back), and inside a stack \

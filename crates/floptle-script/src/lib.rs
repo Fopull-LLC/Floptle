@@ -325,6 +325,13 @@ pub struct ScriptHost {
     scene_request: Rc<RefCell<Option<String>>>,
     /// The running scene's name, fed by the driver — what `scene.current()` reads.
     scene_name: Rc<RefCell<String>>,
+    /// The focused UI element, fed by the engine each frame: what
+    /// `ui.focused()` and `node.focused` read. Not a component — a focus ring
+    /// that survived into a saved scene would be a bug.
+    ui_focus: Rc<RefCell<Option<u32>>>,
+    /// A pending `ui.focus(...)` (last call this frame wins), drained by the
+    /// engine after the run.
+    ui_focus_request: Rc<RefCell<Option<Option<u32>>>>,
     /// Animator state per entity (layers/states/time), fed by the editor before `run`
     /// so scripts can read `anim:state()`, `anim:time()`, `anim:clips()`, ….
     anim_info: Rc<RefCell<HashMap<u32, AnimInfo>>>,
@@ -700,6 +707,9 @@ struct Shared {
     /// are different fields that happen to share a "string, read-your-writes"
     /// shape; one map would have to tag every entry with which field it meant.
     ui_style_changes: Rc<RefCell<HashMap<u32, String>>>,
+    /// The focused UI element, fed by the engine each frame — what
+    /// `node.focused` reads.
+    ui_focus: Rc<RefCell<Option<u32>>>,
     /// `node:getcomponent(name).field = value` writes: (entity, component, field) → number,
     /// flushed to the ECS after `run` (and read back the same frame).
     component_changes: ComponentWrites,
@@ -2516,6 +2526,67 @@ end
             1.0,
             "the script must read back its own style write within the frame"
         );
+    }
+
+    #[test]
+    fn script_reads_and_moves_ui_focus() {
+        let dir = std::env::temp_dir().join("floptle_script_test_ui_focus");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "menu",
+            concat!(
+                "function update(node, dt)\n",
+                "  local play = find(\"Play\")\n",
+                "  local quit = find(\"Quit\")\n",
+                // Read the engine's focus, two ways.
+                "  node.x = play.focused and 1 or 0\n",
+                "  node.y = (ui.focused() ~= nil) and 1 or 0\n",
+                // Move it, then read the move back within the same frame.
+                "  ui.focus(quit)\n",
+                "  node.z = quit.focused and 1 or 0\n",
+                "end\n",
+            ),
+        );
+        let mut world = World::default();
+        let driver = world.spawn();
+        world.insert(driver, Transform::IDENTITY);
+        world.insert(
+            driver,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "menu".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut el = |name: &str| {
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(e, floptle_core::Name(name.into()));
+            world.insert(
+                e,
+                floptle_ui::ElementSpec { focusable: true, ..Default::default() },
+            );
+            e
+        };
+        let play = el("Play");
+        let quit = el("Quit");
+
+        let mut host = ScriptHost::new();
+        // The engine publishes the focus before the run, exactly as the
+        // interact pass does.
+        host.set_ui_focus(Some(play.index()));
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let t = world.get::<Transform>(driver).unwrap().translation;
+        assert_eq!(t.x, 1.0, "node.focused sees the engine's focus");
+        assert_eq!(t.y, 1.0, "ui.focused() returns a node");
+        assert_eq!(t.z, 1.0, "ui.focus() reads back within the same frame");
+        // …and the engine gets the request out.
+        assert_eq!(host.take_ui_focus_request(), Some(Some(quit.index())));
+        assert_eq!(host.take_ui_focus_request(), None, "draining is one-shot");
     }
 
     #[test]

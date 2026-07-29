@@ -130,6 +130,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
         // Scriptable because "raise the panel the player is talking to" is a
         // gameplay decision, not a layout one.
         f.insert("order".to_string(), spec.order as f64);
+        f.insert("focusable".to_string(), f64::from(u8::from(spec.focusable)));
         // The visual transform — the press-dip / hover-pop channel. Layout is
         // unaffected, so a script can animate these every frame without ever
         // reflowing the screen.
@@ -310,6 +311,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "disabled" => spec.disabled = val != 0.0,
                     "selected" => spec.selected = val != 0.0,
                     "order" => spec.order = v.round() as i32,
+                    "focusable" => spec.focusable = val != 0.0,
                     "rotation" => spec.rotation = v,
                     "scaleX" => spec.scale[0] = v,
                     "scaleY" => spec.scale[1] = v,
@@ -673,6 +675,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let body_changes = shared.body_changes.clone();
         let ui_text_changes = shared.ui_text_changes.clone();
         let ui_style_changes = shared.ui_style_changes.clone();
+        let ui_focus = shared.ui_focus.clone();
         let layer_changes = shared.layer_changes.clone();
         let tag_changes = shared.tag_changes.clone();
         let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
@@ -838,6 +841,10 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         None => Value::Nil,
                     });
                 }
+                // Is the keyboard/gamepad ring on this element right now? Read
+                // only — moving focus is `ui.focus(node)`, so there is exactly
+                // one place that can change it and one place to look for bugs.
+                "focused" => return Ok(Value::Boolean(*ui_focus.borrow() == Some(e))),
                 _ => {}
             }
             // Physics body fields.

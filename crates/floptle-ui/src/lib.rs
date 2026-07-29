@@ -19,6 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod nav;
 pub mod paint;
 pub mod style;
 pub mod text;
@@ -30,6 +31,7 @@ pub use style::{
     apply_styles, ColorRef, Ease, NumRef, StateInput, Style, StyleBlock, StyleRuntime, StyleSheet,
     Tokens, Transition, UiState,
 };
+pub use nav::Dir4;
 pub use text::{Case, Overflow, TextShadow, TextStroke};
 
 // ---------------------------------------------------------------------------
@@ -621,6 +623,19 @@ pub struct ElementSpec {
     /// (0,0 = top-left, 0.5,0.5 = centre).
     #[serde(default = "half2", skip_serializing_if = "is_half2")]
     pub pivot: [f32; 2],
+    /// Reachable by keyboard and gamepad: a direction press can move focus
+    /// here, and a submit press fires this element's `clicked` hook.
+    ///
+    /// Opt-in, because "everything with a button flag is focusable" is wrong
+    /// often enough to matter — a clickable background, a drag handle, a row
+    /// that only responds to a long press. What a focused element LOOKS like is
+    /// the style's `focus` block; the engine draws no ring of its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub focusable: bool,
+    /// Where a direction press goes from here, by element name, when the
+    /// geometry gets it wrong. Empty = work it out from the solved rects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nav: Option<Nav>,
     /// Sibling sort key — lower draws first (further back), and inside a
     /// [`StackCfg`] lower comes first in the flow. Ties keep scene order, so a
     /// layer that never touches this behaves exactly as before.
@@ -690,8 +705,42 @@ impl Default for ElementSpec {
             rotation: 0.0,
             scale: [1.0, 1.0],
             pivot: [0.5, 0.5],
+            focusable: false,
+            nav: None,
             order: 0,
         }
+    }
+}
+
+/// Per-element navigation overrides: the element NAME to focus when this
+/// direction is pressed from here. An empty string means "work it out from the
+/// geometry", so you override only the edges that need it.
+///
+/// The cases geometry can't know: a grid that should wrap at the end of a row,
+/// a "back" button that should be reachable from anywhere on the screen, two
+/// columns that must not be treated as one field of buttons.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Nav {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub up: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub down: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub left: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub right: String,
+}
+
+impl Nav {
+    /// The override for a direction, if any.
+    pub fn get(&self, dir: Dir4) -> Option<&str> {
+        let s = match dir {
+            Dir4::Up => &self.up,
+            Dir4::Down => &self.down,
+            Dir4::Left => &self.left,
+            Dir4::Right => &self.right,
+        };
+        (!s.is_empty()).then_some(s.as_str())
     }
 }
 
@@ -772,10 +821,31 @@ pub struct UiLayer {
     /// 720-design layer stands 7.2 world units tall.
     #[serde(default = "default_canvas_scale")]
     pub canvas_scale: f32,
+    /// Seconds a direction must be held before it starts repeating.
+    #[serde(default = "default_nav_delay")]
+    pub nav_delay: f32,
+    /// Seconds between repeats once it starts.
+    #[serde(default = "default_nav_repeat")]
+    pub nav_repeat: f32,
+    /// Running off the end of the screen comes back on the other side.
+    ///
+    /// Off by default: wrapping is right for a short vertical menu and wrong
+    /// for a long inventory, and guessing wrong is worse than asking.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nav_wrap: bool,
 }
 
 fn default_canvas_scale() -> f32 {
     0.01
+}
+// The house menu feel: one move on press, a beat to decide you meant to hold,
+// then a steady roll. Both are per-layer, because a fast action menu and a
+// long settings list genuinely want different numbers.
+fn default_nav_delay() -> f32 {
+    0.35
+}
+fn default_nav_repeat() -> f32 {
+    0.12
 }
 fn default_reference_width() -> f32 {
     1280.0
@@ -833,6 +903,9 @@ impl Default for UiLayer {
             enabled: true,
             space: UiSpace::Screen,
             canvas_scale: 0.01,
+            nav_delay: default_nav_delay(),
+            nav_repeat: default_nav_repeat(),
+            nav_wrap: false,
         }
     }
 }

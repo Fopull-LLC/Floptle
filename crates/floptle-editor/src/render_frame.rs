@@ -3937,6 +3937,7 @@ impl Editor {
         // hover there can't fight the Game view's real one) and therefore needs
         // its own clock. Read, not drained: it renders exactly once a frame.
         self.ui_design_dt = dt.min(0.25);
+        self.ui_frame_dt = dt.min(0.25);
         let elapsed = self.started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
         self.poll_ui_styles(elapsed);
         self.fog_time = elapsed; // drifts the volumetric-fog noise (offscreen views too)
@@ -4145,6 +4146,12 @@ impl Editor {
             }
             // A `scene.load(...)` from this frame's scripts: queued, performed
             // at the top of the next frame (see above).
+            // `ui.focus(node)` from a script. Applied after the run so the
+            // hooks fire on the next frame's pass, in the same place engine-
+            // driven focus changes fire them — one code path, one ordering.
+            if let Some(want) = self.script_host.take_ui_focus_request() {
+                self.ui_focus_set(want);
+            }
             if let Some(req) = self.script_host.take_scene_request() {
                 self.pending_scene = Some(req);
             }

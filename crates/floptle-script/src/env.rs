@@ -370,6 +370,16 @@ pub(crate) fn apply_node(t: &Table, tr: &mut Transform, pre: &NodePre) -> mlua::
 
 /// Create a Lua **node handle** for entity index `e`: a table `{__id = e}` with the shared
 /// node metatable, so `h.x`, `h.parent`, `h:getscript("foo")`, etc. work for any node.
+/// The entity index behind a node handle, or `None` for anything else.
+/// Deliberately tolerant of a plain `{__id = n}` table: user code passes those
+/// around, and rejecting them would be a distinction without a difference.
+pub(crate) fn node_id_of(v: &mlua::Value) -> Option<u32> {
+    match v {
+        mlua::Value::Table(t) => t.raw_get::<u32>("__id").ok(),
+        _ => None,
+    }
+}
+
 pub(crate) fn new_node_handle(lua: &Lua, e: u32) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.raw_set("__id", e)?;

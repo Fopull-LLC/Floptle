@@ -93,6 +93,7 @@ mod theme;
 mod ui_design;
 mod ui_design_ui;
 mod ui_game;
+mod ui_nav;
 mod ui_shader_lib;
 mod ui_widgets;
 mod timeline;
@@ -1216,6 +1217,18 @@ struct Editor {
     /// Game-UI interaction state: the element the pointer hovers / grabbed.
     ui_hover: Option<u32>,
     ui_active: Option<u32>,
+    /// The focused element (keyboard / gamepad). One at a time across every
+    /// layer, the way focus works everywhere else. Cleared on Play start/stop
+    /// so a menu never resumes with a stale ring.
+    ui_focus: Option<u32>,
+    /// Auto-repeat for a held direction (see `floptle_ui::nav::Repeat`).
+    ui_nav_repeat: floptle_ui::nav::Repeat,
+    /// This frame's delta, for UI navigation auto-repeat. Its own field rather
+    /// than a share of `ui_style_dt`, which the gather pass drains.
+    ui_frame_dt: f32,
+    /// Last frame's submit/cancel levels, for press edges.
+    ui_submit_was: bool,
+    ui_cancel_was: bool,
     /// The project's UI style sheet + tokens, merged from every
     /// `*.uistyle.ron` / `*.tokens.ron` under the project (see
     /// `ui_game::reload_ui_styles`). Empty when a project defines none — the

@@ -680,6 +680,45 @@ impl ScriptHost {
             let _ = lua.globals().set("scene", t);
         }
 
+        // `ui.*` — the game-UI runtime surface. Focus is engine state rather
+        // than a component (a hover that survived into a saved scene would be a
+        // bug), so it travels through its own channels instead of the mirror.
+        let ui_focus: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
+        let ui_focus_request: Rc<RefCell<Option<Option<u32>>>> = Rc::new(RefCell::new(None));
+        if let Ok(t) = lua.create_table() {
+            let req = ui_focus_request.clone();
+            let cur = ui_focus.clone();
+            let _ = t.set(
+                "focus",
+                lua.create_function(move |_, node: mlua::Value| {
+                    // `ui.focus(node)` moves the ring; `ui.focus(nil)` drops it
+                    // (a screen that wants nothing focused until the player
+                    // touches something).
+                    let want = match &node {
+                        mlua::Value::Nil => None,
+                        v => Some(crate::env::node_id_of(v).ok_or_else(|| {
+                            mlua::Error::runtime("ui.focus expects a node or nil")
+                        })?),
+                    };
+                    // Read-your-writes within the frame, same as `node.style`.
+                    *cur.borrow_mut() = want;
+                    *req.borrow_mut() = Some(want);
+                    Ok(())
+                })
+                .ok(),
+            );
+            let cur = ui_focus.clone();
+            let _ = t.set(
+                "focused",
+                lua.create_function(move |lua, ()| match *cur.borrow() {
+                    Some(id) => crate::env::new_node_handle(lua, id).map(mlua::Value::Table),
+                    None => Ok(mlua::Value::Nil),
+                })
+                .ok(),
+            );
+            let _ = lua.globals().set("ui", t);
+        }
+
         // `spawnEffect(key, x, y, z [, vx, vy, vz])` — fire a one-shot particle effect at
         // a world point, no node required. The editor spawns a detached instance that
         // plays once and auto-despawns (the fire-and-forget path for hits, pickups,
@@ -1068,6 +1107,7 @@ impl ScriptHost {
             layer_table: layer_table.clone(),
             ui_text_changes: Rc::new(RefCell::new(HashMap::new())),
             ui_style_changes: Rc::new(RefCell::new(HashMap::new())),
+            ui_focus: ui_focus.clone(),
             component_changes: Rc::new(RefCell::new(HashMap::new())),
             rich_sets: Rc::new(RefCell::new(Vec::new())),
             anim_info: Rc::new(RefCell::new(HashMap::new())),
@@ -1260,6 +1300,8 @@ impl ScriptHost {
             param_writes: RefCell::new(Vec::new()),
             scene_request,
             scene_name,
+            ui_focus,
+            ui_focus_request,
             anim_info: shared.anim_info.clone(),
             anim_commands: shared.anim_commands.clone(),
             vfx_info: shared.vfx_info.clone(),
@@ -1298,6 +1340,18 @@ impl ScriptHost {
     /// wins). The driver performs the switch between frames.
     pub fn take_scene_request(&mut self) -> Option<String> {
         self.scene_request.borrow_mut().take()
+    }
+
+    /// Publish the engine's current UI focus, before scripts run.
+    pub fn set_ui_focus(&mut self, focused: Option<u32>) {
+        *self.ui_focus.borrow_mut() = focused;
+    }
+
+    /// Drain a `ui.focus(...)` call made this frame (last one wins). `Some(None)`
+    /// is a script explicitly asking for NOTHING to be focused, which is
+    /// different from not asking.
+    pub fn take_ui_focus_request(&mut self) -> Option<Option<u32>> {
+        self.ui_focus_request.borrow_mut().take()
     }
 
     /// Drop every per-(node, script) environment plus its net handlers and

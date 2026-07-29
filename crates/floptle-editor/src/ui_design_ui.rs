@@ -25,6 +25,7 @@ const SEL: egui::Color32 = egui::Color32::from_rgb(255, 180, 60);
 const HOT: egui::Color32 = egui::Color32::from_rgb(80, 200, 255);
 const SMART: egui::Color32 = egui::Color32::from_rgb(255, 90, 200);
 const GUIDE: egui::Color32 = egui::Color32::from_rgb(90, 210, 160);
+const NAV: egui::Color32 = egui::Color32::from_rgb(150, 190, 255);
 
 impl EditorTabViewer<'_> {
     pub(crate) fn ui_design_ui(&mut self, ui: &mut egui::Ui) {
@@ -266,6 +267,10 @@ impl EditorTabViewer<'_> {
 
             ui.separator();
             ui.toggle_value(&mut self.ui_design.outlines, "⬚").on_hover_text("element outlines");
+            ui.toggle_value(&mut self.ui_design.show_nav, "⇹⇳").on_hover_text(
+                "navigation graph: every focusable element, and where each direction leads from \
+                 the selected one",
+            );
             ui.toggle_value(&mut self.ui_design.rulers, "📏").on_hover_text("rulers and guides");
             ui.toggle_value(&mut self.ui_design.outline_panel, "☰")
                 .on_hover_text("the element outline panel");
@@ -599,6 +604,10 @@ impl EditorTabViewer<'_> {
             }
         }
 
+        if self.ui_design.show_nav {
+            self.ui_design_nav_overlay(&painter, layer, &rows, &rect_of, &sel, ppd, to_screen);
+        }
+
         self.ui_design_selection_chrome(ui, &painter, &sel, &rect_of, &stack_parents, &parent_of, ppd, to_screen);
 
         // Guide dragging owns the pointer while it's active.
@@ -651,6 +660,95 @@ impl EditorTabViewer<'_> {
             );
         }
         self.ui_design.rect = Some(view);
+    }
+
+    /// Draw the navigation graph: a dot on every focusable element, and an
+    /// arrow from the selected one to wherever each direction leads.
+    ///
+    /// This runs the SAME geometry the game runs (`floptle_ui::nav`), including
+    /// the per-element name overrides and the layer's wrap setting — a preview
+    /// that approximated it would be worse than none.
+    #[allow(clippy::too_many_arguments)]
+    fn ui_design_nav_overlay(
+        &self,
+        painter: &egui::Painter,
+        layer: &floptle_ui::UiLayer,
+        rows: &[Row],
+        rect_of: &HashMap<u32, [f32; 4]>,
+        sel: &[u32],
+        ppd: f32,
+        to_screen: impl Fn([f32; 2]) -> egui::Pos2,
+    ) {
+        let focusables: Vec<(u32, [f32; 4])> = rows
+            .iter()
+            .filter(|r| {
+                self.world
+                    .get::<ElementSpec>(r.entity)
+                    .is_some_and(|s| s.focusable && s.visible && !s.disabled)
+            })
+            .filter_map(|r| rect_of.get(&r.id).map(|rc| (r.id, *rc)))
+            .collect();
+        let centre = |r: &[f32; 4]| to_screen([r[0] + r[2] * 0.5, r[1] + r[3] * 0.5]);
+        for (_, r) in &focusables {
+            painter.circle_filled(centre(r), 3.5, NAV);
+        }
+        if focusables.is_empty() {
+            painter.text(
+                to_screen([8.0, 8.0]),
+                egui::Align2::LEFT_TOP,
+                "nothing on this layer is focusable — a pad can't reach any of it",
+                egui::FontId::proportional(12.0),
+                NAV,
+            );
+            return;
+        }
+        let Some(from) = sel.first().copied() else { return };
+        let Some(from_rect) = focusables.iter().find(|(id, _)| *id == from).map(|(_, r)| *r) else {
+            return;
+        };
+        let by_name: HashMap<&str, u32> = rows
+            .iter()
+            .map(|r| (r.name.as_str(), r.id))
+            .collect();
+        let nav = self.world
+            .query::<floptle_core::transform::Transform>()
+            .map(|(e, _)| e)
+            .find(|e| e.index() == from)
+            .and_then(|e| self.world.get::<ElementSpec>(e))
+            .and_then(|s| s.nav.clone());
+        for dir in [
+            floptle_ui::Dir4::Up,
+            floptle_ui::Dir4::Down,
+            floptle_ui::Dir4::Left,
+            floptle_ui::Dir4::Right,
+        ] {
+            let overridden = nav
+                .as_ref()
+                .and_then(|n| n.get(dir))
+                .and_then(|name| by_name.get(name).copied())
+                .filter(|id| focusables.iter().any(|(f, _)| f == id));
+            let target = overridden.or_else(|| {
+                floptle_ui::nav::nearest(from_rect, &focusables, dir).or_else(|| {
+                    layer.nav_wrap.then(|| floptle_ui::nav::wrap(from_rect, &focusables, dir)).flatten()
+                })
+            });
+            let Some(target) = target.filter(|t| *t != from) else { continue };
+            let Some(tr) = focusables.iter().find(|(id, _)| *id == target).map(|(_, r)| *r) else {
+                continue;
+            };
+            let a = centre(&from_rect);
+            let b = centre(&tr);
+            // A named override is drawn thicker: "this one is on purpose".
+            let w = if overridden.is_some() { 2.5 } else { 1.2 };
+            painter.line_segment([a, b], egui::Stroke::new(w, NAV));
+            // Arrowhead at the destination.
+            let d = (b - a).normalized();
+            let n = egui::vec2(-d.y, d.x);
+            let tip = b - d * 8.0;
+            painter.line_segment([b - d * 16.0 + n * 5.0, tip], egui::Stroke::new(w, NAV));
+            painter.line_segment([b - d * 16.0 - n * 5.0, tip], egui::Stroke::new(w, NAV));
+        }
+        let _ = ppd;
     }
 
     /// Selection outlines, resize handles, and the parent/stack cues that

@@ -118,6 +118,10 @@ pub(crate) struct UiDesignState {
     pub show_grid: bool,
     pub rulers: bool,
     pub outlines: bool,
+    /// Overlay the navigation graph: which elements are focusable, and where
+    /// each direction leads from the selected one. Checking a gamepad path by
+    /// launching the game and pressing down forty times is not checking it.
+    pub show_nav: bool,
     pub outline_panel: bool,
     /// Force a style state on the whole layer so states can be *designed*
     /// rather than discovered at runtime.
@@ -172,6 +176,7 @@ impl Default for UiDesignState {
             show_grid: false,
             rulers: true,
             outlines: true,
+            show_nav: false,
             outline_panel: true,
             state: None,
             guides: BTreeMap::new(),
