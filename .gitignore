@@ -53,9 +53,18 @@ out.png
 # Player save slots (per-slot save stores + slot terrain caches) — runtime data.
 **/saves/
 
-# Crash-recovery autosaves + per-project runtime save dirs.
+# Crash-recovery autosaves.
 **/.floptle/autosave/
-solar/save/
+
+# A PROJECT's runtime dirs, for every project in the repo rather than a named
+# one. These are written by the engine while the game runs, not authored:
+#   save/     — the script save API's slots (floptle_script::save → <project>/save/<slot>.ron)
+#   replays/  — recorded rollback match logs (crate::shadow), which get large
+# Anchored one level down on purpose. A NESTED folder called `save` is content
+# and ships — the same distinction the exporter draws when it decides what a
+# build carries.
+/*/save/
+/*/replays/
 
 # Auto-seeded UI effect examples in the scratch/default project (regenerated on
 # project open; the canonical copies live under each real project, e.g. solar/).
@@ -68,6 +77,12 @@ assets/shaders/examples/ui/
 # Claude Code's per-project state (session transcripts, local settings). Machine-
 # and person-specific, and it can carry conversation content — never in history.
 .claude/
+
+# Python bytecode from the repo's helper scripts (solar/tools/…). Regenerated on
+# every run and interpreter-version-specific, so it is pure churn in a diff.
+__pycache__/
+*.pyc
+.venv/
 
 # Local packaging output (scripts/package.sh writes bundles + releases.json here;
 # real releases are built by CI and published to GitHub Releases).
