@@ -403,6 +403,48 @@ fn sustain(i: &NetInput) -> NetInput {
 
 #[cfg(test)]
 mod tests {
+    /// floptle/0045: two peers whose script state differs by ONE value must be
+    /// told which value, on which node, in which script.
+    ///
+    /// The cross-platform failure that motivated this was a single Lua number —
+    /// `st.visYaw`, smoothed with `math.exp`, which is library code and is not
+    /// required to agree between glibc and Windows' UCRT. One ULP a tick voided
+    /// a match both players could see was identical, and the game was told
+    /// nothing at all: `net.on("desync")` fired with no payload.
+    #[test]
+    fn a_desync_names_the_value_that_diverged() {
+        use crate::session::diff_details;
+        // Both peers agree about everything except one key, one ULP apart.
+        let linux = vec![
+            ("Player1/body".to_string(), 0x1111u64),
+            ("Player2/body".to_string(), 0x2222),
+            ("Player2/fighterController/hp".to_string(), 0x3333),
+            ("Player2/fighterController/visYaw".to_string(), 0xa3f1),
+        ];
+        let mut windows = linux.clone();
+        windows[3].1 = 0xa3f2;
+
+        let out = diff_details(&[(0, linux.clone()), (1, windows.clone())]);
+        assert_eq!(out.len(), 1, "exactly ONE value diverged: {out:?}");
+        assert_eq!(out[0].0, "Player2/fighterController/visYaw", "named in full");
+        assert_eq!(out[0].1, vec![(0, 0xa3f1), (1, 0xa3f2)], "with both peers' values");
+
+        // Agreement anywhere else must not be reported — a list that also
+        // contains everything that matched is a report that named nothing.
+        assert!(diff_details(&[(0, linux.clone()), (1, linux.clone())]).is_empty());
+
+        // One peer missing a value entirely is also a divergence: the two
+        // snapshots are a different SHAPE, which is worth naming.
+        let short: Vec<(String, u64)> = linux[..3].to_vec();
+        let out = diff_details(&[(0, linux), (1, short)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "Player2/fighterController/visYaw");
+        assert_eq!(out[0].1.len(), 1, "only the peer that HAS it reports one");
+
+        // A single report can't disagree with anything.
+        assert!(diff_details(&[(0, vec![("a".into(), 1)])]).is_empty());
+    }
+
     use super::*;
 
     const P1: PeerId = 1;

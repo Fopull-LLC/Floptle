@@ -94,6 +94,16 @@ impl Binding {
         self.player.is_none_or(|p| p == slot)
     }
 
+    /// Same physical input, regardless of which player it is scoped to.
+    ///
+    /// "Do I already have this bound" is a question about the SOURCE. Whole-value
+    /// equality answered a different question and so treated a binding the user
+    /// had deliberately scoped as absent, duplicating it with an unscoped copy
+    /// that then served every local player. floptle/0044.
+    pub fn same_source(&self, other: &Binding) -> bool {
+        self.source == other.source && self.modifiers == other.modifiers
+    }
+
     /// Chip text including the chord (`"⌨ Ctrl+S"`).
     pub fn chip(&self) -> String {
         if self.modifiers.is_empty() {
@@ -167,6 +177,10 @@ pub enum Axis1Binding {
     /// A single analog source passed through deadzone → curve → sensitivity.
     Analog {
         source: Source,
+        /// Restrict to one local player slot — see [`Binding::player`]. Same
+        /// hole as [`Axis2Binding::Stick`] had. floptle/0043.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player: Option<u8>,
         #[serde(default = "default_deadzone")]
         deadzone: f32,
         #[serde(default = "default_sensitivity", skip_serializing_if = "is_one")]
@@ -179,6 +193,19 @@ pub enum Axis1Binding {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         gate: Vec<Source>,
     },
+}
+
+impl Axis1Binding {
+    /// Same physical input, ignoring player scope — see [`Binding::same_source`].
+    pub fn same_source(&self, other: &Axis1Binding) -> bool {
+        match (self, other) {
+            (Axis1Binding::Keys { minus: a, plus: b, .. }, Axis1Binding::Keys { minus: c, plus: d, .. }) => {
+                a == c && b == d
+            }
+            (Axis1Binding::Analog { source: a, .. }, Axis1Binding::Analog { source: b, .. }) => a == b,
+            _ => false,
+        }
+    }
 }
 
 /// One contributor to a 2D axis.
@@ -201,6 +228,17 @@ pub enum Axis2Binding {
         id: PadId,
         x: PadAxis,
         y: PadAxis,
+        /// Restrict to one local player slot — see [`Binding::player`].
+        ///
+        /// Without this a two-player map could not express "P1 on pad 1, P2 on
+        /// pad 2" at all: `PadId::Slot(n)` names a DEVICE, not a player, so two
+        /// slot-named stick bindings each contributed to BOTH players and
+        /// largest-magnitude-wins meant whichever stick was pushed harder drove
+        /// both characters. The `Keys` arm beside it had the field all along,
+        /// so a D-pad scoped correctly while the stick on the same pad did not.
+        /// floptle/0043.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player: Option<u8>,
         #[serde(default = "default_deadzone")]
         deadzone: f32,
         #[serde(default = "default_sensitivity", skip_serializing_if = "is_one")]
@@ -241,6 +279,24 @@ pub enum Axis2Binding {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         gate: Vec<Source>,
     },
+}
+
+impl Axis2Binding {
+    /// Same physical input, ignoring player scope — see [`Binding::same_source`].
+    pub fn same_source(&self, other: &Axis2Binding) -> bool {
+        use Axis2Binding as B;
+        match (self, other) {
+            (
+                B::Keys { up: a, down: b, left: c, right: d, .. },
+                B::Keys { up: e, down: f, left: g, right: h, .. },
+            ) => a == e && b == f && c == g && d == h,
+            (B::Stick { id: a, x: b, y: c, .. }, B::Stick { id: d, x: e, y: f, .. }) => {
+                a == d && b == e && c == f
+            }
+            (B::Mouse { .. }, B::Mouse { .. }) => true,
+            _ => false,
+        }
+    }
 }
 
 /// A named 1D analog axis (triggers, wheel, a key pair).
@@ -387,6 +443,55 @@ impl InputMap {
     /// silently does nothing.
     ///
     /// Returns how many entries and bindings were added.
+    /// Top up a project's map with anything from `starter` it has **no entry
+    /// for at all**, matching by NAME. Returns the names added.
+    ///
+    /// This is what a version upgrade may do to a project, and it is
+    /// deliberately blunter than [`Self::merge_missing`]: it never adds a
+    /// binding to an action the project already defines.
+    ///
+    /// `merge_missing` decided "missing" with whole-struct equality on
+    /// `Binding`, `player` included, which made three states indistinguishable:
+    /// the project never had this binding, the project **deleted** it on
+    /// purpose, and the project **kept it but scoped it to one player**. The
+    /// last two were silently undone on every version bump — re-adding an
+    /// unscoped `Keys(WASD)` and `Key(Space)` that then moved and jumped BOTH
+    /// local players, and shipping that into two builds before anyone re-read
+    /// the file. An action the project has an opinion about is an action it has
+    /// considered. floptle/0044.
+    pub fn top_up_missing(&mut self, starter: &InputMap) -> Vec<String> {
+        let mut added = Vec::new();
+        for a in &starter.actions {
+            if self.actions.iter().all(|x| x.name != a.name) && self.actions.len() < MAX_ACTIONS {
+                self.actions.push(a.clone());
+                added.push(a.name.clone());
+            }
+        }
+        for a in &starter.axes1 {
+            if self.axes1.iter().all(|x| x.name != a.name) {
+                self.axes1.push(a.clone());
+                added.push(a.name.clone());
+            }
+        }
+        for a in &starter.axes2 {
+            if self.axes2.iter().all(|x| x.name != a.name) {
+                self.axes2.push(a.clone());
+                added.push(a.name.clone());
+            }
+        }
+        for m in &starter.motions {
+            if self.motion(&m.name).is_none() {
+                self.motions.push(m.clone());
+                added.push(m.name.clone());
+            }
+        }
+        added
+    }
+
+    /// Fill gaps at BINDING granularity — the editor's explicit "add the
+    /// starter bindings" button, where the user has just asked for exactly this.
+    ///
+    /// Not used by migration: see [`Self::top_up_missing`] for why.
     pub fn merge_missing(&mut self, other: &InputMap) -> usize {
         let mut added = 0;
 
@@ -394,7 +499,7 @@ impl InputMap {
             match self.actions.iter().position(|x| x.name == a.name) {
                 Some(i) => {
                     for b in &a.bindings {
-                        if !self.actions[i].bindings.contains(b) {
+                        if !self.actions[i].bindings.iter().any(|x| x.same_source(b)) {
                             self.actions[i].bindings.push(b.clone());
                             added += 1;
                         }
@@ -414,7 +519,7 @@ impl InputMap {
             match self.axes1.iter_mut().find(|x| x.name == a.name) {
                 Some(mine) => {
                     for b in &a.bindings {
-                        if !mine.bindings.contains(b) {
+                        if !mine.bindings.iter().any(|x| x.same_source(b)) {
                             mine.bindings.push(b.clone());
                             added += 1;
                         }
@@ -431,7 +536,7 @@ impl InputMap {
             match self.axes2.iter_mut().find(|x| x.name == a.name) {
                 Some(mine) => {
                     for b in &a.bindings {
-                        if !mine.bindings.contains(b) {
+                        if !mine.bindings.iter().any(|x| x.same_source(b)) {
                             mine.bindings.push(b.clone());
                             added += 1;
                         }
@@ -515,6 +620,7 @@ impl InputMap {
                     socd: Socd::Neutral,
                     bindings: vec![
                         Axis1Binding::Analog {
+                            player: None,
                             source: Source::MouseAxis(MouseAxis::ScrollY),
                             deadzone: 0.0,
                             sensitivity: 1.0,
@@ -541,6 +647,7 @@ impl InputMap {
                             player: None,
                         },
                         Axis1Binding::Analog {
+                            player: None,
                             source: pad_axis(PadAxis::RightZ),
                             deadzone: 0.1,
                             sensitivity: 1.0,
@@ -549,6 +656,7 @@ impl InputMap {
                             gate: Vec::new(),
                         },
                         Axis1Binding::Analog {
+                            player: None,
                             source: pad_axis(PadAxis::LeftZ),
                             deadzone: 0.1,
                             sensitivity: 1.0,
@@ -572,6 +680,7 @@ impl InputMap {
                             player: None,
                         },
                         Axis2Binding::Stick {
+                            player: None,
                             id: PadId::Any,
                             x: PadAxis::LeftStickX,
                             y: PadAxis::LeftStickY,
@@ -599,6 +708,7 @@ impl InputMap {
                             rate: true,
                         },
                         Axis2Binding::Stick {
+                            player: None,
                             id: PadId::Any,
                             x: PadAxis::RightStickX,
                             y: PadAxis::RightStickY,
@@ -626,6 +736,7 @@ impl InputMap {
                             rate: true,
                         },
                         Axis2Binding::Stick {
+                            player: None,
                             id: PadId::Any,
                             x: PadAxis::RightStickX,
                             y: PadAxis::RightStickY,
@@ -709,6 +820,78 @@ mod tests {
         assert!(!plain.to_ron().contains("player:"), "unscoped bindings stay clean");
         assert!(plain.actions[0].bindings[0].serves(0));
         assert!(plain.actions[0].bindings[0].serves(3));
+    }
+
+    /// floptle/0044: a version bump must not undo a deliberate input.ron edit.
+    ///
+    /// The three states whole-value equality could not tell apart: never had
+    /// it, deleted it on purpose, kept it but scoped it to one player. The last
+    /// two were silently reverted on every upgrade — and an unscoped binding
+    /// serves EVERY local slot, so the re-seeded Space jumped both fighters.
+    #[test]
+    fn topping_up_a_project_never_undoes_a_deliberate_edit() {
+        let starter = InputMap::starter();
+
+        // Case 2 — deleted on purpose: an action stripped of its bindings.
+        let mut deleted = starter.clone();
+        let jump = deleted.actions.iter_mut().find(|a| a.name == "Jump").expect("starter has Jump");
+        jump.bindings.clear();
+        let added = deleted.top_up_missing(&starter);
+        assert!(added.is_empty(), "nothing to add: the project has an opinion about every name");
+        assert!(
+            deleted.actions.iter().find(|a| a.name == "Jump").unwrap().bindings.is_empty(),
+            "a binding removed on purpose STAYS removed across an upgrade"
+        );
+
+        // Case 3 — kept but scoped: must not gain an unscoped twin.
+        let mut scoped = starter.clone();
+        for b in &mut scoped.actions.iter_mut().find(|a| a.name == "Jump").unwrap().bindings {
+            b.player = Some(0);
+        }
+        let before = scoped.actions.iter().find(|a| a.name == "Jump").unwrap().bindings.len();
+        assert!(scoped.top_up_missing(&starter).is_empty());
+        let after = scoped.actions.iter().find(|a| a.name == "Jump").unwrap().bindings.len();
+        assert_eq!(before, after, "a scoped binding counts as PRESENT, not missing");
+        assert!(
+            scoped
+                .actions
+                .iter()
+                .find(|a| a.name == "Jump")
+                .unwrap()
+                .bindings
+                .iter()
+                .all(|b| b.player.is_some()),
+            "no unscoped copy crept in — it would serve every local player"
+        );
+
+        // Case 1 — the feature still works: a project missing a whole action
+        // gets it, and is told which.
+        let mut lacking = starter.clone();
+        lacking.actions.retain(|a| a.name != "Jump");
+        let added = lacking.top_up_missing(&starter);
+        assert_eq!(added, vec!["Jump".to_string()], "tops up by name, and reports it");
+        assert!(lacking.actions.iter().any(|a| a.name == "Jump"));
+
+        // And an untouched project is a no-op, so nothing rewrites the file
+        // (which would take its explanatory comments with it).
+        assert!(starter.clone().top_up_missing(&starter).is_empty(), "idempotent");
+    }
+
+    /// The editor's explicit "add the starter bindings" button still works at
+    /// binding granularity — but it, too, must treat a scoped binding as
+    /// present rather than duplicating it unscoped.
+    #[test]
+    fn merging_treats_a_scoped_binding_as_already_bound() {
+        let starter = InputMap::starter();
+        let mut scoped = starter.clone();
+        for b in &mut scoped.actions.iter_mut().find(|a| a.name == "Jump").unwrap().bindings {
+            b.player = Some(1);
+        }
+        let before = scoped.actions.iter().find(|a| a.name == "Jump").unwrap().bindings.len();
+        scoped.merge_missing(&starter);
+        let jump = scoped.actions.iter().find(|a| a.name == "Jump").unwrap();
+        assert_eq!(jump.bindings.len(), before, "same source = already bound");
+        assert!(jump.bindings.iter().all(|b| b.player == Some(1)), "and stays scoped");
     }
 
     #[test]

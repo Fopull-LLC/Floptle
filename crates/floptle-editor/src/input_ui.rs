@@ -945,6 +945,7 @@ mod tests {
         assert_eq!(axis2_chip(&keys), format!("{} WASD", icons::KEYBOARD));
 
         let stick = Axis2Binding::Stick {
+            player: None,
             id: PadId::Any,
             x: PadAxis::LeftStickX,
             y: PadAxis::LeftStickY,

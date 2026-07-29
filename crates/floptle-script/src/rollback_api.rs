@@ -46,7 +46,25 @@ pub const MAX_STATE_DEPTH: usize = 16;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScriptState {
     /// `(script kind, captured value)`, in the order the instances ran.
+    ///
+    /// **Everything here is hashed**, so everything here is something two peers
+    /// must agree about bit for bit.
     pub entries: Vec<(String, NetValue)>,
+    /// The **cosmetic** half: restored on rollback, never hashed.
+    ///
+    /// A correction must put back everything the replay needs to reproduce, but
+    /// the checksum should only fire on divergence the *simulation* can feel.
+    /// Those are different sets, and `snapshot()` used to be all-or-nothing —
+    /// so presentation state smuggled itself into the checksum through the only
+    /// door available.
+    ///
+    /// That cost a cross-platform match: a model's turn-toward-the-opponent
+    /// angle, smoothed with `math.exp`, which is library code and is not
+    /// required to agree between glibc and Windows' UCRT. One ULP a tick, and a
+    /// match that both players could see was identical voided itself every few
+    /// seconds. The alarm was working perfectly and firing on something neither
+    /// simulation could feel. floptle/0045.
+    pub cosmetic: Vec<(String, NetValue)>,
 }
 
 impl ScriptState {
@@ -64,7 +82,7 @@ impl ScriptState {
                 _ => 8,
             }
         }
-        self.entries.iter().map(|(k, val)| k.len() + v(val)).sum()
+        self.entries.iter().chain(self.cosmetic.iter()).map(|(k, val)| k.len() + v(val)).sum()
     }
 }
 
@@ -74,8 +92,9 @@ mod tests {
 
     #[test]
     fn size_hint_grows_with_the_tree() {
-        let small = ScriptState { entries: vec![("a".into(), NetValue::Num(1.0))] };
+        let small = ScriptState { entries: vec![("a".into(), NetValue::Num(1.0))], cosmetic: Vec::new() };
         let big = ScriptState {
+            cosmetic: Vec::new(),
             entries: vec![(
                 "a".into(),
                 NetValue::Table(vec![

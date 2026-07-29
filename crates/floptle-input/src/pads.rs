@@ -218,6 +218,9 @@ impl Pads {
                 continue;
             };
             state.connected = true;
+            if state.name.is_empty() {
+                state.name = gp.name().to_string();
+            }
             state.buttons.clear();
             for &b in PadButton::ALL {
                 if gp.is_pressed(to_gilrs_button(b)) {

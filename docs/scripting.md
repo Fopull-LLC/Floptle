@@ -390,6 +390,60 @@ A locked cursor is genuinely pinned to the window center (hardware lock where
 the OS supports it, per-frame re-centering where it doesn't) — read motion with
 `input.mouse_delta()`. Stop always releases the lock.
 
+### Gamepads a script can actually see
+
+Every other call here answers the *resolved* question — did this player press
+Jump. None of them can answer the one underneath it: **is there a controller
+here at all**. So "the pad was never enumerated", "it went into a slot the map
+doesn't bind", "the window hasn't got focus" and "something downstream ate it"
+all reach you as the same observation — nothing happens — and the bug report
+that comes back is "controllers don't work".
+
+| Call | Returns |
+|---|---|
+| `input.pads()` | a list of `{ index, name, connected }`, index 1-based |
+| `input.padCount()` | how many pads are connected right now |
+| `input.padButton(1, "South")` | that pad's button, **raw** — no action binding involved |
+| `input.padAxis(1, "LeftStickX")` | that pad's axis, raw, −1..1 (triggers 0..1) |
+
+```lua
+for _, p in ipairs(input.pads()) do
+  log(string.format("pad %d: %s%s", p.index, p.name, p.connected and "" or " (gone)"))
+end
+```
+
+If the list is empty it is a *device* problem and nothing about your input map
+matters. If the pad is listed but `input.action(...)` stays false, the pad is
+fine and the **binding** is where to look — and `input.padButton` will tell you
+the button is physically down while the action is not firing. Put that on a
+controls screen and a player can diagnose it for you.
+
+The list follows hot-plug: poll it, and a disconnected pad reads neutral rather
+than freezing its last pose. Button and axis names are the variant names
+(`South`, `East`, `LeftBumper`, `Start`, `LeftStickX`, `RightZ`, …), matched
+case-insensitively; an unknown name reads `false`/`0` rather than erroring.
+
+### Two local players on one axis
+
+A binding can be scoped to a local player slot, which is what lets one `Move`
+axis carry WASD for player 1 and the arrow keys for player 2 — and one pad per
+player:
+
+```ron
+Stick( player: Some(0), id: Slot(0), x: LeftStickX, y: LeftStickY, deadzone: 0.25 ),
+Stick( player: Some(1), id: Slot(1), x: LeftStickX, y: LeftStickY, deadzone: 0.25 ),
+```
+
+`player` is available on every binding form — actions, `Keys`, `Stick` and
+`Analog`. **Without it two pads do not mean two players**: `Slot(n)` names a
+*device*, not a player, so an unscoped pair contributes both sticks to both
+players and the harder push drives both characters.
+
+A player-scoped `id: Any` means *that player's own pad, or nothing* — so a
+second player with no pad reads zero instead of mirroring the first player's
+stick. Unscoped `Any` keeps its old meaning: the resolving player's pad, else
+the first connected one.
+
 ### The camera projection (`camera.*`)
 
 Turn a world point into a screen pixel (and back) against the **active game

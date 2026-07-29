@@ -2480,6 +2480,8 @@ mod tests {
 
     fn blank_node() -> floptle_scene::NodeDoc {
         floptle_scene::NodeDoc {
+            id: None,
+            parent_id: None,
             terrain_gen: None,
             name: String::new(),
             transform: Default::default(),

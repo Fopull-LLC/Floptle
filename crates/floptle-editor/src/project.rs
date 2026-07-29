@@ -374,6 +374,7 @@ impl Editor {
         self.play_snapshot = None;
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
+        self.report_scene_wiring(&doc);
         self.migrate_legacy_post(&doc);
         self.set_scene_file(p);
         self.adopt_terrain();
@@ -803,24 +804,65 @@ impl Editor {
         write_lua_support(&self.project_root);
     }
 
+    /// Report anything wrong with a freshly-loaded scene's wiring.
+    ///
+    /// A stale positional parent link is always *valid* — the index exists, it
+    /// is just not the node the author meant — so nothing could ever catch it
+    /// from the file. What CAN be caught is reported here, loudly, because the
+    /// symptom otherwise reaches you as a UI bug and sends you reading UI
+    /// scripts that are correct. floptle/0046.
+    pub(crate) fn report_scene_wiring(&mut self, doc: &floptle_scene::SceneDoc) {
+        for line in floptle_scene::validate_parents(&doc.nodes) {
+            self.console.push(floptle_script::LogLevel::Error, format!("🔗 {line}"), None);
+        }
+        for line in floptle_scene::validate_ui_visibility(&doc.nodes) {
+            self.console.push(floptle_script::LogLevel::Warn, format!("👁 {line}"), None);
+        }
+    }
+
     /// Write `input.ron` if absent, and top up an existing one with any starter
-    /// binding it lacks. Never overwrites: your bindings, your own actions and
-    /// your SOCD choices survive, which is what makes this safe to run on every
-    /// project open and from `--migrate`.
+    /// entry it has no NAME for. Never overwrites and never re-adds: a project
+    /// that deleted or re-scoped a binding keeps that decision across every
+    /// version bump, and anything that IS added is printed. floptle/0044.
     pub(crate) fn seed_input_map(&self) {
+        let mut had_map = true;
         let mut map = match floptle_input::load_map(&self.project_root) {
             Ok(Some(m)) => m,
-            Ok(None) => floptle_input::InputMap::default(),
+            Ok(None) => {
+                had_map = false;
+                floptle_input::InputMap::default()
+            }
             // Don't touch a file we couldn't parse — the editor reports it and
             // keeps the previous map; clobbering it here would destroy work.
             Err(_) => return,
         };
-        if map.merge_missing(&floptle_input::InputMap::starter()) == 0 {
+        // A project with NO map gets the whole starter set — that is the
+        // feature. A project that HAS one has an opinion, and only gets entries
+        // it has no name for at all.
+        //
+        // It used to top up at BINDING granularity, which could not tell "never
+        // had this" from "deleted this on purpose" or "kept it but scoped it to
+        // one player". So every version bump silently re-added unscoped
+        // bindings a two-player game had deliberately removed — an unscoped
+        // binding serves every local slot, so the re-seeded Space jumped both
+        // fighters — and the rewrite took the file's explanatory comments with
+        // it. That shipped into two builds before anyone re-read the file.
+        // floptle/0044.
+        let added = if had_map {
+            map.top_up_missing(&floptle_input::InputMap::starter())
+        } else {
+            map = floptle_input::InputMap::starter();
+            vec!["the starter set".to_string()]
+        };
+        if added.is_empty() {
             return;
         }
         if let Err(e) = floptle_input::save_map(&map, &self.project_root) {
             eprintln!("  could not seed input.ron: {e}");
+            return;
         }
+        // Never silent: this rewrites input.ron, comments and all.
+        println!("  input.ron: added {}", added.join(", "));
     }
 
     pub(crate) fn load_materials(&self) -> Vec<(String, floptle_scene::MaterialDoc)> {
@@ -904,6 +946,7 @@ impl Editor {
         self.set_scene_file(&path);
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
+        self.report_scene_wiring(&doc);
         self.adopt_terrain();
         self.adopt_paint();
         self.adopt_tex_paint();
@@ -1384,6 +1427,8 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
     let up = right.cross(fwd);
     let rot = Quat::from_mat3(&Mat3::from_cols(right, up, -fwd));
     floptle_scene::NodeDoc {
+        id: None,
+        parent_id: None,
         terrain_gen: None,
         name: "Camera".into(),
         transform: floptle_scene::TransformDoc {

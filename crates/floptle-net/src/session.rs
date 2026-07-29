@@ -411,6 +411,9 @@ pub struct NetSession {
     referee_outliers: Vec<u64>,
     /// Host: reported checksums per confirmed tick, `(peer, hash)` (§6).
     state_hashes: HashMap<u64, Vec<(PeerId, u64)>>,
+    /// Post-mortem breakdowns for a tick that already desynced, per peer.
+    /// Only ever populated after the match is lost. floptle/0045.
+    state_details: HashMap<u64, Vec<PeerDetail>>,
     /// Ticks a desync was detected or announced for, for the driver to surface.
     desyncs_in: Vec<u64>,
     // --- both ---
@@ -421,6 +424,52 @@ pub struct NetSession {
     /// view of the world is exactly what it acted on).
     rpcs_out: Vec<(RpcTarget, String, NetValue, Option<u64>)>,
     synced_in: SyncedVars,
+}
+
+/// One peer's labelled per-value breakdown of a desynced tick.
+pub type PeerDetail = (PeerId, Vec<(String, u64)>);
+
+/// Every labelled value the peers disagree about, in snapshot order.
+///
+/// A free function so the comparison can be tested without a live session on a
+/// real transport — the reports it folds arrive from several machines over
+/// several frames, which is not a shape a unit test can drive.
+///
+/// Only the values that actually differ come back: the report's whole job is to
+/// point at one thing, and a list that also contains everything that AGREED is
+/// the report that named nothing. floptle/0045.
+#[allow(clippy::type_complexity)]
+pub fn diff_details(reports: &[PeerDetail]) -> Vec<(String, Vec<(PeerId, u64)>)> {
+    if reports.len() < 2 {
+        return Vec::new();
+    }
+    // Union of labels, in the order the first reporter produced them, so the
+    // output reads in the same order as the snapshot itself.
+    let mut order: Vec<&String> = Vec::new();
+    for (_, entries) in reports {
+        for (label, _) in entries {
+            if !order.contains(&label) {
+                order.push(label);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for label in order {
+        let mut per_peer: Vec<(PeerId, u64)> = Vec::new();
+        for (peer, entries) in reports {
+            if let Some((_, h)) = entries.iter().find(|(l, _)| l == label) {
+                per_peer.push((*peer, *h));
+            }
+        }
+        // A value one peer does not have AT ALL is also a divergence — the two
+        // snapshots are a different shape, which is worth naming.
+        let disagrees =
+            per_peer.windows(2).any(|w| w[0].1 != w[1].1) || per_peer.len() < reports.len();
+        if disagrees {
+            out.push((label.clone(), per_peer));
+        }
+    }
+    out
 }
 
 impl NetSession {
@@ -509,6 +558,7 @@ impl NetSession {
             referee_faults: Vec::new(),
             referee_outliers: Vec::new(),
             state_hashes: HashMap::new(),
+            state_details: HashMap::new(),
             desyncs_in: Vec::new(),
             events: Vec::new(),
             rpcs_in: Vec::new(),
@@ -917,6 +967,7 @@ impl NetSession {
         self.peer_confirmed.clear();
         self.rollback_confirmed = 0;
         self.state_hashes.clear();
+        self.state_details.clear();
         if self.role != NetRole::Server {
             return;
         }
@@ -1273,6 +1324,29 @@ impl NetSession {
     /// Publish this peer's state checksum for a confirmed tick (§6). On a
     /// client it goes to the host; on the host it enters the comparison
     /// directly.
+    /// Send this peer's labelled breakdown of a tick that already desynced.
+    /// The host folds them together and names the first value that differs.
+    pub fn send_state_detail(&mut self, tick: u64, entries: Vec<(String, u64)>) {
+        match self.role {
+            NetRole::Server => {
+                self.state_details.entry(tick).or_default().push((SERVER, entries));
+            }
+            NetRole::Client => {
+                let msg = Msg::StateDetail { tick, entries }.encode();
+                self.transport.send(SERVER, Channel::Reliable, &msg);
+            }
+        }
+    }
+
+    /// Every value two peers disagree about at `tick`, most useful first.
+    ///
+    /// Returns `(label, [(peer, hash)])`. Consumed once — the caller reports it.
+    #[allow(clippy::type_complexity)]
+    pub fn take_desync_detail(&mut self, tick: u64) -> Vec<(String, Vec<(PeerId, u64)>)> {
+        let Some(reports) = self.state_details.remove(&tick) else { return Vec::new() };
+        diff_details(&reports)
+    }
+
     pub fn send_state_hash(&mut self, tick: u64, hash: u64) {
         match self.role {
             NetRole::Server => self.compare_state_hash(SERVER, tick, hash),
@@ -1794,6 +1868,9 @@ impl NetSession {
             }
             Msg::Pong { id } => self.note_pong(id, from),
             Msg::StateHash { tick, hash } => self.compare_state_hash(from, tick, hash),
+            Msg::StateDetail { tick, entries } => {
+                self.state_details.entry(tick).or_default().push((from, entries));
+            }
             Msg::Bye => self.drop_peer(from),
             _ => { /* clients don't send anything else */ }
         }

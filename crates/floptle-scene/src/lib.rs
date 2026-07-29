@@ -122,8 +122,27 @@ pub struct NodeDoc {
     /// See [`floptle_core::ParticleSystem`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub particles: Option<ParticleSystemDoc>,
+    /// A stable identity for this node **within this scene**, allocated on save
+    /// and never reused. What [`NodeDoc::parent_id`] points at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u32>,
+    /// This node's parent, by [`NodeDoc::id`] — the authoritative link.
+    ///
+    /// Preferred over [`NodeDoc::parent`] whenever present, because a positional
+    /// index is not a reference to a node, it is a reference to a *position*.
+    /// Inserting or removing any node ahead of it silently re-points it at a
+    /// different node, the file still loads, and nothing warns: the scene is
+    /// simply wired to something else. In the field this moved a whole match HUD
+    /// onto a line of help text inside another panel, and since an invisible
+    /// parent hides its subtree, the round clock and score pips were never drawn
+    /// in any mode. It reached players as three unrelated UI bugs. floptle/0046.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<u32>,
     /// Index (into this scene's `nodes`) of this node's parent — its transform is
     /// local to it. `None` = a root node. The transform is local either way.
+    ///
+    /// **Legacy.** Still written so older engines can read new scenes, and still
+    /// honoured when `parent_id` is absent, but [`NodeDoc::parent_id`] wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<usize>,
     /// Bone/sub-object of the parent Mesh this node rides (`None` = a plain child).
@@ -1490,6 +1509,129 @@ pub fn save_project(cfg: &ProjectConfigDoc, path: &Path) -> Result<(), SceneErro
 
 /// Spawn every node into `world` as an entity with `Transform` + `Name` + `Matter`,
 /// then spawn the one mandatory Lighting node (`Name` + [`Light`]).
+/// `NodeDoc::id` → position in `nodes`, for resolving stable parent links.
+pub fn node_id_positions(nodes: &[NodeDoc]) -> std::collections::HashMap<u32, usize> {
+    nodes.iter().enumerate().filter_map(|(i, n)| n.id.map(|id| (id, i))).collect()
+}
+
+/// This node's parent as a position in `nodes`.
+///
+/// `parent_id` wins whenever it is present: it names a NODE. The positional
+/// `parent` names a *position*, which any insertion or removal ahead of it
+/// silently re-points at something else — see [`NodeDoc::parent_id`]. A
+/// `parent_id` that resolves to nothing falls through to the index rather than
+/// orphaning the node, so a hand-edited file degrades instead of breaking.
+pub fn resolve_parent(
+    node: &NodeDoc,
+    by_id: &std::collections::HashMap<u32, usize>,
+) -> Option<usize> {
+    node.parent_id.and_then(|id| by_id.get(&id).copied()).or(node.parent)
+}
+
+/// Everything wrong with a scene's parent wiring that can be seen from the file
+/// alone, each as a line naming the node.
+///
+/// A dangling index would at least be *caught*; the fault this exists for never
+/// was, because a stale positional link is always **valid** — node 156 exists,
+/// it is simply not the node the author meant, and nothing in the file records
+/// which one that was. So this reports the cases that ARE decidable, and the
+/// stable ids ([`NodeDoc::parent_id`]) prevent the case that is not.
+/// floptle/0046.
+pub fn validate_parents(nodes: &[NodeDoc]) -> Vec<String> {
+    let mut out = Vec::new();
+    let by_id = node_id_positions(nodes);
+    // Two nodes claiming one id makes every link to it ambiguous — the shape a
+    // generator script hits when it copies a block without renumbering.
+    let mut seen: std::collections::HashMap<u32, &str> = std::collections::HashMap::new();
+    for n in nodes {
+        if let Some(id) = n.id
+            && let Some(first) = seen.insert(id, n.name.as_str())
+        {
+            out.push(format!(
+                "\"{}\" and \"{first}\" both claim node id {id} — links to it are ambiguous",
+                n.name
+            ));
+        }
+    }
+    let name = |i: usize| -> String {
+        nodes.get(i).map(|n| n.name.clone()).unwrap_or_else(|| format!("#{i}"))
+    };
+    for (i, n) in nodes.iter().enumerate() {
+        if let Some(id) = n.parent_id
+            && !by_id.contains_key(&id)
+        {
+            out.push(format!(
+                "\"{}\" names parent id {id}, which no node in this scene carries{}",
+                n.name,
+                match n.parent {
+                    Some(p) => format!(" — falling back to the positional link ({p})"),
+                    None => " — it will load as a root".into(),
+                }
+            ));
+        }
+        if let Some(p) = n.parent
+            && n.parent_id.is_none()
+            && p >= nodes.len()
+        {
+            out.push(format!(
+                "\"{}\" has parent index {p}, but this scene has {} node(s) — it will load \
+                 as a root",
+                n.name,
+                nodes.len()
+            ));
+        }
+        if resolve_parent(n, &by_id) == Some(i) {
+            out.push(format!("\"{}\" is its own parent — the link is ignored", n.name));
+        }
+    }
+    // Cycles: walk each node's chain with a step budget rather than tracking a
+    // visited set per node, which is the same answer for far less work.
+    for (i, _) in nodes.iter().enumerate() {
+        let mut at = i;
+        for step in 0..=nodes.len() {
+            let Some(p) = nodes.get(at).and_then(|n| resolve_parent(n, &by_id)) else { break };
+            if p == i && step > 0 {
+                out.push(format!("\"{}\" is in a parent CYCLE — the scene cannot lay out", name(i)));
+                break;
+            }
+            at = p;
+        }
+    }
+    out
+}
+
+/// UI elements whose parent chain can never be visible, one line each.
+///
+/// An invisible parent hides its whole subtree, so this is the difference
+/// between "obviously broken" and "you cannot see any of this and nothing will
+/// tell you why" — which is how a match HUD went missing for two play sessions
+/// and was reported as three separate bugs. floptle/0046.
+pub fn validate_ui_visibility(nodes: &[NodeDoc]) -> Vec<String> {
+    let by_id = node_id_positions(nodes);
+    let mut out = Vec::new();
+    for (i, n) in nodes.iter().enumerate() {
+        if n.ui.is_none() {
+            continue;
+        }
+        let mut at = i;
+        for _ in 0..=nodes.len() {
+            let Some(p) = nodes.get(at).and_then(|x| resolve_parent(x, &by_id)) else { break };
+            let Some(parent) = nodes.get(p) else { break };
+            let hidden_spec = parent.ui.as_ref().is_some_and(|u| !u.visible);
+            if !parent.visible || hidden_spec {
+                out.push(format!(
+                    "UI element \"{}\" sits under \"{}\", which is not visible — nothing in \
+                     this subtree will ever be drawn",
+                    n.name, parent.name
+                ));
+                break;
+            }
+            at = p;
+        }
+    }
+    out
+}
+
 /// Spawn ONE node's components into the world (no parent/attachment linking —
 /// those need the whole doc's index space; the caller links if it wants to).
 /// Used by the editor's node clipboard/spawners and by `floptle-net` to
@@ -1580,8 +1722,9 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
         ents.push(spawn_node(node, world));
     }
     // Second pass: link parents (skip out-of-range / self references).
+    let by_id = node_id_positions(&doc.nodes);
     for (i, node) in doc.nodes.iter().enumerate() {
-        if let Some(p) = node.parent
+        if let Some(p) = resolve_parent(node, &by_id)
             && p < ents.len() && p != i {
                 world.insert(ents[i], floptle_core::Parent(ents[p]));
             }
@@ -1589,7 +1732,7 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
     // Third pass: bone attachments (target = the parent linked above; resolved by the
     // editor's resolve_attachments each frame, which fixes the identity transform).
     for (i, node) in doc.nodes.iter().enumerate() {
-        if let (Some(att), Some(p)) = (&node.attachment, node.parent)
+        if let (Some(att), Some(p)) = (&node.attachment, resolve_parent(node, &by_id))
             && p < ents.len()
             && p != i
         {
@@ -1689,6 +1832,13 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let ui = world.get::<floptle_ui::ElementSpec>(e).cloned();
         let audio = world.get::<floptle_audio::AudioSource>(e).cloned();
         let parent = world.get::<floptle_core::Parent>(e).and_then(|p| index.get(&p.0).copied());
+        // Both links are written: `parent_id` is what any current engine reads,
+        // and the positional `parent` keeps an older one able to open the file.
+        // Ids are the node's position at save time + 1 — unique within the
+        // scene, which is all the reference needs to be, and stable across the
+        // reorder or insertion that would move an index. floptle/0046.
+        let id = index.get(&e).map(|i| *i as u32 + 1);
+        let parent_id = parent.map(|p| p as u32 + 1);
         // "Default" never serializes — a node's absence of a layer IS Default.
         let layer = world
             .get::<floptle_core::Layer>(e)
@@ -1696,6 +1846,8 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             .filter(|l| l != floptle_core::layers::DEFAULT_LAYER);
         let tags = world.get::<floptle_core::Tags>(e).map(|t| t.0.clone()).unwrap_or_default();
         nodes.push(NodeDoc {
+            id,
+            parent_id,
             name,
             transform,
             matter: MatterDoc::from(matter),
@@ -1733,6 +1885,127 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
 mod tests {
     use super::*;
 
+    /// A bare node with a name, for wiring tests — cloned off the demo scene so
+    /// it stays valid as `NodeDoc` grows.
+    fn plain(name: &str, id: u32, parent_id: Option<u32>) -> NodeDoc {
+        let mut n = demo().nodes[0].clone();
+        n.id = Some(id);
+        n.parent_id = parent_id;
+        n.parent = None;
+        n.name = name.into();
+        n.scripts.clear();
+        n.ui = None;
+        n.visible = true;
+        n
+    }
+
+    /// floptle/0046: the whole point of a stable link. Inserting a node ahead of
+    /// a subtree must not re-point it — which is exactly what positional
+    /// indices did, silently, moving a match HUD onto a line of help text in
+    /// another panel and hiding it for two play sessions.
+    #[test]
+    fn inserting_a_node_cannot_re_parent_an_existing_subtree() {
+        // "Match" (id 1) with a child "Timer" (id 2) that names it by ID.
+        let mut nodes = vec![plain("Match", 1, None), plain("Timer", 2, Some(1))];
+        // The legacy positional link agrees, for now.
+        nodes[1].parent = Some(0);
+
+        let by_id = node_id_positions(&nodes);
+        assert_eq!(resolve_parent(&nodes[1], &by_id), Some(0), "Timer starts under Match");
+
+        // Someone inserts two nodes AHEAD of the block — a script generating a
+        // UI layer, a hand edit, anything. Every positional index now names a
+        // different node; the stale ones are left exactly as they were.
+        nodes.insert(0, plain("Legend", 90, None));
+        nodes.insert(0, plain("Legend2", 91, None));
+        let by_id = node_id_positions(&nodes);
+
+        let timer = nodes.iter().find(|n| n.name == "Timer").unwrap();
+        let resolved = resolve_parent(timer, &by_id).map(|i| nodes[i].name.clone());
+        assert_eq!(resolved.as_deref(), Some("Match"), "the ID link survived the insertion");
+        // And the stale positional link is what would have been followed before:
+        // it now names something else entirely.
+        assert_eq!(timer.parent, Some(0));
+        assert_eq!(nodes[0].name, "Legend2", "index 0 is a DIFFERENT node now — the bug");
+    }
+
+    #[test]
+    fn a_scene_round_trips_its_parent_ids() {
+        let mut doc = demo();
+        doc.nodes = vec![plain("Root", 1, None), plain("Child", 2, Some(1))];
+        let text = to_ron(&doc).expect("serializes");
+        assert!(text.contains("parent_id"), "the stable link is written:\n{text}");
+        let back: SceneDoc = ron::from_str(&text).expect("re-parses");
+        let by_id = node_id_positions(&back.nodes);
+        assert_eq!(resolve_parent(&back.nodes[1], &by_id), Some(0));
+    }
+
+    /// A file with no ids at all — every scene written before this existed —
+    /// must load exactly as it always did.
+    #[test]
+    fn a_legacy_scene_still_links_by_index() {
+        let mut nodes = vec![plain("Root", 1, None), plain("Child", 2, None)];
+        for n in &mut nodes {
+            n.id = None;
+        }
+        nodes[1].parent = Some(0);
+        let by_id = node_id_positions(&nodes);
+        assert!(by_id.is_empty());
+        assert_eq!(resolve_parent(&nodes[1], &by_id), Some(0), "the index still governs");
+    }
+
+    #[test]
+    fn broken_wiring_is_reported_by_name() {
+        // A parent_id nothing carries.
+        let mut nodes = vec![plain("Root", 1, None), plain("Orphan", 2, Some(404))];
+        let out = validate_parents(&nodes);
+        assert!(out.iter().any(|l| l.contains("Orphan") && l.contains("404")), "{out:?}");
+
+        // An out-of-range positional index, on a legacy node.
+        nodes[1].parent_id = None;
+        nodes[1].parent = Some(99);
+        let out = validate_parents(&nodes);
+        assert!(out.iter().any(|l| l.contains("Orphan") && l.contains("99")), "{out:?}");
+
+        // A cycle.
+        let cyc = vec![plain("A", 1, Some(2)), plain("B", 2, Some(1))];
+        let out = validate_parents(&cyc);
+        assert!(out.iter().any(|l| l.contains("CYCLE")), "{out:?}");
+
+        // Two nodes claiming one id.
+        let dup = vec![plain("A", 7, None), plain("B", 7, None)];
+        let out = validate_parents(&dup);
+        assert!(out.iter().any(|l| l.contains("both claim node id 7")), "{out:?}");
+
+        // A healthy scene says nothing.
+        assert!(validate_parents(&[plain("Root", 1, None), plain("Kid", 2, Some(1))]).is_empty());
+    }
+
+    /// The lint for the shape that made this invisible rather than obviously
+    /// wrong: a UI element under a permanently invisible ancestor is never
+    /// drawn, in any mode, and nothing anywhere says why.
+    #[test]
+    fn a_ui_element_under_an_invisible_parent_is_reported() {
+        let mut panel = plain("Hidden Panel", 1, None);
+        panel.visible = false;
+        panel.ui = Some(floptle_ui::ElementSpec::default());
+        let mut label = plain("Score", 2, Some(1));
+        label.ui = Some(floptle_ui::ElementSpec::default());
+        let nodes = vec![panel, label];
+        let out = validate_ui_visibility(&nodes);
+        assert!(
+            out.iter().any(|l| l.contains("Score") && l.contains("Hidden Panel")),
+            "names both the element and what is hiding it: {out:?}"
+        );
+
+        // Visible parent: silent.
+        let mut ok_parent = plain("Panel", 1, None);
+        ok_parent.ui = Some(floptle_ui::ElementSpec::default());
+        let mut kid = plain("Score", 2, Some(1));
+        kid.ui = Some(floptle_ui::ElementSpec::default());
+        assert!(validate_ui_visibility(&[ok_parent, kid]).is_empty());
+    }
+
     fn demo() -> SceneDoc {
         SceneDoc {
             name: "demo".into(),
@@ -1747,6 +2020,8 @@ mod tests {
             },
             nodes: vec![
                 NodeDoc {
+                    id: None,
+                    parent_id: None,
                     name: "cube".into(),
                     transform: TransformDoc { translation: [1.0, 2.0, 3.0], ..Default::default() },
                     matter: MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.9, 0.4, 0.3] },
@@ -1874,6 +2149,8 @@ mod tests {
                     tags: vec!["enemy".into(), "boss".into()], // exercise the tags round-trip
                 },
                 NodeDoc {
+                    id: None,
+                    parent_id: None,
                     terrain_gen: None,
                     name: "blob".into(),
                     transform: TransformDoc::default(),
@@ -1905,6 +2182,8 @@ mod tests {
                     tags: Vec::new(),
                 },
                 NodeDoc {
+                    id: None,
+                    parent_id: None,
                     terrain_gen: None,
                     name: "lamp".into(),
                     transform: TransformDoc::default(),
@@ -1933,6 +2212,8 @@ mod tests {
                     tags: Vec::new(),
                 },
                 NodeDoc {
+                    id: None,
+                    parent_id: None,
                     terrain_gen: None,
                     name: "eye".into(),
                     transform: TransformDoc::default(),

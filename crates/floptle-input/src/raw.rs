@@ -24,6 +24,13 @@ pub struct PadState {
     /// False for a slot that has never been filled or whose pad unplugged. A
     /// disconnected pad reads fully neutral rather than freezing its last pose.
     pub connected: bool,
+    /// The device's reported name ("Xbox 360 Controller"). Empty when unknown —
+    /// a headless/test `RawInput` never has one, and the backend fills it on
+    /// connect. Carried here so a SCRIPT can answer "is there a controller at
+    /// all", which no action-shaped API could: every one of them reports the
+    /// resolved question, and "not bound" and "not present" read identically
+    /// through them. floptle/0047.
+    pub name: String,
     pub buttons: HashSet<PadButton>,
     /// Indexed by [`PadAxis::index`]; sticks are −1..1, triggers 0..1.
     pub axes: [f32; PadAxis::COUNT],
@@ -144,7 +151,12 @@ mod tests {
     use crate::source::{MouseAxis, PadControl, PadId};
 
     fn pad(axes: [f32; PadAxis::COUNT], buttons: &[PadButton]) -> PadState {
-        PadState { connected: true, buttons: buttons.iter().copied().collect(), axes }
+        PadState {
+            connected: true,
+            name: String::new(),
+            buttons: buttons.iter().copied().collect(),
+            axes,
+        }
     }
 
     #[test]

@@ -149,6 +149,8 @@ impl Editor {
         let tags = self.world.get::<floptle_core::Tags>(e).map(|t| t.0.clone()).unwrap_or_default();
         let terrain_gen = self.world.get::<floptle_core::TerrainGen>(e).map(|g| g.0.clone());
         Some(NodeDoc {
+            id: None,
+            parent_id: None,
             terrain_gen,
             name,
             transform,
@@ -295,6 +297,8 @@ impl Editor {
             None => TransformDoc { translation: [pos.x, pos.y, pos.z], ..Default::default() },
         };
         let node = NodeDoc {
+            id: None,
+            parent_id: None,
             terrain_gen: None,
             name: name.into(),
             transform,
@@ -343,6 +347,8 @@ impl Editor {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "mesh".into());
             let node = NodeDoc {
+                id: None,
+                parent_id: None,
                 terrain_gen: None,
                 name,
                 transform: TransformDoc {

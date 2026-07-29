@@ -280,13 +280,29 @@ fn resolve_axis1(
             let p = raw.held(*plus, slot, crate::map::DEFAULT_THRESHOLD);
             socd_axis(n, p, socd, memory)
         }
-        Axis1Binding::Analog { source, deadzone, sensitivity, invert, curve, gate } => {
+        Axis1Binding::Analog { source, player, deadzone, sensitivity, invert, curve, gate } => {
+            if player.is_some_and(|p| p != slot) {
+                return 0.0;
+            }
             if !gate_open(gate, raw, slot) {
                 return 0.0;
             }
-            let v = shape(raw.value(*source, slot), *deadzone, *curve, *sensitivity);
+            let v = shape(raw.value(own_pad(*source, *player, slot), slot), *deadzone, *curve, *sensitivity);
             if *invert { -v } else { v }
         }
+    }
+}
+
+/// A player-scoped binding reading `PadId::Any` means **that player's own pad**,
+/// not "the first pad anyone has plugged in". Without this, in a two-player game
+/// with one pad connected, player two borrows player one's stick — the binding
+/// form could express neither "this device" nor "this player's device".
+/// floptle/0043.
+fn own_pad(source: crate::source::Source, player: Option<u8>, slot: u8) -> crate::source::Source {
+    use crate::source::{PadId, Source as S};
+    match (source, player) {
+        (S::Pad { id: PadId::Any, ctrl }, Some(_)) => S::Pad { id: PadId::Slot(slot), ctrl },
+        _ => source,
     }
 }
 
@@ -318,10 +334,21 @@ fn resolve_axis2(
             let mag = (x * x + y * y).sqrt();
             if mag > 1.0 { (x / mag, y / mag) } else { (x, y) }
         }
-        Axis2Binding::Stick { id, x, y, deadzone, sensitivity, invert_y, curve } => {
+        Axis2Binding::Stick { id, x, y, player, deadzone, sensitivity, invert_y, curve } => {
             use crate::source::{PadControl, Source as S};
-            let rx = raw.value(S::Pad { id: *id, ctrl: PadControl::Axis(*x) }, slot);
-            let ry = raw.value(S::Pad { id: *id, ctrl: PadControl::Axis(*y) }, slot);
+            if player.is_some_and(|p| p != slot) {
+                return (0.0, 0.0);
+            }
+            // A player-scoped `Any` means THIS player's own pad, not "any
+            // player's pad" — otherwise a second player with no pad of their
+            // own silently mirrors the first player's stick. floptle/0043.
+            let id = if player.is_some() && *id == crate::source::PadId::Any {
+                crate::source::PadId::Slot(slot)
+            } else {
+                *id
+            };
+            let rx = raw.value(S::Pad { id, ctrl: PadControl::Axis(*x) }, slot);
+            let ry = raw.value(S::Pad { id, ctrl: PadControl::Axis(*y) }, slot);
             // RADIAL deadzone — a per-axis one would let the diagonals leak
             // drift through and would square off the stick's circle.
             let mag = (rx * rx + ry * ry).sqrt();
@@ -385,6 +412,7 @@ mod tests {
                         player: None,
                     },
                     Axis2Binding::Stick {
+                        player: None,
                         id: PadId::Any,
                         x: PadAxis::LeftStickX,
                         y: PadAxis::LeftStickY,
@@ -408,9 +436,131 @@ mod tests {
         axes[PadAxis::LeftStickX.index()] = x;
         axes[PadAxis::LeftStickY.index()] = y;
         RawInput {
-            pads: vec![PadState { connected: true, buttons: Default::default(), axes }],
+            pads: vec![PadState { connected: true, name: String::new(), buttons: Default::default(), axes }],
             ..Default::default()
         }
+    }
+
+    /// floptle/0043: two pads, two players, one axis. Before `Stick` carried a
+    /// `player`, the obvious map — `Slot(0)` and `Slot(1)` side by side — made
+    /// BOTH sticks contribute to BOTH players, and largest-magnitude-wins meant
+    /// whichever stick was pushed harder drove both characters at once.
+    #[test]
+    fn a_player_scoped_stick_reads_only_that_players_pad() {
+        let scoped = |slot: u8, id: PadId| Axis2Binding::Stick {
+            player: Some(slot),
+            id,
+            x: PadAxis::LeftStickX,
+            y: PadAxis::LeftStickY,
+            deadzone: 0.15,
+            sensitivity: 1.0,
+            invert_y: false,
+            curve: Curve::Linear,
+        };
+        // Two pads: P1's pushed full left, P2's pushed full right.
+        let mut raw = RawInput::default();
+        raw.pad_mut(0).connected = true;
+        raw.pad_mut(0).axes[PadAxis::LeftStickX.index()] = -1.0;
+        raw.pad_mut(1).connected = true;
+        raw.pad_mut(1).axes[PadAxis::LeftStickX.index()] = 1.0;
+
+        let map = InputMap {
+            axes2: vec![Axis2 {
+                name: "Move".into(),
+                socd: Socd::Neutral,
+                bindings: vec![scoped(0, PadId::Slot(0)), scoped(1, PadId::Slot(1))],
+            }],
+            players: 2,
+            ..Default::default()
+        };
+        let mut rt = ActionRuntime::new();
+        let (p1x, _) = rt.resolve(&map, &raw, 0, 1.0 / 60.0, AllowMask::ALL).axis2(0);
+        let mut rt2 = ActionRuntime::new();
+        let (p2x, _) = rt2.resolve(&map, &raw, 1, 1.0 / 60.0, AllowMask::ALL).axis2(0);
+        assert!(p1x < -0.5, "player one reads their OWN pad (left), got {p1x}");
+        assert!(p2x > 0.5, "player two reads their OWN pad (right), got {p2x}");
+
+        // The bug, demonstrated: the SAME map with the scope dropped — which is
+        // all that could be written before — leaks both pads into both players,
+        // so they read identically and one stick drives both fighters.
+        let unscoped = |id: PadId| Axis2Binding::Stick {
+            player: None,
+            id,
+            x: PadAxis::LeftStickX,
+            y: PadAxis::LeftStickY,
+            deadzone: 0.15,
+            sensitivity: 1.0,
+            invert_y: false,
+            curve: Curve::Linear,
+        };
+        let leaky = InputMap {
+            axes2: vec![Axis2 {
+                name: "Move".into(),
+                socd: Socd::Neutral,
+                bindings: vec![unscoped(PadId::Slot(0)), unscoped(PadId::Slot(1))],
+            }],
+            players: 2,
+            ..Default::default()
+        };
+        let mut a = ActionRuntime::new();
+        let mut b = ActionRuntime::new();
+        let leak1 = a.resolve(&leaky, &raw, 0, 1.0 / 60.0, AllowMask::ALL).axis2(0).0;
+        let leak2 = b.resolve(&leaky, &raw, 1, 1.0 / 60.0, AllowMask::ALL).axis2(0).0;
+        assert_eq!(leak1, leak2, "unscoped: one stick drives both players — the reported bug");
+    }
+
+    /// The other half: a player-scoped `Any` means *this player's own pad*, not
+    /// "any player's pad". With one pad connected, player two must read nothing
+    /// rather than mirroring player one — which is what the `Any` workaround
+    /// did, visible in local training as a dummy that walks with you.
+    #[test]
+    fn a_scoped_any_does_not_borrow_another_players_pad() {
+        let scoped = |slot: u8| Axis2Binding::Stick {
+            player: Some(slot),
+            id: PadId::Any,
+            x: PadAxis::LeftStickX,
+            y: PadAxis::LeftStickY,
+            deadzone: 0.15,
+            sensitivity: 1.0,
+            invert_y: false,
+            curve: Curve::Linear,
+        };
+        // ONE pad, in slot 0.
+        let mut raw = RawInput::default();
+        raw.pad_mut(0).connected = true;
+        raw.pad_mut(0).axes[PadAxis::LeftStickX.index()] = 1.0;
+
+        let map = InputMap {
+            axes2: vec![Axis2 {
+                name: "Move".into(),
+                socd: Socd::Neutral,
+                bindings: vec![scoped(0), scoped(1)],
+            }],
+            players: 2,
+            ..Default::default()
+        };
+        let mut rt = ActionRuntime::new();
+        let owner = rt.resolve(&map, &raw, 0, 1.0 / 60.0, AllowMask::ALL).axis2(0).0;
+        let mut rt2 = ActionRuntime::new();
+        let other = rt2.resolve(&map, &raw, 1, 1.0 / 60.0, AllowMask::ALL).axis2(0).0;
+        assert!(owner > 0.5, "the pad's owner reads it");
+        assert_eq!(
+            other,
+            0.0,
+            "a player with no pad of their own reads ZERO, not their neighbour's stick"
+        );
+    }
+
+    /// An UNSCOPED `Any` keeps its old meaning exactly — every existing map
+    /// depends on it, and the fix must not change single-player behaviour.
+    #[test]
+    fn an_unscoped_any_stick_is_unchanged() {
+        let mut raw = RawInput::default();
+        raw.pad_mut(0).connected = true;
+        raw.pad_mut(0).axes[PadAxis::LeftStickX.index()] = 1.0;
+        let mut rt = ActionRuntime::new();
+        let map = move_map(Socd::Neutral);
+        assert!(rt.resolve(&map, &raw, 0, 1.0 / 60.0, AllowMask::ALL).axis2(0).0 > 0.5);
     }
 
     #[test]
@@ -706,6 +856,7 @@ mod tests {
                         gate: vec![Source::Mouse(crate::source::MouseButton::Right)],
                     },
                     Axis2Binding::Stick {
+                        player: None,
                         id: PadId::Any,
                         x: PadAxis::RightStickX,
                         y: PadAxis::RightStickY,

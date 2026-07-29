@@ -219,7 +219,7 @@ mod tests {
         let mut axes = [0.0; PadAxis::COUNT];
         axes[PadAxis::LeftStickX.index()] = 0.2;
         let raw = RawInput {
-            pads: vec![PadState { connected: true, buttons: Default::default(), axes }],
+            pads: vec![PadState { connected: true, name: String::new(), buttons: Default::default(), axes }],
             ..Default::default()
         };
         assert!(capture(&raw, BindFilter::AnyButton, 0, false).is_none());
@@ -231,7 +231,7 @@ mod tests {
         let mut axes = [0.0; PadAxis::COUNT];
         axes[PadAxis::RightStickY.index()] = -0.9;
         let raw = RawInput {
-            pads: vec![PadState { connected: true, buttons: Default::default(), axes }],
+            pads: vec![PadState { connected: true, name: String::new(), buttons: Default::default(), axes }],
             ..Default::default()
         };
         let c = capture(&raw, BindFilter::AxisOnly, 0, false).unwrap();
@@ -247,7 +247,7 @@ mod tests {
         axes[PadAxis::LeftStickX.index()] = 0.75;
         axes[PadAxis::RightStickX.index()] = 0.98;
         let raw = RawInput {
-            pads: vec![PadState { connected: true, buttons: Default::default(), axes }],
+            pads: vec![PadState { connected: true, name: String::new(), buttons: Default::default(), axes }],
             ..Default::default()
         };
         let c = capture(&raw, BindFilter::AxisOnly, 0, false).unwrap();

@@ -1740,6 +1740,51 @@ impl ScriptHost {
 
     /// Fire a `net.on(event, fn)` handler set — `playerJoined`/`playerLeft`
     /// carry the peer id, `disconnected` a reason string, `connected` nothing.
+    /// Fire `net.on("desync")` with a table the game can actually act on:
+    /// `{ tick = n, node = "Player2" }`.
+    ///
+    /// It used to fire with no payload at all — not the tick, not the node, not
+    /// the script, not the key — so a game could not tell a player whether
+    /// their connection or their build was at fault, and "desynced",
+    /// "disconnected" and "opponent quit" all reached them as the same thing:
+    /// the game closed the match. Which is what they reported. floptle/0045.
+    pub fn fire_desync(&mut self, world: &mut World, tick: u64, node: Option<&str>) {
+        let payload = self.lua.create_table().ok().inspect(|t| {
+            let _ = t.set("tick", tick);
+            if let Some(n) = node {
+                let _ = t.set("node", n.to_string());
+            }
+        });
+        let handlers: Vec<(u32, String, mlua::Function)> = {
+            let hs = self.net.handlers.borrow();
+            hs.iter()
+                .filter(|h| h.event == "desync")
+                .filter_map(|h| {
+                    self.lua
+                        .registry_value::<mlua::Function>(&h.key)
+                        .ok()
+                        .map(|f| (h.eid, h.kind.clone(), f))
+                })
+                .collect()
+        };
+        let mut called = false;
+        for (eid, kind, f) in handlers {
+            *self.net.current.borrow_mut() = Some((eid, kind.clone()));
+            let r = match &payload {
+                Some(t) => f.call::<()>(t.clone()),
+                None => f.call::<()>(()),
+            };
+            *self.net.current.borrow_mut() = None;
+            called = true;
+            if let Err(err) = r {
+                self.record_error(&kind, format!("{kind}: net.on(\"desync\"): {err}"));
+            }
+        }
+        if called {
+            self.flush_scene(world);
+        }
+    }
+
     pub fn fire_net_event(
         &mut self,
         world: &mut World,
@@ -1992,13 +2037,32 @@ impl ScriptHost {
         let mut out = crate::rollback_api::ScriptState::default();
         for (kind, env) in self.script_kinds_on(eid) {
             let Ok(Some(f)) = env.raw_get::<Option<mlua::Function>>("snapshot") else { continue };
-            let v = match f.call::<mlua::Value>(()) {
-                Ok(v) => v,
+            // A SECOND return value is the cosmetic half: restored on rollback,
+            // never hashed. Multi-return rather than a `{state=, cosmetic=}`
+            // table so it cannot be confused with a state table that happens to
+            // use those keys — and so every existing one-value `snapshot()`
+            // keeps its exact meaning, with the second value simply nil.
+            // floptle/0045.
+            let (v, cosmetic) = match f.call::<(mlua::Value, mlua::Value)>(()) {
+                Ok(pair) => pair,
                 Err(e) => {
                     self.fail(&kind, format!("{kind}: snapshot() failed — {e}"));
                     continue;
                 }
             };
+            if !matches!(cosmetic, mlua::Value::Nil) {
+                match crate::net_api::lua_to_netvalue_max(
+                    &cosmetic,
+                    0,
+                    crate::rollback_api::MAX_STATE_DEPTH,
+                ) {
+                    Ok(nv) => out.cosmetic.push((kind.clone(), nv)),
+                    Err(e) => self.fail(
+                        &kind,
+                        format!("{kind}: snapshot()'s cosmetic half can't be rolled back — {e}"),
+                    ),
+                }
+            }
             match crate::net_api::lua_to_netvalue_max(
                 &v,
                 0,
@@ -2034,7 +2098,16 @@ impl ScriptHost {
                     continue;
                 }
             };
-            if let Err(e) = f.call::<()>(v) {
+            // The cosmetic half rides as a second argument, mirroring
+            // `snapshot()`'s second return. A `restore(s)` that ignores it is
+            // unaffected.
+            let c = state
+                .cosmetic
+                .iter()
+                .find(|(k, _)| *k == kind)
+                .and_then(|(_, nv)| crate::net_api::netvalue_to_lua(&self.lua, nv).ok())
+                .unwrap_or(mlua::Value::Nil);
+            if let Err(e) = f.call::<()>((v, c)) {
                 self.fail(&kind, format!("{kind}: restore() failed — {e}"));
             }
         }

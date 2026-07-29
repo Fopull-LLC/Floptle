@@ -365,6 +365,65 @@ impl RollbackDriver {
     /// Transforms are deliberately NOT hashed. Rotation on a fighter is derived
     /// presentation (which way the model faces), and a checksum that fires on
     /// divergence the simulation cannot feel is the same cried wolf.
+    /// The same fold `state_hash` performs, but **labelled** and one hash per
+    /// leaf value instead of one hash for everything.
+    ///
+    /// A checksum knows exactly which value diverged and used to carry none of
+    /// it: `net.on("desync")` fired with no payload at all — not the tick, not
+    /// the node, not the script, not the key. So a match that ended itself left
+    /// the game unable to tell a player whether their connection or their build
+    /// was at fault, and finding the real cause (one Lua number smoothed with
+    /// `math.exp`, which is not required to agree across libm implementations)
+    /// took a day of reading engine source. floptle/0045.
+    ///
+    /// Costs nothing in a healthy session: it is only ever built once a
+    /// mismatch has already been declared fatal.
+    pub fn state_breakdown(
+        &self,
+        tick: u64,
+        names: &std::collections::HashMap<u32, String>,
+    ) -> Vec<(String, u64)> {
+        let Some(s) = self.ring.iter().find(|s| s.tick == tick) else { return Vec::new() };
+        let mut out = Vec::new();
+        for (i, node) in self.nodes.iter().enumerate() {
+            let who = names.get(&node.eid).cloned().unwrap_or_else(|| format!("#{}", node.eid));
+            if let Some(Some(b)) = s.bodies.get(i) {
+                let mut h = floptle_net::Fnv::new();
+                for v in [b.pos.x, b.pos.y, b.pos.z] {
+                    h.eat(&v.to_bits().to_le_bytes());
+                }
+                for v in [b.vel.x, b.vel.y, b.vel.z] {
+                    h.eat(&v.to_bits().to_le_bytes());
+                }
+                h.eat(&[b.grounded as u8]);
+                out.push((format!("{who}/body"), h.0));
+            }
+            let Some(state) = s.scripts.get(i) else { continue };
+            let mut kinds: Vec<&(String, floptle_net::NetValue)> = state.entries.iter().collect();
+            kinds.sort_by(|a, b| a.0.cmp(&b.0));
+            for (kind, v) in kinds {
+                // One entry per KEY where the snapshot is a table, so the report
+                // can name `st.visYaw` rather than "this script".
+                match v {
+                    floptle_net::NetValue::Table(pairs) => {
+                        let mut keyed: Vec<&(floptle_net::NetValue, floptle_net::NetValue)> =
+                            pairs.iter().collect();
+                        keyed.sort_by_key(|a| a.0.canonical_hash());
+                        for (k, val) in keyed {
+                            let key = match k {
+                                floptle_net::NetValue::Str(s) => s.clone(),
+                                other => format!("{:?}", other),
+                            };
+                            out.push((format!("{who}/{kind}/{key}"), val.canonical_hash()));
+                        }
+                    }
+                    other => out.push((format!("{who}/{kind}"), other.canonical_hash())),
+                }
+            }
+        }
+        out
+    }
+
     pub fn state_hash(&self, tick: u64) -> Option<u64> {
         let s = self.ring.iter().find(|s| s.tick == tick)?;
         let mut h = floptle_net::Fnv::new();

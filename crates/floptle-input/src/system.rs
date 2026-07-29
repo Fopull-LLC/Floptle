@@ -70,6 +70,9 @@ pub struct InputSystem {
     /// of that. It is outside the simulation and therefore outside
     /// [`TickSnapshot`], for the same reason the frame domain is.
     sample: Vec<ActionRuntime>,
+    /// Last frame's device snapshot — what `input.pads()` reports. Read-only
+    /// reporting of state the frame already holds; no new ownership. floptle/0047.
+    pads: Vec<crate::raw::PadState>,
     frame_state: Vec<ActionState>,
     tick_state: Vec<ActionState>,
     history: Vec<History>,
@@ -90,6 +93,7 @@ impl Default for InputSystem {
 impl InputSystem {
     pub fn new(map: InputMap) -> Self {
         let mut s = Self {
+            pads: Vec::new(),
             map,
             frame: Vec::new(),
             tick: Vec::new(),
@@ -186,7 +190,23 @@ impl InputSystem {
     // --- resolution -------------------------------------------------------
 
     /// Resolve every player for the render-frame domain.
+    /// The devices as of the last resolved frame: index-stable, connected flag,
+    /// and the pad's reported name. floptle/0047.
+    pub fn pads(&self) -> &[crate::raw::PadState] {
+        &self.pads
+    }
+
+    /// How many pads are currently connected.
+    pub fn pad_count(&self) -> usize {
+        self.pads.iter().filter(|p| p.connected).count()
+    }
+
     pub fn resolve_frame(&mut self, raw: &RawInput, dt: f32) {
+        // Snapshot the devices so a SCRIPT can ask "is there a controller here"
+        // — the action API can only ever answer the resolved question, so
+        // "not bound" and "not plugged in" are indistinguishable through it.
+        // floptle/0047.
+        self.pads = raw.pads.clone();
         let allow = self.contexts.allow_mask(&self.map);
         for slot in 0..self.players() {
             self.frame_state[slot] =

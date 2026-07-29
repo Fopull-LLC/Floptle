@@ -243,6 +243,64 @@ pub fn install(lua: &Lua, t: &Table, sys: &SharedInput, domain: &SharedDomain) {
         .ok(),
     );
 
+    // --- devices (global, not per-player) ----------------------------------
+    //
+    // Every other function here answers the RESOLVED question — did this player
+    // press Light. None of them can answer the one underneath it: is there a
+    // controller here at all. So "the pad was never enumerated", "it was
+    // enumerated into a slot the map doesn't bind", "the window hasn't got
+    // focus" and "something downstream ate it" all reach the developer as the
+    // same sentence — "controllers don't work" — which is not actionable, and
+    // costs a build-ship-ask-wait round trip per guess. floptle/0047.
+    let s = sys.clone();
+    let _ = t.set(
+        "pads",
+        lua.create_function(move |lua, ()| {
+            let out = lua.create_table()?;
+            for (i, p) in s.borrow().pads().iter().enumerate() {
+                let e = lua.create_table()?;
+                e.set("index", i + 1)?; // 1-based, like `input.player(n)`
+                e.set("name", p.name.clone())?;
+                e.set("connected", p.connected)?;
+                out.set(i + 1, e)?;
+            }
+            Ok(out)
+        })
+        .ok(),
+    );
+
+    let s = sys.clone();
+    let _ = t.set(
+        "padCount",
+        lua.create_function(move |_, ()| Ok(s.borrow().pad_count())).ok(),
+    );
+
+    // Raw read-through, unmediated by the action map. This is the difference
+    // between "your pad works, your bindings are wrong" and "your pad is not
+    // here" — and only the raw read can tell them apart.
+    let s = sys.clone();
+    let _ = t.set(
+        "padButton",
+        lua.create_function(move |_, (pad, name): (usize, String)| {
+            let Some(b) = floptle_input::PadButton::from_name(&name) else { return Ok(false) };
+            Ok(s.borrow()
+                .pads()
+                .get(pad.saturating_sub(1))
+                .is_some_and(|p| p.connected && p.button(b)))
+        })
+        .ok(),
+    );
+
+    let s = sys.clone();
+    let _ = t.set(
+        "padAxis",
+        lua.create_function(move |_, (pad, name): (usize, String)| {
+            let Some(a) = floptle_input::PadAxis::from_name(&name) else { return Ok(0.0f32) };
+            Ok(s.borrow().pads().get(pad.saturating_sub(1)).map_or(0.0, |p| p.axis(a)))
+        })
+        .ok(),
+    );
+
     // --- contexts (global, not per-player) ---------------------------------
     let s = sys.clone();
     let _ = t.set(
@@ -313,6 +371,71 @@ mod tests {
         assert!(lua.load(r#"return input.action("Punch")"#).eval::<bool>().unwrap());
         assert!(lua.load(r#"return input.justPressed("Punch")"#).eval::<bool>().unwrap());
         assert!(!lua.load(r#"return input.action("Kick")"#).eval::<bool>().unwrap());
+    }
+
+    /// floptle/0047: a script can tell "no controller here" from "controller
+    /// here, bindings wrong" — the distinction the action API cannot express,
+    /// and the one that turns "controllers don't work" into something
+    /// actionable without another build-ship-ask round trip.
+    #[test]
+    fn a_script_can_see_the_pads() {
+        let (lua, sys, _d) = fixture();
+
+        // Nothing plugged in: an empty list, and that is the answer.
+        sys.borrow_mut().resolve_frame(&RawInput::default(), 0.016);
+        assert_eq!(lua.load("return #input.pads()").eval::<usize>().unwrap(), 0);
+        assert_eq!(lua.load("return input.padCount()").eval::<usize>().unwrap(), 0);
+
+        // One pad, named, with a button down and a stick pushed.
+        let mut raw = RawInput::default();
+        let pad = raw.pad_mut(0);
+        pad.connected = true;
+        pad.name = "Xbox 360 Controller".into();
+        pad.buttons.insert(floptle_input::PadButton::South);
+        pad.axes[floptle_input::PadAxis::LeftStickX.index()] = 0.75;
+        sys.borrow_mut().resolve_frame(&raw, 0.016);
+
+        assert_eq!(lua.load("return #input.pads()").eval::<usize>().unwrap(), 1);
+        assert_eq!(lua.load("return input.padCount()").eval::<usize>().unwrap(), 1);
+        assert_eq!(
+            lua.load("return input.pads()[1].name").eval::<String>().unwrap(),
+            "Xbox 360 Controller",
+            "the device NAMES itself — that is what makes the readout diagnostic"
+        );
+        assert!(lua.load("return input.pads()[1].connected").eval::<bool>().unwrap());
+        assert_eq!(lua.load("return input.pads()[1].index").eval::<usize>().unwrap(), 1);
+
+        // The raw read-through: no action binding involved anywhere.
+        assert!(lua.load(r#"return input.padButton(1, "South")"#).eval::<bool>().unwrap());
+        assert!(lua.load(r#"return input.padButton(1, "south")"#).eval::<bool>().unwrap());
+        assert!(!lua.load(r#"return input.padButton(1, "North")"#).eval::<bool>().unwrap());
+        let x = lua.load(r#"return input.padAxis(1, "LeftStickX")"#).eval::<f32>().unwrap();
+        assert!((x - 0.75).abs() < 1e-6, "got {x}");
+
+        // Hot-unplug: the list must follow, or a game would report a pad that
+        // has physically gone.
+        let mut gone = RawInput::default();
+        gone.pad_mut(0).connected = false;
+        sys.borrow_mut().resolve_frame(&gone, 0.016);
+        assert!(!lua.load("return input.pads()[1].connected").eval::<bool>().unwrap());
+        assert_eq!(lua.load("return input.padCount()").eval::<usize>().unwrap(), 0);
+        assert!(
+            !lua.load(r#"return input.padButton(1, "South")"#).eval::<bool>().unwrap(),
+            "a disconnected pad reads neutral, not its last pose"
+        );
+    }
+
+    /// A typo in a device name must not abort the update, exactly like an
+    /// unknown action name.
+    #[test]
+    fn unknown_pad_names_and_indices_are_quiet() {
+        let (lua, sys, _d) = fixture();
+        let mut raw = RawInput::default();
+        raw.pad_mut(0).connected = true;
+        sys.borrow_mut().resolve_frame(&raw, 0.016);
+        assert!(!lua.load(r#"return input.padButton(1, "Souht")"#).eval::<bool>().unwrap());
+        assert_eq!(lua.load(r#"return input.padAxis(9, "LeftStickX")"#).eval::<f32>().unwrap(), 0.0);
+        assert!(!lua.load(r#"return input.padButton(9, "South")"#).eval::<bool>().unwrap());
     }
 
     #[test]

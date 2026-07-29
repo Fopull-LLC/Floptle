@@ -14,7 +14,7 @@ use crate::PeerId;
 
 /// Bump when the wire format changes incompatibly; mismatched peers are
 /// refused at hello time instead of desyncing mysteriously later.
-pub const PROTO_VERSION: u16 = 12;
+pub const PROTO_VERSION: u16 = 13;
 
 /// Confirmed ticks between rollback state checksums (§6) — twice a second at
 /// 60 Hz. Often enough that a desync is caught within a exchange or two, rare
@@ -267,6 +267,15 @@ pub enum Msg {
     /// `net.on("desync")` so the game can end the match honestly rather than
     /// play out two different fights.
     Desync { tick: u64 },
+    /// Any peer → host, ONCE, after a `Desync`: that peer's labelled per-value
+    /// breakdown of the offending tick.
+    ///
+    /// Sent only after the match is already lost, so it costs nothing in a
+    /// healthy session — and it is the difference between "desynced" and
+    /// `Player2/fighterController/visYaw`. Without it the checksum knew exactly
+    /// which value diverged and reported none of it, and finding the real cause
+    /// meant reading engine source for a day. floptle/0045.
+    StateDetail { tick: u64, entries: Vec<(String, u64)> },
     /// Server → one client, periodically: input-timing feedback. `margin` is
     /// the smoothed number of ticks of that client's input still buffered
     /// ahead when the server consumes one (negative = arriving LATE,
@@ -367,6 +376,7 @@ mod tests {
                 ],
             },
             Msg::StateHash { tick: 90, hash: 0xdead_beef_cafe_f00d },
+            Msg::StateDetail { tick: 90, entries: vec![("P1/ctl/x".into(), 7)] },
             Msg::Desync { tick: 90 },
         ] {
             assert_eq!(Msg::decode(&m.encode()), Some(m.clone()), "{m:?}");

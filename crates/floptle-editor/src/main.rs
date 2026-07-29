@@ -1619,6 +1619,9 @@ struct Editor {
     /// template, or (source checkouts only) building one. Polled each frame;
     /// the export finishes when its binary lands.
     export_job: Option<export::ExportJob>,
+    /// Desynced ticks whose per-value breakdowns have not all arrived yet —
+    /// the reports cross the wire after the desync itself. floptle/0045.
+    net_desync_pending: Vec<u64>,
     /// The tick input snapshot most recently fed to `fixedUpdate` — cloned so
     /// prediction can record + ship exactly what the scripts saw.
     last_tick_input: floptle_script::InputSnapshot,
@@ -2093,6 +2096,7 @@ impl ApplicationHandler for Editor {
         let (scene_file, doc) = self.load_active_scene();
         self.set_scene_file(&scene_file);
         floptle_scene::spawn_into(&doc, &mut self.world);
+        self.report_scene_wiring(&doc);
         self.adopt_terrain();
         // NOTE: adopt_paint/adopt_tex_paint happen AFTER `self.gpu = Some(..)` below —
         // both allocate GPU blocks/textures, and at this point gpu/raster are still

@@ -666,6 +666,52 @@ impl Editor {
         );
     }
 
+    /// Name the value the peers disagreed about, once their breakdowns arrive.
+    ///
+    /// The breakdown crosses the wire AFTER the desync, so this runs on later
+    /// frames until the reports are in. What it prints is the thing the ticket
+    /// asked for and the checksum always knew:
+    ///
+    /// ```text
+    /// ⚖ tick 4127 — Player2/fighterController/visYaw differs (peer 0: a3f1…, peer 1: a3f2…)
+    /// ```
+    fn net_rollback_name_the_divergence(&mut self) {
+        let pending = std::mem::take(&mut self.net_desync_pending);
+        let mut still = Vec::new();
+        for tick in pending {
+            let detail = match (self.net_server.as_mut(), self.net_play_client.as_mut()) {
+                (Some(s), _) => s.take_desync_detail(tick),
+                (_, Some(c)) => c.take_desync_detail(tick),
+                _ => Vec::new(),
+            };
+            if detail.is_empty() {
+                still.push(tick); // reports not in yet
+                continue;
+            }
+            for (label, per_peer) in detail.iter().take(6) {
+                let who: Vec<String> =
+                    per_peer.iter().map(|(p, h)| format!("peer {p}: {:016x}", h)).collect();
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("⚖ tick {tick} — {label} differs ({})", who.join(", ")),
+                    None,
+                );
+            }
+            if detail.len() > 6 {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("⚖ …and {} more value(s) at tick {tick}", detail.len() - 6),
+                    None,
+                );
+            }
+        }
+        // Give a straggling report a few frames before giving up on it.
+        self.net_desync_pending = still;
+        if self.net_desync_pending.len() > 8 {
+            self.net_desync_pending.remove(0);
+        }
+    }
+
     /// Once a second while a match is stalled, say who we are waiting for.
     ///
     /// Silent while the match is healthy — a line per second in a working
@@ -763,17 +809,38 @@ impl Editor {
                 format!(
                     "🥊 DESYNC at tick {tick} — the peers' simulations no longer agree. From \
                      here the two machines are playing different matches. Usual causes: a \
-                     gameplay value outside snapshot()/restore(), an unseeded rng(), or a \
+                     gameplay value outside snapshot()/restore(), an unseeded rng(), a \
                      read of node.x inside fixedUpdate (that is the interpolated render pose \
-                     — use node.tickPos)."
+                     — use node.tickPos), or a libm call (exp/log/sin/cos/pow) whose last \
+                     bit differs between platforms."
                 ),
                 None,
             );
+            // Post-mortem: publish OUR breakdown of the offending tick so the
+            // host can name the value that actually diverged. Costs nothing in
+            // a healthy session — it only ever runs once the match is lost.
+            let names: std::collections::HashMap<u32, String> = self
+                .world
+                .query::<floptle_core::Name>()
+                .map(|(e, n)| (e.index(), n.0.clone()))
+                .collect();
+            if let Some(d) = self.net_rollback.as_ref() {
+                let detail = d.state_breakdown(tick, &names);
+                if !detail.is_empty() {
+                    match (self.net_server.as_mut(), self.net_play_client.as_mut()) {
+                        (Some(s), _) => s.send_state_detail(tick, detail),
+                        (_, Some(c)) => c.send_state_detail(tick, detail),
+                        _ => {}
+                    }
+                }
+            }
             if let Some(d) = self.net_rollback.as_mut() {
                 d.desynced = true;
             }
-            self.script_host.fire_net_event(&mut self.world, "desync", None, None);
+            self.net_desync_pending.push(tick);
+            self.script_host.fire_desync(&mut self.world, tick, None);
         }
+        self.net_rollback_name_the_divergence();
     }
 }
 

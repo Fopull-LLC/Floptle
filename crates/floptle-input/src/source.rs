@@ -283,6 +283,12 @@ pub enum PadButton {
 }
 
 impl PadButton {
+    /// Look a button up by its variant name ("South", "leftbumper"), case-
+    /// insensitively — what a script names it. floptle/0047.
+    pub fn from_name(name: &str) -> Option<PadButton> {
+        Self::ALL.iter().copied().find(|b| format!("{b:?}").eq_ignore_ascii_case(name))
+    }
+
     pub const ALL: &'static [PadButton] = &[
         PadButton::South,
         PadButton::East,
@@ -340,6 +346,12 @@ pub enum PadAxis {
 }
 
 impl PadAxis {
+    /// Look an axis up by its variant name ("LeftStickX"), case-insensitively.
+    /// floptle/0047.
+    pub fn from_name(name: &str) -> Option<PadAxis> {
+        Self::ALL.iter().copied().find(|a| format!("{a:?}").eq_ignore_ascii_case(name))
+    }
+
     pub const ALL: &'static [PadAxis] = &[
         PadAxis::LeftStickX,
         PadAxis::LeftStickY,
