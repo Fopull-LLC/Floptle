@@ -42,6 +42,7 @@ mod assets_ui;
 mod console;
 mod curve_edit;
 mod dock;
+mod export;
 mod gizmo;
 mod hierarchy;
 mod history;
@@ -819,7 +820,7 @@ fn main() {
             }
             "--help" | "-h" => {
                 println!(
-                    "{} editor {}\n\nUSAGE:\n  floptle-editor [PROJECT_DIR]              open a project (default: assets/)\n  floptle-editor --play [PROJECT_DIR]      run the project as a GAME (no editor UI; F1 = multiplayer menu)\n  floptle-editor --new <DIR>               scaffold a new project and exit\n  floptle-editor --migrate <DIR>           migrate a project's assets to this version and exit\n  floptle-editor --extract-clips <DIR> <MODEL>  re-bake a model's embedded glTF clips and exit\n  floptle-editor --engine-version <V>      version to stamp for --new/--migrate (Hub-driven)\n  floptle-editor --version                 print the engine version and exit\n\nA floptle-game.ron manifest next to the binary (File \u{2192} Export Game\u{2026}) implies --play.",
+                    "{} editor {}\n\nUSAGE:\n  floptle-editor [PROJECT_DIR]              open a project (default: assets/)\n  floptle-editor --play [PROJECT_DIR]      run the project as a GAME (no editor UI; F1 = multiplayer menu)\n  floptle-editor --new <DIR>               scaffold a new project and exit\n  floptle-editor --export <PROJ> <OUT> <PLATFORM> [TITLE]  stamp a build and exit\n                                           PLATFORM: host | windows-x86_64 | linux-x86_64 | macos-aarch64 | macos-x86_64\n  floptle-editor --migrate <DIR>           migrate a project's assets to this version and exit\n  floptle-editor --extract-clips <DIR> <MODEL>  re-bake a model's embedded glTF clips and exit\n  floptle-editor --engine-version <V>      version to stamp for --new/--migrate (Hub-driven)\n  floptle-editor --version                 print the engine version and exit\n\nA floptle-game.ron manifest next to the binary (File \u{2192} Export Game\u{2026}) implies --play.",
                     floptle_core::ENGINE_NAME, distribution_version()
                 );
                 return;
@@ -869,6 +870,33 @@ fn main() {
                     }
                 }
             }
+            // Headless build: no window, no GPU. Scriptable, and the path CI
+            // uses to prove exporting for another platform actually works.
+            "--export" => {
+                let proj = args.get(i + 1).filter(|p| !p.starts_with('-'));
+                let out = args.get(i + 2).filter(|p| !p.starts_with('-'));
+                let plat = args.get(i + 3).filter(|p| !p.starts_with('-'));
+                let (Some(proj), Some(out), Some(plat)) = (proj, out, plat) else {
+                    eprintln!("--export needs <project_dir> <out_dir> <platform>");
+                    std::process::exit(2);
+                };
+                let title = args
+                    .get(i + 4)
+                    .filter(|t| !t.starts_with('-'))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        Path::new(proj)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "game".into())
+                    });
+                std::process::exit(export::headless_export(
+                    Path::new(proj),
+                    Path::new(out),
+                    plat,
+                    &title,
+                ));
+            }
             "--play" => player_mode = true,
             s if !s.starts_with('-') => project_path = Some(PathBuf::from(s)),
             other => {
@@ -884,14 +912,19 @@ fn main() {
     let mut game_title = String::new();
     if !player_mode
         && project_path.is_none()
-        && let Some((manifest, dir)) = load_game_manifest()
+        && let Some((manifest, dir)) = export::load_game_manifest()
     {
         player_mode = true;
         game_title = manifest.title;
         project_path = Some(dir.join(manifest.project));
     }
 
-    println!("{} editor v{}", floptle_core::ENGINE_NAME, distribution_version());
+    if player_mode {
+        let name = if game_title.is_empty() { "game".to_string() } else { game_title.clone() };
+        println!("{name} — {} v{}", floptle_core::ENGINE_NAME, distribution_version());
+    } else {
+        println!("{} editor v{}", floptle_core::ENGINE_NAME, distribution_version());
+    }
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     // Gizmos/overlays on by default (toggle in the viewport) — but never in a build.
@@ -901,476 +934,6 @@ fn main() {
         editor.project_root = p;
     }
     event_loop.run_app(&mut editor).expect("run editor");
-}
-
-/// The manifest File ⏵ Export Game… writes next to the binary. Its presence
-/// turns the binary into a game player; `project` is the assets folder
-/// relative to the manifest.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct GameManifest {
-    title: String,
-    project: String,
-}
-
-/// A `floptle-game.ron` beside the running binary, if any → (manifest, its dir).
-fn load_game_manifest() -> Option<(GameManifest, PathBuf)> {
-    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    let text = std::fs::read_to_string(dir.join("floptle-game.ron")).ok()?;
-    match ron::from_str::<GameManifest>(&text) {
-        Ok(m) => Some((m, dir)),
-        Err(e) => {
-            eprintln!("floptle-game.ron next to the binary is invalid ({e}); starting as editor");
-            None
-        }
-    }
-}
-
-impl Editor {
-    /// Export Game… clicked: native targets export immediately from our own
-    /// binary; cross targets spawn a background `cargo build` and the export
-    /// finishes when it lands (see [`Self::poll_export_build`]).
-    fn begin_export(&mut self, dir: String, target: usize) {
-        let dir = self.resolve_export_dir(&dir).display().to_string();
-        let title = if self.export_title.trim().is_empty() {
-            self.project_root
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "game".into())
-        } else {
-            self.export_title.trim().to_string()
-        };
-        let target = target.min(EXPORT_TARGETS.len() - 1);
-        let t = &EXPORT_TARGETS[target];
-        match t.kind {
-            ExportKind::SelfBinary => {
-                // A `cargo run` (debug) editor must not ship ITSELF — a debug
-                // binary is huge (~600 MB) and slow. With the source checkout
-                // around, build the release binary in the background exactly
-                // like a cross target. A release editor (a Hub install, where
-                // no checkout exists) IS the shipping binary: export directly.
-                if cfg!(debug_assertions) && repo_root().is_some() {
-                    self.begin_export_build(None, dir, title, target);
-                } else {
-                    let result =
-                        std::env::current_exe().map_err(|e| e.to_string()).and_then(|exe| {
-                            export_game_with(&self.project_root, Path::new(&dir), &title, &exe, t)
-                        });
-                    self.finish_export(result);
-                }
-            }
-            ExportKind::Prebuilt(rel) => {
-                let result = repo_root()
-                    .ok_or_else(|| {
-                        "prebuilt-binary exports need the engine source checkout this editor \
-                         was built from"
-                            .to_string()
-                    })
-                    .and_then(|root| {
-                        let bin = root.join(rel);
-                        if bin.is_file() {
-                            export_game_with(&self.project_root, Path::new(&dir), &title, &bin, t)
-                        } else {
-                            Err(format!(
-                                "no {} binary at {} — push the repo, run the `macos-binary` \
-                                 workflow (GitHub ⏵ Actions ⏵ Run workflow), download its \
-                                 artifact, untar, and put the binary there",
-                                t.label,
-                                bin.display()
-                            ))
-                        }
-                    });
-                self.finish_export(result);
-            }
-            ExportKind::CargoCross(triple) => {
-                self.begin_export_build(Some(triple), dir, title, target);
-            }
-        }
-    }
-
-    /// Spawn the background release build an export waits on (a cross target,
-    /// or the host release binary when a debug editor exports "This machine").
-    fn begin_export_build(
-        &mut self,
-        triple: Option<&'static str>,
-        out_dir: String,
-        title: String,
-        target: usize,
-    ) {
-        if self.export_build.is_some() {
-            self.export_status = Some("a target build is already running…".into());
-            return;
-        }
-        let log = std::env::temp_dir().join("floptle-export-build.log");
-        match spawn_export_build(triple, &log) {
-            Ok(child) => {
-                self.export_status = Some(format!(
-                    "🔨 building the release {} binary — the export finishes when it's done \
-                     (first build takes minutes; log: {})",
-                    EXPORT_TARGETS[target].label,
-                    log.display()
-                ));
-                self.export_build =
-                    Some(ExportBuild { child, out_dir, title, target, log, started: Instant::now() });
-            }
-            Err(e) => self.finish_export(Err(e)),
-        }
-    }
-
-    fn finish_export(&mut self, result: Result<(String, PathBuf), String>) {
-        let (level, line) = match result {
-            Ok((msg, dir)) => {
-                self.export_done = Some(dir);
-                (floptle_script::LogLevel::Debug, format!("✅ {msg}"))
-            }
-            Err(e) => {
-                self.export_done = None;
-                (floptle_script::LogLevel::Error, format!("📦 export failed: {e}"))
-            }
-        };
-        self.console.push(level, line.clone(), None);
-        self.export_status = Some(line);
-    }
-
-    /// Where a typed export folder actually lands: absolute paths as-is;
-    /// relative paths resolve against the PROJECT's parent folder (predictable
-    /// and next to your work — never the process's working directory, which
-    /// depends on how the editor was launched).
-    pub(crate) fn resolve_export_dir(&self, dir: &str) -> PathBuf {
-        let p = Path::new(dir.trim());
-        if p.is_absolute() {
-            return p.to_path_buf();
-        }
-        // A relative project root (the default `assets/`) would make the result
-        // CWD-relative after all — pin it to the CWD explicitly so the resolved
-        // path we display is the path we actually write.
-        let root = if self.project_root.is_absolute() {
-            self.project_root.clone()
-        } else {
-            std::env::current_dir().unwrap_or_default().join(&self.project_root)
-        };
-        root.parent().map(Path::to_path_buf).unwrap_or(root).join(p)
-    }
-
-    /// Once per frame: reap a finished cross-target build and complete its
-    /// export with the binary it produced.
-    pub(crate) fn poll_export_build(&mut self) {
-        let done = match self.export_build.as_mut() {
-            Some(b) => !matches!(b.child.try_wait(), Ok(None)),
-            None => return,
-        };
-        if !done {
-            return;
-        }
-        let mut b = self.export_build.take().expect("checked above");
-        let status = b.child.wait();
-        let t = &EXPORT_TARGETS[b.target];
-        let triple = match t.kind {
-            ExportKind::CargoCross(tr) => Some(tr),
-            _ => None,
-        };
-        let result = match status {
-            Ok(s) if s.success() => {
-                match export_binary_path(triple, t.exe_suffix) {
-                    Some(bin) if bin.is_file() => export_game_with(
-                        &self.project_root,
-                        Path::new(&b.out_dir),
-                        &b.title,
-                        &bin,
-                        t,
-                    )
-                    .map(|(m, d)| {
-                        (format!("{m} (built in {:.0} s)", b.started.elapsed().as_secs_f32()), d)
-                    }),
-                    Some(bin) => Err(format!(
-                        "the build succeeded but its binary wasn't at {} — rebuild, or report this",
-                        bin.display()
-                    )),
-                    None => Err("the build succeeded but its binary wasn't found".into()),
-                }
-            }
-            Ok(s) => Err(format!(
-                "the {} build failed (exit {}) — full log: {}",
-                t.label,
-                s.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
-                b.log.display()
-            )),
-            Err(e) => Err(format!("build wait: {e}")),
-        };
-        self.finish_export(result);
-    }
-}
-
-/// How an Export Game… target obtains its engine binary.
-enum ExportKind {
-    /// Copy the running binary — always available, always this platform.
-    SelfBinary,
-    /// `cargo build` for this Rust triple in the background (cross-compiled
-    /// locally — Windows-from-Linux via mingw).
-    CargoCross(&'static str),
-    /// A CI-built binary the user drops at this repo-relative path (macOS —
-    /// Apple's SDK can't leave a Mac, so the `macos-binary` GitHub workflow
-    /// builds it and the export consumes the downloaded artifact).
-    Prebuilt(&'static str),
-}
-
-struct ExportTarget {
-    label: &'static str,
-    kind: ExportKind,
-    exe_suffix: &'static str,
-    /// A README dropped into the build, `{exe}` replaced with the binary name
-    /// (macOS: Gatekeeper won't run unsigned internet downloads untouched).
-    readme: Option<&'static str>,
-}
-
-const MAC_README: &str = "\
-This is an unsigned build (no Apple notarization yet), so macOS quarantines it
-after a download. In Terminal, from this folder, run once:
-
-    xattr -dr com.apple.quarantine .
-    chmod +x ./{exe}
-
-Then start the game with:
-
-    ./{exe}
-
-F1 in-game opens the multiplayer menu (host / join with a lobby code).
-";
-
-const EXPORT_TARGETS: &[ExportTarget] = &[
-    ExportTarget {
-        label: "This machine",
-        kind: ExportKind::SelfBinary,
-        exe_suffix: std::env::consts::EXE_SUFFIX,
-        readme: None,
-    },
-    ExportTarget {
-        label: "Windows (x86_64)",
-        kind: ExportKind::CargoCross("x86_64-pc-windows-gnu"),
-        exe_suffix: ".exe",
-        readme: None,
-    },
-    ExportTarget {
-        label: "macOS",
-        kind: ExportKind::Prebuilt("prebuilt/floptle-macos"),
-        exe_suffix: "",
-        readme: Some(MAC_README),
-    },
-];
-
-/// A cross-target build in flight: the spawned `cargo build`, everything
-/// needed to finish the export when it lands, and where its output went.
-struct ExportBuild {
-    child: std::process::Child,
-    out_dir: String,
-    title: String,
-    target: usize,
-    log: PathBuf,
-    started: Instant,
-}
-
-/// Where an export's background-built binary lands: `<target-dir>/<triple>/release/`
-/// for a cross target, `<target-dir>/release/` for the host (`triple: None`).
-/// The running binary is `<target-dir>/<profile>/floptle`, so the target dir is
-/// two levels up — true for `cargo run` and plain `cargo build` alike.
-fn export_binary_path(triple: Option<&str>, exe_suffix: &str) -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let target_dir = exe.parent()?.parent()?;
-    let name = exe.file_stem()?.to_string_lossy().into_owned();
-    let release = match triple {
-        Some(tr) => target_dir.join(tr).join("release"),
-        None => target_dir.join("release"),
-    };
-    Some(release.join(format!("{name}{exe_suffix}")))
-}
-
-/// The mingw cross toolchain for Windows exports: system-wide (PATH) or the
-/// user-space llvm-mingw install (`~/.local/opt/llvm-mingw`) — portable, no
-/// root needed. Returns the bin dir to prepend to the child's PATH (None =
-/// already on PATH).
-fn windows_toolchain_bin() -> Result<Option<PathBuf>, String> {
-    let cc = "x86_64-w64-mingw32-gcc";
-    let on_path = std::env::var_os("PATH").is_some_and(|p| {
-        std::env::split_paths(&p).any(|d| d.join(cc).is_file() || d.join(format!("{cc}.exe")).is_file())
-    });
-    if on_path {
-        return Ok(None);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        let bin = PathBuf::from(home).join(".local/opt/llvm-mingw/bin");
-        if bin.join(cc).is_file() {
-            return Ok(Some(bin));
-        }
-    }
-    Err(format!(
-        "no Windows cross-toolchain: install llvm-mingw to ~/.local/opt/llvm-mingw \
-         (portable, no root) or `{cc}` system-wide (e.g. pacman -S mingw-w64-gcc)"
-    ))
-}
-
-/// The engine source checkout this editor was built from (compiled-in path —
-/// a dev machine, which is where exports happen today). `None` if it's gone.
-fn repo_root() -> Option<PathBuf> {
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?.parent()?;
-    repo.join("Cargo.toml").is_file().then(|| repo.to_path_buf())
-}
-
-/// Spawn the background release `cargo build` for an export: the host binary
-/// (`triple: None`) or a cross target. Needs the engine source checkout and,
-/// for cross targets, the rustup + C toolchains.
-fn spawn_export_build(triple: Option<&str>, log: &Path) -> Result<std::process::Child, String> {
-    let repo = repo_root().ok_or_else(|| {
-        "built exports need the engine source checkout this editor was built from".to_string()
-    })?;
-    let logfile = std::fs::File::create(log).map_err(|e| format!("build log: {e}"))?;
-    let mut cmd = std::process::Command::new("cargo");
-    cmd.current_dir(repo)
-        .args(["build", "--release", "-p", "floptle-editor"])
-        .stdout(logfile.try_clone().map_err(|e| e.to_string())?)
-        .stderr(logfile)
-        .stdin(std::process::Stdio::null());
-    if let Some(tr) = triple {
-        cmd.args(["--target", tr]);
-    }
-    // Build into the SAME target dir `cross_binary_path` reads (the running
-    // editor's). Without this the child cargo used whatever CARGO_TARGET_DIR
-    // the environment happened to have — launched differently, the build
-    // succeeded in one place while the export looked in another and reported
-    // failure over a perfectly good build.
-    if let Some(td) = std::env::current_exe()
-        .ok()
-        .and_then(|e| Some(e.parent()?.parent()?.to_path_buf()))
-    {
-        cmd.env("CARGO_TARGET_DIR", td);
-    }
-    if triple == Some("x86_64-pc-windows-gnu") {
-        if let Some(bin) = windows_toolchain_bin()? {
-            let path = std::env::var_os("PATH").unwrap_or_default();
-            let mut paths = vec![bin.clone()];
-            paths.extend(std::env::split_paths(&path));
-            cmd.env("PATH", std::env::join_paths(paths).map_err(|e| e.to_string())?);
-            // llvm-mingw ships compiler-rt/libunwind, but rustc's windows-gnu
-            // target links `-lgcc`/`-lgcc_eh` — alias them to libunwind once
-            // and point the build at the shim. (A real mingw-w64-gcc on PATH
-            // has libgcc and skips all of this.)
-            let root = bin.parent().ok_or("llvm-mingw layout")?;
-            let shim = root.join("rust-shim");
-            let unwind = root.join("x86_64-w64-mingw32/lib/libunwind.a");
-            if !shim.join("libgcc.a").is_file() {
-                std::fs::create_dir_all(&shim).map_err(|e| format!("shim dir: {e}"))?;
-                std::fs::copy(&unwind, shim.join("libgcc.a"))
-                    .and_then(|_| std::fs::copy(&unwind, shim.join("libgcc_eh.a")))
-                    .map_err(|e| format!("libgcc shim: {e}"))?;
-            }
-            let mut rustflags =
-                std::env::var("RUSTFLAGS").unwrap_or_default();
-            rustflags.push_str(&format!(" -L {}", shim.display()));
-            cmd.env("RUSTFLAGS", rustflags.trim());
-        }
-        cmd.env("CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER", "x86_64-w64-mingw32-gcc");
-    }
-    cmd.spawn().map_err(|e| format!("spawn cargo: {e}"))
-}
-
-/// File ⏵ Export Game…: stamp out a runnable build — an engine binary + the
-/// project's assets + the `floptle-game.ron` manifest that flips it into
-/// player mode. `binary` is the engine to ship: our own executable for a
-/// native export, a cross-compiled one a background build produced, or a
-/// CI-built prebuilt (macOS).
-fn export_game_with(
-    project_root: &Path,
-    out: &Path,
-    title: &str,
-    binary: &Path,
-    target: &ExportTarget,
-) -> Result<(String, PathBuf), String> {
-    let exe_suffix = target.exe_suffix;
-    std::fs::create_dir_all(out).map_err(|e| format!("create {}: {e}", out.display()))?;
-    let proj = project_root.canonicalize().map_err(|e| format!("project dir: {e}"))?;
-    let out_c = out.canonicalize().map_err(|e| format!("export dir: {e}"))?;
-    if out_c.starts_with(&proj) {
-        return Err("the export folder can't be inside the project (it would copy itself)".into());
-    }
-    // A build that can't find its chosen entry scene is dead on arrival — catch
-    // it at export time, not on a player's machine.
-    let cfg = floptle_scene::load_project(&proj.join("project.ron"));
-    if let Some(entry) = cfg.entry_scene.as_deref()
-        && !proj.join(entry).is_file()
-    {
-        return Err(format!(
-            "the project's entry scene ({entry}) doesn't exist — pick one in \
-             Edit ⏵ Project Settings"
-        ));
-    }
-    // Binary name from the title: filesystem-safe, the TARGET's suffix.
-    let stem: String = title
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-    let stem = stem.trim_matches('_');
-    let stem = if stem.is_empty() { "game" } else { stem };
-    let mut exe_name = format!("{stem}{exe_suffix}");
-    // The shipped project folder is literally named `assets` — an exe resolving
-    // to that same name (a project rooted at `assets/`, exported for a
-    // suffix-less target) would collide with it and corrupt the build.
-    if exe_name == "assets" {
-        exe_name = "game".into();
-    }
-    // The build's `assets/` copy is wholly owned by the export: clear the
-    // previous one so files deleted from the project don't linger in shipped
-    // builds (and a stale FILE named `assets` — the old broken-export
-    // artifact — doesn't block the copy).
-    let ship_assets = out_c.join("assets");
-    if ship_assets.is_dir() {
-        std::fs::remove_dir_all(&ship_assets).map_err(|e| format!("clear old assets copy: {e}"))?;
-    } else if ship_assets.exists() {
-        std::fs::remove_file(&ship_assets).map_err(|e| format!("clear old assets copy: {e}"))?;
-    }
-    // Everything the game needs ships BEFORE the binary, and the binary ships
-    // LAST — a failed export must never leave a runnable-looking exe that,
-    // missing its floptle-game.ron, silently boots as the EDITOR.
-    let files = copy_tree(&proj, &ship_assets).map_err(|e| format!("copy assets: {e}"))?;
-    if let Some(tpl) = target.readme {
-        std::fs::write(out_c.join("README.txt"), tpl.replace("{exe}", &exe_name))
-            .map_err(|e| format!("write README: {e}"))?;
-    }
-    let manifest = GameManifest { title: title.to_string(), project: "assets".into() };
-    let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
-        .map_err(|e| format!("manifest: {e}"))?;
-    std::fs::write(out_c.join("floptle-game.ron"), text)
-        .map_err(|e| format!("write manifest: {e}"))?;
-    let shipped = out_c.join(&exe_name);
-    std::fs::copy(binary, &shipped).map_err(|e| format!("copy binary: {e}"))?;
-    // A CI artifact may have lost its executable bit in transit — restore it
-    // (only meaningful for unix-family targets; .exe doesn't care).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&shipped, std::fs::Permissions::from_mode(0o755));
-    }
-    Ok((format!("exported {exe_name} + {files} asset file(s) to {}", out_c.display()), out_c))
-}
-
-/// Recursive copy for the export: skips dot-entries (`.floptle` caches,
-/// `.luarc.json` — IDE/editor plumbing a build doesn't need). Returns the
-/// number of files copied.
-fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<u64> {
-    std::fs::create_dir_all(dst)?;
-    let mut n = 0;
-    for entry in std::fs::read_dir(src)?.flatten() {
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with('.') {
-            continue;
-        }
-        let from = entry.path();
-        let to = dst.join(&name);
-        if entry.file_type()?.is_dir() {
-            n += copy_tree(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-            n += 1;
-        }
-    }
-    Ok(n)
 }
 
 /// Headless `--new <dir>`: scaffold a project (dirs + default materials/scripts, a starter
@@ -2052,9 +1615,10 @@ struct Editor {
     /// An autosave NEWER than the scene file was found at load — the recovery
     /// prompt is up ("restore unsaved work?"); holds the autosave path.
     autosave_prompt: Option<PathBuf>,
-    /// A cross-target `cargo build` running in the background (Windows export
-    /// from Linux etc.); polled each frame, the export finishes when it does.
-    export_build: Option<ExportBuild>,
+    /// An export waiting on a background job — fetching a published engine
+    /// template, or (source checkouts only) building one. Polled each frame;
+    /// the export finishes when its binary lands.
+    export_job: Option<export::ExportJob>,
     /// The tick input snapshot most recently fed to `fixedUpdate` — cloned so
     /// prediction can record + ship exactly what the scripts saw.
     last_tick_input: floptle_script::InputSnapshot,
@@ -3276,116 +2840,3 @@ mod cli_tests {
     }
 }
 
-#[cfg(test)]
-mod export_tests {
-    use super::{export_game_with, Editor, GameManifest, EXPORT_TARGETS};
-    use std::path::PathBuf;
-
-    fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("floptle-export-test-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    /// A typed export folder resolves PREDICTABLY: absolute stays put, relative
-    /// lands next to the project (its parent) — never the process CWD, which
-    /// depends on how the editor was launched (Ty's "where do paths actually
-    /// reference" complaint).
-    #[test]
-    fn export_dir_resolves_against_the_project_parent() {
-        let mut ed = Editor { project_root: PathBuf::from("/repo/assets"), ..Default::default() };
-        assert_eq!(ed.resolve_export_dir("builds"), PathBuf::from("/repo/builds"));
-        assert_eq!(ed.resolve_export_dir("/abs/dist"), PathBuf::from("/abs/dist"));
-        ed.project_root = PathBuf::from("/");
-        assert_eq!(ed.resolve_export_dir("b"), PathBuf::from("/b"));
-    }
-
-    /// Export = binary + assets (dot-entries skipped) + a manifest that parses
-    /// back and points at the copied project.
-    #[test]
-    fn export_stamps_a_runnable_build() {
-        let proj = temp("proj");
-        std::fs::create_dir_all(proj.join("scenes")).unwrap();
-        std::fs::write(proj.join("project.ron"), "()").unwrap();
-        std::fs::write(proj.join("scenes/first.ron"), "()").unwrap();
-        std::fs::create_dir_all(proj.join(".floptle")).unwrap();
-        std::fs::write(proj.join(".floptle/cache.bin"), "x").unwrap();
-        std::fs::write(proj.join(".luarc.json"), "{}").unwrap();
-        let out = temp("out");
-
-        let me = std::env::current_exe().unwrap();
-        let (msg, done_dir) = export_game_with(&proj, &out, "My Cool Game!", &me, &EXPORT_TARGETS[0])
-            .expect("export succeeds");
-        assert!(msg.contains("2 asset file(s)"), "dot-entries must be skipped: {msg}");
-        assert!(done_dir.is_dir(), "the success result carries the build folder");
-        assert!(out.join("assets/project.ron").is_file());
-        assert!(out.join("assets/scenes/first.ron").is_file());
-        assert!(!out.join("assets/.floptle").exists(), "editor cache must not ship");
-        // The binary landed under a filesystem-safe name (this test binary).
-        let exe = format!("My_Cool_Game{}", std::env::consts::EXE_SUFFIX);
-        assert!(out.join(&exe).is_file(), "missing {exe}");
-        let manifest: GameManifest =
-            ron::from_str(&std::fs::read_to_string(out.join("floptle-game.ron")).unwrap())
-                .expect("manifest parses");
-        assert_eq!(manifest.title, "My Cool Game!");
-        assert_eq!(manifest.project, "assets");
-
-        // Exporting INTO the project is refused (it would copy itself).
-        let inside = proj.join("build");
-        assert!(export_game_with(&proj, &inside, "x", &me, &EXPORT_TARGETS[0]).is_err());
-
-        // A macOS-target export ships the Gatekeeper README, {exe} filled in.
-        let out2 = temp("out-mac");
-        let mac = EXPORT_TARGETS.iter().find(|t| t.label == "macOS").unwrap();
-        export_game_with(&proj, &out2, "Sea Game", &me, mac).expect("mac export");
-        let readme = std::fs::read_to_string(out2.join("README.txt")).unwrap();
-        assert!(readme.contains("./Sea_Game"), "README names the actual binary: {readme}");
-        assert!(readme.contains("com.apple.quarantine"));
-        let _ = std::fs::remove_dir_all(&out2);
-
-        let _ = std::fs::remove_dir_all(&proj);
-        let _ = std::fs::remove_dir_all(&out);
-    }
-
-    /// The trap behind "the build opens the editor": a project rooted at
-    /// `assets/` exported with the default title on a suffix-less target named
-    /// the exe `assets` — colliding with the shipped assets FOLDER, killing the
-    /// export halfway and leaving a manifest-less binary that boots as the
-    /// editor. The exe must dodge the reserved name, a re-export must clean up
-    /// the old broken artifact, and the binary must ship LAST so a failed
-    /// export never leaves anything runnable.
-    #[test]
-    fn export_never_collides_the_exe_with_the_assets_folder() {
-        let proj = temp("proj-collide");
-        std::fs::write(proj.join("project.ron"), "()").unwrap();
-        let out = temp("out-collide");
-        // Ty's exact broken state: a previous half-export left a FILE named
-        // `assets` (the binary) in the build folder.
-        std::fs::write(out.join("assets"), "old broken binary").unwrap();
-
-        let me = std::env::current_exe().unwrap();
-        let bare = super::ExportTarget {
-            label: "test",
-            kind: super::ExportKind::SelfBinary,
-            exe_suffix: "", // suffix-less target = the collision case
-            readme: None,
-        };
-        export_game_with(&proj, &out, "assets", &me, &bare).expect("collision export succeeds");
-        assert!(out.join("assets").is_dir(), "assets must be the project folder, not the exe");
-        assert!(out.join("game").is_file(), "the exe dodges the reserved name");
-        assert!(out.join("floptle-game.ron").is_file(), "the build is a GAME (manifest present)");
-
-        // Binary ships LAST: a copy failure (bogus source binary) errors out
-        // without leaving a runnable exe in the build folder.
-        let out2 = temp("out-nobin");
-        let err = export_game_with(&proj, &out2, "Cool", &me.join("nope"), &bare)
-            .expect_err("bogus binary must fail");
-        assert!(err.contains("copy binary"), "fails at the binary step: {err}");
-        assert!(!out2.join("Cool").exists(), "no runnable exe after a failed export");
-
-        let _ = std::fs::remove_dir_all(&proj);
-        let _ = std::fs::remove_dir_all(&out);
-        let _ = std::fs::remove_dir_all(&out2);
-    }
-}

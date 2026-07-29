@@ -310,7 +310,7 @@ impl Editor {
         }
         // Seed from the engine checkout this editor was built from, or from a
         // packaged bundle's assets beside the executable.
-        let shipped = crate::repo_root()
+        let shipped = crate::export::repo_root()
             .map(|r| r.join(MAP_DEFAULT_TEXTURE_SHIPPED))
             .filter(|p| p.is_file())
             .or_else(|| {
@@ -2574,7 +2574,7 @@ mod tests {
             dir.join(MAP_DEFAULT_TEXTURE).is_file(),
             "the reference and the file must arrive together"
         );
-        if crate::repo_root().is_some() {
+        if crate::export::repo_root().is_some() {
             // On a dev checkout the project gets seeded from the engine's copy.
             assert_eq!(tex.as_deref(), Some(MAP_DEFAULT_TEXTURE));
             assert!(dir.join(MAP_DEFAULT_TEXTURE).is_file());

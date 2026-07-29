@@ -4,12 +4,9 @@ use crate::registry::Project;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The manifest that lists installable engine versions. Lives on the PUBLIC
-/// releases repo — anyone can fetch it and download bundles, no token needed
-/// (the engine source stays private; only distribution is public). Swappable
-/// to another host without code changes (docs/hub-proposal.md §3.4).
-pub const DEFAULT_MANIFEST_URL: &str =
-    "https://github.com/Fopull-LLC/Floptle-releases/releases/download/manifest/releases.json";
+/// The manifest that lists installable engine versions — shared with the editor's
+/// export templates, which resolve against the very same releases.
+pub use floptle_dist::DEFAULT_MANIFEST_URL;
 
 /// The pre-public default — configs that still carry it migrate to
 /// [`DEFAULT_MANIFEST_URL`] on load (a hand-customized URL is left alone).
@@ -25,10 +22,10 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// The OS-conventional locations (`directories` crate). `None` if no home dir exists.
+    /// The OS-conventional locations. `None` if no home dir exists. Resolved through
+    /// `floptle-dist` so the editor's export templates land beside these installs.
     pub fn resolve() -> Option<Self> {
-        let pd = directories::ProjectDirs::from("com", "Fopull", "Floptle")?;
-        Some(Self { data: pd.data_dir().to_path_buf(), config: pd.config_dir().to_path_buf() })
+        Some(Self { data: floptle_dist::data_dir()?, config: floptle_dist::config_dir()? })
     }
 
     /// Explicit paths (for tests / a `--data-dir` override).

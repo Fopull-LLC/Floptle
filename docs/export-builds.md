@@ -1,4 +1,4 @@
-# Exporting a game build (v1)
+# Exporting a game build
 
 **File ⏵ Export Game…** stamps out a runnable build:
 
@@ -27,42 +27,101 @@ export: `floptle-editor --play [PROJECT_DIR]`.
 
 ## Platforms
 
-The dialog's **Target** picker chooses the build's platform:
+The dialog's **Target** picker chooses the build's platform. **Every target
+works from every machine** — Windows builds from Linux, Linux builds from a
+Mac, macOS builds from Windows. There is no compiler and no toolchain involved.
 
 - **This machine** — instant: the export copies the running binary itself.
-- **Windows (x86_64)** from Linux — the export compiles the engine for
-  Windows in the background (`cargo build --release --target
-  x86_64-pc-windows-gnu`, spawned for you; the dialog spinner runs until it
-  lands, first build takes minutes, incremental rebuilds are quick). Needs the
-  target + a mingw cross-toolchain once:
+- **Windows (x86_64)**, **Linux (x86_64)**, **macOS (Apple Silicon)**,
+  **macOS (Intel)** — the export uses an **engine template**: the release
+  bundle the pipeline already publishes for that platform, downloaded once,
+  checksum-verified against `releases.json`, and cached at
 
-  ```bash
-  rustup target add x86_64-pc-windows-gnu
-  # either (portable, no root): unpack llvm-mingw into ~/.local/opt/llvm-mingw
-  #   https://github.com/mstorsjo/llvm-mingw/releases  (…-ucrt-ubuntu-…-x86_64.tar.xz)
-  # or system-wide:              pacman -S mingw-w64-gcc   (Arch/CachyOS)
+  ```
+  <data-dir>/templates/<engine-version>/<platform>/floptle[.exe]
   ```
 
-  Cross exports need the engine source checkout the editor was built from
-  (it rebuilds itself) — i.e. a dev machine, which is where exports happen.
-- **macOS** — Apple's SDK can't leave a Mac, so GitHub's macOS runners build
-  the engine binary natively and the export consumes it:
+  (`~/.local/share/floptle/` on Linux, `~/Library/Application Support/Floptle/`
+  on macOS, `%APPDATA%\Floptle\` on Windows — beside the Hub's installed
+  versions, because a template and an installed engine are the same artifact.)
 
-  1. Push the repo, then GitHub ⏵ **Actions ⏵ macos-binary ⏵ Run workflow**
-     (`arm64` default = Apple Silicon; `universal` also covers Intel Macs at
-     ~2× the minutes — note macOS runner minutes bill at 10× on private repos,
-     which is why it's on-demand).
-  2. Download the `floptle-macos` artifact, untar, put the binary at
-     **`prebuilt/floptle-macos`** in this checkout (git-ignored).
-  3. Export with Target = macOS — instant from then on; refresh the prebuilt
-     when you want the build on a newer engine commit (the wire protocol
-     refuses version mismatches at connect, so keep it current for
-     multiplayer tests).
+  The first export of a platform fetches ~15–40 MB and takes a few seconds;
+  every export after that is instant.
 
-  macOS exports include a `README.txt` for the recipient: the build is
-  unsigned, so after downloading they run
-  `xattr -dr com.apple.quarantine .` once in the folder, then launch the
-  binary from Terminal. (Signing/notarization is a Hub-pipeline concern.)
+### Why templates, not compilation
+
+An exported build is *the engine binary + your assets + a manifest*. Nothing
+about your project is compiled in — so the binary a build needs isn't something
+to produce, it's something to fetch. It is byte-for-byte the bundle the release
+pipeline already builds for that platform.
+
+This is how Godot ("export templates") and Unity ("build support modules")
+work, and it's why exporting doesn't need what compiling would: the engine
+source, a C cross-toolchain, or (for macOS, which cannot be cross-compiled at
+all) a second machine.
+
+A template is pinned to the editor's **own version**. Mixing them would ship a
+game whose wire protocol disagrees with the editor that built it, so the
+version is part of the cache key and a mismatch can't happen silently.
+
+### Building from source
+
+If you run the editor from a source checkout at a version that has no published
+bundles yet — engine development between a version bump and its release — the
+export falls back to `cargo build --release --target <triple>` for that
+platform, and says so. That needs the target and, for Windows, a mingw
+cross-toolchain:
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+# either (portable, no root): unpack llvm-mingw into ~/.local/opt/llvm-mingw
+#   https://github.com/mstorsjo/llvm-mingw/releases  (…-ucrt-ubuntu-…-x86_64.tar.xz)
+# or system-wide:              pacman -S mingw-w64-gcc   (Arch/CachyOS)
+```
+
+macOS has no fallback — Apple's SDK can't leave a Mac. Released versions always
+have a macOS template, so this only bites during engine development.
+
+macOS builds ship a `README.txt` for the recipient: the build is unsigned, so
+they clear the quarantine flag once (`xattr -dr com.apple.quarantine <exe>`)
+before launching. Signing/notarization is a Hub-pipeline concern.
+
+## What ships, and what doesn't
+
+The export owns the `assets/` copy, and deliberately leaves things out:
+
+- **dot-entries** (`.floptle` caches, `.luarc.json`) — editor and IDE plumbing.
+- **`save/`** — the engine writes player save slots there (`save.set` in Lua).
+  Shipping your copy hands every player a pre-populated save and changes what
+  the game does on first launch.
+- **`replays/`** — recorded match logs.
+
+Only at the project root: a nested folder named `save/` is content and ships.
+
+**Absolute asset paths are rewritten.** An absolute path resolves as-is with no
+rescue, so a build carrying one is broken on every machine except the one that
+exported it — silently, because a missing model simply doesn't appear. Paths
+that point *into* the project are made relative automatically (the export
+reports how many). Paths pointing *outside* the project can't be repaired — the
+file isn't in the build at all — so they're listed as a warning.
+
+The **entry scene** is resolved the way `scene.load` resolves names: a path
+(`scenes/menu.ron`) or a bare scene name (`menu`) both work. If it resolves to
+nothing the export fails rather than shipping a build that boots somewhere else.
+
+## Headless / scripted builds
+
+```
+floptle --export <PROJECT_DIR> <OUT_DIR> <PLATFORM> [TITLE]
+```
+
+`PLATFORM` is `host` or a release artifact key (`windows-x86_64`,
+`linux-x86_64`, `macos-aarch64`, `macos-x86_64`). No window, no GPU — same code
+the dialog runs, so CI gets exactly the editor's behaviour:
+
+```bash
+floptle --export ~/games/MyGame ~/builds/MyGame-win windows-x86_64 "My Game"
+```
 
 ## Multi-device LAN testing
 
@@ -123,7 +182,8 @@ See [multiplayer.md §6](multiplayer.md) for the surrounding decisions.
 
 - The binary is the full editor in disguise (~the same size); the slim
   dedicated `floptle-runtime` player + packed/compressed assets come with the
-  export phase of the roadmap.
+  export phase of the roadmap. (It is also what makes templates free: the
+  thing a build ships is the thing the pipeline already publishes.)
 - No icon/branding, no asset obfuscation — playtest builds, not store builds.
 - Script errors in a build only surface in the netcode overlay/console
   machinery, not on screen: test in the editor first.

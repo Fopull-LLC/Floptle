@@ -16,6 +16,7 @@ path = "src/main.rs"
 floptle-core = { path = "../floptle-core" }
 floptle-render = { path = "../floptle-render" }
 floptle-scene = { path = "../floptle-scene" }
+floptle-dist = { path = "../floptle-dist" }
 floptle-field = { path = "../floptle-field" }
 floptle-map = { path = "../floptle-map" }
 floptle-shader = { path = "../floptle-shader" }
@@ -46,3 +47,9 @@ floptle-net = { path = "../floptle-net" }
 # Wayland (where winit delivers no file drops) as well as X11/Windows/macOS.
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 tokio = { version = "1", features = ["rt", "net", "time"] }
+
+# Building template-bundle fixtures for the export tests (no network involved).
+[dev-dependencies]
+sha2 = "0.10"
+flate2 = "1"
+tar = "0.4"

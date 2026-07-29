@@ -36,7 +36,8 @@ use crate::shading::{blob_default_material, blob_mat_arrays, collect_point_light
 use crate::terrain_ui::{NewTerrainCfg, TerrainFill};
 use crate::theme::{CODE_THEMES, ENGINE_THEMES};
 use crate::viz::{CameraGizmo, EmitterViz, ForceViz, box_lines, camera_frustum_lines, cursor_ground, gravity_volume_lines, light_dir_lines, mesh_collider_wire_local, oriented_box_lines, particle_gizmo_lines, point_light_lines, project, rigidbody_lines, terrain_collider_wire};
-use crate::{Editor, EditorCmd, EditorTabViewer, EXPORT_TARGETS, FOCUS_SECS, MeshAsset, ProjectAction, Snapshot, anim, anim_ui, grab_cursor, scene_hit};
+use crate::export::EXPORT_TARGETS;
+use crate::{Editor, EditorCmd, EditorTabViewer, FOCUS_SECS, MeshAsset, ProjectAction, Snapshot, anim, anim_ui, grab_cursor, scene_hit};
 
 impl Editor {
     pub(crate) fn render(&mut self) {
@@ -1595,7 +1596,7 @@ impl Editor {
         let export_dir = &mut self.export_dir;
         let export_title = &mut self.export_title;
         let export_target = &mut self.export_target;
-        let export_building = self.export_build.is_some();
+        let export_building = self.export_job.is_some();
         let export_status = &self.export_status;
         let export_done = self.export_done.clone();
         let autosave_prompt = self.autosave_prompt.clone();
@@ -1672,8 +1673,9 @@ impl Editor {
                         if ui
                             .button("Export Game…")
                             .on_hover_text(
-                                "stamp out a runnable build: this binary + the project \
-                                 (for THIS platform — export on each OS you target)",
+                                "stamp out a runnable build: the engine + your project, for \
+                                 any platform — Windows, Linux or macOS, from whichever \
+                                 one you're on",
                             )
                             .clicked()
                         {
@@ -2546,9 +2548,10 @@ impl Editor {
                                 });
                         });
                         ui.small(
-                            "cross-target builds compile the engine for that platform in \
-                             the background (first time takes minutes). macOS can't be \
-                             cross-built — export from an editor on a Mac.",
+                            "any target exports from any machine: the engine binary for \
+                             that platform is downloaded once (matched to this engine \
+                             version, checksum-verified) and reused after that. No \
+                             compiler or toolchain needed.",
                         );
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {

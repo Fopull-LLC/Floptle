@@ -835,11 +835,18 @@ impl Editor {
     /// file even if the scene's internal name differs.
     pub(crate) fn load_active_scene(&self) -> (PathBuf, floptle_scene::SceneDoc) {
         let cfg = floptle_scene::load_project(&self.project_cfg_path());
-        if let Some(entry) = cfg.entry_scene.as_deref() {
-            let p = self.project_root.join(entry);
-            match floptle_scene::load(&p) {
-                Ok(doc) => return (p, doc),
-                Err(e) => eprintln!("  entry scene {entry} failed to load ({e}); falling back"),
+        if let Some(entry) = cfg.entry_scene.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+            // Resolved the way `scene.load` resolves names, so a path AND a bare
+            // scene name both work. They used to disagree — this field demanded
+            // `scenes/menu.ron` while `scene.load` took `menu` — and a plausible
+            // `"menu"` fell through to `scenes/first.ron`, so the scene you
+            // playtested was not the one that shipped.
+            match crate::export::resolve_entry_scene(&self.project_root, entry) {
+                Some(p) => match floptle_scene::load(&p) {
+                    Ok(doc) => return (p, doc),
+                    Err(e) => eprintln!("  entry scene {entry} failed to load ({e}); falling back"),
+                },
+                None => eprintln!("  entry scene {entry} doesn't exist; falling back"),
             }
         }
         let first = self.project_root.join("scenes/first.ron");
