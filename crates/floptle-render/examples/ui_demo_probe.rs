@@ -227,6 +227,14 @@ fn main() {
         let measure = |t: &TextSpec| ui.measure_spec(t);
         let mut placed = floptle_ui::solve(&roots, design_vp, &measure);
         floptle_ui::place_scrollbars(&roots, &mut placed, &scrollbars(&doc.nodes, &roots));
+        // The same tree with the styles left off — what the hit test used to
+        // solve. Computed here because `measure` borrows the renderer, which
+        // the draw below takes mutably.
+        let bare = {
+            let mut unstyled = build(&doc.nodes, Some(layer_at));
+            fill_repeaters(&mut unstyled, &row_spec);
+            floptle_ui::solve(&unstyled, design_vp, &measure)
+        };
         let edit = (editing && field.is_some()).then(|| floptle_ui::EditState {
             id: field.unwrap(),
             caret: 4,
@@ -316,6 +324,43 @@ fn main() {
                 ]) > 150.0,
                 "the focused button should be lit by its style's focus block"
             );
+            // WHERE YOU CLICK IS WHERE IT LOOKS. The hit test solves its own
+            // copy of the tree, so this checks the two agree: every button's
+            // solved centre must land on painted pixels, and the SAME solve
+            // without styles must not — otherwise this proves nothing, because
+            // the shipped bug was the hit test using the unstyled rects.
+            let mut worst = 0.0f32;
+            for id in [play, options].into_iter().flatten() {
+                let hit = placed.iter().find(|p| p.id == id).expect("a solved button");
+                let c = [hit.rect[0] + hit.rect[2] * 0.5, hit.rect[1] + hit.rect[3] * 0.5];
+                let lum = shot.peak([
+                    (c[0] * scale) as u32 - 2,
+                    (c[1] * scale) as u32 - 2,
+                    4,
+                    4,
+                ]);
+                assert!(lum > 20.0, "element {id}'s solved centre lands on empty page ({lum:.0})");
+                let b = bare.iter().find(|p| p.id == id).expect("a bare button");
+                worst = worst
+                    .max((b.rect[0] - hit.rect[0]).abs())
+                    .max((b.rect[1] - hit.rect[1]).abs());
+            }
+            // Not an upper bound — a lower one. If styles stopped moving these
+            // rects the check above would pass for the wrong reason.
+            let (mut far, mut far_id) = (0.0f32, 0);
+            for p in &placed {
+                let Some(b) = bare.iter().find(|q| q.id == p.id) else { continue };
+                let d = (b.rect[0] - p.rect[0]).abs().max((b.rect[1] - p.rect[1]).abs());
+                if d > far {
+                    (far, far_id) = (d, p.id);
+                }
+            }
+            println!(
+                "  styled vs unstyled: {worst:.0} units on the buttons, \
+                 worst {far:.0} on element {far_id} ({:.0} px at this scale)",
+                far * scale
+            );
+            assert!(worst > 4.0, "the demo's styles should move rects; this check is asleep");
         }
     }
     println!("\nOK — look at docs/ui-demo.png, ui_demo_states.png, ui_demo_bare.png");

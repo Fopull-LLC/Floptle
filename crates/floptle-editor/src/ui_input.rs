@@ -286,31 +286,25 @@ impl Editor {
         } else {
             t.text.clone()
         };
-        let mut probe = t.clone();
-        let width = |s: &str, probe: &mut floptle_ui::TextSpec| {
-            probe.text = s.to_string();
-            uir.measure_spec(probe)[0] + t.tracking * s.chars().count() as f32
+        let probe = std::cell::RefCell::new(t.clone());
+        let width = |s: &str| {
+            let mut p = probe.borrow_mut();
+            p.text = s.to_string();
+            uir.measure_spec(&p)[0] + t.tracking * s.chars().count() as f32
         };
-        let full = width(&shown, &mut probe);
+        let full = width(&shown);
         let left = match t.align {
             floptle_ui::Align::Start | floptle_ui::Align::Stretch => rect[0],
             floptle_ui::Align::Center => rect[0] + (rect[2] - full) * 0.5,
             floptle_ui::Align::End => rect[0] + rect[2] - full,
         };
-        // Land on the nearest gap between characters, not the one before it —
-        // clicking the right half of a letter puts the caret after it, which
-        // is what every text field does and what nobody notices until it
-        // doesn't.
-        let target = x - left;
-        let mut best = (0usize, f32::INFINITY);
-        for i in 0..=shown.chars().count() {
-            let prefix: String = shown.chars().take(i).collect();
-            let d = (width(&prefix, &mut probe) - target).abs();
-            if d < best.1 {
-                best = (i, d);
-            }
-        }
-        let caret = best.0;
+        // The mapping — including undoing the scroll the renderer drew with —
+        // lives in the kernel, where it is tested against a fixed-width font
+        // and shares `scroll_shift` with the renderer that applied it. The
+        // caret that drew the frame we're clicking on is what decides how far
+        // the run had slid; an unfocused field has no caret and hasn't slid.
+        let drawn_caret = self.ui_edit.filter(|s| s.id == id).map(|s| s.caret);
+        let caret = floptle_ui::field::caret_at(&shown, left, rect, drawn_caret, x, 2.0, &width);
         let anchor = if extend { self.ui_edit.map(|e| e.anchor).unwrap_or(caret) } else { caret };
         self.ui_edit = Some(floptle_ui::EditState { id, caret, anchor, on: true });
         self.ui_caret_t = 0.0;

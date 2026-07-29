@@ -393,7 +393,13 @@ impl Editor {
     /// Runs on the Node COPIES, never the ECS — which is precisely why a
     /// play-time hover can't end up in a saved scene, and why this needs no
     /// cooperation from the play-snapshot machinery.
-    fn style_layer(&mut self, roots: &mut [floptle_ui::Node], dt: f32) {
+    ///
+    /// EVERY pass that builds a tree must call this before laying it out. A
+    /// style can set `pad`, `gap` and `text_size`, so an unstyled solve puts
+    /// the rects somewhere other than where they are drawn — which as a hit
+    /// test reads exactly like the mouse being offset from the cursor. The
+    /// frame's `dt` is safe to hand to all of them (see `Editor::ui_style_dt`).
+    fn style_layer(&mut self, roots: &mut [floptle_ui::Node]) {
         if self.ui_styles.styles.is_empty() {
             return;
         }
@@ -403,16 +409,25 @@ impl Editor {
             focused: self.ui_focus,
         };
         let (sheet, tokens) = (&self.ui_styles, &self.ui_tokens);
+        let dt = self.ui_style_dt;
         floptle_ui::apply_styles(roots, sheet, tokens, &input, &mut self.ui_style_rt, dt);
     }
 
-    /// Solve every UI layer for this frame: (draw list, px-per-design-unit),
-    /// z-sorted. Pre-resolves image textures into the registry (needs
-    /// `&mut self`, so this runs BEFORE the draw core's field borrows).
-    pub(crate) fn gather_game_ui(&mut self, viewport: [f32; 2]) -> Vec<(floptle_ui::DrawList, f32)> {
-        if viewport[0] <= 1.0 || viewport[1] <= 1.0 {
-            return Vec::new();
-        }
+    /// Every enabled UI layer `want` accepts, as a STYLED node tree, z-sorted
+    /// (stable, so scene order breaks ties). Also returns the index→entity map
+    /// the scrollbar and mask lookups need.
+    ///
+    /// The single place a layer tree gets built. It exists because there are
+    /// three consumers — the hit test, the screen overlay and the world
+    /// canvases — and while each rolled its own, one of them forgot to style:
+    /// `pad`, `gap` and `text_size` all move rects, so the hit test was reading
+    /// geometry that had never been on screen, which feels exactly like the
+    /// cursor being offset from the mouse.
+    #[allow(clippy::type_complexity)]
+    fn ui_layer_trees(
+        &mut self,
+        want: impl Fn(&UiLayer) -> bool,
+    ) -> (Vec<(Entity, UiLayer, Vec<floptle_ui::Node>)>, HashMap<u32, Entity>) {
         self.ensure_ui_fonts();
         // Scene order + children map (node order = deterministic draw order).
         let order: Vec<Entity> = self.world.query::<Transform>().map(|(e, _)| e).collect();
@@ -435,38 +450,46 @@ impl Editor {
                 .unwrap_or_default();
             Some(floptle_ui::Node::with_children(e.index(), spec, children))
         }
-        let mut layers: Vec<(i32, Vec<floptle_ui::Node>, f32)> = Vec::new();
+        let mut out: Vec<(Entity, UiLayer, Vec<floptle_ui::Node>)> = Vec::new();
         for e in &order {
             let Some(layer) = self.world.get::<UiLayer>(*e).copied() else { continue };
-            if !layer.enabled || layer.is_world() {
-                continue; // world-space layers render in the scene, not as an overlay
+            if !layer.enabled || !want(&layer) {
+                continue;
             }
-            let scale = layer.scale_for(viewport);
             let mut roots: Vec<_> = kids
                 .get(&e.index())
                 .map(|cs| cs.iter().filter_map(|c| build(&self.world, &kids, *c)).collect())
                 .unwrap_or_default();
             floptle_ui::sort_roots(&mut roots);
-            if !roots.is_empty() {
-                layers.push((layer.z, roots, scale));
+            if roots.is_empty() {
+                continue;
             }
+            // BEFORE layout, always: a style can set padding, gap and text
+            // size, all of which change what the solver measures.
+            self.style_layer(&mut roots);
+            out.push((*e, layer, roots));
         }
-        if layers.is_empty() {
+        out.sort_by_key(|(_, l, _)| l.z);
+        (out, ents)
+    }
+
+    /// Solve every UI layer for this frame: (draw list, px-per-design-unit),
+    /// z-sorted. Pre-resolves image textures into the registry (needs
+    /// `&mut self`, so this runs BEFORE the draw core's field borrows).
+    pub(crate) fn gather_game_ui(&mut self, viewport: [f32; 2]) -> Vec<(floptle_ui::DrawList, f32)> {
+        if viewport[0] <= 1.0 || viewport[1] <= 1.0 {
             return Vec::new();
         }
-        layers.sort_by_key(|(z, ..)| *z);
-        // Styles resolve BEFORE layout, because a style can set padding, gap
-        // and text size — all of which change what the solver measures.
-        // One drained `dt` shared across every layer of the frame: charging
-        // each layer separately would run transitions N times too fast.
-        let dt = std::mem::take(&mut self.ui_style_dt);
-        for (_, roots, _) in &mut layers {
-            self.style_layer(roots, dt);
+        // World-space layers render in the scene, not as an overlay.
+        let (layers, ents) = self.ui_layer_trees(|l| !l.is_world());
+        if layers.is_empty() {
+            return Vec::new();
         }
         let Some(uir) = self.ui_render.as_ref() else { return Vec::new() };
         let mut out = Vec::new();
         let mut textures: Vec<String> = Vec::new();
-        for (_, roots, scale) in &layers {
+        for (_, layer, roots) in &layers {
+            let scale = layer.scale_for(viewport);
             let design_vp = [viewport[0] / scale, viewport[1] / scale];
             let measure = |t: &TextSpec| uir.measure_spec(t);
             let mut placed = floptle_ui::solve(roots, design_vp, &measure);
@@ -478,7 +501,7 @@ impl Editor {
                     textures.push(q.texture.clone());
                 }
             }
-            out.push((dl, *scale));
+            out.push((dl, scale));
         }
         for t in textures {
             let _ = self.ensure_texture(&t);
@@ -503,50 +526,18 @@ impl Editor {
         include_screen: bool,
     ) -> Vec<(floptle_ui::DrawList, Vec<floptle_ui::Placed>, [f64; 3], [f32; 3], [f32; 3], [f32; 2])>
     {
-        self.ensure_ui_fonts();
-        let order: Vec<Entity> = self.world.query::<Transform>().map(|(e, _)| e).collect();
-        let ents: HashMap<u32, Entity> = order.iter().map(|e| (e.index(), *e)).collect();
-        let mut kids: HashMap<u32, Vec<Entity>> = HashMap::new();
-        for e in &order {
-            if let Some(p) = self.world.get::<Parent>(*e) {
-                kids.entry(p.0.index()).or_default().push(*e);
-            }
-        }
-        fn build(
-            world: &floptle_core::World,
-            kids: &HashMap<u32, Vec<Entity>>,
-            e: Entity,
-        ) -> Option<floptle_ui::Node> {
-            let spec = world.get::<ElementSpec>(e)?.clone();
-            let children = kids
-                .get(&e.index())
-                .map(|cs| cs.iter().filter_map(|c| build(world, kids, *c)).collect())
-                .unwrap_or_default();
-            Some(floptle_ui::Node::with_children(e.index(), spec, children))
-        }
+        let (built, ents) = self.ui_layer_trees(|l| include_screen || l.is_world());
         let Some(uir) = self.ui_render.as_ref() else { return Vec::new() };
         let mut out = Vec::new();
         let mut textures: Vec<String> = Vec::new();
-        for e in &order {
-            let Some(layer) = self.world.get::<UiLayer>(*e).copied() else { continue };
-            if !layer.enabled || (!include_screen && !layer.is_world()) {
-                continue;
-            }
-            let mut roots: Vec<_> = kids
-                .get(&e.index())
-                .map(|cs| cs.iter().filter_map(|c| build(&self.world, &kids, *c)).collect())
-                .unwrap_or_default();
-            floptle_ui::sort_roots(&mut roots);
-            if roots.is_empty() {
-                continue;
-            }
+        for (e, layer, roots) in &built {
             let design_vp =
                 [layer.design_height * window_aspect.max(0.1), layer.design_height];
             let measure = |t: &TextSpec| uir.measure_spec(t);
-            let mut placed = floptle_ui::solve(&roots, design_vp, &measure);
-            floptle_ui::place_scrollbars(&roots, &mut placed, &layer_scrollbars(&self.world, &ents, &roots));
-            let masks = layer_masks(&self.world, &ents, &roots);
-            let dl = floptle_ui::draw_list_with(&roots, &placed, &masks, self.ui_edit);
+            let mut placed = floptle_ui::solve(roots, design_vp, &measure);
+            floptle_ui::place_scrollbars(roots, &mut placed, &layer_scrollbars(&self.world, &ents, roots));
+            let masks = layer_masks(&self.world, &ents, roots);
+            let dl = floptle_ui::draw_list_with(roots, &placed, &masks, self.ui_edit);
             for q in &dl.quads {
                 if !q.texture.is_empty() {
                     textures.push(q.texture.clone());
@@ -742,27 +733,10 @@ impl Editor {
             && viewport[0] > 1.0
             && viewport[1] > 1.0
         {
-            self.ensure_ui_fonts();
-            let order: Vec<Entity> = self.world.query::<Transform>().map(|(e, _)| e).collect();
-            let ents: HashMap<u32, Entity> = order.iter().map(|e| (e.index(), *e)).collect();
-            let mut kids: HashMap<u32, Vec<Entity>> = HashMap::new();
-            for e in &order {
-                if let Some(p) = self.world.get::<Parent>(*e) {
-                    kids.entry(p.0.index()).or_default().push(*e);
-                }
-            }
-            fn build(
-                world: &floptle_core::World,
-                kids: &HashMap<u32, Vec<Entity>>,
-                e: Entity,
-            ) -> Option<floptle_ui::Node> {
-                let spec = world.get::<ElementSpec>(e)?.clone();
-                let children = kids
-                    .get(&e.index())
-                    .map(|cs| cs.iter().filter_map(|c| build(world, kids, *c)).collect())
-                    .unwrap_or_default();
-                Some(floptle_ui::Node::with_children(e.index(), spec, children))
-            }
+            // Every enabled layer, screen-space and world alike — the same
+            // STYLED trees the draw passes lay out, which is the only reason a
+            // click lands where the element looks like it is.
+            let (layers, ents) = self.ui_layer_trees(|_| true);
             // Camera-relative pointer ray (for world-space panels). ADR-0015:
             // the world is offset to the camera, so the ray origin is ~0.
             let cam = play_camera(&self.world, self.camera.render_camera());
@@ -776,25 +750,8 @@ impl Editor {
                 ((far.truncate() / far.w - ro).normalize(), ro)
             });
 
-            // (z, roots, layer) in draw order.
-            let mut layers: Vec<(i32, Vec<floptle_ui::Node>, UiLayer, Entity)> = Vec::new();
-            for e in &order {
-                let Some(layer) = self.world.get::<UiLayer>(*e).copied() else { continue };
-                if !layer.enabled {
-                    continue;
-                }
-                let mut roots: Vec<_> = kids
-                    .get(&e.index())
-                    .map(|cs| cs.iter().filter_map(|c| build(&self.world, &kids, *c)).collect())
-                    .unwrap_or_default();
-                floptle_ui::sort_roots(&mut roots);
-                if !roots.is_empty() {
-                    layers.push((layer.z, roots, layer, *e));
-                }
-            }
-            layers.sort_by_key(|(z, ..)| *z);
             if let Some(uir) = self.ui_render.as_ref() {
-                for (_, roots, layer, e) in &layers {
+                for (e, layer, roots) in &layers {
                     // Design viewport + the pointer's position within it +, for
                     // screen-space layers, the design→physical-pixel scale so
                     // solved rects can be published to scripts (`node:uiRect()`).

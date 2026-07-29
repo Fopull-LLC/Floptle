@@ -1228,8 +1228,7 @@ struct Editor {
     ui_scroll_drag: Option<(u32, [f32; 2])>,
     /// Auto-repeat for a held direction (see `floptle_ui::nav::Repeat`).
     ui_nav_repeat: floptle_ui::nav::Repeat,
-    /// This frame's delta, for UI navigation auto-repeat. Its own field rather
-    /// than a share of `ui_style_dt`, which the gather pass drains.
+    /// This frame's delta, for UI navigation auto-repeat.
     ui_frame_dt: f32,
     /// Last frame's submit/cancel levels, for press edges.
     ui_submit_was: bool,
@@ -1267,14 +1266,14 @@ struct Editor {
     /// In-flight style transitions, keyed by element. Deliberately NOT part of
     /// the scene: a hover that survived into a saved `.ron` would be a bug.
     ui_style_rt: floptle_ui::StyleRuntime,
-    /// Frame time owed to UI transitions, banked by `advance_clock` and drained
-    /// by whichever gather pass runs first.
+    /// This frame's time for UI transitions, set once by `advance_clock` and
+    /// then READ — never drained — by every pass that styles a layer tree.
     ///
-    /// Banking rather than re-reading the clock, because the UI is gathered
-    /// from two places (the docked Game viewport and the fullscreen/player
-    /// path) and a frame that hits both must not advance transitions twice.
-    /// A frame that draws no UI at all keeps accumulating, so a hidden menu
-    /// resumes where it left off instead of freezing.
+    /// A frame styles the same tree several times over: the hit test needs the
+    /// styled geometry (padding and text size move every rect), the screen
+    /// overlay draws it, and the world canvases draw it again. Each of those
+    /// gets the full `dt`; `StyleRuntime::begin_frame` is what keeps an element
+    /// from spending it more than once.
     ui_style_dt: f32,
     /// Style names that appeared in more than one sheet — surfaced in the
     /// Inspector so a silently shadowed style can't cost an afternoon.

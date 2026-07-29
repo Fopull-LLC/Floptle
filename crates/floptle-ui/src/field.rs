@@ -67,6 +67,64 @@ impl Cursor {
     }
 }
 
+/// How far a field's text run slides LEFT (a negative number, or 0) so the
+/// caret stays inside the box — a value longer than its field scrolls out from
+/// under itself as you type past the end.
+///
+/// Lives here, in the unit-free half, because two places need the same answer
+/// and they work in different units: the renderer applies it in physical
+/// pixels, and the editor SUBTRACTS it in design units to turn a click x back
+/// into a character index. When only one of them knew about it, clicking into a
+/// scrolled value put the caret several characters from the pointer — which
+/// reads as the mouse being offset, not as a text bug.
+///
+/// Clamped so a value that fits never pulls away from the edge it was aligned
+/// against.
+pub fn scroll_shift(caret_x: f32, run_w: f32, rect_x: f32, rect_w: f32, pad: f32) -> f32 {
+    let over = caret_x - (rect_x + rect_w - pad);
+    if over <= 0.0 {
+        return 0.0;
+    }
+    -over.min((run_w - rect_w + pad * 2.0).max(0.0))
+}
+
+/// Which gap between characters a click at `x` lands in — the inverse of where
+/// the renderer put the glyphs.
+///
+/// `width` measures a prefix of `shown` in the caller's units (the editor works
+/// in design units, so `x`, `left`, `rect` and `pad` are too); the font belongs
+/// to the caller. `drawn_caret` is the caret index that was on screen in the
+/// frame being clicked, which is what decides how far the run had scrolled —
+/// `None` for a field that wasn't focused, and therefore hadn't scrolled.
+///
+/// Lands on the NEAREST gap, not the one before: clicking the right half of a
+/// letter puts the caret after it, which is what every text field does and what
+/// nobody notices until it doesn't.
+pub fn caret_at(
+    shown: &str,
+    left: f32,
+    rect: [f32; 4],
+    drawn_caret: Option<usize>,
+    x: f32,
+    pad: f32,
+    width: &dyn Fn(&str) -> f32,
+) -> usize {
+    let prefix = |i: usize| -> String { shown.chars().take(i).collect() };
+    let full = width(shown);
+    let shift = drawn_caret
+        .map(|c| scroll_shift(left + width(&prefix(c)), full, rect[0], rect[2], pad))
+        .unwrap_or(0.0);
+    let target = x - left - shift;
+    let mut best = (0usize, f32::INFINITY);
+    for i in 0..=shown.chars().count() {
+        let d = (width(&prefix(i)) - target).abs();
+        if d < best.1 {
+            best = (i, d);
+        }
+    }
+    best.0
+}
+
 /// Apply one edit. Returns true when the VALUE changed (caret-only moves
 /// return false, so `changed` doesn't fire for pressing Left).
 ///
@@ -341,6 +399,55 @@ mod tests {
         let mut c = Cursor::at(3);
         assert!(!apply(&mut v, &mut c, &Edit::Delete, false, &plain()));
         assert_eq!(v, "abc");
+    }
+
+    /// The renderer draws with this and the click-to-caret mapping undoes it.
+    /// Both must read the same function or a click lands on the wrong glyph.
+    #[test]
+    fn a_run_only_scrolls_once_the_caret_leaves_the_box() {
+        // Box 100 wide at x=10, 2 units of breathing room, run 300 wide.
+        let s = |caret_x: f32| scroll_shift(caret_x, 300.0, 10.0, 100.0, 2.0);
+        assert_eq!(s(50.0), 0.0, "a caret inside the box must not scroll it");
+        assert_eq!(s(108.0), 0.0, "the last two units are the pad, still inside");
+        assert!((s(148.0) - -40.0).abs() < 1e-4, "past the edge, scroll by the overshoot");
+        // Scrolled to the end: the run's tail sits against the right edge and
+        // stops — it never keeps sliding into empty space.
+        assert!((s(9_999.0) - -(300.0 - 100.0 + 4.0)).abs() < 1e-4);
+        // A value that FITS never scrolls, however far right the caret is.
+        assert_eq!(scroll_shift(9_999.0, 40.0, 10.0, 100.0, 2.0), 0.0);
+    }
+
+    /// The whole point of sharing `scroll_shift`: a click has to come back to
+    /// the character it landed on, at any scroll position. A 10-unit fixed
+    /// width per glyph makes the expected answers arithmetic.
+    #[test]
+    fn a_click_round_trips_to_the_character_under_it_even_when_scrolled() {
+        let w = |s: &str| s.chars().count() as f32 * 10.0;
+        let shown = "ABCDEFGHIJKLMNOPQRST"; // 200 units of text …
+        let rect = [10.0, 0.0, 100.0, 20.0]; // … in a 100-unit box at x=10.
+        let (left, pad) = (10.0, 2.0);
+        // Unfocused: no caret was drawn, so nothing scrolled. The 4th glyph
+        // spans 30..40, so its left half lands before it and its right half
+        // after — 35.0 exactly is a tie, and ties go to the earlier gap.
+        assert_eq!(caret_at(shown, left, rect, None, 10.0 + 32.0, pad, &w), 3);
+        assert_eq!(caret_at(shown, left, rect, None, 10.0 + 38.0, pad, &w), 4);
+        // Focused with the caret at the end, the run has scrolled left by
+        // 200 - 100 + 4 = 104. Every glyph on screen is 104 units further left
+        // than the layout says, so a click at the box's left edge is the
+        // character at 104 units into the string — glyph 10 (index 10 or 11).
+        let at_edge = caret_at(shown, left, rect, Some(20), 10.0, pad, &w);
+        assert!(
+            (10..=11).contains(&at_edge),
+            "clicking the left edge of a scrolled field gave index {at_edge}, not ~10"
+        );
+        // And the inverse of the renderer: whatever x the caret is DRAWN at
+        // must map back to the caret's own index.
+        for c in [0usize, 3, 9, 17, 20] {
+            let caret_x = left + w(&shown[..c]);
+            let shift = scroll_shift(caret_x, w(shown), rect[0], rect[2], pad);
+            let back = caret_at(shown, left, rect, Some(c), caret_x + shift, pad, &w);
+            assert_eq!(back, c, "the drawn caret for {c} did not map back to itself");
+        }
     }
 
     #[test]

@@ -1443,13 +1443,15 @@ impl Ui {
                 let left = align_x(t.align, rect_px, run_w);
                 let caret_x = left + x_of(car.index);
                 // A value longer than its box scrolls out from under itself so
-                // the caret stays on screen — clamped so a short value never
-                // pulls away from the edge it was authored against.
-                let pad = 2.0 * scale;
-                let over = caret_x - (rect_px[0] + rect_px[2] - pad);
-                if over > 0.0 {
-                    field_shift = -over.min((run_w - rect_px[2] + pad * 2.0).max(0.0));
-                }
+                // the caret stays on screen. Shared with the editor's
+                // click→caret mapping, which has to undo exactly this.
+                field_shift = floptle_ui::field::scroll_shift(
+                    caret_x,
+                    run_w,
+                    rect_px[0],
+                    rect_px[2],
+                    2.0 * scale,
+                );
                 let (a, b) = (car.index.min(car.anchor), car.index.max(car.anchor));
                 // Selection first: it sits behind the glyphs, so a light band
                 // over dark text stays readable rather than erasing it.

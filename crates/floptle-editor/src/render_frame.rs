@@ -3958,9 +3958,12 @@ impl Editor {
         let raw_dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);
         self.last = Some(now);
         let dt = self.smooth_dt(raw_dt);
-        // Bank this frame's time for UI style transitions; the gather pass
-        // drains it (see `Editor::ui_style_dt`).
-        self.ui_style_dt = (self.ui_style_dt + dt).min(0.25);
+        // This frame's time for UI style transitions. Handed to the RUNTIME
+        // rather than to a pass, because several passes style the same tree in
+        // a frame and each needs the real `dt`; `begin_frame` is what stops an
+        // element charging it twice (see `Editor::ui_style_dt`).
+        self.ui_style_dt = dt.min(0.25);
+        self.ui_style_rt.begin_frame();
         // The ◫ UI tab's canvas runs its own style runtime (so a previewed
         // hover there can't fight the Game view's real one) and therefore needs
         // its own clock. Read, not drained: it renders exactly once a frame.

@@ -556,6 +556,8 @@ struct Anim {
     t: f32,
     dur: f32,
     ease: Ease,
+    /// The last `StyleRuntime::frame` this entry charged `dt` on.
+    stepped: u64,
 }
 
 /// Per-element transition state, owned by whoever drives the frame.
@@ -566,6 +568,10 @@ struct Anim {
 #[derive(Clone, Debug, Default)]
 pub struct StyleRuntime {
     live: std::collections::HashMap<u32, Anim>,
+    /// Bumped once per frame by [`Self::begin_frame`]; stamped onto each `Anim`
+    /// the first time it steps, so later passes over the same frame don't
+    /// charge `dt` again.
+    frame: u64,
 }
 
 impl StyleRuntime {
@@ -573,6 +579,19 @@ impl StyleRuntime {
     /// on the next frame from whatever is on screen.
     pub fn clear(&mut self) {
         self.live.clear();
+    }
+
+    /// Open a new frame: from here until the next call, each element's
+    /// transition advances by `dt` ONCE, however many times it is styled.
+    ///
+    /// A frame styles the same tree more than once by design — the hit test
+    /// needs the styled geometry, the screen overlay draws it, and a world
+    /// canvas draws it again — and every one of those has to call
+    /// [`apply_styles`] or it works from rects the styles have since moved.
+    /// Without this stamp the shared cost of that is transitions running at 2×
+    /// or 3× speed depending on which views happen to be open.
+    pub fn begin_frame(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
     }
 
     /// Drop entries for elements that no longer exist, so a long session
@@ -588,6 +607,7 @@ impl StyleRuntime {
     /// eases back from where it actually is instead of snapping to full hover
     /// and then leaving.
     fn step(&mut self, id: u32, state: UiState, target: Animated, tr: Transition, dt: f32) -> Animated {
+        let frame = self.frame;
         let entry = self.live.entry(id).or_insert_with(|| Anim {
             state,
             from: target,
@@ -595,6 +615,9 @@ impl StyleRuntime {
             t: tr.duration,
             dur: tr.duration,
             ease: tr.ease,
+            // Never stepped: `frame` itself would mean "already charged this
+            // frame" and cost a brand-new element its first tick of movement.
+            stepped: frame.wrapping_sub(1),
         });
         if entry.state != state || entry.to != target {
             let current = entry.current();
@@ -605,9 +628,14 @@ impl StyleRuntime {
                 t: 0.0,
                 dur: tr.duration.max(0.0),
                 ease: tr.ease,
+                stepped: entry.stepped,
             };
         }
-        entry.t += dt;
+        // Once per frame, no matter how many passes style this element.
+        if entry.stepped != frame {
+            entry.stepped = frame;
+            entry.t += dt;
+        }
         entry.current()
     }
 }
@@ -788,8 +816,11 @@ fn apply_animated(spec: &mut crate::ElementSpec, a: &Animated, styled_shape: boo
 /// [`crate::solve`]. It mutates the tree's spec copies, never the scene — which
 /// is the whole reason play-time hover states can't end up in a saved `.ron`.
 ///
-/// `dt` is seconds since the last call. Pass 0 to resolve without advancing
-/// (an editor drawing a paused frame).
+/// `dt` is seconds of frame time. Pass 0 to resolve without advancing (an
+/// editor drawing a paused frame). Time is charged per element per frame, so
+/// call [`StyleRuntime::begin_frame`] once a frame and then style as many trees
+/// as the frame needs with the same `dt` — the second and third pass over an
+/// element resolve it without moving it.
 pub fn apply_styles(
     roots: &mut [crate::Node],
     sheet: &StyleSheet,
@@ -970,12 +1001,14 @@ mod tests {
 
         // Hover for half the 0.1 s duration, linear ease → halfway to 1.05.
         let hover = StateInput { hovered: Some(1), ..Default::default() };
+        rt.begin_frame();
         let mut roots = make();
         apply_styles(&mut roots, &sheet, &tk, &hover, &mut rt, 0.05);
         let s = roots[0].spec.scale[0];
         assert!((s - 1.025).abs() < 1e-4, "expected halfway (1.025), got {s}");
 
         // Finish it.
+        rt.begin_frame();
         let mut roots = make();
         apply_styles(&mut roots, &sheet, &tk, &hover, &mut rt, 0.05);
         assert!((roots[0].spec.scale[0] - 1.05).abs() < 1e-4);
@@ -1007,6 +1040,7 @@ mod tests {
         apply_styles(&mut roots, &sheet, &tk, &StateInput::default(), &mut rt, 1.0);
 
         let hover = StateInput { hovered: Some(1), ..Default::default() };
+        rt.begin_frame();
         let mut roots = make();
         apply_styles(&mut roots, &sheet, &tk, &hover, &mut rt, 0.05); // → 1.025
         assert!((roots[0].spec.scale[0] - 1.025).abs() < 1e-4);
@@ -1014,10 +1048,52 @@ mod tests {
         // Leave immediately; one frame later we must be BETWEEN 1.0 and 1.025 —
         // never above it, which is what snapping to the full hover value first
         // would produce, and what reads on screen as a pop.
+        rt.begin_frame();
         let mut roots = make();
         apply_styles(&mut roots, &sheet, &tk, &StateInput::default(), &mut rt, 0.01);
         let s = roots[0].spec.scale[0];
         assert!(s > 1.0 && s < 1.025, "should ease back down from 1.025, got {s}");
+    }
+
+    /// A frame styles the same tree more than once — the hit test, the screen
+    /// overlay, and a world canvas each build their own copy and each must
+    /// resolve styles or work from rects the styles have moved. The frame's
+    /// `dt` is therefore spent per element, not per pass: three passes must
+    /// leave the transition exactly where one would.
+    #[test]
+    fn styling_a_tree_twice_in_one_frame_does_not_run_time_twice() {
+        let sheet = button_sheet();
+        let tk = tokens();
+        let make = || {
+            vec![node(
+                1,
+                ElementSpec {
+                    style: "button".into(),
+                    shape: Some(ShapeSpec::default()),
+                    ..Default::default()
+                },
+            )]
+        };
+        let hover = StateInput { hovered: Some(1), ..Default::default() };
+        let settle_then_hover = |rt: &mut StyleRuntime, passes: usize| {
+            let mut roots = make();
+            apply_styles(&mut roots, &sheet, &tk, &StateInput::default(), rt, 1.0);
+            rt.begin_frame();
+            let mut last = 0.0;
+            for _ in 0..passes {
+                let mut roots = make();
+                apply_styles(&mut roots, &sheet, &tk, &hover, rt, 0.05);
+                last = roots[0].spec.scale[0];
+            }
+            last
+        };
+        let once = settle_then_hover(&mut StyleRuntime::default(), 1);
+        let thrice = settle_then_hover(&mut StyleRuntime::default(), 3);
+        assert!((once - 1.025).abs() < 1e-4, "one pass should reach halfway, got {once}");
+        assert!(
+            (thrice - once).abs() < 1e-6,
+            "three passes over one frame ran the transition {thrice} vs {once}"
+        );
     }
 
     /// An element appearing already in a state settles there instead of
