@@ -31,6 +31,10 @@ pub(crate) enum EditorTab {
     /// The map-building suite: blockout shapes, sub-object mode, modeling ops,
     /// per-face material slots (docs/map-tools-proposal.md).
     Map,
+    /// The UI authoring canvas: one game-UI layer at design resolution, with
+    /// rulers, guides, snapping, align/distribute, state preview and an
+    /// element outline (docs/ui-system-2-proposal.md, phase C).
+    UiDesign,
     /// Project Settings: game/rendering/layers/input, searchable by section.
     /// Opened from Edit ⏵ Project Settings; a real dock tab, so it can be
     /// dragged anywhere, split beside the viewport, or left closed.
@@ -56,6 +60,7 @@ impl EditorTab {
             EditorTab::ShaderGraph => "◈ Shaders",
             EditorTab::Paint => "◨ Paint",
             EditorTab::Image => "🖼 Image",
+            EditorTab::UiDesign => "◫ UI",
             EditorTab::Settings => "⚙ Settings",
         }
     }
@@ -79,6 +84,7 @@ impl EditorTab {
         EditorTab::Paint,
         EditorTab::Image,
         EditorTab::Map,
+        EditorTab::UiDesign,
         EditorTab::Settings,
     ];
 }
@@ -141,6 +147,7 @@ pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
         EditorTab::ShaderGraph,
         EditorTab::AnimGraph,
         EditorTab::Image,
+        EditorTab::UiDesign,
     ]);
     let surface = dock.main_surface_mut();
     let [central, _] =
@@ -209,6 +216,16 @@ pub(crate) fn focus_image_tab(dock: &mut egui_dock::DockState<EditorTab>) {
         let _ = dock.set_active_tab(path);
     } else {
         dock.push_to_focused_leaf(EditorTab::Image);
+    }
+}
+
+/// Focus the ◫ UI dock tab — re-adding it if the user closed it. Used by
+/// Add ⏵ UI and the Inspector, so building a screen never means hunting tabs.
+pub(crate) fn focus_ui_tab(dock: &mut egui_dock::DockState<EditorTab>) {
+    if let Some(path) = dock.find_tab(&EditorTab::UiDesign) {
+        let _ = dock.set_active_tab(path);
+    } else {
+        dock.push_to_focused_leaf(EditorTab::UiDesign);
     }
 }
 

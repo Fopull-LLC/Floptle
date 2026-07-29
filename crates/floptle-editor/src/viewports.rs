@@ -662,3 +662,235 @@ impl Editor {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The ◫ UI tab's canvas
+// ---------------------------------------------------------------------------
+
+impl Editor {
+    /// Lazily (re)create the UI tab's offscreen canvas at `w`×`h` physical px.
+    fn ensure_ui_design_vp(&mut self, w: u32, h: u32) {
+        let (w, h) = (w.clamp(16, 8192), h.clamp(16, 8192));
+        if self.ui_design_vp.is_some() && self.ui_design_vp_dims == (w, h) {
+            return;
+        }
+        let (Some(gpu), Some(egui)) = (self.gpu.as_ref(), self.egui.as_mut()) else { return };
+        if let Some(old) = self.ui_design_vp.take() {
+            egui.renderer.free_texture(&old.tex_id);
+        }
+        // Nearest: the canvas is rendered AT its on-screen size (zoom multiplies
+        // the render, it doesn't stretch a smaller image), so a linear blit
+        // would only soften pixel-art UI for nothing.
+        self.ui_design_vp =
+            Some(make_offscreen_target(gpu, egui, w, h, "ui-design", wgpu::FilterMode::Nearest));
+        self.ui_design_vp_dims = (w, h);
+    }
+
+    /// Which layer the UI tab is editing: the chosen one if it still exists,
+    /// else the first in the scene.
+    pub(crate) fn ui_design_layer(&self) -> Option<(Entity, floptle_ui::UiLayer)> {
+        let layers: Vec<(Entity, floptle_ui::UiLayer)> =
+            self.world.query::<floptle_ui::UiLayer>().map(|(e, l)| (e, *l)).collect();
+        self.ui_design
+            .layer
+            .and_then(|idx| layers.iter().find(|(e, _)| e.index() == idx).copied())
+            .or_else(|| layers.first().copied())
+    }
+
+    /// Load / save the UI tab's guides as the open scene changes.
+    ///
+    /// Guides follow the SCENE, and are keyed inside it by layer name — an
+    /// entity index is a runtime accident, and a guide that silently reattached
+    /// to a different layer after a reload would be worse than no guide.
+    pub(crate) fn sync_ui_design_guides(&mut self) {
+        let scene = self.scene_name.clone();
+        if self.ui_design_guides_scene.as_deref() != Some(scene.as_str()) {
+            if let Some(prev) = self.ui_design_guides_scene.clone() {
+                crate::ui_design::save_guides(
+                    &self.project_root,
+                    &prev,
+                    &self.world,
+                    &self.ui_design.guides,
+                );
+            }
+            self.ui_design.guides =
+                crate::ui_design::load_guides(&self.project_root, &scene, &self.world);
+            self.ui_design.guides_dirty = false;
+            self.ui_design_guides_scene = Some(scene);
+            return;
+        }
+        if std::mem::take(&mut self.ui_design.guides_dirty) {
+            crate::ui_design::save_guides(
+                &self.project_root,
+                &scene,
+                &self.world,
+                &self.ui_design.guides,
+            );
+        }
+    }
+
+    /// Render the ◫ UI tab's canvas: the selected layer, solved at the preview
+    /// resolution and drawn by the REAL UI pipeline into an offscreen target.
+    ///
+    /// Everything the tab draws on top (outlines, handles, guides) is chrome
+    /// over this image — the image itself is the shipping renderer, so what the
+    /// canvas shows is what the game shows. Also stashes the solved rects,
+    /// which is what makes picking and snapping possible at all.
+    pub(crate) fn update_ui_design_view(&mut self) {
+        // Consumed here so a hidden tab stops costing a render.
+        let visible = std::mem::take(&mut self.ui_design.tab_visible);
+        if !visible {
+            self.ui_design.rendered_layer = None;
+            self.ui_design.placed.clear();
+            return;
+        }
+        let Some((layer_ent, layer)) = self.ui_design_layer() else {
+            self.ui_design.rendered_layer = None;
+            self.ui_design.placed.clear();
+            return;
+        };
+        self.ui_design.layer = Some(layer_ent.index());
+        let preview_px = self.ui_design.preview_px(&layer);
+        // The runtime's own scaler: switching the preview resolution shows what
+        // the canvas scaler actually does, rather than a naive rescale.
+        let layer_scale = layer.scale_for(preview_px);
+        let design_vp = [preview_px[0] / layer_scale, preview_px[1] / layer_scale];
+        let zoom = self.ui_design.zoom.clamp(0.05, 8.0);
+        // Cap the target so a 4× zoom on an ultrawide can't ask for a texture
+        // the device won't allocate; the canvas just stops getting crisper.
+        let max_dim = 8192.0f32;
+        let fit = (max_dim / (preview_px[0] * zoom)).min(max_dim / (preview_px[1] * zoom)).min(1.0);
+        let render_scale = layer_scale * zoom * fit;
+        let tw = (design_vp[0] * render_scale).round().max(16.0) as u32;
+        let th = (design_vp[1] * render_scale).round().max(16.0) as u32;
+        self.ensure_ui_design_vp(tw, th);
+
+        self.ensure_ui_fonts();
+        let mut roots = self.ui_layer_tree(layer_ent);
+        // State preview: forced on the SELECTION, on the tree copies. A state is
+        // a property of one element under one pointer, so "show me hover" means
+        // "show me hover on this button" — and doing it on the copies is why it
+        // can never reach the saved scene.
+        let sel: Vec<u32> = self.selection.iter().map(|e| e.index()).collect();
+        let forced = self.ui_design.state;
+        let mut input = floptle_ui::StateInput::default();
+        if let (Some(state), Some(&id)) = (forced, sel.first()) {
+            match state {
+                floptle_ui::UiState::Hover => input.hovered = Some(id),
+                floptle_ui::UiState::Pressed => input.pressed = Some(id),
+                floptle_ui::UiState::Focus => input.focused = Some(id),
+                floptle_ui::UiState::Disabled | floptle_ui::UiState::Selected => {
+                    fn mark(ns: &mut [floptle_ui::Node], id: u32, disabled: bool) {
+                        for n in ns.iter_mut() {
+                            if n.id == id {
+                                if disabled {
+                                    n.spec.disabled = true;
+                                } else {
+                                    n.spec.selected = true;
+                                }
+                            }
+                            mark(&mut n.children, id, disabled);
+                        }
+                    }
+                    mark(&mut roots, id, state == floptle_ui::UiState::Disabled);
+                }
+                floptle_ui::UiState::Base => {}
+            }
+        }
+        if !self.ui_styles.styles.is_empty() {
+            let (sheet, tokens) = (&self.ui_styles, &self.ui_tokens);
+            let dt = self.ui_design_dt;
+            floptle_ui::apply_styles(
+                &mut roots,
+                sheet,
+                tokens,
+                &input,
+                &mut self.ui_design_rt,
+                dt,
+            );
+        }
+        let (placed, dl) = {
+            let Some(uir) = self.ui_render.as_ref() else { return };
+            let measure = |t: &floptle_ui::TextSpec| uir.measure_spec(t);
+            let placed = floptle_ui::solve(&roots, design_vp, &measure);
+            let masks = self.ui_layer_masks(&roots);
+            let dl = floptle_ui::draw_list(&roots, &placed, &masks);
+            (placed, dl)
+        };
+        for q in &dl.quads {
+            if !q.texture.is_empty() {
+                let _ = self.ensure_texture(&q.texture);
+            }
+        }
+
+        let Some(target) = self.ui_design_vp.as_ref() else { return };
+        let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_ref()) else { return };
+        // Clear to the chosen backdrop. wgpu clear colours are LINEAR and the
+        // target is sRGB, so the picked colour is encoded on the way in —
+        // without this the canvas background reads several stops too light.
+        let lin = |c: f32| {
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        let bg = self.ui_design.backdrop;
+        {
+            let mut enc = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui-design-clear") });
+            enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ui-design-clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target.color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: lin(bg[0]) as f64,
+                            g: lin(bg[1]) as f64,
+                            b: lin(bg[2]) as f64,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            gpu.queue.submit(Some(enc.finish()));
+        }
+        let vp = [self.ui_design_vp_dims.0 as f32, self.ui_design_vp_dims.1 as f32];
+        let mut instances = Vec::new();
+        let mut batches = Vec::new();
+        {
+            let reg = &self.texture_registry;
+            let uic = &self.ui_flsl_cache;
+            let uib = &self.ui_flsl_binds;
+            let Some(uir) = self.ui_render.as_mut() else { return };
+            uir.pack(
+                gpu,
+                &dl,
+                [0.0, 0.0],
+                render_scale,
+                &mut |p| reg.get(p).copied(),
+                &|id| raster.texture_size(id),
+                &mut |p, owner| {
+                    let shader = uic.get(p).and_then(|e| e.compiled.as_ref()).map(|(_, id)| *id)?;
+                    Some((shader, uib.get(&owner)?.binding))
+                },
+                &mut instances,
+                &mut batches,
+            );
+            // A `backdrop()` UI shader has nothing behind it here — the canvas
+            // shows the layer, not the 3D scene. Clear rather than leave the
+            // last game frame stuck in the sampler.
+            uir.clear_backdrop();
+            uir.draw(gpu, &target.color_view, vp, &instances, &batches, raster);
+        }
+        self.ui_design.tex = Some(target.tex_id);
+        self.ui_design.design_vp = design_vp;
+        self.ui_design.render_scale = render_scale;
+        self.ui_design.placed = placed;
+        self.ui_design.rendered_layer = Some(layer_ent.index());
+    }
+}

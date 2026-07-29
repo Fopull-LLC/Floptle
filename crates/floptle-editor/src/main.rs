@@ -90,6 +90,8 @@ mod shading;
 mod terrain_edit;
 mod terrain_ui;
 mod theme;
+mod ui_design;
+mod ui_design_ui;
 mod ui_game;
 mod ui_shader_lib;
 mod ui_widgets;
@@ -188,8 +190,10 @@ struct EditorCmd {
     export_game: Option<(String, usize)>,
     /// Add ⏵ UI: create a game-UI node (layer/panel/text/image).
     add_ui: Option<crate::ui_game::AddUi>,
-    /// Scene-view UI drag: (element entity index, accumulated design-unit delta).
-    ui_move: Option<(u32, [f32; 2])>,
+    /// UI element moves this frame: (element entity index, design-unit delta).
+    /// A list, not one entry, because a multi-selection drag and every
+    /// align/distribute op move several elements in a single gesture.
+    ui_move: Vec<(u32, [f32; 2])>,
     /// Rect-tool resize of a UI element (Scene tab handles): entity index,
     /// size delta (design units), which edge per axis (true = min/left/top),
     /// and the element's current solved design size (for %-mode scaling).
@@ -199,6 +203,21 @@ struct EditorCmd {
     /// viewport press must not gizmo-grab or pick (picking can't see 2D elements
     /// and would clear the selection out from under the drag).
     ui_hot: bool,
+    /// Sibling-order writes: (element index, new `ElementSpec::order`). The
+    /// outline panel's z-drag and the canvas's stack re-order both renumber a
+    /// whole sibling run, so this is a list.
+    ui_order: Vec<(u32, i32)>,
+    /// Visibility toggles from the ◫ UI tab's outline panel.
+    ui_set_visible: Vec<(u32, bool)>,
+    /// Inline text editing on the canvas: (element index, new string).
+    ui_set_text: Option<(u32, String)>,
+    /// Style assignment: (element index, style name — empty clears it).
+    ui_set_style: Vec<(u32, String)>,
+    /// Paste a raw look (shape/text/element properties) onto elements — what
+    /// "copy style" does in a project that has no style sheet yet.
+    ui_paste_look: Vec<(u32, Box<floptle_ui::ElementSpec>)>,
+    /// Re-read the project's style sheets (after "make this a style" wrote one).
+    ui_reload_styles: bool,
     /// Attach an AudioSource component (empty clip — picked in the Inspector).
     add_audio: Option<Entity>,
     remove_audio: Option<Entity>,
@@ -584,6 +603,11 @@ struct EditorTabViewer<'a> {
     /// The project's UI style sheet — the UI Element section offers its names
     /// in a picker so a style is chosen, not typed.
     ui_styles: &'a floptle_ui::StyleSheet,
+    /// The project's UI design tokens — the ◫ UI tab's snap step defaults to
+    /// the project's own spacing scale rather than a number the engine picked.
+    ui_tokens: &'a floptle_ui::Tokens,
+    /// The ◫ UI tab's state (view, guides, snapping, selection tools).
+    ui_design: &'a mut crate::ui_design::UiDesignState,
     /// Parsed Sdf-stage shaders (Field Shapes) — the Material section falls
     /// back to this schema when the picked shader is `stage sdf`.
     sdf_cache: &'a shaders::SdfCache,
@@ -787,6 +811,7 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
                 cx.ui(ui);
             }
             EditorTab::Map => self.map_ui(ui),
+            EditorTab::UiDesign => self.ui_design_ui(ui),
             EditorTab::Settings => {
                 let out = self.settings.ui(ui, self.project);
                 self.cmd.save_project |= out.save_project;
@@ -1216,6 +1241,18 @@ struct Editor {
     ui_style_files: Vec<(std::path::PathBuf, std::option::Option<std::time::SystemTime>)>,
     /// `elapsed` at the last style-file scan (rate-limits the directory walk).
     ui_style_poll: f32,
+    /// The ◫ UI tab: what's on the canvas, how it's framed, and the guides.
+    ui_design: ui_design::UiDesignState,
+    /// The UI tab's own offscreen canvas (the real UI pipeline, rendered at the
+    /// preview resolution × zoom) and its size in physical pixels.
+    ui_design_vp: Option<PreviewTarget>,
+    ui_design_vp_dims: (u32, u32),
+    /// The UI tab's style runtime + clock, kept apart from the game's so a
+    /// previewed `hover` on the canvas can't disturb a real one in the Game view.
+    ui_design_rt: floptle_ui::StyleRuntime,
+    ui_design_dt: f32,
+    /// The scene name the tab's guides were loaded for (they follow the scene).
+    ui_design_guides_scene: Option<String>,
     /// Last frame's LMB, for press/release edges in the UI interact pass.
     ui_lmb_was: bool,
     /// Event-banked left-button edges for the game-UI pass: set by the raw

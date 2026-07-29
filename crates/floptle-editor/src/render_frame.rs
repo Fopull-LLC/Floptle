@@ -289,6 +289,11 @@ impl Editor {
         self.update_render_targets(elapsed);
         self.update_camera_preview(elapsed);
         self.update_game_viewport(elapsed);
+        // The ◫ UI tab's canvas — the selected layer through the real UI
+        // pipeline. Runs alongside the other offscreen views, and no-ops (and
+        // frees nothing but time) when the tab isn't showing.
+        self.sync_ui_design_guides();
+        self.update_ui_design_view();
         // The ◈ Shaders tab's per-node preview atlas (only while it's visible).
         self.update_shader_graph_preview(elapsed);
         // `stage ui` shaders read `time` from the UI globals' spare lane.
@@ -1509,6 +1514,7 @@ impl Editor {
         let anim_ui_state = &mut self.anim_ui;
         let shader_graph_state = &mut self.shader_graph;
         let image_state = &mut self.image;
+        let ui_design = &mut self.ui_design;
         let shader_preview_state = &mut self.shader_preview;
         let mesh_registry = &self.mesh_registry;
         // Multiplayer harness panel state: read-only status snapshot + live knobs.
@@ -2398,6 +2404,8 @@ impl Editor {
                 flsl_cache: &self.flsl_cache,
                 ui_flsl_cache: &self.ui_flsl_cache,
                 ui_styles: &self.ui_styles,
+                ui_tokens: &self.ui_tokens,
+                ui_design,
                 sdf_cache: &self.sdf_cache,
                 sky_uniforms: self.sky_shader.as_ref().map_or(&[], |(_, _, u)| u.as_slice()),
                 component_clip,
@@ -3925,6 +3933,10 @@ impl Editor {
         // Bank this frame's time for UI style transitions; the gather pass
         // drains it (see `Editor::ui_style_dt`).
         self.ui_style_dt = (self.ui_style_dt + dt).min(0.25);
+        // The ◫ UI tab's canvas runs its own style runtime (so a previewed
+        // hover there can't fight the Game view's real one) and therefore needs
+        // its own clock. Read, not drained: it renders exactly once a frame.
+        self.ui_design_dt = dt.min(0.25);
         let elapsed = self.started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
         self.poll_ui_styles(elapsed);
         self.fog_time = elapsed; // drifts the volumetric-fog noise (offscreen views too)
@@ -4833,6 +4845,12 @@ impl Editor {
         }
         if let Some(what) = cmd.add_ui {
             self.add_ui_node(what);
+            // Bring the ◫ UI tab up: the thing you just added is a flat screen
+            // element, and hunting for the tab that shows it is the kind of
+            // friction that keeps people typing coordinates instead.
+            if let Some(dock) = self.dock_state.as_mut() {
+                crate::dock::focus_ui_tab(dock);
+            }
         }
         if let Some(shape) = cmd.add_map_shape {
             self.add_map_shape(shape);
@@ -4878,29 +4896,15 @@ impl Editor {
         // frame of the gesture via the pre-edit frame_snapshot; closed when the
         // pointer releases and `editing` resets). Without this, dragging/resizing
         // a UI element in the Scene view left no undo point.
-        if cmd.ui_move.is_some() || cmd.ui_resize.is_some() {
+        if !cmd.ui_move.is_empty() || cmd.ui_resize.is_some() {
             self.begin_edit();
         }
-        if let Some((idx, d)) = cmd.ui_move {
-            let ent = self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == idx);
+        for (idx, d) in &cmd.ui_move {
+            let ent = self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == *idx);
             if let Some(e) = ent
                 && let Some(mut spec) = self.world.get::<floptle_ui::ElementSpec>(e).cloned()
             {
-                match &mut spec.place {
-                    floptle_ui::Place::Free { pos } => {
-                        pos[0] += d[0];
-                        pos[1] += d[1];
-                    }
-                    floptle_ui::Place::Pin { offset, .. } => {
-                        offset[0] += d[0];
-                        offset[1] += d[1];
-                    }
-                    // Slide the whole anchored box by nudging the leading margins.
-                    floptle_ui::Place::Stretch { margin, .. } => {
-                        margin[0] += d[0];
-                        margin[1] += d[1];
-                    }
-                }
+                crate::ui_game::nudge_place(&mut spec.place, *d);
                 self.world.insert(e, spec);
             }
         }
@@ -4946,6 +4950,81 @@ impl Editor {
                 }
                 self.world.insert(e, spec);
             }
+        }
+        // ◫ UI tab writes. Each is an ordinary component edit, banked as one
+        // undo step like any Inspector change.
+        if !cmd.ui_order.is_empty()
+            || !cmd.ui_set_visible.is_empty()
+            || cmd.ui_set_text.is_some()
+            || !cmd.ui_set_style.is_empty()
+            || !cmd.ui_paste_look.is_empty()
+        {
+            self.begin_edit();
+            let ent = |world: &floptle_core::World, idx: u32| {
+                world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == idx)
+            };
+            for (idx, order) in &cmd.ui_order {
+                if let Some(e) = ent(&self.world, *idx)
+                    && let Some(mut spec) = self.world.get::<floptle_ui::ElementSpec>(e).cloned()
+                {
+                    spec.order = *order;
+                    self.world.insert(e, spec);
+                }
+            }
+            for (idx, vis) in &cmd.ui_set_visible {
+                if let Some(e) = ent(&self.world, *idx)
+                    && let Some(mut spec) = self.world.get::<floptle_ui::ElementSpec>(e).cloned()
+                {
+                    spec.visible = *vis;
+                    self.world.insert(e, spec);
+                }
+            }
+            if let Some((idx, text)) = &cmd.ui_set_text
+                && let Some(e) = ent(&self.world, *idx)
+                && let Some(mut spec) = self.world.get::<floptle_ui::ElementSpec>(e).cloned()
+                && let Some(t) = spec.text.as_mut()
+            {
+                t.text = text.clone();
+                self.world.insert(e, spec);
+            }
+            for (idx, name) in &cmd.ui_set_style {
+                if let Some(e) = ent(&self.world, *idx)
+                    && let Some(mut spec) = self.world.get::<floptle_ui::ElementSpec>(e).cloned()
+                {
+                    spec.style = name.clone();
+                    self.world.insert(e, spec);
+                }
+            }
+            // Pasting a LOOK copies the visual properties only: placement, size
+            // and the element's children are what make it that element, and
+            // nothing about "make this look like that" should move it.
+            for (idx, src) in &cmd.ui_paste_look {
+                if let Some(e) = ent(&self.world, *idx)
+                    && let Some(mut spec) = self.world.get::<floptle_ui::ElementSpec>(e).cloned()
+                {
+                    spec.shape = src.shape;
+                    spec.opacity = src.opacity;
+                    spec.tint = src.tint;
+                    spec.rotation = src.rotation;
+                    spec.scale = src.scale;
+                    spec.pivot = src.pivot;
+                    spec.style = src.style.clone();
+                    if let (Some(dst), Some(s)) = (spec.text.as_mut(), src.text.as_ref()) {
+                        let keep = std::mem::take(&mut dst.text);
+                        *dst = s.clone();
+                        dst.text = keep;
+                    }
+                    if let (Some(dst), Some(s)) = (spec.stack.as_mut(), src.stack.as_ref()) {
+                        dst.pad = s.pad;
+                        dst.gap = s.gap;
+                    }
+                    self.world.insert(e, spec);
+                }
+            }
+            self.scene_dirty = true;
+        }
+        if cmd.ui_reload_styles {
+            self.reload_ui_styles();
         }
         if cmd.inspector_changed {
             self.begin_edit();

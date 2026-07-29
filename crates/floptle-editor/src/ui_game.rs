@@ -60,6 +60,31 @@ pub(crate) enum AddUi {
     Scroll,
 }
 
+/// Slide an element by `d` design units, whatever its placement mode.
+///
+/// One function so every mover agrees: the Scene overlay drag, the ◫ UI tab's
+/// canvas drag and nudge keys, and align/distribute. `Free` moves its position,
+/// `Pin` its offset, `Stretch` its leading margins — in every case the element
+/// ends up exactly `d` further along, and the placement mode the designer chose
+/// survives the gesture.
+pub(crate) fn nudge_place(place: &mut floptle_ui::Place, d: [f32; 2]) {
+    match place {
+        floptle_ui::Place::Free { pos } => {
+            pos[0] += d[0];
+            pos[1] += d[1];
+        }
+        floptle_ui::Place::Pin { offset, .. } => {
+            offset[0] += d[0];
+            offset[1] += d[1];
+        }
+        // Slide the whole anchored box by nudging the leading margins.
+        floptle_ui::Place::Stretch { margin, .. } => {
+            margin[0] += d[0];
+            margin[1] += d[1];
+        }
+    }
+}
+
 /// A radius/border row: ONE drag value while all four entries agree, four when
 /// they don't (or when you click ⋯ to split them).
 ///
@@ -182,7 +207,7 @@ impl Editor {
 
     /// Pre-register every font any UI text references (before the immutable
     /// renderer borrow the measure callback needs).
-    fn ensure_ui_fonts(&mut self) {
+    pub(crate) fn ensure_ui_fonts(&mut self) {
         let fonts: Vec<String> = self
             .world
             .query::<ElementSpec>()
@@ -355,7 +380,7 @@ impl Editor {
                 .get(&e.index())
                 .map(|cs| cs.iter().filter_map(|c| build(world, kids, *c)).collect())
                 .unwrap_or_default();
-            Some(floptle_ui::Node { id: e.index(), spec, children })
+            Some(floptle_ui::Node::with_children(e.index(), spec, children))
         }
         let mut layers: Vec<(i32, Vec<floptle_ui::Node>, f32)> = Vec::new();
         for e in &order {
@@ -364,10 +389,11 @@ impl Editor {
                 continue; // world-space layers render in the scene, not as an overlay
             }
             let scale = layer.scale_for(viewport);
-            let roots: Vec<_> = kids
+            let mut roots: Vec<_> = kids
                 .get(&e.index())
                 .map(|cs| cs.iter().filter_map(|c| build(&self.world, &kids, *c)).collect())
                 .unwrap_or_default();
+            floptle_ui::sort_roots(&mut roots);
             if !roots.is_empty() {
                 layers.push((layer.z, roots, scale));
             }
@@ -442,7 +468,7 @@ impl Editor {
                 .get(&e.index())
                 .map(|cs| cs.iter().filter_map(|c| build(world, kids, *c)).collect())
                 .unwrap_or_default();
-            Some(floptle_ui::Node { id: e.index(), spec, children })
+            Some(floptle_ui::Node::with_children(e.index(), spec, children))
         }
         let Some(uir) = self.ui_render.as_ref() else { return Vec::new() };
         let mut out = Vec::new();
@@ -452,10 +478,11 @@ impl Editor {
             if !layer.enabled || (!include_screen && !layer.is_world()) {
                 continue;
             }
-            let roots: Vec<_> = kids
+            let mut roots: Vec<_> = kids
                 .get(&e.index())
                 .map(|cs| cs.iter().filter_map(|c| build(&self.world, &kids, *c)).collect())
                 .unwrap_or_default();
+            floptle_ui::sort_roots(&mut roots);
             if roots.is_empty() {
                 continue;
             }
@@ -487,6 +514,46 @@ impl Editor {
             let _ = self.ensure_texture(&t);
         }
         out
+    }
+
+    /// Build ONE layer's element tree, in draw order.
+    ///
+    /// The ◫ UI tab needs a single layer rather than the whole frame's worth,
+    /// and needs it without the gather pass's z-sorting and texture
+    /// registration — so this is the shared piece, not a fork of the pass.
+    pub(crate) fn ui_layer_tree(&self, layer: Entity) -> Vec<floptle_ui::Node> {
+        let order: Vec<Entity> = self.world.query::<Transform>().map(|(e, _)| e).collect();
+        let mut kids: HashMap<u32, Vec<Entity>> = HashMap::new();
+        for e in &order {
+            if let Some(p) = self.world.get::<Parent>(*e) {
+                kids.entry(p.0.index()).or_default().push(*e);
+            }
+        }
+        fn build(
+            world: &floptle_core::World,
+            kids: &HashMap<u32, Vec<Entity>>,
+            e: Entity,
+        ) -> Option<floptle_ui::Node> {
+            let spec = world.get::<ElementSpec>(e)?.clone();
+            let children = kids
+                .get(&e.index())
+                .map(|cs| cs.iter().filter_map(|c| build(world, kids, *c)).collect())
+                .unwrap_or_default();
+            Some(floptle_ui::Node::with_children(e.index(), spec, children))
+        }
+        let mut roots: Vec<_> = kids
+            .get(&layer.index())
+            .map(|cs| cs.iter().filter_map(|c| build(&self.world, &kids, *c)).collect())
+            .unwrap_or_default();
+        floptle_ui::sort_roots(&mut roots);
+        roots
+    }
+
+    /// Mask pairs for a tree the caller already built (see [`layer_masks`]).
+    pub(crate) fn ui_layer_masks(&self, roots: &[floptle_ui::Node]) -> Vec<(u32, u32)> {
+        let ents: HashMap<u32, Entity> =
+            self.world.query::<Transform>().map(|(e, _)| (e.index(), e)).collect();
+        layer_masks(&self.world, &ents, roots)
     }
 
     /// Pointer position + viewport (physical px, game-view space) for game-UI
@@ -578,7 +645,7 @@ impl Editor {
                     .get(&e.index())
                     .map(|cs| cs.iter().filter_map(|c| build(world, kids, *c)).collect())
                     .unwrap_or_default();
-                Some(floptle_ui::Node { id: e.index(), spec, children })
+                Some(floptle_ui::Node::with_children(e.index(), spec, children))
             }
             // Camera-relative pointer ray (for world-space panels). ADR-0015:
             // the world is offset to the camera, so the ray origin is ~0.
@@ -598,10 +665,11 @@ impl Editor {
                 if !layer.enabled {
                     continue;
                 }
-                let roots: Vec<_> = kids
+                let mut roots: Vec<_> = kids
                     .get(&e.index())
                     .map(|cs| cs.iter().filter_map(|c| build(&self.world, &kids, *c)).collect())
                     .unwrap_or_default();
+                floptle_ui::sort_roots(&mut roots);
                 if !roots.is_empty() {
                     layers.push((layer.z, roots, layer, *e));
                 }
@@ -1203,6 +1271,14 @@ impl Editor {
             ui.label("max size").on_hover_text("cap on the resolved size (design units, 0 = none) — keeps it from ballooning on huge/ultrawide screens");
             c |= ui.add(egui::DragValue::new(&mut spec.max_size[0]).speed(1.0).range(0.0..=8192.0).prefix("W ")).changed();
             c |= ui.add(egui::DragValue::new(&mut spec.max_size[1]).speed(1.0).range(0.0..=8192.0).prefix("H ")).changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("depth").on_hover_text(
+                "sort key among siblings — lower draws first (further back), and inside a stack \
+                 lower comes first in the flow. Ties keep scene order. The ◫ UI tab's outline \
+                 drag writes this.",
+            );
+            c |= ui.add(egui::DragValue::new(&mut spec.order).speed(0.2)).changed();
         });
         ui.horizontal(|ui| {
             c |= ui.checkbox(&mut spec.visible, "visible").changed();

@@ -126,6 +126,10 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
         // one", "this button can't be used yet".
         f.insert("disabled".to_string(), f64::from(u8::from(spec.disabled)));
         f.insert("selected".to_string(), f64::from(u8::from(spec.selected)));
+        // Sibling depth: lower draws further back, and orders a stack's flow.
+        // Scriptable because "raise the panel the player is talking to" is a
+        // gameplay decision, not a layout one.
+        f.insert("order".to_string(), spec.order as f64);
         // The visual transform — the press-dip / hover-pop channel. Layout is
         // unaffected, so a script can animate these every frame without ever
         // reflowing the screen.
@@ -305,6 +309,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     }
                     "disabled" => spec.disabled = val != 0.0,
                     "selected" => spec.selected = val != 0.0,
+                    "order" => spec.order = v.round() as i32,
                     "rotation" => spec.rotation = v,
                     "scaleX" => spec.scale[0] = v,
                     "scaleY" => spec.scale[1] = v,

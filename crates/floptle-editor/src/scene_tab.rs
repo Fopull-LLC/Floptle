@@ -92,12 +92,12 @@ impl EditorTabViewer<'_> {
                     // frame; the Rect tool's resize handles sit on top of this.
                     if resp.dragged() && ent.is_some_and(|e| self.selection.contains(&e)) {
                         let d = resp.drag_delta() / *scale;
-                        match &mut self.cmd.ui_move {
-                            Some((i, acc)) if *i == *idx => {
+                        match self.cmd.ui_move.iter_mut().find(|(i, _)| *i == *idx) {
+                            Some((_, acc)) => {
                                 acc[0] += d.x;
                                 acc[1] += d.y;
                             }
-                            slot => *slot = Some((*idx, [d.x, d.y])),
+                            None => self.cmd.ui_move.push((*idx, [d.x, d.y])),
                         }
                     }
                     // Rect tool: 8 grab handles on the selected element — drag a

@@ -621,6 +621,17 @@ pub struct ElementSpec {
     /// (0,0 = top-left, 0.5,0.5 = centre).
     #[serde(default = "half2", skip_serializing_if = "is_half2")]
     pub pivot: [f32; 2],
+    /// Sibling sort key — lower draws first (further back), and inside a
+    /// [`StackCfg`] lower comes first in the flow. Ties keep scene order, so a
+    /// layer that never touches this behaves exactly as before.
+    ///
+    /// This exists because "which of these two panels is on top" was previously
+    /// a property of *entity creation order*: invisible, unauthorable, and
+    /// impossible to change without deleting and re-adding a node. One integer
+    /// makes depth an ordinary editable property — that's what the UI tab's
+    /// outline drag and "bring forward" write to.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub order: i32,
 }
 
 fn white() -> [f32; 4] {
@@ -631,6 +642,9 @@ fn is_white(v: &[f32; 4]) -> bool {
 }
 fn is_zero(v: &f32) -> bool {
     *v == 0.0
+}
+fn is_zero_i32(v: &i32) -> bool {
+    *v == 0
 }
 fn half2() -> [f32; 2] {
     [0.5, 0.5]
@@ -676,6 +690,7 @@ impl Default for ElementSpec {
             rotation: 0.0,
             scale: [1.0, 1.0],
             pivot: [0.5, 0.5],
+            order: 0,
         }
     }
 }
@@ -833,6 +848,26 @@ pub struct Node {
     pub id: u32,
     pub spec: ElementSpec,
     pub children: Vec<Node>,
+}
+
+impl Node {
+    /// Build a node with its children in *draw order* — sorted by
+    /// [`ElementSpec::order`], scene order breaking ties.
+    ///
+    /// Every tree-building path goes through here so depth means the same thing
+    /// to the solver, the draw list, hit-testing and the editor's outline. A
+    /// stable sort is load-bearing: with the default `order: 0` everywhere, this
+    /// is exactly the old scene order.
+    pub fn with_children(id: u32, spec: ElementSpec, mut children: Vec<Node>) -> Self {
+        children.sort_by_key(|c| c.spec.order);
+        Node { id, spec, children }
+    }
+}
+
+/// Put a layer's root elements in draw order (see [`Node::with_children`] — the
+/// roots have no parent node to sort them).
+pub fn sort_roots(roots: &mut [Node]) {
+    roots.sort_by_key(|n| n.spec.order);
 }
 
 /// A solved element: its rect in layer design units, `[x, y, w, h]`.
@@ -2442,5 +2477,34 @@ mod tests {
         let old: UiLayer = ron::from_str("(design_height: 720.0, z: 0)").unwrap();
         assert_eq!(old.scale_mode, UiScaleMode::MatchHeight);
         assert_eq!(old.reference_width, 1280.0);
+    }
+
+    #[test]
+    fn order_sorts_siblings_and_ties_keep_scene_order() {
+        let el = |id: u32, order: i32| {
+            Node::with_children(id, ElementSpec { order, ..Default::default() }, vec![])
+        };
+        // Built in scene order 1,2,3,4 with orders 5,0,0,-5.
+        let root = Node::with_children(
+            0,
+            ElementSpec::default(),
+            vec![el(1, 5), el(2, 0), el(3, 0), el(4, -5)],
+        );
+        let ids: Vec<u32> = root.children.iter().map(|c| c.id).collect();
+        // Sorted by order; the two ties (2, 3) keep the order they were built in.
+        assert_eq!(ids, vec![4, 2, 3, 1]);
+
+        // An untouched tree is EXACTLY scene order — the back-compat guarantee.
+        let plain = Node::with_children(
+            0,
+            ElementSpec::default(),
+            vec![el(7, 0), el(3, 0), el(9, 0), el(1, 0)],
+        );
+        let ids: Vec<u32> = plain.children.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![7, 3, 9, 1]);
+
+        // And `order: 0` never reaches a saved scene.
+        let text = ron::ser::to_string(&ElementSpec::default()).unwrap();
+        assert!(!text.contains("order"), "default order omitted: {text}");
     }
 }
