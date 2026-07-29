@@ -1190,6 +1190,19 @@ impl Raster {
         self.textures.get(id.0 as usize).map(|t| &t.view)
     }
 
+    /// A registered texture's pixel dimensions.
+    ///
+    /// The UI pass needs these for the two things that can't be decided without
+    /// knowing the source size: 9-slice (how big an *unstretched* corner is)
+    /// and `Contain`/`Cover` aspect fitting. `floptle-ui` is renderer-agnostic
+    /// and has no texture registry, so it hands those decisions here.
+    pub fn texture_size(&self, id: TexId) -> Option<[f32; 2]> {
+        self.textures.get(id.0 as usize).map(|t| {
+            let s = t._texture.size();
+            [s.width as f32, s.height as f32]
+        })
+    }
+
     /// Register a standalone material texture (RGBA8) with the given sampling, returning
     /// its handle. Bound per-instance in `draw_scene` to re-texture a shape regardless
     /// of its mesh. Re-registering the same image with new settings returns a fresh id.

@@ -2111,7 +2111,7 @@ mod tests {
                         size: [floptle_ui::Size::Fixed(220.0), floptle_ui::Size::Fixed(40.0)],
                         shape: Some(floptle_ui::ShapeSpec {
                             fill: [0.1, 0.1, 0.1, 0.7],
-                            radius: 8.0,
+                            radius: 8.0.into(),
                             ..Default::default()
                         }),
                         text: Some(floptle_ui::TextSpec {

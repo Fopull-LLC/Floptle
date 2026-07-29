@@ -15,22 +15,65 @@ use std::collections::HashMap;
 
 use crate::device::Gpu;
 use crate::raster::{Raster, TexId};
-use floptle_ui::{Align, DrawList};
+use floptle_ui::{Align, Blend, DrawList, ImageFit, Overflow, QuadKind};
 
-/// One quad/glyph instance — mirrors `ui.wgsl`'s six vec4 attributes.
+/// One quad/glyph instance — mirrors `ui.wgsl`'s thirteen vec4 attributes.
+///
+/// **Attribute budget.** This uses shader locations 1–13; location 0 is the
+/// unit-quad corner. WebGPU guarantees 16, so there are two spare. That is
+/// deliberate headroom: the raster pipeline is already at 16/16 and adding an
+/// attribute there is now a refactor rather than an edit. If a future feature
+/// needs more than two lanes, move the gradient stops to a storage buffer
+/// indexed by instance (the `vpaint` pattern) rather than packing harder.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct UiInstance {
     /// x, y, w, h in physical px.
     pub rect: [f32; 4],
+    /// Flat fill, or the near stop of a gradient.
     pub color: [f32; 4],
     pub border_color: [f32; 4],
-    /// radius px, border px, kind (0 = shape/image, 1 = glyph), clip radius px.
+    /// feather px, kind (0 shape/image, 1 glyph, 2 shadow, 3 inset), clip
+    /// radius px, unused.
     pub params: [f32; 4],
     /// u0, v0, u1, v1.
     pub uv: [f32; 4],
     /// UI-mask clip rect in px (w <= 0 = unclipped).
     pub clip: [f32; 4],
+    /// Corner radii in px: TL, TR, BR, BL.
+    pub radius: [f32; 4],
+    /// Border widths in px: L, T, R, B.
+    pub border: [f32; 4],
+    /// The gradient's far stop.
+    pub grad_to: [f32; 4],
+    /// kind (0 none, 1 linear, 2 radial, 3 angular), angle rad, mid, extent.
+    pub grad_cfg: [f32; 4],
+    /// rotation rad, scale x, scale y, unused.
+    pub xform: [f32; 4],
+    /// grain amount, grain cell px, pivot x, pivot y (fractions of `rect`).
+    pub fx: [f32; 4],
+    /// Inset shadow only: offset x, offset y, spread px, unused.
+    pub inset: [f32; 4],
+}
+
+impl Default for UiInstance {
+    fn default() -> Self {
+        UiInstance {
+            rect: [0.0; 4],
+            color: [1.0; 4],
+            border_color: [0.0; 4],
+            params: [0.0; 4],
+            uv: [0.0, 0.0, 1.0, 1.0],
+            clip: [0.0; 4],
+            radius: [0.0; 4],
+            border: [0.0; 4],
+            grad_to: [0.0; 4],
+            grad_cfg: [0.0; 4],
+            xform: [0.0, 1.0, 1.0, 0.0],
+            fx: [0.0, 1.0, 0.5, 0.5],
+            inset: [0.0; 4],
+        }
+    }
 }
 
 /// What a batch binds at group 1.
@@ -53,7 +96,143 @@ pub struct UiBatch {
     /// Custom-shader batch: the pipeline + per-element param binding to use
     /// instead of the built-in `fs_main` (a `stage ui` .flsl element).
     pub shader: Option<(UiShaderId, UiBindingId)>,
+    /// Compositing mode. A batch key rather than instance data — blending is
+    /// pipeline state, and a run of same-mode quads still coalesces into one
+    /// draw call, so a screen that never leaves Normal pays nothing.
+    pub blend: Blend,
     pub range: std::ops::Range<u32>,
+}
+
+/// The wgpu blend state for each [`Blend`] mode. Premultiplication is NOT
+/// assumed anywhere in the UI pass — colours arrive straight, so `SrcAlpha`
+/// appears on the source factor of every mode that respects alpha.
+fn blend_state(b: Blend) -> wgpu::BlendState {
+    use wgpu::{BlendComponent, BlendFactor, BlendOperation, BlendState};
+    match b {
+        Blend::Normal => BlendState::ALPHA_BLENDING,
+        // Adds light. Alpha still gates it, so a faded-out glow disappears
+        // rather than staying at full strength.
+        Blend::Additive => BlendState {
+            color: BlendComponent {
+                src_factor: BlendFactor::SrcAlpha,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::Add,
+            },
+            alpha: BlendComponent {
+                src_factor: BlendFactor::Zero,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::Add,
+            },
+        },
+        // Darkens. Lerped by alpha so a half-transparent multiply is a half
+        // multiply, not a half-strength one applied at full coverage.
+        Blend::Multiply => BlendState {
+            color: BlendComponent {
+                src_factor: BlendFactor::Dst,
+                dst_factor: BlendFactor::OneMinusSrcAlpha,
+                operation: BlendOperation::Add,
+            },
+            alpha: BlendComponent {
+                src_factor: BlendFactor::Zero,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::Add,
+            },
+        },
+        // Lightens without the blow-out Additive gives.
+        Blend::Screen => BlendState {
+            color: BlendComponent {
+                src_factor: BlendFactor::SrcAlpha,
+                dst_factor: BlendFactor::OneMinusSrc,
+                operation: BlendOperation::Add,
+            },
+            alpha: BlendComponent {
+                src_factor: BlendFactor::Zero,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::Add,
+            },
+        },
+    }
+}
+
+/// Re-express an element-level pivot for a SUB-rect of that element.
+///
+/// Glyphs and 9-slice patches are drawn as their own quads, but a rotation or
+/// scale belongs to the whole element — spinning each glyph about its own
+/// centre would be nonsense. The transform maths is per-quad, so instead we
+/// keep the transform and move the pivot: the element's pivot point, expressed
+/// as a fraction of the patch's rect (routinely outside 0..1, which is fine).
+fn pivot_for(patch: [f32; 4], element: [f32; 4], pivot: [f32; 2]) -> [f32; 2] {
+    let anchor = [element[0] + element[2] * pivot[0], element[1] + element[3] * pivot[1]];
+    [
+        if patch[2].abs() > 1e-6 { (anchor[0] - patch[0]) / patch[2] } else { 0.5 },
+        if patch[3].abs() > 1e-6 { (anchor[1] - patch[1]) / patch[3] } else { 0.5 },
+    ]
+}
+
+/// Expand one textured quad into the nine patches of a 9-slice.
+///
+/// `slice` is `[L, T, R, B]` as a fraction of the sampled UV region; `tex` is
+/// the source's pixel size. Corner patches are drawn at their source pixel size
+/// times `scale`, so a panel's border art keeps a constant visual weight no
+/// matter how large the panel gets — which is the entire point, and the reason
+/// authored panel textures were unusable before this.
+///
+/// Degenerate cases fall back to the single stretched quad: insets that meet or
+/// cross, or an element too small to seat its own corners.
+fn nine_slice(base: &UiInstance, slice: [f32; 4], tex: [f32; 2], scale: f32) -> Vec<UiInstance> {
+    let (u0, v0, u1, v1) = (base.uv[0], base.uv[1], base.uv[2], base.uv[3]);
+    let (su, sv) = (u1 - u0, v1 - v0);
+    let (l, t, r, b) = (slice[0], slice[1], slice[2], slice[3]);
+    if l + r >= 1.0 || t + b >= 1.0 || su <= 0.0 || sv <= 0.0 {
+        return vec![*base];
+    }
+    // Patch widths in px: source fraction → source px → design px.
+    let src_w = tex[0] * su;
+    let src_h = tex[1] * sv;
+    let (pl, pr) = (src_w * l * scale, src_w * r * scale);
+    let (pt, pb) = (src_h * t * scale, src_h * b * scale);
+    let (w, h) = (base.rect[2], base.rect[3]);
+    if pl + pr > w || pt + pb > h {
+        // The element is smaller than its own frame — stretching the whole
+        // texture looks better than overlapping corners.
+        return vec![*base];
+    }
+    let xs = [base.rect[0], base.rect[0] + pl, base.rect[0] + w - pr];
+    let ws = [pl, w - pl - pr, pr];
+    let ys = [base.rect[1], base.rect[1] + pt, base.rect[1] + h - pb];
+    let hs = [pt, h - pt - pb, pb];
+    let us = [u0, u0 + su * l, u1 - su * r, u1];
+    let vs = [v0, v0 + sv * t, v1 - sv * b, v1];
+
+    let mut out = Vec::with_capacity(9);
+    for row in 0..3 {
+        for col in 0..3 {
+            if ws[col] <= 0.0 || hs[row] <= 0.0 {
+                continue;
+            }
+            let mut inst = *base;
+            inst.rect = [xs[col], ys[row], ws[col], hs[row]];
+            inst.uv = [us[col], vs[row], us[col + 1], vs[row + 1]];
+            // The frame art carries the corners now; a rounded-rect mask on
+            // each patch would clip the middle of the image.
+            inst.radius = [0.0; 4];
+            inst.border = [0.0; 4];
+            inst.fx[2] = pivot_for(inst.rect, base.rect, [base.fx[2], base.fx[3]])[0];
+            inst.fx[3] = pivot_for(inst.rect, base.rect, [base.fx[2], base.fx[3]])[1];
+            out.push(inst);
+        }
+    }
+    out
+}
+
+/// Index of a blend mode in the pipeline arrays.
+fn blend_index(b: Blend) -> usize {
+    match b {
+        Blend::Normal => 0,
+        Blend::Additive => 1,
+        Blend::Multiply => 2,
+        Blend::Screen => 3,
+    }
 }
 
 /// A registered `stage ui` .flsl pipeline (screen + world variants).
@@ -110,10 +289,11 @@ pub struct UiPlane {
 }
 
 pub struct Ui {
-    pipeline: wgpu::RenderPipeline,
-    /// The world-canvas variant (Scene-view authoring): depth-tested against
+    /// One pipeline per [`Blend`] mode, indexed by [`blend_index`].
+    pipeline: [wgpu::RenderPipeline; 4],
+    /// The world-canvas variants (Scene-view authoring): depth-tested against
     /// the scene so the layer plane sits IN the world.
-    pipeline_world: wgpu::RenderPipeline,
+    pipeline_world: [wgpu::RenderPipeline; 4],
     globals_buf: wgpu::Buffer,
     globals_bind: wgpu::BindGroup,
     white_bind: wgpu::BindGroup,
@@ -190,13 +370,20 @@ const CORNER_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayou
     }],
 };
 
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 6] = [
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 13] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 1 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 2 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 3 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 4 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 64, shader_location: 5 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 80, shader_location: 6 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 96, shader_location: 7 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 112, shader_location: 8 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 128, shader_location: 9 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 144, shader_location: 10 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 160, shader_location: 11 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 176, shader_location: 12 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 192, shader_location: 13 },
 ];
 
 const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -255,65 +442,84 @@ impl Ui {
             bind_group_layouts: &[Some(&globals_layout), Some(&tex_layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("ui"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                buffers: &[CORNER_LAYOUT, INSTANCE_LAYOUT],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let pipeline_world = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("ui-world"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                buffers: &[CORNER_LAYOUT, INSTANCE_LAYOUT],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Gpu::DEPTH_FORMAT,
-                // Test against the scene but DON'T write: an alpha-blended
-                // pass writing depth would make transparent pixels occlude
-                // later layers. Painter's order handles intra-canvas layering.
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        // One pipeline per blend mode. Only the colour-target blend state
+        // differs, so this is four near-identical descriptors rather than four
+        // shaders — and a screen that stays on Normal never binds the others.
+        let make_screen = |b: Blend| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("ui"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[CORNER_LAYOUT, INSTANCE_LAYOUT],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: gpu.surface_format(),
+                        blend: Some(blend_state(b)),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let make_world = |b: Blend| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("ui-world"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    buffers: &[CORNER_LAYOUT, INSTANCE_LAYOUT],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: gpu.surface_format(),
+                        blend: Some(blend_state(b)),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: Gpu::DEPTH_FORMAT,
+                    // Test against the scene but DON'T write: an alpha-blended
+                    // pass writing depth would make transparent pixels occlude
+                    // later layers. Painter's order handles intra-canvas layering.
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline = [
+            make_screen(Blend::Normal),
+            make_screen(Blend::Additive),
+            make_screen(Blend::Multiply),
+            make_screen(Blend::Screen),
+        ];
+        let pipeline_world = [
+            make_world(Blend::Normal),
+            make_world(Blend::Additive),
+            make_world(Blend::Multiply),
+            make_world(Blend::Screen),
+        ];
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ui-globals"),
@@ -331,6 +537,11 @@ impl Ui {
             label: Some("ui-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            // Repeat, so `ImageSpec::tiling` works by simply sending UVs past
+            // 1. Spritesheet cells and 9-slice patches keep their UVs inside
+            // [0,1], so nothing that worked under clamping changes.
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
             ..Default::default()
         });
         let make_tex_bind = |tex: &wgpu::Texture, label: &str| {
@@ -931,6 +1142,7 @@ impl Ui {
         origin: [f32; 2],
         scale: f32,
         resolve: &mut dyn FnMut(&str) -> Option<TexId>,
+        tex_size: &dyn Fn(TexId) -> Option<[f32; 2]>,
         resolve_shader: UiShaderResolve,
         instances: &mut Vec<UiInstance>,
         batches: &mut Vec<UiBatch>,
@@ -953,59 +1165,163 @@ impl Ui {
                         batches: &mut Vec<UiBatch>,
                         tex: UiTex,
                         shader: Option<(UiShaderId, UiBindingId)>,
+                        blend: Blend,
                         inst: UiInstance| {
             let i = instances.len() as u32;
             instances.push(inst);
             match batches.last_mut() {
-                Some(b) if b.tex == tex && b.shader == shader && b.range.end == i => {
+                Some(b)
+                    if b.tex == tex
+                        && b.shader == shader
+                        && b.blend == blend
+                        && b.range.end == i =>
+                {
                     b.range.end = i + 1
                 }
-                _ => batches.push(UiBatch { tex, shader, range: i..i + 1 }),
+                _ => batches.push(UiBatch { tex, shader, blend, range: i..i + 1 }),
             }
         };
         for q in &list.quads {
-            let tex = if q.texture.is_empty() {
-                UiTex::White
+            let (tex, tex_size) = if q.texture.is_empty() {
+                (UiTex::White, None)
             } else {
                 match resolve(&q.texture) {
-                    Some(id) => UiTex::Tex(id),
-                    None => UiTex::White, // missing texture: tinted solid
+                    Some(id) => (UiTex::Tex(id), tex_size(id)),
+                    None => (UiTex::White, None), // missing texture: tinted solid
                 }
             };
             // A custom-shader face: unresolved (missing/broken .flsl) falls
             // back to a plain quad, so the element still shows SOMETHING.
             let shader = q.shader.as_ref().and_then(|(p, owner)| resolve_shader(p, *owner));
             let (clip, clip_r) = clip_px(&q.clip);
-            push(
-                instances,
-                batches,
-                tex,
-                shader,
-                UiInstance {
-                    rect: [
-                        origin[0] + q.rect[0] * scale,
-                        origin[1] + q.rect[1] * scale,
-                        q.rect[2] * scale,
-                        q.rect[3] * scale,
-                    ],
-                    color: q.color,
-                    border_color: q.border_color,
-                    // A shadow quad (feather > 0) uses kind 2 and carries its
-                    // soft-edge width in the border lane; everything else is a
-                    // crisp shape/image (kind 0) with its border width.
-                    params: if q.feather > 0.0 {
-                        [q.radius * scale, q.feather * scale, 2.0, clip_r]
-                    } else {
-                        [q.radius * scale, q.border * scale, 0.0, clip_r]
-                    },
-                    // Spritesheet cell (or the whole texture, [0,0,1,1]).
-                    uv: q.uv,
-                    clip,
-                },
-            );
+            let kind = match q.kind {
+                QuadKind::Shape => 0.0,
+                QuadKind::Shadow => 2.0,
+                QuadKind::InsetShadow => 3.0,
+            };
+            let mut rect = [
+                origin[0] + q.rect[0] * scale,
+                origin[1] + q.rect[1] * scale,
+                q.rect[2] * scale,
+                q.rect[3] * scale,
+            ];
+            let mut uv = q.uv;
+            // Aspect handling. Contain/Cover need the source's pixel size, so
+            // this is the one place it can happen — floptle-ui is deliberately
+            // renderer-agnostic and has no texture registry.
+            if q.fit != ImageFit::Stretch
+                && let Some([tw, th]) = tex_size
+                && tw > 0.0
+                && th > 0.0
+                && rect[2] > 0.0
+                && rect[3] > 0.0
+            {
+                let src = (tw * (uv[2] - uv[0])).max(1e-4) / (th * (uv[3] - uv[1])).max(1e-4);
+                let dst = rect[2] / rect[3];
+                match q.fit {
+                    ImageFit::Contain => {
+                        // Shrink the drawn rect, keeping it centred: the whole
+                        // image shows, letterboxed.
+                        if src > dst {
+                            let h = rect[2] / src;
+                            rect[1] += (rect[3] - h) * 0.5;
+                            rect[3] = h;
+                        } else {
+                            let w = rect[3] * src;
+                            rect[0] += (rect[2] - w) * 0.5;
+                            rect[2] = w;
+                        }
+                    }
+                    ImageFit::Cover => {
+                        // Crop the UVs instead: the rect stays full and the
+                        // overflow is cut, centred. What a portrait wants.
+                        if src > dst {
+                            let keep = dst / src;
+                            let m = (uv[2] - uv[0]) * (1.0 - keep) * 0.5;
+                            uv[0] += m;
+                            uv[2] -= m;
+                        } else {
+                            let keep = src / dst;
+                            let m = (uv[3] - uv[1]) * (1.0 - keep) * 0.5;
+                            uv[1] += m;
+                            uv[3] -= m;
+                        }
+                    }
+                    ImageFit::Stretch => {}
+                }
+            }
+            // An OUTER shadow's soft edge spreads beyond the shape, so its quad
+            // has to be bigger than the shape or the feather is clipped square
+            // — which is exactly what a glow looked like before this: a hard
+            // box with a gradient in it. Grow the geometry and tell the
+            // fragment to inset the SDF by the same amount, leaving the drawn
+            // shape unchanged.
+            let pad = if q.kind == QuadKind::Shadow { q.feather.max(0.0) * scale } else { 0.0 };
+            if pad > 0.0 {
+                rect = [rect[0] - pad, rect[1] - pad, rect[2] + pad * 2.0, rect[3] + pad * 2.0];
+            }
+            let base = UiInstance {
+                rect,
+                color: q.color,
+                border_color: q.border_color,
+                params: [q.feather * scale, kind, clip_r, 0.0],
+                uv,
+                clip,
+                radius: [
+                    q.radius[0] * scale,
+                    q.radius[1] * scale,
+                    q.radius[2] * scale,
+                    q.radius[3] * scale,
+                ],
+                border: [
+                    q.border[0] * scale,
+                    q.border[1] * scale,
+                    q.border[2] * scale,
+                    q.border[3] * scale,
+                ],
+                grad_to: q.gradient.map(|g| g.to).unwrap_or([0.0; 4]),
+                grad_cfg: q.gradient.map(|g| g.pack()).unwrap_or([0.0; 4]),
+                xform: [q.xform.rotation, q.xform.scale[0], q.xform.scale[1], 0.0],
+                fx: [
+                    q.grain.map(|g| g.amount).unwrap_or(0.0),
+                    q.grain.map(|g| g.scale * scale).unwrap_or(1.0),
+                    q.xform.pivot[0],
+                    q.xform.pivot[1],
+                ],
+                inset: [
+                    q.shadow_offset[0] * scale,
+                    q.shadow_offset[1] * scale,
+                    // Inset shadow: how far in the lit shape shrinks (its
+                    // `spread`, which rides the border lane in the draw list
+                    // since an inset has no border of its own).
+                    // Outer shadow: how far the quad was grown, so the
+                    // fragment can inset the SDF back to the real shape.
+                    if q.kind == QuadKind::Shadow { pad } else { q.border[0] * scale },
+                    0.0,
+                ],
+            };
+            // 9-slice: nine patches instead of one stretched quad. The corners
+            // keep their source pixel size (times `scale`, so they track the UI
+            // scale rather than the element), the edges stretch on one axis and
+            // the middle on both.
+            if q.slice.iter().any(|v| *v > 0.0)
+                && let Some(size) = tex_size
+            {
+                for patch in nine_slice(&base, q.slice, size, scale) {
+                    push(instances, batches, tex, shader, q.blend, patch);
+                }
+                continue;
+            }
+            push(instances, batches, tex, shader, q.blend, base);
         }
         for t in &list.texts {
             let fid = self.font_id(&t.font);
+            let rect_px = [
+                origin[0] + t.rect[0] * scale,
+                origin[1] + t.rect[1] * scale,
+                t.rect[2] * scale,
+                t.rect[3] * scale,
+            ];
             // Dynamic sizing: `fit` scales the glyphs so the run fills the
             // element's rect (largest size that fits both axes).
             let size = if t.fit && !t.text.is_empty() {
@@ -1018,64 +1334,127 @@ impl Ui {
                 t.size
             };
             let px = (size * scale).round().max(1.0) as u32;
-            let run_w = self.measure_font(fid, &t.text, size)[0] * scale;
-            let rect_px = [
-                origin[0] + t.rect[0] * scale,
-                origin[1] + t.rect[1] * scale,
-                t.rect[2] * scale,
-                t.rect[3] * scale,
-            ];
-            let mut pen_x = match t.align {
-                Align::Start | Align::Stretch => rect_px[0],
-                Align::Center => rect_px[0] + (rect_px[2] - run_w) * 0.5,
-                Align::End => rect_px[0] + rect_px[2] - run_w,
+            let track_px = t.tracking * scale;
+            // One place decides line breaks. The layout solver measures with
+            // the same helper, so a `Fit` element can never disagree with what
+            // is finally drawn about where the text wraps.
+            // Break, truncate and measure the lines up front. Everything below
+            // rasterizes glyphs (`&mut self`), so the measuring closure — which
+            // borrows `self` immutably — has to be finished with by then.
+            let (lines, widths): (Vec<String>, Vec<f32>) = {
+                let advance = |s: &str| {
+                    self.measure_font(fid, s, size)[0] * scale
+                        + track_px * s.chars().count() as f32
+                };
+                let mut lines = if t.wrap {
+                    floptle_ui::text::wrap_lines(&t.text, rect_px[2], &advance)
+                } else {
+                    t.text.split('\n').map(str::to_string).collect()
+                };
+                if t.max_lines > 0 && lines.len() > t.max_lines as usize {
+                    lines.truncate(t.max_lines as usize);
+                    // The cut is only honest if the last surviving line says so.
+                    if t.overflow == Overflow::Ellipsis
+                        && let Some(last) = lines.last_mut()
+                    {
+                        *last = floptle_ui::text::ellipsize(last, rect_px[2], &advance);
+                    }
+                } else if t.overflow == Overflow::Ellipsis && !t.wrap {
+                    for line in &mut lines {
+                        *line = floptle_ui::text::ellipsize(line, rect_px[2], &advance);
+                    }
+                }
+                let widths = lines.iter().map(|l| advance(l)).collect();
+                (lines, widths)
             };
-            // Baseline: anchor the line box per valign (top / center / bottom).
+
             let (ascent, descent) = self.fonts[fid]
                 .horizontal_line_metrics(px as f32)
                 .map(|l| (l.ascent, l.descent))
                 .unwrap_or((px as f32, 0.0));
-            let line_h = ascent - descent;
+            let natural_h = ascent - descent;
+            // `line_height` is a multiplier on the font's own metrics; 0 keeps
+            // the historical 1.15 leading so existing multi-line text is
+            // untouched.
+            let line_h = if t.line_height > 0.0 { natural_h * t.line_height } else { natural_h * 1.15 };
+            let block_h = natural_h + line_h * (lines.len().saturating_sub(1)) as f32;
             let vf = match t.valign {
                 Align::Start => 0.0,
                 Align::Center | Align::Stretch => 0.5,
                 Align::End => 1.0,
             };
-            let mut baseline = rect_px[1] + (rect_px[3] - line_h) * vf + ascent;
+            let top = rect_px[1] + (rect_px[3] - block_h) * vf;
             let (clip, clip_r) = clip_px(&t.clip);
-            let line_start = pen_x;
-            for c in t.text.chars() {
-                // Multi-line: '\n' wraps to the next line (HUDs, readouts).
-                // Center/End alignment measures the WHOLE run, so multi-line
-                // text aligns best with Start — fine for the panels using it.
-                if c == '\n' {
-                    pen_x = line_start;
-                    baseline += line_h * 1.15;
-                    continue;
+
+            // Shadow, then stroke, then the run itself — each is the same
+            // glyphs again, so they cost quads rather than pipelines. The
+            // stroke's eight offsets are what a true SDF outline would
+            // approximate anyway at UI sizes.
+            let mut passes: Vec<([f32; 2], [f32; 4])> = Vec::new();
+            if let Some(sh) = t.shadow {
+                passes.push(([sh.offset[0] * scale, sh.offset[1] * scale], sh.color));
+            }
+            if let Some(st) = t.stroke
+                && st.width > 0.0
+            {
+                let w = st.width * scale;
+                const DIRS: [[f32; 2]; 8] = [
+                    [-1.0, 0.0], [1.0, 0.0], [0.0, -1.0], [0.0, 1.0],
+                    [-0.7, -0.7], [0.7, -0.7], [-0.7, 0.7], [0.7, 0.7],
+                ];
+                for d in DIRS {
+                    passes.push(([d[0] * w, d[1] * w], st.color));
                 }
-                let Some(g) = self.glyph(gpu, fid, c, px) else { continue };
-                if g.size[0] > 0.0 {
-                    push(
-                        instances,
-                        batches,
-                        UiTex::Atlas,
-                        None,
-                        UiInstance {
-                            rect: [
-                                pen_x + g.offset[0],
-                                baseline + g.offset[1],
-                                g.size[0],
-                                g.size[1],
-                            ],
-                            color: t.color,
-                            border_color: [0.0; 4],
-                            params: [0.0, 0.0, 1.0, clip_r],
-                            uv: g.uv,
-                            clip,
-                        },
-                    );
+            }
+            passes.push(([0.0, 0.0], t.color));
+
+            for (shift, color) in passes {
+                let mut baseline = top + ascent + shift[1];
+                for (line, &run_w) in lines.iter().zip(&widths) {
+                    let mut pen_x = shift[0]
+                        + match t.align {
+                            Align::Start | Align::Stretch => rect_px[0],
+                            Align::Center => rect_px[0] + (rect_px[2] - run_w) * 0.5,
+                            Align::End => rect_px[0] + rect_px[2] - run_w,
+                        };
+                    for c in line.chars() {
+                        let Some(g) = self.glyph(gpu, fid, c, px) else { continue };
+                        if g.size[0] > 0.0 {
+                            let rect =
+                                [pen_x + g.offset[0], baseline + g.offset[1], g.size[0], g.size[1]];
+                            push(
+                                instances,
+                                batches,
+                                UiTex::Atlas,
+                                None,
+                                Blend::Normal,
+                                UiInstance {
+                                    rect,
+                                    color,
+                                    params: [0.0, 1.0, clip_r, 0.0],
+                                    uv: g.uv,
+                                    clip,
+                                    xform: [
+                                        t.xform.rotation,
+                                        t.xform.scale[0],
+                                        t.xform.scale[1],
+                                        0.0,
+                                    ],
+                                    fx: {
+                                        let p = pivot_for(rect, rect_px, t.xform.pivot);
+                                        [0.0, 1.0, p[0], p[1]]
+                                    },
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        // Tracking is added per glyph, including after the
+                        // last — matching how `advance` measures, so centred
+                        // tracked text stays centred.
+                        pen_x += g.advance + track_px;
+                    }
+                    baseline += line_h;
                 }
-                pen_x += g.advance;
             }
         }
     }
@@ -1132,12 +1511,16 @@ impl Ui {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_pipeline(&self.pipeline);
+            rp.set_pipeline(&self.pipeline[0]);
             rp.set_bind_group(0, &self.globals_bind, &[]);
             rp.set_vertex_buffer(0, self.quad_vbuf.slice(..));
             rp.set_vertex_buffer(1, self.instance_buf.slice(..));
             rp.set_index_buffer(self.quad_ibuf.slice(..), wgpu::IndexFormat::Uint16);
-            let mut on_custom = false;
+            // What is currently bound: `None` = a custom-shader pipeline (they
+            // are always alpha-blended — a per-blend variant of every .flsl
+            // would be four pipelines per shader for no demonstrated need),
+            // `Some(i)` = built-in pipeline for blend index `i`.
+            let mut bound: Option<usize> = Some(0);
             for b in batches {
                 if b.range.is_empty() {
                     continue;
@@ -1153,13 +1536,15 @@ impl Ui {
                         }
                         // group(3) = the backdrop (real capture or 1×1 black).
                         rp.set_bind_group(3, self.backdrop_group(), &[]);
-                        on_custom = true;
+                        bound = None;
                     }
-                    None if on_custom => {
-                        rp.set_pipeline(&self.pipeline);
-                        on_custom = false;
+                    None => {
+                        let want = blend_index(b.blend);
+                        if bound != Some(want) {
+                            rp.set_pipeline(&self.pipeline[want]);
+                            bound = Some(want);
+                        }
                     }
-                    None => {}
                 }
                 let bind = match b.tex {
                     UiTex::White => &self.white_bind,
@@ -1224,12 +1609,12 @@ impl Ui {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_pipeline(&self.pipeline_world);
+            rp.set_pipeline(&self.pipeline_world[0]);
             rp.set_bind_group(0, &self.globals_bind, &[]);
             rp.set_vertex_buffer(0, self.quad_vbuf.slice(..));
             rp.set_vertex_buffer(1, self.instance_buf.slice(..));
             rp.set_index_buffer(self.quad_ibuf.slice(..), wgpu::IndexFormat::Uint16);
-            let mut on_custom = false;
+            let mut bound: Option<usize> = Some(0);
             for b in batches {
                 if b.range.is_empty() {
                     continue;
@@ -1241,13 +1626,15 @@ impl Ui {
                             rp.set_bind_group(2, &pb.bind, &[]);
                         }
                         rp.set_bind_group(3, self.backdrop_group(), &[]);
-                        on_custom = true;
+                        bound = None;
                     }
-                    None if on_custom => {
-                        rp.set_pipeline(&self.pipeline_world);
-                        on_custom = false;
+                    None => {
+                        let want = blend_index(b.blend);
+                        if bound != Some(want) {
+                            rp.set_pipeline(&self.pipeline_world[want]);
+                            bound = Some(want);
+                        }
                     }
-                    None => {}
                 }
                 let bind = match b.tex {
                     UiTex::White => &self.white_bind,

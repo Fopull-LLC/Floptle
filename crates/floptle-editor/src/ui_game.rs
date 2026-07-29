@@ -60,6 +60,68 @@ pub(crate) enum AddUi {
     Scroll,
 }
 
+/// A radius/border row: ONE drag value while all four entries agree, four when
+/// they don't (or when you click ⋯ to split them).
+///
+/// The point is that the common case stays a single number — per-corner radii
+/// exist for headers and tabs, not to make every panel a four-field chore. The
+/// row auto-collapses again as soon as the four values match, so nothing is
+/// left in a fiddly state by accident.
+fn quad_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    v: &mut [f32; 4],
+    parts: [&str; 4],
+    max: f32,
+    salt: &str,
+) -> bool {
+    let uniform = v[1] == v[0] && v[2] == v[0] && v[3] == v[0];
+    let id = egui::Id::new((salt, label));
+    // Sticky only while it is needed: a split row that becomes uniform again
+    // stays split until you leave it, so typing four equal numbers doesn't
+    // yank the fields out from under the cursor mid-edit.
+    let mut split = ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false)) || !uniform;
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if split {
+            for (i, part) in parts.iter().enumerate() {
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut v[i])
+                            .speed(0.5)
+                            .range(0.0..=max)
+                            .prefix(format!("{part} ")),
+                    )
+                    .changed();
+            }
+            if ui.small_button("=").on_hover_text("link all four again").clicked() {
+                *v = [v[0]; 4];
+                split = false;
+                changed = true;
+            }
+        } else {
+            let mut all = v[0];
+            if ui
+                .add(egui::DragValue::new(&mut all).speed(0.5).range(0.0..=max))
+                .changed()
+            {
+                *v = [all; 4];
+                changed = true;
+            }
+            if ui
+                .small_button("⋯")
+                .on_hover_text(format!("set {} separately", parts.join("/")))
+                .clicked()
+            {
+                split = true;
+            }
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(id, split));
+    changed
+}
+
 /// Resolve a layer's mask pairs `(mask id, target id)` in scene order: every
 /// element with a MaskSpec claims its targets BY NAME within this layer (first
 /// name match in scene order). Order in = order out, so "earliest mask wins"
@@ -627,7 +689,7 @@ impl Editor {
                     size: [Size::Fixed(200.0), Size::Fixed(56.0)],
                     shape: Some(ShapeSpec {
                         fill: [0.16, 0.16, 0.19, 0.95],
-                        radius: 10.0,
+                        radius: 10.0.into(),
                         ..Default::default()
                     }),
                     text: Some(TextSpec { text: "Button".into(), align: Align::Center, ..Default::default() }),
@@ -645,7 +707,7 @@ impl Editor {
                     size: [Size::Fixed(320.0), Size::Fixed(28.0)],
                     shape: Some(ShapeSpec {
                         fill: [0.13, 0.13, 0.15, 0.9],
-                        radius: 8.0,
+                        radius: 8.0.into(),
                         ..Default::default()
                     }),
                     slider: Some(SliderSpec::default()),
@@ -660,7 +722,7 @@ impl Editor {
                     size: [Size::Fixed(280.0), Size::Fixed(200.0)],
                     shape: Some(ShapeSpec {
                         fill: [0.1, 0.1, 0.12, 0.85],
-                        radius: 8.0,
+                        radius: 8.0.into(),
                         ..Default::default()
                     }),
                     scroll: Some(floptle_ui::ScrollSpec::default()),
@@ -688,7 +750,7 @@ impl Editor {
                         size: [Size::Pct(1.0), Size::Pct(1.0)],
                         shape: Some(ShapeSpec {
                             fill: [0.85, 0.87, 0.9, 1.0],
-                            radius: 8.0,
+                            radius: 8.0.into(),
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -702,7 +764,7 @@ impl Editor {
                         size: [Size::Fixed(16.0), Size::Fixed(36.0)],
                         shape: Some(ShapeSpec {
                             fill: [1.0, 1.0, 1.0, 1.0],
-                            radius: 6.0,
+                            radius: 6.0.into(),
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -1002,8 +1064,58 @@ impl Editor {
         ui.horizontal(|ui| {
             c |= ui.checkbox(&mut spec.visible, "visible").changed();
             ui.label("opacity");
-            c |= ui.add(egui::Slider::new(&mut spec.opacity, 0.0..=1.0)).changed();
+            c |= ui
+                .add(egui::Slider::new(&mut spec.opacity, 0.0..=1.0))
+                .on_hover_text("multiplies this element AND its children — fade a whole menu with one number")
+                .changed();
         });
+        ui.horizontal(|ui| {
+            ui.label("group tint")
+                .on_hover_text("multiplies every colour in this subtree — damage flashes, disabled washes");
+            c |= ui.color_edit_button_rgba_unmultiplied(&mut spec.tint).changed();
+            if spec.tint != [1.0; 4] && ui.small_button("reset").clicked() {
+                spec.tint = [1.0; 4];
+                c = true;
+            }
+        });
+        // --- transform (visual only — layout never sees it) ---
+        ui.horizontal(|ui| {
+            ui.label("rotate");
+            c |= ui
+                .add(egui::DragValue::new(&mut spec.rotation).speed(0.5).suffix("°"))
+                .changed();
+            ui.label("scale");
+            c |= ui
+                .add(egui::DragValue::new(&mut spec.scale[0]).speed(0.01).range(0.01..=8.0).prefix("x "))
+                .changed();
+            c |= ui
+                .add(egui::DragValue::new(&mut spec.scale[1]).speed(0.01).range(0.01..=8.0).prefix("y "))
+                .changed();
+        })
+        .response
+        .on_hover_text(
+            "visual only — the element keeps its layout rect, so a hover pop or a press dip \
+             can never shove its siblings around",
+        );
+        if spec.rotation != 0.0 || spec.scale != [1.0, 1.0] {
+            ui.horizontal(|ui| {
+                ui.label("  pivot");
+                c |= ui
+                    .add(egui::DragValue::new(&mut spec.pivot[0]).speed(0.01).range(-2.0..=3.0).prefix("x "))
+                    .changed();
+                c |= ui
+                    .add(egui::DragValue::new(&mut spec.pivot[1]).speed(0.01).range(-2.0..=3.0).prefix("y "))
+                    .changed();
+                if ui.small_button("reset").clicked() {
+                    spec.rotation = 0.0;
+                    spec.scale = [1.0, 1.0];
+                    spec.pivot = [0.5, 0.5];
+                    c = true;
+                }
+            })
+            .response
+            .on_hover_text("fraction of the element's own rect — 0.5, 0.5 is its centre");
+        }
         c |= ui
             .checkbox(&mut spec.button, "button (clickable)")
             .on_hover_text(
@@ -1052,19 +1164,74 @@ impl Editor {
             ui.horizontal(|ui| {
                 ui.label("fill");
                 c |= ui.color_edit_button_rgba_unmultiplied(&mut s.fill).changed();
-                ui.label("radius");
-                c |= ui.add(egui::DragValue::new(&mut s.radius).speed(0.5).range(0.0..=512.0)).changed();
+                // A gradient is one checkbox away from any flat fill, because
+                // "this panel reads as a slab" should be a ten-second fix and
+                // not a reason to go write a `stage ui` shader.
+                let mut on = s.gradient.is_some();
+                if ui
+                    .checkbox(&mut on, "gradient")
+                    .on_hover_text("fade this fill into a second colour")
+                    .changed()
+                {
+                    s.gradient = on.then(|| floptle_ui::Gradient {
+                        // Start from the fill, darkened: the element keeps the
+                        // look it already had at one end, so ticking the box
+                        // never throws away what you had.
+                        to: [s.fill[0] * 0.55, s.fill[1] * 0.55, s.fill[2] * 0.55, s.fill[3]],
+                        ..Default::default()
+                    });
+                    c = true;
+                }
             });
+            if let Some(g) = &mut s.gradient {
+                ui.horizontal(|ui| {
+                    ui.label("  to");
+                    c |= ui.color_edit_button_rgba_unmultiplied(&mut g.to).changed();
+                    egui::ComboBox::from_id_salt("ui_grad_kind")
+                        .selected_text(match g.kind {
+                            floptle_ui::GradientKind::Linear => "linear",
+                            floptle_ui::GradientKind::Radial => "radial",
+                            floptle_ui::GradientKind::Angular => "angular",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (k, label) in [
+                                (floptle_ui::GradientKind::Linear, "linear"),
+                                (floptle_ui::GradientKind::Radial, "radial"),
+                                (floptle_ui::GradientKind::Angular, "angular"),
+                            ] {
+                                c |= ui.selectable_value(&mut g.kind, k, label).changed();
+                            }
+                        });
+                });
+                ui.horizontal(|ui| {
+                    ui.label("  angle");
+                    c |= ui
+                        .add(egui::DragValue::new(&mut g.angle).speed(1.0).suffix("°"))
+                        .changed();
+                    ui.label("mid");
+                    c |= ui
+                        .add(egui::DragValue::new(&mut g.mid).speed(0.01).range(0.0..=1.0))
+                        .on_hover_text("where the two colours meet")
+                        .changed();
+                    if g.kind == floptle_ui::GradientKind::Radial {
+                        ui.label("extent");
+                        c |= ui
+                            .add(egui::DragValue::new(&mut g.radius).speed(0.02).range(0.01..=4.0))
+                            .changed();
+                    }
+                });
+            }
+            c |= quad_row(ui, "radius", &mut s.radius.0, ["TL", "TR", "BR", "BL"], 512.0, "ui_r");
             ui.horizontal(|ui| {
-                ui.label("border");
-                c |= ui.add(egui::DragValue::new(&mut s.border).speed(0.5).range(0.0..=64.0)).changed();
+                ui.label("border colour");
                 c |= ui.color_edit_button_rgba_unmultiplied(&mut s.border_color).changed();
             });
-            // Soft drop shadow — the one effect that lives outside the rect.
+            c |= quad_row(ui, "border", &mut s.border.0, ["L", "T", "R", "B"], 64.0, "ui_b");
+            // Soft shadow — behind the rect, or inside it.
             let mut has_shadow = s.shadow.is_some();
             if ui
-                .checkbox(&mut has_shadow, "drop shadow")
-                .on_hover_text("a soft shadow behind the panel — lifts it off the background")
+                .checkbox(&mut has_shadow, "shadow")
+                .on_hover_text("a soft shadow behind the panel (or inside it, for a recess)")
                 .changed()
             {
                 s.shadow = has_shadow.then(floptle_ui::ShadowSpec::default);
@@ -1076,6 +1243,10 @@ impl Editor {
                     c |= ui.color_edit_button_rgba_unmultiplied(&mut sh.color).changed();
                     ui.label("blur");
                     c |= ui.add(egui::DragValue::new(&mut sh.blur).speed(0.5).range(0.0..=128.0)).changed();
+                    c |= ui
+                        .checkbox(&mut sh.inset, "inset")
+                        .on_hover_text("draw it inside the shape — a recessed well")
+                        .changed();
                 });
                 ui.horizontal(|ui| {
                     ui.label("  offset");
@@ -1085,6 +1256,60 @@ impl Editor {
                     c |= ui.add(egui::DragValue::new(&mut sh.spread).speed(0.5).range(0.0..=128.0)).changed();
                 });
             }
+            // Glow — light spilling out from under the element.
+            let mut has_glow = s.glow.is_some();
+            if ui
+                .checkbox(&mut has_glow, "glow")
+                .on_hover_text("an additive bloom around the element")
+                .changed()
+            {
+                s.glow = has_glow.then(floptle_ui::GlowSpec::default);
+                c = true;
+            }
+            if let Some(g) = &mut s.glow {
+                ui.horizontal(|ui| {
+                    ui.label("  color");
+                    c |= ui.color_edit_button_rgba_unmultiplied(&mut g.color).changed();
+                    ui.label("radius");
+                    c |= ui.add(egui::DragValue::new(&mut g.radius).speed(0.5).range(0.0..=128.0)).changed();
+                    ui.label("spread");
+                    c |= ui.add(egui::DragValue::new(&mut g.spread).speed(0.5).range(0.0..=128.0)).changed();
+                });
+            }
+            // Grain — the cheapest thing on this panel, and often the one that
+            // stops a screen looking machine-made.
+            let mut has_grain = s.grain.is_some();
+            if ui
+                .checkbox(&mut has_grain, "grain")
+                .on_hover_text("a little noise over the fill — kills the plastic look")
+                .changed()
+            {
+                s.grain = has_grain.then(floptle_ui::GrainSpec::default);
+                c = true;
+            }
+            if let Some(g) = &mut s.grain {
+                ui.horizontal(|ui| {
+                    ui.label("  amount");
+                    c |= ui
+                        .add(egui::DragValue::new(&mut g.amount).speed(0.005).range(0.0..=1.0))
+                        .changed();
+                    ui.label("cell");
+                    c |= ui
+                        .add(egui::DragValue::new(&mut g.scale).speed(0.1).range(1.0..=32.0))
+                        .on_hover_text("noise cell size in px — higher is chunkier")
+                        .changed();
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.label("blend");
+                egui::ComboBox::from_id_salt("ui_blend")
+                    .selected_text(s.blend.label())
+                    .show_ui(ui, |ui| {
+                        for b in floptle_ui::Blend::ALL {
+                            c |= ui.selectable_value(&mut s.blend, b, b.label()).changed();
+                        }
+                    });
+            });
         }
         // --- text ---
         let mut has = spec.text.is_some();
@@ -1141,6 +1366,95 @@ impl Editor {
             })
             .response
             .on_hover_text("any .ttf/.otf in your assets — drop font files into the project and they appear here");
+            ui.horizontal(|ui| {
+                ui.label("tracking");
+                c |= ui
+                    .add(egui::DragValue::new(&mut t.tracking).speed(0.05).range(-8.0..=32.0))
+                    .on_hover_text("letter spacing — wide tracking is what makes a title look set")
+                    .changed();
+                ui.label("line");
+                c |= ui
+                    .add(egui::DragValue::new(&mut t.line_height).speed(0.02).range(0.0..=4.0))
+                    .on_hover_text("line height multiplier (0 = the font's own metrics)")
+                    .changed();
+                egui::ComboBox::from_id_salt("ui_case")
+                    .selected_text(match t.case {
+                        floptle_ui::Case::AsIs => "as-is",
+                        floptle_ui::Case::Upper => "UPPER",
+                        floptle_ui::Case::Lower => "lower",
+                        floptle_ui::Case::Title => "Title",
+                    })
+                    .show_ui(ui, |ui| {
+                        for (v, l) in [
+                            (floptle_ui::Case::AsIs, "as-is"),
+                            (floptle_ui::Case::Upper, "UPPER"),
+                            (floptle_ui::Case::Lower, "lower"),
+                            (floptle_ui::Case::Title, "Title"),
+                        ] {
+                            c |= ui.selectable_value(&mut t.case, v, l).changed();
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                c |= ui
+                    .checkbox(&mut t.wrap, "wrap")
+                    .on_hover_text("break lines at the element's width")
+                    .changed();
+                ui.label("max lines");
+                c |= ui
+                    .add(egui::DragValue::new(&mut t.max_lines).speed(0.2).range(0..=64))
+                    .on_hover_text("0 = unlimited")
+                    .changed();
+                egui::ComboBox::from_id_salt("ui_overflow")
+                    .selected_text(match t.overflow {
+                        floptle_ui::Overflow::Show => "show",
+                        floptle_ui::Overflow::Clip => "clip",
+                        floptle_ui::Overflow::Ellipsis => "ellipsis",
+                    })
+                    .show_ui(ui, |ui| {
+                        for (v, l) in [
+                            (floptle_ui::Overflow::Show, "show"),
+                            (floptle_ui::Overflow::Clip, "clip"),
+                            (floptle_ui::Overflow::Ellipsis, "ellipsis"),
+                        ] {
+                            c |= ui.selectable_value(&mut t.overflow, v, l).changed();
+                        }
+                    });
+            });
+            // Outline and shadow: what lets a label survive an arbitrary
+            // background without a panel behind it.
+            let mut has_stroke = t.stroke.is_some();
+            if ui
+                .checkbox(&mut has_stroke, "outline")
+                .on_hover_text("an outline around the glyphs — legibility over anything")
+                .changed()
+            {
+                t.stroke = has_stroke.then(floptle_ui::TextStroke::default);
+                c = true;
+            }
+            if let Some(st) = &mut t.stroke {
+                ui.horizontal(|ui| {
+                    ui.label("  color");
+                    c |= ui.color_edit_button_rgba_unmultiplied(&mut st.color).changed();
+                    ui.label("width");
+                    c |= ui
+                        .add(egui::DragValue::new(&mut st.width).speed(0.1).range(0.0..=8.0))
+                        .changed();
+                });
+            }
+            let mut has_tsh = t.shadow.is_some();
+            if ui.checkbox(&mut has_tsh, "text shadow").changed() {
+                t.shadow = has_tsh.then(floptle_ui::TextShadow::default);
+                c = true;
+            }
+            if let Some(sh) = &mut t.shadow {
+                ui.horizontal(|ui| {
+                    ui.label("  color");
+                    c |= ui.color_edit_button_rgba_unmultiplied(&mut sh.color).changed();
+                    c |= ui.add(egui::DragValue::new(&mut sh.offset[0]).speed(0.2).prefix("x ")).changed();
+                    c |= ui.add(egui::DragValue::new(&mut sh.offset[1]).speed(0.2).prefix("y ")).changed();
+                });
+            }
         }
         // --- image ---
         let mut has = spec.image.is_some();
@@ -1242,7 +1556,63 @@ impl Editor {
             ui.horizontal(|ui| {
                 ui.label("tint");
                 c |= ui.color_edit_button_rgba_unmultiplied(&mut img.tint).changed();
+                ui.label("fit");
+                egui::ComboBox::from_id_salt("ui_img_fit")
+                    .selected_text(match img.fit {
+                        floptle_ui::ImageFit::Stretch => "stretch",
+                        floptle_ui::ImageFit::Contain => "contain",
+                        floptle_ui::ImageFit::Cover => "cover",
+                    })
+                    .show_ui(ui, |ui| {
+                        for (v, l, tip) in [
+                            (floptle_ui::ImageFit::Stretch, "stretch", "fill the rect, ignore aspect"),
+                            (floptle_ui::ImageFit::Contain, "contain", "fit inside, letterboxed"),
+                            (floptle_ui::ImageFit::Cover, "cover", "fill the rect, crop the overflow"),
+                        ] {
+                            c |= ui.selectable_value(&mut img.fit, v, l).on_hover_text(tip).changed();
+                        }
+                    });
             });
+            // 9-slice: the thing that makes YOUR panel art usable at any size.
+            let mut sliced = img.slice.iter().any(|v| *v > 0.0);
+            if ui
+                .checkbox(&mut sliced, "9-slice")
+                .on_hover_text(
+                    "keep the corners unstretched and stretch only the edges and middle — \
+                     how one small frame texture dresses a panel at any size",
+                )
+                .changed()
+            {
+                // A sensible starting frame beats four zeroes: ticking the box
+                // should show you the effect, not nothing.
+                img.slice = if sliced { [0.25; 4] } else { [0.0; 4] };
+                c = true;
+            }
+            if sliced {
+                c |= quad_row(
+                    ui,
+                    "  insets",
+                    &mut img.slice,
+                    ["L", "T", "R", "B"],
+                    0.49,
+                    "ui_slice",
+                );
+                ui.small("fractions of the image — 0.25 means the outer quarter is the frame");
+            }
+            ui.horizontal(|ui| {
+                ui.label("tiling");
+                c |= ui
+                    .add(egui::DragValue::new(&mut img.tiling[0]).speed(0.05).range(0.01..=64.0).prefix("x "))
+                    .changed();
+                c |= ui
+                    .add(egui::DragValue::new(&mut img.tiling[1]).speed(0.05).range(0.01..=64.0).prefix("y "))
+                    .changed();
+                ui.label("offset");
+                c |= ui.add(egui::DragValue::new(&mut img.offset[0]).speed(0.01).prefix("u ")).changed();
+                c |= ui.add(egui::DragValue::new(&mut img.offset[1]).speed(0.01).prefix("v ")).changed();
+            })
+            .response
+            .on_hover_text("repeat the image across the rect; animate the offset to scroll it");
         }
         // --- slider (value-driven bar: this element is the track) ---
         let mut has = spec.slider.is_some();

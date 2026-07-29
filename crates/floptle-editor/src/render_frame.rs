@@ -3347,6 +3347,7 @@ impl Editor {
                                 [0.0, 0.0],
                                 1.0,
                                 &mut |p| reg.get(p).copied(),
+                                &|id| raster.texture_size(id),
                                 &mut |p, owner| {
                                     let shader = uic
                                         .get(p)
@@ -3504,6 +3505,7 @@ impl Editor {
                             [0.0, 0.0],
                             *scale,
                             &mut |p| reg.get(p).copied(),
+                                &|id| raster.texture_size(id),
                             &mut |p, owner| {
                                 let shader =
                                     uic.get(p).and_then(|e| e.compiled.as_ref()).map(|(_, id)| *id)?;

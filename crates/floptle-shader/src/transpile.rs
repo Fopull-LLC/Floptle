@@ -1022,8 +1022,17 @@ struct VsOut {
     @location(5) half_size: vec2<f32>,
     @location(6) px: vec2<f32>,
     @location(7) @interpolate(flat) clip: vec4<f32>,
+    @location(8) @interpolate(flat) radius: vec4<f32>,
+    @location(9) @interpolate(flat) border: vec4<f32>,
+    @location(10) @interpolate(flat) grad_to: vec4<f32>,
+    @location(11) @interpolate(flat) grad_cfg: vec4<f32>,
+    @location(12) @interpolate(flat) fx: vec4<f32>,
+    @location(13) @interpolate(flat) inset: vec4<f32>,
 };
 fn sd_round_rect(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 { return 0.0; }
+fn corner_radius(p: vec2<f32>, half: vec2<f32>, r: vec4<f32>) -> f32 { return 0.0; }
+fn gradient_t(p: vec2<f32>, half: vec2<f32>, cfg: vec4<f32>) -> f32 { return 0.0; }
+fn hash21(p: vec2<f32>) -> f32 { return 0.0; }
 "#;
 
 /// Field-symbol stand-ins the UI module must append before the shared stdlib

@@ -19,6 +19,14 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod paint;
+pub mod text;
+
+pub use paint::{
+    Blend, Corners, GlowSpec, Gradient, GradientKind, GrainSpec, ImageFit, ShadowSpec, Sides,
+};
+pub use text::{Case, Overflow, TextShadow, TextStroke};
+
 // ---------------------------------------------------------------------------
 // The element vocabulary
 // ---------------------------------------------------------------------------
@@ -166,51 +174,61 @@ impl Default for StackCfg {
     }
 }
 
-/// A soft drop shadow cast behind a [`ShapeSpec`] — the juice that lifts a panel
-/// off the background. Rendered as a blurred rounded rect BEHIND the element's
-/// own rect (the one effect that lives outside the rect, so it's built-in rather
-/// than a shader).
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ShadowSpec {
-    /// Shadow color; alpha is the strength (multiplied by the element opacity).
-    pub color: [f32; 4],
-    /// Offset in design units — `+x` right, `+y` down (a light from top-left).
-    pub offset: [f32; 2],
-    /// Soft-edge width in design units (0 = a hard offset shape; bigger = softer).
-    pub blur: f32,
-    /// Grow the shadow beyond the element on every side (design units).
-    pub spread: f32,
-}
-
-impl Default for ShadowSpec {
-    fn default() -> Self {
-        ShadowSpec { color: [0.0, 0.0, 0.0, 0.5], offset: [0.0, 4.0], blur: 10.0, spread: 0.0 }
-    }
-}
-
 /// The visual primitive: a rounded rectangle. Radius 0 = sharp panel, radius
 /// ≥ half the short side = pill/circle. Transparency via the fill alpha.
 /// The engine ships no UI art — shapes + your textures + text ARE the kit.
+///
+/// Everything past `fill`/`radius`/`border` is optional and defaults to off, so
+/// a shape authored against the first cut of the UI system looks identical.
+/// What the extras buy, in the order they matter: `gradient` (a surface stops
+/// reading as a slab), `radius` per corner (headers, tabs, cards), `border` per
+/// side (rules and accent bars stop costing an extra node), `grain` (the
+/// cheapest cure for plastic-looking UI), and `glow`/inset `shadow` (light and
+/// recession).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShapeSpec {
+    /// The flat fill — and, when `gradient` is set, its near colour.
     pub fill: [f32; 4],
-    pub radius: f32,
-    /// Border thickness in design units (0 = none).
-    pub border: f32,
+    /// Optional two-stop gradient running from `fill` to [`Gradient::to`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradient: Option<Gradient>,
+    /// Corner radii `[TL, TR, BR, BL]`. Accepts a bare number for all four.
+    #[serde(default)]
+    pub radius: Corners,
+    /// Border thickness `[L, T, R, B]` in design units. Accepts a bare number.
+    #[serde(default)]
+    pub border: Sides,
     pub border_color: [f32; 4],
-    /// Optional soft drop shadow drawn behind this shape.
+    /// Optional soft shadow — behind the shape, or inside it (`inset`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow: Option<ShadowSpec>,
+    /// Optional outer bloom, drawn behind the shadow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glow: Option<GlowSpec>,
+    /// Optional per-pixel noise over the fill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grain: Option<GrainSpec>,
+    /// How this shape composites against what is already drawn.
+    #[serde(default, skip_serializing_if = "is_normal_blend")]
+    pub blend: Blend,
+}
+
+fn is_normal_blend(b: &Blend) -> bool {
+    *b == Blend::Normal
 }
 
 impl Default for ShapeSpec {
     fn default() -> Self {
         ShapeSpec {
             fill: [1.0, 1.0, 1.0, 1.0],
-            radius: 0.0,
-            border: 0.0,
+            gradient: None,
+            radius: Corners::all(0.0),
+            border: Sides::all(0.0),
             border_color: [0.0, 0.0, 0.0, 1.0],
             shadow: None,
+            glow: None,
+            grain: None,
+            blend: Blend::Normal,
         }
     }
 }
@@ -234,6 +252,43 @@ pub struct TextSpec {
     /// empty = the engine's neutral fallback font.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub font: String,
+    /// Outline around the glyphs — legibility over an arbitrary background.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke: Option<TextStroke>,
+    /// A dropped copy behind the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<TextShadow>,
+    /// Extra space between glyphs, in design units. Negative tightens.
+    /// Wide tracking on small caps is most of what makes a title look set
+    /// rather than typed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tracking: f32,
+    /// Line spacing as a multiple of the font's natural line height
+    /// (0 = the font's own metrics, which is what the first cut always used).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub line_height: f32,
+    /// Wrap to the element's width instead of running past it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wrap: bool,
+    /// Cap the rendered line count (0 = unlimited). Pairs with `Ellipsis`.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub max_lines: u32,
+    /// What happens to text that doesn't fit.
+    #[serde(default, skip_serializing_if = "is_show")]
+    pub overflow: Overflow,
+    /// Case transform applied at draw time; the authored string is untouched.
+    #[serde(default, skip_serializing_if = "is_as_is")]
+    pub case: Case,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+fn is_show(v: &Overflow) -> bool {
+    *v == Overflow::Show
+}
+fn is_as_is(v: &Case) -> bool {
+    *v == Case::AsIs
 }
 
 fn default_center() -> Align {
@@ -250,7 +305,22 @@ impl Default for TextSpec {
             valign: Align::Center,
             fit: false,
             font: String::new(),
+            stroke: None,
+            shadow: None,
+            tracking: 0.0,
+            line_height: 0.0,
+            wrap: false,
+            max_lines: 0,
+            overflow: Overflow::Show,
+            case: Case::AsIs,
         }
+    }
+}
+
+impl TextSpec {
+    /// The string as it should actually be drawn (case applied).
+    pub fn display(&self) -> std::borrow::Cow<'_, str> {
+        self.case.apply(&self.text)
     }
 }
 
@@ -271,15 +341,57 @@ pub struct ImageSpec {
     /// Which cell to show (row-major, clamped into range).
     #[serde(default)]
     pub cell: u32,
+    /// **9-slice** insets `[L, T, R, B]` as a FRACTION of the sampled region
+    /// (0 = off). The four corners keep their size, the four edges stretch
+    /// along one axis, and the middle stretches both — so one small texture
+    /// dresses a panel at any size.
+    ///
+    /// This is what makes authored panel art usable at all. Without it a
+    /// project's own border/frame textures smear when the panel resizes, which
+    /// is why both of Ty's projects draw panels with engine rects instead of
+    /// their own art.
+    #[serde(default, skip_serializing_if = "is_zero4")]
+    pub slice: [f32; 4],
+    /// Repeat the image across the rect (1 = once). Patterned fills.
+    #[serde(default = "one2", skip_serializing_if = "is_one2")]
+    pub tiling: [f32; 2],
+    /// UV offset in tiles — animate it for a scrolling background.
+    #[serde(default, skip_serializing_if = "is_zero2")]
+    pub offset: [f32; 2],
+    /// How the image fills the rect when its aspect differs.
+    #[serde(default, skip_serializing_if = "is_stretch")]
+    pub fit: ImageFit,
 }
 
 fn one_u32() -> u32 {
     1
 }
+fn one2() -> [f32; 2] {
+    [1.0, 1.0]
+}
+fn is_one2(v: &[f32; 2]) -> bool {
+    v[0] == 1.0 && v[1] == 1.0
+}
+fn is_zero4(v: &[f32; 4]) -> bool {
+    v.iter().all(|x| *x == 0.0)
+}
+fn is_stretch(f: &ImageFit) -> bool {
+    *f == ImageFit::Stretch
+}
 
 impl Default for ImageSpec {
     fn default() -> Self {
-        ImageSpec { texture: String::new(), tint: [1.0; 4], cols: 1, rows: 1, cell: 0 }
+        ImageSpec {
+            texture: String::new(),
+            tint: [1.0; 4],
+            cols: 1,
+            rows: 1,
+            cell: 0,
+            slice: [0.0; 4],
+            tiling: [1.0, 1.0],
+            offset: [0.0, 0.0],
+            fit: ImageFit::Stretch,
+        }
     }
 }
 
@@ -297,6 +409,27 @@ impl ImageSpec {
         let (cx, cy) = (cell % cols, cell / cols);
         let (du, dv) = (1.0 / cols as f32, 1.0 / rows as f32);
         [cx as f32 * du, cy as f32 * dv, (cx + 1) as f32 * du, (cy + 1) as f32 * dv]
+    }
+
+    /// [`cell_uv`](Self::cell_uv) with `tiling`/`offset` applied — the UV rect
+    /// the renderer actually samples. Repeats above 1 rely on a repeating
+    /// sampler; `offset` is in tiles, so animating it scrolls the fill.
+    ///
+    /// Tiling a spritesheet CELL would sample its neighbours, so tiling is
+    /// ignored on a sheet — the cell rect wins.
+    pub fn tiled_uv(&self) -> [f32; 4] {
+        let base = self.cell_uv();
+        let is_sheet = self.cols.max(1) * self.rows.max(1) > 1;
+        if is_sheet || (self.tiling == [1.0, 1.0] && self.offset == [0.0, 0.0]) {
+            return base;
+        }
+        let (tu, tv) = (self.tiling[0], self.tiling[1]);
+        [
+            base[0] + self.offset[0],
+            base[1] + self.offset[1],
+            base[0] + self.offset[0] + (base[2] - base[0]) * tu,
+            base[1] + self.offset[1] + (base[3] - base[1]) * tv,
+        ]
     }
 }
 
@@ -446,9 +579,46 @@ pub struct ElementSpec {
     pub button: bool,
     #[serde(default = "default_true")]
     pub visible: bool,
-    /// Multiplies every color this element draws (self only, v1).
+    /// Multiplies every colour this element draws — **and every descendant's**.
+    /// Cascading is what lets a whole menu fade as one thing; before it,
+    /// fading a panel meant parking a black rectangle over the screen
+    /// (Fofighter's `Front Fade`).
     #[serde(default = "default_one")]
     pub opacity: f32,
+    /// Multiplies every colour this element and its descendants draw. Group
+    /// flashes (damage red, a disabled wash) without touching each child.
+    #[serde(default = "white", skip_serializing_if = "is_white")]
+    pub tint: [f32; 4],
+    /// Rotation in degrees about `pivot`. Layout is unaffected — the element
+    /// occupies the same rect and only its drawing turns, so a tilted label
+    /// can't shove its siblings around.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotation: f32,
+    /// Visual scale about `pivot`, per axis. Also layout-neutral: this is the
+    /// press-dip and hover-pop channel, and a button that resized its parent
+    /// on hover would be a bug, not juice.
+    #[serde(default = "one2", skip_serializing_if = "is_one2")]
+    pub scale: [f32; 2],
+    /// Origin for `rotation`/`scale`, as a fraction of the element's own rect
+    /// (0,0 = top-left, 0.5,0.5 = centre).
+    #[serde(default = "half2", skip_serializing_if = "is_half2")]
+    pub pivot: [f32; 2],
+}
+
+fn white() -> [f32; 4] {
+    [1.0; 4]
+}
+fn is_white(v: &[f32; 4]) -> bool {
+    v.iter().all(|x| *x == 1.0)
+}
+fn is_zero(v: &f32) -> bool {
+    *v == 0.0
+}
+fn half2() -> [f32; 2] {
+    [0.5, 0.5]
+}
+fn is_half2(v: &[f32; 2]) -> bool {
+    v[0] == 0.5 && v[1] == 0.5
 }
 
 fn default_true() -> bool {
@@ -481,6 +651,10 @@ impl Default for ElementSpec {
             button: false,
             visible: true,
             opacity: 1.0,
+            tint: [1.0; 4],
+            rotation: 0.0,
+            scale: [1.0, 1.0],
+            pivot: [0.5, 0.5],
         }
     }
 }
@@ -884,27 +1058,112 @@ pub struct Clip {
     pub radius: f32,
 }
 
+/// A visual (NOT layout) transform applied to a quad about a pivot inside its
+/// own rect. Layout already happened; this only turns and scales the drawing,
+/// so juice can never reflow a screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Xform {
+    /// Radians, clockwise on screen (y is down).
+    pub rotation: f32,
+    pub scale: [f32; 2],
+    /// Fraction of the quad's own rect.
+    pub pivot: [f32; 2],
+}
+
+impl Default for Xform {
+    fn default() -> Self {
+        Xform { rotation: 0.0, scale: [1.0, 1.0], pivot: [0.5, 0.5] }
+    }
+}
+
+impl Xform {
+    /// True when this transform would change nothing (the overwhelmingly
+    /// common case — worth an early-out in the packer).
+    pub fn is_identity(&self) -> bool {
+        self.rotation == 0.0 && self.scale == [1.0, 1.0]
+    }
+}
+
+/// What kind of face a [`Quad`] is — picks the fragment path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum QuadKind {
+    /// Rounded rect: gradient/flat fill, per-side border, optional texture.
+    #[default]
+    Shape,
+    /// A feathered rounded rect drawn BEHIND the shape (drop shadow, glow).
+    Shadow,
+    /// A feathered rounded rect drawn INSIDE the shape (recessed well).
+    InsetShadow,
+}
+
 /// One rounded-rect quad, in design units (the renderer scales).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Quad {
     pub rect: [f32; 4],
+    /// Flat fill, or the near stop when `gradient` is set.
     pub color: [f32; 4],
-    pub radius: f32,
-    pub border: f32,
+    /// Two-stop gradient over the fill (`None` = flat).
+    pub gradient: Option<Gradient>,
+    /// Corner radii `[TL, TR, BR, BL]`.
+    pub radius: [f32; 4],
+    /// Border widths `[L, T, R, B]`.
+    pub border: [f32; 4],
     pub border_color: [f32; 4],
     /// Texture asset path (empty = solid fill).
     pub texture: String,
     /// UV sub-rect `[min_u, min_v, max_u, max_v]` to sample — the whole texture
-    /// `[0,0,1,1]` normally, a single cell for a spritesheet image.
+    /// `[0,0,1,1]` normally, a single cell for a spritesheet image, and the
+    /// region a 9-slice cuts its nine patches out of.
     pub uv: [f32; 4],
+    /// 9-slice insets `[L, T, R, B]` as a fraction of the sampled region
+    /// (all zero = off). Expanded into nine patches by the renderer, which is
+    /// the only place that knows the texture's pixel size — and therefore how
+    /// big an unstretched corner should be drawn.
+    pub slice: [f32; 4],
+    /// Aspect handling when the image doesn't match the rect.
+    pub fit: ImageFit,
     /// Set when a mask claims this element.
     pub clip: Option<Clip>,
     /// Custom-shader face: `(flsl path, owner element id)` — the renderer
     /// resolves this to a pipeline + per-element param binding.
     pub shader: Option<(String, u32)>,
-    /// Soft-shadow feather in design units. `0` = a normal crisp quad; `> 0`
-    /// marks this as a drop-shadow quad the renderer draws with a blurred edge.
+    /// Which fragment path draws this quad.
+    pub kind: QuadKind,
+    /// Soft-edge width in design units for the two shadow kinds.
     pub feather: f32,
+    /// `InsetShadow` only: how far the inner shape is displaced.
+    pub shadow_offset: [f32; 2],
+    /// Per-pixel noise over the fill (`None` = clean).
+    pub grain: Option<GrainSpec>,
+    /// Compositing mode — a batch key, so runs of one mode stay one draw call.
+    pub blend: Blend,
+    /// Visual rotate/scale about a pivot.
+    pub xform: Xform,
+}
+
+impl Default for Quad {
+    fn default() -> Self {
+        Quad {
+            rect: [0.0; 4],
+            color: [1.0; 4],
+            gradient: None,
+            radius: [0.0; 4],
+            border: [0.0; 4],
+            border_color: [0.0; 4],
+            texture: String::new(),
+            uv: [0.0, 0.0, 1.0, 1.0],
+            slice: [0.0; 4],
+            fit: ImageFit::Stretch,
+            clip: None,
+            shader: None,
+            kind: QuadKind::Shape,
+            feather: 0.0,
+            shadow_offset: [0.0; 2],
+            grain: None,
+            blend: Blend::Normal,
+            xform: Xform::default(),
+        }
+    }
 }
 
 /// One text run (the renderer owns the font and lays out glyphs).
@@ -912,6 +1171,9 @@ pub struct Quad {
 pub struct TextRun {
     /// The element's rect — alignment happens inside it.
     pub rect: [f32; 4],
+    /// The string as it should be drawn: the case transform is already applied,
+    /// so the renderer never has to re-derive it (and the authored string in
+    /// the scene stays what the designer typed).
     pub text: String,
     pub size: f32,
     pub color: [f32; 4],
@@ -924,6 +1186,45 @@ pub struct TextRun {
     pub font: String,
     /// Set when a mask claims this element.
     pub clip: Option<Clip>,
+    /// Outline around the glyphs (extra offset copies at pack time).
+    pub stroke: Option<TextStroke>,
+    /// A dropped copy behind the run.
+    pub shadow: Option<TextShadow>,
+    /// Extra advance between glyphs, design units.
+    pub tracking: f32,
+    /// Line spacing multiplier (0 = the font's own metrics).
+    pub line_height: f32,
+    /// Wrap to `rect`'s width.
+    pub wrap: bool,
+    /// Cap on rendered lines (0 = unlimited).
+    pub max_lines: u32,
+    pub overflow: Overflow,
+    /// Visual rotate/scale, matching the owning element's.
+    pub xform: Xform,
+}
+
+impl Default for TextRun {
+    fn default() -> Self {
+        TextRun {
+            rect: [0.0; 4],
+            text: String::new(),
+            size: 24.0,
+            color: [1.0; 4],
+            align: Align::Start,
+            valign: Align::Center,
+            fit: false,
+            font: String::new(),
+            clip: None,
+            stroke: None,
+            shadow: None,
+            tracking: 0.0,
+            line_height: 0.0,
+            wrap: false,
+            max_lines: 0,
+            overflow: Overflow::Show,
+            xform: Xform::default(),
+        }
+    }
 }
 
 /// Everything a layer draws this frame, painter's order.
@@ -959,7 +1260,7 @@ pub fn scroll_clips(
         if n.spec.scroll.is_none() {
             continue;
         }
-        let radius = n.spec.shape.map(|s| s.radius).unwrap_or(0.0);
+        let radius = n.spec.shape.map(|s| s.radius.max()).unwrap_or(0.0);
         let clip = Clip { rect: p.rect, radius };
         let mut stack: Vec<u32> = n.children.iter().map(|c| c.id).collect();
         while let Some(id) = stack.pop() {
@@ -1031,10 +1332,13 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
     let mut clip_of = scroll_clips(roots, placed);
     for (mask_id, target_id) in masks {
         let Some(&rect) = rects.get(mask_id) else { continue };
+        // A clip is one scalar radius in the instance data, so mixed corners
+        // round the mask by their largest — over-rounding hides less than
+        // under-rounding would show.
         let radius = nodes
             .get(mask_id)
             .and_then(|n| n.spec.shape)
-            .map(|s| s.radius)
+            .map(|s| s.radius.max())
             .unwrap_or(0.0);
         let clip = Clip { rect, radius };
         let mut stack = vec![*target_id];
@@ -1045,60 +1349,114 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
             }
         }
     }
+    // Opacity and tint CASCADE: an element's effective multiplier is its own
+    // times every ancestor's. This is what lets one `opacity` fade a whole
+    // menu — before it, `opacity` was self-only and fading a panel meant
+    // parking a black rectangle over the screen.
+    let inherited = inherited_tints(roots);
+    let white = [1.0f32; 4];
+
     let mut dl = DrawList::default();
     for p in placed {
         let Some(node) = nodes.get(&p.id) else { continue };
         let spec = &node.spec;
         let clip = clip_of.get(&p.id).copied();
-        let a = spec.opacity.clamp(0.0, 1.0);
+        let mul = inherited.get(&p.id).copied().unwrap_or(white);
+        // Every colour this element draws passes through the cascade.
+        let paint = |c: [f32; 4]| -> [f32; 4] {
+            [c[0] * mul[0], c[1] * mul[1], c[2] * mul[2], c[3] * mul[3]]
+        };
+        let xform = Xform {
+            rotation: spec.rotation.to_radians(),
+            scale: spec.scale,
+            pivot: spec.pivot,
+        };
+        let radius = spec.shape.map(|s| s.radius.0).unwrap_or([0.0; 4]);
+        let blend = spec.shape.map(|s| s.blend).unwrap_or(Blend::Normal);
+
         if let Some(s) = spec.shape {
-            // Drop shadow first, so it sits BEHIND the shape (and lifts it off
-            // whatever was drawn before). It grows by `spread` and offsets by
-            // `offset`, with a `blur`-wide soft edge (the `feather`).
-            if let Some(sh) = s.shadow
-                && sh.color[3] > 0.0
+            // Glow sits furthest back — it is light spilling from under the
+            // element, so a drop shadow drawn after it still reads as contact.
+            if let Some(g) = s.glow
+                && g.color[3] > 0.0
             {
-                let mut col = sh.color;
-                col[3] *= a;
                 dl.quads.push(Quad {
-                    rect: [
-                        p.rect[0] + sh.offset[0] - sh.spread,
-                        p.rect[1] + sh.offset[1] - sh.spread,
-                        p.rect[2] + sh.spread * 2.0,
-                        p.rect[3] + sh.spread * 2.0,
-                    ],
-                    color: col,
-                    radius: s.radius + sh.spread.max(0.0),
-                    border: 0.0,
-                    border_color: [0.0; 4],
-                    texture: String::new(),
-                    uv: [0.0, 0.0, 1.0, 1.0],
+                    rect: grow(p.rect, g.spread),
+                    color: paint(g.color),
+                    radius: grow_radius(radius, g.spread),
                     clip,
-                    shader: None,
-                    feather: sh.blur.max(0.0),
+                    kind: QuadKind::Shadow,
+                    feather: g.radius.max(0.0),
+                    // Glow is light: it adds rather than covers, which is the
+                    // difference between "lit" and "a coloured smudge".
+                    blend: Blend::Additive,
+                    xform,
+                    ..Default::default()
                 });
             }
-            let mut fill = s.fill;
-            fill[3] *= a;
-            let mut bc = s.border_color;
-            bc[3] *= a;
+            // Outer drop shadow: behind the shape, lifting it off whatever was
+            // drawn before. Grows by `spread`, offsets by `offset`, with a
+            // `blur`-wide soft edge (the `feather`).
+            if let Some(sh) = s.shadow
+                && !sh.inset
+                && sh.color[3] > 0.0
+            {
+                let mut r = grow(p.rect, sh.spread);
+                r[0] += sh.offset[0];
+                r[1] += sh.offset[1];
+                dl.quads.push(Quad {
+                    rect: r,
+                    color: paint(sh.color),
+                    radius: grow_radius(radius, sh.spread),
+                    clip,
+                    kind: QuadKind::Shadow,
+                    feather: sh.blur.max(0.0),
+                    xform,
+                    ..Default::default()
+                });
+            }
             dl.quads.push(Quad {
                 rect: p.rect,
-                color: fill,
-                radius: s.radius,
-                border: s.border,
-                border_color: bc,
-                texture: String::new(),
-                uv: [0.0, 0.0, 1.0, 1.0],
+                color: paint(s.fill),
+                gradient: s.gradient.map(|mut g| {
+                    g.to = paint(g.to);
+                    g
+                }),
+                radius,
+                border: s.border.0,
+                border_color: paint(s.border_color),
                 clip,
-                shader: None,
-                feather: 0.0,
+                grain: s.grain,
+                blend,
+                xform,
+                ..Default::default()
             });
+            // Inset shadow rides ON TOP of the fill (it is a hole in the
+            // surface, not something behind it) but under the image and text.
+            if let Some(sh) = s.shadow
+                && sh.inset
+                && sh.color[3] > 0.0
+            {
+                dl.quads.push(Quad {
+                    rect: p.rect,
+                    color: paint(sh.color),
+                    radius,
+                    clip,
+                    kind: QuadKind::InsetShadow,
+                    feather: sh.blur.max(0.0),
+                    shadow_offset: sh.offset,
+                    // `spread` pushes the inner edge further in.
+                    border: [sh.spread; 4],
+                    blend,
+                    xform,
+                    ..Default::default()
+                });
+            }
         }
         if !spec.shader.is_empty() {
             // A custom-shader face: white tint (the shader reads it as
-            // `instanceColor`, alpha = the element's opacity). The shape's corner
-            // radius rides along in `radius` so the transpiled shader can clip its
+            // `instanceColor`, alpha = the element's effective opacity). The
+            // corner radii ride along so the transpiled shader can clip its
             // output to the element's rounded rect (no spill past the corners).
             // The element's image (if any) binds at group(1), so the shader can
             // sample it with `baseTexture(uv)` — the shader then OWNS the image
@@ -1112,15 +1470,15 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
             let img_uv = spec.image.as_ref().map(|i| i.cell_uv()).unwrap_or([0.0, 0.0, 1.0, 1.0]);
             dl.quads.push(Quad {
                 rect: p.rect,
-                color: [1.0, 1.0, 1.0, a],
-                radius: spec.shape.map(|s| s.radius).unwrap_or(0.0),
-                border: 0.0,
-                border_color: [0.0; 4],
+                color: paint(white),
+                radius,
                 texture: img_tex,
                 uv: img_uv,
                 clip,
                 shader: Some((spec.shader.clone(), p.id)),
-                feather: 0.0,
+                blend,
+                xform,
+                ..Default::default()
             });
         }
         // The plain image quad — skipped when a shader owns the element (the
@@ -1129,40 +1487,91 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
             && !img.texture.is_empty()
             && spec.shader.is_empty()
         {
-            let mut tint = img.tint;
-            tint[3] *= a;
             dl.quads.push(Quad {
                 rect: p.rect,
-                color: tint,
-                radius: spec.shape.map(|s| s.radius).unwrap_or(0.0),
-                border: 0.0,
-                border_color: [0.0; 4],
+                color: paint(img.tint),
+                radius,
                 texture: img.texture.clone(),
-                uv: img.cell_uv(),
+                uv: img.tiled_uv(),
+                slice: img.slice,
+                fit: img.fit,
                 clip,
-                shader: None,
-                feather: 0.0,
+                blend,
+                xform,
+                ..Default::default()
             });
         }
         if let Some(t) = &spec.text
             && !t.text.is_empty()
         {
-            let mut color = t.color;
-            color[3] *= a;
             dl.texts.push(TextRun {
                 rect: p.rect,
-                text: t.text.clone(),
+                text: t.display().into_owned(),
                 size: t.size,
-                color,
+                color: paint(t.color),
                 align: t.align,
                 valign: t.valign,
                 fit: t.fit,
                 font: t.font.clone(),
                 clip,
+                stroke: t.stroke.map(|mut s| {
+                    s.color = paint(s.color);
+                    s
+                }),
+                shadow: t.shadow.map(|mut s| {
+                    s.color = paint(s.color);
+                    s
+                }),
+                tracking: t.tracking,
+                line_height: t.line_height,
+                wrap: t.wrap,
+                max_lines: t.max_lines,
+                overflow: t.overflow,
+                xform,
             });
         }
     }
     dl
+}
+
+/// Expand a rect by `d` on every side.
+fn grow(r: [f32; 4], d: f32) -> [f32; 4] {
+    [r[0] - d, r[1] - d, r[2] + d * 2.0, r[3] + d * 2.0]
+}
+
+/// Corner radii for a rect grown by `d` — a spread shadow's corners open up by
+/// the same amount, or the silhouette pinches at the corners.
+fn grow_radius(r: [f32; 4], d: f32) -> [f32; 4] {
+    let d = d.max(0.0);
+    [r[0] + d, r[1] + d, r[2] + d, r[3] + d]
+}
+
+/// Effective colour multiplier per element: own `tint` (with `opacity` folded
+/// into alpha) times every ancestor's.
+///
+/// Computed over the TREE, not the placed list, because an invisible parent
+/// still parents its children's cascade — and hidden subtrees never reach the
+/// draw list anyway.
+fn inherited_tints(roots: &[Node]) -> std::collections::HashMap<u32, [f32; 4]> {
+    fn walk(n: &Node, parent: [f32; 4], out: &mut std::collections::HashMap<u32, [f32; 4]>) {
+        let o = n.spec.opacity.clamp(0.0, 1.0);
+        let t = n.spec.tint;
+        let mine = [
+            parent[0] * t[0],
+            parent[1] * t[1],
+            parent[2] * t[2],
+            parent[3] * t[3] * o,
+        ];
+        out.insert(n.id, mine);
+        for c in &n.children {
+            walk(c, mine, out);
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    for r in roots {
+        walk(r, [1.0; 4], &mut out);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1562,7 +1971,7 @@ mod tests {
             ElementSpec {
                 place: Place::Free { pos: [100.0, 0.0] },
                 size: [Size::Fixed(80.0), Size::Fixed(80.0)],
-                shape: Some(ShapeSpec { radius: 12.0, ..Default::default() }),
+                shape: Some(ShapeSpec { radius: 12.0.into(), ..Default::default() }),
                 mask: Some(MaskSpec { targets: vec!["t".into()] }),
                 ..Default::default()
             },
@@ -1627,6 +2036,261 @@ mod tests {
         assert!(spec.stack.is_none(), "flow is opt-in");
         assert_eq!(spec.min_size, [0.0, 0.0]);
         assert_eq!(spec.max_size, [0.0, 0.0]);
+        assert_eq!(spec.scale, [1.0, 1.0], "the transform starts neutral");
+        assert_eq!(spec.tint, [1.0; 4]);
+    }
+
+    // -----------------------------------------------------------------------
+    // The paint box (docs/ui-system-2-proposal.md §A)
+    // -----------------------------------------------------------------------
+
+    /// A shape with a fill, so cascade tests have something coloured to look at.
+    fn painted(fill: [f32; 4]) -> Option<ShapeSpec> {
+        Some(ShapeSpec { fill, ..Default::default() })
+    }
+
+    /// THE headline behaviour change: `opacity` used to be self-only, so a
+    /// parent could not fade its children and projects parked a black rect over
+    /// the screen instead.
+    #[test]
+    fn opacity_cascades_to_descendants() {
+        let child = el(
+            ElementSpec {
+                size: [Size::Fixed(10.0), Size::Fixed(10.0)],
+                shape: painted([1.0, 1.0, 1.0, 1.0]),
+                opacity: 0.5,
+                ..Default::default()
+            },
+            vec![],
+        );
+        let cid = child.id;
+        let parent = el(
+            ElementSpec {
+                size: [Size::Fixed(100.0), Size::Fixed(100.0)],
+                opacity: 0.5,
+                ..Default::default()
+            },
+            vec![child],
+        );
+        let placed = solve(std::slice::from_ref(&parent), [1280.0, 720.0], &m);
+        let dl = draw_list(&[parent], &placed, &[]);
+        let q = dl.quads.iter().find(|_| true).unwrap();
+        assert_eq!(q.rect[2], 10.0, "the only shape is the child's");
+        // 0.5 (parent) × 0.5 (own) — multiplicative, like every other engine.
+        assert!((q.color[3] - 0.25).abs() < 1e-6, "got {}", q.color[3]);
+        let _ = cid;
+    }
+
+    /// `tint` multiplies RGB down the subtree — a group flash without touching
+    /// each child's own colour.
+    #[test]
+    fn tint_cascades_and_multiplies_rgb() {
+        let child = el(
+            ElementSpec {
+                size: [Size::Fixed(10.0), Size::Fixed(10.0)],
+                shape: painted([1.0, 1.0, 1.0, 1.0]),
+                ..Default::default()
+            },
+            vec![],
+        );
+        let parent = el(
+            ElementSpec {
+                size: [Size::Fixed(100.0), Size::Fixed(100.0)],
+                tint: [1.0, 0.0, 0.0, 1.0],
+                ..Default::default()
+            },
+            vec![child],
+        );
+        let placed = solve(std::slice::from_ref(&parent), [1280.0, 720.0], &m);
+        let dl = draw_list(&[parent], &placed, &[]);
+        let q = &dl.quads[0];
+        assert_eq!([q.color[0], q.color[1], q.color[2]], [1.0, 0.0, 0.0]);
+    }
+
+    /// Glow behind, fill next, inset shadow on top — the order that makes an
+    /// inset read as a hole in the surface rather than something behind it.
+    #[test]
+    fn shape_layers_emit_back_to_front() {
+        let n = el(
+            ElementSpec {
+                size: [Size::Fixed(100.0), Size::Fixed(40.0)],
+                shape: Some(ShapeSpec {
+                    fill: [0.2, 0.2, 0.2, 1.0],
+                    glow: Some(GlowSpec::default()),
+                    shadow: Some(ShadowSpec { inset: true, ..Default::default() }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            vec![],
+        );
+        let placed = solve(std::slice::from_ref(&n), [1280.0, 720.0], &m);
+        let dl = draw_list(&[n], &placed, &[]);
+        let kinds: Vec<QuadKind> = dl.quads.iter().map(|q| q.kind).collect();
+        assert_eq!(kinds, vec![QuadKind::Shadow, QuadKind::Shape, QuadKind::InsetShadow]);
+        assert_eq!(dl.quads[0].blend, Blend::Additive, "glow adds light");
+    }
+
+    /// An outer shadow's spread has to open the corner radii too, or a spread
+    /// shadow pinches at the corners and reads as a misaligned second rect.
+    #[test]
+    fn spread_opens_the_shadow_corners() {
+        let n = el(
+            ElementSpec {
+                size: [Size::Fixed(100.0), Size::Fixed(40.0)],
+                shape: Some(ShapeSpec {
+                    radius: Corners::all(6.0),
+                    shadow: Some(ShadowSpec {
+                        spread: 4.0,
+                        offset: [0.0, 0.0],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            vec![],
+        );
+        let placed = solve(std::slice::from_ref(&n), [1280.0, 720.0], &m);
+        let dl = draw_list(&[n], &placed, &[]);
+        let sh = &dl.quads[0];
+        assert_eq!(sh.kind, QuadKind::Shadow);
+        assert_eq!(sh.rect[2], 108.0, "grew by spread on both sides");
+        assert_eq!(sh.radius, [10.0; 4]);
+    }
+
+    #[test]
+    fn per_corner_radius_and_per_side_border_reach_the_draw_list() {
+        let n = el(
+            ElementSpec {
+                size: [Size::Fixed(100.0), Size::Fixed(40.0)],
+                shape: Some(ShapeSpec {
+                    radius: Corners([12.0, 12.0, 0.0, 0.0]),
+                    border: Sides([0.0, 0.0, 0.0, 2.0]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            vec![],
+        );
+        let placed = solve(std::slice::from_ref(&n), [1280.0, 720.0], &m);
+        let dl = draw_list(&[n], &placed, &[]);
+        assert_eq!(dl.quads[0].radius, [12.0, 12.0, 0.0, 0.0]);
+        assert_eq!(dl.quads[0].border, [0.0, 0.0, 0.0, 2.0]);
+    }
+
+    /// The case transform is resolved into the draw list, so the renderer never
+    /// re-derives it and the authored string stays what the designer typed.
+    #[test]
+    fn case_is_applied_for_drawing_but_not_stored() {
+        let spec = TextSpec { text: "menu".into(), case: Case::Upper, ..Default::default() };
+        let n = el(ElementSpec { text: Some(spec.clone()), ..Default::default() }, vec![]);
+        let placed = solve(std::slice::from_ref(&n), [1280.0, 720.0], &m);
+        let dl = draw_list(&[n], &placed, &[]);
+        assert_eq!(dl.texts[0].text, "MENU");
+        assert_eq!(spec.text, "menu", "the scene keeps the authored string");
+    }
+
+    /// Tiling a spritesheet cell would sample its neighbours — a silent, ugly
+    /// failure. The cell wins.
+    #[test]
+    fn tiling_is_ignored_on_a_spritesheet() {
+        let sheet = ImageSpec {
+            cols: 4,
+            rows: 1,
+            cell: 1,
+            tiling: [3.0, 3.0],
+            ..Default::default()
+        };
+        assert_eq!(sheet.tiled_uv(), sheet.cell_uv());
+        let plain = ImageSpec { tiling: [3.0, 2.0], ..Default::default() };
+        assert_eq!(plain.tiled_uv(), [0.0, 0.0, 3.0, 2.0]);
+    }
+
+    /// Every scene in Ty's projects was authored against the first cut. They
+    /// must load with no edits — this is the exact shape RON from
+    /// `Fofighter/scenes/menu.ron`.
+    #[test]
+    fn first_cut_scenes_still_parse() {
+        let old = r#"(
+            place: Free(pos: (330.0, 196.0)),
+            size: (Fixed(620.0), Fixed(430.0)),
+            shape: Some((
+                fill: (0.043, 0.051, 0.086, 0.970),
+                radius: 14.0,
+                border: 2.0,
+                border_color: (0.620, 0.520, 0.240, 1.000),
+            )),
+            visible: true,
+            opacity: 1.00,
+        )"#;
+        let spec: ElementSpec = ron::from_str(old).unwrap();
+        let s = spec.shape.unwrap();
+        assert_eq!(s.radius.0, [14.0; 4]);
+        assert_eq!(s.border.0, [2.0; 4]);
+        assert!(s.gradient.is_none() && s.glow.is_none() && s.grain.is_none());
+        assert_eq!(spec.scale, [1.0, 1.0], "new transform fields default to neutral");
+        assert_eq!(spec.tint, [1.0; 4]);
+    }
+
+    /// …and a text element from the same file, now that TextSpec has grown
+    /// seven fields.
+    #[test]
+    fn first_cut_text_still_parses() {
+        let old = r#"(
+            text: "an arcade fighter built on parries",
+            size: 16.0,
+            color: (0.560, 0.610, 0.740, 1.000),
+            align: Center,
+            valign: Center,
+            fit: false,
+        )"#;
+        let t: TextSpec = ron::from_str(old).unwrap();
+        assert_eq!(t.size, 16.0);
+        assert_eq!(t.tracking, 0.0);
+        assert_eq!(t.overflow, Overflow::Show);
+        assert_eq!(t.case, Case::AsIs);
+        assert!(t.stroke.is_none());
+    }
+
+    /// Untouched extras must not appear in saved scenes, or every save churns
+    /// the whole file and the diff stops being reviewable.
+    ///
+    /// Checked against a REAL element shape (shape + text + image all present),
+    /// because the first version of this test only covered `ShapeSpec` and
+    /// happily let five new `TextSpec` fields into every save.
+    #[test]
+    fn unused_extras_do_not_serialize() {
+        let text = ron::to_string(&ElementSpec {
+            shape: Some(ShapeSpec::default()),
+            text: Some(TextSpec { text: "hi".into(), ..Default::default() }),
+            image: Some(ImageSpec { texture: "t.png".into(), ..Default::default() }),
+            ..Default::default()
+        })
+        .unwrap();
+        for absent in [
+            // ShapeSpec
+            "gradient", "glow", "grain", "blend",
+            // ElementSpec transform
+            "rotation", "scale", "pivot",
+            // TextSpec
+            "stroke", "shadow", "tracking", "line_height", "wrap", "max_lines", "overflow",
+            "case",
+            // ImageSpec. `tint` is pre-existing and always written, so it is
+            // checked separately below where no image can supply it; the image
+            // fit is matched by its value because TextSpec has a `fit` too.
+            "slice", "tiling", "offset", "fit:Stretch",
+        ] {
+            assert!(!text.contains(absent), "`{absent}` leaked into {text}");
+        }
+        // The element-level group tint, on an element with no image to confuse
+        // the search.
+        let bare = ron::to_string(&ElementSpec {
+            shape: Some(ShapeSpec::default()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!bare.contains("tint"), "the group tint leaked into {bare}");
     }
 
     #[test]

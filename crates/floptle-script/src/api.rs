@@ -98,17 +98,39 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             }
         }
         if let Some(s) = spec.shape {
-            f.insert("radius".to_string(), s.radius as f64);
-            f.insert("border".to_string(), s.border as f64);
+            // `radius`/`border` read back the FIRST entry: with a uniform value
+            // (the overwhelmingly common case) that is exactly the number the
+            // designer typed, and per-corner shapes have the indexed fields
+            // below to read instead.
+            f.insert("radius".to_string(), s.radius[0] as f64);
+            f.insert("border".to_string(), s.border[0] as f64);
+            for (k, v) in ["radiusTL", "radiusTR", "radiusBR", "radiusBL"].iter().zip(s.radius.0) {
+                f.insert(k.to_string(), v as f64);
+            }
+            for (k, v) in ["borderL", "borderT", "borderR", "borderB"].iter().zip(s.border.0) {
+                f.insert(k.to_string(), v as f64);
+            }
             for (k, v) in ["fillR", "fillG", "fillB", "fillA"].iter().zip(s.fill) {
                 f.insert(k.to_string(), v as f64);
             }
         }
         if let Some(t) = &spec.text {
             f.insert("textSize".to_string(), t.size as f64);
+            f.insert("tracking".to_string(), t.tracking as f64);
             for (k, v) in ["textR", "textG", "textB", "textA"].iter().zip(t.color) {
                 f.insert(k.to_string(), v as f64);
             }
+        }
+        // The visual transform — the press-dip / hover-pop channel. Layout is
+        // unaffected, so a script can animate these every frame without ever
+        // reflowing the screen.
+        f.insert("rotation".to_string(), spec.rotation as f64);
+        f.insert("scaleX".to_string(), spec.scale[0] as f64);
+        f.insert("scaleY".to_string(), spec.scale[1] as f64);
+        // Named `group*`, not `tint*`: an image already owns `tintR..A`, and
+        // this one multiplies the whole SUBTREE rather than one texture.
+        for (k, v) in ["groupR", "groupG", "groupB", "groupA"].iter().zip(spec.tint) {
+            f.insert(k.to_string(), v as f64);
         }
         if let Some(img) = &spec.image {
             for (k, v) in ["tintR", "tintG", "tintB", "tintA"].iter().zip(img.tint) {
@@ -203,6 +225,14 @@ fn format_lua_number(n: f64) -> String {
     }
 }
 
+/// Which of four corners/edges a `radiusTL`/`borderB`-style field addresses.
+/// `suffixes` is in the stored order — `[TL, TR, BR, BL]` for corners,
+/// `[L, T, R, B]` for edges. An unmatched suffix falls back to 0 rather than
+/// panicking; the callers only pass names they already matched.
+fn quad_index(field: &str, suffixes: [&str; 4]) -> usize {
+    suffixes.iter().position(|s| field.ends_with(s)).unwrap_or(0)
+}
+
 /// Which RGBA channel a `fillR`/`textG`/`tintA`-style field addresses.
 fn rgba_index(field: &str) -> usize {
     match field.as_bytes().last() {
@@ -240,19 +270,43 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                             _ => floptle_ui::Size::Fixed(v),
                         };
                     }
+                    // Writing the bare name sets ALL four — "make this pill
+                    // shaped" stays one line. The indexed names below reach a
+                    // single corner or edge.
                     "radius" => {
                         if let Some(s) = &mut spec.shape {
-                            s.radius = v;
+                            s.radius = floptle_ui::Corners::all(v);
                         }
                     }
                     "border" => {
                         if let Some(s) = &mut spec.shape {
-                            s.border = v;
+                            s.border = floptle_ui::Sides::all(v);
+                        }
+                    }
+                    "radiusTL" | "radiusTR" | "radiusBR" | "radiusBL" => {
+                        if let Some(s) = &mut spec.shape {
+                            s.radius[quad_index(field, ["TL", "TR", "BR", "BL"])] = v;
+                        }
+                    }
+                    "borderL" | "borderT" | "borderR" | "borderB" => {
+                        if let Some(s) = &mut spec.shape {
+                            s.border[quad_index(field, ["L", "T", "R", "B"])] = v;
                         }
                     }
                     "fillR" | "fillG" | "fillB" | "fillA" => {
                         if let Some(s) = &mut spec.shape {
                             s.fill[rgba_index(field)] = v;
+                        }
+                    }
+                    "rotation" => spec.rotation = v,
+                    "scaleX" => spec.scale[0] = v,
+                    "scaleY" => spec.scale[1] = v,
+                    "groupR" | "groupG" | "groupB" | "groupA" => {
+                        spec.tint[rgba_index(field)] = v;
+                    }
+                    "tracking" => {
+                        if let Some(t) = &mut spec.text {
+                            t.tracking = v;
                         }
                     }
                     "textSize" => {

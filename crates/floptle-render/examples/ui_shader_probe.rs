@@ -56,15 +56,8 @@ fn render_ui_shader(
     let list = DrawList {
         quads: vec![Quad {
             rect: [20.0, 20.0, 400.0, 400.0],
-            color: [1.0, 1.0, 1.0, 1.0],
-            radius: 0.0,
-            border: 0.0,
-            border_color: [0.0; 4],
-            texture: String::new(),
-            uv: [0.0, 0.0, 1.0, 1.0],
-            clip: None,
             shader: Some((path.to_string(), 1)),
-            feather: 0.0,
+            ..Default::default()
         }],
         texts: Vec::new(),
     };
@@ -76,6 +69,7 @@ fn render_ui_shader(
         [0.0, 0.0],
         1.0,
         &mut |_| None,
+        &|_| None,
         &mut |_, _| Some((shader, binding)),
         &mut instances,
         &mut batches,
@@ -214,14 +208,14 @@ fn main() {
         let q = |rect: [f32; 4], color: [f32; 4], radius: f32, feather: f32| Quad {
             rect,
             color,
-            radius,
-            border: 0.0,
-            border_color: [0.0; 4],
-            texture: String::new(),
-            uv: [0.0, 0.0, 1.0, 1.0],
-            clip: None,
-            shader: None,
+            radius: [radius; 4],
             feather,
+            kind: if feather > 0.0 {
+                floptle_ui::QuadKind::Shadow
+            } else {
+                floptle_ui::QuadKind::Shape
+            },
+            ..Default::default()
         };
         let list = DrawList {
             quads: vec![
@@ -234,7 +228,7 @@ fn main() {
         let mut instances = Vec::new();
         let mut batches = Vec::new();
         ui.clear_backdrop();
-        ui.pack(&gpu, &list, [0.0, 0.0], 1.0, &mut |_| None, &mut |_, _| None, &mut instances, &mut batches);
+        ui.pack(&gpu, &list, [0.0, 0.0], 1.0, &mut |_| None, &|_| None, &mut |_, _| None, &mut instances, &mut batches);
         ui.draw(&gpu, &color_view, [W as f32, H as f32], &instances, &batches, &raster);
         let px = readback(&gpu, &color_tex);
         save_png(&px, "shadow_probe.png");
