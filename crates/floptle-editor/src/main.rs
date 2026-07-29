@@ -581,6 +581,9 @@ struct EditorTabViewer<'a> {
     /// Compiled `stage ui` element shaders — the Inspector's UI Element section
     /// reads the selected shader's uniform schema (and error) from here.
     ui_flsl_cache: &'a shaders::UiFlslCache,
+    /// The project's UI style sheet — the UI Element section offers its names
+    /// in a picker so a style is chosen, not typed.
+    ui_styles: &'a floptle_ui::StyleSheet,
     /// Parsed Sdf-stage shaders (Field Shapes) — the Material section falls
     /// back to this schema when the picked shader is `stage sdf`.
     sdf_cache: &'a shaders::SdfCache,
@@ -1188,6 +1191,31 @@ struct Editor {
     /// Game-UI interaction state: the element the pointer hovers / grabbed.
     ui_hover: Option<u32>,
     ui_active: Option<u32>,
+    /// The project's UI style sheet + tokens, merged from every
+    /// `*.uistyle.ron` / `*.tokens.ron` under the project (see
+    /// `ui_game::reload_ui_styles`). Empty when a project defines none — the
+    /// engine ships no styles and no theme.
+    ui_styles: floptle_ui::StyleSheet,
+    ui_tokens: floptle_ui::Tokens,
+    /// In-flight style transitions, keyed by element. Deliberately NOT part of
+    /// the scene: a hover that survived into a saved `.ron` would be a bug.
+    ui_style_rt: floptle_ui::StyleRuntime,
+    /// Frame time owed to UI transitions, banked by `advance_clock` and drained
+    /// by whichever gather pass runs first.
+    ///
+    /// Banking rather than re-reading the clock, because the UI is gathered
+    /// from two places (the docked Game viewport and the fullscreen/player
+    /// path) and a frame that hits both must not advance transitions twice.
+    /// A frame that draws no UI at all keeps accumulating, so a hidden menu
+    /// resumes where it left off instead of freezing.
+    ui_style_dt: f32,
+    /// Style names that appeared in more than one sheet — surfaced in the
+    /// Inspector so a silently shadowed style can't cost an afternoon.
+    ui_style_clashes: Vec<String>,
+    /// The style/token files and their mtimes — the hot-reload signature.
+    ui_style_files: Vec<(std::path::PathBuf, std::option::Option<std::time::SystemTime>)>,
+    /// `elapsed` at the last style-file scan (rate-limits the directory walk).
+    ui_style_poll: f32,
     /// Last frame's LMB, for press/release edges in the UI interact pass.
     ui_lmb_was: bool,
     /// Event-banked left-button edges for the game-UI pass: set by the raw

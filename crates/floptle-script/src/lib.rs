@@ -275,6 +275,11 @@ pub struct ScriptHost {
     layer_table: Rc<RefCell<floptle_core::Layers>>,
     /// `node.text = ...` writes (entity index → text), applied to the node's UI ElementSpec.
     ui_text_changes: Rc<RefCell<HashMap<u32, String>>>,
+    /// `node.style = ...` writes (entity index → style name), applied to the
+    /// node's UI ElementSpec. A separate channel from the text one because they
+    /// are different fields that happen to share a "string, read-your-writes"
+    /// shape; one map would have to tag every entry with which field it meant.
+    ui_style_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node:getcomponent(name).field = value` writes, flushed to the ECS after `run`.
     component_changes: ComponentWrites,
     /// The material presets the editor lends each frame (name → Material), so a script can
@@ -584,6 +589,8 @@ struct SceneMirror {
     models: HashMap<u32, String>,
     /// UI elements' current text (so a script can read `node.text`).
     ui_texts: HashMap<u32, String>,
+    /// UI elements' current style name (so a script can read `node.style`).
+    ui_styles: HashMap<u32, String>,
     /// Nodes that carry an explicit `Visible` component (so a script can read
     /// `node.visible`; absent = visible by default).
     visible: HashMap<u32, bool>,
@@ -688,6 +695,11 @@ struct Shared {
     layer_table: Rc<RefCell<floptle_core::Layers>>,
     /// `node.text = ...` writes (entity index → text), applied to the node's UI ElementSpec.
     ui_text_changes: Rc<RefCell<HashMap<u32, String>>>,
+    /// `node.style = ...` writes (entity index → style name), applied to the
+    /// node's UI ElementSpec. A separate channel from the text one because they
+    /// are different fields that happen to share a "string, read-your-writes"
+    /// shape; one map would have to tag every entry with which field it meant.
+    ui_style_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node:getcomponent(name).field = value` writes: (entity, component, field) → number,
     /// flushed to the ECS after `run` (and read back the same frame).
     component_changes: ComponentWrites,
@@ -2448,6 +2460,62 @@ end
         assert_eq!(bspec.opacity, 0.5);
         // Read-your-writes: the script saw its own label.text assignment.
         assert_eq!(world.get::<Transform>(driver).unwrap().translation.x, 1.0);
+    }
+
+    /// `node.style`, `disabled` and `selected` — the state channel a menu
+    /// drives. Read-your-writes matters here as much as it does for `text`:
+    /// a row script routinely sets a style and then reads it back to decide
+    /// what else to do.
+    #[test]
+    fn script_drives_ui_style_and_states() {
+        let dir = std::env::temp_dir().join("floptle_script_test_ui_style");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "row",
+            concat!(
+                "function update(node, dt)\n",
+                "  local r = find(\"Row\")\n",
+                "  r.style = \"button/danger\"\n",
+                "  local e = r:getcomponent(\"UiElement\")\n",
+                "  e.selected = 1\n",
+                "  e.disabled = 0\n",
+                "  node.x = (r.style == \"button/danger\") and 1 or 0\n",
+                "end\n",
+            ),
+        );
+        let mut world = World::default();
+        let driver = world.spawn();
+        world.insert(driver, Transform::IDENTITY);
+        world.insert(
+            driver,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "row".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let row = world.spawn();
+        world.insert(row, Transform::IDENTITY);
+        world.insert(row, floptle_core::Name("Row".into()));
+        world.insert(
+            row,
+            floptle_ui::ElementSpec { style: "row".into(), disabled: true, ..Default::default() },
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let spec = world.get::<floptle_ui::ElementSpec>(row).unwrap();
+        assert_eq!(spec.style, "button/danger");
+        assert!(spec.selected);
+        assert!(!spec.disabled);
+        assert_eq!(
+            world.get::<Transform>(driver).unwrap().translation.x,
+            1.0,
+            "the script must read back its own style write within the frame"
+        );
     }
 
     #[test]

@@ -2397,6 +2397,7 @@ impl Editor {
                 mat_name_buf,
                 flsl_cache: &self.flsl_cache,
                 ui_flsl_cache: &self.ui_flsl_cache,
+                ui_styles: &self.ui_styles,
                 sdf_cache: &self.sdf_cache,
                 sky_uniforms: self.sky_shader.as_ref().map_or(&[], |(_, _, u)| u.as_slice()),
                 component_clip,
@@ -3921,7 +3922,11 @@ impl Editor {
         let raw_dt = self.last.map(|l| (now - l).as_secs_f32()).unwrap_or(0.0);
         self.last = Some(now);
         let dt = self.smooth_dt(raw_dt);
+        // Bank this frame's time for UI style transitions; the gather pass
+        // drains it (see `Editor::ui_style_dt`).
+        self.ui_style_dt = (self.ui_style_dt + dt).min(0.25);
         let elapsed = self.started.map(|s| (now - s).as_secs_f32()).unwrap_or(0.0);
+        self.poll_ui_styles(elapsed);
         self.fog_time = elapsed; // drifts the volumetric-fog noise (offscreen views too)
         // Don't drive the editor (Scene) camera while the Game viewport is focused — that
         // input belongs to the game (e.g. the mouse is over the Game view in split mode).

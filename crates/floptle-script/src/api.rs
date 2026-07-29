@@ -121,6 +121,11 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 f.insert(k.to_string(), v as f64);
             }
         }
+        // Interaction states a script drives. `hover`/`pressed` are the
+        // engine's to set; these two are the game's — "this row is the current
+        // one", "this button can't be used yet".
+        f.insert("disabled".to_string(), f64::from(u8::from(spec.disabled)));
+        f.insert("selected".to_string(), f64::from(u8::from(spec.selected)));
         // The visual transform — the press-dip / hover-pop channel. Layout is
         // unaffected, so a script can animate these every frame without ever
         // reflowing the screen.
@@ -298,6 +303,8 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                             s.fill[rgba_index(field)] = v;
                         }
                     }
+                    "disabled" => spec.disabled = val != 0.0,
+                    "selected" => spec.selected = val != 0.0,
                     "rotation" => spec.rotation = v,
                     "scaleX" => spec.scale[0] = v,
                     "scaleY" => spec.scale[1] = v,
@@ -630,6 +637,9 @@ pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, fie
                             t.text = val.to_string();
                         }
                     }
+                    // Swap which named style paints this element — a row that
+                    // becomes an error row, a button that turns primary.
+                    "style" => spec.style = val.to_string(),
                     _ => {}
                 }
             }
@@ -657,6 +667,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let bodies = shared.bodies.clone();
         let body_changes = shared.body_changes.clone();
         let ui_text_changes = shared.ui_text_changes.clone();
+        let ui_style_changes = shared.ui_style_changes.clone();
         let layer_changes = shared.layer_changes.clone();
         let tag_changes = shared.tag_changes.clone();
         let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
@@ -808,6 +819,20 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         None => Value::Nil,
                     });
                 }
+                // The element's style name. Same read-your-writes rule as
+                // `text`: a write earlier this frame reads back before the
+                // flush to the ECS.
+                "style" => {
+                    let s = ui_style_changes
+                        .borrow()
+                        .get(&e)
+                        .cloned()
+                        .or_else(|| scene.borrow().ui_styles.get(&e).cloned());
+                    return Ok(match s {
+                        Some(s) => Value::String(lua.create_string(&s)?),
+                        None => Value::Nil,
+                    });
+                }
                 _ => {}
             }
             // Physics body fields.
@@ -869,6 +894,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let tag_changes = shared.tag_changes.clone();
         let layer_table = shared.layer_table.clone();
         let ui_text_changes = shared.ui_text_changes.clone();
+        let ui_style_changes = shared.ui_style_changes.clone();
         let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
             let e: u32 = this.raw_get("__id")?;
             // `node.pos = vec3(...)` (or any {x=,y=,z=} / node) — the own-node
@@ -1112,6 +1138,13 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         }
                     }
                     tag_changes.borrow_mut().insert(e, tags);
+                    return Ok(());
+                }
+                // Which named style paints this element ("" = none).
+                "style" => {
+                    if let Value::String(s) = &val {
+                        ui_style_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
+                    }
                     return Ok(());
                 }
                 // UI element text: numbers coerce (hp counters write numbers directly).

@@ -10,6 +10,9 @@ rust-version.workspace = true
 
 [dependencies]
 serde = { workspace = true }
-
-[dev-dependencies]
+# Style sheets and token files ARE RON assets, and they need the implicit-some
+# extension turned on to be pleasant to hand-edit (see style::parse_ron). That
+# knowledge belongs with the types it parses, not in whoever loads them — so
+# `ron` graduates from a dev-dependency here. Still a leaf crate: no engine
+# dependencies, no renderer.
 ron = { workspace = true }

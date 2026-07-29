@@ -2176,7 +2176,7 @@ impl EditorTabViewer<'_> {
 
                 // ===== Game UI (layer/element; only when the node has one) =====
                 {
-                    if crate::Editor::ui_inspector(world, e, ui, self.asset_tree, self.project_root, self.texture_settings, self.ui_flsl_cache) {
+                    if crate::Editor::ui_inspector(world, e, ui, self.asset_tree, self.project_root, self.texture_settings, self.ui_flsl_cache, self.ui_styles) {
                         cmd.inspector_changed = true;
                     }
                 }

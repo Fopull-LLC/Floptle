@@ -20,10 +20,15 @@
 use serde::{Deserialize, Serialize};
 
 pub mod paint;
+pub mod style;
 pub mod text;
 
 pub use paint::{
     Blend, Corners, GlowSpec, Gradient, GradientKind, GrainSpec, ImageFit, ShadowSpec, Sides,
+};
+pub use style::{
+    apply_styles, ColorRef, Ease, NumRef, StateInput, Style, StyleBlock, StyleRuntime, StyleSheet,
+    Tokens, Transition, UiState,
 };
 pub use text::{Case, Overflow, TextShadow, TextStroke};
 
@@ -574,9 +579,22 @@ pub struct ElementSpec {
     pub shader_params: std::collections::BTreeMap<String, [f32; 4]>,
     /// Clickable: the pointer can hover/press/click this element, firing the
     /// script hooks (`hoverStart`/`hoverEnd`/`pressed`/`released`/`clicked`)
-    /// on this node's scripts. No imposed look — style the states in Lua.
+    /// on this node's scripts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub button: bool,
+    /// Name of a style in the project's style sheet (empty = none). At most
+    /// ONE — no lists, no classes, no selectors (see `style.rs`). Whatever the
+    /// style doesn't mention stays exactly as authored here.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub style: String,
+    /// Greys out and stops responding. A state, not a look: what `disabled`
+    /// looks like is the style's business.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
+    /// "This is the current one" — the state a menu cursor, a chosen tab, or a
+    /// locked-in fighter portrait needs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub selected: bool,
     #[serde(default = "default_true")]
     pub visible: bool,
     /// Multiplies every colour this element draws — **and every descendant's**.
@@ -649,6 +667,9 @@ impl Default for ElementSpec {
             shader: String::new(),
             shader_params: std::collections::BTreeMap::new(),
             button: false,
+            style: String::new(),
+            disabled: false,
+            selected: false,
             visible: true,
             opacity: 1.0,
             tint: [1.0; 4],

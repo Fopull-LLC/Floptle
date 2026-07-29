@@ -195,6 +195,139 @@ impl Editor {
         }
     }
 
+    /// Re-read the project's UI tokens and style sheets.
+    ///
+    /// Every `*.tokens.ron` and `*.uistyle.ron` anywhere under the project
+    /// merges into one sheet — the same "many files, one namespace" rule
+    /// materials and prefabs already follow. Load order is sorted by path so
+    /// the winner of a name clash is stable between runs; clashes are recorded
+    /// rather than silently resolved.
+    ///
+    /// A project with no style files gets empty ones and nothing changes. The
+    /// engine ships neither.
+    pub(crate) fn reload_ui_styles(&mut self) {
+        let mut tokens = floptle_ui::Tokens::default();
+        let mut sheet = floptle_ui::StyleSheet::default();
+        let mut clashes = Vec::new();
+        let files = Self::scan_ui_style_files(&self.project_root);
+        for (path, _) in &files {
+            let Ok(text) = std::fs::read_to_string(path) else { continue };
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            if name.ends_with(".tokens.ron") {
+                match floptle_ui::Tokens::parse(&text) {
+                    Ok(t) => tokens.merge(t),
+                    Err(e) => self.console.push(
+                        floptle_script::LogLevel::Error,
+                        format!("ui tokens {name}: {e}"),
+                        None,
+                    ),
+                }
+            } else {
+                match floptle_ui::StyleSheet::parse(&text) {
+                    Ok(s) => clashes.extend(sheet.merge(s)),
+                    Err(e) => self.console.push(
+                        floptle_script::LogLevel::Error,
+                        format!("ui styles {name}: {e}"),
+                        None,
+                    ),
+                }
+            }
+        }
+        for name in &clashes {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!("ui style \"{name}\" is defined in more than one sheet — the last one wins"),
+                None,
+            );
+        }
+        self.ui_tokens = tokens;
+        self.ui_styles = sheet;
+        self.ui_style_clashes = clashes;
+        self.ui_style_files = files;
+        // Transitions are keyed to the old resolved values; a token edit that
+        // changes what "accent" means must not leave elements easing from a
+        // colour that no longer exists.
+        self.ui_style_rt.clear();
+    }
+
+    /// Every `*.tokens.ron` / `*.uistyle.ron` under the project, sorted, with
+    /// its mtime — the load list AND the hot-reload signature.
+    fn scan_ui_style_files(
+        root: &std::path::Path,
+    ) -> Vec<(std::path::PathBuf, Option<std::time::SystemTime>)> {
+        fn walk(
+            dir: &std::path::Path,
+            out: &mut Vec<(std::path::PathBuf, Option<std::time::SystemTime>)>,
+            depth: u32,
+        ) {
+            if depth > 8 {
+                return;
+            }
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for entry in rd.flatten() {
+                let p = entry.path();
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                if p.is_dir() {
+                    // Skip the engine's own runtime dirs and anything hidden —
+                    // `target/` alone would make this walk cost real time.
+                    if name.starts_with('.') || name == "target" || name == "builds" {
+                        continue;
+                    }
+                    walk(&p, out, depth + 1);
+                } else if name.ends_with(".tokens.ron") || name.ends_with(".uistyle.ron") {
+                    let m = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+                    out.push((p, m));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, &mut out, 0);
+        // Sorted so a name clash always resolves the same way between runs.
+        out.sort();
+        out
+    }
+
+    /// Hot reload: re-scan on a timer and reload when anything changed.
+    ///
+    /// The house mtime pattern (textures, prefabs, `.flsl`). Rate-limited
+    /// because this walks directories rather than watching them — and the
+    /// payoff is the loop the whole style system exists for: edit a token,
+    /// watch every screen in the project repaint.
+    pub(crate) fn poll_ui_styles(&mut self, now: f32) {
+        // `Editor` derives Default, so both of these start at 0.0 — the first
+        // frame must therefore be treated as "never scanned" rather than
+        // "scanned just now", or the project's styles wouldn't load until half
+        // a second in and the first frame would flash unstyled.
+        if self.ui_style_poll > 0.0 && now - self.ui_style_poll < 0.5 {
+            return;
+        }
+        self.ui_style_poll = now.max(f32::EPSILON);
+        // Signature covers adds, deletes, renames and edits in one comparison.
+        if Self::scan_ui_style_files(&self.project_root) != self.ui_style_files {
+            self.reload_ui_styles();
+        }
+    }
+
+    /// Resolve styles + advance transitions over a freshly-built layer tree.
+    ///
+    /// Runs on the Node COPIES, never the ECS — which is precisely why a
+    /// play-time hover can't end up in a saved scene, and why this needs no
+    /// cooperation from the play-snapshot machinery.
+    fn style_layer(&mut self, roots: &mut [floptle_ui::Node], dt: f32) {
+        if self.ui_styles.styles.is_empty() {
+            return;
+        }
+        let input = floptle_ui::StateInput {
+            hovered: self.ui_hover,
+            pressed: self.ui_active,
+            // Keyboard/gamepad focus is phase D; until then nothing is focused
+            // and a `focus` block simply never fires.
+            focused: None,
+        };
+        let (sheet, tokens) = (&self.ui_styles, &self.ui_tokens);
+        floptle_ui::apply_styles(roots, sheet, tokens, &input, &mut self.ui_style_rt, dt);
+    }
+
     /// Solve every UI layer for this frame: (draw list, px-per-design-unit),
     /// z-sorted. Pre-resolves image textures into the registry (needs
     /// `&mut self`, so this runs BEFORE the draw core's field borrows).
@@ -243,6 +376,14 @@ impl Editor {
             return Vec::new();
         }
         layers.sort_by_key(|(z, ..)| *z);
+        // Styles resolve BEFORE layout, because a style can set padding, gap
+        // and text size — all of which change what the solver measures.
+        // One drained `dt` shared across every layer of the frame: charging
+        // each layer separately would run transitions N times too fast.
+        let dt = std::mem::take(&mut self.ui_style_dt);
+        for (_, roots, _) in &mut layers {
+            self.style_layer(roots, dt);
+        }
         let Some(uir) = self.ui_render.as_ref() else { return Vec::new() };
         let mut out = Vec::new();
         let mut textures: Vec<String> = Vec::new();
@@ -784,6 +925,7 @@ impl Editor {
 
     /// The Inspector's UI section: shown for nodes carrying UiLayer and/or
     /// ElementSpec. Returns true when something changed (undo coalescing).
+    #[allow(clippy::too_many_arguments)] // an Inspector section needs the project's context
     pub(crate) fn ui_inspector(
         world: &mut floptle_core::World,
         e: Entity,
@@ -792,6 +934,7 @@ impl Editor {
         project_root: &std::path::Path,
         texture_settings: &std::collections::HashMap<String, crate::assets::TexSetting>,
         ui_flsl_cache: &crate::shaders::UiFlslCache,
+        styles: &floptle_ui::StyleSheet,
     ) -> bool {
         let mut changed = false;
         if let Some(mut layer) = world.get::<UiLayer>(e).copied() {
@@ -1119,9 +1262,55 @@ impl Editor {
         c |= ui
             .checkbox(&mut spec.button, "button (clickable)")
             .on_hover_text(
-                "the pointer can hover/press/click this element — its scripts get                  hoverStart / hoverEnd / pressed / released / clicked hooks. Style                  the states in Lua (no imposed look).",
+                "the pointer can hover/press/click this element — its scripts get                  hoverStart / hoverEnd / pressed / released / clicked hooks.",
             )
             .changed();
+        ui.horizontal(|ui| {
+            c |= ui
+                .checkbox(&mut spec.disabled, "disabled")
+                .on_hover_text("stops responding and picks the style's `disabled` block")
+                .changed();
+            c |= ui
+                .checkbox(&mut spec.selected, "selected")
+                .on_hover_text("\"this is the current one\" — a menu cursor, a chosen tab")
+                .changed();
+        });
+        // --- style (at most one; the element's own properties still win) ---
+        ui.horizontal(|ui| {
+            ui.label("style");
+            let current = if spec.style.is_empty() { "(none)" } else { spec.style.as_str() };
+            egui::ComboBox::from_id_salt(("ui_style_pick", e.index()))
+                .selected_text(current)
+                .width(180.0)
+                .show_ui(ui, |ui| {
+                    let mut none = String::new();
+                    if ui.selectable_value(&mut none, String::new(), "(none)").clicked() {
+                        spec.style.clear();
+                        c = true;
+                    }
+                    for name in styles.styles.keys() {
+                        if ui.selectable_label(&spec.style == name, name).clicked() {
+                            spec.style = name.clone();
+                            c = true;
+                        }
+                    }
+                });
+            if !spec.style.is_empty() && styles.get(&spec.style).is_none() {
+                ui.colored_label(egui::Color32::from_rgb(255, 140, 90), "⚠ missing")
+                    .on_hover_text(
+                        "no style by that name in any .uistyle.ron — the element keeps \
+                         its authored look",
+                    );
+            }
+        })
+        .response
+        .on_hover_text(
+            "one named style from the project's .uistyle.ron files. Whatever the style \
+             doesn't set stays exactly as authored here — no cascade, no specificity.",
+        );
+        if styles.styles.is_empty() {
+            ui.small("no .uistyle.ron in this project yet — styles are how hover/pressed stop being per-button Lua");
+        }
         // --- stack (opt-in flow) ---
         let mut has_stack = spec.stack.is_some();
         if ui
