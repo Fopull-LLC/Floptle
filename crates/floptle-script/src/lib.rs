@@ -131,6 +131,9 @@ fn error_line(msg: &str) -> u32 {
     msg.split(':').find_map(|s| s.trim().parse::<u32>().ok()).unwrap_or(0)
 }
 
+/// The UI drag reported to scripts: `(source element, drop target under it)`.
+pub(crate) type UiDragCell = Rc<RefCell<Option<(u32, Option<u32>)>>>;
+
 /// A snapshot of player input for one frame, fed to scripts via the `input` global
 /// (so games can read the keyboard/mouse). Key names are lowercase
 /// (`"w"`, `"space"`, `"left"`, `"escape"`, …). Mouse position is in pixels;
@@ -143,6 +146,14 @@ pub struct InputSnapshot {
     pub keys_pressed: std::collections::HashSet<String>,
     /// Keys that went up THIS frame (edge).
     pub keys_released: std::collections::HashSet<String>,
+    /// The CHARACTERS entered this frame, resolved by the OS keyboard layout,
+    /// with a paste folded in.
+    ///
+    /// Not the same question as `keys_pressed`: that one is physical (`"q"` is
+    /// the key where Q sits on a QWERTY board, which types `a` on AZERTY), and
+    /// this is what the player meant to write. Polling keys to build a string
+    /// gets the alphabet wrong for anyone whose keyboard isn't yours.
+    pub typed: String,
     pub mouse: (f32, f32),
     pub mouse_delta: (f32, f32),
     pub scroll: f32,
@@ -332,6 +343,9 @@ pub struct ScriptHost {
     /// A pending `ui.focus(...)` (last call this frame wins), drained by the
     /// engine after the run.
     ui_focus_request: Rc<RefCell<Option<Option<u32>>>>,
+    /// The drag in flight as `(source, target under it)` — `ui.dragging()` and
+    /// `ui.dropTarget()`. Also set for the one frame the `dropped` hooks run.
+    ui_drag: UiDragCell,
     /// Animator state per entity (layers/states/time), fed by the editor before `run`
     /// so scripts can read `anim:state()`, `anim:time()`, `anim:clips()`, ….
     anim_info: Rc<RefCell<HashMap<u32, AnimInfo>>>,

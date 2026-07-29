@@ -524,7 +524,7 @@ impl Editor {
 
     /// Lazily connect the OS clipboard (arboard under the hood; falls back to
     /// an in-app buffer if the OS clipboard is unreachable).
-    fn ensure_os_clipboard(&mut self) {
+    pub(crate) fn ensure_os_clipboard(&mut self) {
         if self.os_clipboard.is_none() {
             use winit::raw_window_handle::HasDisplayHandle;
             let handle =

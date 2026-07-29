@@ -359,6 +359,13 @@ pub struct StyleBlock {
     pub text_stroke: Option<TextStroke>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_shadow: Option<TextShadow>,
+    // --- text field (only reach an element with a `field`) ---
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caret_color: Option<ColorRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_color: Option<ColorRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder_color: Option<ColorRef>,
     // --- layout (opt-in; a style CAN own padding/gap so a "card" is one name) ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pad: Option<NumRef>,
@@ -676,6 +683,19 @@ fn apply_discrete(spec: &mut crate::ElementSpec, block: &StyleBlock, tk: &Tokens
         && let Some(t) = &mut spec.text
     {
         t.shadow = Some(sh);
+    }
+    if let Some(f) = &mut spec.field {
+        // Discrete rather than animated: a caret that cross-fades its colour
+        // on focus would be a caret you can't see at the moment you need it.
+        if let Some(c) = &block.caret_color {
+            f.caret_color = tk.color(c);
+        }
+        if let Some(c) = &block.selection_color {
+            f.selection_color = tk.color(c);
+        }
+        if let Some(c) = &block.placeholder_color {
+            f.placeholder_color = tk.color(c);
+        }
     }
     if let Some(p) = &block.pad
         && let Some(st) = &mut spec.stack

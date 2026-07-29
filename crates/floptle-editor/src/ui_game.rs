@@ -58,6 +58,8 @@ pub(crate) enum AddUi {
     Slider,
     Button,
     Scroll,
+    Field,
+    Tooltip,
 }
 
 /// Resolve each scrollbar's `target` NAME to the scroll view it drives, within
@@ -119,6 +121,21 @@ pub(crate) fn nudge_place(place: &mut floptle_ui::Place, d: [f32; 2]) {
         floptle_ui::Place::Stretch { margin, .. } => {
             margin[0] += d[0];
             margin[1] += d[1];
+        }
+    }
+}
+
+/// Put an element AT a position in design units, whatever its placement mode.
+///
+/// The absolute twin of [`nudge_place`], for the one caller that knows where a
+/// thing should be rather than how far to move it: the tooltip follower.
+pub(crate) fn set_place(place: &mut floptle_ui::Place, at: [f32; 2]) {
+    match place {
+        floptle_ui::Place::Free { pos } => *pos = at,
+        floptle_ui::Place::Pin { offset, .. } => *offset = at,
+        floptle_ui::Place::Stretch { margin, .. } => {
+            margin[0] = at[0];
+            margin[1] = at[1];
         }
     }
 }
@@ -455,7 +472,7 @@ impl Editor {
             let mut placed = floptle_ui::solve(roots, design_vp, &measure);
             floptle_ui::place_scrollbars(roots, &mut placed, &layer_scrollbars(&self.world, &ents, roots));
             let masks = layer_masks(&self.world, &ents, roots);
-            let dl = floptle_ui::draw_list(roots, &placed, &masks);
+            let dl = floptle_ui::draw_list_with(roots, &placed, &masks, self.ui_edit);
             for q in &dl.quads {
                 if !q.texture.is_empty() {
                     textures.push(q.texture.clone());
@@ -529,7 +546,7 @@ impl Editor {
             let mut placed = floptle_ui::solve(&roots, design_vp, &measure);
             floptle_ui::place_scrollbars(&roots, &mut placed, &layer_scrollbars(&self.world, &ents, &roots));
             let masks = layer_masks(&self.world, &ents, &roots);
-            let dl = floptle_ui::draw_list(&roots, &placed, &masks);
+            let dl = floptle_ui::draw_list_with(&roots, &placed, &masks, self.ui_edit);
             for q in &dl.quads {
                 if !q.texture.is_empty() {
                     textures.push(q.texture.clone());
@@ -664,6 +681,12 @@ impl Editor {
             self.ui_nav_repeat.clear();
             self.ui_submit_was = false;
             self.ui_cancel_was = false;
+            self.ui_edit = None;
+            self.ui_drag = None;
+            self.ui_drag_report = None;
+            self.ui_tip_hover = None;
+            self.ui_text_ops.clear();
+            self.input_typed.clear();
             // Don't let edit-mode clicks bank up and fire as phantom presses
             // on the first playing frame.
             self.ui_lmb_pressed_evt = false;
@@ -695,6 +718,18 @@ impl Editor {
         // (bar, target view, axis, track rect, pointer in design units).
         type BarHit = (u32, u32, usize, [f32; 4], [f32; 2]);
         let mut bar_hits: Vec<BarHit> = Vec::new();
+        // Every `drop_target` the pointer is inside, in draw order. Kept apart
+        // from `hover` because a drop target is usually the slot BEHIND the
+        // item you are carrying it onto — taking only the topmost hit would
+        // mean an inventory that never accepts anything.
+        let mut drop_hits: Vec<u32> = Vec::new();
+        // Per layer: (layer entity, design viewport, solved rects, tooltip
+        // delay, pointer in design units) — what the tooltip pass needs.
+        type TipLayer = (Entity, [f32; 2], Vec<floptle_ui::Placed>, f32, Option<[f32; 2]>);
+        let mut tip_layers: Vec<TipLayer> = Vec::new();
+        // The pointer in the last-solved layer's design units — the fallback
+        // for gestures that wander off every element mid-drag.
+        let mut last_ptr_design: Option<[f32; 2]> = None;
         // Solved screen-space rects in physical px, published to scripts after
         // this pass (`node:uiRect()`): a script can hit-test the mouse against
         // a panel's real position instead of guessing.
@@ -843,8 +878,22 @@ impl Editor {
                         let Some(spec) = spec_of.get(&pl.id) else { continue };
                         let clip = clips.get(&pl.id).map(|c| c.rect);
                         let slider = spec.slider.filter(|s| s.interact);
-                        if spec.button || slider.is_some() {
+                        // Everything the pointer can do something with. A
+                        // tooltip counts: hovering IS the interaction.
+                        if spec.button
+                            || slider.is_some()
+                            || spec.field.is_some()
+                            || spec.draggable
+                            || !spec.tooltip.is_empty()
+                        {
                             items.push((pl.id, pl.rect, ptr_design, slider, clip));
+                        }
+                        if spec.drop_target
+                            && ptr_design.is_some_and(|p| {
+                                in_rect(&pl.rect, &p) && clip.is_none_or(|c| in_rect(&c, &p))
+                            })
+                        {
+                            drop_hits.push(pl.id);
                         }
                         // Wheel over a scroll view (respecting its own clip if
                         // nested): later layers/elements are on top, so the
@@ -894,6 +943,8 @@ impl Editor {
                             bar_hits.push((pl.id, target, axis, pl.rect, p));
                         }
                     }
+                    last_ptr_design = ptr_design.or(last_ptr_design);
+                    tip_layers.push((*e, design_vp, placed, layer.tooltip_delay, ptr_design));
                 }
             }
         }
@@ -917,13 +968,14 @@ impl Editor {
         };
         // Topmost interactive element under the pointer (per-item design
         // pointer), honoring scroll clips.
-        let hover = items
-            .iter()
-            .rev()
-            .find(|(_, rect, pd, _, clip)| {
-                pd.is_some_and(|p| contains(rect, &p) && clip.is_none_or(|c| contains(&c, &p)))
-            })
-            .map(|(id, ..)| *id);
+        let hit = items.iter().rev().find(|(_, rect, pd, _, clip)| {
+            pd.is_some_and(|p| contains(rect, &p) && clip.is_none_or(|c| contains(&c, &p)))
+        });
+        let hover = hit.map(|(id, ..)| *id);
+        // The pointer in the hovered element's own design units — what a drag
+        // measures its travel in. Falls back to the last layer solved this
+        // frame so a drag that wanders off every element still tracks.
+        let hover_pd = hit.and_then(|(_, _, pd, ..)| *pd).or(last_ptr_design);
         if hover != self.ui_hover {
             if let Some(old) = self.ui_hover {
                 self.ui_events.push((old, "hoverEnd"));
@@ -940,7 +992,10 @@ impl Editor {
             // from where they clicked rather than from where the ring was left.
             let focusable = nav_layers.iter().any(|(_, roots, _)| {
                 fn has(ns: &[floptle_ui::Node], id: u32) -> bool {
-                    ns.iter().any(|n| (n.id == id && n.spec.focusable) || has(&n.children, id))
+                    ns.iter().any(|n| {
+                        (n.id == id && (n.spec.focusable || n.spec.field.is_some()))
+                            || has(&n.children, id)
+                    })
                 }
                 has(roots, h)
             });
@@ -948,6 +1003,26 @@ impl Editor {
                 self.ui_focus_set(Some(h));
             }
             self.ui_events.push((h, "pressed"));
+            // Clicking inside a field puts the caret where you clicked, not at
+            // the end. Anything else and correcting a typo means retyping the
+            // rest of the word.
+            if self.ui_field_of(h).is_some()
+                && let Some((_, rect, Some(pd), ..)) =
+                    items.iter().find(|(id, ..)| *id == h).copied()
+            {
+                self.ui_sync_edit();
+                self.ui_caret_at(h, rect, pd[0], self.shift);
+            }
+        }
+        // Dragging inside a field extends the selection, the same gesture that
+        // selects text everywhere else.
+        if down
+            && !pressed_edge
+            && let Some(a) = self.ui_active
+            && self.ui_field_of(a).is_some()
+            && let Some((_, rect, Some(pd), ..)) = items.iter().find(|(id, ..)| *id == a).copied()
+        {
+            self.ui_caret_at(a, rect, pd[0], true);
         }
         // A grabbed interactive slider follows the pointer while held —
         // even when it wanders off the track (normal drag feel). The pointer is
@@ -1052,6 +1127,20 @@ impl Editor {
         if pointer.is_none() && !down {
             self.ui_active = None;
         }
+        // ---- drag and drop ---------------------------------------------------
+        // The drop target is the LAST `drop_target` under the pointer rather
+        // than the topmost hit: the slot you are aiming at is usually behind
+        // the item sitting in it.
+        self.ui_drag_report = None;
+        let drop_over = drop_hits.last().copied();
+        self.ui_drag_step(drop_over, hover, hover_pd, pressed_edge, down);
+        // ---- text fields -----------------------------------------------------
+        self.ui_edit_text(self.ui_frame_dt);
+        // ---- tooltips --------------------------------------------------------
+        for (layer, design_vp, placed, delay, ptr) in tip_layers {
+            self.ui_tooltips(layer, hover, ptr, design_vp, &placed, delay);
+        }
+        self.ui_tick_tooltip_timer(hover, self.ui_frame_dt);
         // Publish this frame's solved screen rects for `node:uiRect()` — fed
         // here (right before scripts run) so a script's mouse hit-test uses
         // the panel's ACTUAL rendered position.
@@ -1059,6 +1148,7 @@ impl Editor {
         // …and the focus, so `node.focused` / `ui.focused()` read this frame's
         // truth rather than last frame's.
         self.script_host.set_ui_focus(self.ui_focus);
+        self.script_host.set_ui_drag(self.ui_drag_report);
     }
 
     /// Write one axis of a scroll view's offset.
@@ -1211,6 +1301,51 @@ impl Editor {
                         ..Default::default()
                     }),
                     scroll: Some(floptle_ui::ScrollSpec::default()),
+                    ..Default::default()
+                }),
+            ),
+            AddUi::Field => (
+                "Text Field",
+                None,
+                Some(ElementSpec {
+                    place: Place::Free { pos: [40.0, 40.0] },
+                    size: [Size::Fixed(280.0), Size::Fixed(48.0)],
+                    shape: Some(ShapeSpec {
+                        fill: [0.09, 0.09, 0.11, 0.9],
+                        radius: 6.0.into(),
+                        ..Default::default()
+                    }),
+                    // Left-aligned with a little breathing room, because that
+                    // is what a field is; everything else about the look is a
+                    // style away.
+                    text: Some(TextSpec { align: Align::Start, ..Default::default() }),
+                    field: Some(floptle_ui::FieldSpec {
+                        placeholder: "Type here".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            ),
+            AddUi::Tooltip => (
+                "Tooltip",
+                None,
+                Some(ElementSpec {
+                    place: Place::Free { pos: [0.0, 0.0] },
+                    size: [Size::Fit, Size::Fit],
+                    stack: Some(floptle_ui::StackCfg { pad: 8.0, ..Default::default() }),
+                    shape: Some(ShapeSpec {
+                        fill: [0.06, 0.06, 0.08, 0.94],
+                        radius: 4.0.into(),
+                        ..Default::default()
+                    }),
+                    text: Some(TextSpec { size: 18.0, ..Default::default() }),
+                    tooltip_box: true,
+                    // Starts hidden; the engine shows it when something with a
+                    // tooltip has been hovered long enough.
+                    visible: false,
+                    // On top of the screen it annotates, which is the one
+                    // thing about a tooltip that is not a matter of taste.
+                    order: 1000,
                     ..Default::default()
                 }),
             ),
@@ -1386,6 +1521,37 @@ impl Editor {
                          unit). Screen-space gameplay is unaffected; switch 'space' to World \
                          to make this the real in-game size."
                     })
+                    .changed();
+            });
+            // Navigation feel + tooltip dwell, per layer — a fast action menu
+            // and a long settings list genuinely want different numbers, and
+            // guessing one for both is how a menu ends up feeling wrong
+            // without anyone being able to say why.
+            ui.horizontal(|ui| {
+                ui.label("nav hold").on_hover_text(
+                    "seconds a direction is held before it starts repeating, then seconds \
+                     between repeats",
+                );
+                changed |= ui
+                    .add(egui::DragValue::new(&mut layer.nav_delay).speed(0.01).range(0.0..=2.0).prefix("wait "))
+                    .changed();
+                changed |= ui
+                    .add(egui::DragValue::new(&mut layer.nav_repeat).speed(0.01).range(0.01..=1.0).prefix("every "))
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut layer.nav_wrap, "wrap")
+                    .on_hover_text(
+                        "running off the end comes back on the other side. Right for a short \
+                         menu, wrong for a long inventory — which is why it asks.",
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("tooltip delay").on_hover_text(
+                    "seconds of hovering before this layer's tooltip element appears",
+                );
+                changed |= ui
+                    .add(egui::DragValue::new(&mut layer.tooltip_delay).speed(0.02).range(0.0..=5.0).suffix(" s"))
                     .changed();
             });
             if changed {
@@ -1603,6 +1769,40 @@ impl Editor {
                 }
             });
         }
+        // --- drag & drop -----------------------------------------------------
+        ui.horizontal(|ui| {
+            c |= ui
+                .checkbox(&mut spec.draggable, "draggable")
+                .on_hover_text(
+                    "can be picked up: fires `dragStart` / `dragMove` / `dropped` (or \
+                     `dragCancel`). The engine does NOT move it and draws no ghost — what a \
+                     drag looks like is your script's, because a card that tilts and an item \
+                     that snaps to a grid are both drags.",
+                )
+                .changed();
+            c |= ui
+                .checkbox(&mut spec.drop_target, "drop target")
+                .on_hover_text(
+                    "can receive one: `dragEnter` / `dragOver` / `dragLeave` / `dropped`. \
+                     Read `ui.dragging()` in the hook to see what arrived.",
+                )
+                .changed();
+        });
+        // --- tooltip ---------------------------------------------------------
+        ui.horizontal(|ui| {
+            ui.label("tooltip").on_hover_text(
+                "shown after a moment's hover, in this layer's tooltip element. Empty = none.",
+            );
+            c |= ui.text_edit_singleline(&mut spec.tooltip).changed();
+        });
+        c |= ui
+            .checkbox(&mut spec.tooltip_box, "is this layer's tooltip")
+            .on_hover_text(
+                "this element IS the tooltip: the engine hides it when nothing is hovered, \
+                 writes the hovered element's text into its first label, and moves it to \
+                 follow the pointer. What it looks like is entirely yours.",
+            )
+            .changed();
         ui.horizontal(|ui| {
             ui.label("depth").on_hover_text(
                 "sort key among siblings — lower draws first (further back), and inside a stack \
@@ -2051,6 +2251,84 @@ impl Editor {
                     c |= ui.add(egui::DragValue::new(&mut sh.offset[1]).speed(0.2).prefix("y ")).changed();
                 });
             }
+        }
+        // --- text field ---
+        // Lives under `text` because a field's VALUE is its text: everything
+        // above (font, alignment, tracking, stroke, the style's `text_color`)
+        // applies unchanged, and a script reads it the way it reads any label.
+        let mut has_field = spec.field.is_some();
+        if ui
+            .checkbox(&mut has_field, "editable (text field)")
+            .on_hover_text(
+                "the player can type into this element; the value IS its text above. \
+                 Implicitly focusable. Fires `changed` and `submitted`.",
+            )
+            .changed()
+        {
+            spec.field = has_field.then(floptle_ui::FieldSpec::default);
+            // A field with no text has nothing to edit and nothing to draw.
+            if spec.field.is_some() {
+                spec.text.get_or_insert_with(TextSpec::default);
+            }
+            c = true;
+        }
+        if let Some(f) = &mut spec.field {
+            ui.indent("ui_field", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("placeholder")
+                        .on_hover_text("shown while empty — never submits, never reads back as a value");
+                    c |= ui.text_edit_singleline(&mut f.placeholder).changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("max").on_hover_text("cap in CHARACTERS (0 = none)");
+                    c |= ui
+                        .add(egui::DragValue::new(&mut f.max_len).speed(0.2).range(0..=1024))
+                        .changed();
+                    c |= ui
+                        .checkbox(&mut f.numeric, "numeric")
+                        .on_hover_text("digits, one leading -, one .")
+                        .changed();
+                    c |= ui
+                        .checkbox(&mut f.upper, "UPPER")
+                        .on_hover_text("shout as you type — lobby codes, initials, licence keys")
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    c |= ui
+                        .checkbox(&mut f.mask, "mask")
+                        .on_hover_text(
+                            "draw every character as a dot. Copy and cut are refused while \
+                             this is on — a password field that fills the clipboard is a bug.",
+                        )
+                        .changed();
+                    if f.mask {
+                        let mut s = f.mask_char.to_string();
+                        if ui
+                            .add(egui::TextEdit::singleline(&mut s).desired_width(24.0))
+                            .changed()
+                            && let Some(ch) = s.chars().next()
+                        {
+                            f.mask_char = ch;
+                            c = true;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("caret");
+                    c |= ui.add(egui::DragValue::new(&mut f.caret_width).speed(0.1).range(0.5..=16.0)).changed();
+                    c |= ui.color_edit_button_rgba_unmultiplied(&mut f.caret_color).changed();
+                    ui.label("sel");
+                    c |= ui.color_edit_button_rgba_unmultiplied(&mut f.selection_color).changed();
+                    ui.label("hint");
+                    c |= ui.color_edit_button_rgba_unmultiplied(&mut f.placeholder_color).changed();
+                })
+                .response
+                .on_hover_text(
+                    "leave a colour fully transparent and it follows the text colour \
+                     (caret: as-is, selection: 30%, placeholder: 45%). Derived from the design \
+                     you already made, rather than picked by the engine.",
+                );
+            });
         }
         // --- image ---
         let mut has = spec.image.is_some();

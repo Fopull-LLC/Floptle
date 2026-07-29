@@ -2518,8 +2518,26 @@ fn api_category(label: &str) -> &'static str {
         "components — getcomponent"
     } else if matches!(
         label,
-        "node.text" | "clicked" | "hoverStart" | "hoverEnd" | "pressed" | "released"
-    ) {
+        "node.text"
+            | "clicked"
+            | "hoverStart"
+            | "hoverEnd"
+            | "pressed"
+            | "released"
+            | "focusEnter"
+            | "focusExit"
+            | "cancelled"
+            | "submitted"
+            | "changed"
+            | "dragStart"
+            | "dragMove"
+            | "dropped"
+            | "dragCancel"
+            | "dragEnter"
+            | "dragOver"
+            | "dragLeave"
+    ) || label.starts_with("ui.")
+    {
         "game UI — text, buttons & hooks"
     } else if matches!(label, "noderef" | "scriptref" | "componentref") {
         "references — wire nodes in the Inspector"
@@ -2634,6 +2652,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "input", insert: "input", doc: "Player input (play mode). input.key/pressed/axis/mouse/button — make interactive games." },
     ApiEntry { label: "input.key", insert: "input.key(", doc: "input.key(\"w\") — true while the key is held. Names: a-z, 0-9, space, enter, shift, ctrl, alt, left/right/up/down, escape, tab." },
     ApiEntry { label: "input.pressed", insert: "input.pressed(", doc: "input.pressed(\"space\") — true only on the frame the key goes down (an edge)." },
+    ApiEntry { label: "input.typed", insert: "input.typed()", doc: "input.typed() — the CHARACTERS entered this frame, as a string, resolved by the OS keyboard layout (a paste folded in). Not the same question as input.pressed: that one is physical, so \"q\" is the key where Q sits on QWERTY and types `a` on AZERTY. Never contains control characters — Enter and Backspace stay actions. Empty while a UI text field has focus, because the field ate them." },
     ApiEntry { label: "input.released", insert: "input.released(", doc: "input.released(\"space\") — true only on the frame the key goes up (an edge)." },
     ApiEntry { label: "input.axis", insert: "input.axis(", doc: "input.axis(\"a\", \"d\") — returns -1/0/1 from a negative/positive key pair (e.g. strafing)." },
     ApiEntry { label: "input.mouse", insert: "input.mouse(", doc: "local x, y = input.mouse() — cursor position in pixels." },
@@ -2803,6 +2822,22 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "hoverEnd", insert: "hoverEnd", doc: "function hoverEnd(node) — UI hook: the pointer left this node's clickable element." },
     ApiEntry { label: "pressed", insert: "pressed", doc: "function pressed(node) — UI hook: LMB went down on this node's clickable element." },
     ApiEntry { label: "released", insert: "released", doc: "function released(node) — UI hook: LMB came back up (on or off the element)." },
+    ApiEntry { label: "focusEnter", insert: "focusEnter", doc: "function focusEnter(node) — UI hook: keyboard/gamepad focus arrived here. What focus LOOKS like is your style's `focus` block; this is for the rest (a sound, a preview, a description panel)." },
+    ApiEntry { label: "focusExit", insert: "focusExit", doc: "function focusExit(node) — UI hook: focus left this element." },
+    ApiEntry { label: "cancelled", insert: "cancelled", doc: "function cancelled(node) — UI hook: the UiCancel action (Escape / B) while this element has focus. Back out of a screen from the element the player is on." },
+    ApiEntry { label: "submitted", insert: "submitted", doc: "function submitted(node) — UI hook: Enter (UiSubmit) in a focused TEXT FIELD. Read the value with node.text. A field fires this instead of `clicked`, so a field inside a button doesn't run the button." },
+    ApiEntry { label: "changed", insert: "changed", doc: "function changed(node) — UI hook: a text field's value changed (typing, paste, backspace). Once per frame however many keystrokes landed. Read node.text." },
+    ApiEntry { label: "dragStart", insert: "dragStart", doc: "function dragStart(node) — UI hook: a `draggable` element has been picked up (the pointer travelled far enough that it isn't a click). The engine does NOT move the element — draw the drag however your game wants." },
+    ApiEntry { label: "dragMove", insert: "dragMove", doc: "function dragMove(node) — UI hook: fires every frame of a drag on the SOURCE. Use input.mouse() / node:uiRect() to position whatever you're showing." },
+    ApiEntry { label: "dropped", insert: "dropped", doc: "function dropped(node) — UI hook: fires on BOTH ends of a completed drag — the target (which now has it) and the source (which gave it away). `ui.dragging()` and `ui.dropTarget()` name the pair." },
+    ApiEntry { label: "dragCancel", insert: "dragCancel", doc: "function dragCancel(node) — UI hook: a drag was released over nothing. Put the item back; a half-finished gesture must not leave it stuck to the cursor." },
+    ApiEntry { label: "dragEnter", insert: "dragEnter", doc: "function dragEnter(node) — UI hook: a drag moved over this `drop target`. Pair with `dragLeave`; highlight the slot here." },
+    ApiEntry { label: "dragOver", insert: "dragOver", doc: "function dragOver(node) — UI hook: fires every frame a drag rests over this drop target." },
+    ApiEntry { label: "dragLeave", insert: "dragLeave", doc: "function dragLeave(node) — UI hook: the drag moved off this drop target." },
+    ApiEntry { label: "ui.focus", insert: "ui.focus(", doc: "ui.focus(node) — move the keyboard/gamepad focus. ui.focus(nil) drops it (a screen that wants nothing focused until the player touches something). Focusing a text field starts editing it." },
+    ApiEntry { label: "ui.focused", insert: "ui.focused()", doc: "ui.focused() — the focused element as a node, or nil. Also readable per-node as node.focused." },
+    ApiEntry { label: "ui.dragging", insert: "ui.dragging()", doc: "ui.dragging() — the element being dragged, as a node, or nil. Live for the whole drag AND for the frame the `dropped` hooks run on. There is no separate payload channel because a node already carries params, a name and tags — ask it what it is." },
+    ApiEntry { label: "ui.dropTarget", insert: "ui.dropTarget()", doc: "ui.dropTarget() — the drop target the drag is currently over, as a node, or nil." },
 ];
 
 /// The built-in Scripting docs, shown on the IDE's Docs page as searchable

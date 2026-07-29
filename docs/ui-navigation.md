@@ -254,3 +254,130 @@ jumps there and keeps tracking.
 
 It reuses the slider's `part: Handle` machinery, so it's the same idea you
 already know from progress bars.
+
+---
+
+## Text fields
+
+Tick **editable** on an element that has text. The value it edits *is* that
+text, so every bit of typography you already set up — the font, the alignment,
+the tracking, the style's `text_color` — applies unchanged, and a script reads
+and writes it the way it reads and writes any label.
+
+```ron
+text: ( text: "", size: 26.0, align: Start ),
+field: ( placeholder: "Lobby code", max_len: 8, upper: true ),
+```
+
+A field is **implicitly focusable** — an element you can type into but can't
+reach was never what anyone meant.
+
+| | |
+|---|---|
+| `placeholder` | shown while empty; never submits, never reads back as a value |
+| `max_len` | a cap in **characters**, not bytes, so it behaves the same for every alphabet |
+| `numeric` | digits, one leading `-`, one `.` |
+| `upper` | shout as you type — lobby codes, initials, licence keys |
+| `mask` / `mask_char` | draw dots instead of the value |
+
+### What you get
+
+Caret and selection, click to place the caret, drag to select, shift-arrows to
+extend, Ctrl-arrows by word, Home/End, Ctrl-A, Ctrl-C/X/V, and key repeat that
+comes from the OS rather than from a timer somebody wrote. A value longer than
+its box scrolls under the caret and clips to the box. Hooks:
+
+| | |
+|---|---|
+| `changed(node)` | the value changed — once per frame, however many keystrokes landed |
+| `submitted(node)` | Enter. **Not** `clicked` — a field inside a button must not run the button |
+
+`cancelled` fires on Escape and also leaves the field, which is the only way
+out on a screen with nothing else focusable.
+
+### Colours are derived, not chosen
+
+The caret, the selection band and the placeholder each have a colour, and each
+defaults to **transparent, meaning "follow the text colour"** — as-is for the
+caret, 30% for the selection, 45% for the placeholder. So a field you never
+configure still looks like it belongs to the text you designed, and the engine
+never picked a colour. Set any of the three, on the element or in a style
+(`caret_color`, `selection_color`, `placeholder_color`), and yours wins.
+
+### Left and Right belong to the field
+
+While a field has focus, horizontal directions move the **caret**; Up and Down
+still move the focus, so a form stays navigable and nobody is ever trapped in a
+box. Without that rule one arrow press is spent twice.
+
+Typing that a field does *not* consume reaches the game as
+`input.typed()` — the characters entered this frame, resolved by the OS
+keyboard layout, with a paste folded in. That is a different question from
+`input.pressed("q")`, which is a *physical key*: on AZERTY it types `a`.
+Building a string by polling keys gets the alphabet wrong for anyone whose
+keyboard isn't yours.
+
+IME (Chinese/Japanese/Korean composition) is not handled yet. It is a real gap
+and it is stated rather than hidden.
+
+---
+
+## Drag and drop
+
+`draggable` on what can be picked up, `drop target` on what can receive it.
+
+**The engine moves nothing and draws no ghost.** A card that tilts, an item
+that snaps to a grid, a wire that stretches out of its socket and a portrait
+that just glows at the destination are all "drag", and none of them is a
+translated copy of the source. So you get the events and the geometry, and the
+gesture looks like your game.
+
+| on the source | |
+|---|---|
+| `dragStart(node)` | the pointer travelled far enough that this isn't a click |
+| `dragMove(node)` | every frame after that |
+| `dropped(node)` | it landed on a target — you gave it away |
+| `dragCancel(node)` | it landed on nothing — put it back |
+
+| on the target | |
+|---|---|
+| `dragEnter` / `dragLeave` | highlight the slot |
+| `dragOver` | every frame it rests there |
+| `dropped(node)` | you received it |
+
+`dropped` fires on **both** ends, because both have something to do about it.
+
+```lua
+function dropped(node)                 -- on the slot
+    local item = ui.dragging()         -- the node that was carried
+    inventory.move(item.name, node.name)
+end
+```
+
+There is no separate payload channel, deliberately: the thing being dragged is
+a **node**, and a node already carries params, a name, tags and its own
+scripts. A second data path would only be a second thing to keep in sync.
+
+A press and a drag begin identically, so a drag doesn't start until the pointer
+has actually travelled — otherwise every button press would fire `dragStart`.
+And the drop target is the **innermost `drop target` under the pointer**, not
+the topmost element: the slot you are aiming at is usually behind the item
+sitting in it.
+
+---
+
+## Tooltips
+
+Put a `tooltip` string on anything hoverable. Then mark one element in the
+layer as **this layer's tooltip** — an ordinary panel with a label inside,
+styled however you like.
+
+The engine hides it when nothing is hovered, writes the hovered element's text
+into its first label, and moves it to follow the pointer, keeping it inside the
+canvas. That is the whole mechanism; the rounded corners, the shadow, the
+delay, the font and the arrow are all yours. A tooltip that should sit
+somewhere fixed instead is one `Pin` away — the engine only *offers* to follow.
+
+`tooltip_delay` lives on the layer (default 0.5 s). Tooltips are suppressed
+while a drag is in flight: a label chasing the cursor while you're already
+carrying something is noise on top of noise.

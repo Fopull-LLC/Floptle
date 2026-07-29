@@ -161,6 +161,19 @@ fn blend_state(b: Blend) -> wgpu::BlendState {
 /// centre would be nonsense. The transform maths is per-quad, so instead we
 /// keep the transform and move the pivot: the element's pivot point, expressed
 /// as a fraction of the patch's rect (routinely outside 0..1, which is fine).
+/// Where a run of width `run_w` starts inside `rect`, per its alignment.
+///
+/// One function because the glyph pass, the caret and the selection band must
+/// agree to the pixel — three copies of this arithmetic is exactly how a caret
+/// ends up half a character off in centred text.
+fn align_x(align: Align, rect: [f32; 4], run_w: f32) -> f32 {
+    match align {
+        Align::Start | Align::Stretch => rect[0],
+        Align::Center => rect[0] + (rect[2] - run_w) * 0.5,
+        Align::End => rect[0] + rect[2] - run_w,
+    }
+}
+
 fn pivot_for(patch: [f32; 4], element: [f32; 4], pivot: [f32; 2]) -> [f32; 2] {
     let anchor = [element[0] + element[2] * pivot[0], element[1] + element[3] * pivot[1]];
     [
@@ -1408,15 +1421,75 @@ impl Ui {
             }
             passes.push(([0.0, 0.0], t.color));
 
+            // Drawn after the glyphs, so a caret sitting on a wide character
+            // is still visible.
+            let mut caret_bar: Option<UiInstance> = None;
+            // ---- caret, selection, and keeping them in view -------------------
+            // The run is already broken into lines and measured, so a character
+            // index is one prefix walk away. This is the only place in the
+            // engine that knows where character N sits, which is why the caret
+            // arrives here as an index rather than as a rect.
+            let mut field_shift = 0.0f32;
+            if let Some(car) = t.caret {
+                let line0 = lines.first().map(String::as_str).unwrap_or("");
+                let x_of = |chars: usize| -> f32 {
+                    line0
+                        .chars()
+                        .take(chars)
+                        .map(|c| self.fonts[fid].metrics(c, size).advance_width * scale + track_px)
+                        .sum()
+                };
+                let run_w = widths.first().copied().unwrap_or(0.0);
+                let left = align_x(t.align, rect_px, run_w);
+                let caret_x = left + x_of(car.index);
+                // A value longer than its box scrolls out from under itself so
+                // the caret stays on screen — clamped so a short value never
+                // pulls away from the edge it was authored against.
+                let pad = 2.0 * scale;
+                let over = caret_x - (rect_px[0] + rect_px[2] - pad);
+                if over > 0.0 {
+                    field_shift = -over.min((run_w - rect_px[2] + pad * 2.0).max(0.0));
+                }
+                let (a, b) = (car.index.min(car.anchor), car.index.max(car.anchor));
+                // Selection first: it sits behind the glyphs, so a light band
+                // over dark text stays readable rather than erasing it.
+                if a != b && car.selection[3] > 0.0 {
+                    let (x0, x1) = (left + x_of(a), left + x_of(b));
+                    push(
+                        instances,
+                        batches,
+                        UiTex::White,
+                        None,
+                        Blend::Normal,
+                        UiInstance {
+                            rect: [x0 + field_shift, top, (x1 - x0).max(1.0), natural_h],
+                            color: car.selection,
+                            params: [0.0, 0.0, clip_r, 0.0],
+                            clip,
+                            ..Default::default()
+                        },
+                    );
+                }
+                if car.on {
+                    caret_bar = Some(UiInstance {
+                        rect: [
+                            caret_x + field_shift,
+                            top,
+                            (car.width * scale).max(1.0),
+                            natural_h,
+                        ],
+                        color: car.color,
+                        params: [0.0, 0.0, clip_r, 0.0],
+                        clip,
+                        ..Default::default()
+                    });
+                }
+            }
+
             for (shift, color) in passes {
                 let mut baseline = top + ascent + shift[1];
                 for (line, &run_w) in lines.iter().zip(&widths) {
-                    let mut pen_x = shift[0]
-                        + match t.align {
-                            Align::Start | Align::Stretch => rect_px[0],
-                            Align::Center => rect_px[0] + (rect_px[2] - run_w) * 0.5,
-                            Align::End => rect_px[0] + rect_px[2] - run_w,
-                        };
+                    let mut pen_x = shift[0] + field_shift + align_x(t.align, rect_px, run_w);
                     for c in line.chars() {
                         let Some(g) = self.glyph(gpu, fid, c, px) else { continue };
                         if g.size[0] > 0.0 {
@@ -1455,6 +1528,9 @@ impl Ui {
                     }
                     baseline += line_h;
                 }
+            }
+            if let Some(bar) = caret_bar {
+                push(instances, batches, UiTex::White, None, Blend::Normal, bar);
             }
         }
     }

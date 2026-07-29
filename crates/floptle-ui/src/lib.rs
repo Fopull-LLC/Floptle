@@ -19,6 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod field;
 pub mod nav;
 pub mod paint;
 pub mod style;
@@ -683,6 +684,121 @@ pub struct ElementSpec {
     /// outline drag and "bring forward" write to.
     #[serde(default, skip_serializing_if = "is_zero_i32")]
     pub order: i32,
+    /// Editable text: the player can type into this element, and the value it
+    /// edits is this element's own [`TextSpec::text`].
+    ///
+    /// Storing the value in the ordinary text means every bit of typography
+    /// already works — font, alignment, tracking, stroke, the style's
+    /// `text_color` — and a script reads and writes it the same way it reads
+    /// and writes any other label. A field is implicitly focusable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<FieldSpec>,
+    /// Can be picked up and carried to a [`Self::drop_target`].
+    ///
+    /// The engine does not move the element and does not draw a ghost: it
+    /// reports `dragStart` / `dragMove` / `dropped` and lets the game decide
+    /// what dragging looks like, because a card that tilts, an item that snaps
+    /// to a grid and a wire that stretches from its socket are all "drag" and
+    /// none of them is a translated copy of the source.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draggable: bool,
+    /// Can receive a dragged element — fires `dragEnter` / `dragOver` /
+    /// `dragLeave` / `dropped`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drop_target: bool,
+    /// Hovering this element for [`UiLayer::tooltip_delay`] seconds shows this
+    /// string in the layer's [`Self::tooltip_box`]. Empty = no tooltip.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tooltip: String,
+    /// This element IS the layer's tooltip: one of yours, an ordinary panel
+    /// with a label inside, styled however you like.
+    ///
+    /// The engine never draws a tooltip of its own. It hides this element when
+    /// nothing is hovered, writes the hovered element's [`Self::tooltip`] into
+    /// its first text (its own, or its first labelled descendant's), and moves
+    /// it to follow the pointer, keeping it inside the canvas. A tooltip that
+    /// should sit somewhere fixed instead is one `Pin` away.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tooltip_box: bool,
+}
+
+/// An editable text element (see [`ElementSpec::field`]).
+///
+/// The value is the element's [`TextSpec::text`]; everything here is about how
+/// it is *entered*. Deliberately small: a field is one of the places where a
+/// game most wants its own look, and the three colours below all default to
+/// something derived from the text colour you already chose rather than to a
+/// colour the engine picked.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FieldSpec {
+    /// Shown while the value is empty. Not a value — it never submits and a
+    /// script never reads it back as content.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub placeholder: String,
+    /// Cap on the number of CHARACTERS (0 = no cap). Characters, not bytes, so
+    /// a name field behaves the same for every alphabet.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub max_len: u32,
+    /// Draw every character as `mask_char`. Copy and cut are refused while
+    /// this is on — a password field that fills the clipboard is a bug.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mask: bool,
+    /// What a masked character draws as.
+    #[serde(default = "default_mask_char", skip_serializing_if = "is_default_mask_char")]
+    pub mask_char: char,
+    /// Accept only digits, one leading `-` and one `.`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub numeric: bool,
+    /// Force every entered character to upper case as it is typed — lobby
+    /// codes, initials, licence keys. The stored value is what you see.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub upper: bool,
+    /// Caret colour. **Alpha 0 = follow the text colour**, which is almost
+    /// always right and is a derived default rather than an imposed one.
+    #[serde(default, skip_serializing_if = "is_clear")]
+    pub caret_color: [f32; 4],
+    /// Selection highlight. Alpha 0 = the text colour at 30%.
+    #[serde(default, skip_serializing_if = "is_clear")]
+    pub selection_color: [f32; 4],
+    /// Placeholder colour. Alpha 0 = the text colour at 45%.
+    #[serde(default, skip_serializing_if = "is_clear")]
+    pub placeholder_color: [f32; 4],
+    /// Caret bar width in design units.
+    #[serde(default = "default_caret_width", skip_serializing_if = "is_default_caret_width")]
+    pub caret_width: f32,
+}
+
+impl Default for FieldSpec {
+    fn default() -> Self {
+        FieldSpec {
+            placeholder: String::new(),
+            max_len: 0,
+            mask: false,
+            mask_char: default_mask_char(),
+            numeric: false,
+            upper: false,
+            caret_color: [0.0; 4],
+            selection_color: [0.0; 4],
+            placeholder_color: [0.0; 4],
+            caret_width: default_caret_width(),
+        }
+    }
+}
+
+fn default_mask_char() -> char {
+    '•'
+}
+fn is_default_mask_char(c: &char) -> bool {
+    *c == '•'
+}
+fn default_caret_width() -> f32 {
+    2.0
+}
+fn is_default_caret_width(v: &f32) -> bool {
+    *v == 2.0
+}
+fn is_clear(v: &[f32; 4]) -> bool {
+    v[3] == 0.0
 }
 
 fn white() -> [f32; 4] {
@@ -747,6 +863,11 @@ impl Default for ElementSpec {
             focusable: false,
             nav: None,
             order: 0,
+            field: None,
+            draggable: false,
+            drop_target: false,
+            tooltip: String::new(),
+            tooltip_box: false,
         }
     }
 }
@@ -882,6 +1003,9 @@ pub struct UiLayer {
     /// for a long inventory, and guessing wrong is worse than asking.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub nav_wrap: bool,
+    /// Seconds of hovering before the tooltip appears.
+    #[serde(default = "default_tooltip_delay", skip_serializing_if = "is_default_tooltip_delay")]
+    pub tooltip_delay: f32,
 }
 
 fn default_canvas_scale() -> f32 {
@@ -901,6 +1025,12 @@ fn is_default_nav_delay(v: &f32) -> bool {
 }
 fn is_default_nav_repeat(v: &f32) -> bool {
     *v == default_nav_repeat()
+}
+fn default_tooltip_delay() -> f32 {
+    0.5
+}
+fn is_default_tooltip_delay(v: &f32) -> bool {
+    *v == default_tooltip_delay()
 }
 fn default_reference_width() -> f32 {
     1280.0
@@ -961,6 +1091,7 @@ impl Default for UiLayer {
             nav_delay: default_nav_delay(),
             nav_repeat: default_nav_repeat(),
             nav_wrap: false,
+            tooltip_delay: default_tooltip_delay(),
         }
     }
 }
@@ -1386,6 +1517,26 @@ pub struct TextRun {
     pub overflow: Overflow,
     /// Visual rotate/scale, matching the owning element's.
     pub xform: Xform,
+    /// Set on the one run currently being edited: where the caret sits and
+    /// what is selected. The renderer owns glyph layout, so it is the only
+    /// place that can turn a character index into an x position — which is why
+    /// this rides the run rather than arriving as pre-computed quads.
+    pub caret: Option<Caret>,
+}
+
+/// A text caret and selection, in CHARACTER indices into [`TextRun::text`]
+/// (the string as drawn — masked, case-transformed, whatever it ended up).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Caret {
+    pub index: usize,
+    /// The other end of the selection; `== index` when nothing is selected.
+    pub anchor: usize,
+    pub color: [f32; 4],
+    pub selection: [f32; 4],
+    /// Bar width in design units.
+    pub width: f32,
+    /// Blink phase: false hides the bar (the selection still draws).
+    pub on: bool,
 }
 
 impl Default for TextRun {
@@ -1408,8 +1559,28 @@ impl Default for TextRun {
             max_lines: 0,
             overflow: Overflow::Show,
             xform: Xform::default(),
+            caret: None,
         }
     }
+}
+
+/// Which element is being typed into, and where its caret is.
+///
+/// Runtime state, held by the editor/player and handed to [`draw_list_with`]
+/// once per frame. It is deliberately NOT part of [`ElementSpec`]: a caret
+/// position in a saved scene would be nonsense, and keeping it out means it is
+/// structurally impossible for one to get there.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EditState {
+    /// The element being edited.
+    pub id: u32,
+    /// Caret position, in characters into the element's VALUE (the authored
+    /// string — masking and case happen afterwards).
+    pub caret: usize,
+    /// The other end of the selection.
+    pub anchor: usize,
+    /// Blink phase.
+    pub on: bool,
 }
 
 /// Everything a layer draws this frame, painter's order.
@@ -1570,6 +1741,20 @@ pub fn scroll_max(roots: &[Node], placed: &[Placed], scroll_id: u32) -> [f32; 2]
 /// list in scene order and the rule is "earliest mask in the scene wins". A
 /// mask that wasn't placed this frame (hidden) clips nothing.
 pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> DrawList {
+    draw_list_with(roots, placed, masks, None)
+}
+
+/// [`draw_list`] plus the caret of whichever text field is being edited.
+///
+/// A separate entry point rather than a fifth parameter on `draw_list`,
+/// because every caller that has no text field — the UI tab's canvas, the
+/// probes, the tests — should not have to say so.
+pub fn draw_list_with(
+    roots: &[Node],
+    placed: &[Placed],
+    masks: &[(u32, u32)],
+    edit: Option<EditState>,
+) -> DrawList {
     fn collect<'a>(n: &'a Node, m: &mut std::collections::HashMap<u32, &'a Node>) {
         m.insert(n.id, n);
         for c in &n.children {
@@ -1756,34 +1941,91 @@ pub fn draw_list(roots: &[Node], placed: &[Placed], masks: &[(u32, u32)]) -> Dra
                 ..Default::default()
             });
         }
-        if let Some(t) = &spec.text
-            && !t.text.is_empty()
-        {
-            dl.texts.push(TextRun {
-                rect: p.rect,
-                text: t.display().into_owned(),
-                size: t.size,
-                color: paint(t.color),
-                align: t.align,
-                valign: t.valign,
-                fit: t.fit,
-                font: t.font.clone(),
-                clip,
-                stroke: t.stroke.map(|mut s| {
-                    s.color = paint(s.color);
-                    s
+        if let Some(t) = &spec.text {
+            // A field's text is what the PLAYER typed, so three things differ
+            // from an ordinary label: an empty one shows the placeholder, a
+            // masked one shows dots, and the one being edited carries a caret.
+            let editing = edit.filter(|e| e.id == p.id);
+            let field = spec.field.as_ref();
+            let (shown, mut color, caret_chars) = match field {
+                Some(f) if t.text.is_empty() && editing.is_none() && !f.placeholder.is_empty() => {
+                    // Alpha 0 means "derive from the text colour" — a default
+                    // that comes out of the design instead of out of us.
+                    let c = if f.placeholder_color[3] > 0.0 {
+                        f.placeholder_color
+                    } else {
+                        [t.color[0], t.color[1], t.color[2], t.color[3] * 0.45]
+                    };
+                    (f.placeholder.clone(), c, None)
+                }
+                Some(f) => {
+                    let n = t.text.chars().count();
+                    let shown = if f.mask {
+                        std::iter::repeat_n(f.mask_char, n).collect()
+                    } else {
+                        t.display().into_owned()
+                    };
+                    (shown, t.color, Some(n))
+                }
+                None => (t.display().into_owned(), t.color, None),
+            };
+            color = paint(color);
+            // A field always clips to its own rect: the value is the player's,
+            // so it can be longer than the box, and text running out of a box
+            // and across the screen is never what anyone wanted.
+            let clip = if field.is_some() {
+                Some(clip.unwrap_or(Clip {
+                    rect: p.rect,
+                    radius: spec.shape.map(|s| s.radius.max()).unwrap_or(0.0),
+                }))
+            } else {
+                clip
+            };
+            let caret = match (editing, field, caret_chars) {
+                (Some(e), Some(f), Some(n)) => Some(Caret {
+                    index: e.caret.min(n),
+                    anchor: e.anchor.min(n),
+                    color: paint(if f.caret_color[3] > 0.0 { f.caret_color } else { t.color }),
+                    selection: paint(if f.selection_color[3] > 0.0 {
+                        f.selection_color
+                    } else {
+                        [t.color[0], t.color[1], t.color[2], t.color[3] * 0.3]
+                    }),
+                    width: f.caret_width,
+                    on: e.on,
                 }),
-                shadow: t.shadow.map(|mut s| {
-                    s.color = paint(s.color);
-                    s
-                }),
-                tracking: t.tracking,
-                line_height: t.line_height,
-                wrap: t.wrap,
-                max_lines: t.max_lines,
-                overflow: t.overflow,
-                xform,
-            });
+                _ => None,
+            };
+            // An empty label still draws nothing; an empty FIELD being edited
+            // has to, or the caret has nowhere to appear.
+            if !shown.is_empty() || caret.is_some() {
+                dl.texts.push(TextRun {
+                    rect: p.rect,
+                    text: shown,
+                    size: t.size,
+                    color,
+                    align: t.align,
+                    valign: t.valign,
+                    fit: t.fit,
+                    font: t.font.clone(),
+                    clip,
+                    stroke: t.stroke.map(|mut s| {
+                        s.color = paint(s.color);
+                        s
+                    }),
+                    shadow: t.shadow.map(|mut s| {
+                        s.color = paint(s.color);
+                        s
+                    }),
+                    tracking: t.tracking,
+                    line_height: t.line_height,
+                    wrap: t.wrap,
+                    max_lines: t.max_lines,
+                    overflow: t.overflow,
+                    xform,
+                    caret,
+                });
+            }
         }
     }
     dl
@@ -2684,7 +2926,20 @@ mod tests {
         let has_key = |text: &str, k: &str| {
             text.contains(&format!(",{k}:")) || text.contains(&format!("({k}:"))
         };
-        for absent in ["order", "focusable", "nav", "toggle", "group", "scrollbar"] {
+        for absent in [
+            "order",
+            "focusable",
+            "nav",
+            "toggle",
+            "group",
+            "scrollbar",
+            // Phase D part 3.
+            "field",
+            "draggable",
+            "drop_target",
+            "tooltip",
+            "tooltip_box",
+        ] {
             assert!(!has_key(&text, absent), "`{absent}` leaked into {text}");
         }
         // The element-level group tint, on an element with no image to confuse
@@ -2702,7 +2957,7 @@ mod tests {
         // Caught by round-tripping the real projects, not by this file — which
         // is why it is now also caught by this file.
         let layer = ron::to_string(&UiLayer::default()).unwrap();
-        for absent in ["nav_delay", "nav_repeat", "nav_wrap"] {
+        for absent in ["nav_delay", "nav_repeat", "nav_wrap", "tooltip_delay"] {
             assert!(!layer.contains(absent), "`{absent}` leaked into {layer}");
         }
         // …and a non-default one still round-trips.
@@ -2719,6 +2974,139 @@ mod tests {
         for absent in ["offset_x", "drag"] {
             assert!(!scroller.contains(absent), "`{absent}` leaked into {scroller}");
         }
+
+        // A default FIELD writes only the fact that it is one — the caret
+        // width, the mask character and the three "follow the text colour"
+        // sentinels all stay out of the file.
+        let f = ron::to_string(&ElementSpec {
+            field: Some(FieldSpec::default()),
+            ..Default::default()
+        })
+        .unwrap();
+        for absent in [
+            "placeholder",
+            "max_len",
+            "mask",
+            "mask_char",
+            "numeric",
+            "upper",
+            "caret_color",
+            "selection_color",
+            "placeholder_color",
+            "caret_width",
+        ] {
+            assert!(!f.contains(absent), "`{absent}` leaked into {f}");
+        }
+        // …and a configured one still round-trips through the sentinels.
+        let tuned = FieldSpec {
+            placeholder: "code".into(),
+            max_len: 8,
+            mask: true,
+            mask_char: '*',
+            upper: true,
+            caret_color: [1.0, 0.2, 0.4, 1.0],
+            ..Default::default()
+        };
+        let back: FieldSpec = ron::from_str(&ron::to_string(&tuned).unwrap()).unwrap();
+        assert_eq!(back, tuned);
+    }
+
+    /// Build one field element and draw it, with and without a caret.
+    fn field_dl(value: &str, f: FieldSpec, edit: Option<EditState>) -> DrawList {
+        let n = Node::with_children(
+            1,
+            ElementSpec {
+                place: Place::Free { pos: [0.0, 0.0] },
+                size: [Size::Fixed(200.0), Size::Fixed(40.0)],
+                text: Some(TextSpec { text: value.into(), ..Default::default() }),
+                field: Some(f),
+                ..Default::default()
+            },
+            vec![],
+        );
+        let m: MeasureText = &|_| [0.0, 0.0];
+        let placed = solve(std::slice::from_ref(&n), [400.0, 300.0], m);
+        draw_list_with(std::slice::from_ref(&n), &placed, &[], edit)
+    }
+
+    #[test]
+    fn an_empty_field_shows_its_placeholder_until_you_start_typing() {
+        let spec = FieldSpec { placeholder: "Lobby code".into(), ..Default::default() };
+        let dl = field_dl("", spec.clone(), None);
+        assert_eq!(dl.texts[0].text, "Lobby code");
+        assert!(dl.texts[0].caret.is_none());
+        // Focused, the hint gets out of the way — otherwise the caret sits in
+        // the middle of a word the player did not type.
+        let editing = field_dl("", spec, Some(EditState { id: 1, caret: 0, anchor: 0, on: true }));
+        assert_eq!(editing.texts[0].text, "");
+        assert!(editing.texts[0].caret.is_some(), "an empty field still needs somewhere to blink");
+    }
+
+    #[test]
+    fn a_masked_field_draws_dots_and_the_caret_counts_them() {
+        let spec = FieldSpec { mask: true, ..Default::default() };
+        let dl =
+            field_dl("hunter2", spec, Some(EditState { id: 1, caret: 7, anchor: 4, on: true }));
+        assert_eq!(dl.texts[0].text, "•••••••");
+        let c = dl.texts[0].caret.expect("caret");
+        assert_eq!((c.index, c.anchor), (7, 4), "indices count the DRAWN characters");
+    }
+
+    #[test]
+    fn a_field_clips_to_itself_even_with_no_mask_around_it() {
+        // The value is the player's, so it can be longer than the box. Text
+        // running out of a box and across the screen is never what was meant.
+        let dl = field_dl("x", FieldSpec::default(), None);
+        let clip = dl.texts[0].clip.expect("a field always clips");
+        assert_eq!(clip.rect, [0.0, 0.0, 200.0, 40.0]);
+        // An ordinary label is untouched by this.
+        let label = Node::with_children(
+            2,
+            ElementSpec {
+                place: Place::Free { pos: [0.0, 0.0] },
+                text: Some(TextSpec { text: "hi".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            vec![],
+        );
+        let m: MeasureText = &|_| [0.0, 0.0];
+        let placed = solve(std::slice::from_ref(&label), [400.0, 300.0], m);
+        let dl = draw_list(std::slice::from_ref(&label), &placed, &[]);
+        assert!(dl.texts[0].clip.is_none());
+    }
+
+    #[test]
+    fn the_caret_colours_follow_the_text_unless_you_say_otherwise() {
+        // "Alpha 0 = derive" is the rule that keeps the engine out of the
+        // business of picking a caret colour.
+        let dl = field_dl(
+            "abc",
+            FieldSpec::default(),
+            Some(EditState { id: 1, caret: 1, anchor: 3, on: true }),
+        );
+        let t = &dl.texts[0];
+        let c = t.caret.expect("caret");
+        assert_eq!(c.color, t.color, "the caret is the text colour by default");
+        assert!(
+            (c.selection[3] - t.color[3] * 0.3).abs() < 1e-6,
+            "and the selection is that colour, quieter"
+        );
+        // An explicit colour wins, obviously.
+        let spec = FieldSpec { caret_color: [1.0, 0.0, 0.0, 1.0], ..Default::default() };
+        let dl = field_dl("abc", spec, Some(EditState { id: 1, caret: 1, anchor: 1, on: true }));
+        assert_eq!(dl.texts[0].caret.unwrap().color, [1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn a_caret_past_the_end_is_clamped_rather_than_drawn_off_the_word() {
+        // A script can assign `text` while the player is mid-edit.
+        let dl = field_dl(
+            "ab",
+            FieldSpec::default(),
+            Some(EditState { id: 1, caret: 99, anchor: 99, on: true }),
+        );
+        let c = dl.texts[0].caret.unwrap();
+        assert_eq!((c.index, c.anchor), (2, 2));
     }
 
     #[test]

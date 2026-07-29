@@ -122,7 +122,11 @@ pub fn focusables(roots: &[Node], placed: &[Placed]) -> Vec<(u32, [f32; 4])> {
         if !n.spec.visible || n.spec.disabled {
             return;
         }
-        if n.spec.focusable {
+        // A text field is focusable whether or not it says so: an element you
+        // type into and cannot reach is never what was meant, and making
+        // everyone remember to tick a second box would only ever produce bug
+        // reports.
+        if n.spec.focusable || n.spec.field.is_some() {
             ok.insert(n.id);
         }
         for c in &n.children {
@@ -314,6 +318,23 @@ mod tests {
         // Release clears everything.
         assert!(!r.step(None, 0.016, 0.35, 0.12));
         assert!(r.step(Some(Dir4::Up), 0.016, 0.35, 0.12), "a fresh press always moves");
+    }
+
+    #[test]
+    fn a_text_field_is_reachable_without_ticking_a_second_box() {
+        // An element you can type into but cannot reach is never what anyone
+        // meant, and making everyone remember a second checkbox would only
+        // produce bug reports.
+        let roots = vec![Node::with_children(
+            1,
+            crate::ElementSpec {
+                field: Some(crate::FieldSpec::default()),
+                ..Default::default()
+            },
+            vec![],
+        )];
+        let placed = vec![Placed { id: 1, rect: [0.0, 0.0, 100.0, 40.0] }];
+        assert_eq!(focusables(&roots, &placed).len(), 1);
     }
 
     #[test]

@@ -375,6 +375,7 @@ Available while playing.
 | `input.key("w")` | `true` while the key is held |
 | `input.pressed("space")` | `true` only on the frame it goes **down** (an edge) |
 | `input.released("space")` | `true` only on the frame it goes **up** (an edge) |
+| `input.typed()` | the **characters** entered this frame, as a string (see below) |
 | `input.axis("a", "d")` | `-1` / `0` / `1` from a negative/positive key pair |
 | `input.button(1)` | mouse button held (`0` left, `1` right, `2` middle) |
 | `input.clicked(1)` | mouse button pressed this frame (an edge) |
@@ -389,6 +390,25 @@ Key names: `a`–`z`, `0`–`9`, `space`, `enter`, `escape`, `tab`, `backspace`,
 A locked cursor is genuinely pinned to the window center (hardware lock where
 the OS supports it, per-frame re-centering where it doesn't) — read motion with
 `input.mouse_delta()`. Stop always releases the lock.
+
+**`input.pressed` is a key; `input.typed` is a character.** `input.pressed("q")`
+asks about the *physical* key where Q sits on a QWERTY board — on AZERTY that
+key types `a`, and nothing in the name says so. `input.typed()` returns what
+the player meant to write, resolved by the OS layout, with a paste (Ctrl/Cmd-V)
+folded into the same string. It never contains control characters: Enter and
+Backspace stay actions.
+
+```lua
+code = code .. input.typed()
+if input.pressed("backspace") then code = code:sub(1, -2) end
+```
+
+Building a string by polling `a`–`z` gets the alphabet wrong for anyone whose
+keyboard isn't yours, and gets it wrong for digits and punctuation on every
+keyboard. For anything more than a few characters, use a **UI text field** —
+it brings a caret, selection, the clipboard and key repeat with it
+([ui-navigation.md](ui-navigation.md)). `input.typed()` is empty while a field
+has focus, because the field consumed them.
 
 ### Gamepads a script can actually see
 
@@ -915,6 +935,21 @@ scripts get pointer hooks — plain functions, called with a node handle:
 | `hoverStart(node)` / `hoverEnd(node)` | the pointer entered / left the element |
 | `pressed(node)` / `released(node)` | LMB went down on it / came back up |
 | `clicked(node)` | pressed AND released on the same element |
+| `focusEnter(node)` / `focusExit(node)` | keyboard/gamepad focus arrived / left |
+| `cancelled(node)` | `UiCancel` (Escape / B) while focused |
+| `changed(node)` / `submitted(node)` | a text field's value changed / Enter |
+| `dragStart` / `dragMove` / `dropped` / `dragCancel` | on a `draggable` source |
+| `dragEnter` / `dragOver` / `dragLeave` / `dropped` | on a `drop target` |
+
+A gamepad **submit fires the same `clicked`** a mouse does, so a button written
+for a pointer works with a pad and no second code path. See
+[ui-navigation.md](ui-navigation.md) for focus, text fields, drag & drop and
+tooltips, and [ui-styles.md](ui-styles.md) for what the states look like.
+
+```lua
+ui.focus(find("Play"))    ui.focused()      -- move / read the focus
+ui.dragging()             ui.dropTarget()   -- the drag in flight
+```
 
 The engine imposes no button look — style the states yourself, it's 5 lines:
 

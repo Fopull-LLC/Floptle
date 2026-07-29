@@ -255,6 +255,11 @@ impl ScriptHost {
                 })
                 .ok(),
             );
+            let ty = input.clone();
+            let _ = t.set(
+                "typed",
+                lua.create_function(move |_, ()| Ok(ty.borrow().typed.clone())).ok(),
+            );
             let m = input.clone();
             let _ = t.set(
                 "mouse",
@@ -685,6 +690,10 @@ impl ScriptHost {
         // bug), so it travels through its own channels instead of the mirror.
         let ui_focus: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
         let ui_focus_request: Rc<RefCell<Option<Option<u32>>>> = Rc::new(RefCell::new(None));
+        // (drag source, drop target under it) — live for the whole drag AND
+        // for the frame the `dropped` hooks run on, which is the frame that
+        // actually needs to read it.
+        let ui_drag: crate::UiDragCell = Rc::new(RefCell::new(None));
         if let Ok(t) = lua.create_table() {
             let req = ui_focus_request.clone();
             let cur = ui_focus.clone();
@@ -711,6 +720,29 @@ impl ScriptHost {
             let _ = t.set(
                 "focused",
                 lua.create_function(move |lua, ()| match *cur.borrow() {
+                    Some(id) => crate::env::new_node_handle(lua, id).map(mlua::Value::Table),
+                    None => Ok(mlua::Value::Nil),
+                })
+                .ok(),
+            );
+            // The drag in flight. There is no separate payload channel on
+            // purpose: the source is a NODE, and a node already carries params,
+            // a name, tags and its own scripts — everything an inventory row
+            // needs to say what it is. A second data path would only be a
+            // second thing to keep in sync.
+            let d = ui_drag.clone();
+            let _ = t.set(
+                "dragging",
+                lua.create_function(move |lua, ()| match d.borrow().map(|(s, _)| s) {
+                    Some(id) => crate::env::new_node_handle(lua, id).map(mlua::Value::Table),
+                    None => Ok(mlua::Value::Nil),
+                })
+                .ok(),
+            );
+            let d = ui_drag.clone();
+            let _ = t.set(
+                "dropTarget",
+                lua.create_function(move |lua, ()| match d.borrow().and_then(|(_, t)| t) {
                     Some(id) => crate::env::new_node_handle(lua, id).map(mlua::Value::Table),
                     None => Ok(mlua::Value::Nil),
                 })
@@ -1302,6 +1334,7 @@ impl ScriptHost {
             scene_name,
             ui_focus,
             ui_focus_request,
+            ui_drag,
             anim_info: shared.anim_info.clone(),
             anim_commands: shared.anim_commands.clone(),
             vfx_info: shared.vfx_info.clone(),
@@ -1352,6 +1385,11 @@ impl ScriptHost {
     /// different from not asking.
     pub fn take_ui_focus_request(&mut self) -> Option<Option<u32>> {
         self.ui_focus_request.borrow_mut().take()
+    }
+
+    /// Publish the drag in flight, before scripts run.
+    pub fn set_ui_drag(&mut self, drag: Option<(u32, Option<u32>)>) {
+        *self.ui_drag.borrow_mut() = drag;
     }
 
     /// Drop every per-(node, script) environment plus its net handlers and

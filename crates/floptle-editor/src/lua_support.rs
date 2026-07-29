@@ -349,6 +349,60 @@ function clicked(node) end
 ---@param node Node
 function hoverStart(node) end
 
+---UI hook: keyboard/gamepad focus arrived here. What focus LOOKS like is your
+---style's `focus` block; this is for the rest — a sound, a preview, a
+---description panel. Pair with `focusExit`.
+---@param node Node
+function focusEnter(node) end
+
+---UI hook: the `UiCancel` action (Escape / B) while this element has focus.
+---@param node Node
+function cancelled(node) end
+
+---UI text-field hook: Enter in a focused field. Read the value with `node.text`.
+---A field fires this INSTEAD of `clicked`, so a field inside a button doesn't
+---also run the button.
+---@param node Node
+function submitted(node) end
+
+---UI text-field hook: the value changed (typing, paste, backspace). Once per
+---frame however many keystrokes landed.
+---@param node Node
+function changed(node) end
+
+---UI hook: a `draggable` element was picked up. The engine does NOT move it and
+---draws no ghost — a card that tilts and an item that snaps to a grid are both
+---drags, so the look is yours. Also: `dragMove`, `dragCancel`, `dropped`, and on
+---the target `dragEnter` / `dragOver` / `dragLeave` / `dropped`.
+---@param node Node
+function dragStart(node) end
+
+---UI hook: a completed drag. Fires on BOTH ends — the target that now has it and
+---the source that gave it away. `ui.dragging()` / `ui.dropTarget()` name the pair.
+---@param node Node
+function dropped(node) end
+
+---The game-UI runtime: focus and drags. Everything else about an element is a
+---component (`node:getcomponent`); these two are engine state, because a focus
+---ring that survived into a saved scene would be a bug.
+---@class Ui
+ui = {}
+---Move the keyboard/gamepad focus. `ui.focus(nil)` drops it. Focusing a text
+---field starts editing it.
+---@param node Node|nil
+function ui.focus(node) end
+---The focused element, or nil. Also readable per-node as `node.focused`.
+---@return Node|nil
+function ui.focused() end
+---The element being dragged, or nil — live for the whole drag and for the frame
+---the `dropped` hooks run on. There is no separate payload channel: a node
+---already carries params, a name and tags, so ask it what it is.
+---@return Node|nil
+function ui.dragging() end
+---The drop target the drag is currently over, or nil.
+---@return Node|nil
+function ui.dropTarget() end
+
 ---Multiplayer (docs/netcode-design.md). Mark nodes with the Networked component,
 ---declare synced vars with a top-level `replicated = { hp = 100 }` table (read/
 ---write them as `synced.hp` — the server owns them), handle remote calls with
@@ -495,6 +549,16 @@ function input.key(name) end
 ---@param name string
 ---@return boolean
 function input.pressed(name) end
+---The CHARACTERS entered this frame, as a string, resolved by the OS keyboard
+---layout — with a paste (Ctrl/Cmd-V) folded in.
+---
+---A different question from `input.pressed`, which is PHYSICAL: `\"q\"` is the key
+---where Q sits on a QWERTY board and types `a` on AZERTY. Building a string by
+---polling keys gets the alphabet wrong for anyone whose keyboard isn't yours.
+---Never contains control characters — Enter and Backspace stay actions. Empty
+---while a UI text field has focus, because the field consumed them.
+---@return string
+function input.typed() end
 ---The ACTIVE camera's world yaw (radians), captured with the input snapshot.
 ---THE way to do camera-relative movement in multiplayer: the aim rides the
 ---input command, so the server and prediction replay use exactly the angle

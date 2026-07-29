@@ -4078,6 +4078,8 @@ impl Editor {
                     keys_down: self.input_keys.clone(),
                     keys_pressed: self.input_keys_pressed.clone(),
                     keys_released: self.input_keys_released.clone(),
+                    // Whatever a focused text field did not eat.
+                    typed: self.input_typed.clone(),
                     mouse: self.cursor.map(|c| (c.x, c.y)).unwrap_or((0.0, 0.0)),
                     mouse_delta: self.input_mouse_delta,
                     scroll: self.input_scroll,
@@ -4278,6 +4280,7 @@ impl Editor {
                             keys_down: self.input_keys.clone(),
                             keys_pressed: std::mem::take(&mut self.tick_keys_pressed),
                             keys_released: std::mem::take(&mut self.tick_keys_released),
+                            typed: std::mem::take(&mut self.tick_typed),
                             mouse: self.cursor.map(|c| (c.x, c.y)).unwrap_or((0.0, 0.0)),
                             mouse_delta: std::mem::take(&mut self.tick_mouse_delta),
                             scroll: std::mem::take(&mut self.tick_scroll),
@@ -4288,6 +4291,7 @@ impl Editor {
                     } else {
                         self.tick_keys_pressed.clear();
                         self.tick_keys_released.clear();
+                        self.tick_typed.clear();
                         self.tick_mouse_delta = (0.0, 0.0);
                         self.tick_scroll = 0.0;
                         self.tick_buttons_pressed = [false; 3];
@@ -4721,6 +4725,8 @@ impl Editor {
         // Clear per-frame input edges after scripts consumed them.
         self.input_keys_pressed.clear();
         self.input_keys_released.clear();
+        self.input_typed.clear();
+        self.ui_text_ops.clear();
         self.input_buttons_pressed = [false; 3];
         self.input_mouse_delta = (0.0, 0.0);
         self.input_scroll = 0.0;
@@ -4729,6 +4735,7 @@ impl Editor {
         if !self.playing {
             self.tick_keys_pressed.clear();
             self.tick_keys_released.clear();
+            self.tick_typed.clear();
             self.tick_buttons_pressed = [false; 3];
             self.tick_mouse_delta = (0.0, 0.0);
             self.tick_scroll = 0.0;

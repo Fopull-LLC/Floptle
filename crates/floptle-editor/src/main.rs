@@ -93,6 +93,7 @@ mod theme;
 mod ui_design;
 mod ui_design_ui;
 mod ui_game;
+mod ui_input;
 mod ui_nav;
 mod ui_shader_lib;
 mod ui_widgets;
@@ -1233,6 +1234,30 @@ struct Editor {
     /// Last frame's submit/cancel levels, for press edges.
     ui_submit_was: bool,
     ui_cancel_was: bool,
+    /// The text field being typed into, and its caret/selection.
+    ///
+    /// One field at a time, and it is always the focused element — a caret in
+    /// a box the player can't see the ring on is how "my typing went
+    /// somewhere else" happens. Never saved: a caret position in a scene file
+    /// would be nonsense.
+    ui_edit: Option<floptle_ui::EditState>,
+    /// Caret blink phase, in seconds. Reset on every keystroke so the caret is
+    /// solid while you type and only blinks once you stop.
+    ui_caret_t: f32,
+    /// Editing keystrokes banked from window events this frame (arrows,
+    /// backspace, clipboard), decoded into layout-independent operations.
+    ui_text_ops: Vec<crate::ui_input::TextOp>,
+    /// A drag in flight: the source element, the pointer position where it
+    /// started, and the drop target it is currently over.
+    ui_drag: Option<crate::ui_input::UiDrag>,
+    /// What `ui.dragging()` / `ui.dropTarget()` report this frame. Set while a
+    /// drag is live AND for the one frame the `dropped` hooks run on, which is
+    /// the frame that needs it most.
+    ui_drag_report: Option<(u32, Option<u32>)>,
+    /// The element the pointer has been resting on and for how long, plus
+    /// whether its tooltip is showing — one timer, because only one tooltip
+    /// can be up at a time.
+    ui_tip_hover: Option<(u32, f32)>,
     /// The project's UI style sheet + tokens, merged from every
     /// `*.uistyle.ron` / `*.tokens.ron` under the project (see
     /// `ui_game::reload_ui_styles`). Empty when a project defines none — the
@@ -1556,6 +1581,16 @@ struct Editor {
     input_buttons_pressed: [bool; 3],
     input_mouse_delta: (f32, f32),
     input_scroll: f32,
+    /// Characters TYPED this frame, resolved by the OS keyboard layout — the
+    /// Lua `input.typed()` and what a focused UI text field consumes.
+    ///
+    /// Separate from the key sets because they answer different questions:
+    /// `input.pressed("q")` is a physical key (AZERTY types `q` and gets `a`),
+    /// and this is what the player meant to write. A paste arrives through
+    /// here too, so a game never has to special-case Ctrl-V.
+    input_typed: String,
+    /// The per-tick twin, drained by `fixedUpdate` like every other edge.
+    tick_typed: String,
     /// Per-GAMEPLAY-TICK input accumulators (docs/netcode-design.md §3): edges and
     /// deltas bank here in parallel with the per-frame sets above, and are consumed
     /// by each `fixedUpdate` tick — so a key pressed between ticks is never lost,
@@ -2409,6 +2444,43 @@ impl ApplicationHandler for Editor {
                         } else if self.input_keys.remove(name) {
                             self.input_keys_released.insert(name.to_string());
                             self.tick_keys_released.insert(name.to_string());
+                        }
+                    }
+                    // What the player TYPED, as opposed to which key they hit.
+                    // Layout-resolved by the OS, so an AZERTY `a` is an `a`.
+                    // Only while the game owns the keyboard: typing into the
+                    // Inspector must not also type into a menu behind it.
+                    if pressed && !typing && self.playing && !self.ctrl {
+                        if let Some(text) = event.text.as_ref() {
+                            // Control characters stay actions: Enter submits,
+                            // Backspace deletes, Tab moves — none of them is a
+                            // glyph, and a game that received one as text would
+                            // print a box.
+                            let typed: String = text.chars().filter(|c| !c.is_control()).collect();
+                            self.input_typed.push_str(&typed);
+                            self.tick_typed.push_str(&typed);
+                        }
+                        self.note_ui_text_key(code);
+                    }
+                    // The clipboard chords, which are the same keys with Ctrl
+                    // held and so are excluded above.
+                    if pressed && !typing && self.playing && self.ctrl {
+                        match code {
+                            KeyCode::KeyV => {
+                                self.ensure_os_clipboard();
+                                if let Some(t) = self.os_clipboard.as_mut().and_then(|c| c.get()) {
+                                    // A paste is typing that happens to be
+                                    // fast, so it arrives the same way — a game
+                                    // never special-cases Ctrl-V.
+                                    let t: String = t.chars().filter(|c| !c.is_control()).collect();
+                                    self.input_typed.push_str(&t);
+                                    self.tick_typed.push_str(&t);
+                                }
+                            }
+                            KeyCode::KeyA | KeyCode::KeyC | KeyCode::KeyX
+                            | KeyCode::ArrowLeft | KeyCode::ArrowRight
+                            | KeyCode::Backspace => self.note_ui_text_key(code),
+                            _ => {}
                         }
                     }
                     // …and the same event into the ACTION layer. Both views of

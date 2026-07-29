@@ -123,7 +123,16 @@ impl Editor {
         layers: &[(floptle_ui::UiLayer, Vec<floptle_ui::Node>, Vec<floptle_ui::Placed>)],
         dt: f32,
     ) {
-        let input = self.ui_nav_input();
+        let mut input = self.ui_nav_input();
+        // A focused text field owns the horizontal directions: Left and Right
+        // move the caret, not the ring. Up and Down still leave the field, so
+        // a form is still navigable and nobody is ever trapped in a box.
+        //
+        // This is the ordering half of "every key is two things" — without it
+        // one arrow press is spent twice, moving the caret AND the selection.
+        if self.ui_field_focused() {
+            input.dir = input.dir.filter(|d| matches!(d, Dir4::Up | Dir4::Down));
+        }
 
         // Front-most layer with focusable elements owns focus.
         let owner = layers.iter().rev().find_map(|(layer, roots, placed)| {
@@ -179,13 +188,27 @@ impl Editor {
         self.ui_submit_was = input.submit;
         self.ui_cancel_was = input.cancel;
         if let Some(id) = self.ui_focus {
+            let is_field = self.ui_field_of(id).is_some();
             if submit_edge {
-                self.ui_events.push((id, "pressed"));
-                self.ui_events.push((id, "released"));
-                self.ui_events.push((id, "clicked"));
+                if is_field {
+                    // Enter in a field is `submitted`, not a click: a lobby
+                    // code is entered and confirmed, and a field that also
+                    // fired `clicked` would run the button logic of whatever
+                    // the designer put the field inside.
+                    self.ui_events.push((id, "submitted"));
+                } else {
+                    self.ui_events.push((id, "pressed"));
+                    self.ui_events.push((id, "released"));
+                    self.ui_events.push((id, "clicked"));
+                }
             }
             if cancel_edge {
                 self.ui_events.push((id, "cancelled"));
+                // Escape leaves the field, which is the only way out on a
+                // keyboard-only screen with nothing else focusable.
+                if is_field {
+                    self.ui_focus_set(None);
+                }
             }
         }
     }
