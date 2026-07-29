@@ -57,6 +57,43 @@ pub enum ColorRef {
     Lit([f32; 4]),
 }
 
+/// Corner radii: either written out (one number or four), or the name of a
+/// project **radii** token.
+///
+/// Without this the radii scale was defined and unreachable — every corner in
+/// a style sheet had to be a magic number, which is the hand-typing the token
+/// system exists to remove, moved one file along.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CornerRef {
+    Token(String),
+    Lit(Corners),
+}
+
+/// A drop shadow whose colour can be a token (the paint type's cannot).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StyleShadow {
+    pub color: ColorRef,
+    #[serde(default)]
+    pub offset: [f32; 2],
+    #[serde(default)]
+    pub blur: f32,
+    #[serde(default)]
+    pub spread: f32,
+    #[serde(default)]
+    pub inset: bool,
+}
+
+/// A glow whose colour can be a token.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StyleGlow {
+    pub color: ColorRef,
+    #[serde(default)]
+    pub radius: f32,
+    #[serde(default)]
+    pub spread: f32,
+}
+
 /// A number: either written out, or the name of a project token.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -320,15 +357,15 @@ pub struct StyleBlock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gradient: Option<Gradient>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub radius: Option<Corners>,
+    pub radius: Option<CornerRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border: Option<Sides>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border_color: Option<ColorRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shadow: Option<ShadowSpec>,
+    pub shadow: Option<StyleShadow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub glow: Option<GlowSpec>,
+    pub glow: Option<StyleGlow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grain: Option<GrainSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -619,8 +656,11 @@ fn overlay(mut a: Animated, block: &StyleBlock, tk: &Tokens) -> Animated {
     if let Some(c) = &block.tint {
         a.tint = tk.color(c);
     }
-    if let Some(r) = block.radius {
-        a.radius = r.0;
+    if let Some(r) = &block.radius {
+        a.radius = match r {
+            CornerRef::Lit(c) => c.0,
+            CornerRef::Token(n) => Corners::all(tk.num(&NumRef::Token(n.clone()), Scale::Radii)).0,
+        };
     }
     if let Some(b) = block.border {
         a.border = b.0;
@@ -652,11 +692,21 @@ fn apply_discrete(spec: &mut crate::ElementSpec, block: &StyleBlock, tk: &Tokens
         let s = spec.shape.get_or_insert_with(Default::default);
         s.gradient = Some(g);
     }
-    if let Some(sh) = block.shadow {
-        spec.shape.get_or_insert_with(Default::default).shadow = Some(sh);
+    if let Some(sh) = &block.shadow {
+        spec.shape.get_or_insert_with(Default::default).shadow = Some(ShadowSpec {
+            color: tk.color(&sh.color),
+            offset: sh.offset,
+            blur: sh.blur,
+            spread: sh.spread,
+            inset: sh.inset,
+        });
     }
-    if let Some(gl) = block.glow {
-        spec.shape.get_or_insert_with(Default::default).glow = Some(gl);
+    if let Some(gl) = &block.glow {
+        spec.shape.get_or_insert_with(Default::default).glow = Some(GlowSpec {
+            color: tk.color(&gl.color),
+            radius: gl.radius,
+            spread: gl.spread,
+        });
     }
     if let Some(gr) = block.grain {
         spec.shape.get_or_insert_with(Default::default).grain = Some(gr);
@@ -1095,7 +1145,7 @@ mod tests {
         // parsing these files with implicit-some.
         assert_eq!(s.base.fill, Some(ColorRef::Token("accent".into())));
         assert_eq!(s.base.case, Some(Case::Upper));
-        assert_eq!(s.base.radius, Some(Corners::all(10.0)));
+        assert_eq!(s.base.radius, Some(CornerRef::Lit(Corners::all(10.0))));
         assert_eq!(s.transition.duration, 0.09);
         assert!(s.disabled.is_none(), "a state with no block stays None");
     }
@@ -1133,7 +1183,7 @@ mod tests {
             Style {
                 base: StyleBlock {
                     fill: Some(ColorRef::Token("accent".into())),
-                    radius: Some(Corners::all(6.0)),
+                    radius: Some(CornerRef::Lit(Corners::all(6.0))),
                     // A style owning padding is the case that forces styles to
                     // resolve BEFORE layout.
                     pad: Some(NumRef::Token("md".into())),

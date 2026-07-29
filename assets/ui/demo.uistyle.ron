@@ -1,0 +1,220 @@
+// Styles for the UI demo scene.
+//
+// One style per element, five states with fixed precedence
+// (disabled → pressed → hover → focus → selected → base), and a transition
+// that eases from wherever the value currently is. Every colour here is a
+// TOKEN NAME — the look of the whole demo is `demo.tokens.ron`.
+//
+// Note what is NOT here: no focus ring the engine drew, no scrollbar it drew,
+// no button shape it decided. The `focus` blocks below are the focus ring.
+{
+    // ---- the main call to action ------------------------------------------
+    "button/primary": (
+        base: (
+            fill: "accent-dim",
+            radius: "soft",
+            border: 2.0,
+            border_color: "accent",
+            text_color: "ink",
+            text_size: "label",
+            tracking: 1.2,
+        ),
+        hover: (
+            fill: "accent",
+            text_color: "bg",
+            scale: (1.02, 1.02),
+        ),
+        pressed: (
+            fill: "accent",
+            scale: (0.98, 0.98),
+        ),
+        // This IS the focus ring: a glow and a fatter border. On a round
+        // button it would be round, because it is the button's own shape.
+        focus: (
+            border: 3.0,
+            border_color: "ink",
+            glow: (color: (0.38, 0.78, 0.96, 0.55), radius: 18.0),
+            scale: (1.03, 1.03),
+        ),
+        disabled: (
+            fill: "bg",
+            border: 1.0,
+            border_color: (0.16, 0.18, 0.22, 1.0),
+            text_color: (0.34, 0.37, 0.43, 1.0),
+        ),
+        transition: (duration: 0.10, ease: OutBack),
+    ),
+
+    // ---- the quiet one ----------------------------------------------------
+    "button/ghost": (
+        base: (
+            fill: (0.0, 0.0, 0.0, 0.0),
+            radius: "soft",
+            border: 1.0,
+            border_color: "line",
+            text_color: "ink-dim",
+            text_size: "body",
+        ),
+        hover: (fill: "raised", text_color: "ink"),
+        pressed: (fill: "surface"),
+        focus: (border: 2.0, border_color: "accent", text_color: "ink"),
+        transition: (duration: 0.08, ease: OutCubic),
+    ),
+
+    // ---- a tab in a radio group -------------------------------------------
+    // `selected` is a first-class state, so a tab strip needs no script at
+    // all: `group: "tabs"` on each one and the engine does the rest.
+    "tab": (
+        base: (
+            fill: (0.0, 0.0, 0.0, 0.0),
+            radius: (8.0, 8.0, 0.0, 0.0),
+            border: (0.0, 0.0, 0.0, 2.0),
+            border_color: (0.0, 0.0, 0.0, 0.0),
+            text_color: "ink-dim",
+            text_size: "body",
+        ),
+        hover: (text_color: "ink"),
+        selected: (
+            text_color: "accent",
+            border_color: "accent",
+            fill: (0.38, 0.78, 0.96, 0.08),
+        ),
+        focus: (fill: (1.0, 1.0, 1.0, 0.06), text_color: "ink"),
+        transition: (duration: 0.12, ease: OutCubic),
+    ),
+
+    // ---- panels -----------------------------------------------------------
+    "panel": (
+        base: (
+            fill: "surface",
+            radius: "round",
+            border: 1.0,
+            border_color: "line",
+            shadow: (color: "shadow", offset: (0.0, 8.0), blur: 24.0, spread: 0.0),
+            pad: "md",
+            gap: "sm",
+        ),
+    ),
+    "panel/sunken": (
+        base: (
+            fill: "bg",
+            radius: "soft",
+            border: 1.0,
+            border_color: "line",
+        ),
+    ),
+
+    // ---- a text field -----------------------------------------------------
+    // The three colours below are the ONLY reason this style differs from a
+    // sunken panel. Leave them out and they follow the text colour, which is
+    // usually right — they are here to show they exist.
+    "field": (
+        base: (
+            fill: "bg",
+            radius: "soft",
+            border: 2.0,
+            border_color: "line",
+            text_color: "ink",
+            text_size: "label",
+            caret_color: "accent",
+            selection_color: (0.38, 0.78, 0.96, 0.30),
+            placeholder_color: "ink-dim",
+        ),
+        hover: (border_color: "ink-dim"),
+        focus: (border_color: "accent", glow: (color: (0.38, 0.78, 0.96, 0.35), radius: 12.0)),
+        transition: (duration: 0.08, ease: OutCubic),
+    ),
+
+    // ---- an inventory slot, and the item that lives in it -----------------
+    "slot": (
+        base: (
+            fill: (1.0, 1.0, 1.0, 0.03),
+            radius: "soft",
+            border: 2.0,
+            border_color: "line",
+        ),
+        // A drop target highlights itself with the ordinary `hover` state —
+        // no new look, no new hook.
+        hover: (border_color: "accent", fill: (0.38, 0.78, 0.96, 0.10)),
+        transition: (duration: 0.08, ease: OutCubic),
+    ),
+    "item": (
+        base: (
+            fill: "raised",
+            radius: "soft",
+            border: 1.0,
+            border_color: "line",
+            text_color: "ink",
+            text_size: "caption",
+        ),
+        hover: (fill: "accent-dim", border_color: "accent", scale: (1.06, 1.06)),
+        pressed: (scale: (0.94, 0.94)),
+        transition: (duration: 0.09, ease: OutBack),
+    ),
+
+    // ---- a list row -------------------------------------------------------
+    "chip": (
+        base: (
+            fill: (1.0, 1.0, 1.0, 0.04),
+            radius: "pill",
+            border: 1.0,
+            border_color: "line",
+            text_color: "ink-dim",
+            text_size: "body",
+        ),
+        hover: (border_color: "ink-dim", text_color: "ink"),
+        // "On" is the style's business. A tick mark, a filled pill, a lit
+        // edge — the engine draws none of them and has no opinion.
+        selected: (
+            fill: "accent",
+            border_color: "accent",
+            text_color: "bg",
+        ),
+        focus: (border: 2.0, border_color: "ink"),
+        transition: (duration: 0.10, ease: OutBack),
+    ),
+
+    // ---- a list row -------------------------------------------------------
+    "row": (
+        base: (
+            fill: (1.0, 1.0, 1.0, 0.02),
+            radius: "soft",
+            text_color: "ink-dim",
+            text_size: "body",
+        ),
+        hover: (fill: (1.0, 1.0, 1.0, 0.07), text_color: "ink"),
+        selected: (fill: (0.38, 0.78, 0.96, 0.14), text_color: "accent"),
+        focus: (border: 2.0, border_color: "accent"),
+        transition: (duration: 0.08, ease: OutCubic),
+    ),
+
+    // ---- the scrollbar, which is two of your elements ---------------------
+    "scroll/track": (
+        base: (fill: (1.0, 1.0, 1.0, 0.04), radius: "pill"),
+    ),
+    "scroll/thumb": (
+        base: (fill: "line", radius: "pill"),
+        hover: (fill: "accent"),
+        transition: (duration: 0.10, ease: OutCubic),
+    ),
+
+    // ---- text -------------------------------------------------------------
+    "title": (
+        base: (text_color: "ink", text_size: "title", tracking: 2.0, case: Upper),
+    ),
+    "caption": (
+        base: (text_color: "ink-dim", text_size: "caption"),
+    ),
+    "tooltip": (
+        base: (
+            fill: (0.02, 0.03, 0.05, 0.96),
+            radius: "soft",
+            border: 1.0,
+            border_color: "accent-dim",
+            text_color: "ink",
+            text_size: "caption",
+            pad: "sm",
+            shadow: (color: "shadow", offset: (0.0, 4.0), blur: 14.0, spread: 0.0),
+        ),
+    ),
+}

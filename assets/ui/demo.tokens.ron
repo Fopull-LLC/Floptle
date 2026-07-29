@@ -1,0 +1,49 @@
+// Design tokens for the UI demo scene.
+//
+// This is a PROJECT file, not an engine one. The engine ships no palette, no
+// type scale and no spacing scale — it only knows how to look names up. Change
+// `accent` here and everything that used the name changes with it; delete this
+// file and the demo goes back to whatever each element was authored with.
+(
+    colors: {
+        // Surfaces, dark to light.
+        "bg":       (0.055, 0.062, 0.078, 1.0),
+        "surface":  (0.095, 0.105, 0.130, 1.0),
+        "raised":   (0.135, 0.150, 0.185, 1.0),
+        "line":     (0.250, 0.280, 0.340, 1.0),
+
+        // Text.
+        "ink":      (0.900, 0.925, 0.965, 1.0),
+        "ink-dim":  (0.560, 0.600, 0.680, 1.0),
+
+        // The one colour that says which game this is. Everything accented
+        // points at this name, so it is one edit.
+        "accent":     (0.380, 0.780, 0.960, 1.0),
+        "accent-dim": (0.180, 0.400, 0.520, 1.0),
+        "warn":       (0.980, 0.520, 0.320, 1.0),
+        "good":       (0.400, 0.870, 0.560, 1.0),
+        "shadow":     (0.000, 0.000, 0.000, 0.500),
+    },
+    // A 4-unit scale. The ◫ UI tab's snap grid defaults to the SMALLEST value
+    // here, so dragging lands on this scale without anyone configuring it.
+    spacing: {
+        "xs":  4.0,
+        "sm":  8.0,
+        "md": 16.0,
+        "lg": 24.0,
+        "xl": 40.0,
+    },
+    radii: {
+        "sharp": 0.0,
+        "soft":  6.0,
+        "round": 12.0,
+        "pill":  999.0,
+    },
+    text: {
+        "caption": 14.0,
+        "body":    18.0,
+        "label":   20.0,
+        "title":   34.0,
+        "display": 52.0,
+    },
+)

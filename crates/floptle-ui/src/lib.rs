@@ -29,8 +29,8 @@ pub use paint::{
     Blend, Corners, GlowSpec, Gradient, GradientKind, GrainSpec, ImageFit, ShadowSpec, Sides,
 };
 pub use style::{
-    apply_styles, ColorRef, Ease, NumRef, StateInput, Style, StyleBlock, StyleRuntime, StyleSheet,
-    Tokens, Transition, UiState,
+    apply_styles, ColorRef, CornerRef, Ease, NumRef, StateInput, Style, StyleBlock, StyleGlow,
+    StyleRuntime, StyleShadow, StyleSheet, Tokens, Transition, UiState,
 };
 pub use nav::Dir4;
 pub use text::{Case, Overflow, TextShadow, TextStroke};

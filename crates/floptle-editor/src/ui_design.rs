@@ -607,10 +607,23 @@ pub(crate) fn block_from(spec: &ElementSpec) -> floptle_ui::StyleBlock {
         b.fill = Some(ColorRef::Lit(sh.fill));
         b.border_color = Some(ColorRef::Lit(sh.border_color));
         b.gradient = sh.gradient;
-        b.radius = Some(sh.radius);
+        b.radius = Some(floptle_ui::CornerRef::Lit(sh.radius));
         b.border = Some(sh.border);
-        b.shadow = sh.shadow;
-        b.glow = sh.glow;
+        // Literal colours: this lifts what is ON the element, and the element
+        // never knew a token name. Swapping them for tokens afterwards is the
+        // natural second step, and one the author has to choose.
+        b.shadow = sh.shadow.map(|s| floptle_ui::StyleShadow {
+            color: ColorRef::Lit(s.color),
+            offset: s.offset,
+            blur: s.blur,
+            spread: s.spread,
+            inset: s.inset,
+        });
+        b.glow = sh.glow.map(|g| floptle_ui::StyleGlow {
+            color: ColorRef::Lit(g.color),
+            radius: g.radius,
+            spread: g.spread,
+        });
         b.grain = sh.grain;
         if sh.blend != floptle_ui::Blend::Normal {
             b.blend = Some(sh.blend);
