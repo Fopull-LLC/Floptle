@@ -76,6 +76,25 @@ pub struct DrawTri {
 /// sort before applying — netcode prediction replays depend on same-inputs →
 /// same-results.
 type ComponentWrites = Rc<RefCell<HashMap<(u32, String, String), f64>>>;
+/// The COLOUR-valued twin of [`ComponentWrites`] (`e.fill = color(...)`). A
+/// separate map because `borderR` already means the right border width — one
+/// namespace would have made a colour assignment resize an edge.
+type ComponentColorWrites = Rc<RefCell<HashMap<(u32, String, String), [f32; 4]>>>;
+
+/// One live `ui.bind(node, prop, fn)`: the engine calls `fn` once a frame and
+/// writes what it returns.
+///
+/// This exists because "keep this label showing that number" was an `update`
+/// per label — every one of them a place to forget the formatting, drift out
+/// of step, or keep writing after the panel closed. The binding says the
+/// relationship once.
+pub(crate) struct UiBinding {
+    pub e: u32,
+    pub prop: String,
+    pub f: mlua::RegistryKey,
+}
+
+type UiBindings = Rc<RefCell<Vec<UiBinding>>>;
 
 mod api;
 mod audio_api;
@@ -97,7 +116,10 @@ pub(crate) use api::install_handle_api;
 /// Live ECS field appliers, reused by the animation system's property tracks.
 /// `mirror_components` reads them back (numeric) — the animation recorder diffs
 /// it to auto-key changed properties.
-pub use api::{apply_component_field, apply_component_field_str, mirror_components};
+pub use api::{
+    apply_component_color, apply_component_field, apply_component_field_str,
+    mirror_component_colors, mirror_components,
+};
 pub use input_api::{SharedDomain, SharedInput};
 pub use net_api::{
     input_to_net, net_aim, net_to_input, NetCmd, NetRoleState, NetState, RewindScope, RollbackInfo,
@@ -293,6 +315,8 @@ pub struct ScriptHost {
     ui_style_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node:getcomponent(name).field = value` writes, flushed to the ECS after `run`.
     component_changes: ComponentWrites,
+    component_colors: ComponentColorWrites,
+    ui_bindings: UiBindings,
     /// The material presets the editor lends each frame (name → Material), so a script can
     /// set `node.material = "Gold"` (or an `assets.getFile("materials/Gold.ron")`).
     materials: Rc<RefCell<HashMap<String, Material>>>,
@@ -593,7 +617,7 @@ pub struct AudioInfo {
 /// handles (which can persist across frames, e.g. a cached manager reference) from the
 /// `&mut World` borrow, and lets one script reach any other node by hierarchy or name.
 #[derive(Default)]
-struct SceneMirror {
+pub(crate) struct SceneMirror {
     /// Stable iteration order (entity index), for deterministic name lookups.
     order: Vec<u32>,
     names: HashMap<u32, String>,
@@ -625,6 +649,11 @@ struct SceneMirror {
     /// `node:getcomponent("PointLight"/"RigidBody")`. Synced each run for read-back; writes
     /// go through `Shared::component_changes` and are flushed to the ECS after `run`.
     components: HashMap<u32, HashMap<String, HashMap<String, f64>>>,
+    /// Repeater rows' 0-based index, read as `node.index`. Absent on
+    /// everything a repeater didn't spawn.
+    repeat_index: HashMap<u32, u32>,
+    /// The colour-valued half of the same mirror (`e.fill`, `e.textColor`, …).
+    component_colors: HashMap<u32, HashMap<String, HashMap<String, [f32; 4]>>>,
     /// Entity index → its `Entity` (with generation), so handle-written transforms flush
     /// back to the right ECS entity.
     ents: HashMap<u32, Entity>,
@@ -727,6 +756,7 @@ struct Shared {
     /// `node:getcomponent(name).field = value` writes: (entity, component, field) → number,
     /// flushed to the ECS after `run` (and read back the same frame).
     component_changes: ComponentWrites,
+    component_colors: ComponentColorWrites,
     /// Construction-API writes (`setCelestial`/`setMaterial`/`setTerrain`/
     /// `setPrimitive`), applied in the flush.
     rich_sets: Rc<RefCell<Vec<(u32, RichSet)>>>,
@@ -2604,6 +2634,185 @@ end
     }
 
     #[test]
+    fn a_script_paints_with_colors_and_reads_booleans_as_booleans() {
+        let dir = std::env::temp_dir().join("floptle_script_test_ui_color");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "paint",
+            concat!(
+                "function update(node, dt)\n",
+                "  local el = node:getcomponent(\"UiElement\")\n",
+                // One line instead of four channel pokes.
+                "  el.fill = color(1, 0.5, 0.25)\n",
+                "  el.textColor = color.hex(\"#3366ccff\")\n",
+                // …and a boolean that behaves like one. `visible` starts
+                // false; if it read back as the number 0 this branch would be
+                // taken, because 0 is truthy in Lua. That is the bug.
+                "  if el.visible then node.x = 99 else node.x = 1 end\n",
+                "  el.visible = true\n",
+                "end\n",
+            ),
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            floptle_ui::ElementSpec {
+                visible: false,
+                shape: Some(floptle_ui::ShapeSpec::default()),
+                text: Some(floptle_ui::TextSpec { text: "hi".into(), ..Default::default() }),
+                ..Default::default()
+            },
+        );
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "paint".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(
+            world.get::<Transform>(e).unwrap().translation.x,
+            1.0,
+            "`if el.visible` must be false when it is false — 0 is truthy in Lua"
+        );
+        let spec = world.get::<floptle_ui::ElementSpec>(e).unwrap();
+        let fill = spec.shape.unwrap().fill;
+        assert!((fill[0] - 1.0).abs() < 1e-6 && (fill[1] - 0.5).abs() < 1e-6);
+        assert_eq!(fill[3], 1.0, "a three-argument color is opaque, not invisible");
+        let tc = spec.text.as_ref().unwrap().color;
+        assert!((tc[0] - 0x33 as f32 / 255.0).abs() < 1e-4, "hex parsed: {tc:?}");
+        assert!(spec.visible);
+    }
+
+    #[test]
+    fn ui_bind_keeps_a_label_and_a_bar_up_to_date() {
+        let dir = std::env::temp_dir().join("floptle_script_test_ui_bind");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "hud",
+            concat!(
+                "hp = 10\n",
+                "function start(node)\n",
+                // Say the relationship once, in `start` — not an `update` per
+                // label that has to be kept true by hand.
+                "  ui.bind(find(\"Label\"), \"text\", function() return \"HP \" .. hp end)\n",
+                "  ui.bind(find(\"Bar\"), \"value\", function() return hp / 20 end)\n",
+                "  ui.bind(find(\"Label\"), \"textColor\",\n",
+                "          function() return hp >= 5 and color(1,1,1) or color(1,0,0) end)\n",
+                "end\n",
+                "function update(node, dt)\n  hp = hp - 5\nend\n",
+            ),
+        );
+        let mut world = World::default();
+        let driver = world.spawn();
+        world.insert(driver, Transform::IDENTITY);
+        world.insert(
+            driver,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "hud".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let label = world.spawn();
+        world.insert(label, Transform::IDENTITY);
+        world.insert(label, floptle_core::Name("Label".into()));
+        world.insert(
+            label,
+            floptle_ui::ElementSpec {
+                text: Some(floptle_ui::TextSpec { text: "?".into(), ..Default::default() }),
+                ..Default::default()
+            },
+        );
+        let bar = world.spawn();
+        world.insert(bar, Transform::IDENTITY);
+        world.insert(bar, floptle_core::Name("Bar".into()));
+        world.insert(
+            bar,
+            floptle_ui::ElementSpec {
+                slider: Some(floptle_ui::SliderSpec { value: 0.0, ..Default::default() }),
+                ..Default::default()
+            },
+        );
+
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        // Bindings run after every `update`, so the first frame already shows
+        // the value this frame produced, not the one it started with.
+        assert_eq!(world.get::<floptle_ui::ElementSpec>(label).unwrap().text.as_ref().unwrap().text, "HP 5");
+        let v = world.get::<floptle_ui::ElementSpec>(bar).unwrap().slider.unwrap().value;
+        assert!((v - 0.25).abs() < 1e-6, "the bar found UiSlider.value, not UiElement: {v}");
+        assert_eq!(
+            world.get::<floptle_ui::ElementSpec>(label).unwrap().text.as_ref().unwrap().color,
+            [1.0, 1.0, 1.0, 1.0]
+        );
+
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert_eq!(world.get::<floptle_ui::ElementSpec>(label).unwrap().text.as_ref().unwrap().text, "HP 0");
+        assert_eq!(
+            world.get::<floptle_ui::ElementSpec>(label).unwrap().text.as_ref().unwrap().color,
+            [1.0, 0.0, 0.0, 1.0],
+            "the colour binding re-evaluated too"
+        );
+    }
+
+    #[test]
+    fn a_binding_that_throws_is_dropped_rather_than_reported_sixty_times_a_second() {
+        let dir = std::env::temp_dir().join("floptle_script_test_ui_bind_err");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "bad",
+            concat!(
+                "function start(node)\n",
+                "  ui.bind(find(\"Label\"), \"text\", function() error(\"nope\") end)\n",
+                "end\n",
+            ),
+        );
+        let mut world = World::default();
+        let driver = world.spawn();
+        world.insert(driver, Transform::IDENTITY);
+        world.insert(
+            driver,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "bad".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let label = world.spawn();
+        world.insert(label, Transform::IDENTITY);
+        world.insert(label, floptle_core::Name("Label".into()));
+        world.insert(
+            label,
+            floptle_ui::ElementSpec {
+                text: Some(floptle_ui::TextSpec::default()),
+                ..Default::default()
+            },
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert_eq!(host.errors().len(), 1, "reported once: {:?}", host.errors());
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "…and not again: {:?}", host.errors());
+    }
+
+    #[test]
     fn script_applies_material_preset() {
         // node.material = "<name>" resolves against the lent presets and inserts a Material.
         let dir = std::env::temp_dir().join("floptle_script_test_material");
@@ -2681,7 +2890,7 @@ end
              rb.lock_z = true\n\
              rb.lock_rot_x = true\n\
              rb.lock_rot_z = 1\n\
-             if rb.lock_y > 0 then rb.friction = -1 end -- read-back sanity: must be 0\n\
+             if rb.lock_y then rb.friction = -1 end -- reads back as a BOOLEAN, and is false\n\
             end\n",
         );
         let mut world = World::default();

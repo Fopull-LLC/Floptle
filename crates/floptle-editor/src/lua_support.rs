@@ -402,6 +402,48 @@ function ui.dragging() end
 ---The drop target the drag is currently over, or nil.
 ---@return Node|nil
 function ui.dropTarget() end
+---Say a relationship once instead of writing an `update` that keeps it true:
+---the engine calls `fn` once a frame, after every update, and writes what it
+---returns. A string or number goes to `text`; a `color(...)` to a colour field;
+---a number or boolean to whichever component actually has that field (so
+---`\"value\"` finds the slider). Re-binding the same property replaces it.
+---@param node Node
+---@param property string
+---@param fn fun(): any
+function ui.bind(node, property, fn) end
+---Drop every binding on a node, or just one property's.
+---@param node Node
+---@param property string|nil
+function ui.unbind(node, property) end
+
+---A colour: `color(r, g, b [, a])`, `color(gray [, a])`, or `color(other, a)`
+---to copy with a new alpha. Channels are 0..1 and alpha defaults to 1, so
+---`color(1, 0, 0)` is opaque red. It is a plain `{r, g, b, a}` table (also
+---indexable `[1]`..`[4]`), so it prints, saves and compares — and any
+---`{1, 0, 0}` your project already had is already a colour.
+---
+---Assign one whole: `el.fill = color(1, 0.85, 0.35)`. Also `textColor`,
+---`borderColor`, `tint`, `groupTint`, `caretColor`, `selectionColor`,
+---`placeholderColor`.
+---@overload fun(gray: number, a: number|nil): table
+---@overload fun(other: table, a: number|nil): table
+---@param r number
+---@param g number
+---@param b number
+---@param a number|nil
+---@return table
+function color(r, g, b, a) end
+---`color.hex(\"#ff8800\")` — 6 or 8 hex digits. A 3-digit shorthand is refused
+---rather than guessed at.
+---@param s string
+---@return table
+function color.hex(s) end
+---Blend two colours per channel; `t` is clamped to 0..1.
+---@param a table
+---@param b table
+---@param t number
+---@return table
+function color.lerp(a, b, t) end
 
 ---Multiplayer (docs/netcode-design.md). Mark nodes with the Networked component,
 ---declare synced vars with a top-level `replicated = { hp = 100 }` table (read/

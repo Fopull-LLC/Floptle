@@ -32,6 +32,16 @@ impl Tags {
     }
 }
 
+/// Which row of a UI **repeater** this node is: 0-based, in flow order.
+///
+/// Runtime-only and never serialised — a repeater's rows are spawned by the
+/// engine while the game runs, so an index in a saved scene would describe a
+/// node that no longer exists. A row's script reads it as `node.index` and
+/// fills itself in; that read is the entire interface between "there are seven
+/// of these" and "this one is the third".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RepeatIndex(pub u32);
+
 /// A scene-graph parent link: this entity's [`Transform`](crate::transform::Transform)
 /// is **local** (relative to the parent), and its world transform is the parent's
 /// world transform composed with it. Moving/rotating/scaling a parent therefore

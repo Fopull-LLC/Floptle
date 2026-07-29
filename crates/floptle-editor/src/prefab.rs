@@ -198,7 +198,7 @@ impl Editor {
         self.apply_destroys(destroys);
     }
 
-    fn apply_spawn_batch(
+    pub(crate) fn apply_spawn_batch(
         &mut self,
         spawns: Vec<floptle_script::SpawnRequest>,
         creates: Vec<floptle_script::CreateRequest>,
@@ -657,7 +657,7 @@ impl Editor {
         self.selection.retain(|&e| self.world.is_alive(e));
     }
 
-    fn apply_destroys(&mut self, destroys: Vec<u32>) {
+    pub(crate) fn apply_destroys(&mut self, destroys: Vec<u32>) {
         let mut kids: std::collections::HashMap<Entity, Vec<Entity>> =
             std::collections::HashMap::new();
         for (e, p) in self.world.query::<floptle_core::Parent>() {

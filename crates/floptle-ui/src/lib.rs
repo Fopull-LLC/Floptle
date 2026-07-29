@@ -710,6 +710,16 @@ pub struct ElementSpec {
     /// string in the layer's [`Self::tooltip_box`]. Empty = no tooltip.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tooltip: String,
+    /// One copy of a prefab per row: the engine keeps this element's children
+    /// matching [`RepeatSpec::count`], spawning and destroying only the
+    /// difference.
+    ///
+    /// This is the answer to eight hand-placed `Icon1`…`Icon8` elements and to
+    /// the four near-identical `*_row.lua` scripts that build lists a node at
+    /// a time. The row is an ordinary prefab you author and can open; the
+    /// engine only counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeater: Option<RepeatSpec>,
     /// This element IS the layer's tooltip: one of yours, an ordinary panel
     /// with a label inside, styled however you like.
     ///
@@ -720,6 +730,24 @@ pub struct ElementSpec {
     /// should sit somewhere fixed instead is one `Pin` away.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub tooltip_box: bool,
+}
+
+/// A repeated row (see [`ElementSpec::repeater`]).
+///
+/// Deliberately two fields. Everything else about a list — what each row says,
+/// what it does when clicked, how it is sorted, whether it animates in — is
+/// the row prefab's and the game's. The engine's whole job is "there should be
+/// `count` of these", which is the part that was being rewritten per screen.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RepeatSpec {
+    /// The prefab instantiated once per row, by name or project-relative path
+    /// — the same string [`spawn`](https://example.invalid) takes in Lua.
+    pub template: String,
+    /// How many rows there should be. A script sets it, or `ui.bind`s it to
+    /// the length of a table; the engine spawns or destroys the difference and
+    /// leaves every surviving row alone.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub count: u32,
 }
 
 /// An editable text element (see [`ElementSpec::field`]).
@@ -867,6 +895,7 @@ impl Default for ElementSpec {
             draggable: false,
             drop_target: false,
             tooltip: String::new(),
+            repeater: None,
             tooltip_box: false,
         }
     }
@@ -2939,6 +2968,8 @@ mod tests {
             "drop_target",
             "tooltip",
             "tooltip_box",
+            // Phase E.
+            "repeater",
         ] {
             assert!(!has_key(&text, absent), "`{absent}` leaked into {text}");
         }

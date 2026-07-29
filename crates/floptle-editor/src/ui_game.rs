@@ -1788,6 +1788,35 @@ impl Editor {
                 )
                 .changed();
         });
+        // --- repeater --------------------------------------------------------
+        let mut has_rep = spec.repeater.is_some();
+        if ui
+            .checkbox(&mut has_rep, "repeat a row")
+            .on_hover_text(
+                "keep this element's children matching `count`, one copy of a prefab each. \
+                 The engine spawns and destroys only the difference, so a list that gains \
+                 a row keeps the others' state. Rows read `node.index`. Runs during Play.",
+            )
+            .changed()
+        {
+            spec.repeater = has_rep.then(floptle_ui::RepeatSpec::default);
+            c = true;
+        }
+        if let Some(r) = &mut spec.repeater {
+            ui.indent("ui_repeat", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("row prefab").on_hover_text("the same name `spawn()` takes");
+                    c |= ui.text_edit_singleline(&mut r.template).changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("count").on_hover_text(
+                        "usually driven from Lua — `ui.bind(list, \"count\", function() \
+                         return #items end)`",
+                    );
+                    c |= ui.add(egui::DragValue::new(&mut r.count).speed(0.2).range(0..=4096)).changed();
+                });
+            });
+        }
         // --- tooltip ---------------------------------------------------------
         ui.horizontal(|ui| {
             ui.label("tooltip").on_hover_text(

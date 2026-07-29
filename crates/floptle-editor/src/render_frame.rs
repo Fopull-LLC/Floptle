@@ -4064,6 +4064,10 @@ impl Editor {
                     [yaw, pitch]
                 })
             });
+            // Repeaters first: a list whose count changed last frame gets its
+            // rows NOW, so this frame's layout, hit-testing and hooks all see
+            // the same set of rows the player is looking at.
+            self.ui_repeaters();
             // Game-UI interaction (buttons + draggable sliders): detect hover/press/
             // click against this frame's layout BEFORE scripts run, so a dragged
             // slider's value is already in the ECS when `update` reads it. The hook

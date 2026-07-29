@@ -694,6 +694,7 @@ impl ScriptHost {
         // for the frame the `dropped` hooks run on, which is the frame that
         // actually needs to read it.
         let ui_drag: crate::UiDragCell = Rc::new(RefCell::new(None));
+        let ui_bindings: Rc<RefCell<Vec<crate::UiBinding>>> = Rc::new(RefCell::new(Vec::new()));
         if let Ok(t) = lua.create_table() {
             let req = ui_focus_request.clone();
             let cur = ui_focus.clone();
@@ -745,6 +746,43 @@ impl ScriptHost {
                 lua.create_function(move |lua, ()| match d.borrow().and_then(|(_, t)| t) {
                     Some(id) => crate::env::new_node_handle(lua, id).map(mlua::Value::Table),
                     None => Ok(mlua::Value::Nil),
+                })
+                .ok(),
+            );
+            // `ui.bind(node, prop, fn)` — say the relationship once instead of
+            // writing an `update` that keeps it true. The engine calls `fn`
+            // once a frame and writes what comes back; a binding on a node
+            // that goes away goes away with it.
+            let binds = ui_bindings.clone();
+            let _ = t.set(
+                "bind",
+                lua.create_function(
+                    move |lua, (node, prop, f): (mlua::Value, String, mlua::Function)| {
+                        let e = crate::env::node_id_of(&node).ok_or_else(|| {
+                            mlua::Error::runtime("ui.bind expects (node, property, function)")
+                        })?;
+                        let key = lua.create_registry_value(f)?;
+                        let mut b = binds.borrow_mut();
+                        // Re-binding the same property replaces rather than
+                        // stacks: two functions fighting over one label every
+                        // frame is never what was meant.
+                        b.retain(|x| !(x.e == e && x.prop == prop));
+                        b.push(crate::UiBinding { e, prop, f: key });
+                        Ok(())
+                    },
+                )
+                .ok(),
+            );
+            let binds = ui_bindings.clone();
+            let _ = t.set(
+                "unbind",
+                lua.create_function(move |_, (node, prop): (mlua::Value, Option<String>)| {
+                    let e = crate::env::node_id_of(&node)
+                        .ok_or_else(|| mlua::Error::runtime("ui.unbind expects a node"))?;
+                    binds
+                        .borrow_mut()
+                        .retain(|x| x.e != e || prop.as_ref().is_some_and(|p| *p != x.prop));
+                    Ok(())
                 })
                 .ok(),
             );
@@ -1141,6 +1179,7 @@ impl ScriptHost {
             ui_style_changes: Rc::new(RefCell::new(HashMap::new())),
             ui_focus: ui_focus.clone(),
             component_changes: Rc::new(RefCell::new(HashMap::new())),
+            component_colors: Rc::new(RefCell::new(HashMap::new())),
             rich_sets: Rc::new(RefCell::new(Vec::new())),
             anim_info: Rc::new(RefCell::new(HashMap::new())),
             anim_commands: Rc::new(RefCell::new(Vec::new())),
@@ -1318,6 +1357,7 @@ impl ScriptHost {
             ui_text_changes: shared.ui_text_changes.clone(),
             ui_style_changes: shared.ui_style_changes.clone(),
             component_changes: shared.component_changes.clone(),
+            component_colors: shared.component_colors.clone(),
             materials: Rc::new(RefCell::new(HashMap::new())),
             project_root,
             save_state,
@@ -1335,6 +1375,7 @@ impl ScriptHost {
             ui_focus,
             ui_focus_request,
             ui_drag,
+            ui_bindings,
             anim_info: shared.anim_info.clone(),
             anim_commands: shared.anim_commands.clone(),
             vfx_info: shared.vfx_info.clone(),
@@ -1392,6 +1433,106 @@ impl ScriptHost {
         *self.ui_drag.borrow_mut() = drag;
     }
 
+    /// Evaluate every live `ui.bind` and queue what it returned.
+    ///
+    /// A binding whose node no longer exists is dropped silently — a screen
+    /// closing should not be an error. A binding whose function THROWS is
+    /// dropped **loudly, once**: left in place it would report the same
+    /// failure sixty times a second and bury everything else in the Console.
+    fn run_ui_bindings(&mut self) {
+        if self.ui_bindings.borrow().is_empty() {
+            return;
+        }
+        let mut dead: Vec<usize> = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
+        {
+            let binds = self.ui_bindings.borrow();
+            let scene = self.scene.borrow();
+            for (i, b) in binds.iter().enumerate() {
+                if !scene.ents.contains_key(&b.e) {
+                    dead.push(i);
+                    continue;
+                }
+                let Ok(f) = self.lua.registry_value::<mlua::Function>(&b.f) else {
+                    dead.push(i);
+                    continue;
+                };
+                match f.call::<mlua::Value>(()) {
+                    Ok(v) => self.apply_binding(&scene, b.e, &b.prop, v),
+                    Err(err) => {
+                        failures.push(format!("ui.bind({}): {err}", b.prop));
+                        dead.push(i);
+                    }
+                }
+            }
+        }
+        for i in dead.into_iter().rev() {
+            let b = self.ui_bindings.borrow_mut().remove(i);
+            let _ = self.lua.remove_registry_value(b.f);
+        }
+        for msg in failures {
+            self.record_error("ui.bind", msg);
+        }
+    }
+
+    /// Route one binding result onto the right write channel.
+    ///
+    /// The property name decides nothing on its own — `value` belongs to a
+    /// slider and `opacity` to an element — so the component is picked by
+    /// asking the mirror which one actually has that field. A binding written
+    /// against the wrong component then does nothing instead of quietly
+    /// writing to a field of the same name somewhere else.
+    fn apply_binding(&self, scene: &crate::SceneMirror, e: u32, prop: &str, v: mlua::Value) {
+        match (&v, prop) {
+            // `text` and `style` are node properties, not component fields.
+            (_, "text") => {
+                let s = match &v {
+                    mlua::Value::String(s) => s.to_string_lossy(),
+                    mlua::Value::Number(n) => crate::api::format_lua_number(*n),
+                    mlua::Value::Integer(n) => n.to_string(),
+                    mlua::Value::Boolean(b) => b.to_string(),
+                    _ => return,
+                };
+                self.ui_text_changes.borrow_mut().insert(e, s);
+            }
+            (mlua::Value::String(s), "style") => {
+                self.ui_style_changes.borrow_mut().insert(e, s.to_string_lossy());
+            }
+            (mlua::Value::Table(t), _) => {
+                if let Ok(c) = crate::api::read_color(t) {
+                    let comp = Self::owning_component(scene, e, prop, true);
+                    self.component_colors.borrow_mut().insert((e, comp, prop.to_string()), c);
+                }
+            }
+            _ => {
+                let n = match v {
+                    mlua::Value::Number(n) => n,
+                    mlua::Value::Integer(n) => n as f64,
+                    mlua::Value::Boolean(b) => f64::from(u8::from(b)),
+                    // nil means "nothing to say this frame", not "write zero".
+                    _ => return,
+                };
+                let comp = Self::owning_component(scene, e, prop, false);
+                self.component_changes.borrow_mut().insert((e, comp, prop.to_string()), n);
+            }
+        }
+    }
+
+    /// Which component on `e` owns `prop`, per the mirror. Defaults to
+    /// `UiElement`, which is what a binding is nearly always about.
+    fn owning_component(scene: &crate::SceneMirror, e: u32, prop: &str, color: bool) -> String {
+        let found = if color {
+            scene.component_colors.get(&e).and_then(|m| {
+                m.iter().find(|(_, fields)| fields.contains_key(prop)).map(|(k, _)| k.clone())
+            })
+        } else {
+            scene.components.get(&e).and_then(|m| {
+                m.iter().find(|(_, fields)| fields.contains_key(prop)).map(|(k, _)| k.clone())
+            })
+        };
+        found.unwrap_or_else(|| "UiElement".to_string())
+    }
+
     /// Drop every per-(node, script) environment plus its net handlers and
     /// synced stores — a SCENE SWITCH: the next `run` rebuilds fresh instances
     /// against the new world, and every `start` re-fires. Compiled sources stay
@@ -1405,6 +1546,11 @@ impl ScriptHost {
             self.drop_net_instance(&k);
         }
         self.envs.borrow_mut().clear();
+        // Bindings point at the OLD scene's entity indices, which the new
+        // scene will reuse. Left in place they would drive the wrong nodes.
+        for b in self.ui_bindings.borrow_mut().drain(..) {
+            let _ = self.lua.remove_registry_value(b.f);
+        }
         // Queued spawn/destroy requests must not leak across a scene switch
         // (their entities/prefabs belong to the old scene's session).
         for req in self.spawn_requests.borrow_mut().drain(..) {
@@ -2451,6 +2597,10 @@ impl ScriptHost {
         }
         // Pass 2: run each script's start/update.
         self.run_pass(world, &work, dt, time, Pass::Frame, floptle_input::Domain::Frame);
+        // Bindings run AFTER every `update`, so a label always shows this
+        // frame's value rather than last frame's, and before the flush, so a
+        // binding's write rides the same pass as a hand-written one.
+        self.run_ui_bindings();
         self.flush_writes(world);
 
         // Drop environments whose (node, script) no longer exists.
@@ -2799,6 +2949,11 @@ impl ScriptHost {
                     apply_component_field(world, ent, comp, field, *val);
                 }
             }
+            for ((eid, comp, field), c) in self.component_colors.borrow().iter() {
+                if let Some(&ent) = scene.ents.get(eid) {
+                    crate::apply_component_color(world, ent, comp, field, *c);
+                }
+            }
             // `node:setShaderParam(name, ...)`: fold into the node's UI element
             // (when it has a `stage ui` shader) or its Material's params. The
             // per-frame shader drivers see the change and upload a uniform
@@ -2824,6 +2979,7 @@ impl ScriptHost {
         self.ui_text_changes.borrow_mut().clear();
         self.ui_style_changes.borrow_mut().clear();
         self.component_changes.borrow_mut().clear();
+        self.component_colors.borrow_mut().clear();
     }
 
     /// Fire UI-interaction hooks on a node's scripts: for each `(entity, hook)`
@@ -2906,6 +3062,13 @@ impl ScriptHost {
             let comps = mirror_components(world, e);
             if !comps.is_empty() {
                 s.components.insert(id, comps);
+            }
+            if let Some(i) = world.get::<floptle_core::RepeatIndex>(e) {
+                s.repeat_index.insert(id, i.0);
+            }
+            let cols = crate::mirror_component_colors(world, e);
+            if !cols.is_empty() {
+                s.component_colors.insert(id, cols);
             }
             if let Some(v) = world.get::<Visible>(e) {
                 s.visible.insert(id, v.0);

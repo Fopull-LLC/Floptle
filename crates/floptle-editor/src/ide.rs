@@ -2536,7 +2536,9 @@ fn api_category(label: &str) -> &'static str {
             | "dragEnter"
             | "dragOver"
             | "dragLeave"
+            | "node.index"
     ) || label.starts_with("ui.")
+        || label.starts_with("color")
     {
         "game UI — text, buttons & hooks"
     } else if matches!(label, "noderef" | "scriptref" | "componentref") {
@@ -2838,6 +2840,12 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "ui.focused", insert: "ui.focused()", doc: "ui.focused() — the focused element as a node, or nil. Also readable per-node as node.focused." },
     ApiEntry { label: "ui.dragging", insert: "ui.dragging()", doc: "ui.dragging() — the element being dragged, as a node, or nil. Live for the whole drag AND for the frame the `dropped` hooks run on. There is no separate payload channel because a node already carries params, a name and tags — ask it what it is." },
     ApiEntry { label: "ui.dropTarget", insert: "ui.dropTarget()", doc: "ui.dropTarget() — the drop target the drag is currently over, as a node, or nil." },
+    ApiEntry { label: "ui.bind", insert: "ui.bind(", doc: "ui.bind(node, \"property\", function() ... end) — say the relationship once instead of writing an update() that keeps it true. The engine calls the function once a frame, after every update, and writes what it returns: a string or number to \"text\", a color(...) to a colour field, a number/boolean to any component field (the component is picked by which one actually has that field, so \"value\" finds UiSlider). Re-binding the same property replaces. A binding whose node is gone is dropped silently; one that throws is dropped after reporting once." },
+    ApiEntry { label: "ui.unbind", insert: "ui.unbind(", doc: "ui.unbind(node) drops every binding on that node; ui.unbind(node, \"text\") drops one." },
+    ApiEntry { label: "color", insert: "color(", doc: "color(r, g, b [, a]) — a colour, 0..1 per channel, alpha 1 by default. Also color(gray [, a]) and color(other [, a]) to copy with a new alpha. It's a plain table {r,g,b,a} (also [1]..[4]) so it prints, saves and compares. Assign it whole: el.fill = color(1, 0.85, 0.35), el.textColor, el.borderColor, el.tint, el.groupTint, el.caretColor." },
+    ApiEntry { label: "color.hex", insert: "color.hex(\"#\")", doc: "color.hex(\"#ff8800\") / color.hex(\"ff8800aa\") — 6 or 8 hex digits. A 3-digit shorthand is refused rather than guessed at." },
+    ApiEntry { label: "color.lerp", insert: "color.lerp(", doc: "color.lerp(a, b, t) — blend two colours per channel, t clamped to 0..1." },
+    ApiEntry { label: "node.index", insert: "node.index", doc: "Which row of a UI repeater this node is, 0-based — nil on anything a repeater didn't spawn, so `if node.index then` is a fine \"am I a row\". Read the count with getcomponent(\"UiElement\").count on the container." },
 ];
 
 /// The built-in Scripting docs, shown on the IDE's Docs page as searchable

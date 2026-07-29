@@ -290,6 +290,120 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // ---- color -----------------------------------------------------------
+    // A plain `{r, g, b, a}` table (also indexable [1]..[4]) rather than a
+    // userdata: it prints, it serialises into a save, it compares, and any
+    // `{1, 0, 0}` a project already had lying around is now a colour. Channels
+    // are 0..1 to match every other colour in the engine.
+    {
+        let ctor = lua.create_function(|lua, args: mlua::MultiValue| {
+            let a: Vec<Value> = args.into_iter().collect();
+            let c: [f32; 4] = match a.len() {
+                // color(gray) / color(gray, alpha) — the two-argument form is
+                // how you dim something without naming its hue.
+                1 | 2 if num_of(&a[0]).is_some() => {
+                    let g = num_of(&a[0]).unwrap_or(0.0) as f32;
+                    [g, g, g, a.get(1).and_then(num_of).unwrap_or(1.0) as f32]
+                }
+                // color(other) / color(other, alpha) — copy, optionally with a
+                // new alpha. `color(theme.accent, 0.5)` is the common one.
+                1 | 2 => {
+                    let Value::Table(t) = &a[0] else {
+                        return Err(mlua::Error::RuntimeError(
+                            "color(gray | color | {r=,g=,b=,a=} [, alpha])".into(),
+                        ));
+                    };
+                    let mut c = crate::api::read_color(t)?;
+                    if let Some(al) = a.get(1).and_then(num_of) {
+                        c[3] = al as f32;
+                    }
+                    c
+                }
+                3 | 4 => {
+                    let n: Option<Vec<f64>> = a.iter().map(num_of).collect();
+                    let Some(n) = n else {
+                        return Err(mlua::Error::RuntimeError(
+                            "color(r, g, b [, a]) takes numbers".into(),
+                        ));
+                    };
+                    [
+                        n[0] as f32,
+                        n[1] as f32,
+                        n[2] as f32,
+                        n.get(3).copied().unwrap_or(1.0) as f32,
+                    ]
+                }
+                _ => {
+                    return Err(mlua::Error::RuntimeError(
+                        "color(r, g, b [, a]) | color(gray [, a]) | color(other [, a])".into(),
+                    ));
+                }
+            };
+            crate::api::new_color(lua, c)
+        })?;
+        // `color.hex("#ff8800")` / `color.hex("ff8800aa")` — the form a
+        // designer pastes out of anywhere else.
+        let helpers = lua.create_table()?;
+        helpers.set(
+            "hex",
+            lua.create_function(|lua, s: String| {
+                let h = s.trim().trim_start_matches('#');
+                let byte = |i: usize| -> Option<f32> {
+                    u8::from_str_radix(h.get(i..i + 2)?, 16).ok().map(|v| v as f32 / 255.0)
+                };
+                // 6 or 8 digits. A 3-digit shorthand is deliberately refused:
+                // silently reading "#f80" as something else would be worse
+                // than saying so.
+                let c = match h.len() {
+                    6 | 8 => [
+                        byte(0).unwrap_or(0.0),
+                        byte(2).unwrap_or(0.0),
+                        byte(4).unwrap_or(0.0),
+                        if h.len() == 8 { byte(6).unwrap_or(1.0) } else { 1.0 },
+                    ],
+                    _ => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "color.hex expects 6 or 8 hex digits, got '{s}'"
+                        )));
+                    }
+                };
+                crate::api::new_color(lua, c)
+            })?,
+        )?;
+        // `color.lerp(a, b, t)` — a fade between two colours, per channel.
+        helpers.set(
+            "lerp",
+            lua.create_function(|lua, (a, b, t): (Table, Table, f64)| {
+                let (a, b) = (crate::api::read_color(&a)?, crate::api::read_color(&b)?);
+                let t = t.clamp(0.0, 1.0) as f32;
+                crate::api::new_color(
+                    lua,
+                    [
+                        a[0] + (b[0] - a[0]) * t,
+                        a[1] + (b[1] - a[1]) * t,
+                        a[2] + (b[2] - a[2]) * t,
+                        a[3] + (b[3] - a[3]) * t,
+                    ],
+                )
+            })?,
+        )?;
+        // Callable table: `color(1, 0, 0)` and `color.hex("#f80")` both work.
+        let mt = lua.create_table()?;
+        mt.set(
+            "__call",
+            lua.create_function(move |_, args: mlua::MultiValue| {
+                let mut a: Vec<Value> = args.into_iter().collect();
+                // Drop the `color` table itself, which `__call` passes as self.
+                if !a.is_empty() {
+                    a.remove(0);
+                }
+                ctor.call::<Table>(mlua::MultiValue::from_iter(a))
+            })?,
+        )?;
+        helpers.set_metatable(Some(mt));
+        lua.globals().set("color", helpers)?;
+    }
+
     // ---- deterministic noise + RNG (floptle-core::noise — the SAME numbers the
     // Rust generators produce, on every machine; the substrate for replicated
     // procgen and netcode-safe gameplay randomness) ------------------------------

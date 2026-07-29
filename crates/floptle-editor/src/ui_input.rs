@@ -409,6 +409,93 @@ impl Editor {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Repeaters
+    // -----------------------------------------------------------------------
+
+    /// Keep every repeater's children matching its `count`.
+    ///
+    /// Spawns and destroys only the DIFFERENCE. A list that gains one row
+    /// keeps the other nine, with their scripts' state, their hover, their
+    /// in-flight style transitions and their scroll position — rebuilding the
+    /// lot every frame is what makes a hand-rolled list flicker and forget.
+    ///
+    /// Play only. The rows are runtime entities; conjuring them in edit mode
+    /// would put engine-spawned nodes in a scene you are about to save. The
+    /// cost is that the ◫ UI tab shows an empty container — put one row in the
+    /// scene by hand to design against, and let the repeater fill the rest.
+    pub(crate) fn ui_repeaters(&mut self) {
+        if !self.playing {
+            return;
+        }
+        // (container, template, wanted, current rows in index order)
+        let mut work: Vec<(Entity, String, u32, Vec<Entity>)> = Vec::new();
+        let mut rows_of: std::collections::HashMap<u32, Vec<(u32, Entity)>> = Default::default();
+        for (e, idx) in self.world.query::<floptle_core::RepeatIndex>() {
+            if let Some(p) = self.world.get::<floptle_core::Parent>(e) {
+                rows_of.entry(p.0.index()).or_default().push((idx.0, e));
+            }
+        }
+        for (e, spec) in self.world.query::<ElementSpec>() {
+            let Some(r) = spec.repeater.as_ref() else { continue };
+            if r.template.is_empty() {
+                continue;
+            }
+            let mut rows = rows_of.remove(&e.index()).unwrap_or_default();
+            rows.sort_by_key(|(i, _)| *i);
+            work.push((e, r.template.clone(), r.count, rows.into_iter().map(|(_, e)| e).collect()));
+        }
+        let mut spawns: Vec<floptle_script::SpawnRequest> = Vec::new();
+        let mut destroys: Vec<u32> = Vec::new();
+        for (container, template, want, rows) in &work {
+            let have = rows.len() as u32;
+            for extra in rows.iter().skip(*want as usize) {
+                destroys.push(extra.index());
+            }
+            for _ in have..*want {
+                spawns.push(floptle_script::SpawnRequest {
+                    prefab: template.clone(),
+                    // No position: the container's layout places the row, and
+                    // a world position on a UI element would be meaningless.
+                    pos: None,
+                    cb: None,
+                    parent: Some(container.index()),
+                });
+            }
+        }
+        if !destroys.is_empty() {
+            self.apply_destroys(destroys);
+        }
+        if !spawns.is_empty() {
+            self.apply_spawn_batch(spawns, Vec::new());
+        }
+        // Re-number every surviving row in flow order, so `node.index` is
+        // right the frame a row is added or removed rather than the frame
+        // after — a list that renumbers late shows one wrong label per edit.
+        self.ui_renumber_rows();
+    }
+
+    /// Stamp `RepeatIndex` on every repeater's children in scene order.
+    fn ui_renumber_rows(&mut self) {
+        let containers: Vec<Entity> = self
+            .world
+            .query::<ElementSpec>()
+            .filter(|(_, s)| s.repeater.is_some())
+            .map(|(e, _)| e)
+            .collect();
+        for c in containers {
+            let kids: Vec<Entity> = self
+                .world
+                .query::<floptle_core::Parent>()
+                .filter(|(_, p)| p.0 == c)
+                .map(|(e, _)| e)
+                .collect();
+            for (i, k) in kids.into_iter().enumerate() {
+                self.world.insert(k, floptle_core::RepeatIndex(i as u32));
+            }
+        }
+    }
+
     /// Advance the hover dwell timer. Once per frame, after every layer's
     /// tooltip has been placed from it — a timer reset inside the per-layer
     /// loop would run at N times the frame rate on a screen with N layers.

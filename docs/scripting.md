@@ -951,6 +951,84 @@ ui.focus(find("Play"))    ui.focused()      -- move / read the focus
 ui.dragging()             ui.dropTarget()   -- the drag in flight
 ```
 
+### Colours
+
+`color(r, g, b [, a])` — channels 0..1, alpha 1 by default, so `color(1, 0, 0)`
+is opaque red rather than invisible red. Also `color(gray)`,
+`color(other, 0.5)` to copy with a new alpha, `color.hex("#ff8800")` and
+`color.lerp(a, b, t)`. It's a plain `{r, g, b, a}` table (also `[1]`..`[4]`),
+so it prints, saves into a file and compares — and a `{1, 0, 0}` you already
+had lying around is already a colour.
+
+```lua
+local el = node:getcomponent("UiElement")
+el.fill = color.hex("#1b1e26")
+el.textColor = color.lerp(dim, bright, t)
+```
+
+Whole-colour fields: `fill`, `textColor`, `borderColor`, `tint`, `groupTint`,
+`caretColor`, `selectionColor`, `placeholderColor`. The per-channel names
+(`fillR`…) still work — a script that fades one channel is untouched.
+
+Boolean fields (`visible`, `disabled`, `selected`, `toggle`, `focusable`,
+`gravity`, `kinematic`, `active`, `enabled`, the `lock_*` set) now read back as
+**real booleans**. They used to read back as 1/0, and `0` is truthy in Lua —
+`if el.visible then` was always taken. If you were comparing one with `> 0`,
+drop the comparison.
+
+### Bindings — `ui.bind`
+
+```lua
+ui.bind(params.coins, "text",  function() return ("%d ¢"):format(coins) end)
+ui.bind(params.hpBar, "value", function() return hp / maxHp end)
+ui.bind(params.warn,  "textColor", function() return hp < 20 and red or white end)
+```
+
+Say the relationship once instead of writing an `update` that keeps it true.
+The engine calls the function once a frame — **after** every `update`, so a
+label shows this frame's value, not last frame's — and writes what comes back.
+
+Which component it writes to is decided by which one actually *has* that field,
+so `"value"` finds `UiSlider` and `"opacity"` finds `UiElement` without you
+saying. Returning `nil` means "nothing to say this frame", not "write zero".
+Re-binding the same property replaces it; two functions fighting over one label
+every frame is never what was meant.
+
+A binding whose node is gone is dropped silently (a screen closing is not an
+error). One that **throws** is dropped after reporting once — left in place it
+would report the same failure sixty times a second and bury everything else.
+`ui.unbind(node)` drops them all, `ui.unbind(node, "text")` just one.
+
+### Lists — the repeater
+
+Tick **repeat a row** on a container, name a row prefab, and drive `count`:
+
+```lua
+ui.bind(params.list, "count", function() return #inventory end)
+```
+
+The engine keeps the container's children matching `count`, spawning and
+destroying only the **difference** — a list that gains a row keeps the other
+nine, with their script state, their hover, their in-flight style transitions
+and the view's scroll position. Rebuilding the lot every frame is what makes a
+hand-rolled list flicker and forget.
+
+Each row reads `node.index` (0-based, in flow order) and fills itself in:
+
+```lua
+-- on the row prefab
+function update(node, dt)
+    local item = inventory[node.index + 1]
+    if item then node.text = item.name end
+end
+```
+
+`node.index` is `nil` on anything a repeater didn't spawn, so `if node.index`
+is a fine "am I a row". Repeaters run **during Play only** — the rows are
+runtime entities, and conjuring them in edit mode would put engine-spawned
+nodes into a scene you're about to save. Put one row in the scene by hand to
+design against and let the repeater fill the rest.
+
 The engine imposes no button look — style the states yourself, it's 5 lines:
 
 ```lua

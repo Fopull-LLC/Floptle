@@ -13,6 +13,166 @@ use mlua::{Lua, Table, Value};
 use crate::env::{as_num, new_component_handle, new_node_handle, new_script_handle};
 use crate::{AnimCmd, AnimInfo, Shared, VfxCmd};
 
+/// Build a Lua colour: `{ r = , g = , b = , a = }`, also indexable `[1]`..`[4]`.
+///
+/// A plain table rather than a userdata, so it prints, serialises, compares and
+/// can be built by hand out of a save file — and so `{1, 0, 0}` from anywhere
+/// else in a project is already a colour.
+pub(crate) fn new_color(lua: &Lua, c: [f32; 4]) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    for (k, v) in ["r", "g", "b", "a"].iter().zip(c) {
+        t.raw_set(*k, v as f64)?;
+    }
+    for (i, v) in c.iter().enumerate() {
+        t.raw_set(i + 1, *v as f64)?;
+    }
+    Ok(t)
+}
+
+/// Read a colour out of a Lua table: named `r/g/b/a` first, then `[1]`..`[4]`.
+/// A missing alpha is 1 — `color(1, 0, 0)` is opaque red, not invisible red.
+pub(crate) fn read_color(t: &Table) -> mlua::Result<[f32; 4]> {
+    let get = |named: &str, i: usize| -> f64 {
+        t.raw_get::<Option<f64>>(named)
+            .ok()
+            .flatten()
+            .or_else(|| t.raw_get::<Option<f64>>(i).ok().flatten())
+            .unwrap_or(if named == "a" { 1.0 } else { 0.0 })
+    };
+    Ok([
+        get("r", 1) as f32,
+        get("g", 2) as f32,
+        get("b", 3) as f32,
+        get("a", 4) as f32,
+    ])
+}
+
+/// Component fields that read and write as a whole COLOUR rather than as four
+/// channels: `(component, field)`.
+///
+/// `e.fill = color(1, 0.85, 0.35)` instead of four lines of `e.fillR = …`. The
+/// channel names stay — a script that pokes one channel to fade something
+/// keeps working — but nobody has to write a colour that way any more.
+///
+/// A separate channel from the numeric one rather than an expansion into
+/// `fillR`..`fillA`, because `borderR` already means the RIGHT border width.
+/// Sharing the namespace would have made a colour assignment silently resize
+/// an edge.
+pub fn mirror_component_colors(
+    world: &World,
+    e: Entity,
+) -> HashMap<String, HashMap<String, [f32; 4]>> {
+    let mut out: HashMap<String, HashMap<String, [f32; 4]>> = HashMap::new();
+    if let Some(spec) = world.get::<floptle_ui::ElementSpec>(e) {
+        let mut f: HashMap<String, [f32; 4]> = HashMap::new();
+        if let Some(s) = spec.shape {
+            f.insert("fill".into(), s.fill);
+            f.insert("borderColor".into(), s.border_color);
+        }
+        if let Some(t) = &spec.text {
+            f.insert("textColor".into(), t.color);
+        }
+        if let Some(img) = &spec.image {
+            f.insert("tint".into(), img.tint);
+        }
+        if let Some(fl) = &spec.field {
+            f.insert("caretColor".into(), fl.caret_color);
+            f.insert("selectionColor".into(), fl.selection_color);
+            f.insert("placeholderColor".into(), fl.placeholder_color);
+        }
+        // The subtree multiplier. Named apart from the image `tint` because
+        // they are genuinely different things and the channel names already
+        // were (`groupR` vs `tintR`).
+        f.insert("groupTint".into(), spec.tint);
+        out.insert("UiElement".to_string(), f);
+    }
+    if let Some(Matter::PointLight { color, .. }) = world.get::<Matter>(e) {
+        out.insert(
+            "PointLight".to_string(),
+            HashMap::from([("color".to_string(), [color[0], color[1], color[2], 1.0])]),
+        );
+    }
+    out
+}
+
+/// Apply a colour-valued `node:getcomponent(...).field = color(...)` write.
+pub fn apply_component_color(
+    world: &mut World,
+    ent: Entity,
+    comp: &str,
+    field: &str,
+    v: [f32; 4],
+) {
+    match comp {
+        "UiElement" => {
+            let Some(spec) = world.get_mut::<floptle_ui::ElementSpec>(ent) else { return };
+            match field {
+                "fill" => spec.shape.get_or_insert_with(Default::default).fill = v,
+                "borderColor" => {
+                    spec.shape.get_or_insert_with(Default::default).border_color = v;
+                }
+                // Colouring text on a node that has none is a no-op rather
+                // than a surprise label appearing.
+                "textColor" => {
+                    if let Some(t) = &mut spec.text {
+                        t.color = v;
+                    }
+                }
+                "tint" => {
+                    if let Some(img) = &mut spec.image {
+                        img.tint = v;
+                    }
+                }
+                "caretColor" | "selectionColor" | "placeholderColor" => {
+                    if let Some(f) = &mut spec.field {
+                        match field {
+                            "caretColor" => f.caret_color = v,
+                            "selectionColor" => f.selection_color = v,
+                            _ => f.placeholder_color = v,
+                        }
+                    }
+                }
+                "groupTint" => spec.tint = v,
+                _ => {}
+            }
+        }
+        "PointLight" => {
+            if let Some(Matter::PointLight { color, .. }) = world.get_mut::<Matter>(ent)
+                && field == "color"
+            {
+                *color = [v[0], v[1], v[2]];
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Component fields that read back as a BOOLEAN, by `(component, field)`.
+///
+/// They are stored as 1/0 like everything else, and that is a trap in Lua:
+/// `0` is **truthy**, so `if el.visible then` was always taken. Returning a
+/// real boolean is the only way `if` means what it looks like.
+pub fn is_bool_field(comp: &str, field: &str) -> bool {
+    matches!(
+        (comp, field),
+        ("UiElement", "visible" | "disabled" | "selected" | "toggle" | "focusable")
+            | ("UiLayer", "enabled" | "worldSpace")
+            | ("Camera", "active")
+            | (
+                "RigidBody",
+                "gravity"
+                    | "kinematic"
+                    | "pushboxOnly"
+                    | "lock_x"
+                    | "lock_y"
+                    | "lock_z"
+                    | "lock_rot_x"
+                    | "lock_rot_y"
+                    | "lock_rot_z"
+            )
+    )
+}
+
 /// The numeric component fields exposed to scripts via `node:getcomponent(name)`, mirrored
 /// from the live ECS each frame. Extend here (and in [`apply_component_field`]) to reach
 /// more components / fields.
@@ -153,6 +313,11 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             f.insert("scrollX".to_string(), sc.offset_x as f64);
         }
         f.insert("toggle".to_string(), f64::from(u8::from(spec.toggle)));
+        // A repeater's row count — the one number a data-driven list needs,
+        // and the natural target for `ui.bind(list, "count", …)`.
+        if let Some(r) = &spec.repeater {
+            f.insert("count".to_string(), f64::from(r.count));
+        }
         out.insert("UiElement".to_string(), f);
         if let Some(s) = spec.slider {
             out.insert(
@@ -229,7 +394,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
 }
 
 /// Format a Lua number the way `tostring` would (integers without the `.0`).
-fn format_lua_number(n: f64) -> String {
+pub(crate) fn format_lua_number(n: f64) -> String {
     if n.fract() == 0.0 && n.abs() < 1e15 {
         format!("{}", n as i64)
     } else {
@@ -359,6 +524,11 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                         }
                     }
                     "toggle" => spec.toggle = val != 0.0,
+                    "count" => {
+                        if let Some(r) = &mut spec.repeater {
+                            r.count = val.max(0.0) as u32;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -853,6 +1023,15 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 // only — moving focus is `ui.focus(node)`, so there is exactly
                 // one place that can change it and one place to look for bugs.
                 "focused" => return Ok(Value::Boolean(*ui_focus.borrow() == Some(e))),
+                // Which row of a repeater this is, 0-based. `nil` on anything
+                // a repeater didn't spawn — so `if node.index then` is a
+                // perfectly good "am I a row".
+                "index" => {
+                    return Ok(match scene.borrow().repeat_index.get(&e) {
+                        Some(i) => Value::Integer(i64::from(*i)),
+                        None => Value::Nil,
+                    });
+                }
                 _ => {}
             }
             // Physics body fields.
@@ -1201,17 +1380,36 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         {
             let scene = shared.scene.clone();
             let changes = shared.component_changes.clone();
-            let idx = lua.create_function(move |_, (this, key): (Table, String)| {
+            let colors = shared.component_colors.clone();
+            let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
                 let e: u32 = this.raw_get("__id")?;
                 let comp: String = this.raw_get("__comp")?;
-                if let Some(v) = changes.borrow().get(&(e, comp.clone(), key.clone())) {
-                    return Ok(Value::Number(*v));
+                // Colours first: a colour field never has a numeric twin.
+                if let Some(c) = colors.borrow().get(&(e, comp.clone(), key.clone())) {
+                    return Ok(Value::Table(new_color(lua, *c)?));
                 }
                 let s = scene.borrow();
+                if let Some(c) =
+                    s.component_colors.get(&e).and_then(|m| m.get(&comp)).and_then(|m| m.get(&key))
+                {
+                    return Ok(Value::Table(new_color(lua, *c)?));
+                }
+                // Booleans read back as booleans, because 0 is truthy in Lua
+                // and `if el.visible then` was always taken.
+                let wrap = |v: f64| {
+                    if is_bool_field(&comp, &key) {
+                        Value::Boolean(v != 0.0)
+                    } else {
+                        Value::Number(v)
+                    }
+                };
+                if let Some(v) = changes.borrow().get(&(e, comp.clone(), key.clone())) {
+                    return Ok(wrap(*v));
+                }
                 if let Some(v) =
                     s.components.get(&e).and_then(|c| c.get(&comp)).and_then(|m| m.get(&key))
                 {
-                    return Ok(Value::Number(*v));
+                    return Ok(wrap(*v));
                 }
                 Ok(Value::Nil)
             })?;
@@ -1219,23 +1417,26 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         }
         {
             let changes = shared.component_changes.clone();
+            let colors = shared.component_colors.clone();
             let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
                 let e: u32 = this.raw_get("__id")?;
                 let comp: String = this.raw_get("__comp")?;
+                // A table is a colour: `e.fill = color(1, 0.85, 0.35)`, or any
+                // `{r,g,b,a}` / `{1,0,0}` table, so a palette read out of a
+                // save file works without a conversion step.
+                if let Value::Table(t) = &val {
+                    let c = read_color(t)?;
+                    colors.borrow_mut().insert((e, comp, key), c);
+                    return Ok(());
+                }
                 let n = match val {
                     Value::Number(n) => n,
                     Value::Integer(n) => n as f64,
-                    Value::Boolean(b) => {
-                        if b {
-                            1.0
-                        } else {
-                            0.0
-                        }
-                    }
+                    Value::Boolean(b) => f64::from(u8::from(b)),
                     _ => {
                         return Err(mlua::Error::RuntimeError(format!(
-                            "component field '{key}' must be a number"
-                        )))
+                            "component field '{key}' must be a number, a boolean or a color"
+                        )));
                     }
                 };
                 changes.borrow_mut().insert((e, comp, key), n);
