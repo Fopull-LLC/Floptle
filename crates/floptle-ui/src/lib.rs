@@ -514,12 +514,21 @@ pub struct MaskSpec {
 /// scroll fully out; scripts read/write it as `UiElement.scrollY`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScrollSpec {
-    /// Current scroll position in design units (0 = top of the content).
+    /// Current vertical scroll position in design units (0 = top of the content).
     #[serde(default)]
     pub offset: f32,
+    /// Current horizontal scroll position (0 = left edge of the content).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub offset_x: f32,
     /// Design units per wheel notch.
     #[serde(default = "default_scroll_speed")]
     pub speed: f32,
+    /// Dragging the view's background pans the content — the touch/kinetic
+    /// idiom, and the only way to scroll a list with a thumbstick-less pointer
+    /// device. Off by default: on a view full of buttons, a drag that scrolled
+    /// would fight every press.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drag: bool,
 }
 
 fn default_scroll_speed() -> f32 {
@@ -528,7 +537,12 @@ fn default_scroll_speed() -> f32 {
 
 impl Default for ScrollSpec {
     fn default() -> Self {
-        ScrollSpec { offset: 0.0, speed: default_scroll_speed() }
+        ScrollSpec {
+            offset: 0.0,
+            offset_x: 0.0,
+            speed: default_scroll_speed(),
+            drag: false,
+        }
     }
 }
 
@@ -623,6 +637,28 @@ pub struct ElementSpec {
     /// (0,0 = top-left, 0.5,0.5 = centre).
     #[serde(default = "half2", skip_serializing_if = "is_half2")]
     pub pivot: [f32; 2],
+    /// Clicking flips [`Self::selected`] — a checkbox, a mute button, a
+    /// filter chip. What "on" looks like is the style's `selected` block.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub toggle: bool,
+    /// Radio behaviour: clicking selects this element and deselects every
+    /// other element sharing the group name. Tabs, difficulty pickers, weapon
+    /// slots, a character-select grid.
+    ///
+    /// Groups are resolved within a LAYER, so two screens can reuse a name
+    /// without interfering — and a group of one is just a toggle that can't be
+    /// turned off, which is occasionally exactly what you want.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub group: String,
+    /// Drive a named scroll view's offset: this element becomes a scrollbar
+    /// track, and its `part: Handle` child becomes the thumb.
+    ///
+    /// A scrollbar is two of YOUR elements, styled however you like, reusing
+    /// the slider machinery that was already there. The engine draws no
+    /// scrollbar of its own, because a scrollbar is one of the most
+    /// style-defining things on a screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrollbar: Option<ScrollBar>,
     /// Reachable by keyboard and gamepad: a direction press can move focus
     /// here, and a submit press fires this element's `clicked` hook.
     ///
@@ -705,11 +741,24 @@ impl Default for ElementSpec {
             rotation: 0.0,
             scale: [1.0, 1.0],
             pivot: [0.5, 0.5],
+            toggle: false,
+            group: String::new(),
+            scrollbar: None,
             focusable: false,
             nav: None,
             order: 0,
         }
     }
+}
+
+/// A scrollbar's link to the view it drives.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScrollBar {
+    /// The scroll view's element NAME, within this layer.
+    pub target: String,
+    /// Which axis this bar drives. `Column` = the vertical bar.
+    #[serde(default)]
+    pub axis: Dir,
 }
 
 /// Per-element navigation overrides: the element NAME to focus when this
@@ -822,10 +871,10 @@ pub struct UiLayer {
     #[serde(default = "default_canvas_scale")]
     pub canvas_scale: f32,
     /// Seconds a direction must be held before it starts repeating.
-    #[serde(default = "default_nav_delay")]
+    #[serde(default = "default_nav_delay", skip_serializing_if = "is_default_nav_delay")]
     pub nav_delay: f32,
     /// Seconds between repeats once it starts.
-    #[serde(default = "default_nav_repeat")]
+    #[serde(default = "default_nav_repeat", skip_serializing_if = "is_default_nav_repeat")]
     pub nav_repeat: f32,
     /// Running off the end of the screen comes back on the other side.
     ///
@@ -846,6 +895,12 @@ fn default_nav_delay() -> f32 {
 }
 fn default_nav_repeat() -> f32 {
     0.12
+}
+fn is_default_nav_delay(v: &f32) -> bool {
+    *v == default_nav_delay()
+}
+fn is_default_nav_repeat(v: &f32) -> bool {
+    *v == default_nav_repeat()
 }
 fn default_reference_width() -> f32 {
     1280.0
@@ -1094,7 +1149,8 @@ fn layout_node(n: &Node, rect: [f32; 4], measure: MeasureText, out: &mut Vec<Pla
     // content shifts up by the scroll offset (clipping happens in draw_list /
     // hit-testing via the implicit self-mask).
     let scroll_y = n.spec.scroll.map(|s| s.offset.max(0.0)).unwrap_or(0.0);
-    let (px, py, pw, ph) = (rect[0], rect[1] - scroll_y, rect[2], rect[3]);
+    let scroll_x = n.spec.scroll.map(|s| s.offset_x.max(0.0)).unwrap_or(0.0);
+    let (px, py, pw, ph) = (rect[0] - scroll_x, rect[1] - scroll_y, rect[2], rect[3]);
     if let Some(s) = n.spec.stack {
         let (main, cross) = axes(s.dir);
         let inner_pos = [px + s.pad, py + s.pad];
@@ -1402,12 +1458,72 @@ pub fn scroll_clips(
     out
 }
 
-/// How far a scroll view can scroll: `max(0, content height − view height)`,
-/// where content height is the placed subtree's bottommost edge measured in
-/// content space (offset-independent). The input driver clamps
-/// [`ScrollSpec::offset`] to this every frame, so content can never be
-/// scrolled fully away — and a view whose content fits doesn't scroll at all.
-pub fn scroll_max(roots: &[Node], placed: &[Placed], scroll_id: u32) -> f32 {
+/// Size and position every scrollbar's thumb from the view it tracks.
+///
+/// A post-pass rather than solver work, because a bar and the view it drives
+/// live in different subtrees and the solver is one parent-to-child walk. Each
+/// pair is `(bar element, scroll view)`, resolved by name by the caller (names
+/// are the engine's, not this crate's).
+///
+/// The thumb is the bar's `part: Handle` child. Its length becomes the visible
+/// fraction of the content — which is the thing that makes a scrollbar readable
+/// as "how much of this list am I seeing" rather than just a position — and its
+/// cross-axis geometry is left exactly as authored, so a 4-unit hairline and a
+/// chunky 20-unit slab are both yours to make.
+pub fn place_scrollbars(roots: &[Node], placed: &mut [Placed], pairs: &[(u32, u32)]) {
+    fn find(ns: &[Node], id: u32) -> Option<&Node> {
+        for n in ns {
+            if n.id == id {
+                return Some(n);
+            }
+            if let Some(f) = find(&n.children, id) {
+                return Some(f);
+            }
+        }
+        None
+    }
+    for (bar_id, view_id) in pairs {
+        let Some(bar) = find(roots, *bar_id) else { continue };
+        let Some(sb) = bar.spec.scrollbar.as_ref() else { continue };
+        let Some(thumb) = bar
+            .children
+            .iter()
+            .find(|c| c.spec.part == Some(SliderPart::Handle) && c.spec.visible)
+        else {
+            continue;
+        };
+        let Some(view) = placed.iter().find(|p| p.id == *view_id).map(|p| p.rect) else { continue };
+        let Some(track) = placed.iter().find(|p| p.id == *bar_id).map(|p| p.rect) else { continue };
+        let Some(scroll) = find(roots, *view_id).and_then(|n| n.spec.scroll) else { continue };
+        let max = scroll_max(roots, placed, *view_id);
+        let a = match sb.axis {
+            Dir::Row => 0,
+            Dir::Column => 1,
+        };
+        let offset = if a == 0 { scroll.offset_x } else { scroll.offset };
+        let content = view[a + 2] + max[a];
+        // Nothing to scroll: a full-length thumb, which reads correctly as
+        // "this is all of it" instead of vanishing or pinning to the top.
+        let frac = if content > 0.0 { (view[a + 2] / content).clamp(0.05, 1.0) } else { 1.0 };
+        let len = (track[a + 2] * frac).max(4.0);
+        let t = if max[a] > 0.0 { (offset / max[a]).clamp(0.0, 1.0) } else { 0.0 };
+        let pos = track[a] + (track[a + 2] - len) * t;
+        if let Some(p) = placed.iter_mut().find(|p| p.id == thumb.id) {
+            p.rect[a] = pos;
+            p.rect[a + 2] = len;
+        }
+    }
+}
+
+/// How far a scroll view can scroll on each axis: `max(0, content − view)`,
+/// where content is the placed subtree's far edge measured in content space
+/// (offset-independent). The input driver clamps [`ScrollSpec::offset`] and
+/// `offset_x` to this every frame, so content can never be scrolled fully away
+/// — and a view whose content fits doesn't scroll at all.
+///
+/// Returns `[x, y]`. An axis that returns 0 has nothing to scroll, which is
+/// also how the wheel decides which axis it drives.
+pub fn scroll_max(roots: &[Node], placed: &[Placed], scroll_id: u32) -> [f32; 2] {
     fn find(roots: &[Node], id: u32) -> Option<&Node> {
         for n in roots {
             if n.id == id {
@@ -1419,20 +1535,30 @@ pub fn scroll_max(roots: &[Node], placed: &[Placed], scroll_id: u32) -> f32 {
         }
         None
     }
-    let Some(n) = find(roots, scroll_id) else { return 0.0 };
-    let offset = n.spec.scroll.map(|s| s.offset.max(0.0)).unwrap_or(0.0);
+    let Some(n) = find(roots, scroll_id) else { return [0.0, 0.0] };
+    let off = n
+        .spec
+        .scroll
+        .map(|s| [s.offset_x.max(0.0), s.offset.max(0.0)])
+        .unwrap_or([0.0, 0.0]);
     let rects: std::collections::HashMap<u32, [f32; 4]> =
         placed.iter().map(|p| (p.id, p.rect)).collect();
-    let Some(&view) = rects.get(&scroll_id) else { return 0.0 };
-    let mut bottom = view[1] - offset; // content top
+    let Some(&view) = rects.get(&scroll_id) else { return [0.0, 0.0] };
+    // Content extents, measured from the SHIFTED rects and then un-shifted, so
+    // the answer doesn't depend on where the view happens to be scrolled to.
+    let mut far = [view[0] - off[0], view[1] - off[1]];
     let mut stack: Vec<&Node> = n.children.iter().collect();
     while let Some(c) = stack.pop() {
         if let Some(r) = rects.get(&c.id) {
-            bottom = bottom.max(r[1] + r[3]);
+            far[0] = far[0].max(r[0] + r[2]);
+            far[1] = far[1].max(r[1] + r[3]);
         }
         stack.extend(c.children.iter());
     }
-    ((bottom + offset) - view[1] - view[3]).max(0.0)
+    [
+        ((far[0] + off[0]) - view[0] - view[2]).max(0.0),
+        ((far[1] + off[1]) - view[1] - view[3]).max(0.0),
+    ]
 }
 
 /// Build the draw list for solved elements. `roots`/`placed` must come from
@@ -1748,7 +1874,7 @@ mod tests {
             ElementSpec {
                 place: Place::Free { pos: [10.0, 20.0] },
                 size: [Size::Fixed(120.0), Size::Fixed(100.0)],
-                scroll: Some(ScrollSpec { offset: 30.0, speed: 48.0 }),
+                scroll: Some(ScrollSpec { offset: 30.0, speed: 48.0, ..Default::default() }),
                 ..Default::default()
             },
             rows.into(),
@@ -1764,7 +1890,9 @@ mod tests {
         assert_eq!(clips.get(&r3).map(|c| c.rect), Some([10.0, 20.0, 120.0, 100.0]));
         assert!(!clips.contains_key(&roots[0].id), "the view itself is not clipped");
         // Content is 190 tall in a 100-tall view → 90 of travel, at ANY offset.
-        assert_eq!(scroll_max(&roots, &placed, roots[0].id), 90.0);
+        // The rows are 120 wide in a 120-wide view, so there is no X travel —
+        // which is also how the wheel knows this view scrolls vertically.
+        assert_eq!(scroll_max(&roots, &placed, roots[0].id), [0.0, 90.0]);
         // A view whose content fits has no travel.
         let fits = el(
             ElementSpec {
@@ -1777,7 +1905,144 @@ mod tests {
         );
         let roots = [fits];
         let placed = solve(&roots, [1280.0, 720.0], &m);
-        assert_eq!(scroll_max(&roots, &placed, roots[0].id), 0.0);
+        assert_eq!(scroll_max(&roots, &placed, roots[0].id), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_scrollbar_thumb_shows_position_and_how_much_you_can_see() {
+        let m: MeasureText = &|_| [0.0, 0.0];
+        let row = |y: f32| {
+            el(
+                ElementSpec {
+                    place: Place::Free { pos: [0.0, y] },
+                    size: [Size::Fixed(100.0), Size::Fixed(40.0)],
+                    ..Default::default()
+                },
+                vec![],
+            )
+        };
+        // A 100-tall view over 400 of content: a quarter is visible.
+        let view = el(
+            ElementSpec {
+                place: Place::Free { pos: [0.0, 0.0] },
+                size: [Size::Fixed(100.0), Size::Fixed(100.0)],
+                scroll: Some(ScrollSpec { offset: 150.0, ..Default::default() }),
+                ..Default::default()
+            },
+            vec![row(0.0), row(360.0)],
+        );
+        let thumb = el(
+            ElementSpec {
+                part: Some(SliderPart::Handle),
+                place: Place::Free { pos: [0.0, 0.0] },
+                size: [Size::Fixed(8.0), Size::Fixed(10.0)],
+                ..Default::default()
+            },
+            vec![],
+        );
+        let thumb_id = thumb.id;
+        let bar = el(
+            ElementSpec {
+                place: Place::Free { pos: [120.0, 0.0] },
+                size: [Size::Fixed(8.0), Size::Fixed(100.0)],
+                scrollbar: Some(ScrollBar { target: "View".into(), axis: Dir::Column }),
+                ..Default::default()
+            },
+            vec![thumb],
+        );
+        let view_id = view.id;
+        let bar_id = bar.id;
+        let roots = [view, bar];
+        let mut placed = solve(&roots, [1280.0, 720.0], &m);
+        place_scrollbars(&roots, &mut placed, &[(bar_id, view_id)]);
+        let t = rect_of(&placed, thumb_id);
+        // Content 400, view 100 → the thumb is a quarter of the 100-unit track.
+        assert!((t[3] - 25.0).abs() < 0.01, "thumb length tracks visible fraction: {t:?}");
+        // Offset 150 of 300 travel → halfway down the remaining 75 units.
+        assert!((t[1] - 37.5).abs() < 0.01, "thumb position tracks the offset: {t:?}");
+        // The cross axis is left exactly as authored — a hairline stays a
+        // hairline, and the engine never picks a scrollbar width.
+        assert_eq!(t[0], 120.0);
+        assert_eq!(t[2], 8.0);
+    }
+
+    #[test]
+    fn a_scrollbar_over_content_that_fits_is_full_length() {
+        let m: MeasureText = &|_| [0.0, 0.0];
+        let view = el(
+            ElementSpec {
+                place: Place::Free { pos: [0.0, 0.0] },
+                size: [Size::Fixed(100.0), Size::Fixed(200.0)],
+                scroll: Some(ScrollSpec::default()),
+                ..Default::default()
+            },
+            vec![el(
+                ElementSpec {
+                    place: Place::Free { pos: [0.0, 0.0] },
+                    size: [Size::Fixed(100.0), Size::Fixed(40.0)],
+                    ..Default::default()
+                },
+                vec![],
+            )],
+        );
+        let thumb = el(
+            ElementSpec {
+                part: Some(SliderPart::Handle),
+                size: [Size::Fixed(8.0), Size::Fixed(10.0)],
+                ..Default::default()
+            },
+            vec![],
+        );
+        let thumb_id = thumb.id;
+        let bar = el(
+            ElementSpec {
+                place: Place::Free { pos: [120.0, 0.0] },
+                size: [Size::Fixed(8.0), Size::Fixed(200.0)],
+                scrollbar: Some(ScrollBar { target: "View".into(), axis: Dir::Column }),
+                ..Default::default()
+            },
+            vec![thumb],
+        );
+        let (view_id, bar_id) = (view.id, bar.id);
+        let roots = [view, bar];
+        let mut placed = solve(&roots, [1280.0, 720.0], &m);
+        place_scrollbars(&roots, &mut placed, &[(bar_id, view_id)]);
+        let t = rect_of(&placed, thumb_id);
+        assert!((t[3] - 200.0).abs() < 0.01, "full track when it all fits: {t:?}");
+        assert_eq!(t[1], 0.0);
+    }
+
+    #[test]
+    fn a_scroll_view_scrolls_sideways_too() {
+        let m: MeasureText = &|_| [0.0, 0.0];
+        let card = |x: f32| {
+            el(
+                ElementSpec {
+                    place: Place::Free { pos: [x, 0.0] },
+                    size: [Size::Fixed(200.0), Size::Fixed(80.0)],
+                    ..Default::default()
+                },
+                vec![],
+            )
+        };
+        let cards = [card(0.0), card(220.0), card(440.0)];
+        let first = cards[0].id;
+        let view = el(
+            ElementSpec {
+                place: Place::Free { pos: [10.0, 10.0] },
+                size: [Size::Fixed(300.0), Size::Fixed(80.0)],
+                scroll: Some(ScrollSpec { offset_x: 120.0, ..Default::default() }),
+                ..Default::default()
+            },
+            cards.into(),
+        );
+        let roots = [view];
+        let placed = solve(&roots, [1280.0, 720.0], &m);
+        // Content slid LEFT by the horizontal offset; vertical is untouched.
+        assert_eq!(rect_of(&placed, first)[0], 10.0 - 120.0);
+        assert_eq!(rect_of(&placed, first)[1], 10.0);
+        // 640 of content in a 300 view → 340 of horizontal travel, no vertical.
+        assert_eq!(scroll_max(&roots, &placed, roots[0].id), [340.0, 0.0]);
     }
 
     #[test]
@@ -2409,8 +2674,18 @@ mod tests {
             // checked separately below where no image can supply it; the image
             // fit is matched by its value because TextSpec has a `fit` too.
             "slice", "tiling", "offset", "fit:Stretch",
+            // Behaviour (phases C + D). Matched as `,key:` / `(key:` further
+            // down, because "order" is a substring of "border" and a naive
+            // `contains` would fire on a shape that is behaving perfectly.
         ] {
             assert!(!text.contains(absent), "`{absent}` leaked into {text}");
+        }
+        // Key-position match: a field name only counts when it's actually a key.
+        let has_key = |text: &str, k: &str| {
+            text.contains(&format!(",{k}:")) || text.contains(&format!("({k}:"))
+        };
+        for absent in ["order", "focusable", "nav", "toggle", "group", "scrollbar"] {
+            assert!(!has_key(&text, absent), "`{absent}` leaked into {text}");
         }
         // The element-level group tint, on an element with no image to confuse
         // the search.
@@ -2420,6 +2695,30 @@ mod tests {
         })
         .unwrap();
         assert!(!bare.contains("tint"), "the group tint leaked into {bare}");
+
+        // A default LAYER writes no new keys either. This is the one that got
+        // away: `nav_delay` / `nav_repeat` had `serde(default)` but no
+        // `skip_serializing_if`, so every saved scene grew two lines per layer.
+        // Caught by round-tripping the real projects, not by this file — which
+        // is why it is now also caught by this file.
+        let layer = ron::to_string(&UiLayer::default()).unwrap();
+        for absent in ["nav_delay", "nav_repeat", "nav_wrap"] {
+            assert!(!layer.contains(absent), "`{absent}` leaked into {layer}");
+        }
+        // …and a non-default one still round-trips.
+        let tuned = UiLayer { nav_delay: 0.2, nav_repeat: 0.05, nav_wrap: true, ..Default::default() };
+        let back: UiLayer = ron::from_str(&ron::to_string(&tuned).unwrap()).unwrap();
+        assert_eq!(back, tuned);
+
+        // Same for a default scroll view: `offset_x` and `drag` are additive.
+        let scroller = ron::to_string(&ElementSpec {
+            scroll: Some(ScrollSpec::default()),
+            ..Default::default()
+        })
+        .unwrap();
+        for absent in ["offset_x", "drag"] {
+            assert!(!scroller.contains(absent), "`{absent}` leaked into {scroller}");
+        }
     }
 
     #[test]

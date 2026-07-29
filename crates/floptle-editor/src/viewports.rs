@@ -812,7 +812,8 @@ impl Editor {
         let (placed, dl) = {
             let Some(uir) = self.ui_render.as_ref() else { return };
             let measure = |t: &floptle_ui::TextSpec| uir.measure_spec(t);
-            let placed = floptle_ui::solve(&roots, design_vp, &measure);
+            let mut placed = floptle_ui::solve(&roots, design_vp, &measure);
+            floptle_ui::place_scrollbars(&roots, &mut placed, &self.ui_layer_scrollbars(&roots));
             let masks = self.ui_layer_masks(&roots);
             let dl = floptle_ui::draw_list(&roots, &placed, &masks);
             (placed, dl)

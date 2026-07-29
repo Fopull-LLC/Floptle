@@ -150,7 +150,9 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
         }
         if let Some(sc) = spec.scroll {
             f.insert("scrollY".to_string(), sc.offset as f64);
+            f.insert("scrollX".to_string(), sc.offset_x as f64);
         }
+        f.insert("toggle".to_string(), f64::from(u8::from(spec.toggle)));
         out.insert("UiElement".to_string(), f);
         if let Some(s) = spec.slider {
             out.insert(
@@ -351,6 +353,12 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                             sc.offset = v.max(0.0);
                         }
                     }
+                    "scrollX" => {
+                        if let Some(sc) = &mut spec.scroll {
+                            sc.offset_x = v.max(0.0);
+                        }
+                    }
+                    "toggle" => spec.toggle = val != 0.0,
                     _ => {}
                 }
             }

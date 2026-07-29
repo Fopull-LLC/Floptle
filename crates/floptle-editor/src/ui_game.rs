@@ -60,6 +60,44 @@ pub(crate) enum AddUi {
     Scroll,
 }
 
+/// Resolve each scrollbar's `target` NAME to the scroll view it drives, within
+/// this layer. Same name-scoping rule as masks: first match in scene order.
+fn layer_scrollbars(
+    world: &floptle_core::World,
+    ents: &HashMap<u32, Entity>,
+    roots: &[floptle_ui::Node],
+) -> Vec<(u32, u32)> {
+    fn walk(n: &floptle_ui::Node, out: &mut Vec<u32>) {
+        out.push(n.id);
+        for c in &n.children {
+            walk(c, out);
+        }
+    }
+    let mut ids = Vec::new();
+    for r in roots {
+        walk(r, &mut ids);
+    }
+    let mut by_name: HashMap<&str, u32> = HashMap::new();
+    for id in &ids {
+        if let Some(e) = ents.get(id)
+            && let Some(n) = world.get::<floptle_core::Name>(*e)
+        {
+            by_name.entry(n.0.as_str()).or_insert(*id);
+        }
+    }
+    let mut out = Vec::new();
+    for id in &ids {
+        let Some(e) = ents.get(id) else { continue };
+        let Some(spec) = world.get::<ElementSpec>(*e) else { continue };
+        if let Some(sb) = &spec.scrollbar
+            && let Some(&target) = by_name.get(sb.target.as_str())
+        {
+            out.push((*id, target));
+        }
+    }
+    out
+}
+
 /// Slide an element by `d` design units, whatever its placement mode.
 ///
 /// One function so every mover agrees: the Scene overlay drag, the ◫ UI tab's
@@ -414,7 +452,8 @@ impl Editor {
         for (_, roots, scale) in &layers {
             let design_vp = [viewport[0] / scale, viewport[1] / scale];
             let measure = |t: &TextSpec| uir.measure_spec(t);
-            let placed = floptle_ui::solve(roots, design_vp, &measure);
+            let mut placed = floptle_ui::solve(roots, design_vp, &measure);
+            floptle_ui::place_scrollbars(roots, &mut placed, &layer_scrollbars(&self.world, &ents, roots));
             let masks = layer_masks(&self.world, &ents, roots);
             let dl = floptle_ui::draw_list(roots, &placed, &masks);
             for q in &dl.quads {
@@ -487,7 +526,8 @@ impl Editor {
             let design_vp =
                 [layer.design_height * window_aspect.max(0.1), layer.design_height];
             let measure = |t: &TextSpec| uir.measure_spec(t);
-            let placed = floptle_ui::solve(&roots, design_vp, &measure);
+            let mut placed = floptle_ui::solve(&roots, design_vp, &measure);
+            floptle_ui::place_scrollbars(&roots, &mut placed, &layer_scrollbars(&self.world, &ents, &roots));
             let masks = layer_masks(&self.world, &ents, &roots);
             let dl = floptle_ui::draw_list(&roots, &placed, &masks);
             for q in &dl.quads {
@@ -552,6 +592,13 @@ impl Editor {
         let ents: HashMap<u32, Entity> =
             self.world.query::<Transform>().map(|(e, _)| (e.index(), e)).collect();
         layer_masks(&self.world, &ents, roots)
+    }
+
+    /// Scrollbar → scroll-view pairs for a tree the caller already built.
+    pub(crate) fn ui_layer_scrollbars(&self, roots: &[floptle_ui::Node]) -> Vec<(u32, u32)> {
+        let ents: HashMap<u32, Entity> =
+            self.world.query::<Transform>().map(|(e, _)| (e.index(), e)).collect();
+        layer_scrollbars(&self.world, &ents, roots)
     }
 
     /// The game view's size in physical pixels — the whole window when the game
@@ -638,7 +685,16 @@ impl Editor {
         // clamped new offset). Applied after the borrows drop; consumes the
         // wheel so gameplay zoom never fights a menu scroll.
         let wheel = self.input_scroll;
-        let mut wheel_target: Option<(u32, f32)> = None;
+        // (element, [new offset_x, new offset]).
+        let mut wheel_target: Option<(u32, [f32; 2])> = None;
+        // Scroll views the pointer is inside, innermost last, with their travel
+        // — what drag-to-scroll and scrollbar drags need.
+        let mut scroll_hits: Vec<(u32, [f32; 2])> = Vec::new();
+        // The pointer in the innermost hit scroll view's design units.
+        let mut scroll_ptr: Option<[f32; 2]> = None;
+        // (bar, target view, axis, track rect, pointer in design units).
+        type BarHit = (u32, u32, usize, [f32; 4], [f32; 2]);
+        let mut bar_hits: Vec<BarHit> = Vec::new();
         // Solved screen-space rects in physical px, published to scripts after
         // this pass (`node:uiRect()`): a script can hit-test the mouse against
         // a panel's real position instead of guessing.
@@ -653,6 +709,7 @@ impl Editor {
         {
             self.ensure_ui_fonts();
             let order: Vec<Entity> = self.world.query::<Transform>().map(|(e, _)| e).collect();
+            let ents: HashMap<u32, Entity> = order.iter().map(|e| (e.index(), *e)).collect();
             let mut kids: HashMap<u32, Vec<Entity>> = HashMap::new();
             for e in &order {
                 if let Some(p) = self.world.get::<Parent>(*e) {
@@ -746,7 +803,10 @@ impl Editor {
                         )
                     };
                     let measure = |t: &TextSpec| uir.measure_spec(t);
-                    let placed = floptle_ui::solve(roots, design_vp, &measure);
+                    let mut placed = floptle_ui::solve(roots, design_vp, &measure);
+                    let bars = layer_scrollbars(&self.world, &ents, roots);
+                    floptle_ui::place_scrollbars(roots, &mut placed, &bars);
+                    let bar_targets: HashMap<u32, u32> = bars.into_iter().collect();
                     nav_layers.push((*layer, roots.clone(), placed.clone()));
                     // Publish each screen-space element's SOLVED rect in physical
                     // pixels (design rect × scale) — `node:uiRect()` reads it.
@@ -797,8 +857,41 @@ impl Editor {
                             })
                         {
                             let max = floptle_ui::scroll_max(roots, &placed, pl.id);
-                            let next = (sc.offset - wheel * sc.speed).clamp(0.0, max);
+                            // The wheel drives Y when there's Y to drive, else
+                            // X — so a horizontal strip of cards scrolls with
+                            // an ordinary wheel and nobody has to know why.
+                            // Shift forces X, the universal convention.
+                            let shift = self.shift;
+                            let sideways = shift || (max[1] <= 0.0 && max[0] > 0.0);
+                            let d = wheel * sc.speed;
+                            let next = if sideways {
+                                [(sc.offset_x - d).clamp(0.0, max[0]), sc.offset]
+                            } else {
+                                [sc.offset_x, (sc.offset - d).clamp(0.0, max[1])]
+                            };
                             wheel_target = Some((pl.id, next));
+                        }
+                        // Drag-to-scroll + scrollbar hit records, both of which
+                        // need the travel and the pointer in THIS layer's units.
+                        if spec.scroll.is_some()
+                            && ptr_design.is_some_and(|p| {
+                                in_rect(&pl.rect, &p) && clip.is_none_or(|c| in_rect(&c, &p))
+                            })
+                        {
+                            scroll_hits
+                                .push((pl.id, floptle_ui::scroll_max(roots, &placed, pl.id)));
+                            scroll_ptr = ptr_design;
+                        }
+                        if let Some(sb) = spec.scrollbar.as_ref()
+                            && let Some(p) = ptr_design
+                            && in_rect(&pl.rect, &p)
+                            && let Some(&target) = bar_targets.get(&pl.id)
+                        {
+                            let axis = match sb.axis {
+                                Dir::Row => 0,
+                                Dir::Column => 1,
+                            };
+                            bar_hits.push((pl.id, target, axis, pl.rect, p));
                         }
                     }
                 }
@@ -810,7 +903,8 @@ impl Editor {
                 && let Some(spec) = self.world.get_mut::<ElementSpec>(e)
                 && let Some(sc) = &mut spec.scroll
             {
-                sc.offset = next;
+                sc.offset_x = next[0];
+                sc.offset = next[1];
             }
             self.input_scroll = 0.0;
             self.tick_scroll = 0.0;
@@ -886,7 +980,74 @@ impl Editor {
             self.ui_events.push((a, "released"));
             if hover == Some(a) {
                 self.ui_events.push((a, "clicked"));
+                self.ui_toggle(a);
             }
+        }
+        // ---- scrollbar drags -------------------------------------------------
+        // Grabbing anywhere on the track jumps to that position and keeps
+        // tracking, which is what every scrollbar does and what makes a long
+        // list usable at all.
+        if pressed_edge && let Some(&(bar, ..)) = bar_hits.last() {
+            self.ui_scroll_grab = Some(bar);
+        }
+        if !down {
+            self.ui_scroll_grab = None;
+            self.ui_scroll_drag = None;
+        }
+        if let Some(bar) = self.ui_scroll_grab
+            && let Some(&(_, view, axis, track, p)) =
+                bar_hits.iter().find(|(id, ..)| *id == bar)
+        {
+            let travel = scroll_hits
+                .iter()
+                .find(|(id, _)| *id == view)
+                .map(|(_, m)| m[axis])
+                .unwrap_or(0.0);
+            if travel > 0.0 && track[axis + 2] > 0.0 {
+                let t = ((p[axis] - track[axis]) / track[axis + 2]).clamp(0.0, 1.0);
+                self.ui_set_scroll(view, axis, t * travel);
+            }
+        }
+        // ---- drag the content itself ----------------------------------------
+        if pressed_edge
+            && self.ui_active.is_none()
+            && let Some(&(view, _)) = scroll_hits.last()
+            && self
+                .world
+                .query::<Transform>()
+                .map(|(e, _)| e)
+                .find(|e| e.index() == view)
+                .and_then(|e| self.world.get::<ElementSpec>(e))
+                .and_then(|s| s.scroll)
+                .is_some_and(|sc| sc.drag)
+            && let Some(p) = scroll_ptr
+        {
+            self.ui_scroll_drag = Some((view, p));
+        }
+        if down
+            && let Some((view, last)) = self.ui_scroll_drag
+            && let Some(p) = scroll_ptr
+        {
+            let travel = scroll_hits.iter().find(|(id, _)| *id == view).map(|(_, m)| *m);
+            if let Some(max) = travel {
+                let cur = self
+                    .world
+                    .query::<Transform>()
+                    .map(|(e, _)| e)
+                    .find(|e| e.index() == view)
+                    .and_then(|e| self.world.get::<ElementSpec>(e))
+                    .and_then(|s| s.scroll)
+                    .map(|sc| [sc.offset_x, sc.offset])
+                    .unwrap_or([0.0, 0.0]);
+                for a in 0..2 {
+                    if max[a] > 0.0 {
+                        // Content follows the finger: dragging down reveals
+                        // what's above, so the offset moves the other way.
+                        self.ui_set_scroll(view, a, (cur[a] - (p[a] - last[a])).clamp(0.0, max[a]));
+                    }
+                }
+            }
+            self.ui_scroll_drag = Some((view, p));
         }
         if pointer.is_none() && !down {
             self.ui_active = None;
@@ -898,6 +1059,76 @@ impl Editor {
         // …and the focus, so `node.focused` / `ui.focused()` read this frame's
         // truth rather than last frame's.
         self.script_host.set_ui_focus(self.ui_focus);
+    }
+
+    /// Write one axis of a scroll view's offset.
+    fn ui_set_scroll(&mut self, view: u32, axis: usize, value: f32) {
+        let ent = self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == view);
+        if let Some(e) = ent
+            && let Some(spec) = self.world.get_mut::<ElementSpec>(e)
+            && let Some(sc) = &mut spec.scroll
+        {
+            if axis == 0 {
+                sc.offset_x = value;
+            } else {
+                sc.offset = value;
+            }
+        }
+        self.input_scroll = 0.0;
+    }
+
+    /// Apply toggle / radio-group behaviour to a clicked element.
+    ///
+    /// `selected` is already a first-class style state, so this needs no new
+    /// look and no new hook — the element simply becomes selected, and the
+    /// project's `selected` block says what that means. A group clears its
+    /// mates within the same LAYER, so two screens can reuse a group name.
+    fn ui_toggle(&mut self, clicked: u32) {
+        let Some(ent) =
+            self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == clicked)
+        else {
+            return;
+        };
+        let Some(spec) = self.world.get::<ElementSpec>(ent) else { return };
+        let group = spec.group.clone();
+        let toggle = spec.toggle;
+        if group.is_empty() {
+            if toggle {
+                let now = !spec.selected;
+                if let Some(s) = self.world.get_mut::<ElementSpec>(ent) {
+                    s.selected = now;
+                }
+            }
+            return;
+        }
+        // Group-mates: same layer root, same group name.
+        let layer = self.ui_layer_of(ent);
+        let mates: Vec<Entity> = self
+            .world
+            .query::<ElementSpec>()
+            .filter(|(e, s)| s.group == group && self.ui_layer_of(*e) == layer)
+            .map(|(e, _)| e)
+            .collect();
+        for m in mates {
+            if let Some(s) = self.world.get_mut::<ElementSpec>(m) {
+                s.selected = m == ent;
+            }
+        }
+    }
+
+    /// The UiLayer entity an element belongs to (walking up `Parent`), so group
+    /// names and element-name lookups are scoped to one screen.
+    fn ui_layer_of(&self, mut e: Entity) -> Option<Entity> {
+        for _ in 0..64 {
+            if self.world.get::<UiLayer>(e).is_some() {
+                return Some(e);
+            }
+            match self.world.get::<Parent>(e) {
+                Some(p) => e = p.0,
+                None => return None,
+            }
+        }
+        None
     }
 
     /// Add ⏵ UI: an Empty node carrying the UI components. Elements land
@@ -1316,6 +1547,21 @@ impl Editor {
             ui.label("max size").on_hover_text("cap on the resolved size (design units, 0 = none) — keeps it from ballooning on huge/ultrawide screens");
             c |= ui.add(egui::DragValue::new(&mut spec.max_size[0]).speed(1.0).range(0.0..=8192.0).prefix("W ")).changed();
             c |= ui.add(egui::DragValue::new(&mut spec.max_size[1]).speed(1.0).range(0.0..=8192.0).prefix("H ")).changed();
+        });
+        ui.horizontal(|ui| {
+            c |= ui
+                .checkbox(&mut spec.toggle, "toggle")
+                .on_hover_text(
+                    "clicking flips `selected` — a checkbox, a mute button, a filter chip. \
+                     What ON looks like is your style's `selected` block.",
+                )
+                .changed();
+            ui.label("group").on_hover_text(
+                "radio behaviour: clicking selects this and deselects everything else with \
+                 the same group name in this layer. Tabs, difficulty pickers, weapon slots. \
+                 Empty = not a group.",
+            );
+            c |= ui.text_edit_singleline(&mut spec.group).changed();
         });
         ui.horizontal(|ui| {
             c |= ui
@@ -2142,6 +2388,58 @@ impl Editor {
                     .add(egui::DragValue::new(&mut sc.speed).range(4.0..=400.0))
                     .on_hover_text("design units per wheel notch")
                     .changed();
+                c |= ui
+                    .checkbox(&mut sc.drag, "drag to scroll")
+                    .on_hover_text(
+                        "dragging the background pans the content. Off by default: in a view \
+                         full of buttons a drag that scrolled would fight every press",
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("offset").on_hover_text(
+                    "current scroll position in design units. Both axes scroll — the wheel \
+                     drives whichever one has travel (shift forces sideways)",
+                );
+                c |= ui.add(egui::DragValue::new(&mut sc.offset_x).prefix("x ")).changed();
+                c |= ui.add(egui::DragValue::new(&mut sc.offset).prefix("y ")).changed();
+            });
+        }
+        // --- scrollbar (drives a named scroll view; your two elements) ---
+        let mut has = spec.scrollbar.is_some();
+        if ui
+            .checkbox(&mut has, "scrollbar")
+            .on_hover_text(
+                "this element becomes a scrollbar TRACK for a named scroll view, and its \
+                 `part: Handle` child becomes the thumb — sized to how much of the content \
+                 is visible. The engine draws no scrollbar of its own; these are your two \
+                 elements, styled however you like",
+            )
+            .changed()
+        {
+            spec.scrollbar = has.then(floptle_ui::ScrollBar::default);
+            c = true;
+        }
+        if let Some(sb) = &mut spec.scrollbar {
+            ui.horizontal(|ui| {
+                ui.label("drives");
+                c |= ui
+                    .text_edit_singleline(&mut sb.target)
+                    .on_hover_text("the scroll view's node name, within this layer")
+                    .changed();
+                let vertical = sb.axis == floptle_ui::Dir::Column;
+                let mut v = vertical;
+                if ui.selectable_label(v, "↕").on_hover_text("vertical").clicked() {
+                    v = true;
+                }
+                if ui.selectable_label(!v, "↔").on_hover_text("horizontal").clicked() {
+                    v = false;
+                }
+                if v != vertical {
+                    sb.axis =
+                        if v { floptle_ui::Dir::Column } else { floptle_ui::Dir::Row };
+                    c = true;
+                }
             });
         }
         // --- mask (clip other elements to this element's rounded rect) ---

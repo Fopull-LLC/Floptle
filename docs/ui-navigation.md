@@ -192,3 +192,65 @@ they're deliberate) and the layer's wrap setting.
 
 If a layer has nothing focusable, the overlay says so. That is the single most
 common cause of "my menu ignores the controller".
+
+---
+
+## Toggles, radio groups, and scrolling
+
+Three things every menu needs that used to be a script each.
+
+### Toggle
+
+`toggle: true` — clicking flips `selected`. A checkbox, a mute button, a
+filter chip. What "on" looks like is your style's `selected` block; the engine
+draws no tick and no switch.
+
+### Radio groups
+
+`group: "difficulty"` — clicking selects this element and deselects everything
+else in the same layer with that group name. Tabs, difficulty pickers, weapon
+slots, a character-select grid.
+
+Groups are scoped to a **layer**, so two screens can reuse a name without
+interfering. A group of one is a toggle that can't be turned off, which is
+occasionally exactly what you want.
+
+Both work identically from a mouse click and a gamepad submit, because both
+paths fire the same `clicked`.
+
+### Scrolling
+
+A scroll view scrolls on **both axes**. The wheel drives whichever axis has
+travel — so a horizontal strip of cards scrolls with an ordinary wheel and
+nobody has to know why — and shift forces sideways.
+
+```ron
+scroll: ( speed: 48.0, drag: true ),
+```
+
+`drag` pans the content by dragging its background. Off by default: in a view
+full of buttons, a drag that scrolled would fight every press.
+
+Scripts read and write `UiElement.scrollX` / `scrollY`.
+
+### Scrollbars are your elements
+
+There is no built-in scrollbar, for the same reason there is no built-in focus
+ring: a scrollbar is one of the most style-defining things on a screen.
+
+Instead, any element can *become* a track:
+
+```ron
+// the track
+( scrollbar: ( target: "Inventory", axis: Column ), shape: (...) )
+//   └── child, part: Handle → the thumb
+```
+
+The thumb's length becomes the **visible fraction of the content**, so the bar
+reads as "how much of this list am I seeing", not just "where am I". Its
+cross-axis geometry is left exactly as you authored it — a 4-unit hairline and
+a chunky 20-unit slab are both yours to make. Grabbing anywhere on the track
+jumps there and keeps tracking.
+
+It reuses the slider's `part: Handle` machinery, so it's the same idea you
+already know from progress bars.

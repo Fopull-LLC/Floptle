@@ -1221,6 +1221,10 @@ struct Editor {
     /// layer, the way focus works everywhere else. Cleared on Play start/stop
     /// so a menu never resumes with a stale ring.
     ui_focus: Option<u32>,
+    /// The scrollbar being dragged (element index), and the drag-to-scroll
+    /// gesture in flight: (scroll view, last pointer position in design units).
+    ui_scroll_grab: Option<u32>,
+    ui_scroll_drag: Option<(u32, [f32; 2])>,
     /// Auto-repeat for a held direction (see `floptle_ui::nav::Repeat`).
     ui_nav_repeat: floptle_ui::nav::Repeat,
     /// This frame's delta, for UI navigation auto-repeat. Its own field rather
