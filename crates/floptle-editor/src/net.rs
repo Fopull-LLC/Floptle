@@ -457,6 +457,11 @@ pub(crate) struct ClientSidePlan {
     /// frame filter exactly as it was (no local avatar, no driver — the
     /// pure-`Authority` client, whose behaviour must not change).
     pub fskip: Option<std::collections::HashSet<u32>>,
+    /// Entities whose TICKS the rollback driver owns. Kept OUT of `skip`: that
+    /// set gates every pass including `lateUpdate`, which no driver replays,
+    /// so folding them in here silently killed their cosmetic pass in net play
+    /// only. floptle/0042.
+    pub dskip: std::collections::HashSet<u32>,
     /// Bodies to deactivate: snapshots own their motion from here.
     pub park: Vec<u32>,
     /// Our own avatar, if this client has one yet.
@@ -488,31 +493,32 @@ pub(crate) fn plan_client_side(
         if !(r.transform || r.physics) {
             continue; // var-only: scripts run on the client too
         }
-        plan.skip.insert(e.index());
-        // A ROLLBACK node's body is NOT parked: `step_body` early-returns on
-        // an inactive body, so parking it would leave the fighter inert on
-        // every client — and because this runs again on each replicated
-        // spawn, it would freeze one mid-match. Before the driver engages
-        // the node parks like any other synced one, so it cannot drift
-        // under local input between joining and `RollbackStart`.
+        // A node the DRIVER owns is locally simulated — only the scheduling of
+        // its ticks moved. So it goes in `dskip`, not `skip`: `skip` gates
+        // every pass including `lateUpdate`, which no driver replays, and a
+        // fighter writing its model yaw there silently stopped in net play
+        // (floptle/0042).
+        //
+        // Its body is NOT parked either: `step_body` early-returns on an
+        // inactive body, so parking would leave the fighter inert on every
+        // client — and because this runs again on each replicated spawn, it
+        // would freeze one mid-match. Before the driver engages the node parks
+        // like any other synced one, so it cannot drift under local input
+        // between joining and `RollbackStart`.
         if r.mode.is_rollback() && rollback.contains(&e.index()) {
             continue;
         }
+        plan.skip.insert(e.index());
         plan.park.push(e.index());
     }
-    plan.skip.extend(rollback.iter().copied());
-    plan.fskip = match plan.predicted {
-        // The predicted node's `update` moves to the TICK clock (the server
-        // integrates it per tick — the client must match or they fight).
-        Some(pe) => {
-            let mut f: std::collections::HashSet<u32> =
-                rollback.iter().copied().collect();
-            f.insert(pe.index());
-            Some(f)
-        }
-        None if !rollback.is_empty() => Some(rollback.clone()),
-        None => None,
-    };
+    // The driver's nodes go in their OWN set: they leave `fixedUpdate` and
+    // `update` (the driver replays those) but keep `lateUpdate`, which nothing
+    // else runs.
+    plan.dskip = rollback.clone();
+    // The predicted node's `update` moves to the TICK clock (the server
+    // integrates it per tick — the client must match or they fight). `None`
+    // leaves the frame filter exactly as it was.
+    plan.fskip = plan.predicted.map(|pe| std::collections::HashSet::from([pe.index()]));
     plan
 }
 
@@ -534,7 +540,7 @@ impl Editor {
             .query::<floptle_core::Replicated>()
             .map(|(e, r)| (e, *r))
             .collect();
-        let ClientSidePlan { skip, fskip, park, predicted } =
+        let ClientSidePlan { skip, fskip, dskip, park, predicted } =
             plan_client_side(&reps, my_owner, &roll);
         for eid in park {
             if let Some(sim) = self.sim.as_mut() {
@@ -542,6 +548,7 @@ impl Editor {
             }
         }
         self.script_host.set_script_filter(skip);
+        self.script_host.set_driver_filter(dskip);
         if let Some(pe) = predicted {
             if let Some(r) = self.world.get_mut::<floptle_core::Replicated>(pe)
                 && !r.physics
@@ -623,12 +630,10 @@ impl Editor {
             skip.insert(e.index());
             fskip.insert(e.index());
         }
-        // Same union as the client side: the rollback driver's nodes run under
-        // it, not under either global pass, and this must not erase that.
-        for eid in self.rollback_filter_eids() {
-            skip.insert(eid);
-            fskip.insert(eid);
-        }
+        // Same split as the client side: the driver's nodes run their TICKS
+        // under it, so they leave both global tick passes — but their
+        // `lateUpdate` has no substitute anywhere and stays here.
+        self.script_host.set_driver_filter(self.rollback_filter_eids());
         self.script_host.set_script_filter(skip);
         self.script_host.set_frame_filter(fskip);
     }
@@ -1877,6 +1882,9 @@ impl Editor {
         self.net_hub = None;
         self.net_scene_doc = None;
         self.script_host.set_frame_filter(std::collections::HashSet::new());
+        // No session, no driver: a stale entry here would keep skipping an
+        // unrelated node's tick passes once the allocator reused its index.
+        self.script_host.set_driver_filter(std::collections::HashSet::new());
         // Back to offline rules: extra player slots idle again (this also
         // clears the session's script filter for everything else).
         if self.playing {
@@ -2077,16 +2085,22 @@ mod tests {
         // Both halves of the filter, not just the half whoever ran last owned.
         assert!(plan.skip.contains(&es[0].index()), "the session's authority skip survived");
         assert!(
-            plan.skip.contains(&es[1].index()) && plan.skip.contains(&es[2].index()),
-            "the driver's fighters run under it, not under the global pass"
+            plan.dskip.contains(&es[1].index()) && plan.dskip.contains(&es[2].index()),
+            "the driver's fighters run their TICKS under it, not under the global pass"
+        );
+        // floptle/0042: NOT in `skip`. That set gates every pass including
+        // `lateUpdate`, which no driver replays — so a fighter that wrote its
+        // model yaw there silently stopped, in net play only, with no error.
+        assert!(
+            !plan.skip.contains(&es[1].index()) && !plan.skip.contains(&es[2].index()),
+            "a driver-owned node keeps its late pass — it is still locally simulated"
         );
         assert!(!plan.skip.contains(&es[3].index()), "a var-only node still runs everywhere");
         let fskip = plan.fskip.expect("a frame filter is owed");
+        assert!(fskip.contains(&es[4].index()), "the avatar's update moves to the tick clock");
         assert!(
-            fskip.contains(&es[1].index())
-                && fskip.contains(&es[2].index())
-                && fskip.contains(&es[4].index()),
-            "fighters AND the avatar leave the per-frame pass, or they run twice a tick"
+            !fskip.contains(&es[1].index()),
+            "a fighter's frame pass is the driver set's business, not this one's"
         );
     }
 

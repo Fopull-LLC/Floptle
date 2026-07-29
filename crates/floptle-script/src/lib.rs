@@ -386,6 +386,12 @@ pub struct ScriptHost {
     /// `update` re-runs on the gameplay tick (`run_frame_for`) so client and
     /// server integrate identically.
     frame_skip: std::collections::HashSet<u32>,
+    /// Entities whose TICKS a driver owns (the rollback driver): their
+    /// `fixedUpdate` and `update` run from there, so the global passes skip
+    /// them — but their `lateUpdate` does NOT run there and is NOT skipped
+    /// here. Separate from `script_skip` because a driver-owned node is still
+    /// locally simulated; only the scheduling moved. floptle/0042.
+    driver_skip: std::collections::HashSet<u32>,
     /// Set while the rollback driver is RE-SIMULATING ticks it already ran
     /// (`docs/rollback-netcode-design.md` §4). Scripts read it as
     /// `net.replaying()`; the engine uses it to discard the one-shot side
@@ -1402,6 +1408,122 @@ end
         host.set_frame_filter(std::collections::HashSet::new());
         host.run(&mut world, &dir, 0.016, 0.064); // cleared → frame pass runs again
         assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 3.0);
+    }
+
+    /// floptle/0042: a driver owns a node's TICKS, not its frames.
+    ///
+    /// `extend_filters` used to put the node in `script_skip`, which gates every
+    /// pass — and the rollback driver replays only `fixedUpdate` and `update`.
+    /// So `lateUpdate` had no substitute execution anywhere and simply stopped,
+    /// with no error and no log line. It is the documented place to write a
+    /// node's cosmetic transform (it runs after the interpolated writeback), so
+    /// a game following that advice broke the instant the node went Rollback —
+    /// and only in a net match, never offline.
+    #[test]
+    fn a_driver_owned_node_still_gets_its_late_pass() {
+        let dir = std::env::temp_dir().join("floptle_script_test_driver_late");
+        let _ = std::fs::create_dir_all(&dir);
+        // Each pass counts itself in a distinct axis: x = update, y = fixedUpdate,
+        // z = lateUpdate.
+        write_script(
+            &dir,
+            "counter",
+            "function update(node, dt)\n  node.x = node.x + 1\nend\n\
+             function fixedUpdate(node, dt)\n  node.y = node.y + 1\nend\n\
+             function lateUpdate(node, dt)\n  node.z = node.z + 1\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "counter".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        let pos = |w: &World| {
+            let t = w.get::<Transform>(e).unwrap().translation;
+            (t.x, t.y, t.z)
+        };
+
+        // Unclaimed: every pass runs globally.
+        host.run(&mut world, &dir, 0.016, 0.016);
+        host.run_fixed(&mut world, 0.016, 0.016);
+        host.run_late(&mut world, 0.016, 0.016);
+        assert_eq!(pos(&world), (1.0, 1.0, 1.0), "all three passes run when unclaimed");
+
+        // The driver claims it. Its ticks move into the driver — but its late
+        // pass has no substitute anywhere, so it must keep running here.
+        host.extend_filters([e.index()]);
+        assert!(host.is_filtered(e.index()), "the driver owns it");
+        host.run(&mut world, &dir, 0.016, 0.032);
+        host.run_fixed(&mut world, 0.016, 0.032);
+        host.run_late(&mut world, 0.016, 0.032);
+        assert_eq!(
+            pos(&world),
+            (1.0, 1.0, 2.0),
+            "update/fixedUpdate are the driver's now; lateUpdate ran exactly once more"
+        );
+
+        // The driver's own substitute calls still bypass the filter.
+        host.run_frame_for(&mut world, e.index(), 1.0 / 60.0, 0.048);
+        host.run_fixed_for(&mut world, e.index(), 1.0 / 60.0, 0.048);
+        assert_eq!(pos(&world), (2.0, 2.0, 2.0), "the driver replays the ticks it owns");
+
+        // Released: back to every pass globally, exactly once.
+        host.shrink_filters([e.index()]);
+        assert!(!host.is_filtered(e.index()));
+        host.run(&mut world, &dir, 0.016, 0.064);
+        host.run_fixed(&mut world, 0.016, 0.064);
+        host.run_late(&mut world, 0.016, 0.064);
+        assert_eq!(pos(&world), (3.0, 3.0, 3.0), "handed back cleanly");
+    }
+
+    /// The OTHER reason a node is filtered must keep its old meaning: a
+    /// snapshot-driven node is not simulated locally at all, so every pass —
+    /// `lateUpdate` included — stays skipped. Separating the two sets must not
+    /// leak the late pass into this case.
+    #[test]
+    fn a_snapshot_driven_node_still_skips_every_pass() {
+        let dir = std::env::temp_dir().join("floptle_script_test_snapshot_late");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "late_only",
+            "function lateUpdate(node, dt)\n  node.z = node.z + 1\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "late_only".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.016, 0.016);
+        host.run_late(&mut world, 0.016, 0.016);
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.z, 1.0);
+
+        let mut skip = std::collections::HashSet::new();
+        skip.insert(e.index());
+        host.set_script_filter(skip);
+        host.run_late(&mut world, 0.016, 0.032);
+        assert_eq!(
+            world.get::<Transform>(e).unwrap().translation.z,
+            1.0,
+            "a server-authoritative node runs NO pass locally, late included"
+        );
     }
 
     #[test]

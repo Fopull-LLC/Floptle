@@ -1278,6 +1278,7 @@ impl ScriptHost {
             synced_warned: std::collections::HashSet::new(),
             script_skip: std::collections::HashSet::new(),
             frame_skip: std::collections::HashSet::new(),
+            driver_skip: std::collections::HashSet::new(),
             replaying,
             replay_marks: None,
         }
@@ -2362,9 +2363,10 @@ impl ScriptHost {
             .collect();
         // The targeted passes bypass the skip sets — they ARE the substitute
         // execution for a filtered entity.
-        let (skip, fskip) = (
+        let (skip, fskip, dskip) = (
             std::mem::take(&mut self.script_skip),
             std::mem::take(&mut self.frame_skip),
+            std::mem::take(&mut self.driver_skip),
         );
         // BOTH targeted passes run on the gameplay tick, including the `update`
         // one — that is the whole point of `run_frame_for`. So a predicted
@@ -2380,6 +2382,7 @@ impl ScriptHost {
         );
         self.script_skip = skip;
         self.frame_skip = fskip;
+        self.driver_skip = dskip;
         self.flush_writes(world);
     }
 
@@ -2391,6 +2394,13 @@ impl ScriptHost {
     /// host's replayed-input pass) — and if nothing has, its scripts never run
     /// at all, which is a failure with no symptom other than silence.
     pub fn is_filtered(&self, eid: u32) -> bool {
+        self.script_skip.contains(&eid) || self.driver_skip.contains(&eid)
+    }
+
+    /// Is `eid` in the SNAPSHOT-driven filter — the one that gates every pass,
+    /// `lateUpdate` included? A driver-owned node must never be in here: no
+    /// driver replays the late pass, so it would simply stop. floptle/0042.
+    pub fn is_snapshot_filtered(&self, eid: u32) -> bool {
         self.script_skip.contains(&eid)
     }
 
@@ -2408,9 +2418,30 @@ impl ScriptHost {
     /// Add to the filters instead of replacing them, for a caller that owns
     /// only part of the set (the rollback driver's nodes, which leave both
     /// passes on top of whatever the session already skips).
+    /// A driver (the rollback driver, the replayed-input pass) is taking over
+    /// this node's **ticks**. Its `fixedUpdate` and `update` run from there
+    /// instead of the global passes — but its `lateUpdate` does NOT, and must
+    /// keep running here.
+    ///
+    /// That distinction is the whole reason this is a separate set from
+    /// [`Self::set_script_filter`]. A snapshot-driven node is not simulated
+    /// locally at all, so skipping every pass is right. A driver-owned node IS
+    /// locally simulated — only the *scheduling* of its ticks moved. Its
+    /// per-frame cosmetic pass has no substitute anywhere, and putting it in
+    /// `script_skip` silently stopped it: `lateUpdate` is where the docs send
+    /// you to write a node's presentation transform (it runs after the
+    /// interpolated writeback, which would otherwise overwrite it), so a game
+    /// that follows that advice broke the moment the node became a Rollback
+    /// node — offline it was perfect, and it produced no error and no log line.
+    /// floptle/0042.
     pub fn extend_filters(&mut self, skip: impl IntoIterator<Item = u32> + Clone) {
-        self.script_skip.extend(skip.clone());
-        self.frame_skip.extend(skip);
+        self.driver_skip.extend(skip);
+    }
+
+    /// Whole-set form of [`Self::extend_filters`] — the session recomputing who
+    /// the driver owns. Pass an empty set to clear (Stop / session end).
+    pub fn set_driver_filter(&mut self, skip: std::collections::HashSet<u32>) {
+        self.driver_skip = skip;
     }
 
     /// Undo an [`Self::extend_filters`] — the same caller taking its own half
@@ -2419,6 +2450,12 @@ impl ScriptHost {
     /// REUSED by the allocator, and would then silently skip an unrelated
     /// node's scripts).
     pub fn shrink_filters(&mut self, drop: impl IntoIterator<Item = u32> + Clone) {
+        for eid in drop.clone() {
+            self.driver_skip.remove(&eid);
+        }
+        // Historic entries: drivers used to write into both of these sets, and
+        // a stale index here would silently skip an UNRELATED node once the
+        // allocator reused it.
         for eid in drop.clone() {
             self.script_skip.remove(&eid);
         }
@@ -2446,6 +2483,13 @@ impl ScriptHost {
         for (e, scripts) in work {
             if self.script_skip.contains(&e.index()) {
                 continue; // networked: this node's state arrives in snapshots
+            }
+            // A driver owns this node's TICKS, not its frames. `lateUpdate` is
+            // per-frame cosmetic work that no driver replays — and must not be
+            // replayed, since a rollback frame runs many ticks and would fire it
+            // once per tick. So it alone survives this filter. floptle/0042.
+            if pass != Pass::Late && self.driver_skip.contains(&e.index()) {
+                continue; // driver-owned: its fixedUpdate/update run from there
             }
             if pass == Pass::Frame && self.frame_skip.contains(&e.index()) {
                 continue; // predicted: its `update` re-runs on the tick clock

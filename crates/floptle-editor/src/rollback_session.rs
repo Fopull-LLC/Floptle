@@ -47,9 +47,31 @@ pub(crate) fn orphaned_rollback_nodes(
         .collect()
 }
 
+/// The sibling fault the orphan check cannot see: a node the driver DOES own,
+/// but which also sits in the snapshot filter that gates every pass.
+///
+/// The orphan check asks "does somebody run your ticks". This asks "does
+/// somebody run your *passes*" — and the answer differs, because the driver
+/// replays `fixedUpdate` and `update` and nothing replays `lateUpdate`. A node
+/// in the all-passes filter therefore loses its late pass with no error and no
+/// log line, offline behaviour perfect, net play silently wrong. floptle/0042.
+pub(crate) fn late_starved_rollback_nodes(
+    reps: &[(floptle_core::Entity, bool)],
+    driven: &std::collections::HashSet<u32>,
+    snapshot_filtered: impl Fn(u32) -> bool,
+) -> Vec<floptle_core::Entity> {
+    reps.iter()
+        .filter(|(_, is_rollback)| *is_rollback)
+        .map(|(e, _)| *e)
+        .filter(|e| driven.contains(&e.index()) && snapshot_filtered(e.index()))
+        .collect()
+}
+
 impl Editor {
-    /// The live driver's node ids — the set that belongs in BOTH script
-    /// filters for as long as it is running those nodes' hooks itself.
+    /// The live driver's node ids — the set that belongs in the DRIVER filter
+    /// for as long as it is running those nodes' ticks itself. Not the snapshot
+    /// filter: that one gates `lateUpdate` too, which no driver replays
+    /// (floptle/0042).
     ///
     /// Empty when no driver is running, which is what makes it safe to union
     /// into every other filter computation unconditionally. The session's
@@ -129,13 +151,14 @@ impl Editor {
             );
             return;
         }
-        // The driver runs these nodes' hooks itself, every tick, in its own
-        // order — so they leave the global passes entirely. `run_*_for` bypasses
-        // both filters, which is the same arrangement the host already uses for
-        // remote-owned Predicted nodes. ADDED to the session's filters, never
-        // assigned over them: on a client the session is already skipping every
-        // authority-driven node, and replacing the set would set all of those
-        // running again.
+        // The driver runs these nodes' TICKS itself, in its own order — so they
+        // leave the global `fixedUpdate` and `update` passes. Their `lateUpdate`
+        // stays on the global pass: no driver replays it, and a rollback frame
+        // runs many ticks, so replaying it would fire it N times (floptle/0042).
+        // `run_*_for` bypasses every filter, which is the same arrangement the
+        // host already uses for remote-owned Predicted nodes. ADDED to the
+        // driver filter, never assigned over the session's own: on a client the
+        // session is already skipping every authority-driven node.
         self.script_host.extend_filters(d.eids());
         // A new match: both once-per-session diagnostics arm again.
         self.net_flow_reported = 0;
@@ -594,6 +617,37 @@ impl Editor {
                 .unwrap_or_else(|| format!("#{}", e.index()))
         })
         .collect();
+        let name = |e: floptle_core::Entity| {
+            self.world
+                .get::<floptle_core::Name>(e)
+                .map(|n| n.0.clone())
+                .unwrap_or_else(|| format!("#{}", e.index()))
+        };
+        // The pass-level sibling: owned by the driver, but ALSO in the filter
+        // that gates every pass — so its `lateUpdate` runs nowhere.
+        let starved: Vec<String> =
+            late_starved_rollback_nodes(&reps, &driven, |eid| {
+                self.script_host.is_snapshot_filtered(eid)
+            })
+            .into_iter()
+            .map(name)
+            .collect();
+        if !starved.is_empty() {
+            self.console.push(
+                floptle_script::LogLevel::Error,
+                format!(
+                    "🥊 {} Rollback node(s) are in the snapshot filter as well as the \
+                     driver's: {}. The driver replays fixedUpdate and update but nothing \
+                     replays lateUpdate, so their late pass runs NOWHERE — cosmetic work \
+                     written there (model yaw, rim lights, camera offsets) silently stops \
+                     in net play while offline stays perfect. This is an engine fault, not \
+                     a project one; please report it with the console text.",
+                    starved.len(),
+                    starved.join(", "),
+                ),
+                None,
+            );
+        }
         if orphans.is_empty() {
             return;
         }
@@ -803,8 +857,57 @@ impl RollbackStats {
 
 #[cfg(test)]
 mod tests {
-    use super::orphaned_rollback_nodes;
+    use super::{late_starved_rollback_nodes, orphaned_rollback_nodes};
     use std::collections::HashSet;
+
+    /// FIELD REGRESSION (floptle/0042): the pass-level sibling of the orphan
+    /// check. A node the driver owns is NOT an orphan — somebody runs its ticks
+    /// — so the orphan check is blind to it. But if it is also in the snapshot
+    /// filter, its `lateUpdate` runs nowhere: the driver replays `fixedUpdate`
+    /// and `update`, and nothing replays the late pass.
+    ///
+    /// In the field this drew both fighters at the same yaw for a whole match,
+    /// with no error and no log line, while offline was perfect.
+    #[test]
+    fn a_driven_node_in_the_snapshot_filter_is_reported_as_late_starved() {
+        use floptle_core::transform::Transform;
+        use floptle_core::{Replicated, ReplicationMode, World};
+
+        let mut world = World::default();
+        let mut fighters = Vec::new();
+        for _ in 0..2 {
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(e, Replicated { mode: ReplicationMode::Rollback, ..Default::default() });
+            fighters.push(e);
+        }
+        let reps: Vec<(floptle_core::Entity, bool)> =
+            world.query::<Replicated>().map(|(e, r)| (e, r.mode.is_rollback())).collect();
+        let driven: HashSet<u32> = fighters.iter().map(|e| e.index()).collect();
+
+        // The fix: driven, and NOT in the all-passes filter.
+        assert!(
+            late_starved_rollback_nodes(&reps, &driven, |_| false).is_empty(),
+            "a driver-owned node outside the snapshot filter keeps its late pass"
+        );
+        // And the orphan check agrees they are not orphans — which is exactly
+        // why this second check has to exist.
+        assert!(
+            orphaned_rollback_nodes(&reps, &driven, |_| true).is_empty(),
+            "the orphan check cannot see this class: somebody DOES run their ticks"
+        );
+
+        // The bug: driven, but also snapshot-filtered.
+        let starved = late_starved_rollback_nodes(&reps, &driven, |_| true);
+        assert_eq!(starved.len(), 2, "both fighters lose their late pass");
+
+        // A node nobody drives is the ORPHAN case, not this one — the two
+        // reports must not double-count the same fault.
+        assert!(
+            late_starved_rollback_nodes(&reps, &HashSet::new(), |_| true).is_empty(),
+            "an undriven node is an orphan, and is reported by the other check"
+        );
+    }
 
     /// FIELD REGRESSION (floptle/0040): the client's join sequence must never
     /// leave a `Rollback` node filtered with no driver holding it.
