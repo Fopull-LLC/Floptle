@@ -25,6 +25,9 @@ pub(crate) enum EditorTab {
     ShaderGraph,
     /// The vertex-paint brush settings (color, radius, strength, falloff, channels).
     Paint,
+    /// The image editor: one canvas for pixels, paint and vectors, exporting the
+    /// PNG the rest of the engine already references (docs/image-editor-proposal.md).
+    Image,
     /// The map-building suite: blockout shapes, sub-object mode, modeling ops,
     /// per-face material slots (docs/map-tools-proposal.md).
     Map,
@@ -52,6 +55,7 @@ impl EditorTab {
             EditorTab::Mixer => "≣ Mixer",
             EditorTab::ShaderGraph => "◈ Shaders",
             EditorTab::Paint => "◨ Paint",
+            EditorTab::Image => "🖼 Image",
             EditorTab::Settings => "⚙ Settings",
         }
     }
@@ -73,6 +77,7 @@ impl EditorTab {
         EditorTab::Mixer,
         EditorTab::ShaderGraph,
         EditorTab::Paint,
+        EditorTab::Image,
         EditorTab::Map,
         EditorTab::Settings,
     ];
@@ -135,6 +140,7 @@ pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
         EditorTab::Scripting,
         EditorTab::ShaderGraph,
         EditorTab::AnimGraph,
+        EditorTab::Image,
     ]);
     let surface = dock.main_surface_mut();
     let [central, _] =
@@ -193,6 +199,16 @@ pub(crate) fn focus_paint_tab(dock: &mut egui_dock::DockState<EditorTab>) {
         let _ = dock.set_active_tab(path);
     } else {
         dock.push_to_focused_leaf(EditorTab::Paint);
+    }
+}
+
+/// Focus the 🖼 Image dock tab — re-adding it if the user closed it. Used when
+/// an image asset is opened, so the canvas is never a tab-hunt away.
+pub(crate) fn focus_image_tab(dock: &mut egui_dock::DockState<EditorTab>) {
+    if let Some(path) = dock.find_tab(&EditorTab::Image) {
+        let _ = dock.set_active_tab(path);
+    } else {
+        dock.push_to_focused_leaf(EditorTab::Image);
     }
 }
 

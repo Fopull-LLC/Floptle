@@ -1292,6 +1292,12 @@ impl Editor {
         self.stop_recording();
         // Any pending graph-canvas edit lands on disk with everything else.
         self.shader_graph.flush(&self.project_root, &mut self.ide, true, false);
+        // …and so does an edited image document (Ctrl+S over the 🖼 tab means
+        // the same thing it means everywhere else). A document that was never
+        // given a name asks for one instead of inventing a file.
+        if self.image.dirty && self.image.doc.is_some() {
+            self.save_image_doc();
+        }
         self.save_scene(); // clears scene_dirty ONLY on success + logs either way
         if let Err(e) = floptle_scene::save_project(&self.project, &self.project_cfg_path()) {
             self.console.push(

@@ -384,6 +384,10 @@ impl<'a> EditorTabViewer<'a> {
             // Shaders open in the graph by default — the beginner front door;
             // the tab's `</>` button (and the context menu) reach the text.
             self.cmd.open_shader_graph = Some(path.to_string());
+        } else if crate::assets::is_texture(path) || crate::image_io::is_image_doc(path) {
+            // A PNG with a sibling .flimg opens its document; a bare one is
+            // wrapped in a single-layer document (io::open_any).
+            self.cmd.open_image = Some(path.to_string());
         } else if is_script(path) || is_markdown(path) {
             self.cmd.open_script_pref = Some(path.to_string());
         }
@@ -401,6 +405,12 @@ impl<'a> EditorTabViewer<'a> {
                 ui.close();
             }
             ui.separator();
+        }
+        if (crate::assets::is_texture(path) || crate::image_io::is_image_doc(path))
+            && ui.button("🖼 Edit image").clicked()
+        {
+            self.cmd.open_image = Some(path.to_string());
+            ui.close();
         }
         if crate::assets::is_shader(path) && ui.button("◈ Open in Shader Graph").clicked() {
             self.cmd.open_shader_graph = Some(path.to_string());

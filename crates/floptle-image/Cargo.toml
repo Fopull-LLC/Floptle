@@ -1,0 +1,19 @@
+[package]
+name = "floptle-image"
+description = "Image-document kernel for the in-editor image editor: tiled RGBA storage, layer compositing, brushes, selections, adjustments, filters, vector paths, palettes, sprite sheets, and the .flimg container. No egui, no wgpu — pure CPU, fully unit-testable."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# PNG/GIF codecs for the .flimg payloads and the flattened export beside it.
+# Deliberately the `image` crate DIRECTLY rather than floptle-assets: that crate's
+# codecs speak `floptle_render::TextureData` and would drag wgpu into a kernel whose
+# whole point is that it builds and tests without a GPU.
+image = { workspace = true }
+# Vector paths / adjustment params ride RON inside the container.
+serde = { workspace = true }
+ron = { workspace = true }

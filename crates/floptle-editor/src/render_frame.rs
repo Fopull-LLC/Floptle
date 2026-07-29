@@ -125,6 +125,10 @@ impl Editor {
         // plugged in during startup is already slotted.
         self.pump_input_devices();
         self.poll_input_map_reload();
+        // The half of the live loop that ISN'T the editor's own push: a texture
+        // rewritten by anything (Aseprite, a build script, a git checkout)
+        // re-uploads here. See image_io.rs.
+        self.poll_texture_hot_reload();
 
         // Nothing to drive until the window + GPU stack exist. (The borrows
         // themselves are taken per stage, and by the gather/draw core below.)
@@ -151,6 +155,14 @@ impl Editor {
             .and_then(|d| d.find_active_focused().map(|(_, t)| *t)));
 
         let (dt, elapsed) = self.advance_clock(game_focused);
+        // 🖼 Image tab: frame playback, toasts, external-change reload, and the
+        // Live re-export that keeps the mesh in step with the brush.
+        let image_visible = std::mem::take(&mut self.image.tab_visible);
+        self.image.tick(dt);
+        if image_visible {
+            self.poll_image_doc_reload();
+            self.step_image_live();
+        }
         // Capture this frame's pre-edit scene, so an inspector/gizmo edit can push it
         // as a single undo step (see `begin_edit`). Inlined (not via `self.snapshot()`)
         // so it only touches disjoint fields while gpu/egui are borrowed. Not while
@@ -1399,6 +1411,13 @@ impl Editor {
         let delete_confirm = &mut self.delete_confirm;
         let toast = &mut self.toast;
         let scene_dirty_now = self.scene_dirty;
+        // The 🖼 tab keeps its own dirty flag — an unsaved image is unsaved
+        // work, and quitting past it silently is the same loss as quitting past
+        // a scene.
+        let image_dirty_now = self.image.dirty && self.image.doc.is_some();
+        // …and one that has never been written has no filename to save under,
+        // so "Save & Quit" cannot silently do it: it has to ask first.
+        let image_unnamed = image_dirty_now && self.image.path.is_none();
         let new_terrain_cfg = &mut self.new_terrain_cfg;
         let pending_open_scene = &mut self.pending_open_scene;
         let vertex_brush = &mut self.vertex_brush;
@@ -1489,6 +1508,7 @@ impl Editor {
         let mixer_ui_state = &mut self.mixer_ui;
         let anim_ui_state = &mut self.anim_ui;
         let shader_graph_state = &mut self.shader_graph;
+        let image_state = &mut self.image;
         let shader_preview_state = &mut self.shader_preview;
         let mesh_registry = &self.mesh_registry;
         // Multiplayer harness panel state: read-only status snapshot + live knobs.
@@ -1746,6 +1766,16 @@ impl Editor {
                         }
                         if ui.button("⬢ Map tools").clicked() {
                             cmd.focus_map = true;
+                            ui.close();
+                        }
+                        if ui
+                            .button("🖼 Image editor")
+                            .on_hover_text(
+                                "draw a texture in the engine — pixels, paint and vectors,                                  with the mesh updating as you paint",
+                            )
+                            .clicked()
+                        {
+                            cmd.focus_image = true;
                             ui.close();
                         }
                         ui.separator();
@@ -2429,6 +2459,7 @@ impl Editor {
                 particles_active,
                 anim_ui: anim_ui_state,
                 shader_graph: shader_graph_state,
+                image: image_state,
                 shader_preview: shader_preview_state,
                 mesh_registry,
                 pointer_down,
@@ -2903,18 +2934,30 @@ impl Editor {
                     .collapsible(false)
                     .default_width(320.0)
                     .show(ui.ctx(), |ui| {
-                        if scene_dirty_now {
-                            ui.label("The scene has unsaved changes.");
-                        } else {
-                            ui.label("Quit Floptle?");
-                        }
+                        match (scene_dirty_now, image_dirty_now) {
+                            (true, true) => ui.label("The scene and the open image have unsaved changes."),
+                            (true, false) => ui.label("The scene has unsaved changes."),
+                            (false, true) => ui.label("The open image has unsaved changes."),
+                            (false, false) => ui.label("Quit Floptle?"),
+                        };
                         ui.horizontal(|ui| {
                             // Save & Quit: save everything, THEN close (the save runs after
                             // this closure, then `about_to_wait` exits — a real close, not the
                             // no-op ViewportCommand this app used to send).
-                            if scene_dirty_now && ui.button("💾 Save & Quit").clicked() {
+                            let save_label =
+                                if image_unnamed { "💾 Save…" } else { "💾 Save & Quit" };
+                            if (scene_dirty_now || image_dirty_now)
+                                && ui.button(save_label)
+                                    .on_hover_text(if image_unnamed {
+                                        "the image has never been saved — it needs a name, so this \
+                                         stays open"
+                                    } else {
+                                        "save everything, then close"
+                                    })
+                                    .clicked()
+                            {
                                 want_save_all = true;
-                                want_exit = true;
+                                want_exit = !image_unnamed;
                                 close = true;
                             }
                             // Discard: leave WITHOUT saving.
@@ -3542,6 +3585,12 @@ impl Editor {
         if want_save_all {
             // Quit-time full save (scene + project + scripts), with its own toast.
             self.save_all();
+            // An unnamed image opened its "save as" dialog instead of saving —
+            // put the tab in front of it, or that dialog is behind whatever the
+            // user was actually looking at.
+            if self.image.save_name.is_some() {
+                self.focus_image_tab();
+            }
         } else if want_save || cmd.save_scene {
             self.save_scene();
         }
@@ -5436,6 +5485,31 @@ impl Editor {
         if let Some(path) = cmd.open_shader_graph {
             self.open_shader_in_graph(&path);
         }
+        if let Some(path) = cmd.open_image {
+            self.open_image_doc(&path);
+        }
+        if let Some(form) = cmd.image_new {
+            self.new_image_doc(&form);
+        }
+        if cmd.image_save {
+            self.save_image_doc();
+        }
+        if let Some(name) = cmd.image_save_as {
+            self.save_image_doc_as(&name);
+        }
+        if let Some(what) = cmd.image_export {
+            self.export_image(what);
+        }
+        if cmd.image_save_palette {
+            self.save_image_palette();
+        }
+        if cmd.image_close {
+            if self.image.dirty {
+                self.image.toast("unsaved changes — save first, or use File ⏵ Save");
+            } else {
+                self.image.close();
+            }
+        }
         if let Some(key) = cmd.open_particle_editor {
             cmd.focus_particles = true;
             self.vfx_ui.open(key);
@@ -5605,6 +5679,9 @@ impl Editor {
             }
         if cmd.focus_terrain {
             self.focus_terrain();
+        }
+        if cmd.focus_image {
+            self.focus_image_tab();
         }
         if cmd.focus_map {
             self.focus_map();

@@ -29,6 +29,7 @@ floptle-rules = { path = "../floptle-rules" }
 floptle-input = { path = "../floptle-input" }
 floptle-ui = { path = "../floptle-ui" }
 floptle-assets = { path = "../floptle-assets" }
+floptle-image = { path = "../floptle-image" }   # image documents behind the 🖼 Image tab
 floptle-script = { path = "../floptle-script" }
 
 winit = { workspace = true }

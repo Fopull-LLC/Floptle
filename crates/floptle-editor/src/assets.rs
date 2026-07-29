@@ -112,6 +112,9 @@ pub(crate) fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
         ("⬣", egui::Color32::from_rgb(120, 200, 210))
     } else if is_script(path) {
         ("¶", egui::Color32::from_rgb(130, 170, 240))
+    } else if crate::image_io::is_image_doc(path) {
+        // The layered document (🖼 Image tab), beside the flat .png it exports.
+        ("▨", egui::Color32::from_rgb(130, 200, 255))
     } else if is_texture(path) {
         ("🖼", egui::Color32::from_rgb(140, 210, 140))
     } else if is_material(path) {

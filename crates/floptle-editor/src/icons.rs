@@ -60,6 +60,12 @@ pub(crate) const PARTICLES: &str = "✱";
 pub(crate) const MIXER: &str = "≣";
 pub(crate) const SHADERS: &str = "◈";
 pub(crate) const PAINT: &str = "◨";
+/// The 2D image editor (distinct from ◨ Paint, which is the 3D brush).
+/// NOT 🎨 — the proposal suggested it and `every_icon_has_a_glyph` refused it:
+/// the bundled NotoEmoji subset has no palette glyph, so it would have shipped
+/// as a tofu box in the tab bar. 🖼 renders, and matches the Assets browser's
+/// texture icon.
+pub(crate) const IMAGE: &str = "🖼";
 
 /// Every icon, for the coverage test.
 pub(crate) const ALL: &[(&str, &str)] = &[
@@ -85,6 +91,7 @@ pub(crate) const ALL: &[(&str, &str)] = &[
     ("MIXER", MIXER),
     ("SHADERS", SHADERS),
     ("PAINT", PAINT),
+    ("IMAGE", IMAGE),
 ];
 
 /// Build the editor's exact font stack (mirrors the setup in `main.rs`).
@@ -142,6 +149,92 @@ mod tests {
             }
         });
         assert!(tofu.is_empty(), "icons render as tofu squares:\n  {}", tofu.join("\n  "));
+    }
+
+    /// Every non-ASCII character in a **string literal** anywhere in the 🖼 tab
+    /// must have a glyph.
+    ///
+    /// [`ALL`] only covers icons someone remembered to register. The image
+    /// editor's chrome is full of one-off glyphs typed straight into button
+    /// labels — ⏶ ⏷ ⎘ 👁 ⛶ ↶ ↷ ⇩ ⊗ — and any one of them silently shipping as a
+    /// tofu box is exactly the failure this module exists to prevent. So scan
+    /// the source instead of trusting a list.
+    #[test]
+    fn every_glyph_in_the_image_tab_renders() {
+        let sources = [
+            ("image_ui.rs", include_str!("image_ui.rs")),
+            ("image_edit.rs", include_str!("image_edit.rs")),
+            ("image_io.rs", include_str!("image_io.rs")),
+        ];
+        let ctx = test_context();
+        let id = egui::FontId::proportional(14.0);
+        let mut tofu = Vec::new();
+        ctx.fonts_mut(|f| {
+            for (name, src) in sources {
+                for c in string_literal_chars(src) {
+                    if !c.is_ascii() && !f.has_glyph(&id, c) {
+                        tofu.push(format!("{name}: {c:?} (U+{:04X})", c as u32));
+                    }
+                }
+            }
+        });
+        tofu.sort();
+        tofu.dedup();
+        assert!(tofu.is_empty(), "the Image tab draws tofu squares:\n  {}", tofu.join("\n  "));
+    }
+
+    /// Characters inside double-quoted string literals — skipping comments,
+    /// where a glyph is prose rather than something a user will ever see.
+    fn string_literal_chars(src: &str) -> Vec<char> {
+        #[derive(PartialEq)]
+        enum S {
+            Code,
+            Line,
+            Block,
+            Str,
+        }
+        let mut state = S::Code;
+        let mut out = Vec::new();
+        let mut escaped = false;
+        let cs: Vec<char> = src.chars().collect();
+        let mut i = 0;
+        while i < cs.len() {
+            let c = cs[i];
+            let next = cs.get(i + 1).copied().unwrap_or('\0');
+            match state {
+                S::Code => match (c, next) {
+                    ('/', '/') => {
+                        state = S::Line;
+                        i += 1;
+                    }
+                    ('/', '*') => {
+                        state = S::Block;
+                        i += 1;
+                    }
+                    ('"', _) => state = S::Str,
+                    _ => {}
+                },
+                S::Line if c == '\n' => state = S::Code,
+                S::Block if c == '*' && next == '/' => {
+                    state = S::Code;
+                    i += 1;
+                }
+                S::Str => {
+                    if escaped {
+                        escaped = false;
+                    } else if c == '\\' {
+                        escaped = true;
+                    } else if c == '"' {
+                        state = S::Code;
+                    } else {
+                        out.push(c);
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out
     }
 
     /// Every dock tab title must render too — titles embed icons directly.

@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+use std::time::SystemTime;
 
 use floptle_core::math::{DVec3, Vec2, Vec3};
 use floptle_core::transform::Transform;
@@ -48,6 +49,10 @@ mod hierarchy;
 mod history;
 mod icons;
 mod ide;
+mod image_edit;
+mod image_icons;
+mod image_io;
+mod image_ui;
 mod input_actions;
 mod input_scan;
 mod input_ui;
@@ -320,6 +325,22 @@ struct EditorCmd {
     open_script_pref: Option<String>,
     /// Open a `.flsl` in the ◈ Shaders graph tab.
     open_shader_graph: Option<String>,
+    /// Focus (or open) the 🖼 Image dock tab.
+    focus_image: bool,
+    /// Open an image (or `.flimg`) in the 🖼 Image tab.
+    open_image: Option<String>,
+    /// Create a new image document from the New dialog.
+    image_new: Option<image_edit::NewForm>,
+    /// Write the open document (`.flimg` + the flattened `.png` beside it).
+    image_save: bool,
+    /// Save it under a new name inside `textures/`.
+    image_save_as: Option<String>,
+    /// Export the open document some other way (layer / selection / sheet / GIF).
+    image_export: Option<image_ui::ImageExport>,
+    /// Write the document's palette into `.floptle/palettes/`.
+    image_save_palette: bool,
+    /// Close the open document.
+    image_close: bool,
     /// The graph tab's ✚ New: after `new_shader_in` runs, open the fresh file
     /// in the graph (instead of only the text editor).
     new_shader_to_graph: bool,
@@ -671,6 +692,8 @@ struct EditorTabViewer<'a> {
     anim_ui: &'a mut anim_ui::AnimUiState,
     /// The ◈ Shaders tab: the node-graph view of one `.flsl`.
     shader_graph: &'a mut shader_graph::ShaderGraphState,
+    /// The 🖼 Image tab: the open image document, its view and its tools.
+    image: &'a mut image_edit::ImageEditState,
     /// The graph's per-node preview atlas (tiles drawn on the nodes).
     shader_preview: &'a mut shader_preview::ShaderGraphPreview,
     /// Registered models — rig lookups for the animation UI.
@@ -752,6 +775,14 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
             EditorTab::Particles => self.particles_ui(ui),
             EditorTab::Mixer => self.mixer_ui(ui),
             EditorTab::ShaderGraph => self.shader_graph_ui(ui),
+            EditorTab::Image => {
+                let mut cx = image_ui::ImageCtx {
+                    st: self.image,
+                    project_root: self.project_root,
+                    cmd: self.cmd,
+                };
+                cx.ui(ui);
+            }
             EditorTab::Map => self.map_ui(ui),
             EditorTab::Settings => {
                 let out = self.settings.ui(ui, self.project);
@@ -1786,6 +1817,16 @@ struct Editor {
     flsl_field_key: Vec<(Entity, String, u64)>,
     /// The ◈ Shaders tab: the node-graph view of one `.flsl`.
     shader_graph: shader_graph::ShaderGraphState,
+    /// The 🖼 Image tab: the open `.flimg`, its view state and its undo stack.
+    /// Tab-local by design — image edits are not scene edits (proposal §11.4).
+    image: image_edit::ImageEditState,
+    /// Last-seen mtime per registered texture, for the hot-reload poll. This is
+    /// what makes an external Aseprite save show up on the mesh.
+    texture_mtime: HashMap<String, SystemTime>,
+    /// When the mtime poll last ran (it stats files at most twice a second).
+    texture_poll_at: Option<Instant>,
+    /// "Discard unsaved image changes" is armed: the next open goes through.
+    image_discard_armed: bool,
     /// The graph's live per-node preview atlas (pipeline + egui texture).
     shader_preview: shader_preview::ShaderGraphPreview,
     /// The terrain fields (id-keyed) + texture palette when Play started.
@@ -2206,7 +2247,7 @@ impl ApplicationHandler for Editor {
 
         match event {
             WindowEvent::CloseRequested => {
-                if self.scene_dirty && !self.player_mode {
+                if (self.scene_dirty || self.image.dirty) && !self.player_mode {
                     self.show_quit_confirm = true;
                 } else {
                     event_loop.exit();
@@ -2319,6 +2360,7 @@ impl ApplicationHandler for Editor {
                                     | EditorTab::AnimGraph
                                     | EditorTab::Particles
                                     | EditorTab::ShaderGraph
+                                    | EditorTab::Image
                             )
                         )
                         && let Some(cmd) = self.map_keys.command(code, self.shift)
@@ -2336,7 +2378,11 @@ impl ApplicationHandler for Editor {
                                 // graph window, and never silently discard unsaved work.
                                 // A BUILD (player mode) only ever frees the cursor — games
                                 // don't quit on Escape.
-                                if self.map_draw_cancel() || self.map_arm.take().is_some() {
+                                if matches!(self.focused_tab, Some(EditorTab::Image))
+                                    && self.image.cancel_pen()
+                                {
+                                    // Backed out of an in-progress vector path.
+                                } else if self.map_draw_cancel() || self.map_arm.take().is_some() {
                                     // Back out of a draw gesture / disarm the
                                     // shape before anything else claims Escape.
                                 } else if self.game_trap || self.script_mouse_lock {
@@ -2352,7 +2398,7 @@ impl ApplicationHandler for Editor {
                                     // nothing else to cancel in a build
                                 } else if self.anim_ui.drag_from.is_some() {
                                     self.anim_ui.drag_from = None;
-                                } else if self.scene_dirty {
+                                } else if self.scene_dirty || self.image.dirty {
                                     self.show_quit_confirm = true;
                                 } else {
                                     event_loop.exit();
@@ -2383,8 +2429,15 @@ impl ApplicationHandler for Editor {
                                             | EditorTab::AnimGraph
                                             | EditorTab::Particles
                                             | EditorTab::ShaderGraph
+                                            | EditorTab::Image
                                     )
                                 );
+                                // The 🖼 Image canvas keeps its OWN undo stack —
+                                // a scene snapshot per brush stroke would be
+                                // absurd, and image edits aren't scene edits
+                                // (image-editor proposal §11.4).
+                                let in_image =
+                                    matches!(self.focused_tab, Some(EditorTab::Image));
                                 // The ◈ Shaders canvas has its own undo stack
                                 // (printed sources) — scene undo stays out.
                                 let in_graph =
@@ -2417,6 +2470,27 @@ impl ApplicationHandler for Editor {
                                             if matches!(self.focused_tab, Some(EditorTab::Animation)) => {}
                                         KeyCode::KeyY
                                             if matches!(self.focused_tab, Some(EditorTab::Animation)) => {}
+                                        KeyCode::KeyZ if in_image => self.image.undo(),
+                                        KeyCode::KeyY if in_image => self.image.redo(),
+                                        // Ctrl+A and Ctrl+D both mean "stop
+                                        // clipping me": with no selection the
+                                        // whole canvas is editable.
+                                        KeyCode::KeyA | KeyCode::KeyD if in_image => {
+                                            self.image.deselect()
+                                        }
+                                        KeyCode::KeyC if in_image => {
+                                            self.image.copy_selection(false);
+                                        }
+                                        KeyCode::KeyX if in_image => {
+                                            self.image.copy_selection(true);
+                                        }
+                                        KeyCode::KeyV if in_image => {
+                                            self.image.paste();
+                                        }
+                                        KeyCode::KeyT if in_image => {
+                                            self.image.tool = crate::image_edit::ImgTool::Transform;
+                                            self.image.begin_transform();
+                                        }
                                         KeyCode::KeyZ if !in_graph => self.undo(),
                                         KeyCode::KeyY if !in_graph => self.redo(),
                                         KeyCode::KeyS => self.save_all(),
@@ -2428,6 +2502,8 @@ impl ApplicationHandler for Editor {
                                         KeyCode::KeyA if !in_timeline && !posing_bone => self.select_all(),
                                         _ => {}
                                     }
+                                } else if in_image {
+                                    crate::image_edit::image_key(&mut self.image, code, self.shift);
                                 } else if !in_timeline {
                                     match code {
                                         // Never delete a scene node while an object/bone is
