@@ -20,6 +20,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod field;
+pub mod make;
 pub mod nav;
 pub mod paint;
 pub mod style;

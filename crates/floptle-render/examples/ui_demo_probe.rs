@@ -75,6 +75,97 @@ fn fill_repeaters(nodes: &mut [Node], row: &ElementSpec) {
     }
 }
 
+/// Run the demo's own `ui_demo.lua` and lift the `ui.make` subtree out of the
+/// world it built.
+///
+/// The crew panel is empty in the scene file on purpose — its whole contents
+/// are described in Lua from a table — so without this the most novel panel in
+/// the demo would be a blank rectangle in the one image anybody looks at. This
+/// is the real script through the real parse and the real reconcile; only the
+/// pixels are faked, and only because there's no window.
+fn made_crew(docs: &[floptle_scene::NodeDoc], next_id: &mut u32) -> Vec<Node> {
+    use floptle_core::{Matter, Name, Parent, World, transform::Transform};
+    let mut world = World::new();
+    let ents: Vec<floptle_core::Entity> = docs
+        .iter()
+        .map(|d| {
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(e, Matter::Empty);
+            world.insert(e, Name(d.name.clone()));
+            if let Some(ui) = d.ui.clone() {
+                world.insert(e, ui);
+            }
+            e
+        })
+        .collect();
+    for (i, d) in docs.iter().enumerate() {
+        if let Some(p) = d.parent {
+            world.insert(ents[i], Parent(ents[p]));
+        }
+        if !d.scripts.is_empty() {
+            world.insert(
+                ents[i],
+                floptle_core::Scripts(
+                    d.scripts
+                        .iter()
+                        .map(|s| floptle_core::ScriptInst {
+                            kind: s.kind.clone(),
+                            enabled: s.enabled,
+                            params: s.params.clone(),
+                            refs: s.refs.clone(),
+                            strs: s.strs.clone(),
+                        })
+                        .collect(),
+                ),
+            );
+        }
+    }
+    let scripts = root().join("scripts");
+    let mut host = floptle_script::ScriptHost::new();
+    host.set_project_root(root());
+    host.run(&mut world, &scripts, 1.0 / 60.0, 0.0);
+    host.apply_ui_makes(&mut world);
+    for e in host.errors() {
+        eprintln!("script error: {e}");
+    }
+    let Some(panel) = docs.iter().position(|d| d.name == "Crew Panel").map(|i| ents[i]) else {
+        return Vec::new();
+    };
+    lift(&world, panel, next_id)
+}
+
+/// A world subtree as renderable nodes, in the order the solver would flow it.
+fn lift(world: &floptle_core::World, parent: floptle_core::Entity, next: &mut u32) -> Vec<Node> {
+    let mut kids: Vec<(i32, u32, floptle_core::Entity)> = world
+        .query::<floptle_core::Parent>()
+        .filter(|(_, p)| p.0 == parent)
+        .filter_map(|(e, _)| {
+            let spec = world.get::<ElementSpec>(e)?;
+            Some((spec.order, e.index(), e))
+        })
+        .collect();
+    kids.sort_by_key(|(order, index, _)| (*order, *index));
+    kids.into_iter()
+        .map(|(_, _, e)| {
+            let id = *next;
+            *next += 1;
+            let spec = world.get::<ElementSpec>(e).cloned().unwrap_or_default();
+            Node::with_children(id, spec, lift(world, e, next))
+        })
+        .collect()
+}
+
+/// Hang the made subtree under the element that owns it.
+fn splice(nodes: &mut [Node], id: u32, made: &[Node]) {
+    for n in nodes.iter_mut() {
+        if n.id == id {
+            n.children.extend(made.iter().cloned());
+        }
+        splice(&mut n.children, id, made);
+    }
+}
+
 /// Every element id under `nodes` whose scene name matches.
 fn id_named(docs: &[floptle_scene::NodeDoc], name: &str) -> Option<u32> {
     docs.iter().position(|d| d.name == name).map(|i| i as u32)
@@ -210,10 +301,19 @@ fn main() {
         ("ui_demo_bare.png", StateInput::default(), false),
     ];
 
+    // Ids past the scene's node count and past the repeater's 10_000s.
+    let mut made_id = 20_000u32;
+    let crew = made_crew(&doc.nodes, &mut made_id);
+    let crew_panel = id_named(&doc.nodes, "Crew Panel");
+    println!("ui.make built {} root(s) under the crew panel", crew.len());
+
     let mut checked = false;
     for (out, input, editing) in shots {
         let mut roots = build(&doc.nodes, Some(layer_at));
         fill_repeaters(&mut roots, &row_spec);
+        if let Some(id) = crew_panel {
+            splice(&mut roots, id, &crew);
+        }
         // The demo's field is empty in the file; give the "editing" shot
         // something to put a caret in the middle of.
         if editing && let Some(id) = field {

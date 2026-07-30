@@ -1163,5 +1163,20 @@
                 )),
             )),
         ),
+        (
+            name: "Crew Panel",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(2),
+            ui: Some((
+                place: Free(pos: (980.0, 132.0)),
+                size: (Fixed(252.0), Fixed(476.0)),
+            )),
+        ),
     ],
 )

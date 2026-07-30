@@ -1479,6 +1479,7 @@ dependencies = [
  "floptle-field",
  "floptle-rules",
  "floptle-scene",
+ "floptle-script",
  "floptle-shader",
  "floptle-ui",
  "fontdue",

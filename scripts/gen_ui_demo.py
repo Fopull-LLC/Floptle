@@ -306,6 +306,13 @@ TIP = node("Tooltip", LAYER,
 node("Tooltip Text", TIP,
      ui=dict(place=free(0, 0), size=size(FIT, FIT), text=text(" ", sz=14.0)))
 
+# ---- the crew panel, which this file does NOT describe ---------------------
+# Deliberately empty: everything inside it is described in ui_demo.lua with
+# `ui.make` and built from a table. This node is the frame — where the panel
+# sits and how big it is — which is the part a designer wants to place by hand.
+node("Crew Panel", LAYER,
+     ui=dict(place=free(980.0, 132.0), size=size(FIX(252.0), FIX(476.0))))
+
 # ---------------------------------------------------------------------------
 # Emit
 # ---------------------------------------------------------------------------

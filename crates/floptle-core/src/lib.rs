@@ -42,7 +42,7 @@ pub use layers::Layers;
 pub use material::{Material, ObjectMaterials, Tiling};
 pub use matter::{
     world_transform, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, CastShadow,
-    CelestialBody, Collidable, GravityMode, Layer, Light, Matter, MeshCollider, Name, Parent,
+    CelestialBody, Collidable, GravityMode, Layer, Light, Made, Matter, MeshCollider, Name, Parent,
     ParticleSystem, RepeatIndex, RigidBody, Shape, Spin, Tags, TerrainGen, TexturePaint, Trigger, VertexPaint,
     Visible,
 };

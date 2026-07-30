@@ -191,7 +191,22 @@ impl Editor {
             }
             self.apply_spawn_batch(spawns, creates);
         }
-        let destroys = self.script_host.take_destroy_requests();
+        // `ui.make(...)`: reconcile each described tree against the world. It
+        // runs here, with the other node-creating queues, so a screen built in
+        // `start` is on screen for the first frame's layout and hit test.
+        let mut destroys = self.script_host.take_destroy_requests();
+        if self.playing {
+            destroys.extend(self.script_host.apply_ui_makes(&mut self.world));
+        } else if self.script_host.discard_ui_makes() > 0 {
+            // Same rule as a repeater's rows: made elements are runtime
+            // content, and an editor action that conjured them into the open
+            // scene would put engine-built nodes in a file about to be saved.
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                "ui.make builds only while the game is playing — nothing was created".into(),
+                None,
+            );
+        }
         if destroys.is_empty() {
             return;
         }
@@ -658,6 +673,9 @@ impl Editor {
     }
 
     pub(crate) fn apply_destroys(&mut self, destroys: Vec<u32>) {
+        // Every entity that actually goes away, roots and descendants — see
+        // the handler prune at the end.
+        let mut gone: Vec<u32> = Vec::new();
         let mut kids: std::collections::HashMap<Entity, Vec<Entity>> =
             std::collections::HashMap::new();
         for (e, p) in self.world.query::<floptle_core::Parent>() {
@@ -697,6 +715,7 @@ impl Editor {
             }
             for e in doomed {
                 let idx = e.index();
+                gone.push(idx);
                 // On a server session, tracked nodes despawn THROUGH the session
                 // (broadcasts to every client); everything else is local.
                 let tracked =
@@ -719,6 +738,11 @@ impl Editor {
                 }
             }
         }
+        // Entity indices are recycled, so a `ui.make` behaviour closure left
+        // on a destroyed element would fire on whatever node inherits its
+        // slot. Pruned here, at the ONE destroy path, rather than at each
+        // caller.
+        self.script_host.drop_ui_handlers(&gone);
         // Play-mode selections can now point at despawned entities.
         self.selection.retain(|&e| self.world.is_alive(e));
     }

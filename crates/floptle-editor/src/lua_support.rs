@@ -415,6 +415,22 @@ function ui.bind(node, property, fn) end
 ---@param node Node
 ---@param property string|nil
 function ui.unbind(node, property) end
+---Build a UI subtree from data and reconcile it with the one already there.
+---
+---An element is `{ \"kind\", prop = value, ..., children }`, where kind is one of
+---box / row / col / text / image / button / field / slider / scroll. Give a
+---container `items = {...}` and a function child to get one child per item —
+---the function receives `(item, i)` and may return nil to skip. `key = \"id\"`
+---is how a row keeps its entity through a re-sort, and `onClicked = function(node) end`
+---(any UI hook, `on` + its name) carries behaviour inline.
+---
+---Call it again when the data changes: only the difference is spawned and
+---destroyed, so the rows that stay keep their hover, their scroll, their
+---transitions and what was typed into them. A property the table stops
+---mentioning goes back to default. Play only; a mistyped property raises.
+---@param container Node
+---@param tree table
+function ui.make(container, tree) end
 
 ---A colour: `color(r, g, b [, a])`, `color(gray [, a])`, or `color(other, a)`
 ---to copy with a new alpha. Channels are 0..1 and alpha defaults to 1, so

@@ -42,6 +42,32 @@ impl Tags {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RepeatIndex(pub u32);
 
+/// A node built by `ui.make`, and the identity the next call matches it by.
+///
+/// Runtime-only and never serialised, for the same reason as [`RepeatIndex`]:
+/// these nodes are conjured from data while the game runs, and a saved scene
+/// that contained them would describe last session's roster.
+///
+/// The marker is also what keeps a made subtree from touching its neighbours.
+/// Reconciliation only ever considers a container's children that carry this,
+/// so an element you placed by hand under the same parent is never matched,
+/// never patched, and never destroyed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Made {
+    /// The description's `key`, or empty when it was matched by position.
+    pub key: String,
+    /// Position among its made siblings as of the last reconcile — the stable
+    /// order the next diff reads them in.
+    pub slot: u32,
+    /// The described kind that built it (`"row"`, `"text"`, …).
+    ///
+    /// Recorded rather than inferred from the element itself: a `text` with a
+    /// background fill and a `box` with a label are the same ElementSpec, so a
+    /// diff that guessed would see the kind change every call and rebuild the
+    /// screen from scratch each time.
+    pub kind: String,
+}
+
 /// A scene-graph parent link: this entity's [`Transform`](crate::transform::Transform)
 /// is **local** (relative to the parent), and its world transform is the parent's
 /// world transform composed with it. Moving/rotating/scaling a parent therefore

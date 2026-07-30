@@ -5,7 +5,8 @@
 It is one screen that uses everything the UI system grew: styles and tokens,
 the five interaction states, keyboard and gamepad focus, a text field, a
 radio-group tab strip, toggle chips, a slider, a scroll view with a scrollbar,
-a list built by a repeater, drag & drop, and tooltips.
+a list built by a repeater, drag & drop, tooltips, and a panel whose entire
+contents are described in Lua and built from a table.
 
 ![the demo](ui-demo.png)
 
@@ -22,6 +23,7 @@ a list built by a repeater, drag & drop, and tooltips.
 | **Wheel over the manifest** | it scrolls, and the bar's thumb is the visible fraction of the list |
 | **Click a manifest row** | it is removed — watch the others keep their hover and the view keep its scroll |
 | **Drag ORE or FUEL onto an empty slot** | the engine reports the drag; `ui_demo_slot.lua` decides what it means |
+| **Click a crew member** | the whole right-hand panel is `ui.make` — one table, one call. The row goes, the others keep their hover and their transitions, and a RECALL button appears because a function child returned something this time |
 
 ## What it is made of
 
@@ -31,7 +33,7 @@ a list built by a repeater, drag & drop, and tooltips.
 | `assets/ui/demo.tokens.ron` | the palette, spacing scale, radii and type scale |
 | `assets/ui/demo.uistyle.ron` | fifteen styles, every colour a token name |
 | `assets/prefabs/DemoRow.prefab.ron` | one manifest row |
-| `assets/scripts/ui_demo*.lua` | ~110 lines, total |
+| `assets/scripts/ui_demo*.lua` | ~215 lines, total — 70 of which are the crew panel: its contents, its look and what its rows do |
 
 **Delete the two files in `assets/ui/` and the demo still runs**, grey and
 flat. That is the whole point of the arc: nothing in the engine knows what this
@@ -54,6 +56,20 @@ ui.focus(find("Play"))
 Each row asks `node.index` who it is. The tab strip and the toggle chips have
 no script at all — `group:` and `toggle:` flip the `selected` state, and the
 style says what selected looks like.
+
+The crew panel is the other half of that story: the scene holds **one empty
+node** saying where it sits, and everything inside it — the heading, five rows,
+each row's badge, name, role and click handler — is one `ui.make` call over a
+table of five crew members. Add a sixth to the table and a sixth row appears.
+
+```lua
+ui.make(find("Crew Panel"), {
+    "col", inset = 0, style = "panel", gap = 10, pad = 16,
+    { "text", text = "CREW · " .. #crew .. " on duty", style = "caption" },
+    { "col", w = "100%", gap = 6, items = crew, crewRow },
+    function() if #offDuty > 0 then return recallButton() end end,
+})
+```
 
 ## Rendering it without the editor
 
@@ -84,4 +100,5 @@ hand-splice nodes into the `.ron`.
 - [ui-styles.md](ui-styles.md) — tokens, styles, states, transitions
 - [ui-tab.md](ui-tab.md) — the ◫ authoring canvas
 - [ui-navigation.md](ui-navigation.md) — focus, fields, drag & drop, tooltips
+- [ui-make.md](ui-make.md) — building a screen from data
 - [scripting.md](scripting.md) — `color`, `ui.bind`, repeaters, the hooks

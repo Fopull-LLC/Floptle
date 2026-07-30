@@ -96,6 +96,15 @@ pub(crate) struct UiBinding {
 
 type UiBindings = Rc<RefCell<Vec<UiBinding>>>;
 
+/// Queued `ui.make(container, tree)` calls, drained by the driver.
+type UiMakes = Rc<RefCell<Vec<ui_make::MakeRequest>>>;
+
+/// Behaviour closures a made element carries (`onClicked` and friends), by
+/// `(entity, hook)`. Kept beside the scripts rather than inside them: the
+/// element has no script file to put a `clicked` function in, which is the
+/// whole point of describing a screen in one place.
+type UiHandlers = Rc<RefCell<HashMap<(u32, String), mlua::RegistryKey>>>;
+
 mod api;
 mod audio_api;
 mod env;
@@ -110,6 +119,7 @@ mod sched_api;
 mod assembly_api;
 mod space_api;
 mod terrain_api;
+pub mod ui_make;
 mod view_api;
 
 pub(crate) use api::install_handle_api;
@@ -318,6 +328,10 @@ pub struct ScriptHost {
     component_changes: ComponentWrites,
     component_colors: ComponentColorWrites,
     ui_bindings: UiBindings,
+    /// `ui.make(...)` calls this pass, drained by the driver's spawn drain.
+    ui_makes: UiMakes,
+    /// The behaviour closures made elements carry.
+    ui_handlers: UiHandlers,
     /// The material presets the editor lends each frame (name → Material), so a script can
     /// set `node.material = "Gold"` (or an `assets.getFile("materials/Gold.ron")`).
     materials: Rc<RefCell<HashMap<String, Material>>>,
@@ -2407,6 +2421,93 @@ end
         let tr = world.get::<Transform>(e).unwrap();
         assert_eq!((tr.translation.y, tr.translation.z), (1.0, 7.0));
         assert_eq!(world.get::<floptle_ui::ElementSpec>(e).unwrap().opacity, 0.25);
+    }
+
+    /// `ui.make` end to end: a Lua table becomes real nodes, a described
+    /// button's inline `onClicked` fires on a click, and re-describing the
+    /// screen with one fewer row destroys exactly that row.
+    ///
+    /// The pieces have their own tests; this one is the whole path, because
+    /// that is where the seams are — the parse hands paths to the reconcile,
+    /// the reconcile hands entities back, and the closures have to end up on
+    /// the right ones.
+    #[test]
+    fn ui_make_builds_a_screen_and_its_buttons_work() {
+        let dir = std::env::temp_dir().join("floptle_script_test_ui_make");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "screen",
+            concat!(
+                "crew = { \"ana\", \"bo\", \"cy\" }\n",
+                "picked = \"\"\n",
+                "function build(node)\n",
+                "  ui.make(node, { \"col\", gap = 6, items = crew,\n",
+                "    function(id) return { \"button\", key = id, text = id,\n",
+                "      onClicked = function(n) picked = id end } end })\n",
+                "end\n",
+                "function start(node) build(node) end\n",
+            ),
+        );
+        let mut world = World::default();
+        let panel = world.spawn();
+        world.insert(panel, Transform::IDENTITY);
+        world.insert(panel, floptle_core::Name("Panel".into()));
+        world.insert(panel, floptle_ui::ElementSpec::default());
+        world.insert(
+            panel,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "screen".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.apply_ui_makes(&mut world).is_empty(), "nothing to destroy on the first build");
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+
+        // A column under the panel, three buttons under that.
+        let made: Vec<floptle_core::Entity> =
+            world.query::<floptle_core::Made>().map(|(e, _)| e).collect();
+        assert_eq!(made.len(), 4, "one column + three rows");
+        let mut rows: Vec<(u32, floptle_core::Entity)> = world
+            .query::<floptle_core::Made>()
+            .filter(|(_, m)| m.kind == "button")
+            .map(|(e, m)| (m.slot, e))
+            .collect();
+        rows.sort_by_key(|(slot, e)| (*slot, e.index()));
+        assert_eq!(rows.len(), 3);
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|(_, e)| {
+                world.get::<floptle_ui::ElementSpec>(*e).unwrap().text.as_ref().unwrap().text.clone()
+            })
+            .collect();
+        assert_eq!(texts, vec!["ana", "bo", "cy"]);
+
+        // The middle row's inline closure runs on a click, with no script
+        // file, no prefab and no `clicked` function anywhere.
+        host.run_ui_hooks(&mut world, &[(rows[1].1.index(), "clicked")]);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let picked: String = host
+            .instance_env(panel.index(), "screen")
+            .and_then(|env| env.get::<String>("picked").ok())
+            .unwrap_or_default();
+        assert_eq!(picked, "bo");
+
+        // Describing the same screen again changes nothing…
+        host.call_action(&mut world, &dir, panel.index(), "screen", "build");
+        assert!(host.apply_ui_makes(&mut world).is_empty(), "a re-render must not churn");
+        assert_eq!(world.query::<floptle_core::Made>().count(), 4);
+
+        // …and dropping a row hands back exactly that row.
+        let env = host.instance_env(panel.index(), "screen").expect("the instance is live");
+        env.set("crew", vec!["ana".to_string(), "cy".to_string()]).unwrap();
+        host.call_action(&mut world, &dir, panel.index(), "screen", "build");
+        assert_eq!(host.apply_ui_makes(&mut world), vec![rows[1].1.index()]);
     }
 
     /// `node:setShaderParam` lands in the UI element's `shader_params` when it

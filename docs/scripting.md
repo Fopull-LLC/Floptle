@@ -1029,6 +1029,49 @@ runtime entities, and conjuring them in edit mode would put engine-spawned
 nodes into a scene you're about to save. Put one row in the scene by hand to
 design against and let the repeater fill the rest.
 
+### Screens from data — `ui.make`
+
+A repeater answers "there should be N of these". When the SHAPE of the screen
+comes from data — not just how many rows, but what they contain — describe it:
+
+```lua
+ui.make(find("Crew Panel"), {
+    "col", inset = 0, style = "panel", gap = 10, pad = 16,
+    { "text", text = "CREW · " .. #crew .. " on duty", style = "caption" },
+    { "col", w = "100%", gap = 6, items = crew,
+        function(m)
+            return {
+                "button", key = m.id, style = "row", dir = "row", gap = 10,
+                onClicked = function() standDown(m.id) end,
+                { "box", w = 26, h = 26, radius = 13, text = m.name:sub(1, 1) },
+                { "text", text = m.name },
+            }
+        end,
+    },
+})
+```
+
+Full manual: **[ui-make.md](ui-make.md)**. The short version:
+
+- An element is `{ "kind", prop = value, …, children }`. Kinds:
+  `box`, `row`, `col`, `text`, `image`, `button`, `field`, `slider`, `scroll`.
+- `items = {…}` plus a function child makes **one child per item** — the
+  function gets `(item, i)` and may return `nil` to skip. A function child
+  *without* `items` is a conditional part of the screen.
+- `onClicked = function(node) … end` — any UI hook, `on` + its name — carries
+  behaviour inline. No prefab, no second file.
+- **Call it again when the data changes.** It reconciles: only the difference
+  is spawned and destroyed, so the rows that stay keep their entity, their
+  hover, their scroll position and their in-flight transitions. `key = "id"` is
+  how a row keeps all that through a re-sort.
+- The description is authoritative — a property you stop mentioning goes back
+  to default. What the *player* did (scroll, typing, a toggle, a dragged
+  slider) is kept, because that isn't something the description said.
+- Elements you placed by hand under the same container are never touched, so a
+  data-driven list can live inside a designed panel.
+- Play only, same as the repeater. A mistyped property **raises** — a
+  declarative screen that silently ignores a line is worse than one that stops.
+
 The engine imposes no button look — style the states yourself, it's 5 lines:
 
 ```lua

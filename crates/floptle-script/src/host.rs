@@ -695,6 +695,8 @@ impl ScriptHost {
         // actually needs to read it.
         let ui_drag: crate::UiDragCell = Rc::new(RefCell::new(None));
         let ui_bindings: Rc<RefCell<Vec<crate::UiBinding>>> = Rc::new(RefCell::new(Vec::new()));
+        let ui_makes: crate::UiMakes = Rc::new(RefCell::new(Vec::new()));
+        let ui_handlers: crate::UiHandlers = Rc::new(RefCell::new(HashMap::new()));
         if let Ok(t) = lua.create_table() {
             let req = ui_focus_request.clone();
             let cur = ui_focus.clone();
@@ -782,6 +784,30 @@ impl ScriptHost {
                     binds
                         .borrow_mut()
                         .retain(|x| x.e != e || prop.as_ref().is_some_and(|p| *p != x.prop));
+                    Ok(())
+                })
+                .ok(),
+            );
+            // `ui.make(container, tree)` — a screen described as data, and
+            // reconciled against the one already there. The counterpart to
+            // `ui.bind`: bind keeps a value true, make keeps a TREE true.
+            let makes = ui_makes.clone();
+            let _ = t.set(
+                "make",
+                lua.create_function(move |lua, (node, tree): (mlua::Value, mlua::Value)| {
+                    let container = crate::env::node_id_of(&node).ok_or_else(|| {
+                        mlua::Error::runtime("ui.make expects (node, table)")
+                    })?;
+                    // Parsing raises rather than logs: a mistyped property is a
+                    // mistake in the description, and a screen that quietly
+                    // builds without it is harder to debug than one that stops
+                    // with a line number.
+                    let (roots, hooks) = crate::ui_make::parse_tree(lua, &tree)?;
+                    makes.borrow_mut().push(crate::ui_make::MakeRequest {
+                        container,
+                        roots,
+                        hooks,
+                    });
                     Ok(())
                 })
                 .ok(),
@@ -1376,6 +1402,8 @@ impl ScriptHost {
             ui_focus_request,
             ui_drag,
             ui_bindings,
+            ui_makes,
+            ui_handlers,
             anim_info: shared.anim_info.clone(),
             anim_commands: shared.anim_commands.clone(),
             vfx_info: shared.vfx_info.clone(),
@@ -1550,6 +1578,17 @@ impl ScriptHost {
         // scene will reuse. Left in place they would drive the wrong nodes.
         for b in self.ui_bindings.borrow_mut().drain(..) {
             let _ = self.lua.remove_registry_value(b.f);
+        }
+        // Same reasoning for made screens: their described trees and their
+        // behaviour closures both name the OLD scene's entity indices, which
+        // the new scene reuses from zero.
+        for req in self.ui_makes.borrow_mut().drain(..) {
+            for (_, _, f) in req.hooks {
+                let _ = self.lua.remove_registry_value(f);
+            }
+        }
+        for (_, f) in self.ui_handlers.borrow_mut().drain() {
+            let _ = self.lua.remove_registry_value(f);
         }
         // Queued spawn/destroy requests must not leak across a scene switch
         // (their entities/prefabs belong to the old scene's session).
@@ -1735,6 +1774,85 @@ impl ScriptHost {
     /// Drain the nodes scripts asked to remove via `destroy(...)` (entity indices).
     pub fn take_destroy_requests(&self) -> Vec<u32> {
         std::mem::take(&mut *self.destroy_queue.borrow_mut())
+    }
+
+    /// Apply this pass's `ui.make(...)` calls: reconcile each described tree
+    /// against the world, install the behaviour closures on whichever entities
+    /// the described elements turned out to be, and report the elements that
+    /// are no longer described so the caller's destroy path can take them.
+    ///
+    /// Returns the entity indices to destroy. They are NOT despawned here: a
+    /// made container can carry a repeater, whose rows are ordinary prefabs
+    /// with scripts and physics, and the driver's destroy is the one path that
+    /// knows how to unwind those.
+    pub fn apply_ui_makes(&mut self, world: &mut World) -> Vec<u32> {
+        let reqs = std::mem::take(&mut *self.ui_makes.borrow_mut());
+        if reqs.is_empty() {
+            return Vec::new();
+        }
+        let mut destroy = Vec::new();
+        for req in reqs {
+            let out = crate::ui_make::reconcile(world, req.container, &req.roots);
+            destroy.extend(out.destroy);
+            let mut handlers = self.ui_handlers.borrow_mut();
+            for (path, hook, f) in req.hooks {
+                let Some((_, e)) = out.bound.iter().find(|(p, _)| *p == path) else {
+                    // The described element it belonged to didn't survive
+                    // parsing into a node — drop the closure rather than leak
+                    // its registry slot.
+                    let _ = self.lua.remove_registry_value(f);
+                    continue;
+                };
+                // Re-describing a screen replaces its handlers: the closure is
+                // freshly made every call and captures this call's values, so
+                // keeping the old one would run against stale state.
+                if let Some(old) = handlers.insert((*e, hook.to_string()), f) {
+                    let _ = self.lua.remove_registry_value(old);
+                }
+            }
+        }
+        destroy
+    }
+
+    /// Throw away queued `ui.make(...)` calls without applying them, freeing
+    /// their closures. Returns how many were dropped.
+    ///
+    /// Edit mode: a made tree is runtime content — conjured from data the game
+    /// is holding right now — and materialising it into the open scene would
+    /// put engine-built nodes in a file about to be saved. Same rule as a
+    /// repeater's rows, for the same reason.
+    pub fn discard_ui_makes(&mut self) -> usize {
+        let reqs = std::mem::take(&mut *self.ui_makes.borrow_mut());
+        let n = reqs.len();
+        for req in reqs {
+            for (_, _, f) in req.hooks {
+                let _ = self.lua.remove_registry_value(f);
+            }
+        }
+        n
+    }
+
+    /// Forget the behaviour closures on entities that no longer exist.
+    ///
+    /// Called with the set that just went away rather than sweeping every
+    /// frame: entity indices are REUSED, so a handler left behind by a
+    /// destroyed element would fire on whatever node inherits its slot.
+    pub fn drop_ui_handlers(&mut self, gone: &[u32]) {
+        if gone.is_empty() || self.ui_handlers.borrow().is_empty() {
+            return;
+        }
+        let dead: Vec<(u32, String)> = self
+            .ui_handlers
+            .borrow()
+            .keys()
+            .filter(|(e, _)| gone.contains(e))
+            .cloned()
+            .collect();
+        for k in dead {
+            if let Some(f) = self.ui_handlers.borrow_mut().remove(&k) {
+                let _ = self.lua.remove_registry_value(f);
+            }
+        }
     }
 
     /// Invoke a `spawn(...)` request's callback with the freshly spawned root's
@@ -3016,6 +3134,20 @@ impl ScriptHost {
                     failures.push((kind.clone(), format!("{kind}: {hook}: {err}")));
                 }
                 *self.net.current.borrow_mut() = None;
+            }
+            // …and the closure a described element carried, if any. Same
+            // event, same node handle, same place — a made button and an
+            // authored one behave identically from here on.
+            let handler = self
+                .ui_handlers
+                .borrow()
+                .get(&(*eid, (*hook).to_string()))
+                .and_then(|k| self.lua.registry_value::<mlua::Function>(k).ok());
+            if let Some(f) = handler
+                && let Ok(node) = crate::env::new_node_handle(&self.lua, *eid)
+                && let Err(err) = f.call::<()>(node)
+            {
+                failures.push(("ui.make".into(), format!("ui.make: {hook} handler: {err}")));
             }
         }
         for (kind, msg) in failures {
