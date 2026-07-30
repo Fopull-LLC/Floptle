@@ -159,6 +159,26 @@ pub struct BodySnapshot {
     pub grounded: bool,
 }
 
+/// What one dynamic body reports to the game each frame — see
+/// [`Sim::body_states`].
+#[derive(Clone, Copy, Debug)]
+pub struct BodyReport {
+    pub entity: Entity,
+    pub vel: Vec3,
+    /// −gravity at the body: Y under normal gravity, radial on a planet.
+    pub up: Vec3,
+    pub grounded: bool,
+    /// Total standing height (a controller writes it to crouch).
+    pub height: f32,
+    /// The body's own position, absolute world coordinates (NOT the node's
+    /// interpolated render transform).
+    pub pos: DVec3,
+    /// The floor it is standing on — `Some` exactly when `grounded`.
+    pub ground_normal: Option<Vec3>,
+    /// The steepest surface it is pressed against, when too steep to stand on.
+    pub wall_normal: Option<Vec3>,
+}
+
 /// One row of [`Sim::compound_impacts`]: `(root entity index, part = shape_id,
 /// sum normal impulse, peak NORMAL speed, peak TOTAL speed, world contact point)`.
 /// The two speeds let a damage model judge severity by the honest total (energy)
@@ -1433,10 +1453,11 @@ impl Sim {
         }
     }
 
-    /// Per body: (entity, velocity, up, grounded, height, TICK position) — so the
-    /// editor can expose it to scripts (`up` is −gravity, for surface-relative
+    /// Per body: everything a controller script reads about its own body — so
+    /// the editor can expose it (`up` is −gravity, for surface-relative
     /// movement on planets; `height` lets a controller read/animate its capsule
-    /// height for crouching).
+    /// height for crouching; the two normals say what it is standing on and
+    /// what it is pressed against).
     ///
     /// The position is the body's own, in absolute world coordinates — NOT the
     /// node's transform, which between ticks holds the *interpolated render
@@ -1444,13 +1465,25 @@ impl Sim {
     /// inside `fixedUpdate` is an alpha-dependent read, which is a
     /// frame-rate-dependent read, which no replay can reproduce; this is where
     /// `node.tickX/tickY/tickZ/tickPos` come from.
+    ///
+    /// A struct rather than a tuple: this is read at five call sites, and the
+    /// day it grew a seventh member the tuple stopped being readable.
     pub fn body_states(
         &self,
-    ) -> impl Iterator<Item = (Entity, Vec3, Vec3, bool, f32, DVec3)> + '_ {
+    ) -> impl Iterator<Item = BodyReport> + '_ {
         self.map.iter().map(move |l| {
             let b = &self.world.bodies[l.body];
             let pos = self.world.origin + DVec3::new(b.pos.x as f64, b.pos.y as f64, b.pos.z as f64);
-            (l.entity, b.vel, b.up, b.grounded, b.height(), pos)
+            BodyReport {
+                entity: l.entity,
+                vel: b.vel,
+                up: b.up,
+                grounded: b.grounded,
+                height: b.height(),
+                pos,
+                ground_normal: b.ground_normal,
+                wall_normal: b.wall_normal,
+            }
         })
     }
 

@@ -162,6 +162,17 @@ Hooks on the element's scripts:
 | `clicked(node)` | submit, or a mouse click |
 | `cancelled(node)` | `UiCancel` while focused |
 
+…or from somewhere else entirely, when the state a screen changes doesn't live
+on the element that changed it:
+
+```lua
+ui.on(find("Play"), "clicked", function() scene.load("arena") end)
+ui.on(find("Play"), "focusEnter", function(el) preview(el.name) end)
+if ui.focused(find("Play")) then ... end     -- or ask, per frame
+```
+
+See [scripting.md](scripting.md#one-script-for-a-whole-screen--uion--uievents).
+
 Focus is engine state, not a component. It is never saved into a scene, it is
 cleared when Play stops, and there is exactly one way to move it — which is why
 there is exactly one place to look when it goes somewhere surprising.

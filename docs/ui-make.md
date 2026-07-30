@@ -125,7 +125,10 @@ are made fresh on each call and capture that call's values.
 
 An element can still carry an ordinary script (drop one on the container's
 prefab, or use a repeater for rows that need real behaviour of their own). Both
-fire: the script's hook first, then the described handler.
+fire: the script's hook first, then the described handler, then any
+[`ui.on`](scripting.md#one-script-for-a-whole-screen--uion--uievents) listeners
+— which is how a hand-placed screen gets the same "all in one script" shape a
+described one has for free.
 
 ---
 

@@ -161,7 +161,7 @@ impl Editor {
         if let Some(sim) = self.sim.as_mut() {
             let states: std::collections::HashMap<u32, (floptle_core::math::Vec3, bool)> = sim
                 .body_states()
-                .map(|(e, vel, _, grounded, ..)| (e.index(), (vel, grounded)))
+                .map(|r| (r.entity.index(), (r.vel, r.grounded)))
                 .collect();
             let t_old = t - tick_dt * self.space_warp;
             for (eid, pos) in sim.body_positions() {

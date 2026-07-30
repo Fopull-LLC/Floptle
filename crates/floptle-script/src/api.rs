@@ -1188,6 +1188,26 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         None => Value::Nil,
                     });
                 }
+                // What the body is touching: the floor under it, and the
+                // steepest thing it is pressed against. `nil` when there is no
+                // such surface this step — `if node.wallNormal then` is the
+                // whole test. A controller uses the second one to stop pushing
+                // into a cliff, which is what otherwise fires it into the sky.
+                "groundNormal" | "wallNormal" => {
+                    let n = bodies.borrow().get(&e).and_then(|b| {
+                        if key == "groundNormal" { b.ground_normal } else { b.wall_normal }
+                    });
+                    return Ok(match n {
+                        Some(v) => Value::UserData(lua.create_userdata(
+                            crate::math_api::LuaVec3(glam::DVec3::new(
+                                v[0] as f64,
+                                v[1] as f64,
+                                v[2] as f64,
+                            )),
+                        )?),
+                        None => Value::Nil,
+                    });
+                }
                 // Facing, from the node's ROTATION (not the body) so it answers
                 // on anything with a transform. −Z forward matches the camera
                 // convention (`floptle_render::camera`), +X right, +Y local up.

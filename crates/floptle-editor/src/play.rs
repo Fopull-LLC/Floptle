@@ -15,6 +15,25 @@ use crate::assets::{is_script, script_kind_of};
 use crate::dock::{EditorTab};
 use crate::{Editor, grab_cursor};
 
+/// One dynamic body's state, as scripts read it (`node.vx`, `node.grounded`,
+/// `node.groundNormal`, …).
+///
+/// One function rather than the same five-field literal at each of the play
+/// loop's feed points: the frame pass, the tick pass, the post-physics pass,
+/// the hidden harness server and a rollback replay all have to agree about what
+/// a body looks like, and they only did by coincidence.
+pub(crate) fn body_state(r: &floptle_physics::BodyReport) -> floptle_script::BodyState {
+    floptle_script::BodyState {
+        vel: r.vel.to_array(),
+        up: r.up.to_array(),
+        grounded: r.grounded,
+        height: r.height,
+        pos: [r.pos.x, r.pos.y, r.pos.z],
+        ground_normal: r.ground_normal.map(|n| n.to_array()),
+        wall_normal: r.wall_normal.map(|n| n.to_array()),
+    }
+}
+
 impl Editor {
     /// Build the physics gravity field from the scene's GravityVolume nodes: `Down`
     /// volumes add uniform −Y gravity (the level's base), `Radial` volumes add a planet
@@ -292,7 +311,7 @@ impl Editor {
         let saved: Vec<(u32, floptle_core::math::Vec3)> = self
             .sim
             .as_ref()
-            .map(|s| s.body_states().map(|(e, vel, ..)| (e.index(), vel)).collect())
+            .map(|s| s.body_states().map(|r| (r.entity.index(), r.vel)).collect())
             .unwrap_or_default();
         // COMPOUNDS carry more runtime state that the rebuild must not drop:
         // the `anchored` flag AND angular velocity. Losing `anchored` silently

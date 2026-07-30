@@ -45,6 +45,21 @@ pub struct Body {
     pub grounded: bool,
     /// The contact normal from the most recent resolved collision this step (telegraph).
     pub contact: Option<Vec3>,
+    /// The FLOOR this body is standing on: the most gravity-opposing contact
+    /// normal of the step, or `None` when nothing this step counted as ground
+    /// (so it is exactly `grounded`, with the surface attached).
+    pub ground_normal: Option<Vec3>,
+    /// The steepest surface the body is pressed against, when that surface is
+    /// too steep to be a floor — a wall, a cliff face, the side of a crate.
+    ///
+    /// Separate from [`Self::ground_normal`] because a controller asks two
+    /// different questions: *what am I standing on* and *what am I pushing
+    /// into*. Standing at the foot of a cliff answers both, and a controller
+    /// that only had the first one would keep driving into the cliff — whose
+    /// push-out has an upward component, which is what launches a walking
+    /// character into the sky. Both are extremes (max / min of `n · up`), so
+    /// neither depends on the order colliders happen to be resolved in.
+    pub wall_normal: Option<Vec3>,
     /// The position restored on locked axes: captured at spawn, re-captured per
     /// axis at the moment its lock engages (so locking mid-play freezes in place).
     pub(crate) home: Vec3,
@@ -101,6 +116,8 @@ impl Body {
             lock_pos: [false; 3],
             grounded: false,
             contact: None,
+            ground_normal: None,
+            wall_normal: None,
             home: pos,
             active: true,
             layer: 0,

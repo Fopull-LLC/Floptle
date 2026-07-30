@@ -125,6 +125,61 @@ mod tests {
         assert!(body.grounded, "should be grounded on the mesh");
     }
 
+    /// A capsule standing at the foot of a cliff touches two very different
+    /// surfaces at once, and a controller has to tell them apart: the floor it
+    /// stands on, and the face it is pushing into. Which one is reported must
+    /// not depend on the order the colliders happen to be resolved in — that
+    /// order is an implementation detail, and the bug it causes (walking into a
+    /// slope and being ramped into the sky) is not.
+    #[test]
+    fn a_body_reports_its_floor_and_the_wall_it_is_pressed_against() {
+        for cliff_first in [false, true] {
+            let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+            // A steep face (a box rotated 20° off vertical: ~70° slope) and a floor.
+            let cliff = || {
+                Box::new(BoxShape::new(
+                    Vec3::new(2.4, 2.0, 0.0),
+                    Vec3::new(1.0, 2.0, 4.0),
+                    Quat::from_rotation_z(-0.35),
+                )) as Box<dyn CollisionShape>
+            };
+            let floor = || {
+                let (v, i) = floor_quad(0.0, 8.0);
+                Box::new(TriMeshCollider::new(&v, &i)) as Box<dyn CollisionShape>
+            };
+            if cliff_first {
+                w.add_collider(cliff());
+                w.add_collider(floor());
+            } else {
+                w.add_collider(floor());
+                w.add_collider(cliff());
+            }
+            let b = w.add_body(Body::capsule(Vec3::new(0.0, 2.0, 0.0), 0.4, 1.8));
+            simulate(&mut w, 1.5); // land first — a fall is not a walk
+            // Walk into the cliff, the way a controller does: set the horizontal
+            // velocity every step and let the solver answer. Stop at the step
+            // the capsule first touches the face — that is the moment a
+            // controller has to decide whether to keep pushing.
+            let mut touched = false;
+            for _ in 0..240 {
+                w.bodies[b].vel.x = 6.0;
+                w.step(1.0 / 120.0);
+                if w.bodies[b].wall_normal.is_some() {
+                    touched = true;
+                    break;
+                }
+            }
+            let body = w.bodies[b];
+            assert!(touched, "the capsule never reached the cliff: {:?}", body.pos);
+            assert!(body.grounded, "still standing on the floor, pos={:?}", body.pos);
+            let g = body.ground_normal.expect("grounded means there IS a floor normal");
+            assert!(g.y > 0.9, "the floor points up, not the cliff: {g:?}");
+            let wall = body.wall_normal.expect("pressed against the cliff face");
+            assert!(wall.x < -0.5, "the wall faces back at us: {wall:?}");
+            assert!(wall.y < 0.5, "a wall is not a floor: {wall:?}");
+        }
+    }
+
     #[test]
     fn box_shape_distance_and_normal() {
         // An axis-aligned 1×1×1 box (half 0.5) centered at the origin.

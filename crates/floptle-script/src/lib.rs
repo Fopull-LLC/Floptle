@@ -105,6 +105,33 @@ type UiMakes = Rc<RefCell<Vec<ui_make::MakeRequest>>>;
 /// whole point of describing a screen in one place.
 type UiHandlers = Rc<RefCell<HashMap<(u32, String), mlua::RegistryKey>>>;
 
+/// One live `ui.on(element, hook, fn)`: a script listening to an element it
+/// does not live on.
+///
+/// The owner is the LISTENING script, not the element — which is the whole
+/// point. A menu manager holds every button's `clicked` in one file, instead of
+/// a three-line script per button, and its listeners live and die with it: a
+/// reload re-registers them, and destroying the manager stops them.
+pub(crate) struct UiListener {
+    /// The element being listened to.
+    pub e: u32,
+    /// Which hook (`"clicked"`, `"changed"`, … — [`ui_make::HOOKS`]).
+    pub hook: String,
+    /// The `(entity, script kind)` that registered it.
+    pub owner: (u32, String),
+    pub f: mlua::RegistryKey,
+}
+
+type UiListeners = Rc<RefCell<Vec<UiListener>>>;
+
+/// This frame's UI interaction events (`(element, hook)`), fed by the engine
+/// BEFORE the scripts run — what `ui.clicked(el)` and `ui.events()` read.
+///
+/// The same list the engine dispatches hooks from afterwards, published early
+/// so a script that would rather ASK than be called back gets this frame's
+/// answer rather than last frame's.
+type UiFrameEvents = Rc<RefCell<Vec<(u32, String)>>>;
+
 mod api;
 mod audio_api;
 mod env;
@@ -332,6 +359,19 @@ pub struct ScriptHost {
     ui_makes: UiMakes,
     /// The behaviour closures made elements carry.
     ui_handlers: UiHandlers,
+    /// Live `ui.on(...)` listeners — scripts hearing about elements they don't
+    /// live on.
+    ui_listeners: UiListeners,
+    /// Elements a listener was registered for since the last check, verified
+    /// against the world in `run` (an element that takes no clicks would never
+    /// fire, silently).
+    ui_listener_checks: Rc<RefCell<Vec<(u32, String)>>>,
+    /// This frame's `(element, hook)` events, for `ui.clicked(...)` / `ui.events()`.
+    ui_frame_events: UiFrameEvents,
+    /// The element under the pointer, fed by the engine each frame (`ui.hovered`).
+    ui_hover: Rc<RefCell<Option<u32>>>,
+    /// The element being held down, fed by the engine each frame (`ui.held`).
+    ui_active: Rc<RefCell<Option<u32>>>,
     /// The material presets the editor lends each frame (name → Material), so a script can
     /// set `node.material = "Gold"` (or an `assets.getFile("materials/Gold.ron")`).
     materials: Rc<RefCell<HashMap<String, Material>>>,
@@ -832,11 +872,31 @@ pub struct BodyState {
     /// knockback but the hitbox stays put" bug
     /// (`docs/rollback-netcode-design.md` §3).
     pub pos: [f64; 3],
+    /// The floor under the body (`node.groundNormal`) — `Some` exactly when
+    /// `grounded`. Align a character to the slope, judge how steep it is, or
+    /// decide a landing is too hard.
+    pub ground_normal: Option<[f32; 3]>,
+    /// The steepest surface the body is pressed against, when it is too steep
+    /// to stand on (`node.wallNormal`).
+    ///
+    /// This is what stops a walking controller from launching itself: driving
+    /// into a cliff means the solver pushes the capsule out along a normal with
+    /// an upward component, every frame, which reads as being fired into the
+    /// sky. A controller that can SEE the wall simply stops pushing into it.
+    pub wall_normal: Option<[f32; 3]>,
 }
 
 impl Default for BodyState {
     fn default() -> Self {
-        Self { vel: [0.0; 3], up: [0.0, 1.0, 0.0], grounded: false, height: 2.0, pos: [0.0; 3] }
+        Self {
+            vel: [0.0; 3],
+            up: [0.0, 1.0, 0.0],
+            grounded: false,
+            height: 2.0,
+            pos: [0.0; 3],
+            ground_normal: None,
+            wall_normal: None,
+        }
     }
 }
 
@@ -858,6 +918,16 @@ const SHIPPED_SCRIPTS: &[(&str, &str)] = &[
     ("rotate.lua", include_str!("../../../assets/scripts/rotate.lua")),
     ("pulsate.lua", include_str!("../../../assets/scripts/pulsate.lua")),
     ("float.lua", include_str!("../../../assets/scripts/float.lua")),
+    ("hand.lua", include_str!("../../../assets/scripts/hand.lua")),
+    ("portal.lua", include_str!("../../../assets/scripts/portal.lua")),
+    ("parry_dummy.lua", include_str!("../../../assets/scripts/parry_dummy.lua")),
+    ("player_spawner.lua", include_str!("../../../assets/scripts/player_spawner.lua")),
+    ("fixedTest.lua", include_str!("../../../assets/scripts/fixedTest.lua")),
+    ("ui_demo.lua", include_str!("../../../assets/scripts/ui_demo.lua")),
+    ("ui_demo_button.lua", include_str!("../../../assets/scripts/ui_demo_button.lua")),
+    ("ui_demo_field.lua", include_str!("../../../assets/scripts/ui_demo_field.lua")),
+    ("ui_demo_row.lua", include_str!("../../../assets/scripts/ui_demo_row.lua")),
+    ("ui_demo_slot.lua", include_str!("../../../assets/scripts/ui_demo_slot.lua")),
 ];
 
 #[cfg(test)]
@@ -1775,7 +1845,7 @@ end
         let mut bodies = HashMap::new();
         bodies.insert(
             e.index(),
-            BodyState { vel: [0.0; 3], up: [0.0, 1.0, 0.0], grounded: true, height: 2.0, pos: [0.0; 3] },
+            BodyState { grounded: true, ..Default::default() },
         );
         host.set_bodies(bodies);
         host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
@@ -2421,6 +2491,241 @@ end
         let tr = world.get::<Transform>(e).unwrap();
         assert_eq!((tr.translation.y, tr.translation.z), (1.0, 7.0));
         assert_eq!(world.get::<floptle_ui::ElementSpec>(e).unwrap().opacity, 0.25);
+    }
+
+    /// Build a world with a menu node (carrying `script`) and `n` buttons named
+    /// `Btn1`…`Btn<n>`, plus one plain box named `Scenery`.
+    fn menu_world(script: &str, n: usize) -> (World, floptle_core::Entity, Vec<u32>) {
+        let mut world = World::default();
+        let menu = world.spawn();
+        world.insert(menu, Transform::IDENTITY);
+        world.insert(menu, floptle_core::Name("Menu".into()));
+        world.insert(
+            menu,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: script.into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let mut ids = Vec::new();
+        for i in 1..=n {
+            let b = world.spawn();
+            world.insert(b, Transform::IDENTITY);
+            world.insert(b, floptle_core::Name(format!("Btn{i}")));
+            world.insert(b, floptle_ui::ElementSpec { button: true, ..Default::default() });
+            ids.push(b.index());
+        }
+        let scenery = world.spawn();
+        world.insert(scenery, Transform::IDENTITY);
+        world.insert(scenery, floptle_core::Name("Scenery".into()));
+        world.insert(scenery, floptle_ui::ElementSpec::default());
+        (world, menu, ids)
+    }
+
+    /// `ui.on(element, hook, fn)`: one manager script answers for buttons it
+    /// does not live on — the point of the whole thing, since the alternative
+    /// is a script file per button.
+    ///
+    /// Also pins the two properties that make it safe to write: registering
+    /// again REPLACES (so calling it from `update` costs one closure, not one
+    /// per frame), and `ui.off` stops it.
+    #[test]
+    fn a_manager_hears_buttons_it_does_not_live_on() {
+        let dir = std::env::temp_dir().join("floptle_script_test_ui_on");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "menu",
+            concat!(
+                "hits = 0\n",
+                "last = \"\"\n",
+                "lastEvent = \"\"\n",
+                // Registered from `update`, deliberately: re-registering the
+                // same (element, hook) must replace rather than stack.
+                "function update(node, dt)\n",
+                "  for i = 1, 2 do\n",
+                "    ui.on(find(\"Btn\" .. i), \"clicked\", function(el, ev)\n",
+                "      hits = hits + 1\n",
+                "      last = el.name\n",
+                "      lastEvent = ev\n",
+                "    end)\n",
+                "  end\n",
+                "end\n",
+                "function stopListening(node)\n  ui.off(find(\"Btn1\"))\nend\n",
+            ),
+        );
+        let (mut world, menu, btns) = menu_world("menu", 2);
+        let mut host = ScriptHost::new();
+        for _ in 0..3 {
+            host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        }
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let read = |host: &ScriptHost, key: &str| -> String {
+            host.instance_env(menu.index(), "menu")
+                .and_then(|e| e.get::<String>(key).ok())
+                .unwrap_or_default()
+        };
+        let hits = |host: &ScriptHost| -> f64 {
+            host.instance_env(menu.index(), "menu")
+                .and_then(|e| e.get::<f64>("hits").ok())
+                .unwrap_or_default()
+        };
+
+        host.run_ui_hooks(&mut world, &[(btns[1], "clicked")]);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(hits(&host), 1.0, "three frames of ui.on must leave ONE listener");
+        assert_eq!(read(&host, "last"), "Btn2", "the element that fired is the argument");
+        assert_eq!(read(&host, "lastEvent"), "clicked", "…and the hook name rides along");
+
+        // A hook the manager never asked for reaches nothing.
+        host.run_ui_hooks(&mut world, &[(btns[0], "hoverStart")]);
+        assert_eq!(hits(&host), 1.0);
+        host.run_ui_hooks(&mut world, &[(btns[0], "clicked")]);
+        assert_eq!(hits(&host), 2.0);
+
+        // `ui.off` — and only for the element named.
+        host.call_action(&mut world, &dir, menu.index(), "menu", "stopListening");
+        host.run_ui_hooks(&mut world, &[(btns[0], "clicked"), (btns[1], "clicked")]);
+        assert_eq!(hits(&host), 3.0, "Btn1 is off, Btn2 still listening");
+        assert_eq!(read(&host, "last"), "Btn2");
+    }
+
+    /// A listener dies with the script that registered it. Destroying a menu
+    /// manager must not leave its closures answering buttons — the closure also
+    /// holds that script's whole environment alive.
+    #[test]
+    fn a_listener_dies_with_the_script_that_registered_it() {
+        let dir = std::env::temp_dir().join("floptle_script_test_ui_on_life");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "mgr",
+            concat!(
+                "hits = 0\n",
+                "function update(node, dt)\n",
+                "  ui.on(find(\"Btn1\"), \"clicked\", function() hits = hits + 1 end)\n",
+                "end\n",
+            ),
+        );
+        let (mut world, menu, btns) = menu_world("mgr", 1);
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        host.run_ui_hooks(&mut world, &[(btns[0], "clicked")]);
+        let hits = |host: &ScriptHost| -> f64 {
+            host.instance_env(menu.index(), "mgr")
+                .and_then(|e| e.get::<f64>("hits").ok())
+                .unwrap_or_default()
+        };
+        assert_eq!(hits(&host), 1.0);
+        // The manager goes away (the driver reports what it destroyed).
+        host.drop_ui_handlers(&[menu.index()]);
+        host.run_ui_hooks(&mut world, &[(btns[0], "clicked")]);
+        assert_eq!(hits(&host), 1.0, "a destroyed manager stops answering");
+        // …and so does a listener whose ELEMENT went away — entity indices are
+        // reused, so a stale one would fire on whatever inherits the slot.
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0); // update re-registers
+        host.drop_ui_handlers(&[btns[0]]);
+        host.run_ui_hooks(&mut world, &[(btns[0], "clicked")]);
+        assert_eq!(hits(&host), 1.0, "the element is gone, so nothing fires for it");
+    }
+
+    /// The other half: a script that would rather ask than be called back.
+    /// `ui.clicked(el)` / `ui.events()` read the SAME list the hooks fire from,
+    /// published before the run — so a poll and a hook can't disagree.
+    #[test]
+    fn this_frames_ui_events_can_be_polled() {
+        let dir = std::env::temp_dir().join("floptle_script_test_ui_poll");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "poll",
+            concat!(
+                "clicks = \"\"\n",
+                "seen = 0\n",
+                "hover = \"\"\n",
+                "function update(node, dt)\n",
+                "  if ui.clicked(find(\"Btn1\")) then clicks = clicks .. \"1\" end\n",
+                "  if ui.clicked(find(\"Btn2\")) then clicks = clicks .. \"2\" end\n",
+                "  seen = #ui.events(\"clicked\")\n",
+                "  local h = ui.hovered()\n",
+                "  hover = h and h.name or \"\"\n",
+                "  if ui.hovered(find(\"Btn2\")) then hover = hover .. \"!\" end\n",
+                "end\n",
+            ),
+        );
+        let (mut world, menu, btns) = menu_world("poll", 2);
+        let mut host = ScriptHost::new();
+        host.set_ui_frame_state(&[(btns[1], "clicked"), (btns[0], "hoverStart")], Some(btns[1]), None);
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let env = host.instance_env(menu.index(), "poll").expect("live instance");
+        assert_eq!(env.get::<String>("clicks").unwrap(), "2");
+        assert_eq!(env.get::<f64>("seen").unwrap(), 1.0, "hoverStart is not a click");
+        assert_eq!(env.get::<String>("hover").unwrap(), "Btn2!");
+
+        // Next frame, nothing happened: the answers are per-frame, not sticky.
+        host.set_ui_frame_state(&[], None, None);
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        let env = host.instance_env(menu.index(), "poll").expect("live instance");
+        assert_eq!(env.get::<String>("clicks").unwrap(), "2", "no new clicks");
+        assert_eq!(env.get::<f64>("seen").unwrap(), 0.0);
+        assert_eq!(env.get::<String>("hover").unwrap(), "");
+    }
+
+    /// Listening for a click on something that takes no clicks is the one
+    /// mistake this API makes easy, and it leaves NOTHING to look at. It warns.
+    #[test]
+    fn listening_to_an_element_that_takes_no_clicks_warns() {
+        let dir = std::env::temp_dir().join("floptle_script_test_ui_on_warn");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "oops",
+            concat!(
+                "function start(node)\n",
+                "  ui.on(find(\"Scenery\"), \"clicked\", function() end)\n",
+                "  ui.on(find(\"Btn1\"), \"clicked\", function() end)\n",
+                "end\n",
+            ),
+        );
+        let (mut world, _menu, _btns) = menu_world("oops", 1);
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "a warning, not an error: {:?}", host.errors());
+        let warnings: Vec<String> = host
+            .drain_logs()
+            .into_iter()
+            .filter(|l| l.level == LogLevel::Warn)
+            .map(|l| l.msg)
+            .collect();
+        assert_eq!(warnings.len(), 1, "only the wrong one warns: {warnings:?}");
+        assert!(warnings[0].contains("Scenery"), "{}", warnings[0]);
+        assert!(warnings[0].contains("Button"), "it names the fix: {}", warnings[0]);
+        // Warned once, at registration — not every frame it fails to fire.
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        assert!(host.drain_logs().iter().all(|l| l.level != LogLevel::Warn), "warned once");
+    }
+
+    /// A mistyped hook is the other silent failure — `ui.on(b, "onClicked", …)`
+    /// would register a listener nothing ever calls. It raises instead.
+    #[test]
+    fn a_mistyped_hook_name_raises() {
+        let dir = std::env::temp_dir().join("floptle_script_test_ui_on_typo");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "typo",
+            "function start(node)\n  ui.on(find(\"Btn1\"), \"onClicked\", function() end)\nend\n",
+        );
+        let (mut world, _menu, _btns) = menu_world("typo", 1);
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        let errs = format!("{:?}", host.errors());
+        assert!(errs.contains("not a UI hook"), "{errs}");
+        assert!(errs.contains("clicked"), "it lists the real ones: {errs}");
     }
 
     /// `ui.make` end to end: a Lua table becomes real nodes, a described
@@ -3623,7 +3928,7 @@ end
         let mut bodies = HashMap::new();
         bodies.insert(
             e.index(),
-            BodyState { vel: [0.0, -2.0, 0.0], up: [0.0, 1.0, 0.0], grounded: true, height: 2.0, pos: [0.0; 3] },
+            BodyState { vel: [0.0, -2.0, 0.0], grounded: true, ..Default::default() },
         );
         host.set_bodies(bodies);
         host.run(&mut world, &dir, 0.016, 0.016);

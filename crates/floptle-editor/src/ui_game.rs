@@ -769,6 +769,10 @@ impl Editor {
             // on the first playing frame.
             self.ui_lmb_pressed_evt = false;
             self.ui_lmb_released_evt = false;
+            // Nothing is hovered, held or firing while stopped — and a script
+            // pass can still run, so say so rather than leaving the last
+            // playing frame's answers standing.
+            self.script_host.set_ui_frame_state(&[], None, None);
             return;
         }
         let pointer = self.ui_pointer();
@@ -1202,6 +1206,12 @@ impl Editor {
         // truth rather than last frame's.
         self.script_host.set_ui_focus(self.ui_focus);
         self.script_host.set_ui_drag(self.ui_drag_report);
+        // …and this frame's interaction events, so `ui.clicked(el)` in an
+        // `update` answers about THIS frame — the same list that dispatches as
+        // hooks after the run. Hover and the held element ride along: they are
+        // states rather than events, and every screen that asks about one asks
+        // about the others.
+        self.script_host.set_ui_frame_state(&self.ui_events, self.ui_hover, self.ui_active);
     }
 
     /// Write one axis of a scroll view's offset.

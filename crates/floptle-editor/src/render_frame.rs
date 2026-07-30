@@ -4049,17 +4049,8 @@ impl Editor {
             // read/write node.vx/vy/vz (a script sets velocity, physics then integrates).
             if let Some(sim) = self.sim.as_ref() {
                 let mut states = HashMap::new();
-                for (e, vel, up, grounded, height, pos) in sim.body_states() {
-                    states.insert(
-                        e.index(),
-                        floptle_script::BodyState {
-                            vel: [vel.x, vel.y, vel.z],
-                            up: [up.x, up.y, up.z],
-                            grounded,
-                            height,
-                            pos: [pos.x, pos.y, pos.z],
-                        },
-                    );
+                for r in sim.body_states() {
+                    states.insert(r.entity.index(), crate::play::body_state(&r));
                 }
                 for (eid, vel, up, grounded, pos) in sim.compound_states() {
                     states.insert(
@@ -4070,6 +4061,10 @@ impl Editor {
                             grounded,
                             height: 0.0,
                             pos: [pos.x, pos.y, pos.z],
+                            // Compounds resolve contacts per SHAPE with real
+                            // impulses; "the floor under it" isn't one normal.
+                            ground_normal: None,
+                            wall_normal: None,
                         },
                     );
                 }
@@ -4346,17 +4341,8 @@ impl Editor {
                     if let Some(sim) = self.sim.as_mut() {
                         // Fresh body state for THIS tick (post previous tick's physics).
                         let mut states = HashMap::new();
-                        for (e, vel, up, grounded, height, pos) in sim.body_states() {
-                            states.insert(
-                                e.index(),
-                                floptle_script::BodyState {
-                                    vel: [vel.x, vel.y, vel.z],
-                                    up: [up.x, up.y, up.z],
-                                    grounded,
-                                    height,
-                                    pos: [pos.x, pos.y, pos.z],
-                                },
-                            );
+                        for r in sim.body_states() {
+                            states.insert(r.entity.index(), crate::play::body_state(&r));
                         }
                         for (eid, vel, up, grounded, pos) in sim.compound_states() {
                             states.insert(
@@ -4367,6 +4353,8 @@ impl Editor {
                                     grounded,
                                     height: 0.0,
                                     pos: [pos.x, pos.y, pos.z],
+                                    ground_normal: None,
+                                    wall_normal: None,
                                 },
                             );
                         }
@@ -4528,17 +4516,8 @@ impl Editor {
             // rendered and `node.vx/grounded` reads this frame's final values.
             if let Some(sim) = self.sim.as_mut() {
                 let mut states = HashMap::new();
-                for (e, vel, up, grounded, height, pos) in sim.body_states() {
-                    states.insert(
-                        e.index(),
-                        floptle_script::BodyState {
-                            vel: [vel.x, vel.y, vel.z],
-                            up: [up.x, up.y, up.z],
-                            grounded,
-                            height,
-                            pos: [pos.x, pos.y, pos.z],
-                        },
-                    );
+                for r in sim.body_states() {
+                    states.insert(r.entity.index(), crate::play::body_state(&r));
                 }
                 // Compound roots read like bodies too (node.vx / up_x /
                 // grounded on a vessel) — before the collider hand-off, since
@@ -4552,6 +4531,10 @@ impl Editor {
                             grounded,
                             height: 0.0,
                             pos: [pos.x, pos.y, pos.z],
+                            // Compounds resolve contacts per SHAPE with real
+                            // impulses; "the floor under it" isn't one normal.
+                            ground_normal: None,
+                            wall_normal: None,
                         },
                     );
                 }

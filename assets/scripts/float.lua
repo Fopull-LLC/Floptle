@@ -4,7 +4,18 @@
 -- (the start height + a random phase) so multiple copies don't move in lockstep,
 -- and update() reads it every frame.
 
-defaults = { height = 0.5, speed = 1.0, spin = 20 }
+defaults = {
+  --@range 0 5 --@units m
+  height = 0.5,
+  --@range 0 10 --@units Hz
+  speed = 1.0,
+  --@range -360 360 --@units deg/s
+  spin = 20,
+}
+
+-- File-scope locals, not globals: each copy of the script gets its own, and
+-- nothing else in the project can read or clobber them by accident.
+local base_y, phase
 
 function start(node)
   base_y = node.y                 -- remembered per instance

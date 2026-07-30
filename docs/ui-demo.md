@@ -19,7 +19,7 @@ contents are described in Lua and built from a table.
 | **Hover anything for a moment** | the tooltip element follows the pointer |
 | **Click into CALL SIGN and type** | caret, selection, Ctrl-A/C/X/V, key repeat. It shouts, because `upper` is on, and stops at 12 characters |
 | **Drag the THRUST handle** | an ordinary slider: track, `Fill`, `Handle` |
-| **Click the tabs, click the chips** | a radio group and three toggles, with **no script at all** |
+| **Click the tabs, click the chips** | a radio group and three toggles, with **no script on them at all** — the tabs report what you picked because `ui_demo.lua` listens from the panel with `ui.on` |
 | **Wheel over the manifest** | it scrolls, and the bar's thumb is the visible fraction of the list |
 | **Click a manifest row** | it is removed — watch the others keep their hover and the view keep its scroll |
 | **Drag ORE or FUEL onto an empty slot** | the engine reports the drag; `ui_demo_slot.lua` decides what it means |
@@ -51,11 +51,17 @@ ui.bind(find("Status"), "textColor", function()
     return good and color.hex("#66de8f") or color(0.56, 0.60, 0.68)
 end)
 ui.focus(find("Play"))
+
+for _, tab in ipairs({ "Tab Loadout", "Tab Crew", "Tab Log" }) do
+    ui.on(find(tab), "clicked", function(el) status = el.text .. " selected" end)
+end
 ```
 
-Each row asks `node.index` who it is. The tab strip and the toggle chips have
-no script at all — `group:` and `toggle:` flip the `selected` state, and the
-style says what selected looks like.
+Each row asks `node.index` who it is. The tab strip and the toggle chips still
+have no script **on them** — `group:` and `toggle:` flip the `selected` state,
+and the style says what selected looks like. What the last three lines add is
+`ui.on`: this one file answers for buttons it doesn't live on, so a menu stays
+one script instead of becoming one three-line script per button.
 
 The crew panel is the other half of that story: the scene holds **one empty
 node** saying where it sits, and everything inside it — the heading, five rows,

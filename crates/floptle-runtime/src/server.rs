@@ -273,7 +273,7 @@ fn feed_session(
 ) {
     let bodies: floptle_net::BodyStates = sim
         .body_states()
-        .map(|(e, vel, _up, grounded, _h, _pos)| (e, [vel.x, vel.y, vel.z], grounded))
+        .map(|r| (r.entity, r.vel.to_array(), r.grounded))
         .collect();
     session.update_body_states(bodies);
     // Scripts report by entity INDEX; the session replicates by entity. One

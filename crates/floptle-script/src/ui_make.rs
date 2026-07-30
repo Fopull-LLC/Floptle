@@ -49,6 +49,50 @@ pub fn hook_of(key: &str) -> Option<&'static str> {
     HOOKS.iter().copied().find(|h| *h == lowered)
 }
 
+/// Could this element ever fire this hook?
+///
+/// The interaction pass only looks at elements that opted in — a plain box is
+/// scenery, and hit-testing every rectangle on screen would make "click the
+/// panel behind the button" a bug you couldn't turn off. So a listener on the
+/// wrong element is silent, and silence is a bad error message: this is what
+/// lets `ui.on` say so instead.
+pub fn hook_reaches(spec: &ElementSpec, hook: &str) -> bool {
+    let takes_pointer =
+        spec.button || spec.slider.is_some_and(|s| s.interact) || spec.field.is_some();
+    match hook {
+        // A focused element answers a submit press with `clicked`, so a
+        // pad-only menu is a legitimate reason to have no `button`.
+        "clicked" | "pressed" | "released" => takes_pointer || spec.focusable,
+        // Hovering a tooltip element IS an interaction, and a draggable one is
+        // hovered before it's picked up.
+        "hoverStart" | "hoverEnd" => {
+            takes_pointer || spec.draggable || !spec.tooltip.is_empty() || spec.drop_target
+        }
+        "changed" => spec.field.is_some() || spec.slider.is_some(),
+        "submitted" | "cancelled" => spec.field.is_some(),
+        "focusEnter" | "focusExit" => spec.focusable || spec.field.is_some(),
+        "dragStart" | "dragMove" | "dragCancel" => spec.draggable,
+        "dragEnter" | "dragOver" | "dragLeave" => spec.drop_target,
+        "dropped" => spec.drop_target || spec.draggable,
+        _ => true,
+    }
+}
+
+/// What to turn on so `hook` can reach this element — the second half of the
+/// warning, because "it will never fire" without "tick Button" is a riddle.
+pub fn hook_needs(hook: &str) -> &'static str {
+    match hook {
+        "clicked" | "pressed" | "released" => "Button (or Focusable, for pad input)",
+        "hoverStart" | "hoverEnd" => "Button, a tooltip, or Draggable",
+        "changed" => "a text field or an interactive slider",
+        "submitted" | "cancelled" => "a text field",
+        "focusEnter" | "focusExit" => "Focusable",
+        "dragStart" | "dragMove" | "dragCancel" => "Draggable",
+        "dragEnter" | "dragOver" | "dragLeave" | "dropped" => "Drop target",
+        _ => "the matching element setting",
+    }
+}
+
 /// A described element's behaviour closure: where it sits in the tree, which
 /// hook it answers, and the function itself.
 pub type Hook = (Vec<u16>, &'static str, RegistryKey);
@@ -428,6 +472,25 @@ fn collect_subtree(world: &World, e: Entity, out: &mut Vec<u32>) {
 mod tests {
     use super::*;
     use floptle_ui::Size;
+
+    /// What `ui.on` warns about: an element that could never fire the hook.
+    /// The two that matter most are the near-misses — a pad-only menu item is
+    /// focusable without being a button, and a drop target is hovered without
+    /// being one either.
+    #[test]
+    fn a_hook_only_reaches_an_element_that_can_fire_it() {
+        let plain = ElementSpec::default();
+        assert!(!hook_reaches(&plain, "clicked"));
+        assert!(!hook_reaches(&plain, "hoverStart"));
+        let btn = ElementSpec { button: true, ..Default::default() };
+        assert!(hook_reaches(&btn, "clicked") && hook_reaches(&btn, "hoverStart"));
+        assert!(!hook_reaches(&btn, "dropped"), "a button is not a drop target");
+        let pad = ElementSpec { focusable: true, ..Default::default() };
+        assert!(hook_reaches(&pad, "clicked"), "submit on a focused element IS a click");
+        let slot = ElementSpec { drop_target: true, ..Default::default() };
+        assert!(hook_reaches(&slot, "dropped") && hook_reaches(&slot, "hoverStart"));
+        assert!(hook_needs("clicked").contains("Button"));
+    }
 
     fn container(world: &mut World) -> Entity {
         let e = world.spawn();

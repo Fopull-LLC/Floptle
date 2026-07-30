@@ -24,21 +24,61 @@
 -- Want a shoulder camera instead? Use third_person.lua + third_person_camera.lua.
 
 defaults = {
+  --@header Speed
+  --@range 0 20 --@units m/s
   walk = 6.0,
+  --@range 0 30 --@units m/s
   run = 10.0,
+  --@range 0 20 --@units m/s
   crouch_walk = 3.0,
+  --@header Jumping & slopes
+  -- Upward speed a jump starts with — about 2.5 m of height at default gravity.
+  --@range 0 30 --@units m/s
   jump = 7.0,
-  sensitivity = 1.0, -- look speed multiplier
+  -- The steepest ground you can walk UP. Anything steeper you slide off
+  -- instead of climbing, which is also what stops a run at a cliff from firing
+  -- you into the sky.
+  --@slider 20 85 --@step 1 --@units degrees
+  slope_limit = 50,
+  -- Downward probe for the forgiving ground check: running down a slope leaves
+  -- the ground for a few frames and shouldn't rob you of a jump.
+  --@range 0 5 --@units m
+  ground_ray = 1.5,
+  --@header Look
+  --@slider 0.1 4 --@step 0.05
+  sensitivity = 1.0,
+  --@header Capsule
+  --@range 0.5 4 --@units m
   stand_height = 2.0,
+  --@range 0.5 4 --@units m
   crouch_height = 1.1,
-  ground_ray = 1.5, -- downward probe length for the forgiving ground check
-  debug_ray = 0,    -- set to 1 (Inspector) to draw the ground probe as a gizmo
+  --@header Debug
+  -- Draw the ground probe in the Scene view: green grounded, red airborne.
+  debug_ray = false,
 }
 
 local function normalize(x, y, z)
   local l = math.sqrt(x * x + y * y + z * z)
   if l < 1e-6 then return 0, 0, 0 end
   return x / l, y / l, z / l
+end
+
+-- Don't push into a surface you can't walk up.
+--
+-- The solver resolves an overlap by pushing the capsule out along the surface
+-- normal; on a steep face that normal points partly UP, so a controller that
+-- keeps driving into it gets that push again every frame — which is what fires
+-- a character into the sky at the foot of a cliff. Take the into-the-surface
+-- part out of the movement and what's left is a slide along it.
+--
+-- `n` is a contact normal (`node.wallNormal` / `node.groundNormal`, either may
+-- be nil), `u*` is the body's up, `steep` is cos(slope limit).
+local function slide(mx, my, mz, n, ux, uy, uz, steep)
+  if not n then return mx, my, mz end
+  if n.x * ux + n.y * uy + n.z * uz >= steep then return mx, my, mz end -- walkable
+  local into = mx * n.x + my * n.y + mz * n.z
+  if into >= 0 then return mx, my, mz end -- already moving away from it
+  return mx - n.x * into, my - n.y * into, mz - n.z * into
 end
 
 function update(node, dt)
@@ -93,7 +133,7 @@ function update(node, dt)
 
   -- Debug view of that probe, drawn with the `gizmo` API (immediate mode — call
   -- it every frame you want it visible): green while grounded, red in the air.
-  if params.debug_ray > 0.5 and params.ground_ray > 0 then
+  if params.debug_ray and params.ground_ray > 0 then
     if grounded then
       gizmo.ray(node.x, node.y, node.z, -ux, -uy, -uz, params.ground_ray, 0.3, 1.0, 0.4)
     else
@@ -106,11 +146,24 @@ function update(node, dt)
   local vup = node.vx * ux + node.vy * uy + node.vz * uz
   if grounded and input.justPressed("Jump") then
     vup = params.jump
+  elseif node.grounded and vup > 0 then
+    -- Standing on something and moving UP without having jumped: that speed
+    -- came from being pushed out of a slope or a step, not from you. Keeping
+    -- it is how a walk turns into a takeoff. (Downward is kept — that's
+    -- gravity holding you against the ground.)
+    vup = 0
   end
 
   local mx = (fx * f + rx * s) * speed
   local my = (fy * f + ry * s) * speed
   local mz = (fz * f + rz * s) * speed
+
+  -- Slopes: refuse to climb anything steeper than `slope_limit` and slide
+  -- along it instead. `wallNormal` is the steepest surface the body is pressed
+  -- against (the cliff you ran at); `groundNormal` is what it's standing on.
+  local steep = math.cos(math.rad(params.slope_limit))
+  mx, my, mz = slide(mx, my, mz, node.wallNormal, ux, uy, uz, steep)
+  mx, my, mz = slide(mx, my, mz, node.groundNormal, ux, uy, uz, steep)
 
   node.vx = mx + ux * vup
   node.vy = my + uy * vup

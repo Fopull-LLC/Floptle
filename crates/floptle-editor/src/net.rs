@@ -273,7 +273,7 @@ impl Editor {
                 .as_ref()
                 .map(|sim| {
                     sim.body_states()
-                        .map(|(e, vel, _, grounded, ..)| (e, [vel.x, vel.y, vel.z], grounded))
+                        .map(|r| (r.entity, r.vel.to_array(), r.grounded))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -1199,17 +1199,8 @@ impl Editor {
         hs.host.set_net_owners(Self::collect_net_owners(&hs.world));
         // Feed body state + lend colliders, run scripts (server frame = tick).
         let mut states = HashMap::new();
-        for (e, vel, up, grounded, height, pos) in hs.sim.body_states() {
-            states.insert(
-                e.index(),
-                floptle_script::BodyState {
-                    vel: [vel.x, vel.y, vel.z],
-                    up: [up.x, up.y, up.z],
-                    grounded,
-                    height,
-                    pos: [pos.x, pos.y, pos.z],
-                },
-            );
+        for r in hs.sim.body_states() {
+            states.insert(r.entity.index(), crate::play::body_state(&r));
         }
         hs.host.set_bodies(states);
         hs.host.set_project_root(self.project_root.clone());
@@ -1339,7 +1330,7 @@ impl Editor {
         let bstates: floptle_net::BodyStates = hs
             .sim
             .body_states()
-            .map(|(e, vel, _, grounded, ..)| (e, [vel.x, vel.y, vel.z], grounded))
+            .map(|r| (r.entity, r.vel.to_array(), r.grounded))
             .collect();
         hs.session.update_body_states(bstates);
         hs.session
@@ -1569,17 +1560,14 @@ impl Editor {
                 {
                     let mut states = HashMap::new();
                     // up/height: reuse the live values (not part of rollback).
-                    if let Some((_, _, up, _, height, _)) =
-                        sim.body_states().find(|(e, ..)| e.index() == eid)
-                    {
+                    if let Some(r) = sim.body_states().find(|r| r.entity.index() == eid) {
                         states.insert(
                             eid,
                             floptle_script::BodyState {
                                 vel: bs.vel.to_array(),
-                                up: [up.x, up.y, up.z],
                                 grounded: bs.grounded,
-                                height,
                                 pos: bs.pos.to_array(),
+                                ..crate::play::body_state(&r)
                             },
                         );
                     }

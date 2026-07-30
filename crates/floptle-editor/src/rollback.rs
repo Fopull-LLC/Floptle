@@ -866,17 +866,8 @@ impl RollbackDriver {
 
     fn feed_bodies(ctx: &mut Ctx) {
         let mut states = std::collections::HashMap::new();
-        for (e, vel, up, grounded, height, pos) in ctx.sim.body_states() {
-            states.insert(
-                e.index(),
-                floptle_script::BodyState {
-                    vel: [vel.x, vel.y, vel.z],
-                    up: [up.x, up.y, up.z],
-                    grounded,
-                    height,
-                    pos: [pos.x, pos.y, pos.z],
-                },
-            );
+        for r in ctx.sim.body_states() {
+            states.insert(r.entity.index(), crate::play::body_state(&r));
         }
         ctx.host.set_bodies(states);
     }

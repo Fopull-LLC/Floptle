@@ -112,6 +112,15 @@ function start(node)
         return color(0.56, 0.60, 0.68)
     end)
 
+    -- The three tabs are ordinary elements in the scene file: no script, no
+    -- `onClicked`, nothing but a radio group. This listens to them from HERE,
+    -- where `status` already lives — one manager, three buttons, no new files.
+    for _, tab in ipairs({ "Tab Loadout", "Tab Crew", "Tab Log" }) do
+        ui.on(find(tab), "clicked", function(el)
+            status = el.text .. " selected — one listener, in the panel's own script"
+        end)
+    end
+
     -- Open with something focused, so a pad player can start without
     -- touching the mouse.
     ui.focus(find("Play"))

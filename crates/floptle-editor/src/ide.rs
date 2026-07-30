@@ -2741,6 +2741,10 @@ const LUA_SNIPPETS: &[(&str, &[(&str, &str)])] = &[
                 "\n-- Attach to the Bar element (a UiSlider). Reads the player's health.\nfunction update(node, dt)\n  local hp = findScript(\"health\")\n  local bar = node:getcomponent(\"UiSlider\")\n  if hp and bar then bar.value = hp.hp end\nend\n",
             ),
             (
+                "menu manager (one script, every button)",
+                "\n-- Attach to the PANEL, not the buttons: ui.on listens to elements\n-- this script doesn't live on, so a menu is one file instead of one\n-- three-line file per button.\nfunction start(node)\n  ui.on(find(\"Play\"), \"clicked\", function() scene.load(\"level1\") end)\n  ui.on(find(\"Options\"), \"clicked\", function() show(\"OptionsPanel\") end)\n  ui.on(find(\"Quit\"), \"clicked\", function() log(\"quit\") end)\nend\n\nfunction show(name)\n  local p = find(name)\n  if p then p.visible = true end\nend\n",
+            ),
+            (
                 "button hooks (clicked / hover)",
                 "\n-- Attach to a UI element with 'button' ON. Style your own states.\nfunction clicked(node)\n  log(\"clicked \" .. node.name)\nend\n\nfunction hoverStart(node)\n  local el = node:getcomponent(\"UiElement\")\n  if el then el.opacity = 1.0 end\nend\n\nfunction hoverEnd(node)\n  local el = node:getcomponent(\"UiElement\")\n  if el then el.opacity = 0.8 end\nend\n",
             ),
@@ -3043,6 +3047,18 @@ const API_EXAMPLES: &[(&str, &str)] = &[
         "ui.make(find(\"Crew Panel\"), {\n  \"col\", gap = 8, pad = 12, style = \"panel\", items = crew,\n  function(m) return { \"text\", key = m.id, text = m.name } end,\n})",
     ),
     (
+        "ui.on",
+        "-- one menu script instead of a script file per button\nfunction start(node)\n  ui.on(find(\"Play\"), \"clicked\", function() scene.load(\"level1\") end)\n  for _, b in ipairs(find(\"Toolbar\"):children()) do\n    ui.on(b, \"clicked\", function(el) selectTool(el.name) end)\n  end\nend",
+    ),
+    (
+        "ui.events",
+        "-- the whole screen, without naming a single element\nfunction update(node, dt)\n  for _, ev in ipairs(ui.events(\"clicked\")) do\n    log(\"clicked \" .. ev.node.name)\n  end\nend",
+    ),
+    (
+        "ui.hovered",
+        "-- a state, not an event: true for as long as it's true\nlocal over = ui.hovered()\nfind(\"Caption\").text = over and over.name or \"\"",
+    ),
+    (
         "onCollisionEnter",
         "function onCollisionEnter(node, other)\n  if other:hasTag(\"hazard\") then hp = hp - 10 end\nend",
     ),
@@ -3176,6 +3192,8 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node.vy", insert: "node.vy", doc: "Rigidbody velocity Y (m/s). Keep this for gravity/jump while replacing the horizontal part." },
     ApiEntry { label: "node.vz", insert: "node.vz", doc: "Rigidbody velocity Z (m/s)." },
     ApiEntry { label: "node.grounded", insert: "node.grounded", doc: "True while the rigidbody rests on a surface (read-only). Gate jumps on it." },
+    ApiEntry { label: "node.groundNormal", insert: "node.groundNormal", doc: "The floor the body is standing on, as a vec3 normal — nil when airborne, so it is exactly node.grounded with the surface attached. Read-only. `node.groundNormal:dot(node.up)` is the cosine of the slope: 1 is flat, 0.5 is 60°. Align a character to the ground, judge a landing, or refuse to walk up something too steep." },
+    ApiEntry { label: "node.wallNormal", insert: "node.wallNormal", doc: "The steepest surface the body is pressed against, as a vec3 normal — the cliff you ran at, the crate you're shoving — or nil when there's nothing but floor. Read-only. This is what stops a controller launching itself: driving into a steep face means the solver pushes the capsule out along a normal that points partly UP, every frame, which reads as being fired into the sky. Take that component out of your movement (see character.lua's `slide`) and you slide along the face instead. Also: wall jumps, wall slides, 'you can't go that way'." },
     ApiEntry { label: "node.up_x", insert: "node.up_x", doc: "Body up (−gravity) X — radial on a planet, so move along it for planet gravity. Read-only." },
     ApiEntry { label: "node.up_y", insert: "node.up_y", doc: "Body up (−gravity) Y (read-only)." },
     ApiEntry { label: "node.up_z", insert: "node.up_z", doc: "Body up (−gravity) Z (read-only)." },
@@ -3399,7 +3417,18 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "dragOver", insert: "dragOver", doc: "function dragOver(node) — UI hook: fires every frame a drag rests over this drop target." },
     ApiEntry { label: "dragLeave", insert: "dragLeave", doc: "function dragLeave(node) — UI hook: the drag moved off this drop target." },
     ApiEntry { label: "ui.focus", insert: "ui.focus(", doc: "ui.focus(node) — move the keyboard/gamepad focus. ui.focus(nil) drops it (a screen that wants nothing focused until the player touches something). Focusing a text field starts editing it." },
-    ApiEntry { label: "ui.focused", insert: "ui.focused()", doc: "ui.focused() — the focused element as a node, or nil. Also readable per-node as node.focused." },
+    ApiEntry { label: "ui.focused", insert: "ui.focused()", doc: "ui.focused() — the focused element as a node, or nil. ui.focused(el) answers yes/no for one element. Also readable per-node as node.focused." },
+    ApiEntry { label: "ui.on", insert: "ui.on(", doc: "ui.on(element, \"clicked\", function(el, hook) ... end) — listen to an element from a script that does NOT live on it, so ONE manager holds a whole menu instead of a three-line script file per button. Any UI hook: clicked, pressed, released, hoverStart, hoverEnd, changed, submitted, cancelled, focusEnter, focusExit, dragStart/Move/Enter/Over/Leave/Cancel, dropped. The handler gets the element that fired and the hook name, so one function can serve a row of buttons. Registering again for the same element and hook REPLACES (so calling it from update() is harmless, not a leak). A listener dies with its element or with the script that registered it; a hot reload re-registers. Listening for an interaction the element doesn't take warns in the Console — it would otherwise be silent." },
+    ApiEntry { label: "ui.off", insert: "ui.off(", doc: "ui.off(element) stops every hook YOUR script is listening to on that element; ui.off(element, \"clicked\") stops one. Only your own — two managers on one button must not be able to unregister each other." },
+    ApiEntry { label: "ui.clicked", insert: "ui.clicked(", doc: "ui.clicked(element) — did it fire `clicked` THIS frame? The polling half of ui.on, for a manager that already has an update(). Reads the same event list the hooks fire from (published before scripts run), so a poll and a hook can never disagree." },
+    ApiEntry { label: "ui.pressed", insert: "ui.pressed(", doc: "ui.pressed(element) — LMB went down on it this frame. Pair with ui.held(element) for hold-to-charge." },
+    ApiEntry { label: "ui.released", insert: "ui.released(", doc: "ui.released(element) — LMB came back up this frame (on or off the element)." },
+    ApiEntry { label: "ui.changed", insert: "ui.changed(", doc: "ui.changed(element) — a text field's value changed this frame. Read the value with element.text." },
+    ApiEntry { label: "ui.submitted", insert: "ui.submitted(", doc: "ui.submitted(element) — Enter in this focused text field this frame." },
+    ApiEntry { label: "ui.event", insert: "ui.event(", doc: "ui.event(element, \"dropped\") — did that element fire that hook this frame? Any hook by name; ui.clicked/pressed/released/changed/submitted are the shorthands." },
+    ApiEntry { label: "ui.events", insert: "ui.events()", doc: "ui.events() — everything that happened on the UI this frame, as { node = element, event = \"clicked\" } rows. ui.events(\"clicked\") filters. Lets one manager handle a whole screen without naming a single element: for _, ev in ipairs(ui.events(\"clicked\")) do ... end." },
+    ApiEntry { label: "ui.hovered", insert: "ui.hovered()", doc: "ui.hovered() — the element under the pointer, as a node, or nil. ui.hovered(el) answers yes/no for one element. A STATE, not an event: true for as long as it's true (hoverStart/hoverEnd are the edges)." },
+    ApiEntry { label: "ui.held", insert: "ui.held()", doc: "ui.held() — the element the pointer is holding down, as a node, or nil. ui.held(el) answers yes/no. Hold-to-charge, press-and-hold repeat, a dip while pressed." },
     ApiEntry { label: "ui.dragging", insert: "ui.dragging()", doc: "ui.dragging() — the element being dragged, as a node, or nil. Live for the whole drag AND for the frame the `dropped` hooks run on. There is no separate payload channel because a node already carries params, a name and tags — ask it what it is." },
     ApiEntry { label: "ui.dropTarget", insert: "ui.dropTarget()", doc: "ui.dropTarget() — the drop target the drag is currently over, as a node, or nil." },
     ApiEntry { label: "ui.bind", insert: "ui.bind(", doc: "ui.bind(node, \"property\", function() ... end) — say the relationship once instead of writing an update() that keeps it true. The engine calls the function once a frame, after every update, and writes what it returns: a string or number to \"text\", a color(...) to a colour field, a number/boolean to any component field (the component is picked by which one actually has that field, so \"value\" finds UiSlider). Re-binding the same property replaces. A binding whose node is gone is dropped silently; one that throws is dropped after reporting once." },
@@ -3579,7 +3608,33 @@ These extra fields appear ONLY when the node has a Rigidbody (Inspector ⏵
                                 [0,1,0] on a flat world, RADIAL on a planet —
                                 move along it and you handle planets for free
   • node.height                 capsule standing height — write a smaller value
-                                to crouch (the engine shrinks it, feet planted)",
+                                to crouch (the engine shrinks it, feet planted)
+  • node.groundNormal           the floor it stands on, as a vec3 — nil airborne
+  • node.wallNormal             the steepest surface it is PRESSED AGAINST, as a
+                                vec3 — nil when there's nothing but floor
+
+SLOPES. A controller that drives into a steep face LAUNCHES ITSELF: the solver
+resolves the overlap by pushing the capsule out along the surface normal, that
+normal points partly upward, and pushing again next frame collects the same
+push again. At a run into a 70° hillside that is tens of m/s of free climb.
+
+Stop pushing, and what's left is a slide:
+
+    local steep = math.cos(math.rad(params.slope_limit))   -- 50°, say
+
+    local function slide(m, n)
+      if not n or n:dot(node.up) >= steep then return m end  -- absent, or walkable
+      local into = m:dot(n)
+      if into >= 0 then return m end                         -- moving away already
+      return m - n * into                                    -- slide along it
+    end
+
+    move = slide(slide(move, node.wallNormal), node.groundNormal)
+
+…and while grounded and not jumping, drop any upward velocity you did not ask
+for — it came from being pushed out of a slope, and keeping it is how a walk
+turns into a takeoff. The shipped first_person.lua / character.lua /
+third_person.lua do both, with `slope_limit` in the Inspector.",
     ),
     (
         "Components — live tweaks: node:getcomponent",
@@ -3907,6 +3962,52 @@ value by clicking/dragging the track — poll it with getcomponent(\"UiSlider\")
 The engine imposes no look: style hover/press states yourself, it's 3 lines.",
     ),
     (
+        "One script for a whole screen — ui.on and ui.events",
+        "\
+A `clicked` function answers for the node its script is on, so a menu of eight
+buttons wants eight script files — each one three lines long, each one really
+saying \"tell the menu\". Two ways to keep it in ONE script instead.
+
+**Listen from anywhere** — `ui.on(element, hook, fn)`:
+
+    function start(node)
+      ui.on(find(\"Play\"),    \"clicked\", function() scene.load(\"level1\") end)
+      ui.on(find(\"Options\"), \"clicked\", function() open(\"OptionsPanel\") end)
+      ui.on(find(\"Quit\"),    \"clicked\", quit)
+    end
+
+The handler is called `fn(element, hook)` — the element that fired, so one
+function can serve a row of buttons:
+
+    for _, b in ipairs(find(\"Toolbar\"):children()) do
+      ui.on(b, \"clicked\", function(el) selectTool(el.name) end)
+    end
+
+Any hook works: clicked, pressed, released, hoverStart, hoverEnd, changed,
+submitted, cancelled, focusEnter, focusExit, the drag ones. Registering again
+with the same element and hook REPLACES, so calling ui.on from update() is
+harmless. `ui.off(element)` stops listening, `ui.off(element, \"clicked\")` stops
+one hook. Only YOUR listeners — two managers can't unregister each other. A
+listener dies with its element or with the script that registered it.
+
+**Or ask instead of being called** — the same events, polled in update():
+
+    function update(node, dt)
+      if ui.clicked(playButton) then start() end
+      for _, ev in ipairs(ui.events(\"clicked\")) do log(\"clicked \" .. ev.node.name) end
+    end
+
+  • ui.clicked / pressed / released / changed / submitted (element) → this frame?
+  • ui.event(element, hook) — any hook by name.
+  • ui.events([hook]) — everything that fired this frame: { node = , event = }.
+  • ui.hovered() / ui.held() / ui.focused() — which element, or pass one for a
+    yes/no. These are STATES, not events: true for as long as they're true.
+
+Both read the same list, published before scripts run, so a poll and a hook can
+never disagree about what happened. A listener on an element that takes no
+clicks warns in the Console rather than failing silently.",
+    ),
+    (
         "Assets, models & materials — swap things at runtime",
         "\
 Reference files under Assets/ in code, and swap a node's components at runtime.
@@ -4182,6 +4283,7 @@ Prose with `inline code` in it.
             "--@noformat", "--@keep", "--@nolint",
             "Alt+Shift+F", "Ctrl+Space", "F12", "upvalue",
             "node.vel", "node.forward", "math.approach", "math.deltaAngle", "table.filter",
+            "ui.on", "ui.off", "ui.events", "ui.clicked", "ui.hovered", "ui.held",
         ] {
             assert!(all.contains(needle), "the in-engine docs never mention {needle:?}");
         }

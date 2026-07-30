@@ -697,6 +697,11 @@ impl ScriptHost {
         let ui_bindings: Rc<RefCell<Vec<crate::UiBinding>>> = Rc::new(RefCell::new(Vec::new()));
         let ui_makes: crate::UiMakes = Rc::new(RefCell::new(Vec::new()));
         let ui_handlers: crate::UiHandlers = Rc::new(RefCell::new(HashMap::new()));
+        let ui_listeners: crate::UiListeners = Rc::new(RefCell::new(Vec::new()));
+        let ui_listener_checks: Rc<RefCell<Vec<(u32, String)>>> = Rc::new(RefCell::new(Vec::new()));
+        let ui_frame_events: crate::UiFrameEvents = Rc::new(RefCell::new(Vec::new()));
+        let ui_hover: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
+        let ui_active: Rc<RefCell<Option<u32>>> = Rc::new(RefCell::new(None));
         if let Ok(t) = lua.create_table() {
             let req = ui_focus_request.clone();
             let cur = ui_focus.clone();
@@ -722,9 +727,20 @@ impl ScriptHost {
             let cur = ui_focus.clone();
             let _ = t.set(
                 "focused",
-                lua.create_function(move |lua, ()| match *cur.borrow() {
-                    Some(id) => crate::env::new_node_handle(lua, id).map(mlua::Value::Table),
-                    None => Ok(mlua::Value::Nil),
+                // `ui.focused()` = which element; `ui.focused(el)` = is it that
+                // one. Same shape as `ui.hovered` / `ui.held`, so the three
+                // states a screen asks about answer the same way.
+                lua.create_function(move |lua, node: Option<mlua::Value>| {
+                    let f = *cur.borrow();
+                    match node.as_ref().and_then(crate::env::node_id_of) {
+                        Some(e) => Ok(mlua::Value::Boolean(f == Some(e))),
+                        None => match f {
+                            Some(id) => {
+                                crate::env::new_node_handle(lua, id).map(mlua::Value::Table)
+                            }
+                            None => Ok(mlua::Value::Nil),
+                        },
+                    }
                 })
                 .ok(),
             );
@@ -812,6 +828,157 @@ impl ScriptHost {
                 })
                 .ok(),
             );
+            // `ui.on(element, hook, fn)` — listen to an element from a script
+            // that does NOT live on it.
+            //
+            // A `clicked` function in a script file answers for the node that
+            // script is on, which means one script file per button: eight
+            // three-line files whose only real content is "tell the menu".
+            // A listener puts all eight in the menu's own script, where the
+            // state they change already lives.
+            let listeners = ui_listeners.clone();
+            let checks = ui_listener_checks.clone();
+            let n = net.clone();
+            let _ = t.set(
+                "on",
+                lua.create_function(
+                    move |lua, (node, hook, f): (mlua::Value, String, mlua::Function)| {
+                        let e = crate::env::node_id_of(&node).ok_or_else(|| {
+                            mlua::Error::runtime("ui.on expects (element, hook, function)")
+                        })?;
+                        // A mistyped hook is the failure mode here — the
+                        // listener registers, nothing ever calls it, and there
+                        // is nothing to see. Naming the hooks is cheap.
+                        if !crate::ui_make::HOOKS.contains(&hook.as_str()) {
+                            return Err(mlua::Error::runtime(format!(
+                                "ui.on: \"{hook}\" is not a UI hook (one of: {})",
+                                crate::ui_make::HOOKS.join(", ")
+                            )));
+                        }
+                        // Registered outside a script (a bare `ui.on` in a made
+                        // element's closure, say) — still legal, but it belongs
+                        // to nobody, so nothing reloads or destroys it early.
+                        let owner = n.current.borrow().clone().unwrap_or((0, String::new()));
+                        let key = lua.create_registry_value(f)?;
+                        let mut ls = listeners.borrow_mut();
+                        // Same owner, same element, same hook REPLACES — like
+                        // `ui.bind`. That makes `ui.on` safe to call from
+                        // `update`, and makes the classic mistake (registering
+                        // every frame) cost one closure instead of thousands.
+                        if let Some(old) = ls
+                            .iter_mut()
+                            .find(|l| l.e == e && l.hook == hook && l.owner == owner)
+                        {
+                            let stale = std::mem::replace(&mut old.f, key);
+                            let _ = lua.remove_registry_value(stale);
+                            return Ok(());
+                        }
+                        checks.borrow_mut().push((e, hook.clone()));
+                        ls.push(crate::UiListener { e, hook, owner, f: key });
+                        Ok(())
+                    },
+                )
+                .ok(),
+            );
+            // `ui.off(element)` / `ui.off(element, hook)` — stop listening.
+            // Only the CALLER's listeners go: two managers on one element must
+            // not be able to unregister each other.
+            let listeners = ui_listeners.clone();
+            let n = net.clone();
+            let _ = t.set(
+                "off",
+                lua.create_function(move |_, (node, hook): (mlua::Value, Option<String>)| {
+                    let e = crate::env::node_id_of(&node)
+                        .ok_or_else(|| mlua::Error::runtime("ui.off expects an element"))?;
+                    let owner = n.current.borrow().clone().unwrap_or((0, String::new()));
+                    listeners.borrow_mut().retain(|l| {
+                        !(l.e == e
+                            && l.owner == owner
+                            && hook.as_ref().is_none_or(|h| *h == l.hook))
+                    });
+                    Ok(())
+                })
+                .ok(),
+            );
+            // The other half: asking, instead of being called back. Both read
+            // the SAME list of events the hooks fire from, published before the
+            // scripts run — so a poll in `update` and a `clicked` hook can
+            // never disagree about what happened this frame.
+            let ev = ui_frame_events.clone();
+            let _ = t.set(
+                "event",
+                lua.create_function(move |_, (node, hook): (mlua::Value, String)| {
+                    let Some(e) = crate::env::node_id_of(&node) else {
+                        return Ok(false);
+                    };
+                    Ok(ev.borrow().iter().any(|(x, h)| *x == e && *h == hook))
+                })
+                .ok(),
+            );
+            for (name, hook) in [
+                ("clicked", "clicked"),
+                ("pressed", "pressed"),
+                ("released", "released"),
+                ("changed", "changed"),
+                ("submitted", "submitted"),
+            ] {
+                let ev = ui_frame_events.clone();
+                let _ = t.set(
+                    name,
+                    lua.create_function(move |_, node: mlua::Value| {
+                        let Some(e) = crate::env::node_id_of(&node) else {
+                            return Ok(false);
+                        };
+                        Ok(ev.borrow().iter().any(|(x, h)| *x == e && h == hook))
+                    })
+                    .ok(),
+                );
+            }
+            // `ui.events()` — everything that happened this frame, so a manager
+            // can handle a whole screen without naming a single element:
+            // `for _, ev in ipairs(ui.events("clicked")) do ... end`.
+            let ev = ui_frame_events.clone();
+            let _ = t.set(
+                "events",
+                lua.create_function(move |lua, hook: Option<String>| {
+                    let out = lua.create_table()?;
+                    let mut i = 1;
+                    for (e, h) in ev.borrow().iter() {
+                        if hook.as_ref().is_some_and(|w| w != h) {
+                            continue;
+                        }
+                        let row = lua.create_table()?;
+                        row.set("node", crate::env::new_node_handle(lua, *e)?)?;
+                        row.set("event", h.as_str())?;
+                        out.set(i, row)?;
+                        i += 1;
+                    }
+                    Ok(out)
+                })
+                .ok(),
+            );
+            // Live states, not events: what the pointer is over, and what it is
+            // holding down. With an element they answer yes/no; with nothing
+            // they answer *which* — the shape `ui.focused()` already has.
+            for (name, cell) in [("hovered", &ui_hover), ("held", &ui_active)] {
+                let c = cell.clone();
+                let _ = t.set(
+                    name,
+                    lua.create_function(move |lua, node: Option<mlua::Value>| {
+                        let cur = *c.borrow();
+                        match node.as_ref().and_then(crate::env::node_id_of) {
+                            Some(e) => Ok(mlua::Value::Boolean(cur == Some(e))),
+                            None => match cur {
+                                Some(id) => {
+                                    crate::env::new_node_handle(lua, id).map(mlua::Value::Table)
+                                }
+                                None => Ok(mlua::Value::Nil),
+                            },
+                        }
+                    })
+                    .ok(),
+                );
+            }
             let _ = lua.globals().set("ui", t);
         }
 
@@ -1404,6 +1571,11 @@ impl ScriptHost {
             ui_bindings,
             ui_makes,
             ui_handlers,
+            ui_listeners,
+            ui_listener_checks,
+            ui_frame_events,
+            ui_hover,
+            ui_active,
             anim_info: shared.anim_info.clone(),
             anim_commands: shared.anim_commands.clone(),
             vfx_info: shared.vfx_info.clone(),
@@ -1459,6 +1631,26 @@ impl ScriptHost {
     /// Publish the drag in flight, before scripts run.
     pub fn set_ui_drag(&mut self, drag: Option<(u32, Option<u32>)>) {
         *self.ui_drag.borrow_mut() = drag;
+    }
+
+    /// Publish this frame's UI events (`(element, hook)`) and the elements the
+    /// pointer is over / holding down, BEFORE the scripts run — what
+    /// `ui.clicked(el)`, `ui.events()`, `ui.hovered()` and `ui.held()` read.
+    ///
+    /// Early on purpose: these are the same events dispatched as hooks after
+    /// the run, so a script that polls in `update` and a script that answers a
+    /// `clicked` hook are looking at one frame's truth, not two.
+    pub fn set_ui_frame_state(
+        &mut self,
+        events: &[(u32, &'static str)],
+        hover: Option<u32>,
+        held: Option<u32>,
+    ) {
+        let mut ev = self.ui_frame_events.borrow_mut();
+        ev.clear();
+        ev.extend(events.iter().map(|(e, h)| (*e, (*h).to_string())));
+        *self.ui_hover.borrow_mut() = hover;
+        *self.ui_active.borrow_mut() = held;
     }
 
     /// Evaluate every live `ui.bind` and queue what it returned.
@@ -1590,6 +1782,12 @@ impl ScriptHost {
         for (_, f) in self.ui_handlers.borrow_mut().drain() {
             let _ = self.lua.remove_registry_value(f);
         }
+        // …and `ui.on` listeners, which name old entity indices on both sides:
+        // the element they watch AND the script that owns them.
+        for l in self.ui_listeners.borrow_mut().drain(..) {
+            let _ = self.lua.remove_registry_value(l.f);
+        }
+        self.ui_listener_checks.borrow_mut().clear();
         // Queued spawn/destroy requests must not leak across a scene switch
         // (their entities/prefabs belong to the old scene's session).
         for req in self.spawn_requests.borrow_mut().drain(..) {
@@ -1838,7 +2036,7 @@ impl ScriptHost {
     /// frame: entity indices are REUSED, so a handler left behind by a
     /// destroyed element would fire on whatever node inherits its slot.
     pub fn drop_ui_handlers(&mut self, gone: &[u32]) {
-        if gone.is_empty() || self.ui_handlers.borrow().is_empty() {
+        if gone.is_empty() {
             return;
         }
         let dead: Vec<(u32, String)> = self
@@ -1852,6 +2050,76 @@ impl ScriptHost {
             if let Some(f) = self.ui_handlers.borrow_mut().remove(&k) {
                 let _ = self.lua.remove_registry_value(f);
             }
+        }
+        // A `ui.on` listener dies with EITHER end: the element it watches (same
+        // index-reuse reasoning as above) or the script that registered it — a
+        // menu manager that has been destroyed should stop answering buttons,
+        // and its closure still holds its whole environment alive.
+        let orphans: Vec<crate::UiListener> = {
+            let mut ls = self.ui_listeners.borrow_mut();
+            let (dead, live) = std::mem::take(&mut *ls)
+                .into_iter()
+                .partition(|l| gone.contains(&l.e) || gone.contains(&l.owner.0));
+            *ls = live;
+            dead
+        };
+        for l in orphans {
+            let _ = self.lua.remove_registry_value(l.f);
+        }
+    }
+
+    /// Report `ui.on(...)` registrations aimed at an element that can't fire
+    /// the hook — the one mistake this API makes easy, and the one that leaves
+    /// nothing at all to look at.
+    ///
+    /// Deferred to here rather than checked inside `ui.on` because the element
+    /// may not exist yet when the call runs (a `ui.make` screen is described in
+    /// the same pass it is built). An element we can't find is left alone; only
+    /// one we can see, and can see doesn't listen, is worth a word.
+    fn check_ui_listeners(&mut self, world: &World) {
+        let pending: Vec<(u32, String)> = std::mem::take(&mut *self.ui_listener_checks.borrow_mut());
+        for (eid, hook) in pending {
+            let Some(&ent) = self.scene.borrow().ents.get(&eid) else { continue };
+            let Some(spec) = world.get::<floptle_ui::ElementSpec>(ent) else { continue };
+            if crate::ui_make::hook_reaches(spec, &hook) {
+                continue;
+            }
+            let name = world
+                .get::<floptle_core::Name>(ent)
+                .map(|n| n.0.clone())
+                .unwrap_or_else(|| "element".into());
+            let needs = crate::ui_make::hook_needs(&hook);
+            self.logs.borrow_mut().push(crate::ScriptLog {
+                level: crate::LogLevel::Warn,
+                msg: format!(
+                    "ui.on(\"{name}\", \"{hook}\", …): \"{name}\" doesn't take that \
+                     interaction, so the listener will never fire — turn on {needs}."
+                ),
+                source: None,
+            });
+        }
+    }
+
+    /// Forget the `ui.on` listeners a `(node, script)` instance registered —
+    /// it is being rebuilt (hot reload) or has gone away.
+    ///
+    /// Registering replaces (same owner, element and hook), so a reload that
+    /// re-registers is already clean. This is for the reload that does NOT:
+    /// delete the `ui.on` line, save, and the old closure would otherwise keep
+    /// answering that button until the scene changed.
+    fn drop_ui_listeners_of(&mut self, key: &(u32, String)) {
+        let orphans: Vec<crate::UiListener> = {
+            let mut ls = self.ui_listeners.borrow_mut();
+            if !ls.iter().any(|l| l.owner == *key) {
+                return;
+            }
+            let (dead, live) =
+                std::mem::take(&mut *ls).into_iter().partition(|l| l.owner == *key);
+            *ls = live;
+            dead
+        };
+        for l in orphans {
+            let _ = self.lua.remove_registry_value(l.f);
         }
     }
 
@@ -1979,7 +2247,14 @@ impl ScriptHost {
             }
         }
         let Ok(node) = new_node_handle(&self.lua, eid) else { return false };
-        if let Err(err) = f.call::<()>(node) {
+        // An editor action is this script running, same as a lifecycle call —
+        // so anything that registers by owner (`ui.on`, `net.on`) knows whose
+        // it is. Without this, a `--@editorButton` that wires up a screen
+        // registers listeners belonging to nobody, which nothing can unregister.
+        *self.net.current.borrow_mut() = Some((eid, kind.to_string()));
+        let r = f.call::<()>(node);
+        *self.net.current.borrow_mut() = None;
+        if let Err(err) = r {
             self.record_error(kind, format!("{kind}: {func}: {err}"));
         }
         self.flush_writes(world);
@@ -2721,6 +2996,7 @@ impl ScriptHost {
         // binding's write rides the same pass as a hand-written one.
         self.run_ui_bindings();
         self.flush_writes(world);
+        self.check_ui_listeners(world);
 
         // Drop environments whose (node, script) no longer exists.
         let stale: Vec<(u32, String)> =
@@ -2731,6 +3007,7 @@ impl ScriptHost {
             }
             self.envs.borrow_mut().remove(&k);
             self.drop_net_instance(&k);
+            self.drop_ui_listeners_of(&k);
         }
     }
 
@@ -3149,6 +3426,33 @@ impl ScriptHost {
             {
                 failures.push(("ui.make".into(), format!("ui.make: {hook} handler: {err}")));
             }
+            // …and every `ui.on(element, hook, fn)` listener, in registration
+            // order. Last, because the element's own script is the specific
+            // answer and a manager listening from across the scene is the
+            // general one — and because a listener that despawns the screen
+            // must not do it out from under the element's own handler.
+            let listening: Vec<(u32, String, mlua::Function)> = self
+                .ui_listeners
+                .borrow()
+                .iter()
+                .filter(|l| l.e == *eid && l.hook == *hook)
+                .filter_map(|l| {
+                    let f = self.lua.registry_value::<mlua::Function>(&l.f).ok()?;
+                    Some((l.owner.0, l.owner.1.clone(), f))
+                })
+                .collect();
+            for (owner_e, owner_kind, f) in listening {
+                let Ok(node) = crate::env::new_node_handle(&self.lua, *eid) else { continue };
+                // The listening SCRIPT is what's running, not the element's —
+                // so `synced`, `net.*` and error reporting name the manager.
+                *self.net.current.borrow_mut() = Some((owner_e, owner_kind.clone()));
+                let r = f.call::<()>((node, *hook));
+                *self.net.current.borrow_mut() = None;
+                if let Err(err) = r {
+                    let who = if owner_kind.is_empty() { "ui.on" } else { &owner_kind };
+                    failures.push((who.to_string(), format!("{who}: {hook} listener: {err}")));
+                }
+            }
         }
         for (kind, msg) in failures {
             self.record_error(&kind, msg);
@@ -3316,8 +3620,10 @@ impl ScriptHost {
                         let _ = self.lua.remove_registry_value(old.env);
                     }
                     // A rebuild (hot reload) drops the old generation's net
-                    // handlers + synced store — the fresh run re-registers.
+                    // handlers + synced store + UI listeners — the fresh run
+                    // re-registers whatever it still asks for.
                     self.drop_net_instance(&key);
+                    self.drop_ui_listeners_of(&key);
                     self.setup_synced(&env, &key);
                     match self.lua.create_registry_value(env) {
                         Ok(reg) => {

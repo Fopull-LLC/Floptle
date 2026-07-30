@@ -58,6 +58,8 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field pos Vec3 The node's position as a vec3 (read/write: `node.pos = node.pos + dir * dt`). Accepts any {x=,y=,z=} value.
 ---@field vel Vec3 The body's velocity as a vec3 (read/write) — one write instead of vx/vy/vz: `node.vel = node.vel + node.up * jump`.
 ---@field up Vec3 The body's up as a vec3 (−gravity): Y on flat ground, RADIAL on a planet. The direction to jump in wherever you're standing.
+---@field groundNormal Vec3|nil The floor the body stands on (read-only) — nil while airborne. `groundNormal:dot(node.up)` is the cosine of the slope.
+---@field wallNormal Vec3|nil The steepest surface the body is pressed against (read-only), or nil when there's only floor. Stop pushing into it and a walk into a cliff stops launching you into the sky.
 ---@field forward Vec3 The node's facing as a vec3, from its rotation (−Z forward, like the camera). Works on anything with a transform.
 ---@field right Vec3 The node's +X axis as a vec3. Pairs with `forward` for camera-relative movement.
 ---@field size Vec3 The whole scale as a vec3 (read/write). `node.scale` stays the uniform shortcut and also accepts a vec3.
@@ -406,9 +408,77 @@ ui = {}
 ---field starts editing it.
 ---@param node Node|nil
 function ui.focus(node) end
----The focused element, or nil. Also readable per-node as `node.focused`.
----@return Node|nil
-function ui.focused() end
+---The focused element, or nil — or, given an element, whether it is the focused
+---one. Also readable per-node as `node.focused`.
+---@param element Node|nil
+---@return Node|boolean|nil
+function ui.focused(element) end
+---Listen to an element from a script that does NOT live on it.
+---
+---A `clicked` function answers for the node its script is on, so a menu of eight
+---buttons wants eight script files — each three lines long, each really saying
+---\"tell the menu\". This puts all eight in the menu's own script, where the
+---state they change already lives.
+---
+---The handler is called `fn(element, hook)`, so one function can serve a whole
+---row of buttons. Registering again for the same element and hook REPLACES,
+---which makes calling it from `update` harmless. A listener dies with its
+---element or with the script that registered it, and a hot reload re-registers.
+---@param element Node
+---@param hook string clicked|pressed|released|hoverStart|hoverEnd|changed|submitted|cancelled|focusEnter|focusExit|dragStart|dragMove|dragEnter|dragOver|dragLeave|dragCancel|dropped
+---@param fn fun(element: Node, hook: string)
+function ui.on(element, hook, fn) end
+---Stop listening: every hook this script has on the element, or just one.
+---Only this script's own — two managers on one button must not be able to
+---unregister each other.
+---@param element Node
+---@param hook string|nil
+function ui.off(element, hook) end
+---Did this element fire `clicked` this frame? The polling half of `ui.on`, for
+---a manager that already has an `update`. Both read the same event list, so a
+---poll and a hook can never disagree about what happened.
+---@param element Node
+---@return boolean
+function ui.clicked(element) end
+---Did LMB go down on this element this frame?
+---@param element Node
+---@return boolean
+function ui.pressed(element) end
+---Did LMB come back up this frame (on or off the element)?
+---@param element Node
+---@return boolean
+function ui.released(element) end
+---Did this text field's value change this frame?
+---@param element Node
+---@return boolean
+function ui.changed(element) end
+---Was Enter pressed in this focused text field this frame?
+---@param element Node
+---@return boolean
+function ui.submitted(element) end
+---Did this element fire that hook this frame? Any hook by name.
+---@param element Node
+---@param hook string
+---@return boolean
+function ui.event(element, hook) end
+---Everything that happened on the UI this frame, as `{ node = , event = }`
+---rows, optionally filtered to one hook. Lets one manager handle a whole screen
+---without naming a single element.
+---@param hook string|nil
+---@return table[]
+function ui.events(hook) end
+---The element under the pointer, or nil — or, given an element, whether the
+---pointer is over it. A STATE, not an event: true for as long as it is true
+---(`hoverStart` / `hoverEnd` are the edges).
+---@param element Node|nil
+---@return Node|boolean|nil
+function ui.hovered(element) end
+---The element the pointer is holding down, or nil — or, given an element,
+---whether it is being held. Hold-to-charge, press-and-hold repeat, a dip while
+---pressed.
+---@param element Node|nil
+---@return Node|boolean|nil
+function ui.held(element) end
 ---The element being dragged, or nil — live for the whole drag and for the frame
 ---the `dropped` hooks run on. There is no separate payload channel: a node
 ---already carries params, a name and tags, so ask it what it is.

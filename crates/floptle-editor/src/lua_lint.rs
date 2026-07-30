@@ -169,6 +169,13 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
     // publications outnumber typos 100 to 1, and a lint that cries wolf on
     // `fuel = 0` is a lint everyone turns off.
     let mut declared: Vec<(String, usize)> = Vec::new();
+    // Parameters, kept apart: they are declarations (assigning to one is not a
+    // global) but they are NOT candidates for the unused lint. A lifecycle
+    // hook's signature belongs to the ENGINE — `function update(node, dt)`
+    // with an unused `dt` is correct code, and every second script has one, so
+    // reporting them is how a warnings strip becomes something people switch
+    // off. The same goes for a callback that ignores an argument it is handed.
+    let mut param_decls: Vec<(String, usize)> = Vec::new();
     let mut published: Vec<String> = Vec::new();
     // File-scope locals, for the upvalue count.
     let mut file_locals = 0usize;
@@ -210,6 +217,7 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
                 let p = p.trim();
                 if !p.is_empty() && p.chars().all(is_ident_char) {
                     declared.push((p.to_string(), n + 1));
+                    param_decls.push((p.to_string(), n + 1));
                 }
             }
         }
@@ -325,6 +333,9 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
     for (name, line) in &declared {
         if name == "_" || name.starts_with('_') {
             continue; // the conventional "I know" name
+        }
+        if param_decls.contains(&(name.clone(), *line)) {
+            continue; // a parameter — see `param_decls`
         }
         let uses = src
             .lines()
@@ -568,4 +579,61 @@ print(used)
         assert!(files > 20, "expected the real scripts, saw {files}");
         assert!(noisy.is_empty(), "the lint is too noisy on real code:\n{}", noisy.join("\n"));
     }
+
+    /// An unused PARAMETER is not a finding. A lifecycle hook's signature is
+    /// the engine's — `function update(node, dt)` that doesn't need `dt` is
+    /// correct code, and nagging about it is how a warnings strip becomes
+    /// something people switch off. An unused `local` still reports.
+    #[test]
+    fn an_unused_parameter_is_not_a_finding_but_an_unused_local_is() {
+        let src = "\
+function update(node, dt)
+  local unused = 1
+  node.y = 0
+end
+function onCollisionEnter(node, other, hit)
+  other:destroy()
+end
+";
+        let hits = lint(src, API);
+        assert_eq!(
+            hits.iter().filter(|l| l.kind == LintKind::UnusedLocal).count(),
+            1,
+            "only the local, not dt/hit: {hits:?}"
+        );
+        assert!(hits.iter().any(|l| l.message.contains("unused")), "{hits:?}");
+    }
+
+    /// The scripts we SHIP as examples must be lint-clean — all of them, every
+    /// kind, zero hits.
+    ///
+    /// They are the first Lua anyone reads, they get copied into real projects,
+    /// and a warning triangle on the engine's own example teaches exactly one
+    /// lesson: that the warnings don't mean anything. It has also earned its
+    /// keep in the other direction — it is what showed that unused *parameters*
+    /// were being reported, which no correct `function update(node, dt)` can
+    /// avoid.
+    #[test]
+    fn the_shipped_example_scripts_are_lint_clean() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/scripts");
+        let api = crate::ide::api_labels();
+        let api_refs: Vec<&str> = api.iter().map(|s| s.as_str()).collect();
+        let mut bad: Vec<String> = Vec::new();
+        let mut files = 0;
+        for entry in std::fs::read_dir(&dir).expect("the examples ship with the engine").flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("lua") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("readable");
+            files += 1;
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            for l in lint(&src, &api_refs) {
+                bad.push(format!("{name}:{}: {}", l.line, l.message));
+            }
+        }
+        assert!(files >= 15, "expected the shipped examples, saw {files}");
+        assert!(bad.is_empty(), "shipped examples must be lint-clean:\n{}", bad.join("\n"));
+    }
 }
+

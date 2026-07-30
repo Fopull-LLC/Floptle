@@ -125,6 +125,8 @@ engine integrates it (gravity, collisions, ground contact).
 | `node.grounded` | read | `true` while the body rests on a surface. Gate jumps on it. |
 | `node.up_x` `node.up_y` `node.up_z` | read | The body's **up** = −gravity. `[0,1,0]` on a flat world, **radial** on a planet. |
 | `node.height` | read/write | Capsule standing height. Write a smaller value to **crouch** (feet stay planted). |
+| `node.groundNormal` | read | The floor it stands on, as a vec3 — `nil` while airborne. |
+| `node.wallNormal` | read | The steepest surface it is **pressed against**, as a vec3 — `nil` when there's only floor. |
 
 The golden rule for movement: **keep the velocity's vertical (gravity/jump) part,
 replace the horizontal part.**
@@ -140,6 +142,44 @@ node.vy = vy
 Because `node.up_*` is the surface normal of gravity, a controller that moves along
 it and jumps along it works on **flat worlds and on spherical planets** with no extra
 code (see the character recipe below).
+
+### Slopes: don't push into what you can't walk up
+
+A walking controller that drives straight into a steep face **launches itself**.
+Nothing is bouncing it: the solver resolves the overlap by pushing the capsule
+out along the surface normal, that normal points partly *upward*, and a
+controller that keeps pushing collects that push again every single frame. At a
+run into a 70° hillside it is tens of metres per second of free climb.
+
+The two normals are the fix. Take the into-the-surface part out of your movement
+and what remains is a slide along it:
+
+```lua
+-- cos of the steepest ground you allow: 50° here
+local steep = math.cos(math.rad(params.slope_limit))
+
+local function slide(m, n)          -- m = desired velocity (vec3), n = a normal or nil
+  if not n or n:dot(node.up) >= steep then return m end   -- nothing there, or walkable
+  local into = m:dot(n)
+  if into >= 0 then return m end                          -- already moving away
+  return m - n * into                                     -- slide along the face
+end
+
+local move = slide(slide(move, node.wallNormal), node.groundNormal)
+```
+
+`wallNormal` is the cliff you ran at; `groundNormal` catches a slope you are
+standing on that is still ground but steeper than you want to allow. The shipped
+`first_person.lua`, `character.lua` and `third_person.lua` all do exactly this —
+`params.slope_limit` in the Inspector.
+
+One more line pays for itself: while grounded and **not** jumping, drop any
+upward velocity you didn't ask for. It came from being pushed out of a slope or
+a step, and keeping it is how a walk turns into a takeoff.
+
+```lua
+if node.grounded and not jumping and vup > 0 then vup = 0 end
+```
 
 The body's **tunables** — friction, bounciness, gravity on/off, shape/size, axis
 locks — are scriptable too, via `node:getcomponent("RigidBody")` (see
@@ -1027,6 +1067,76 @@ tooltips, and [ui-styles.md](ui-styles.md) for what the states look like.
 ui.focus(find("Play"))    ui.focused()      -- move / read the focus
 ui.dragging()             ui.dropTarget()   -- the drag in flight
 ```
+
+### One script for a whole screen — `ui.on` & `ui.events`
+
+A `clicked` function answers for the node its script is on. A menu of eight
+buttons therefore wants eight script files, each three lines long, each really
+saying *tell the menu* — and the state they all change lives somewhere else
+again. Two ways to keep a screen in one script instead.
+
+**Listen from anywhere.** `ui.on(element, hook, fn)` registers a handler from a
+script that does not live on the element:
+
+```lua
+function start(node)
+  ui.on(find("Play"),    "clicked", function() scene.load("level1") end)
+  ui.on(find("Options"), "clicked", function() find("OptionsPanel").visible = true end)
+  ui.on(find("Quit"),    "clicked", function() scene.load("title") end)
+end
+```
+
+The handler is called `fn(element, hook)` — the element that fired and the hook
+name — so one function can serve a whole row:
+
+```lua
+for _, b in ipairs(find("Toolbar"):children()) do
+  ui.on(b, "clicked", function(el) selectTool(el.name) end)
+end
+```
+
+Every hook in the table above works. Four rules make it safe to write:
+
+- **Registering again replaces.** Same script, same element, same hook — the new
+  closure takes the old one's place, so calling `ui.on` from `update` costs one
+  closure rather than one per frame.
+- **`ui.off(element)` stops every hook your script has on it**; `ui.off(element,
+  "clicked")` stops one. Only *yours*: two managers listening to one button can
+  never unregister each other.
+- **A listener dies with either end** — the element it watches or the script that
+  registered it. A destroyed menu manager stops answering, and a hot reload
+  re-registers from the fresh code.
+- **Order:** the element's own `clicked` function runs first, then a `ui.make`
+  element's inline `onClicked`, then listeners in registration order.
+
+Listening for an interaction an element does not take (a `clicked` on a plain
+box) warns in the Console. Nothing else would happen at all, and silence is a
+bad error message.
+
+**Or ask, instead of being called.** The same events, polled in `update`:
+
+```lua
+function update(node, dt)
+  if ui.clicked(playButton) then start() end
+  for _, ev in ipairs(ui.events("clicked")) do
+    log("clicked " .. ev.node.name)
+  end
+end
+```
+
+| Call | Answers |
+|---|---|
+| `ui.clicked(el)` / `pressed` / `released` / `changed` / `submitted` | did it fire this frame? |
+| `ui.event(el, hook)` | any hook, by name |
+| `ui.events([hook])` | everything that fired this frame: `{ node = , event = }` |
+| `ui.hovered([el])` / `ui.held([el])` / `ui.focused([el])` | which element — or, given one, yes/no |
+
+The last row is **states**, not events: true for as long as they are true, where
+`hoverStart` / `hoverEnd` are the edges. Everything else is per-frame and gone
+the next.
+
+Polls and hooks read the same list, published before scripts run, so the two can
+never disagree about what happened this frame.
 
 ### Colours
 

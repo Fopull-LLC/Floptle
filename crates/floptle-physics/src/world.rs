@@ -593,6 +593,33 @@ impl PhysicsWorld {
         }
     }
 
+    /// Record one resolved contact on a body: the telegraph normal, whether it
+    /// counts as ground, and the step's two extremes — the most floor-like
+    /// surface (`ground_normal`) and the steepest one (`wall_normal`).
+    ///
+    /// Extremes rather than "the last one seen", because a character standing
+    /// at the foot of a cliff touches BOTH, and which arrived last is just
+    /// collider order. Both use the same 0.5 (60°) cut that decides `grounded`,
+    /// so "grounded" and "has a ground normal" are one fact, and a surface is
+    /// never reported as both floor and wall.
+    fn note_body_contact(&mut self, bi: usize, n: Vec3) {
+        self.bodies[bi].contact = Some(n);
+        let gd = self.gravity.accel_at(self.bodies[bi].pos, &self.colliders);
+        if gd.length_squared() <= 1e-6 {
+            return;
+        }
+        let up = -gd.normalize();
+        let d = n.dot(up);
+        if d > 0.5 {
+            self.bodies[bi].grounded = true;
+            if self.bodies[bi].ground_normal.is_none_or(|g| g.dot(up) < d) {
+                self.bodies[bi].ground_normal = Some(n);
+            }
+        } else if self.bodies[bi].wall_normal.is_none_or(|w| w.dot(up) > d) {
+            self.bodies[bi].wall_normal = Some(n);
+        }
+    }
+
     /// Step ONE body by `dt`. Because the solver has no body-vs-body pass
     /// (bodies collide only with static colliders), a single body's step is
     /// EXACTLY the trajectory it takes inside a full [`Self::step`] — the
@@ -645,6 +672,8 @@ impl PhysicsWorld {
             self.bodies[bi].pos += v * dt;
             self.bodies[bi].grounded = false;
             self.bodies[bi].contact = None;
+            self.bodies[bi].ground_normal = None;
+            self.bodies[bi].wall_normal = None;
 
             // Resolve penetration against every collider (relaxation passes), sampling
             // each of the body's collision spheres (2 for a capsule). The collision
@@ -684,12 +713,7 @@ impl PhysicsWorld {
                             let vt = self.bodies[bi].vel - n * vn;
                             self.bodies[bi].vel = vt * fr - n * vn * rest;
                         }
-                        self.bodies[bi].contact = Some(n);
-                        // Grounded if this contact opposes gravity (a floor, not a wall).
-                        let gd = self.gravity.accel_at(self.bodies[bi].pos, &self.colliders);
-                        if gd.length_squared() > 1e-6 && n.dot(-gd.normalize()) > 0.5 {
-                            self.bodies[bi].grounded = true;
-                        }
+                        self.note_body_contact(bi, n);
                         self.contacts.push(Contact {
                             body: bi,
                             collider: ci,
