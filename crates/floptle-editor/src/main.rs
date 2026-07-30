@@ -59,6 +59,8 @@ mod input_ui;
 mod inspector;
 mod settings_ui;
 mod shadow;
+mod lua_format;
+mod lua_lint;
 mod lua_support;
 mod map_edit;
 mod map_ui;
@@ -84,6 +86,7 @@ mod rig_overrides;
 mod scene_ops;
 mod space;
 mod script_actions;
+mod script_meta;
 mod scene_tab;
 mod selection;
 mod shading;
@@ -569,6 +572,8 @@ struct EditorTabViewer<'a> {
     /// The selected node's reference-param kinds ((script kind, param) → kind),
     /// so ref pickers filter to valid targets.
     ref_kinds: &'a HashMap<(String, String), floptle_script::RefKind>,
+    /// Script Inspector metadata (annotations + editor buttons), mtime-cached.
+    script_meta: &'a mut crate::script_meta::ScriptMetaCache,
     /// Canvas bounds (4 corners per layer, Scene-tab points).
     ui_canvas: &'a [[[f32; 2]; 4]],
     /// A selected armature bone `(mesh entity, skeleton node index)` — mutually
@@ -1310,6 +1315,10 @@ struct Editor {
     /// refreshed by `sync_selected_script_params`, read by the Inspector to
     /// filter ref pickers (script/component refs only list valid targets).
     ref_kinds: HashMap<(String, String), floptle_script::RefKind>,
+    /// Per-script Inspector metadata parsed from the `.lua` sources (`--@header`,
+    /// `--@desc`, `--@range`, `--@options`, the editor buttons), cached by mtime —
+    /// the Inspector reads it every frame for the selected node's scripts.
+    script_meta: crate::script_meta::ScriptMetaCache,
     /// The sampling each registered texture was last built with, so a settings change
     /// forces a re-register (with the new sampler / mips).
     texture_registry_setting: HashMap<String, TexSetting>,

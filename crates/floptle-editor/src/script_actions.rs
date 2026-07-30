@@ -15,23 +15,6 @@
 
 use crate::Editor;
 
-/// Parse a script source's `--@editorButton <Label> <fn>` annotations
-/// (`<fn>` defaults to the label; underscores in the label display as
-/// spaces). Cheap enough to run per Inspector frame for the selected node.
-pub(crate) fn script_editor_buttons(root: &std::path::Path, kind: &str) -> Vec<(String, String)> {
-    let path = root.join("scripts").join(format!("{kind}.lua"));
-    let Ok(src) = std::fs::read_to_string(&path) else { return Vec::new() };
-    src.lines()
-        .filter_map(|l| {
-            let rest = l.trim().strip_prefix("--@editorButton")?.trim();
-            let mut it = rest.split_whitespace();
-            let label = it.next()?.to_string();
-            let func = it.next().map(str::to_string).unwrap_or_else(|| label.clone());
-            Some((label.replace('_', " "), func))
-        })
-        .collect()
-}
-
 impl Editor {
     /// Run one editor action: `func(node)` from script `kind` on node `e`,
     /// against the edit-mode world, then apply everything it queued.

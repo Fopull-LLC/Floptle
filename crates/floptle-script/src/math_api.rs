@@ -290,6 +290,9 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    install_math_helpers(lua)?;
+    install_table_helpers(lua)?;
+
     // ---- color -----------------------------------------------------------
     // A plain `{r, g, b, a}` table (also indexable [1]..[4]) rather than a
     // userdata: it prints, it serialises into a save, it compares, and any
@@ -489,4 +492,357 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     Ok(())
+}
+
+/// The gameplay arithmetic every controller script was writing out by hand,
+/// added to the stock `math` table (camelCase, like the rest of the API).
+///
+/// These exist because the alternative is what the solar scripts actually
+/// contained: `math.max(0, math.min(1, x))` for a clamp, a five-line local
+/// `norm(x, y, z)`, and a hand-rolled "move towards" that overshoots at low
+/// frame rates. One name each, once, correct.
+fn install_math_helpers(lua: &Lua) -> mlua::Result<()> {
+    let m: Table = lua.globals().get("math")?;
+
+    // clamp / saturate — the two most-written lines in any game script.
+    m.set(
+        "clamp",
+        lua.create_function(|_, (x, lo, hi): (f64, f64, f64)| Ok(x.clamp(lo.min(hi), hi.max(lo))))?,
+    )?;
+    m.set("saturate", lua.create_function(|_, x: f64| Ok(x.clamp(0.0, 1.0)))?)?;
+    m.set("sign", lua.create_function(|_, x: f64| Ok(if x == 0.0 { 0.0 } else { x.signum() }))?)?;
+    // round(x [, step]) — `round(x, 0.25)` snaps to quarters (grid placement).
+    m.set(
+        "round",
+        lua.create_function(|_, (x, step): (f64, Option<f64>)| {
+            Ok(match step.filter(|s| *s != 0.0) {
+                Some(s) => (x / s).round() * s,
+                None => x.round(),
+            })
+        })?,
+    )?;
+    // lerp is UNCLAMPED (extrapolation is useful); mix() is the clamped twin.
+    m.set("lerp", lua.create_function(|_, (a, b, t): (f64, f64, f64)| Ok(a + (b - a) * t))?)?;
+    m.set(
+        "mix",
+        lua.create_function(|_, (a, b, t): (f64, f64, f64)| {
+            Ok(a + (b - a) * t.clamp(0.0, 1.0))
+        })?,
+    )?;
+    // Where does `x` sit between a and b (the inverse of lerp)? 0 when a == b,
+    // rather than a NaN that quietly poisons everything downstream.
+    m.set(
+        "inverseLerp",
+        lua.create_function(|_, (a, b, x): (f64, f64, f64)| {
+            Ok(if (b - a).abs() < f64::EPSILON { 0.0 } else { ((x - a) / (b - a)).clamp(0.0, 1.0) })
+        })?,
+    )?;
+    m.set(
+        "remap",
+        lua.create_function(|_, (x, a, b, c, d): (f64, f64, f64, f64, f64)| {
+            let t = if (b - a).abs() < f64::EPSILON { 0.0 } else { (x - a) / (b - a) };
+            Ok(c + (d - c) * t)
+        })?,
+    )?;
+    m.set(
+        "smoothstep",
+        lua.create_function(|_, (a, b, x): (f64, f64, f64)| {
+            let t = if (b - a).abs() < f64::EPSILON { 0.0 } else { ((x - a) / (b - a)).clamp(0.0, 1.0) };
+            Ok(t * t * (3.0 - 2.0 * t))
+        })?,
+    )?;
+    // approach(current, target, maxDelta) — frame-rate-correct "move towards"
+    // that never overshoots. Pass `rate * dt` as maxDelta.
+    m.set(
+        "approach",
+        lua.create_function(|_, (cur, target, max_delta): (f64, f64, f64)| {
+            let d = target - cur;
+            let step = max_delta.abs();
+            Ok(if d.abs() <= step { target } else { cur + d.signum() * step })
+        })?,
+    )?;
+    // Angles: wrap into (−π, π], and the SHORTEST signed way from a to b — the
+    // thing every turret, heading readout and camera yaw needs and every script
+    // got subtly wrong across the ±π seam.
+    m.set("wrapAngle", lua.create_function(|_, a: f64| Ok(wrap_pi(a)))?)?;
+    m.set(
+        "deltaAngle",
+        lua.create_function(|_, (a, b): (f64, f64)| Ok(wrap_pi(b - a)))?,
+    )?;
+    // approachAngle — approach() across the seam, for "turn to face" logic.
+    m.set(
+        "approachAngle",
+        lua.create_function(|_, (cur, target, max_delta): (f64, f64, f64)| {
+            let d = wrap_pi(target - cur);
+            let step = max_delta.abs();
+            Ok(if d.abs() <= step { wrap_pi(target) } else { wrap_pi(cur + d.signum() * step) })
+        })?,
+    )?;
+    // pingPong(t, len) — 0 → len → 0 forever (patrols, bobbing, breathing).
+    m.set(
+        "pingPong",
+        lua.create_function(|_, (t, len): (f64, f64)| {
+            if len <= 0.0 {
+                return Ok(0.0);
+            }
+            let c = t.rem_euclid(len * 2.0);
+            Ok(if c > len { len * 2.0 - c } else { c })
+        })?,
+    )?;
+    Ok(())
+}
+
+/// Wrap an angle into (−π, π].
+fn wrap_pi(a: f64) -> f64 {
+    let tau = std::f64::consts::TAU;
+    let mut x = (a + std::f64::consts::PI).rem_euclid(tau) - std::f64::consts::PI;
+    if x <= -std::f64::consts::PI {
+        x += tau;
+    }
+    x
+}
+
+/// List helpers on the stock `table`, so working with a list of things reads as
+/// one line instead of a bookkeeping loop. All of them treat the table as an
+/// ARRAY (1..n) and return a new table rather than mutating, except `extend`.
+fn install_table_helpers(lua: &Lua) -> mlua::Result<()> {
+    let t: Table = lua.globals().get("table")?;
+
+    t.set(
+        "map",
+        lua.create_function(|lua, (list, f): (Table, mlua::Function)| {
+            let out = lua.create_table()?;
+            for (i, v) in list.sequence_values::<Value>().enumerate() {
+                out.raw_set(i + 1, f.call::<Value>((v?, i + 1))?)?;
+            }
+            Ok(out)
+        })?,
+    )?;
+    t.set(
+        "filter",
+        lua.create_function(|lua, (list, f): (Table, mlua::Function)| {
+            let out = lua.create_table()?;
+            let mut n = 0;
+            for (i, v) in list.sequence_values::<Value>().enumerate() {
+                let v = v?;
+                if f.call::<bool>((v.clone(), i + 1))? {
+                    n += 1;
+                    out.raw_set(n, v)?;
+                }
+            }
+            Ok(out)
+        })?,
+    )?;
+    // find(list, fn) → value, index (nil if none). Takes a PREDICATE, so
+    // `table.find(ships, function(s) return s.docked end)` reads as a sentence.
+    t.set(
+        "find",
+        lua.create_function(|_, (list, f): (Table, mlua::Function)| {
+            for (i, v) in list.sequence_values::<Value>().enumerate() {
+                let v = v?;
+                if f.call::<bool>((v.clone(), i + 1))? {
+                    return Ok((v, Value::Integer(i as i64 + 1)));
+                }
+            }
+            Ok((Value::Nil, Value::Nil))
+        })?,
+    )?;
+    // indexOf(list, value) → index or nil (plain equality, no predicate).
+    t.set(
+        "indexOf",
+        lua.create_function(|_, (list, want): (Table, Value)| {
+            for (i, v) in list.sequence_values::<Value>().enumerate() {
+                if v? == want {
+                    return Ok(Value::Integer(i as i64 + 1));
+                }
+            }
+            Ok(Value::Nil)
+        })?,
+    )?;
+    // count(list [, fn]) — the length, or how many satisfy the predicate. Also
+    // counts a KEYED table's entries, which `#t` cannot.
+    t.set(
+        "count",
+        lua.create_function(|_, (list, f): (Table, Option<mlua::Function>)| {
+            match f {
+                Some(f) => {
+                    let mut n = 0i64;
+                    for (i, v) in list.sequence_values::<Value>().enumerate() {
+                        if f.call::<bool>((v?, i + 1))? {
+                            n += 1;
+                        }
+                    }
+                    Ok(n)
+                }
+                None => {
+                    let mut n = 0i64;
+                    for pair in list.pairs::<Value, Value>() {
+                        pair?;
+                        n += 1;
+                    }
+                    Ok(n)
+                }
+            }
+        })?,
+    )?;
+    t.set(
+        "sum",
+        lua.create_function(|_, (list, f): (Table, Option<mlua::Function>)| {
+            let mut acc = 0.0;
+            for (i, v) in list.sequence_values::<Value>().enumerate() {
+                let v = v?;
+                acc += match &f {
+                    Some(f) => f.call::<f64>((v, i + 1))?,
+                    None => num_of(&v).unwrap_or(0.0),
+                };
+            }
+            Ok(acc)
+        })?,
+    )?;
+    // keys(t) — a SORTED key list, so iterating a keyed table is deterministic
+    // (raw `pairs` order is hash order, which a replay can't reproduce).
+    t.set(
+        "keys",
+        lua.create_function(|lua, src: Table| {
+            let mut keys: Vec<(String, Value)> = Vec::new();
+            for pair in src.pairs::<Value, Value>() {
+                let (k, _) = pair?;
+                let sort_key = match &k {
+                    Value::String(s) => format!("s{}", s.to_string_lossy()),
+                    Value::Integer(i) => format!("n{i:020}"),
+                    Value::Number(n) => format!("n{n:020}"),
+                    _ => continue,
+                };
+                keys.push((sort_key, k));
+            }
+            keys.sort_by(|a, b| a.0.cmp(&b.0));
+            let out = lua.create_table()?;
+            for (i, (_, k)) in keys.into_iter().enumerate() {
+                out.raw_set(i + 1, k)?;
+            }
+            Ok(out)
+        })?,
+    )?;
+    t.set(
+        "copy",
+        lua.create_function(|lua, src: Table| {
+            let out = lua.create_table()?;
+            for pair in src.pairs::<Value, Value>() {
+                let (k, v) = pair?;
+                out.raw_set(k, v)?;
+            }
+            Ok(out)
+        })?,
+    )?;
+    // extend(dst, src) — append src's items onto dst (in place) and return dst.
+    t.set(
+        "extend",
+        lua.create_function(|_, (dst, src): (Table, Table)| {
+            let mut n = dst.raw_len();
+            for v in src.sequence_values::<Value>() {
+                n += 1;
+                dst.raw_set(n, v?)?;
+            }
+            Ok(dst)
+        })?,
+    )?;
+    t.set(
+        "reverse",
+        lua.create_function(|lua, src: Table| {
+            let out = lua.create_table()?;
+            let n = src.raw_len();
+            for i in 1..=n {
+                out.raw_set(n - i + 1, src.raw_get::<Value>(i)?)?;
+            }
+            Ok(out)
+        })?,
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use mlua::Lua;
+
+    fn lua() -> Lua {
+        let lua = Lua::new();
+        super::install(&lua).expect("install");
+        lua
+    }
+
+    /// The arithmetic helpers, including the edge cases the hand-written
+    /// versions in solar/ got wrong: an overshooting approach, a zero-width
+    /// remap dividing by zero, and an angle delta across the ±π seam.
+    #[test]
+    fn math_helpers_behave_at_the_edges() {
+        let lua = lua();
+        let n = |src: &str| -> f64 { lua.load(src).call::<f64>(()).expect(src) };
+
+        assert_eq!(n("return math.clamp(5, 0, 1)"), 1.0);
+        assert_eq!(n("return math.clamp(-5, 0, 1)"), 0.0);
+        // Reversed bounds must not produce NaN or panic.
+        assert_eq!(n("return math.clamp(0.5, 1, 0)"), 0.5);
+        assert_eq!(n("return math.saturate(2)"), 1.0);
+        assert_eq!(n("return math.sign(-3)"), -1.0);
+        assert_eq!(n("return math.sign(0)"), 0.0);
+        assert_eq!(n("return math.round(2.5)"), 3.0);
+        assert_eq!(n("return math.round(2.34, 0.25)"), 2.25);
+        assert_eq!(n("return math.lerp(0, 10, 1.5)"), 15.0, "lerp extrapolates");
+        assert_eq!(n("return math.mix(0, 10, 1.5)"), 10.0, "mix clamps");
+        assert_eq!(n("return math.inverseLerp(2, 4, 3)"), 0.5);
+        assert_eq!(n("return math.inverseLerp(2, 2, 3)"), 0.0, "no divide by zero");
+        assert_eq!(n("return math.remap(5, 0, 10, 0, 100)"), 50.0);
+        assert_eq!(n("return math.remap(5, 3, 3, 0, 100)"), 0.0, "no divide by zero");
+        assert_eq!(n("return math.smoothstep(0, 1, 0.5)"), 0.5);
+        // approach never overshoots — the bug in every hand-rolled version.
+        assert_eq!(n("return math.approach(0, 1, 10)"), 1.0);
+        assert_eq!(n("return math.approach(0, 1, 0.25)"), 0.25);
+        assert_eq!(n("return math.approach(1, 0, 0.25)"), 0.75);
+        assert_eq!(n("return math.pingPong(3, 2)"), 1.0);
+        assert_eq!(n("return math.pingPong(0, 0)"), 0.0);
+
+        // The ±π seam: 350° → 10° is +20°, not −340°.
+        let d = n("return math.deltaAngle(math.rad(350), math.rad(10))");
+        assert!((d - 20f64.to_radians()).abs() < 1e-9, "deltaAngle crossed the seam wrong: {d}");
+        let w = n("return math.wrapAngle(math.pi * 3)");
+        assert!((w - std::f64::consts::PI).abs() < 1e-9, "wrapAngle: {w}");
+        // 350° stepping 5° toward 10° lands on 355°, which wrapAngle reports as
+        // −5° — the same angle, so compare modulo a turn rather than literally.
+        let a = n("return math.approachAngle(math.rad(350), math.rad(10), math.rad(5))");
+        let off = super::wrap_pi(a - 355f64.to_radians());
+        assert!(off.abs() < 1e-9, "approachAngle went the long way: {a} (off by {off})");
+    }
+
+    /// The list helpers, and the two behaviours worth pinning: `find` takes a
+    /// predicate and returns value+index, and `keys` is SORTED (hash order isn't
+    /// reproducible, which matters for replays).
+    #[test]
+    fn table_helpers_read_like_sentences() {
+        let lua = lua();
+        let s = |src: &str| -> String { lua.load(src).call::<String>(()).expect(src) };
+        let n = |src: &str| -> f64 { lua.load(src).call::<f64>(()).expect(src) };
+
+        assert_eq!(
+            s("return table.concat(table.map({1,2,3}, function(v) return v * 2 end), ',')"),
+            "2,4,6"
+        );
+        assert_eq!(
+            s("return table.concat(table.filter({1,2,3,4}, function(v) return v % 2 == 0 end), ',')"),
+            "2,4"
+        );
+        assert_eq!(
+            s("local v, i = table.find({'a','b','c'}, function(x) return x == 'b' end)\n\
+               return v .. i"),
+            "b2"
+        );
+        assert_eq!(n("return table.indexOf({'a','b'}, 'b')"), 2.0);
+        assert_eq!(n("return table.count({a=1, b=2, c=3})"), 3.0, "counts keyed tables too");
+        assert_eq!(n("return table.count({1,2,3,4}, function(v) return v > 2 end)"), 2.0);
+        assert_eq!(n("return table.sum({1,2,3})"), 6.0);
+        assert_eq!(n("return table.sum({{hp=2},{hp=5}}, function(v) return v.hp end)"), 7.0);
+        assert_eq!(s("return table.concat(table.keys({z=1, a=1, m=1}), ',')"), "a,m,z");
+        assert_eq!(s("return table.concat(table.reverse({1,2,3}), ',')"), "3,2,1");
+        assert_eq!(s("return table.concat(table.extend({1,2}, {3,4}), ',')"), "1,2,3,4");
+        assert_eq!(n("local c = table.copy({a=7}) return c.a"), 7.0);
+    }
 }

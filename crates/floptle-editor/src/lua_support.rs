@@ -56,6 +56,11 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field up_z number Physics: body up (−gravity) Z.
 ---@field visible boolean Show / hide this node's geometry (Inspector eye toggle).
 ---@field pos Vec3 The node's position as a vec3 (read/write: `node.pos = node.pos + dir * dt`). Accepts any {x=,y=,z=} value.
+---@field vel Vec3 The body's velocity as a vec3 (read/write) — one write instead of vx/vy/vz: `node.vel = node.vel + node.up * jump`.
+---@field up Vec3 The body's up as a vec3 (−gravity): Y on flat ground, RADIAL on a planet. The direction to jump in wherever you're standing.
+---@field forward Vec3 The node's facing as a vec3, from its rotation (−Z forward, like the camera). Works on anything with a transform.
+---@field right Vec3 The node's +X axis as a vec3. Pairs with `forward` for camera-relative movement.
+---@field size Vec3 The whole scale as a vec3 (read/write). `node.scale` stays the uniform shortcut and also accepts a vec3.
 ---@field tickX number Physics: the BODY's world X at the start of this tick. Not node.x — that's the INTERPOLATED render pose between ticks, so reading it in fixedUpdate is frame-rate dependent and no rollback replay can reproduce it. Writing this teleports the body without touching the transform.
 ---@field tickY number Physics: the body's world Y at the start of this tick (read/write).
 ---@field tickZ number Physics: the body's world Z at the start of this tick (read/write).
@@ -1123,6 +1128,36 @@ function terrain.height(x, z) end
 
 ---Seeded value noise, one octave, ≈ -1..1. Deterministic on every machine —
 ---the SAME numbers the engine's Rust generators produce. Scale the inputs to
+---@class mathlib
+---@field clamp fun(x: number, lo: number, hi: number): number Hold x inside lo..hi (reversed bounds tolerated).
+---@field saturate fun(x: number): number Clamp to 0..1.
+---@field sign fun(x: number): number -1, 0 or 1 (exactly 0 for 0).
+---@field round fun(x: number, step?: number): number Nearest whole number, or nearest multiple of `step` (`round(x, 0.25)` snaps to quarters).
+---@field lerp fun(a: number, b: number, t: number): number Linear blend, UNCLAMPED (extrapolates).
+---@field mix fun(a: number, b: number, t: number): number lerp with t clamped to 0..1.
+---@field inverseLerp fun(a: number, b: number, x: number): number Where x sits in a..b, 0..1 (0 when a == b, never NaN).
+---@field remap fun(x: number, a: number, b: number, c: number, d: number): number Range a..b onto c..d.
+---@field smoothstep fun(a: number, b: number, x: number): number 0..1 with eased ends.
+---@field approach fun(current: number, target: number, maxDelta: number): number Move toward target without overshooting — pass `rate * dt`.
+---@field wrapAngle fun(a: number): number An angle folded into (−pi, pi].
+---@field deltaAngle fun(a: number, b: number): number The SHORTEST signed turn from a to b, correct across the ±pi seam.
+---@field approachAngle fun(current: number, target: number, maxDelta: number): number approach() for headings — turns the short way, never overshoots.
+---@field pingPong fun(t: number, len: number): number 0 → len → 0, forever.
+math = math
+
+---@class tablelib
+---@field map fun(list: table, fn: fun(v: any, i: number): any): table A new list of fn(value, i).
+---@field filter fun(list: table, fn: fun(v: any, i: number): boolean): table A new list of the items fn accepts.
+---@field find fun(list: table, fn: fun(v: any, i: number): boolean): any, number|nil The first item satisfying the predicate, and its index.
+---@field indexOf fun(list: table, value: any): number|nil The index of a value by equality.
+---@field count fun(t: table, fn?: fun(v: any, i: number): boolean): number Entries (keyed tables too), or how many match.
+---@field sum fun(list: table, fn?: fun(v: any, i: number): number): number Add the numbers, or add fn over them.
+---@field keys fun(t: table): table The keys as a SORTED list (pairs order isn't reproducible).
+---@field copy fun(t: table): table A shallow copy.
+---@field extend fun(dst: table, src: table): table Append src's items onto dst in place; returns dst.
+---@field reverse fun(list: table): table A new list, back to front.
+table = table
+
 ---pick a frequency (lattice cell = 1 unit).
 ---@param x number
 ---@param y number

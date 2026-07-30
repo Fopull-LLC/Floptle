@@ -109,7 +109,20 @@ pub(crate) fn params_table(
         }
     }
     for (k, v) in params {
-        t.set(k.as_str(), *v as f64)?;
+        // Stored params are floats, but a tunable the script declared as a
+        // BOOLEAN must read back as one — otherwise `if params.invert then`
+        // would be true for a stored 0 (every number is truthy in Lua), which is
+        // the opposite of what the Inspector's unticked checkbox says.
+        let declared_bool = env
+            .get::<Table>("defaults")
+            .ok()
+            .and_then(|d| d.get::<Value>(k.as_str()).ok())
+            .is_some_and(|d| matches!(d, Value::Boolean(_)));
+        if declared_bool {
+            t.set(k.as_str(), *v != 0.0)?;
+        } else {
+            t.set(k.as_str(), *v as f64)?;
+        }
     }
     // Stored STRING overrides land over the defaults, like the numbers above.
     for (k, v) in strs {
@@ -430,4 +443,40 @@ pub(crate) fn material_key(refstr: &str) -> String {
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| refstr.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tunable a script declares as a BOOLEAN must stay a boolean in `params`
+    /// even after the Inspector stores it (params are floats on the way through).
+    /// Every number is truthy in Lua, so a stored 0 arriving as `0` would make
+    /// `if params.invert then` fire with the checkbox unticked.
+    #[test]
+    fn a_boolean_tunable_survives_the_float_round_trip() {
+        let lua = Lua::new();
+        let env = lua.create_table().unwrap();
+        let defaults = lua.create_table().unwrap();
+        defaults.set("invert", false).unwrap();
+        defaults.set("speed", 4.0).unwrap();
+        env.set("defaults", defaults).unwrap();
+
+        // Nothing stored yet: the declared defaults come through as declared.
+        let t = params_table(&lua, &env, &[], &[], &[]).unwrap();
+        assert_eq!(t.get::<mlua::Value>("invert").unwrap(), mlua::Value::Boolean(false));
+
+        // The Inspector ticked the box (stored as 1.0) and dragged the number.
+        let t = params_table(&lua, &env, &[("invert".into(), 1.0), ("speed".into(), 6.5)], &[], &[])
+            .unwrap();
+        assert_eq!(t.get::<mlua::Value>("invert").unwrap(), mlua::Value::Boolean(true));
+        assert_eq!(t.get::<f64>("speed").unwrap(), 6.5);
+
+        // …and unticked again: a stored 0 must be `false`, not a truthy 0.
+        let t = params_table(&lua, &env, &[("invert".into(), 0.0)], &[], &[]).unwrap();
+        assert_eq!(t.get::<mlua::Value>("invert").unwrap(), mlua::Value::Boolean(false));
+        let truthy: bool =
+            lua.load("return ...").call(t.get::<mlua::Value>("invert").unwrap()).unwrap();
+        assert!(!truthy, "`if params.invert then` must not fire for an unticked box");
+    }
 }

@@ -1627,6 +1627,7 @@ impl Editor {
         let play_t = self.play_t;
         let ui_overlay_snapshot = self.ui_overlay.clone();
         let ref_kinds = &self.ref_kinds;
+        let script_meta = &mut self.script_meta;
         let ui_canvas_snapshot = self.ui_canvas.clone();
         let show_export = &mut self.show_export;
         // Relative export folders resolve against the project's PARENT (shown
@@ -2433,6 +2434,7 @@ impl Editor {
                 ui_overlay: &ui_overlay_snapshot,
                 ui_canvas: &ui_canvas_snapshot,
                 ref_kinds,
+                script_meta,
                 bone_selection,
                 pivot_edit,
                 fullscreen_tab,

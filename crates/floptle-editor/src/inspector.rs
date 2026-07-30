@@ -235,6 +235,326 @@ pub(crate) fn shader_uniform_rows(
     changed
 }
 
+/// What [`script_tunables_ui`] needs from the surrounding Inspector to draw a
+/// script's rows: its parsed metadata plus the candidate lists reference params
+/// pick from.
+pub(crate) struct ScriptRowCtx<'a> {
+    pub(crate) meta: &'a crate::script_meta::ScriptMeta,
+    pub(crate) ref_kinds: &'a std::collections::HashMap<(String, String), floptle_script::RefKind>,
+    pub(crate) node_names: &'a Vec<String>,
+    pub(crate) script_nodes: &'a std::collections::HashMap<String, Vec<String>>,
+    pub(crate) comp_nodes: &'a std::collections::HashMap<String, Vec<String>>,
+    pub(crate) name_of: &'a std::collections::HashMap<floptle_core::Entity, String>,
+    /// Salts every widget id in this block (node index, script slot).
+    pub(crate) salt: (u32, usize),
+}
+
+/// A section header inside a script's tunables (`--@header Movement`) — the same
+/// TITLE ──── rule the Map tab uses, so panels read alike.
+fn param_header(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(title)
+                .small()
+                .strong()
+                .color(ui.visuals().strong_text_color()),
+        );
+        let rect = ui.available_rect_before_wrap();
+        if rect.width() > 8.0 {
+            let y = rect.center().y;
+            ui.painter().line_segment(
+                [egui::pos2(rect.left() + 4.0, y), egui::pos2(rect.right(), y)],
+                egui::Stroke::new(1.0, ui.visuals().weak_text_color().gamma_multiply(0.5)),
+            );
+        }
+    });
+}
+
+/// Attach a param's `--@desc` (or the plain comment above it) as the row's
+/// tooltip. Without one the row is bare, exactly as before.
+fn with_desc(resp: egui::Response, meta: Option<&crate::script_meta::ParamMeta>) -> egui::Response {
+    match meta.and_then(|m| m.desc.as_deref()) {
+        Some(d) => resp.on_hover_text(d),
+        None => resp,
+    }
+}
+
+/// One attached script's tunables: the editor-action buttons it declares, then
+/// every `defaults` entry **in declaration order**, grouped under its
+/// `--@header`s and drawn as the widget its annotations ask for — slider,
+/// dropdown, checkbox, colour swatch, text box, node picker. Returns whether
+/// anything changed.
+///
+/// Ordering is the reason this exists as one walk rather than three loops: the
+/// old code drew numbers, then strings, then refs, each alphabetised, so a header
+/// could never sit above the rows it names.
+fn script_tunables_ui(
+    ui: &mut egui::Ui,
+    inst: &mut floptle_core::ScriptInst,
+    cx: ScriptRowCtx<'_>,
+    run_action: &mut Option<(floptle_core::Entity, String, String)>,
+    e: floptle_core::Entity,
+) -> bool {
+    let mut changed = false;
+
+    if !cx.meta.buttons.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            for (label, func) in &cx.meta.buttons {
+                if ui
+                    .button(format!("▶ {label}"))
+                    .on_hover_text(format!(
+                        "runs {func}(node) from {}.lua on this node, editing the open scene",
+                        inst.kind
+                    ))
+                    .clicked()
+                {
+                    *run_action = Some((e, inst.kind.clone(), func.clone()));
+                }
+            }
+        });
+    }
+
+    // Declaration order first (the metadata's order), then anything stored on the
+    // instance that the script no longer declares — never silently dropped, so a
+    // renamed default doesn't hide a value that's still in the scene file.
+    let mut order: Vec<String> = cx.meta.params.iter().map(|p| p.name.clone()).collect();
+    for k in inst
+        .params
+        .iter()
+        .map(|(k, _)| k)
+        .chain(inst.strs.iter().map(|(k, _)| k))
+        .chain(inst.refs.iter().map(|(k, _)| k))
+    {
+        if !order.contains(k) {
+            order.push(k.clone());
+        }
+    }
+
+    for name in order {
+        let pm = cx.meta.param(&name);
+        if pm.is_some_and(|m| m.hidden) {
+            continue;
+        }
+        if let Some(h) = pm.and_then(|m| m.header.as_deref()) {
+            param_header(ui, h);
+        }
+        if let Some(idx) = inst.params.iter().position(|(k, _)| *k == name) {
+            changed |= num_param_row(ui, &mut inst.params[idx], pm, cx.salt);
+        } else if let Some(idx) = inst.strs.iter().position(|(k, _)| *k == name) {
+            changed |= str_param_row(ui, &mut inst.strs[idx], pm, cx.salt);
+        } else if let Some(idx) = inst.refs.iter().position(|(k, _)| *k == name) {
+            changed |= ref_param_row(ui, inst, idx, &cx);
+        }
+    }
+    changed
+}
+
+/// A numeric tunable: checkbox (`--@bool` / a `true`/`false` default), dropdown
+/// (`--@options`, value = index), slider (`--@slider`), else a drag value —
+/// bounded by `--@range`, stepped by `--@step`, suffixed by `--@units`.
+fn num_param_row(
+    ui: &mut egui::Ui,
+    (k, v): &mut (String, f32),
+    pm: Option<&crate::script_meta::ParamMeta>,
+    salt: (u32, usize),
+) -> bool {
+    let mut changed = false;
+    let (lo, hi) = pm.map(|m| m.bounds()).unwrap_or((f32::MIN, f32::MAX));
+    let step = pm.and_then(|m| m.step);
+    let units = pm.and_then(|m| m.units.clone()).unwrap_or_default();
+    ui.horizontal(|ui| {
+        if pm.is_some_and(|m| m.boolean) {
+            let mut on = *v != 0.0;
+            let r = with_desc(ui.checkbox(&mut on, k.as_str()), pm);
+            if r.changed() {
+                *v = f32::from(on);
+                changed = true;
+            }
+            return;
+        }
+        if let Some(opts) = pm.map(|m| &m.options).filter(|o| !o.is_empty()) {
+            with_desc(ui.label(k.as_str()), pm);
+            let cur = (*v).clamp(0.0, (opts.len() - 1) as f32).round() as usize;
+            egui::ComboBox::from_id_salt(("param_opt", salt, k.as_str()))
+                .selected_text(opts[cur].as_str())
+                .show_ui(ui, |ui| {
+                    for (i, label) in opts.iter().enumerate() {
+                        if ui.selectable_label(i == cur, label).clicked() {
+                            *v = i as f32;
+                            changed = true;
+                        }
+                    }
+                });
+            return;
+        }
+        if pm.is_some_and(|m| m.slider) {
+            with_desc(ui.label(k.as_str()), pm);
+            let mut s = egui::Slider::new(v, lo..=hi).show_value(true);
+            if let Some(st) = step {
+                s = s.step_by(st as f64);
+            }
+            if !units.is_empty() {
+                s = s.suffix(format!(" {units}"));
+            }
+            changed |= ui.add(s).changed();
+            return;
+        }
+        let mut d = egui::DragValue::new(v)
+            .speed(step.unwrap_or(0.05))
+            .prefix(format!("{k}  "));
+        if pm.and_then(|m| m.range).is_some() {
+            d = d.range(lo..=hi);
+        }
+        if !units.is_empty() {
+            d = d.suffix(format!(" {units}"));
+        }
+        changed |= with_desc(ui.add(d), pm).changed();
+    });
+    changed
+}
+
+/// A string tunable: colour swatch (`--@color`), dropdown (`--@options`, value =
+/// the label), multi-line box (`--@multiline`), else a single-line field.
+fn str_param_row(
+    ui: &mut egui::Ui,
+    (k, v): &mut (String, String),
+    pm: Option<&crate::script_meta::ParamMeta>,
+    salt: (u32, usize),
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        with_desc(ui.label(k.as_str()), pm);
+        if pm.is_some_and(|m| m.color) {
+            // `#rrggbb` in the script, a swatch in the Inspector.
+            let mut rgb = hex_rgb(v);
+            if ui.color_edit_button_srgb(&mut rgb).changed() {
+                *v = format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]);
+                changed = true;
+            }
+            ui.weak(v.as_str());
+            return;
+        }
+        if let Some(opts) = pm.map(|m| &m.options).filter(|o| !o.is_empty()) {
+            egui::ComboBox::from_id_salt(("param_str_opt", salt, k.as_str()))
+                .selected_text(v.as_str())
+                .show_ui(ui, |ui| {
+                    for label in opts {
+                        if ui.selectable_label(label == v, label).clicked() {
+                            *v = label.clone();
+                            changed = true;
+                        }
+                    }
+                });
+            return;
+        }
+        let edit = if pm.is_some_and(|m| m.multiline) {
+            egui::TextEdit::multiline(v).desired_width(180.0).desired_rows(3)
+        } else {
+            egui::TextEdit::singleline(v).desired_width(140.0)
+        };
+        changed |= ui.add(edit).changed();
+    });
+    changed
+}
+
+/// `#rrggbb` → bytes (anything unparseable reads as white, so a typo shows as a
+/// swatch you can fix rather than a black hole).
+fn hex_rgb(s: &str) -> [u8; 3] {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() < 6 {
+        return [255, 255, 255];
+    }
+    let byte = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(255);
+    [byte(0), byte(2), byte(4)]
+}
+
+/// A reference param (`noderef()` / `scriptref(k)` / `componentref(c)`): a
+/// kind-filtered node picker that also accepts a node dragged from the Hierarchy.
+fn ref_param_row(
+    ui: &mut egui::Ui,
+    inst: &mut floptle_core::ScriptInst,
+    idx: usize,
+    cx: &ScriptRowCtx<'_>,
+) -> bool {
+    let mut changed = false;
+    let kind_key = (inst.kind.clone(), inst.refs[idx].0.clone());
+    let kind = cx.ref_kinds.get(&kind_key);
+    let empty: Vec<String> = Vec::new();
+    let (cands, hint) = match kind {
+        Some(floptle_script::RefKind::Script(sk)) => (
+            cx.script_nodes.get(sk).unwrap_or(&empty),
+            format!("→ the '{sk}' SCRIPT on the wired node (lists nodes carrying it); drag a node from the Hierarchy to wire"),
+        ),
+        Some(floptle_script::RefKind::Component(c)) => (
+            cx.comp_nodes.get(c).unwrap_or(&empty),
+            format!("→ the {c} COMPONENT on the wired node (lists nodes carrying it); drag a node from the Hierarchy to wire"),
+        ),
+        _ => (
+            cx.node_names,
+            "→ a node handle; drag a node from the Hierarchy to wire".to_string(),
+        ),
+    };
+    // A declared description replaces the generic hint's lead line.
+    let desc = cx
+        .meta
+        .param(&inst.refs[idx].0)
+        .and_then(|m| m.desc.clone())
+        .map(|d| format!("{d}\n{hint}"))
+        .unwrap_or(hint);
+    let (k, target) = &mut inst.refs[idx];
+    let row = ui
+        .horizontal(|ui| {
+            ui.label(format!("{k}  ")).on_hover_text(&desc);
+            if let Some(pick) = crate::ui_widgets::searchable_picker(
+                ui,
+                egui::Id::new(("script_ref", cx.salt, idx)),
+                if target.is_empty() { "(pick node)" } else { target },
+                Some("(none)"),
+                cands,
+                150.0,
+            ) {
+                *target = pick.unwrap_or_default();
+                changed = true;
+            }
+            match kind {
+                Some(floptle_script::RefKind::Script(sk)) => {
+                    ui.weak(format!("⚙{sk}"));
+                }
+                Some(floptle_script::RefKind::Component(c)) => {
+                    ui.weak(format!("◆{c}"));
+                }
+                _ => {}
+            }
+        })
+        .response;
+    // Drag-and-drop wiring: drop a Hierarchy node here.
+    if let Some(p) = row.dnd_hover_payload::<crate::hierarchy::NodePayload>() {
+        let ok = cx.name_of.get(&p.0).is_some_and(|n| cands.contains(n));
+        ui.painter().rect_stroke(
+            row.rect.expand(2.0),
+            3.0,
+            egui::Stroke::new(
+                1.5,
+                if ok {
+                    egui::Color32::from_rgb(120, 220, 120)
+                } else {
+                    egui::Color32::from_rgb(220, 120, 120)
+                },
+            ),
+            egui::StrokeKind::Outside,
+        );
+    }
+    if let Some(p) = row.dnd_release_payload::<crate::hierarchy::NodePayload>()
+        && let Some(n) = cx.name_of.get(&p.0)
+        && cands.contains(n)
+    {
+        *target = n.clone();
+        changed = true;
+    }
+    changed
+}
+
 /// Deferred intents from [`material_props_ui`] (applied after the borrow ends).
 #[derive(Default)]
 pub(crate) struct MatEditResult {
@@ -2518,126 +2838,26 @@ impl EditorTabViewer<'_> {
                                         );
                                     });
                                 });
-                                // Editor-action buttons the script declares
-                                // (`--@editorButton Label fn`): clicking runs
-                                // fn(node) against the OPEN scene — Lua editor
-                                // tooling (generators, batch fixups).
-                                let actions = crate::script_actions::script_editor_buttons(
-                                    self.project_root,
-                                    &inst.kind,
+                                // Everything this script declares — editor
+                                // buttons, then its tunables in DECLARATION
+                                // order, grouped under `--@header` sections and
+                                // drawn as the widget each one's annotations ask
+                                // for. See `script_meta`.
+                                cmd.inspector_changed |= script_tunables_ui(
+                                    ui,
+                                    inst,
+                                    ScriptRowCtx {
+                                        meta: self.script_meta.get(self.project_root, &inst.kind),
+                                        ref_kinds: self.ref_kinds,
+                                        node_names: &node_names,
+                                        script_nodes: &script_nodes,
+                                        comp_nodes: &comp_nodes,
+                                        name_of: &name_of,
+                                        salt: (e.index(), i),
+                                    },
+                                    &mut cmd.run_editor_action,
+                                    e,
                                 );
-                                if !actions.is_empty() {
-                                    ui.horizontal_wrapped(|ui| {
-                                        for (label, func) in actions {
-                                            if ui
-                                                .button(format!("▶ {label}"))
-                                                .on_hover_text(format!(
-                                                    "runs {func}(node) from {}.lua on this node, \
-                                                     editing the open scene",
-                                                    inst.kind
-                                                ))
-                                                .clicked()
-                                            {
-                                                cmd.run_editor_action =
-                                                    Some((e, inst.kind.clone(), func));
-                                            }
-                                        }
-                                    });
-                                }
-                                for (k, v) in inst.params.iter_mut() {
-                                    cmd.inspector_changed |= ui
-                                        .add(egui::DragValue::new(v).speed(0.05).prefix(format!("{k}  ")))
-                                        .changed();
-                                }
-                                // String params (`name = "text"` in defaults):
-                                // free-text tunables — a portal's destination
-                                // scene, an item id. Same two-way rules as the
-                                // numbers.
-                                for (k, v) in inst.strs.iter_mut() {
-                                    ui.horizontal(|ui| {
-                                        ui.label(k.as_str());
-                                        cmd.inspector_changed |= ui
-                                            .add(
-                                                egui::TextEdit::singleline(v)
-                                                    .desired_width(140.0),
-                                            )
-                                            .changed();
-                                    });
-                                }
-                                // Reference params (`name = noderef() / scriptref(k) /
-                                // componentref(c)` in the script's defaults): wire a
-                                // scene node — the script gets a node / script /
-                                // component handle directly, no find() scans. Pick
-                                // from the (kind-filtered) list, or DRAG a node from
-                                // the Hierarchy onto the row.
-                                for (ri, (k, target)) in inst.refs.iter_mut().enumerate() {
-                                    let kind = self.ref_kinds.get(&(inst.kind.clone(), k.clone()));
-                                    let empty: Vec<String> = Vec::new();
-                                    let (cands, hint) = match kind {
-                                        Some(floptle_script::RefKind::Script(sk)) => (
-                                            script_nodes.get(sk).unwrap_or(&empty),
-                                            format!("→ the '{sk}' SCRIPT on the wired node (lists nodes carrying it); drag a node from the Hierarchy to wire"),
-                                        ),
-                                        Some(floptle_script::RefKind::Component(c)) => (
-                                            comp_nodes.get(c).unwrap_or(&empty),
-                                            format!("→ the {c} COMPONENT on the wired node (lists nodes carrying it); drag a node from the Hierarchy to wire"),
-                                        ),
-                                        _ => (
-                                            &node_names,
-                                            "→ a node handle; drag a node from the Hierarchy to wire".to_string(),
-                                        ),
-                                    };
-                                    let row = ui.horizontal(|ui| {
-                                        ui.label(format!("{k}  ")).on_hover_text(&hint);
-                                        if let Some(pick) = crate::ui_widgets::searchable_picker(
-                                            ui,
-                                            egui::Id::new(("script_ref", e.index(), i, ri)),
-                                            if target.is_empty() { "(pick node)" } else { target },
-                                            Some("(none)"),
-                                            cands,
-                                            150.0,
-                                        ) {
-                                            *target = pick.unwrap_or_default();
-                                            cmd.inspector_changed = true;
-                                        }
-                                        match kind {
-                                            Some(floptle_script::RefKind::Script(sk)) => {
-                                                ui.weak(format!("⚙{sk}"));
-                                            }
-                                            Some(floptle_script::RefKind::Component(c)) => {
-                                                ui.weak(format!("◆{c}"));
-                                            }
-                                            _ => {}
-                                        }
-                                    })
-                                    .response;
-                                    // Drag-and-drop wiring: drop a Hierarchy node here.
-                                    if let Some(p) = row.dnd_hover_payload::<crate::hierarchy::NodePayload>() {
-                                        let ok = name_of
-                                            .get(&p.0)
-                                            .is_some_and(|n| cands.contains(n));
-                                        ui.painter().rect_stroke(
-                                            row.rect.expand(2.0),
-                                            3.0,
-                                            egui::Stroke::new(
-                                                1.5,
-                                                if ok {
-                                                    egui::Color32::from_rgb(120, 220, 120)
-                                                } else {
-                                                    egui::Color32::from_rgb(220, 120, 120)
-                                                },
-                                            ),
-                                            egui::StrokeKind::Outside,
-                                        );
-                                    }
-                                    if let Some(p) = row.dnd_release_payload::<crate::hierarchy::NodePayload>()
-                                        && let Some(n) = name_of.get(&p.0)
-                                        && cands.contains(n)
-                                    {
-                                        *target = n.clone();
-                                        cmd.inspector_changed = true;
-                                    }
-                                }
                                 ui.add_space(4.0);
                             }
                             if let Some(i) = copy_idx {
@@ -3246,6 +3466,83 @@ mod tests {
             painted = painted_text(&out);
         }
         painted
+    }
+
+    /// The annotated tunables panel: rows in DECLARATION order (not alphabetical),
+    /// a `--@header` above the rows it names, `--@hidden` gone, and each widget the
+    /// one its annotations asked for. The old panel drew numbers-then-strings, each
+    /// alphabetised, so a header could never sit above its own rows.
+    #[test]
+    fn script_tunables_render_in_declaration_order_with_their_widgets() {
+        let meta = crate::script_meta::parse(
+            "defaults = {\n\
+             \x20 --@header Movement\n\
+             \x20 -- How fast you walk.\n\
+             \x20 --@range 0 20 --@units m/s\n\
+             \x20 walk = 4.5,\n\
+             \x20 --@slider 0 1\n\
+             \x20 blend = 0.35,\n\
+             \x20 --@options Off|On|Auto\n\
+             \x20 sas = 0,\n\
+             \x20 invert = false,\n\
+             \x20 --@header Audio\n\
+             \x20 clip = \"footstep\",\n\
+             \x20 --@hidden\n\
+             \x20 debugScale = 1.0,\n\
+             }\n",
+        );
+        // Values as the editor would have seeded them (deliberately NOT in
+        // declaration order, and alphabetically wrong, to prove the order comes
+        // from the source).
+        let mut inst = floptle_core::ScriptInst {
+            kind: "walker".into(),
+            enabled: true,
+            params: vec![
+                ("sas".into(), 1.0),
+                ("blend".into(), 0.35),
+                ("walk".into(), 4.5),
+                ("invert".into(), 0.0),
+                ("debugScale".into(), 1.0),
+            ],
+            refs: Vec::new(),
+            strs: vec![("clip".into(), "footstep".into())],
+        };
+
+        let ctx = crate::icons::test_context();
+        let mut painted = String::new();
+        let mut run_action = None;
+        for _ in 0..2 {
+            let out = ctx.run_ui(crate::icons::test_input(), |ui| {
+                let cx = ScriptRowCtx {
+                    meta: &meta,
+                    ref_kinds: &std::collections::HashMap::new(),
+                    node_names: &Vec::new(),
+                    script_nodes: &std::collections::HashMap::new(),
+                    comp_nodes: &std::collections::HashMap::new(),
+                    name_of: &std::collections::HashMap::new(),
+                    salt: (0, 0),
+                };
+                let e = floptle_core::World::new().spawn();
+                script_tunables_ui(ui, &mut inst, cx, &mut run_action, e);
+            });
+            painted = painted_text(&out);
+        }
+
+        // Headers and rows are all on screen…
+        for want in ["Movement", "walk", "blend", "sas", "invert", "Audio", "clip"] {
+            assert!(painted.contains(want), "{want:?} missing from the panel:\n{painted}");
+        }
+        // …the hidden one is not…
+        assert!(!painted.contains("debugScale"), "--@hidden must not draw:\n{painted}");
+        // …the dropdown shows its LABEL rather than the raw number…
+        assert!(painted.contains("On"), "--@options should render as labels:\n{painted}");
+        // …the units suffix rides the number…
+        assert!(painted.contains("m/s"), "--@units missing:\n{painted}");
+        // …and the order is the script's, not the alphabet's.
+        let pos = |s: &str| painted.find(s).unwrap_or(usize::MAX);
+        assert!(pos("Movement") < pos("walk"), "a header draws above its rows");
+        assert!(pos("walk") < pos("blend") && pos("blend") < pos("sas"), "declaration order");
+        assert!(pos("sas") < pos("Audio") && pos("Audio") < pos("clip"), "sections stay grouped");
     }
 
     /// The hand-off the whole feature stands on: slice the TEXTURE once, and a

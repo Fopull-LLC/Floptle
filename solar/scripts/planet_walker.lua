@@ -10,15 +10,41 @@
 --   DOUBLE-TAP a move key to RUN
 
 defaults = {
+  --@header Movement
+  -- Ground speed while walking.
+  --@range 0 20 --@units m/s
   walk = 4.5,
+  -- Ground speed after a double-tap.
+  --@range 0 30 --@units m/s
   run = 8.0,
+  -- How quickly a move key must be tapped twice to start running.
+  --@range 0.05 1 --@units s
   double_tap = 0.3,
+  -- Upward speed SPACE gives you, along the surface's up.
+  --@range 0 20 --@units m/s
   jump = 7.0,
+  -- How far down to look for ground (a capsule's feet plus slack).
+  --@range 0.2 5 --@units m
   ground_ray = 1.6,
+
+  --@header Character model
   -- Facing offset (radians) added to the character's yaw — flip by π if the
-  -- model faces backwards. Stride length (world units) between footstep sounds.
+  -- model faces backwards.
+  --@slider -3.15 3.15 --@step 0.01 --@units rad
   face_offset = 0.0,
+  -- Stride length (world units) between footstep sounds.
+  --@range 0.5 6 --@units m
   stride = 2.2,
+
+  --@header Swimming
+  -- Slower than walking (see the water block in update).
+  --@range 0 20 --@units m/s
+  swim = 3.0,
+  --@range 0 20 --@units m/s
+  swim_fast = 4.6,
+  -- The climb rate SPACE / CTRL give you against the buoyant bob.
+  --@range 0 20 --@units m/s
+  swim_climb = 3.2,
 }
 
 local cam
@@ -129,9 +155,30 @@ function update(node, dt)
     grounded = raycast(node.x, node.y, node.z, -ux, -uy, -uz, params.ground_ray, node) ~= nil
   end
 
+  -- WATER. A world's sea is a sphere at a fixed radius (climate owns the rule),
+  -- and inside it you swim: slower, no jump, and buoyant — you rise to the
+  -- surface on your own and bob there. SPACE climbs, CTRL dives. The water has
+  -- no collider (it's drawn, not simulated — floptle/0038), so this controller
+  -- IS the swimming physics, which is why the drag and the bob live here.
+  local cl = findScript("climate")
+  local depth = cl and cl.seaDepth(node.x, node.y, node.z) or nil
+  local swimming = depth ~= nil and depth > 0.7
+  if swimming then
+    speed = running and params.swim_fast or params.swim
+  end
+
   -- Steer the tangent part, keep (or set) the up part.
   local vup = node.vx * ux + node.vy * uy + node.vz * uz
-  if grounded and input.pressed("space") then vup = params.jump end
+  if swimming then
+    -- Buoyancy pulls you toward the surface, hard when you're deep and gently
+    -- as you reach it, so floating is the resting state rather than a fight.
+    local want = math.min(2.2, math.max(0.0, depth - 0.7) * 1.1)
+    if input.key("space") then want = params.swim_climb end
+    if input.key("ctrl") then want = -params.swim_climb end
+    vup = vup + (want - vup) * math.min(1.0, dt * 4.0)
+  elseif grounded and input.pressed("space") then
+    vup = params.jump
+  end
   local mx = (fx * f + rx * s) * speed
   local my = (fy * f + ry * s) * speed
   local mz = (fz * f + rz * s) * speed
@@ -153,7 +200,10 @@ function update(node, dt)
   if anim then
     -- Airborne → jump; moving on the ground → run; else idle. The controller's
     -- transitions crossfade between them; play() no-ops on the current state.
-    local want = (not grounded) and "jump" or (moving and "run" or "idle")
+    -- In water there's no falling to show: swimming reads as the run cycle
+    -- while you're moving and idle while you drift.
+    local want = swimming and (moving and "run" or "idle")
+      or ((not grounded) and "jump" or (moving and "run" or "idle"))
     if want ~= cur_state then anim:play(want); cur_state = want end
   end
   if model then

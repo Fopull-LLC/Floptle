@@ -596,6 +596,60 @@ Numbers and strings follow the same rules (seeding, live Inspector sync, the
 two-way behavior below). A string that *looks like* `noderef()` output is a
 reference param, not a string — those keep their picker.
 
+### Describing your tunables to the Inspector
+
+`defaults` says *what* your tunables are. `--@` comments say how they should be
+**presented** — and the Inspector then draws a designed panel instead of a stack of
+anonymous drag values, in **declaration order**:
+
+```lua
+defaults = {
+  --@header Movement
+  -- How fast you walk on flat ground.        <- a plain comment is the tooltip
+  --@range 0 20 --@units m/s
+  walk = 4.5,
+
+  --@desc Blend between the walk and run animations.
+  --@slider 0 1 --@step 0.05
+  blend = 0.35,
+
+  --@header Assist
+  --@options Off|On|Auto
+  assist = 1,               -- a NUMBER + options → dropdown, value = the index
+  --@options walk|run|sprint
+  gait = "walk",            -- a STRING + options → dropdown of those strings
+  invert = false,           -- a boolean default → a checkbox, no annotation needed
+  --@color
+  tint = "#ff8800",         -- a swatch; the script still reads the hex string
+  --@hidden
+  debugScale = 1.0,         -- kept out of the Inspector entirely
+}
+```
+
+| Annotation | Effect |
+|---|---|
+| `--@header Text` | A section rule above this row (underscores render as spaces). |
+| `--@desc Text` | The row's tooltip. Repeat the line to build a paragraph. |
+| *(a plain comment above the key)* | Used as the tooltip when there's no `--@desc` — so scripts that already document their tunables get hover text for free. |
+| `--@range min max` | Clamps the value and bounds the drag. |
+| `--@slider min max` | Draws a slider instead of a drag value. |
+| `--@step n` | Drag speed / slider granularity. |
+| `--@units m/s` | Suffix shown after the number. |
+| `--@options a\|b\|c` | A dropdown. On a **string** param the value is the label; on a **number** it's the index (0, 1, 2 …). |
+| `--@color` | A colour swatch over a `#rrggbb` string param. |
+| `--@multiline` | A text box instead of a single-line field. |
+| `--@hidden` | Don't show this tunable at all. |
+| `--@about Text` | Describes the **script** (write it above `defaults`). |
+| `--@editorButton Label fn` | A button that runs `fn(node)` in **edit** mode. |
+
+They're comments: nothing changes at runtime, deleting them breaks nothing, a
+misspelled one is ignored rather than fatal, and several can share a line.
+
+**Booleans are real booleans.** A `flag = false` default round-trips as a boolean,
+so `if params.flag then` means what it says — it's carried as 0/1 between the
+Inspector and the script, and converted back on the way in (every number is truthy
+in Lua, so a leaked `0` would have been permanently `true`).
+
 ### `params` is two-way
 
 Writing a declared tunable **persists** — the next frame reads your value back,
@@ -1582,16 +1636,51 @@ open it in the **Scripting** tab — a small but real code editor:
 - **Saving** — `Ctrl+S` saves, `Ctrl+Shift+S` saves all; closing a tab with
   unsaved changes asks first, and pressing **Play auto-saves** open edits so
   the run always matches what you see.
-- **Completion & docs** — typing suggests the engine API *and* identifiers
-  from the file, with the highlighted entry's doc shown right in the popup:
-  `↑`/`↓` choose, `Tab` accepts, `Esc` hides it (`Enter` is always just a
-  newline — it never accepts a completion). It understands member
-  access on **any variable** — `rb.fri` offers `friction`, `anim:pl` offers
-  `play`, and `params.` offers this script's own `defaults` keys. Hovering an
-  API name in code shows its doc, and the **§ Docs** page has a search box
-  over the whole guide + API reference.
+- **Completion & docs** — the popup opens **by itself only after `.` or `:`**,
+  where you're asking what fields something has; `Ctrl+Space` summons it anywhere
+  else. `↑`/`↓` choose, **`Enter` accepts**, `Esc` hides it until the token
+  changes — and **`Tab` always indents**, so completion can never eat a
+  keystroke you aimed at your code. It understands member access on **any
+  variable** — `rb.fri` offers `friction`, `anim:pl` offers `play`, and
+  `params.` offers this script's own `defaults` keys. The highlighted entry
+  shows its doc *and a usage example* in the popup; hovering an API name in
+  code shows the same. The **§ Docs** page has a search box over the whole
+  guide + API reference, with worked examples under the common entries.
+- **Formatting** — `Alt+Shift+F` (or the **⚏ Format** button, or tick **on
+  save**) re-indents the file by block depth and tidies whitespace. It changes
+  **nothing else** — no re-flowed expressions, no realigned comments, no moved
+  code — and it's idempotent, so format-on-save can't produce a second diff.
+  `--@noformat` exempts a file; a line ending in `--@keep` keeps its own
+  indentation.
+- **Warnings** — a `⚠ n warnings` strip under the editor expands into a
+  clickable list of the mistakes Lua can't report:
+  - **an undeclared assignment** — `sped = speed * dt` compiles, writes a
+    global, reads `nil` forever, and says nothing. The warning names it and
+    suggests the local you meant. Globals assigned at **file scope** are
+    deliberate publications (§8) and are never flagged.
+  - **an unused local** — usually a half-finished rename. Prefix with `_` to
+    keep it quiet.
+  - **upvalue pressure** — LuaJIT allows **60** upvalues per function and every
+    file-scope `local` is one; at 50 you get a warning whose message names the
+    fix (group related state into one table).
 
-The full shortcut list lives on the tab's **§ Docs** page.
+  `--@nolint` silences a line; on its own line it silences the file.
+
+### Shortcuts
+
+| | | | |
+|---|---|---|---|
+| `Ctrl+S` | save | `Ctrl+Shift+S` | save all |
+| `Ctrl+F` | find | `Ctrl+H` | find & replace |
+| `F3` / `Shift+F3` | next / prev match | `Ctrl+G` | go to line |
+| `Ctrl+C` / `Ctrl+X` | copy / cut line | `Ctrl+D` | duplicate line |
+| `Ctrl+Shift+K` | delete line | `Alt+↑` / `Alt+↓` | move line(s) |
+| `Ctrl+/` | toggle comment | `Tab` / `Shift+Tab` | indent / outdent |
+| `Ctrl+B` or `F12` | go to definition | `Shift+F12` | find references |
+| `Alt+Shift+F` | format document | `Ctrl+Space` | suggest |
+| `Ctrl+W` | close tab | | |
+
+The same list lives on the tab's **§ Docs** page.
 
 ## 15. Tips & gotchas
 
@@ -2082,6 +2171,68 @@ form: `distance(x1,y1,z1, x2,y2,z2)`.
 
 Everything that *accepts* a vector accepts anything with numeric `x/y/z`
 fields — vectors, tables, nodes — so there's never a conversion dance.
+
+### The node's own vectors
+
+| | |
+|---|---|
+| `node.pos` | position (read/write) |
+| `node.vel` | the body's velocity (read/write) — one write, not three |
+| `node.up` | the body's up (−gravity): Y on flat ground, **radial** on a planet |
+| `node.forward` | facing, from the rotation (−Z forward, matching the camera) |
+| `node.right` | the node's +X axis |
+| `node.size` | the whole scale as a vec3 (`node.scale` stays the uniform one, and takes a vec3 too) |
+
+```lua
+-- a jump in whatever direction "up" means where the player is standing
+if node.grounded and input.action("jump") then
+  node.vel = node.vel + node.up * params.jump
+end
+
+-- camera-relative movement, without a line of trigonometry
+local mx, my = input.axis2("move")
+node.pos = node.pos + (node.right * mx + node.forward * my) * params.walk * dt
+```
+
+The scalar spellings (`node.vx`, `node.up_x`, `node.scale_x`) still work and
+always will — they're just not what the docs teach any more.
+
+### `math.*` — the arithmetic you were writing by hand
+
+| | |
+|---|---|
+| `math.clamp(x, lo, hi)` · `math.saturate(x)` · `math.sign(x)` | the everyday three |
+| `math.round(x [, step])` | nearest whole, or nearest multiple (`round(x, 0.25)` snaps to quarters) |
+| `math.lerp(a, b, t)` · `math.mix(a, b, t)` | blend — **unclamped** / clamped |
+| `math.inverseLerp(a, b, x)` · `math.remap(x, a, b, c, d)` | the inverse, and range→range |
+| `math.smoothstep(a, b, x)` | 0..1 with eased ends |
+| `math.approach(cur, target, maxDelta)` | move toward without **ever overshooting** — pass `rate * dt` |
+| `math.wrapAngle(a)` · `math.deltaAngle(a, b)` | fold into (−π, π] · the **short** way round |
+| `math.approachAngle(cur, target, maxDelta)` | "turn to face", correct across the seam |
+| `math.pingPong(t, len)` | 0 → len → 0, forever |
+
+```lua
+-- a turret that turns the short way and never overshoots
+node.yaw = math.approachAngle(node.yaw, wanted, params.turn_rate * dt)
+-- fade something out with distance
+local alpha = math.remap(distance(node, player), 5, 25, 1, 0)
+```
+
+### `table.*` — lists without the bookkeeping loop
+
+| | |
+|---|---|
+| `table.map(list, fn)` · `table.filter(list, fn)` · `table.reverse(list)` | new lists (never mutates) |
+| `table.find(list, fn)` | → `value, index` — takes a **predicate** |
+| `table.indexOf(list, v)` · `table.count(t [, fn])` · `table.sum(list [, fn])` | look up / tally |
+| `table.keys(t)` | keys as a **sorted** list (raw `pairs` order isn't reproducible) |
+| `table.copy(t)` · `table.extend(dst, src)` | shallow copy · append in place |
+
+```lua
+local ready = table.filter(ships, function(s) return s.fuel > 0 end)
+local total = table.sum(ready, function(s) return s.fuel end)
+local names = table.concat(table.map(ready, function(s) return s.name end), ", ")
+```
 
 ---
 

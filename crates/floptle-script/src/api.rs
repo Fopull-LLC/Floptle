@@ -407,6 +407,46 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
     out
 }
 
+/// The component fields still stored in snake_case, so a camelCase write can be
+/// recognised as naming one of them rather than inventing a new key. Everything
+/// added since the camelCase convention landed is absent from this list by
+/// construction — it only ever shrinks.
+pub(crate) const LEGACY_SNAKE_FIELDS: &[&str] = &[
+    "play_on_start",
+    "half_x",
+    "half_y",
+    "half_z",
+    "lock_x",
+    "lock_y",
+    "lock_z",
+    "lock_rot_x",
+    "lock_rot_y",
+    "lock_rot_z",
+];
+
+/// camelCase → snake_case, for the handful of component fields that predate the
+/// camelCase convention (`lock_rot_x`, `half_y`, `play_on_start`).
+///
+/// Both spellings work on a component handle: the mirror stays single-keyed (so
+/// the animation recorder can't produce two tracks for one change) and the
+/// camelCase name a script writes is normalised on the way in. Returns None when
+/// the field has no uppercase letters — nothing to translate.
+pub(crate) fn snake_of(field: &str) -> Option<String> {
+    if !field.chars().any(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
+    let mut out = String::with_capacity(field.len() + 3);
+    for c in field.chars() {
+        if c.is_ascii_uppercase() {
+            out.push('_');
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
+}
+
 /// Format a Lua number the way `tostring` would (integers without the `.0`).
 pub(crate) fn format_lua_number(n: f64) -> String {
     if n.fract() == 0.0 && n.abs() < 1e15 {
@@ -956,9 +996,23 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         "x" => return Ok(Value::Number(tr.translation.x)),
                         "y" => return Ok(Value::Number(tr.translation.y)),
                         "z" => return Ok(Value::Number(tr.translation.z)),
-                        "scale" | "scale_x" => return Ok(Value::Number(tr.scale.x as f64)),
-                        "scale_y" => return Ok(Value::Number(tr.scale.y as f64)),
-                        "scale_z" => return Ok(Value::Number(tr.scale.z as f64)),
+                        "scale" | "scale_x" | "scaleX" => {
+                            return Ok(Value::Number(tr.scale.x as f64));
+                        }
+                        "scale_y" | "scaleY" => return Ok(Value::Number(tr.scale.y as f64)),
+                        "scale_z" | "scaleZ" => return Ok(Value::Number(tr.scale.z as f64)),
+                        // `node.size` — the whole scale as a vec3, for the
+                        // non-uniform case (`node.scale` stays the uniform
+                        // shortcut it has always been).
+                        "size" => {
+                            return Ok(Value::UserData(lua.create_userdata(
+                                crate::math_api::LuaVec3(glam::DVec3::new(
+                                    tr.scale.x as f64,
+                                    tr.scale.y as f64,
+                                    tr.scale.z as f64,
+                                )),
+                            )?));
+                        }
                         "yaw" | "pitch" | "roll" => {
                             let (y, p, r) = tr.rotation.to_euler(EulerRot::YXZ);
                             let v = match key.as_str() {
@@ -1090,13 +1144,66 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         None => Value::Nil,
                     });
                 }
-                "up_x" | "up_y" | "up_z" => {
+                "up_x" | "up_y" | "up_z" | "upX" | "upY" | "upZ" => {
                     return Ok(match bodies.borrow().get(&e) {
                         Some(b) => Value::Number(match key.as_str() {
-                            "up_x" => b.up[0],
-                            "up_y" => b.up[1],
+                            "up_x" | "upX" => b.up[0],
+                            "up_y" | "upY" => b.up[1],
                             _ => b.up[2],
                         } as f64),
+                        None => Value::Nil,
+                    });
+                }
+                // ---- the VECTOR reads ------------------------------------
+                // `node.vel`, `node.up`, `node.forward`, `node.right`: the same
+                // state the scalar fields above expose, as one vec3 each — so a
+                // controller writes `node.vel = node.vel + up * jump` instead of
+                // three lines and a hand-rolled `norm(x, y, z)`.
+                "vel" => {
+                    let vel = body_changes
+                        .borrow()
+                        .get(&e)
+                        .copied()
+                        .or_else(|| bodies.borrow().get(&e).map(|b| b.vel));
+                    return Ok(match vel {
+                        Some(v) => Value::UserData(lua.create_userdata(
+                            crate::math_api::LuaVec3(glam::DVec3::new(
+                                v[0] as f64,
+                                v[1] as f64,
+                                v[2] as f64,
+                            )),
+                        )?),
+                        None => Value::Nil,
+                    });
+                }
+                "up" => {
+                    return Ok(match bodies.borrow().get(&e) {
+                        Some(b) => Value::UserData(lua.create_userdata(
+                            crate::math_api::LuaVec3(glam::DVec3::new(
+                                b.up[0] as f64,
+                                b.up[1] as f64,
+                                b.up[2] as f64,
+                            )),
+                        )?),
+                        None => Value::Nil,
+                    });
+                }
+                // Facing, from the node's ROTATION (not the body) so it answers
+                // on anything with a transform. −Z forward matches the camera
+                // convention (`floptle_render::camera`), +X right, +Y local up.
+                "forward" | "right" | "localUp" => {
+                    let rot = scene.borrow().transforms.get(&e).map(|t| t.rotation);
+                    return Ok(match rot {
+                        Some(r) => {
+                            let v = match key.as_str() {
+                                "forward" => r * glam::Vec3::NEG_Z,
+                                "right" => r * glam::Vec3::X,
+                                _ => r * glam::Vec3::Y,
+                            };
+                            Value::UserData(lua.create_userdata(crate::math_api::LuaVec3(
+                                glam::DVec3::new(v.x as f64, v.y as f64, v.z as f64),
+                            ))?)
+                        }
                         None => Value::Nil,
                     });
                 }
@@ -1236,22 +1343,27 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                                 tr.translation.z = n;
                             }
                         }
-                        "scale" => {
+                        // A number splats (the classic form); a vec3 sets each
+                        // axis, so `node.scale = vec3(2, 1, 1)` no longer needs
+                        // three statements. `node.size` is the same setter.
+                        "scale" | "size" => {
                             if let Some(n) = as_num(&val) {
                                 tr.scale = Vec3::splat(n as f32);
+                            } else if let Some(v) = crate::math_api::vec3_of(&val) {
+                                tr.scale = Vec3::new(v.x as f32, v.y as f32, v.z as f32);
                             }
                         }
-                        "scale_x" => {
+                        "scale_x" | "scaleX" => {
                             if let Some(n) = as_num(&val) {
                                 tr.scale.x = n as f32;
                             }
                         }
-                        "scale_y" => {
+                        "scale_y" | "scaleY" => {
                             if let Some(n) = as_num(&val) {
                                 tr.scale.y = n as f32;
                             }
                         }
-                        "scale_z" => {
+                        "scale_z" | "scaleZ" => {
                             if let Some(n) = as_num(&val) {
                                 tr.scale.z = n as f32;
                             }
@@ -1307,6 +1419,17 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         }
                         bc.insert(e, v);
                     }
+                    return Ok(());
+                }
+                // `node.vel = vec3(...)` — the whole velocity in one write (or
+                // anything with x/y/z, so `node.vel = other.vel` works).
+                "vel" => {
+                    let Some(v) = crate::math_api::vec3_of(&val) else {
+                        return Err(mlua::Error::RuntimeError(
+                            "node.vel takes a vec3 (or anything with x/y/z)".into(),
+                        ));
+                    };
+                    body_changes.borrow_mut().insert(e, [v.x as f32, v.y as f32, v.z as f32]);
                     return Ok(());
                 }
                 "height" => {
@@ -1450,6 +1573,19 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 {
                     return Ok(wrap(*v));
                 }
+                // `rb.lockRotX` → the mirror's `lock_rot_x`: the camelCase
+                // spelling the docs teach, over the snake_case names a few
+                // components still store.
+                if let Some(alt) = snake_of(&key) {
+                    if let Some(v) = changes.borrow().get(&(e, comp.clone(), alt.clone())) {
+                        return Ok(wrap(*v));
+                    }
+                    if let Some(v) =
+                        s.components.get(&e).and_then(|c| c.get(&comp)).and_then(|m| m.get(&alt))
+                    {
+                        return Ok(wrap(*v));
+                    }
+                }
                 Ok(Value::Nil)
             })?;
             comp_mt.set("__index", idx)?;
@@ -1463,6 +1599,13 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 // A table is a colour: `e.fill = color(1, 0.85, 0.35)`, or any
                 // `{r,g,b,a}` / `{1,0,0}` table, so a palette read out of a
                 // save file works without a conversion step.
+                // A camelCase spelling of a legacy snake_case field writes the
+                // field it names (see `snake_of`), so the mirror keeps ONE key
+                // per field. An unknown camelCase name is left alone — its
+                // "unknown field" behaviour is unchanged.
+                let key = snake_of(&key)
+                    .filter(|alt| LEGACY_SNAKE_FIELDS.contains(&alt.as_str()))
+                    .unwrap_or(key);
                 if let Value::Table(t) = &val {
                     let c = read_color(t)?;
                     colors.borrow_mut().insert((e, comp, key), c);
@@ -2451,6 +2594,41 @@ mod tests {
         // Negative frames clamp instead of wrapping to four billion.
         apply_component_field(&mut world, e, "Material", "cell", -3.0);
         assert_eq!(world.get::<Material>(e).unwrap().cell, 0);
+    }
+
+    /// Both spellings of a legacy snake_case component field reach the same
+    /// mirror key — so the docs can teach camelCase (`rb.lockRotX`) while every
+    /// script already written against `rb.lock_rot_x` keeps working, and the
+    /// animation recorder still sees exactly one field change.
+    #[test]
+    fn camel_case_and_snake_case_name_the_same_component_field() {
+        assert_eq!(snake_of("lockRotX").as_deref(), Some("lock_rot_x"));
+        assert_eq!(snake_of("playOnStart").as_deref(), Some("play_on_start"));
+        assert_eq!(snake_of("halfY").as_deref(), Some("half_y"));
+        // Already snake_case, or a single word: nothing to translate.
+        assert_eq!(snake_of("lock_rot_x"), None);
+        assert_eq!(snake_of("friction"), None);
+        // Every name it can produce for a legacy field is in the list the write
+        // path filters on — otherwise a camelCase write would silently create a
+        // second key that nothing reads.
+        for f in LEGACY_SNAKE_FIELDS {
+            let camel = {
+                let mut out = String::new();
+                let mut up = false;
+                for c in f.chars() {
+                    if c == '_' {
+                        up = true;
+                    } else if up {
+                        out.push(c.to_ascii_uppercase());
+                        up = false;
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
+            };
+            assert_eq!(snake_of(&camel).as_deref(), Some(*f), "round trip for {f}");
+        }
     }
 
     /// `node:setMaterial{ cell = n }` — the construction-API spelling — reaches the

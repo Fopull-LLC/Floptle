@@ -3255,6 +3255,11 @@ impl ScriptHost {
             match v {
                 mlua::Value::Number(n) => nums.push((k, n as f32)),
                 mlua::Value::Integer(n) => nums.push((k, n as f32)),
+                // A `flag = false` default is a BOOLEAN tunable: stored as 0/1
+                // (the param vec is floats), drawn as a checkbox, and handed
+                // back to Lua as a real boolean by `params_table` — so the
+                // script sees the type it declared.
+                mlua::Value::Boolean(b) => nums.push((k, f32::from(b))),
                 mlua::Value::String(s) => {
                     let s = s.to_string_lossy();
                     match crate::env::parse_ref_sentinel(&s) {
@@ -3520,6 +3525,31 @@ impl ScriptHost {
                             name.to_string(),
                             k,
                             crate::ParamWrite::Str(new),
+                        ));
+                    }
+                }
+                // `params.flag = true` from Lua — the boolean twin of the
+                // numeric arm above (stored as 0/1, seeded from the declared
+                // boolean default).
+                Value::Boolean(b) => {
+                    let new = f32::from(b);
+                    let seed = seeded
+                        .iter()
+                        .find(|(pk, _)| *pk == k)
+                        .map(|(_, pv)| *pv)
+                        .or_else(|| {
+                            defaults
+                                .as_ref()
+                                .and_then(|d| d.get::<bool>(k.as_str()).ok())
+                                .map(f32::from)
+                        });
+                    let Some(seed) = seed else { continue };
+                    if new != seed {
+                        self.param_writes.borrow_mut().push((
+                            eid,
+                            name.to_string(),
+                            k,
+                            crate::ParamWrite::Num(new),
                         ));
                     }
                 }

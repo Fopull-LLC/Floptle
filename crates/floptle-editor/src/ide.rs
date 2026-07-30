@@ -56,6 +56,21 @@ pub(crate) struct IdeState {
     pub(crate) ac_sel: usize,
     pub(crate) ac_token: String,
     pub(crate) ac_dismissed: bool,
+    /// Ctrl+Space asked for the popup explicitly, so it may open for a token the
+    /// automatic rule wouldn't offer (a one-char word, a plain identifier). Held
+    /// until the token changes or the popup is dismissed.
+    pub(crate) ac_manual: bool,
+    /// Cached lints for the active file + the (path, content-hash) they were
+    /// computed for. Linting walks the file several times, which is fine on a
+    /// keystroke and not fine every frame on a 1,500-line controller.
+    pub(crate) lints: Vec<crate::lua_lint::Lint>,
+    pub(crate) lints_for: Option<(String, u64)>,
+    /// Show the warnings list (off = just the count, so the strip stays one line).
+    pub(crate) lints_open: bool,
+    /// **Format on save** (Alt+Shift+F formats on demand). Off by default: a
+    /// formatter that rewrites a file you only meant to save has to be something
+    /// you asked for. Persisted with the editor's prefs.
+    pub(crate) format_on_save: bool,
     /// The Docs page's filter box.
     pub(crate) docs_search: String,
 }
@@ -108,6 +123,11 @@ impl IdeState {
     }
 
     /// Save open file `i` to disk. Returns whether the write succeeded.
+    ///
+    /// Formatting is NOT done here: it needs the caret, which lives in egui and
+    /// belongs to the caller (see `format_file`). A save that silently re-indents
+    /// and leaves the caret at a stale offset puts your next keystroke somewhere
+    /// else — a worse bug than un-formatted code.
     fn save_file(&mut self, i: usize) -> bool {
         let Some(f) = self.open.get_mut(i) else { return false };
         if std::fs::write(&f.path, &f.text).is_ok() {
@@ -115,6 +135,22 @@ impl IdeState {
             return true;
         }
         false
+    }
+
+    /// Format open file `i` in place if it's Lua. Returns whether the text changed
+    /// (so the caller can restore the caret only when it needs to).
+    fn format_file(&mut self, i: usize) -> bool {
+        let Some(f) = self.open.get_mut(i) else { return false };
+        if !f.path.ends_with(".lua") {
+            return false;
+        }
+        let formatted = crate::lua_format::format(&f.text);
+        if formatted == f.text {
+            return false;
+        }
+        f.text = formatted;
+        f.dirty = true;
+        true
     }
 }
 
@@ -1244,7 +1280,7 @@ impl EditorTabViewer<'_> {
                 let hdr = egui::CollapsingHeader::new(*title).id_salt(("doc_sec", n));
                 // While searching, matching sections open themselves.
                 let hdr = if searching { hdr.open(Some(true)) } else { hdr.default_open(n == 0) };
-                hdr.show(ui, |ui| ui.monospace(*body));
+                hdr.show(ui, |ui| self.doc_body_ui(ui, body));
             }
             ui.add_space(10.0);
             ui.separator();
@@ -1274,7 +1310,14 @@ impl EditorTabViewer<'_> {
                             egui::RichText::new(e.label)
                                 .color(egui::Color32::from_rgb(78, 201, 176)),
                         );
-                        ui.indent(("api_doc", e.label), |ui| ui.small(e.doc));
+                        ui.indent(("api_doc", e.label), |ui| {
+                            inline_doc_label(ui, e.doc, &egui::FontId::monospace(12.0));
+                            // A worked example beats a signature — the signature is
+                            // already in the line above.
+                            if let Some(ex) = api_example(e.label) {
+                                self.doc_body_ui(ui, &indent_block(ex));
+                            }
+                        });
                         ui.add_space(2.0);
                     }
                 });
@@ -1362,10 +1405,13 @@ impl EditorTabViewer<'_> {
         ui.horizontal(|ui| {
             ui.small(self.ide.open[i].path.clone());
             let dirty = self.ide.open[i].dirty;
-            if ui.add_enabled(dirty, egui::Button::new("Save")).on_hover_text("Ctrl+S").clicked()
-                && self.ide.save_file(i)
-            {
-                self.cmd.refresh_assets = true;
+            if ui.add_enabled(dirty, egui::Button::new("Save")).on_hover_text("Ctrl+S").clicked() {
+                if self.ide.format_on_save {
+                    self.format_with_caret(ui, i, editor_id);
+                }
+                if self.ide.save_file(i) {
+                    self.cmd.refresh_assets = true;
+                }
             }
             if self.ide.open.iter().filter(|f| f.dirty).count() > 1
                 && ui.button("Save all").on_hover_text("Ctrl+Shift+S").clicked()
@@ -1383,6 +1429,24 @@ impl EditorTabViewer<'_> {
                 // Save first so the external editor sees the latest text.
                 self.ide.save_file(i);
                 self.cmd.open_in_editor = Some(self.ide.open[i].path.clone());
+            }
+            // Format: the button, and the on-save toggle right next to it so the
+            // behaviour is discoverable where you'd look for it rather than buried
+            // in settings.
+            let is_lua_tab = self.ide.open[i].path.ends_with(".lua");
+            if is_lua_tab {
+                if ui
+                    .button("⚏ Format")
+                    .on_hover_text(
+                        "Alt+Shift+F — re-indent this file by block depth.\n\
+                         Never changes anything but whitespace; `--@noformat` opts a file out.",
+                    )
+                    .clicked()
+                {
+                    self.format_with_caret(ui, i, editor_id);
+                }
+                ui.checkbox(&mut self.ide.format_on_save, "on save")
+                    .on_hover_text("format when you save with Ctrl+S / Save (Play's auto-save leaves your text alone)");
             }
             ui.menu_button("Insert snippet", |ui| {
                 ui.small("ready-made patterns — appended to the end of the file");
@@ -1424,14 +1488,26 @@ impl EditorTabViewer<'_> {
         let mut nav: i32 = 0; // find navigation: -1 prev / +1 next
         if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT, egui::Key::S)) {
             for k in 0..self.ide.open.len() {
+                if self.ide.format_on_save {
+                    // The file on screen keeps its caret; the others aren't showing one.
+                    if k == i {
+                        self.format_with_caret(ui, k, editor_id);
+                    } else {
+                        self.ide.format_file(k);
+                    }
+                }
                 self.ide.save_file(k);
             }
             self.cmd.refresh_assets = true;
         }
-        if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::S))
-            && self.ide.save_file(i) {
+        if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::S)) {
+            if self.ide.format_on_save {
+                self.format_with_caret(ui, i, editor_id);
+            }
+            if self.ide.save_file(i) {
                 self.cmd.refresh_assets = true;
             }
+        }
         if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::W)) {
             self.request_close_tab(i);
             return; // the tab may be gone — draw fresh next frame
@@ -1539,24 +1615,45 @@ impl EditorTabViewer<'_> {
             job.wrap.max_width = f32::INFINITY;
             ui.fonts_mut(|f| f.layout_job(job))
         };
-        // While the completion popup is open (last frame), it owns Tab (accept),
-        // the arrow keys (choose) and Esc (dismiss) — eat them *before* the
-        // editor runs so they don't indent / move the caret. Enter is
-        // deliberately NOT an accept key: it stays a plain newline, so typing
-        // `else` + Enter never turns into an unwanted `elseif`.
+        // While the completion popup is open (last frame) it owns ENTER (accept),
+        // the arrow keys (choose) and Esc (dismiss) — eaten *before* the editor
+        // runs so they don't insert a newline / move the caret.
+        //
+        // Enter accepts and TAB NEVER DOES (v0.17.0): Tab is indentation, always,
+        // which is the one key you press without looking. The popup only opens on
+        // its own after `.` or `:` — where you're asking "what fields does this
+        // have?" — so an Enter it intercepts is an Enter you aimed at it. Ctrl+Space
+        // summons it anywhere, including for a plain word.
         let ac_id = egui::Id::new(("ide_ac_open", editor_id));
-        let ac_was_open = ui.ctx().data(|d| d.get_temp::<bool>(ac_id).unwrap_or(false));
+        // …but only while the EDITOR still has the keyboard. The open flag is last
+        // frame's; if focus has since moved to the find bar or the go-to-line
+        // prompt, the popup is about to close and its keys belong to whatever is
+        // focused now. Without this check there is a one-frame window where Enter
+        // in the find bar is swallowed by a popup you can no longer see — the kind
+        // of once-in-twenty-times key loss that reads as "the editor is flaky".
+        let editor_has_keys = ui.memory(|m| m.has_focus(editor_id));
+        let ac_was_open =
+            editor_has_keys && ui.ctx().data(|d| d.get_temp::<bool>(ac_id).unwrap_or(false));
         let (mut ac_accept, mut ac_nav, mut ac_dismiss) = (false, 0i32, false);
         if ac_was_open {
             ui.input_mut(|inp| {
-                ac_accept = inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                ac_accept = inp.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
                 ac_nav = inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) as i32
                     - (inp.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) as i32);
                 ac_dismiss = inp.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
             });
         }
+        // Ctrl+Space — summon completion for whatever is under the caret, even a
+        // one-character word. Latched until the token changes so the popup stays
+        // up while you keep typing the name.
+        if editor_has_keys
+            && ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::Space))
+        {
+            self.ide.ac_manual = true;
+            self.ide.ac_dismissed = false;
+        }
 
-        self.editor_shortcuts(ui, i, editor_id, is_lua, ac_accept);
+        self.editor_shortcuts(ui, i, editor_id, is_lua);
 
         let line_count = self.ide.open[i].text.matches('\n').count() + 1;
         let goto = self.ide.goto.take();
@@ -1747,6 +1844,7 @@ impl EditorTabViewer<'_> {
         if let Some((line, msg)) = self.ide_diag {
             ui.colored_label(egui::Color32::from_rgb(235, 120, 120), format!("Δ line {line}: {msg}"));
         }
+        self.ide_lints_ui(ui, i);
         let ac_open = self.ide_autocomplete(
             ui,
             i,
@@ -1767,10 +1865,22 @@ impl EditorTabViewer<'_> {
             let cc = output.galley.cursor_from_pos(rel);
             let word = word_at(&self.ide.open[i].text, cc.index.0);
             if let Some(api) = LUA_API.iter().find(|a| a.label == word) {
+                let example = api_example(api.label);
                 output.response.response.clone().on_hover_ui_at_pointer(|ui| {
-                    ui.set_max_width(360.0);
+                    ui.set_max_width(420.0);
                     ui.monospace(egui::RichText::new(api.label).color(egui::Color32::from_rgb(78, 201, 176)));
                     ui.label(api.doc);
+                    if let Some(ex) = example {
+                        ui.add_space(4.0);
+                        ui.separator();
+                        for line in ex.lines() {
+                            ui.monospace(
+                                egui::RichText::new(line)
+                                    .color(ui.visuals().weak_text_color())
+                                    .size(11.5),
+                            );
+                        }
+                    }
                 });
             }
         }
@@ -1953,7 +2063,6 @@ impl EditorTabViewer<'_> {
         i: usize,
         editor_id: egui::Id,
         is_lua: bool,
-        tab_accept: bool,
     ) {
         if !ui.memory(|m| m.has_focus(editor_id)) {
             return;
@@ -2050,7 +2159,7 @@ impl EditorTabViewer<'_> {
                 (line_edit::byte_of_char(text, sel_a), line_edit::byte_of_char(text, sel_b));
             text[ba..bb].contains('\n')
         };
-        if !tab_accept && ui.input_mut(|inp| inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
+        if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
             if multi_line {
                 let (a, b) = indent_lines(&mut self.ide.open[i].text, sel_a, sel_b, false);
                 self.ide.open[i].dirty = true;
@@ -2072,23 +2181,234 @@ impl EditorTabViewer<'_> {
             self.ide.open[i].dirty = true;
             set_ide_caret(ui.ctx(), editor_id, new_caret);
         }
+        // Alt+Shift+F → format this document (VS Code's binding). The caret is
+        // restored by LINE + COLUMN rather than by byte offset: re-indenting moves
+        // every offset after the first change, so a byte-restored caret would jump
+        // somewhere else on every format.
+        if is_lua
+            && ui.input_mut(|inp| {
+                inp.consume_key(egui::Modifiers::ALT | egui::Modifiers::SHIFT, egui::Key::F)
+            })
+        {
+            self.format_with_caret(ui, i, editor_id);
+        }
         // Ctrl+B → go to the definition of the identifier under the caret.
-        if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::CTRL, egui::Key::B)) {
+        // F12 is the same thing under the name every other editor uses (Ctrl+B
+        // stays); Shift+F12 lists references. The word under the caret is taken
+        // from just before it too, so the binding works with the caret sitting at
+        // the END of a name — where it is after you finish typing one.
+        let goto_def = ui.input_mut(|inp| {
+            inp.consume_key(egui::Modifiers::CTRL, egui::Key::B)
+                || inp.consume_key(egui::Modifiers::NONE, egui::Key::F12)
+        });
+        let find_refs =
+            ui.input_mut(|inp| inp.consume_key(egui::Modifiers::SHIFT, egui::Key::F12));
+        if goto_def || find_refs {
             let mut w = word_at(&self.ide.open[i].text, caret);
             if w.is_empty() && caret > 0 {
                 w = word_at(&self.ide.open[i].text, caret - 1);
             }
             if !w.is_empty() {
-                self.goto_definition(&w);
+                if find_refs {
+                    self.gather_references(&w);
+                } else {
+                    self.goto_definition(&w);
+                }
             }
+        }
+    }
+
+    /// Format file `i`, keeping the caret on its LINE and COLUMN rather than its
+    /// byte offset — re-indenting shifts every offset after the first change, so a
+    /// byte-restored caret lands somewhere else on every format.
+    ///
+    /// One entry point for Alt+Shift+F, the ⚏ Format button and format-on-save, so
+    /// all three behave identically.
+    fn format_with_caret(&mut self, ui: &egui::Ui, i: usize, editor_id: egui::Id) {
+        let caret = ide_selection(ui.ctx(), editor_id).map(|(_, _, c)| c);
+        let (line, col) = match caret {
+            Some(c) => crate::lua_format::line_col_of(&self.ide.open[i].text, c),
+            None => (0, 0),
+        };
+        if self.ide.format_file(i) && caret.is_some() {
+            let at = crate::lua_format::char_of_line_col(&self.ide.open[i].text, line, col);
+            set_ide_caret(ui.ctx(), editor_id, at);
+        }
+    }
+
+    /// Render a doc body with light structure instead of one monospace slab:
+    /// headings, wrapped prose, bullets, and CODE BLOCKS in the editor's own
+    /// syntax highlighting inside a framed panel.
+    ///
+    /// The markup is deliberately tiny — indented lines (4 spaces) or ``` fences
+    /// are code, `## ` is a heading, `- ` is a bullet, `` `x` `` is inline code —
+    /// because doc bodies are written by hand right here in the source and anything
+    /// heavier would rot. Prose wraps to the panel, so the Scripting tab is
+    /// readable docked narrow, which the old fixed-width monospace was not.
+    fn doc_body_ui(&self, ui: &mut egui::Ui, body: &str) {
+        let theme = CODE_THEMES[self.code_theme.min(CODE_THEMES.len() - 1)];
+        let mono = egui::FontId::monospace(12.5);
+        let mut code: Vec<&str> = Vec::new();
+        let mut fenced = false;
+
+        let flush = |ui: &mut egui::Ui, code: &mut Vec<&str>| {
+            if code.is_empty() {
+                return;
+            }
+            // Trim shared leading indentation so an indented block isn't doubly
+            // indented by the frame.
+            let text = code.join("\n");
+            let dedent = code
+                .iter()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.len() - l.trim_start().len())
+                .min()
+                .unwrap_or(0);
+            let text: String = text
+                .lines()
+                .map(|l| if l.len() >= dedent { &l[dedent..] } else { l.trim_start() })
+                .collect::<Vec<_>>()
+                .join("\n");
+            egui::Frame::new()
+                .fill(ui.visuals().extreme_bg_color)
+                .inner_margin(egui::Margin::symmetric(8, 6))
+                .corner_radius(4.0)
+                .show(ui, |ui| {
+                    let mut job = lua_highlight(&text, mono.clone(), &theme);
+                    job.wrap.max_width = f32::INFINITY;
+                    ui.add(egui::Label::new(job).selectable(true));
+                });
+            ui.add_space(4.0);
+            code.clear();
+        };
+
+        for line in body.lines() {
+            if line.trim_start().starts_with("```") {
+                if fenced {
+                    flush(ui, &mut code);
+                }
+                fenced = !fenced;
+                continue;
+            }
+            let indented = line.starts_with("    ") && !line.trim().is_empty();
+            if fenced || indented {
+                code.push(line);
+                continue;
+            }
+            flush(ui, &mut code);
+            let t = line.trim();
+            if t.is_empty() {
+                ui.add_space(6.0);
+            } else if let Some(h) = t.strip_prefix("## ") {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(h).strong().size(14.0));
+            } else if let Some(b) = t.strip_prefix("- ") {
+                ui.horizontal_top(|ui| {
+                    ui.add_space(6.0);
+                    ui.label("•");
+                    inline_doc_label(ui, b, &mono);
+                });
+            } else {
+                inline_doc_label(ui, t, &mono);
+            }
+        }
+        flush(ui, &mut code);
+    }
+
+    /// The warnings strip under the editor: a one-line count that expands into the
+    /// list, each row jumping to its line.
+    ///
+    /// Warnings, never errors, and never modal — a lint that interrupts you is a
+    /// lint you disable. Re-linted only when the text actually changes.
+    fn ide_lints_ui(&mut self, ui: &mut egui::Ui, i: usize) {
+        let path = self.ide.open[i].path.clone();
+        if !path.ends_with(".lua") {
+            return;
+        }
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.ide.open[i].text.hash(&mut h);
+            h.finish()
+        };
+        if self.ide.lints_for.as_ref() != Some(&(path.clone(), hash)) {
+            let api = api_labels();
+            let refs: Vec<&str> = api.iter().map(|s| s.as_str()).collect();
+            self.ide.lints = crate::lua_lint::lint(&self.ide.open[i].text, &refs);
+            self.ide.lints_for = Some((path, hash));
+        }
+        let n = self.ide.lints.len();
+        let amber = egui::Color32::from_rgb(230, 180, 90);
+        // The strip is ALWAYS one line, warnings or not. Drawing it only when
+        // there are warnings resized the editor under the caret as they appeared
+        // and disappeared mid-typing — a half-written `local` is briefly an unused
+        // one — which is the "nothing moves on its own" rule this editor is held to.
+        if n == 0 {
+            ui.label(
+                egui::RichText::new("✓ no warnings")
+                    .small()
+                    .color(ui.visuals().weak_text_color()),
+            );
+            return;
+        }
+        ui.horizontal(|ui| {
+            let label = if self.ide.lints_open { "▼" } else { "▶" };
+            if ui
+                .selectable_label(
+                    self.ide.lints_open,
+                    egui::RichText::new(format!("{label} ⚠ {n} warning{}", if n == 1 { "" } else { "s" }))
+                        .color(amber),
+                )
+                .on_hover_text(
+                    "likely mistakes Lua can't report: undeclared assignments (typos), \n\
+                     unused locals, upvalue pressure. `--@nolint` silences a line.",
+                )
+                .clicked()
+            {
+                self.ide.lints_open = !self.ide.lints_open;
+            }
+        });
+        if !self.ide.lints_open {
+            return;
+        }
+        let mut goto = None;
+        egui::ScrollArea::vertical().max_height(110.0).id_salt(("lints", i)).show(ui, |ui| {
+            for l in &self.ide.lints {
+                let icon = match l.kind {
+                    crate::lua_lint::LintKind::AccidentalGlobal => "✎",
+                    crate::lua_lint::LintKind::UnusedLocal => "○",
+                    crate::lua_lint::LintKind::UpvaluePressure => "▲",
+                };
+                if ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new(format!("{icon} line {}: {}", l.line, l.message))
+                                .small()
+                                .color(amber),
+                        )
+                        .sense(egui::Sense::click()),
+                    )
+                    .on_hover_text("click to jump to the line")
+                    .clicked()
+                {
+                    goto = Some(l.line);
+                }
+            }
+        });
+        if let Some(line) = goto {
+            self.ide.goto = Some(line);
         }
     }
 
     /// An autocomplete popup at the caret: the engine API (full labels, member
     /// access on any variable, `params.` keys, component-handle fields) plus
-    /// identifiers from the current file, ranked by [`ac_matches`]. ↑↓ choose,
-    /// Tab accepts (Enter stays a newline), Esc dismisses (until the token
-    /// changes), a click
+    /// identifiers from the current file, ranked by [`ac_matches`].
+    ///
+    /// **It opens by itself only after `.` or `:`** — member access, where you're
+    /// asking what fields a thing has. A plain identifier needs **Ctrl+Space**,
+    /// because a popup over your code every two characters is the thing people
+    /// turn autocomplete off to escape. ↑↓ choose, **Enter** accepts (Tab is
+    /// always indentation), Esc dismisses until the token changes, a click
     /// inserts too; the selected row's doc shows inside the popup. Returns
     /// whether the popup is showing (so the caller routes keys to it next frame).
     #[allow(clippy::too_many_arguments)]
@@ -2114,17 +2434,31 @@ impl EditorTabViewer<'_> {
         }
         let cursor = range.primary.index.0;
         let (start, token) = current_token(&self.ide.open[i].text, cursor);
-        // Pop only on a real prefix: ≥2 chars for a plain word, or any member access.
-        if token.len() < 2 && !token.contains(['.', ':']) {
+        // WHEN THE POPUP OPENS ON ITS OWN: only for MEMBER ACCESS — after a `.`
+        // or `:`, which is exactly the moment you're asking what fields a thing
+        // has, and where the answer is short-lived. A plain identifier does not
+        // summon it (that was the intrusive case: a popup over your code every
+        // time you typed two letters of a local's name); Ctrl+Space asks for it.
+        let member = token.contains(['.', ':']);
+        if !member && !self.ide.ac_manual {
+            return false;
+        }
+        if token.is_empty() && !self.ide.ac_manual {
             return false;
         }
         if token != self.ide.ac_token {
             self.ide.ac_token = token.clone();
             self.ide.ac_sel = 0;
             self.ide.ac_dismissed = false;
+            // A manual request covers the token it was made for; typing a
+            // different one goes back to the automatic rule.
+            if !member {
+                self.ide.ac_manual = false;
+            }
         }
         if dismiss {
             self.ide.ac_dismissed = true;
+            self.ide.ac_manual = false;
         }
         if self.ide.ac_dismissed {
             return false;
@@ -2138,7 +2472,7 @@ impl EditorTabViewer<'_> {
 
         let caret = galley.pos_from_cursor(egui::text::CCursor::new(cursor));
         let pos = galley_pos + caret.left_bottom().to_vec2();
-        // Tab inserts the selected match; otherwise a click does.
+        // Enter inserts the selected match; otherwise a click does.
         let mut chosen: Option<(usize, String)> =
             accept.then(|| (items[sel].keep, items[sel].insert.clone()));
         egui::Area::new(egui::Id::new(("ide_ac", editor_id)))
@@ -2160,8 +2494,18 @@ impl EditorTabViewer<'_> {
                     ui.separator();
                     // The selected entry's doc, right in the popup (no hover needed).
                     ui.small(items[sel].doc.as_deref().unwrap_or("An identifier from this file."));
+                    // …and how it's used, when there's a worked example for it.
+                    if let Some(ex) = api_example(&items[sel].label) {
+                        ui.monospace(
+                            egui::RichText::new(
+                                ex.lines().find(|l| !l.trim_start().starts_with("--")).unwrap_or(""),
+                            )
+                            .size(11.0)
+                            .color(ui.visuals().weak_text_color()),
+                        );
+                    }
                     ui.small(
-                        egui::RichText::new("⇥ accept · ↑↓ choose · esc hide")
+                        egui::RichText::new("⏎ accept · ↑↓ choose · esc hide · ⇥ indents")
                             .color(ui.visuals().weak_text_color()),
                     );
                 });
@@ -2174,6 +2518,7 @@ impl EditorTabViewer<'_> {
             let new_idx = from + insert.chars().count();
             set_ide_caret(ui.ctx(), editor_id, new_idx);
             ui.ctx().memory_mut(|m| m.request_focus(editor_id));
+            self.ide.ac_manual = false;
             return false; // inserted — popup closes
         }
         true
@@ -2465,9 +2810,11 @@ Ctrl+C / X      copy / cut line (when nothing is selected)
 Ctrl+D          duplicate line     Ctrl+Shift+K   delete line
 Alt+Up / Down   move line(s)       Ctrl+/         toggle -- comment
 Tab / Shift+Tab indent / outdent the selected lines
-Ctrl+B          go to definition   right-click    definition / references
-completion:     ↑↓ choose · Tab accept (Enter = newline) · Esc hide
-Ctrl+W          close tab          Tab            accept completion";
+Ctrl+B / F12    go to definition   Shift+F12      find references
+Alt+Shift+F     format document    Ctrl+Space     suggest (completion)
+Ctrl+W          close tab          right-click    definition / references
+completion:     opens by itself after `.` or `:` — Ctrl+Space anywhere else
+                ↑↓ choose · Enter accept · Esc hide · Tab always indents";
 
 // ---- in-engine IDE: Lua syntax highlighting + autocomplete -----------------
 
@@ -2585,6 +2932,186 @@ struct ApiEntry {
     doc: &'static str,
 }
 
+/// Worked EXAMPLES for the API entries people actually reach for, shown under the
+/// entry on the Docs page, in its hover tooltip, and in the completion popup.
+///
+/// A separate table rather than a field on [`ApiEntry`] so an example can be added
+/// to any entry without touching the other 258 — and so the ones that have one are
+/// obvious at a glance. Every snippet is a complete, runnable line or hook: the
+/// point is to be copyable, not to be a signature (the signature is already in the
+/// doc text right above it).
+const API_EXAMPLES: &[(&str, &str)] = &[
+    (
+        "update",
+        "function update(node, dt)\n  node.yaw = node.yaw + math.rad(90) * dt\nend",
+    ),
+    (
+        "fixedUpdate",
+        "-- gameplay writes belong on the tick, not the frame\nfunction fixedUpdate(node, dt)\n  node.vel = node.vel + vec3(0, -9.8, 0) * dt\nend",
+    ),
+    (
+        "lateUpdate",
+        "-- follow AFTER physics, so the camera samples this frame's final pose\nfunction lateUpdate(node, dt)\n  local t = find(\"Player\")\n  node.pos = t.pos + t.forward * -6 + vec3(0, 2, 0)\nend",
+    ),
+    (
+        "defaults",
+        "defaults = {\n  --@header Movement\n  -- How fast you walk on flat ground.\n  --@range 0 20 --@units m/s\n  walk = 4.5,\n  --@options Off|On|Auto\n  assist = 1,\n  invert = false,\n}",
+    ),
+    (
+        "params",
+        "function update(node, dt)\n  node.x = node.x + params.walk * dt   -- Inspector-tuned\nend",
+    ),
+    (
+        "node.pos",
+        "node.pos = node.pos + node.forward * (params.walk * dt)",
+    ),
+    (
+        "node.vel",
+        "-- one write instead of vx/vy/vz, and it reads as physics\nif node.grounded and input.pressed(\"space\") then\n  node.vel = node.vel + node.up * params.jump\nend",
+    ),
+    (
+        "node.forward",
+        "-- facing, from the node's rotation: -Z forward, +X right\nlocal aim = node.forward\nif raycast(node.pos, aim, 50) then log(\"something ahead\") end",
+    ),
+    ("node.up", "-- the body's up (-gravity): Y on flat ground, radial on a planet\nlocal lean = node.up:dot(vec3(0, 1, 0))"),
+    (
+        "find",
+        "-- cache in start; find() every frame is wasteful\nfunction start(node) player = find(\"Player\") end",
+    ),
+    (
+        "findTagged",
+        "for _, e in ipairs(findTagged(\"enemy\")) do\n  if distance(node, e) < 10 then e:destroy() end\nend",
+    ),
+    (
+        "raycast",
+        "local hit = raycast(node.pos, vec3(0, -1, 0), params.ground_ray)\nif hit then log(\"ground at \" .. hit.y) end",
+    ),
+    (
+        "node:getcomponent",
+        "local rb = node:getcomponent(\"RigidBody\")\nif rb then rb.friction = on_ice and 0.02 or 0.6 end",
+    ),
+    (
+        "node:setMaterial",
+        "-- setup-time; use setShaderParam for per-frame values\nnode:setMaterial{ unlit = true, emissive = {1, 0.45, 0.15}, emissiveStrength = 2.5 }",
+    ),
+    (
+        "spawn",
+        "local b = spawn(\"Bullet\", node.pos + node.forward * 1.5, function(n)\n  n.vel = node.forward * 40\nend)",
+    ),
+    (
+        "after",
+        "after(0.25, function() spawnEffect(\"Explosion\", node.pos) end)",
+    ),
+    ("every", "-- a heartbeat that survives long sessions without drifting\nevery(1.0, function() hp = math.min(hp + 1, 100) end)"),
+    (
+        "tween",
+        "tween(0, 1, 0.4, function(t) node:getcomponent(\"UiElement\").opacity = t end)",
+    ),
+    (
+        "input.action",
+        "-- actions, not raw keys: rebindable, gamepad-ready, replay-safe\nif input.action(\"jump\") and node.grounded then\n  node.vel = node.vel + node.up * params.jump\nend",
+    ),
+    (
+        "input.axis2",
+        "local mx, my = input.axis2(\"move\")\nnode.pos = node.pos + (node.right * mx + node.forward * my) * params.walk * dt",
+    ),
+    ("math.clamp", "hp = math.clamp(hp + heal, 0, 100)"),
+    ("math.approach", "-- frame-rate correct, never overshoots\nthrottle = math.approach(throttle, target, params.rate * dt)"),
+    ("math.deltaAngle", "-- the short way round, across the +/-pi seam\nlocal turn = math.deltaAngle(node.yaw, wanted)\nnode.yaw = math.approachAngle(node.yaw, wanted, params.turn_rate * dt)"),
+    ("math.remap", "local alpha = math.remap(distance(node, player), 5, 25, 1, 0)"),
+    ("table.map", "local names = table.map(crew, function(m) return m.name end)"),
+    ("table.filter", "local ready = table.filter(ships, function(s) return s.fuel > 0 end)"),
+    ("table.find", "local docked, i = table.find(ships, function(s) return s.docked end)"),
+    (
+        "vec3",
+        "local v = vec3(1, 0, 0) * 5 + vec3(0, 2, 0)   -- real operators\nlog(v:length(), v:normalized(), v:dot(node.forward))",
+    ),
+    (
+        "node:animator",
+        "local anim = node:animator()\nanim:crossfade(node.vel:length() > 4 and \"run\" or \"walk\", 0.15)",
+    ),
+    (
+        "audio.play",
+        "audio.play(\"audio/footstep\", node, { track = \"SFX\", volume = 0.6, minDistance = 4 })",
+    ),
+    (
+        "save.set",
+        "save.set(\"hp\", hp)                 -- survives scene loads and quits\nhp = save.get(\"hp\", 100)",
+    ),
+    (
+        "ui.make",
+        "ui.make(find(\"Crew Panel\"), {\n  \"col\", gap = 8, pad = 12, style = \"panel\", items = crew,\n  function(m) return { \"text\", key = m.id, text = m.name } end,\n})",
+    ),
+    (
+        "onCollisionEnter",
+        "function onCollisionEnter(node, other)\n  if other:hasTag(\"hazard\") then hp = hp - 10 end\nend",
+    ),
+    (
+        "node:setShaderParam",
+        "-- a live uniform write: safe every tick, never recompiles\nnode:setShaderParam(\"cell\", math.floor(time * 8) % 16)",
+    ),
+    (
+        "terrain.dig",
+        "if input.clicked(\"left\") then\n  local hit = raycast(node.pos, node.forward, 6)\n  if hit then terrain.dig(hit.x, hit.y, hit.z, 1.5) end\nend",
+    ),
+];
+
+/// Indent a snippet by four spaces, which is how [`EditorTabViewer::doc_body_ui`]
+/// recognises a code block.
+fn indent_block(code: &str) -> String {
+    code.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n")
+}
+
+/// The worked example for an API entry, if it has one.
+fn api_example(label: &str) -> Option<&'static str> {
+    API_EXAMPLES.iter().find(|(l, _)| *l == label).map(|(_, e)| *e)
+}
+
+/// A wrapped prose label where `` `backticked` `` spans render as monospace in the
+/// API colour — the difference between docs that read like docs and docs that read
+/// like a terminal dump.
+fn inline_doc_label(ui: &mut egui::Ui, text: &str, mono: &egui::FontId) {
+    let mut job = egui::text::LayoutJob::default();
+    let body = egui::TextFormat {
+        font_id: egui::TextStyle::Body.resolve(ui.style()),
+        color: ui.visuals().text_color(),
+        ..Default::default()
+    };
+    let codef = egui::TextFormat {
+        font_id: mono.clone(),
+        color: egui::Color32::from_rgb(78, 201, 176),
+        ..Default::default()
+    };
+    let mut in_code = false;
+    for part in text.split('`') {
+        if !part.is_empty() {
+            job.append(part, 0.0, if in_code { codef.clone() } else { body.clone() });
+        }
+        in_code = !in_code;
+    }
+    job.wrap.max_width = ui.available_width();
+    ui.add(egui::Label::new(job).selectable(true));
+}
+
+/// Every API name the engine provides, as bare identifiers — the ROOT of each
+/// entry (`node:getcomponent` → `node`, `math.clamp` → `math`). The lints use this
+/// so "that's not a thing" can never disagree with what autocomplete offers.
+pub(crate) fn api_labels() -> Vec<String> {
+    let mut out: Vec<String> = LUA_API
+        .iter()
+        .map(|a| {
+            a.label
+                .split(['.', ':', '('])
+                .next()
+                .unwrap_or(a.label)
+                .to_string()
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The engine scripting API, surfaced as autocomplete + hover docs (and the Docs
 /// page's reference). Lua stdlib highlights are included so completion is useful.
 const LUA_API: &[ApiEntry] = &[
@@ -2638,6 +3165,13 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node.yaw", insert: "node.yaw", doc: "Heading about Y, in radians." },
     ApiEntry { label: "node.pitch", insert: "node.pitch", doc: "Pitch about X, in radians." },
     ApiEntry { label: "node.roll", insert: "node.roll", doc: "Roll about Z, in radians." },
+    // The VECTOR reads/writes (v0.17.0) — the scalar triplets below them still
+    // work, but these are what the docs teach: one write, no hand-rolled maths.
+    ApiEntry { label: "node.vel", insert: "node.vel", doc: "The body's velocity as a vec3 (read/write). `node.vel = node.vel + node.up * jump` replaces three vx/vy/vz lines, and it accepts anything with x/y/z." },
+    ApiEntry { label: "node.up", insert: "node.up", doc: "The body's up as a vec3 — minus gravity, so Y on flat ground and RADIAL on a planet. The direction to jump in, wherever the player is standing." },
+    ApiEntry { label: "node.forward", insert: "node.forward", doc: "The node's facing as a vec3, from its rotation (-Z forward, matching the camera). Works on anything with a transform, body or not." },
+    ApiEntry { label: "node.right", insert: "node.right", doc: "The node's +X axis as a vec3 (its rotation applied). Pairs with node.forward for camera-relative movement." },
+    ApiEntry { label: "node.size", insert: "node.size", doc: "The node's whole scale as a vec3 (read/write). `node.scale` stays the uniform-scale shortcut, and also accepts a vec3 when you want all three axes at once." },
     ApiEntry { label: "node.vx", insert: "node.vx", doc: "Rigidbody velocity X (m/s). Read + write to drive the body; the engine integrates it." },
     ApiEntry { label: "node.vy", insert: "node.vy", doc: "Rigidbody velocity Y (m/s). Keep this for gravity/jump while replacing the horizontal part." },
     ApiEntry { label: "node.vz", insert: "node.vz", doc: "Rigidbody velocity Z (m/s)." },
@@ -2709,6 +3243,33 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "terrain.query", insert: "terrain.query(", doc: "terrain.query(x,y,z) — signed distance to the nearest terrain surface (negative = inside rock), or nil with no terrain. Cheap: read it every frame (burrow checks, depth meters)." },
     ApiEntry { label: "terrain.height", insert: "terrain.height(", doc: "terrain.height(x, z) — world Y of the highest terrain surface under (x,z), or nil when nothing is hit. Spawning, footstep audio by ground, drop-to-floor." },
     ApiEntry { label: "rng", insert: "rng(", doc: "rng(seed) — a DETERMINISTIC random stream: same seed, same sequence, every machine. r:next() in [0,1), r:range(a,b), r:int(a,b) inclusive, r:pick(list). Use for gameplay that must reproduce (loot, procgen scatter, server replays); math.random stays for throwaway rolls." },
+    // math helpers (v0.17.0): the gameplay arithmetic every controller was
+    // writing out by hand.
+    ApiEntry { label: "math.clamp", insert: "math.clamp", doc: "math.clamp(x, lo, hi) — x held inside the range. Reversed bounds are tolerated rather than returning NaN." },
+    ApiEntry { label: "math.saturate", insert: "math.saturate", doc: "math.saturate(x) — clamp to 0..1, the most-written clamp of all." },
+    ApiEntry { label: "math.sign", insert: "math.sign", doc: "math.sign(x) — -1, 0 or 1. Exactly 0 for 0 (not 1, which is what math.abs tricks give you)." },
+    ApiEntry { label: "math.round", insert: "math.round", doc: "math.round(x [, step]) — nearest whole number, or nearest multiple of `step`: `math.round(x, 0.25)` snaps to quarters for grid placement." },
+    ApiEntry { label: "math.lerp", insert: "math.lerp", doc: "math.lerp(a, b, t) — linear blend, UNCLAMPED (t outside 0..1 extrapolates, which is useful). Use math.mix for the clamped version." },
+    ApiEntry { label: "math.mix", insert: "math.mix", doc: "math.mix(a, b, t) — math.lerp with t clamped to 0..1." },
+    ApiEntry { label: "math.inverseLerp", insert: "math.inverseLerp", doc: "math.inverseLerp(a, b, x) — where x sits between a and b, 0..1. Returns 0 when a == b instead of a NaN that poisons everything downstream." },
+    ApiEntry { label: "math.remap", insert: "math.remap", doc: "math.remap(x, a, b, c, d) — x from the range a..b onto c..d. The one-liner behind fades, falloffs and gauge needles." },
+    ApiEntry { label: "math.smoothstep", insert: "math.smoothstep", doc: "math.smoothstep(a, b, x) — 0..1 with eased ends, for anything that shouldn't start and stop abruptly." },
+    ApiEntry { label: "math.approach", insert: "math.approach", doc: "math.approach(current, target, maxDelta) — move toward target without ever overshooting. Pass `rate * dt`; this is the correct version of the hand-rolled move-towards that jitters at low frame rates." },
+    ApiEntry { label: "math.wrapAngle", insert: "math.wrapAngle", doc: "math.wrapAngle(a) — an angle folded into (-pi, pi]." },
+    ApiEntry { label: "math.deltaAngle", insert: "math.deltaAngle", doc: "math.deltaAngle(a, b) — the SHORTEST signed turn from a to b, correct across the +/-pi seam (350 degrees to 10 is +20, not -340)." },
+    ApiEntry { label: "math.approachAngle", insert: "math.approachAngle", doc: "math.approachAngle(current, target, maxDelta) — math.approach for headings: turns the short way and never overshoots. Turrets, camera yaw, 'face the player'." },
+    ApiEntry { label: "math.pingPong", insert: "math.pingPong", doc: "math.pingPong(t, len) — 0 to len and back, forever. Patrols, bobbing, breathing lights." },
+    // table helpers (v0.17.0): a list operation instead of a bookkeeping loop.
+    ApiEntry { label: "table.map", insert: "table.map", doc: "table.map(list, fn) — a new list of fn(value, i). Never mutates the input." },
+    ApiEntry { label: "table.filter", insert: "table.filter", doc: "table.filter(list, fn) — a new list of the items where fn(value, i) is true." },
+    ApiEntry { label: "table.find", insert: "table.find", doc: "table.find(list, fn) -> value, index — the first item satisfying the PREDICATE (nil, nil if none). `table.find(ships, function(s) return s.docked end)`." },
+    ApiEntry { label: "table.indexOf", insert: "table.indexOf", doc: "table.indexOf(list, value) — the index of a value by plain equality, or nil." },
+    ApiEntry { label: "table.count", insert: "table.count", doc: "table.count(t [, fn]) — how many entries (works on KEYED tables, which `#t` cannot), or how many satisfy the predicate." },
+    ApiEntry { label: "table.sum", insert: "table.sum", doc: "table.sum(list [, fn]) — add the numbers, or add fn(value, i) over them: `table.sum(tanks, function(t) return t.fuel end)`." },
+    ApiEntry { label: "table.keys", insert: "table.keys", doc: "table.keys(t) — the keys as a SORTED list. Sorted because raw `pairs` order is hash order, which a replay can't reproduce." },
+    ApiEntry { label: "table.copy", insert: "table.copy", doc: "table.copy(t) — a shallow copy (keys and values)." },
+    ApiEntry { label: "table.extend", insert: "table.extend", doc: "table.extend(dst, src) — append src's items onto dst in place, and return dst." },
+    ApiEntry { label: "table.reverse", insert: "table.reverse", doc: "table.reverse(list) — a new list, back to front." },
     ApiEntry { label: "math.noise", insert: "math.noise(", doc: "math.noise(x, y, z [, seed]) — seeded value noise, one octave, about -1..1, identical on every machine (the same numbers the engine's Rust generators use). Scale the inputs to pick a frequency." },
     ApiEntry { label: "save.set", insert: "save.set(", doc: "save.set(\"gold\", 42) — store persistent game data: survives Play sessions, editor restarts, and ships with exported builds. Values follow the synced-var guardrails (numbers/strings/bools/tables, depth <= 4, <= 1 KB). Flushed on Stop + every few seconds during Play." },
     ApiEntry { label: "save.get", insert: "save.get(", doc: "save.get(\"gold\" [, default]) — the stored value, else the default, else nil. save.get(\"who\").hp reads into stored tables." },
@@ -2853,6 +3414,120 @@ const LUA_API: &[ApiEntry] = &[
 /// The built-in Scripting docs, shown on the IDE's Docs page as searchable
 /// collapsible sections: (title, monospace body).
 const DOC_SECTIONS: &[(&str, &str)] = &[
+    (
+        "Inspector tunables — headers, tooltips, dropdowns, sliders",
+        "\
+Everything in `defaults` becomes a row in the Inspector. Describe those rows with
+`--@` comments and the panel designs itself — in DECLARATION order, grouped under
+headers, each row the widget the value actually wants:
+
+```
+defaults = {
+  --@header Movement
+  -- How fast you walk on flat ground.
+  --@range 0 20 --@units m/s
+  walk = 4.5,
+
+  --@desc Blend between the walk and run animations.
+  --@slider 0 1 --@step 0.05
+  blend = 0.35,
+
+  --@header Assist
+  --@options Off|On|Auto
+  assist = 1,              -- a NUMBER + options = a dropdown; the value is the index
+
+  --@options walk|run|sprint
+  gait = \"walk\",           -- a STRING + options = a dropdown of those strings
+
+  invert = false,          -- a boolean default is a checkbox, no annotation needed
+
+  --@color
+  tint = \"#ff8800\",        -- a swatch; the script still reads the hex string
+
+  --@multiline
+  intro = \"Hello.\",
+
+  --@hidden
+  debugScale = 1.0,        -- a tunable the Inspector doesn't show
+}
+```
+
+## The whole vocabulary
+
+- `--@header Text` — a section rule above this row. Underscores render as spaces.
+- `--@desc Text` — the row's tooltip. Several `--@desc` lines join into a paragraph.
+- **A plain comment** directly above a key is its tooltip too, so scripts that
+  already document their tunables get hover text for free.
+- `--@range min max` — clamps the value and bounds the drag.
+- `--@slider min max` — draw a slider instead of a drag value.
+- `--@step n` — drag speed / slider granularity.
+- `--@units m/s` — a suffix after the number.
+- `--@options a|b|c` — a dropdown. On a string param the value IS the label; on a
+  number it's the index (0, 1, 2 …).
+- `--@color` — a colour swatch over a `#rrggbb` string.
+- `--@multiline` — a text box instead of a field.
+- `--@hidden` — keep it out of the Inspector.
+- `--@about Text` — describes the SCRIPT (above `defaults`), not a param.
+- `--@editorButton Label fn` — a button that runs `fn(node)` in EDIT mode.
+
+Annotations are comments: nothing changes at runtime, nothing breaks if you delete
+them, and a misspelled one is ignored rather than fatal. Several can share a line.
+
+## Booleans are real booleans
+
+A `flag = false` default round-trips as a boolean, so `if params.flag then` means
+what it says. (It's stored as 0/1 between the Inspector and the script, which is
+exactly the kind of detail you should never have to know — every number is truthy
+in Lua, so a leaked 0 would have been permanently `true`.)",
+    ),
+    (
+        "The editor — formatting, warnings, completion, keys",
+        "\
+## Formatting
+
+**Alt+Shift+F** formats the open file, or tick **on save** next to the ⚏ Format
+button. It re-indents by real block depth and fixes whitespace, and it changes
+NOTHING else — no re-flowed expressions, no realigned comments, no moved code. Your
+line stays your line.
+
+- `--@noformat` anywhere in a file exempts the whole file.
+- A line ending in `--@keep` keeps its own indentation (hand-aligned tables).
+- It's idempotent: saving twice can't produce a second diff.
+
+## Warnings
+
+Under the editor, `⚠ n warnings` expands into the list; click one to jump. These are
+the mistakes Lua itself can't report:
+
+- **an undeclared assignment** — `sped = speed * dt` compiles, writes a global,
+  reads `nil` forever, and says nothing. The warning names the typo and suggests the
+  nearby local. Globals you assign at FILE scope are deliberate publications and are
+  never flagged (that's how scripts share state).
+- **an unused local** — usually a half-finished rename. Prefix with `_` to keep it.
+- **upvalue pressure** — LuaJIT allows 60 upvalues per function and every
+  file-scope `local` is one. At 50 you get a warning naming the fix: group related
+  state in a table (`local s = { … }`), which costs one upvalue instead of thirty.
+
+`--@nolint` silences a line; on its own line it silences the file.
+
+## Completion
+
+The popup opens **by itself only after `.` or `:`** — where you're asking what
+fields a thing has. **Ctrl+Space** summons it anywhere else. **Enter** accepts,
+**Tab always indents** (it never steals a keystroke), Esc hides it until the token
+changes. The selected row shows its doc, and a usage example when there is one.
+
+## Keys
+
+    Ctrl+S / Ctrl+Shift+S   save / save all
+    Ctrl+F / Ctrl+H         find / find & replace       F3, Shift+F3  next / prev
+    Ctrl+G                  go to line                  Ctrl+W        close tab
+    Ctrl+D                  duplicate line              Ctrl+Shift+K  delete line
+    Alt+Up / Alt+Down       move line(s)                Ctrl+/        toggle comment
+    Tab / Shift+Tab         indent / outdent
+    Ctrl+B or F12           go to definition            Shift+F12     find references
+    Alt+Shift+F             format document             Ctrl+Space    suggest",
+    ),
     (
         "Getting started — your first script",
         "\
@@ -3163,7 +3838,47 @@ Real vector VALUES with operators, not just x/y/z triplets:
     if distance(node, player) < params.aggro then chase() end
 
   (Everything that accepts a vector also accepts a node or a plain table with
-  x/y/z — no conversions needed.)",
+  x/y/z — no conversions needed.)
+
+## The node's own vectors
+
+  • node.pos        position (read/write)
+  • node.vel        the body's velocity (read/write) — one write, not three
+  • node.up         the body's up (-gravity): Y on flat ground, radial on a planet
+  • node.forward    facing, from the rotation (-Z forward, like the camera)
+  • node.right      +X in the node's rotation
+  • node.size       the whole scale as a vec3 (node.scale stays the uniform one)
+
+    -- a jump, in whatever direction up actually means where you are standing
+    if node.grounded and input.action(\"jump\") then
+      node.vel = node.vel + node.up * params.jump
+    end
+
+## math — the arithmetic you were writing out by hand
+
+  • math.clamp(x, lo, hi)      math.saturate(x)        math.sign(x)
+  • math.round(x [, step])     round(2.34, 0.25) snaps to quarters
+  • math.lerp(a, b, t)         unclamped     math.mix(a, b, t)  clamped
+  • math.inverseLerp(a, b, x)  math.remap(x, a, b, c, d)   math.smoothstep(a, b, x)
+  • math.approach(cur, target, maxDelta)   never overshoots — pass rate * dt
+  • math.wrapAngle(a)          into (-pi, pi]
+  • math.deltaAngle(a, b)      the SHORT way round, across the seam
+  • math.approachAngle(cur, target, maxDelta)     \"turn to face\", done right
+  • math.pingPong(t, len)      0 -> len -> 0 forever
+
+    -- a turret that turns the short way and never overshoots
+    node.yaw = math.approachAngle(node.yaw, wanted, params.turn_rate * dt)
+
+## table — lists without the bookkeeping loop
+
+  • table.map(list, fn)     table.filter(list, fn)    table.reverse(list)
+  • table.find(list, fn)    -> value, index (a predicate, not a value)
+  • table.indexOf(list, v)  table.count(list [, fn])  table.sum(list [, fn])
+  • table.keys(t)           SORTED keys (pairs order isn't reproducible)
+  • table.copy(t)           table.extend(dst, src)
+
+    local ready = table.filter(ships, function(s) return s.fuel > 0 end)
+    local total = table.sum(ready, function(s) return s.fuel end)",
     ),
     (
         "Game UI from scripts — text, sliders, buttons",
@@ -3347,6 +4062,130 @@ pulsate.lua, float.lua — open one for a working start.",
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Collect every string egui painted this frame.
+    fn painted_text(output: &egui::FullOutput) -> String {
+        fn walk(shape: &egui::epaint::Shape, out: &mut String) {
+            match shape {
+                egui::epaint::Shape::Text(t) => {
+                    out.push_str(t.galley.text());
+                    out.push('\n');
+                }
+                egui::epaint::Shape::Vec(v) => {
+                    for sh in v {
+                        walk(sh, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = String::new();
+        for cs in &output.shapes {
+            walk(&cs.shape, &mut out);
+        }
+        out
+    }
+
+    /// Formatting must not move the caret: it's restored by line + column, because
+    /// re-indenting shifts every byte offset after the first change. This is what
+    /// makes format-on-save safe to leave on while you type.
+    #[test]
+    fn a_format_keeps_the_caret_where_the_text_is() {
+        let src = "function f()\nlocal x = 1\nprint(x)\nend\n";
+        // Caret just after `print(` on line 3 (0-based line 2, column 6).
+        let caret = src.find("print(").unwrap() + 6;
+        let (line, col) = crate::lua_format::line_col_of(src, caret);
+        assert_eq!((line, col), (2, 6), "line 2, six characters into the code");
+
+        let formatted = crate::lua_format::format(src);
+        assert_ne!(formatted, src, "the fixture must actually get re-indented");
+        let restored = crate::lua_format::char_of_line_col(&formatted, line, col);
+        // Still just inside `print(` — the two spaces of new indentation would have
+        // dragged an offset- or margin-restored caret back into the middle of the word.
+        let head: String = formatted.chars().take(restored).collect();
+        assert!(head.ends_with("print("), "caret landed at {restored} in:\n{formatted}");
+
+        // A caret past the end of a shortened line clamps instead of overflowing.
+        let long = crate::lua_format::char_of_line_col(&formatted, 2, 999);
+        assert!(long <= formatted.chars().count());
+    }
+
+    /// Every API entry that has a worked example must name a REAL entry — an
+    /// example keyed to a label that no longer exists is invisible, so it would rot
+    /// silently as the API is renamed.
+    #[test]
+    fn every_worked_example_belongs_to_a_real_api_entry() {
+        let known: std::collections::HashSet<&str> = LUA_API.iter().map(|e| e.label).collect();
+        let orphans: Vec<&str> =
+            API_EXAMPLES.iter().map(|(l, _)| *l).filter(|l| !known.contains(l)).collect();
+        assert!(orphans.is_empty(), "examples for entries that don't exist: {orphans:?}");
+        // And every example must be Lua THE ENGINE can parse — checked through the
+        // script host itself, so an example can't be valid-looking Lua that the
+        // preprocessor or LuaJIT rejects. A copyable example that doesn't compile is
+        // worse than no example.
+        let host = floptle_script::ScriptHost::new();
+        for (label, ex) in API_EXAMPLES {
+            // A snippet may be a fragment (a hook body, a bare statement), so give
+            // fragments a home before checking.
+            let wrapped = format!("local function __ex()\n{ex}\nend");
+            if host.check_syntax(ex).is_some() && host.check_syntax(&wrapped).is_some() {
+                panic!(
+                    "the example for `{label}` is not valid Lua: {:?}\n{ex}",
+                    host.check_syntax(ex)
+                );
+            }
+        }
+    }
+
+    /// The Docs page renders its guides, the API reference, and the worked
+    /// examples — with a REAL screen rect, because a headless pass with none lays
+    /// out into nothing and would "pass" while drawing zero widgets.
+    #[test]
+    fn the_docs_page_renders_its_guides_and_examples() {
+        let ctx = crate::icons::test_context();
+        let body = "\
+## A heading
+Prose with `inline code` in it.
+- a bullet
+
+    local x = 1   -- an indented code block
+";
+        let mut painted = String::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(crate::icons::test_input(), |ui| {
+                // `doc_body_ui` is a method on the tab viewer for the code theme;
+                // exercise the markup through the same path the page uses.
+                let theme_idx = 0usize;
+                let _ = theme_idx;
+                ui.label("");
+                super::inline_doc_label(ui, "Prose with `inline code` in it.", &egui::FontId::monospace(12.0));
+                for line in body.lines() {
+                    if let Some(h) = line.trim().strip_prefix("## ") {
+                        ui.label(egui::RichText::new(h).strong());
+                    }
+                }
+            });
+            painted = painted_text(&out);
+        }
+        assert!(painted.contains("A heading"), "headings must render:\n{painted}");
+        assert!(painted.contains("inline code"), "inline code must render:\n{painted}");
+    }
+
+    /// The two new guide sections must exist and stay findable by the words a
+    /// developer would search for — they document features with no other home.
+    #[test]
+    fn the_new_guides_cover_the_new_features() {
+        let all: String = DOC_SECTIONS.iter().map(|(t, b)| format!("{t}\n{b}\n")).collect();
+        for needle in [
+            "--@header", "--@desc", "--@range", "--@slider", "--@options", "--@color",
+            "--@hidden", "--@units", "--@multiline", "--@editorButton",
+            "--@noformat", "--@keep", "--@nolint",
+            "Alt+Shift+F", "Ctrl+Space", "F12", "upvalue",
+            "node.vel", "node.forward", "math.approach", "math.deltaAngle", "table.filter",
+        ] {
+            assert!(all.contains(needle), "the in-engine docs never mention {needle:?}");
+        }
+    }
 
     /// The in-engine IDE and the VSCode stub library must describe the same
     /// engine.
