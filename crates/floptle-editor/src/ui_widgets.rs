@@ -352,6 +352,77 @@ fn tex_thumb(ui: &egui::Ui, path: &str) -> Option<egui::TextureHandle> {
     asset_thumb(ui, path, 48)
 }
 
+/// The **spritesheet cell picker**: a clickable grid of the sheet's cells (the
+/// current one ringed gold) plus a `cell` number field. Draws nothing and
+/// returns `false` when the grid is 1×1 — a texture is a sheet only if its asset
+/// settings say so.
+///
+/// One widget, used by BOTH the UI element inspector and the Material editor, so
+/// picking a frame reads identically wherever a sheet is used — same row-major
+/// order, same ring, same hint. `id` salts the per-caller egui state (scroll
+/// position), `cell` is edited in place.
+pub(crate) fn sheet_cell_picker(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    texture: &str,
+    cols: u32,
+    rows: u32,
+    cell: &mut u32,
+) -> bool {
+    if cols * rows <= 1 {
+        return false;
+    }
+    let mut changed = false;
+    ui.label(format!("sprite cell ({cols}×{rows} sheet)"));
+    if let Some(sheet) = asset_thumb(ui, texture, 256) {
+        let cell_px = (240.0 / cols as f32).clamp(16.0, 48.0);
+        egui::ScrollArea::vertical().max_height(180.0).id_salt(id).show(ui, |ui| {
+            for r in 0..rows {
+                ui.horizontal(|ui| {
+                    for c in 0..cols {
+                        let idx = r * cols + c;
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(cell_px, cell_px), egui::Sense::click());
+                        let uv = egui::Rect::from_min_max(
+                            egui::pos2(c as f32 / cols as f32, r as f32 / rows as f32),
+                            egui::pos2((c + 1) as f32 / cols as f32, (r + 1) as f32 / rows as f32),
+                        );
+                        egui::Image::new(&sheet).uv(uv).paint_at(ui, rect);
+                        let current = *cell == idx;
+                        let ring = if current {
+                            egui::Color32::from_rgb(255, 200, 60)
+                        } else if resp.hovered() {
+                            egui::Color32::from_gray(200)
+                        } else {
+                            egui::Color32::from_gray(90)
+                        };
+                        ui.painter().rect_stroke(
+                            rect,
+                            1.0,
+                            egui::Stroke::new(if current { 2.0 } else { 1.0 }, ring),
+                            egui::StrokeKind::Inside,
+                        );
+                        if resp.on_hover_text(format!("cell {idx}")).clicked() {
+                            *cell = idx;
+                            changed = true;
+                        }
+                    }
+                });
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        ui.label("cell");
+        let mut n = *cell;
+        if ui.add(egui::DragValue::new(&mut n).range(0..=(cols * rows - 1))).changed() {
+            *cell = n;
+            changed = true;
+        }
+        ui.small("animate this (stepped property track) for sprite animation");
+    });
+    changed
+}
+
 /// Box-downscale interleaved RGBA to at most `max` px on the long side — keeps
 /// thumbnails tiny in GPU memory regardless of the source texture's size.
 fn downscale_rgba(px: &[u8], w: usize, h: usize, max: usize) -> egui::ColorImage {

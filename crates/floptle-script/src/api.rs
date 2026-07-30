@@ -196,6 +196,20 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             HashMap::from([("play_on_start".to_string(), if ps.play_on_start { 1.0 } else { 0.0 })]),
         );
     }
+    // A material's SPRITESHEET frame — the mesh-side twin of a UI image's
+    // `cell`. Only the sheet fields live here: everything else about a material
+    // is set through `node:setMaterial{...}` (colors and paths a f64 can't
+    // carry), while `cell` wants the cheap per-frame write a mirror field is.
+    if let Some(m) = world.get::<floptle_core::Material>(e) {
+        out.insert(
+            "Material".to_string(),
+            HashMap::from([
+                ("cell".to_string(), m.cell as f64),
+                ("sheetCols".to_string(), m.sheet_cols as f64),
+                ("sheetRows".to_string(), m.sheet_rows as f64),
+            ]),
+        );
+    }
     // AudioSource tunables (camelCase, live during play — the audio system
     // diffs the component each frame and updates the voice). Enums are
     // numeric here (the f64 mirror): mode 0=Spatial 1=Distance 2=Flat;
@@ -578,6 +592,20 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 ps.play_on_start = val != 0.0;
             }
         }
+        // The spritesheet frame — a plain uniform-cheap write, so a script can
+        // step it every tick (`face:getcomponent("Material").cell = f`) and an
+        // animation clip can key it on a stepped track.
+        "Material" => {
+            if let Some(m) = world.get_mut::<floptle_core::Material>(ent) {
+                let n = val.max(0.0) as u32;
+                match field {
+                    "cell" => m.cell = n,
+                    "sheetCols" => m.sheet_cols = n,
+                    "sheetRows" => m.sheet_rows = n,
+                    _ => {}
+                }
+            }
+        }
         "PointLight" => {
             if let Some(Matter::PointLight { color, intensity, range }) = world.get_mut::<Matter>(ent) {
                 match field {
@@ -761,6 +789,17 @@ pub(crate) fn apply_rich_sets(
                             if let CompVal::Str(t) = v {
                                 m.texture = (!t.is_empty()).then(|| t.clone());
                             }
+                        }
+                        // Spritesheet: slice the base texture into a grid and pick
+                        // a cell. `sheetCols`/`sheetRows` are usually authored in
+                        // the Inspector (inherited from the texture's own asset
+                        // settings) and only `cell` moves at runtime.
+                        "cell" => m.cell = num(v).unwrap_or(m.cell as f64).max(0.0) as u32,
+                        "sheetCols" => {
+                            m.sheet_cols = num(v).unwrap_or(m.sheet_cols as f64).max(0.0) as u32
+                        }
+                        "sheetRows" => {
+                            m.sheet_rows = num(v).unwrap_or(m.sheet_rows as f64).max(0.0) as u32
                         }
                         _ => {}
                     }
@@ -2383,4 +2422,58 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floptle_core::Material;
+
+    /// A material's spritesheet frame is reachable from a script the same way a UI
+    /// image's is: `getcomponent("Material").cell = n`. That means BOTH halves —
+    /// the mirror (which is also what makes the field animatable and what
+    /// `getcomponent` gates presence on) and the write-back.
+    #[test]
+    fn a_scripts_material_handle_carries_the_sprite_cell() {
+        let mut world = World::new();
+        let e = world.spawn();
+        // No Material yet ⇒ no handle at all (getcomponent must return nil).
+        assert!(!mirror_components(&world, e).contains_key("Material"));
+
+        world.insert(e, Material { sheet_cols: 4, sheet_rows: 4, cell: 2, ..Material::default() });
+        let mir = mirror_components(&world, e);
+        let m = mir.get("Material").expect("a Material node exposes its handle");
+        assert_eq!(m.get("cell"), Some(&2.0));
+        assert_eq!(m.get("sheetCols"), Some(&4.0));
+
+        apply_component_field(&mut world, e, "Material", "cell", 9.0);
+        assert_eq!(world.get::<Material>(e).unwrap().cell, 9);
+        // Negative frames clamp instead of wrapping to four billion.
+        apply_component_field(&mut world, e, "Material", "cell", -3.0);
+        assert_eq!(world.get::<Material>(e).unwrap().cell, 0);
+    }
+
+    /// `node:setMaterial{ cell = n }` — the construction-API spelling — reaches the
+    /// same field, and inserts a Material if the node had none.
+    #[test]
+    fn set_material_can_slice_a_sheet_and_pick_a_cell() {
+        let mut world = World::new();
+        let e = world.spawn();
+        let ents = std::collections::HashMap::from([(e.index(), e)]);
+        apply_rich_sets(
+            &mut world,
+            &ents,
+            vec![(
+                e.index(),
+                crate::RichSet::Material(vec![
+                    ("sheetCols".into(), crate::CompVal::Num(8.0)),
+                    ("sheetRows".into(), crate::CompVal::Num(2.0)),
+                    ("cell".into(), crate::CompVal::Num(11.0)),
+                ]),
+            )],
+        );
+        let m = world.get::<Material>(e).expect("setMaterial inserts the component");
+        assert_eq!((m.sheet_cols, m.sheet_rows, m.cell), (8, 2, 11));
+        assert!(m.is_sheet());
+    }
 }

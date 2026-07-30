@@ -191,6 +191,50 @@ impl MaterialParams {
             terrain_splat: false,
         }
     }
+
+    /// Pack an artist-facing [`floptle_core::Material`] into per-instance params —
+    /// the ONE conversion every render site goes through (the editor's gather, the
+    /// probes), so nothing can drift from what ships.
+    ///
+    /// Tiling comes from [`floptle_core::Material::effective_tiling`], which is
+    /// also where a **spritesheet** lands: a sheet material is a UV window onto its
+    /// current cell, riding these same lanes instead of an instance attribute of
+    /// its own (location 15 is the last one).
+    ///
+    /// `paint_base` / `terrain_paint_base` / the two paint flags stay zeroed: paint
+    /// is a property of the GEOMETRY, so the caller fills them in once it knows
+    /// which mesh is being drawn.
+    pub fn from_material(m: &floptle_core::Material) -> Self {
+        let (tile_mode, tile, tile_rotation) = match m.effective_tiling() {
+            None => (0, [0.0; 4], 0.0),
+            Some(floptle_core::Tiling::Uv { count, offset, rotation }) => {
+                (1, [count[0], count[1], offset[0], offset[1]], rotation)
+            }
+            Some(floptle_core::Tiling::Triplanar { scale, blend }) => {
+                (2, [scale, blend, 0.0, 0.0], 0.0)
+            }
+        };
+        Self {
+            color: m.color,
+            emissive: m.emissive,
+            emissive_strength: m.emissive_strength,
+            specular: m.specular,
+            shininess: m.shininess,
+            specular_strength: m.specular_strength,
+            rim: m.rim,
+            rim_strength: m.rim_strength,
+            unlit: m.unlit,
+            ambient: m.ambient,
+            alpha: m.alpha,
+            tile_mode,
+            tile,
+            tile_rotation,
+            paint_base: 0,
+            terrain_paint_base: 0,
+            paint_modulate: false,
+            terrain_splat: false,
+        }
+    }
 }
 
 const INSTANCE_ATTRS: [wgpu::VertexAttribute; 13] = [

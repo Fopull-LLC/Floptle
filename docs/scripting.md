@@ -714,6 +714,29 @@ every step, so a change takes effect immediately with no reset or teleport.
 | `fovY` | Vertical field of view, radians. |
 | `active` | The play-mode view camera — assign `true` to switch to it (a scripted camera cut). |
 
+| `getcomponent("Material")` | Meaning (Inspector: ◑ Material) |
+|---|---|
+| `cell` | **Spritesheet frame**: which cell of the sliced base texture this surface draws (row-major from the top-left; clamped into the grid). The one material field cheap enough to write every tick. |
+| `sheetCols` / `sheetRows` | The grid the texture is sliced into. Normally authored in the Inspector — it's inherited from the texture's own asset settings — so scripts only touch `cell`. |
+
+Sprite-animating a mesh is that field and a clock — a character's face on a plane,
+an animated billboard, a flipping coin:
+
+```lua
+local face, fps, frames, t = nil, 8, 16, 0
+
+function start(node) face = node:getcomponent("Material") end
+
+function update(node, dt)
+  t = t + dt
+  face.cell = math.floor(t * fps) % frames        -- or `base + i` per emotion
+end
+```
+
+Everything else about a material (colors, textures, emissive) goes through
+`node:setMaterial{...}` below — which also accepts `cell` / `sheetCols` /
+`sheetRows` for setup-time slicing.
+
 Booleans can be written as `true`/`false` (they read back as 1/0). All fields are
 numbers — anything else raises a script error naming the field.
 

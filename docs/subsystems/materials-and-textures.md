@@ -101,6 +101,31 @@ Material(
 )
 ```
 
+> **SPRITESHEETS (shipped 2026-07-30).** A texture sliced into a `cols`×`rows`
+> grid in its **asset settings** (the same grid a UI image reads) can be indexed
+> by a Material: `sheet_cols` / `sheet_rows` / `cell` on the component, one cell
+> drawn over the mesh's UVs, row-major from the top-left. Picking the texture in
+> the Inspector inherits its grid, and a clickable cell grid appears under the
+> texture row — the same widget the UI element inspector uses, so a sheet reads
+> identically on a HUD image and on a character's face plane.
+>
+> **Animate it** by stepping `cell`: from Lua (`node:getcomponent("Material").cell
+> = f`, or `node:setMaterial{ cell = f }`), or with a **stepped property track**
+> in the Animation tab (＋ Property ▸ Material ▸ cell). Under the hood a sheet is
+> the *cell's UV window* packed into the existing tiling lanes
+> (`Material::effective_tiling`), so it costs no instance attribute (location 15
+> is the last one), no shader variant, and a custom `.flsl`'s `baseTexture()` gets
+> it for free. Consequences worth knowing:
+>
+> - A **sheet wins over a tiling block** — repeating or rotating one cell would
+>   drag in its neighbours. The Inspector says so where the tiling rows were.
+> - Set the texture's filter to **Pixelated** for pixel art; a smooth filter can
+>   bleed half a texel from the neighbouring cell at the seam.
+> - Cells clamp into the grid, and re-slicing the `.png` re-slices every material
+>   using it (a now-missing cell falls back into range).
+> - Raster surfaces only (meshes, primitives, map geometry) — blobs/SDF matter
+>   have no UVs to window.
+
 ## 3. Tiling without a shader
 
 Tiling is a `Tiling` value on each `TexBinding`. Two projection modes cover the

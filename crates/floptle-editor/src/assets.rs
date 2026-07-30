@@ -344,7 +344,8 @@ pub(crate) struct TexSetting {
     #[serde(default)]
     pub(crate) wrap: WrapMode,
     /// Spritesheet columns (0/1 = not a sheet). Slices the texture into
-    /// `sheet_cols`×`sheet_rows` cells that a UI image can pick individually.
+    /// `sheet_cols`×`sheet_rows` cells that a UI image or a mesh's Material can
+    /// pick individually — one grid per texture, inherited by everything using it.
     #[serde(default)]
     pub(crate) sheet_cols: u32,
     #[serde(default)]

@@ -30,6 +30,10 @@ node. This is the single biggest simplification in the design.
 > animating `cell` with a stepped property track (see
 > [animation.md](animation.md)). Assigning an oversized sheet no longer
 > crashes — textures past the GPU's max dimension are downscaled to fit.
+> A **mesh Material** indexes the same sliced texture the same way — same field
+> names, same cell order, same picker (see
+> [materials-and-textures.md](materials-and-textures.md) §2) — so a sprite sheet
+> authored once works on a HUD image and on a plane in the world.
 
 > **Screen vs world space (shipped).** The layer component (`UiLayer`) has a
 > `space` field — `Screen` (default: a flat overlay that fills the window) or

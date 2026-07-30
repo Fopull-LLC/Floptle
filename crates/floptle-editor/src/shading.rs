@@ -9,40 +9,13 @@ use floptle_core::{Entity, Light, Material, Matter, World};
 use floptle_render::MaterialParams;
 
 /// Convert a core [`Material`] into the renderer's per-instance [`MaterialParams`].
+///
+/// The packing itself lives in the renderer ([`MaterialParams::from_material`]) so
+/// the probes exercise the same code the editor draws with — including the tiling
+/// lanes, which a **spritesheet** material rides to show one cell. Geometry-owned
+/// paint offsets are still filled in by the caller (it knows the mesh).
 pub(crate) fn material_params(m: &Material) -> MaterialParams {
-    let (tile_mode, tile, tile_rotation) = match m.tiling {
-        None => (0, [0.0; 4], 0.0),
-        Some(floptle_core::Tiling::Uv { count, offset, rotation }) => {
-            (1, [count[0], count[1], offset[0], offset[1]], rotation)
-        }
-        Some(floptle_core::Tiling::Triplanar { scale, blend }) => {
-            (2, [scale, blend, 0.0, 0.0], 0.0)
-        }
-    };
-    MaterialParams {
-        color: m.color,
-        emissive: m.emissive,
-        emissive_strength: m.emissive_strength,
-        specular: m.specular,
-        shininess: m.shininess,
-        specular_strength: m.specular_strength,
-        rim: m.rim,
-        rim_strength: m.rim_strength,
-        unlit: m.unlit,
-        ambient: m.ambient,
-        alpha: m.alpha,
-        // Paint is a property of the GEOMETRY, not the material — the caller fills these
-        // from `Raster::mesh_paint_base` / `Raster::dyn_paint_base` once it knows which
-        // mesh is being drawn (terrain chunks take the latter), and sets `paint_modulate`
-        // based on whether the paint is brush work (2×) or a glTF import (×1).
-        paint_base: 0,
-        terrain_paint_base: 0,
-        paint_modulate: false,
-        terrain_splat: false,
-        tile_mode,
-        tile,
-        tile_rotation,
-    }
+    MaterialParams::from_material(m)
 }
 
 /// The default look for a Blob with no Material: neutral tint plus the subtle blue

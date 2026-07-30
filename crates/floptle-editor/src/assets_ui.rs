@@ -679,8 +679,9 @@ impl<'a> EditorTabViewer<'a> {
         // ---- Spritesheet slicing -------------------------------------------
         ui.separator();
         ui.strong("Spritesheet");
-        ui.small("Split this texture into a grid of cells. A UI image can then show one \
-                  cell — animate the cell index for sprite animation.");
+        ui.small("Split this texture into a grid of cells. A UI image OR a mesh's \
+                  Material can then show one cell — animate the cell index for sprite \
+                  animation.");
         let (mut cols, mut rows) = (s.sheet_cols.max(1), s.sheet_rows.max(1));
         ui.horizontal(|ui| {
             ui.label("columns");
@@ -728,7 +729,7 @@ impl<'a> EditorTabViewer<'a> {
             return;
         }
         ui.separator();
-        let r = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache);
+        let r = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
         if let Some(name) = r.save_as
             && !name.is_empty() {
                 self.cmd.save_material = Some((name, MaterialDoc::from_material(mat)));

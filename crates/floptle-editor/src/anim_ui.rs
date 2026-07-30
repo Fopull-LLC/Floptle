@@ -1688,7 +1688,13 @@ const ANIMATABLE_PROPS: &[(&str, &[(&str, PropKind)])] = &[
             ("b", PropKind::Float),
         ],
     ),
-    ("Material", &[("texture", PropKind::Text)]),
+    (
+        "Material",
+        &[
+            ("texture", PropKind::Text),
+            ("cell", PropKind::Float), // spritesheet frame index — key with Step
+        ],
+    ),
     ("Camera", &[("fovY", PropKind::Float)]),
 ];
 

@@ -255,8 +255,28 @@ pub(crate) fn material_props_ui(
     name_buf: &mut String,
     flsl: &crate::shaders::FlslCache,
     sdf: &crate::shaders::SdfCache,
+    texture_settings: &std::collections::HashMap<String, crate::assets::TexSetting>,
 ) -> MatEditResult {
     let mut r = MatEditResult::default();
+
+    // The base texture's spritesheet grid comes from the TEXTURE's asset settings
+    // (slice the .png once, every material using it inherits the same cells), so
+    // re-slicing an asset re-slices its materials. A cell that no longer exists
+    // falls back into range instead of drawing off the end of the sheet.
+    let sheet_of = |m: &Material| {
+        crate::assets::tex_setting(
+            texture_settings,
+            project_root,
+            m.texture.as_deref().unwrap_or_default(),
+        )
+        .sheet()
+    };
+    let (sc, sr) = sheet_of(m);
+    if (m.sheet_cols, m.sheet_rows) != (sc, sr) {
+        (m.sheet_cols, m.sheet_rows) = (sc, sr);
+        m.cell = m.cell.min((sc * sr).saturating_sub(1));
+        r.changed = true;
+    }
 
     egui::Grid::new("mat_top").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
         ui.label("base color");
@@ -278,14 +298,34 @@ pub(crate) fn material_props_ui(
             crate::assets::is_texture,
             160.0,
         ) {
+            // Inherit the texture's spritesheet grid (set once in its asset
+            // settings) so a picked sheet slices without any extra steps — the
+            // same hand-off a UI image gets.
+            let (sc, sr) = crate::assets::tex_setting(
+                texture_settings,
+                project_root,
+                pick.as_deref().unwrap_or_default(),
+            )
+            .sheet();
+            (m.sheet_cols, m.sheet_rows, m.cell) = (sc, sr, 0);
             m.texture = pick;
             r.changed = true;
         }
         ui.end_row();
         // Tiling applies to the base texture (the mesh's own or the override).
+        // A sheet takes the tiling lanes over (one cell, no repeats), so the
+        // controls say so rather than silently doing nothing.
         ui.label("tiling");
         ui.vertical(|ui| {
-            r.changed |= tiling_ui(ui, &mut m.tiling);
+            if m.is_sheet() {
+                ui.label(
+                    egui::RichText::new("— a sheet draws one cell (tiling off)")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+            } else {
+                r.changed |= tiling_ui(ui, &mut m.tiling);
+            }
         });
         ui.end_row();
         ui.label("emissive");
@@ -301,6 +341,22 @@ pub(crate) fn material_props_ui(
         r.changed |= ui.checkbox(&mut m.unlit, "fullbright / flat").changed();
         ui.end_row();
     });
+
+    // ---- spritesheet: which cell of the sliced texture this surface draws.
+    // Outside the grid, on its own full-width row — a 21-wide sheet's cell grid
+    // needs the whole panel, not a grid cell. (`m.texture` may have changed in the
+    // rows above, so the grid is re-read here.)
+    let (sc, sr) = sheet_of(m);
+    if sc * sr > 1 {
+        r.changed |= crate::ui_widgets::sheet_cell_picker(
+            ui,
+            ui.id().with("mat_cells"),
+            m.texture.as_deref().unwrap_or_default(),
+            sc,
+            sr,
+            &mut m.cell,
+        );
+    }
 
     // ---- custom shader (ADR-0007): pick a .flsl; its exposed uniforms and
     // texture slots become the rows below, live-editing the group(3) params.
@@ -617,7 +673,7 @@ impl EditorTabViewer<'_> {
                     .get_mut::<floptle_core::ObjectMaterials>(mesh)
                     .and_then(|om| om.0.get_mut(&bone_name))
                 {
-                    let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache);
+                    let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
                     self.cmd.inspector_changed |= res.changed;
                     clear |= res.remove;
                     if let Some(name) = res.save_as {
@@ -1623,7 +1679,7 @@ impl EditorTabViewer<'_> {
                     }
                     ui.indent("material_props", |ui| {
                         if let Some(mat) = world.get_mut::<Material>(e) {
-                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache);
+                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
                             cmd.inspector_changed |= res.changed;
                             if res.remove {
                                 cmd.remove_material = Some(e);
@@ -3085,7 +3141,7 @@ impl EditorTabViewer<'_> {
                         ui.label(format!("editing: {nm}"));
                         ui.separator();
                         if let Some(mat) = world.get_mut::<Material>(e) {
-                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache);
+                            let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
                             cmd.inspector_changed |= res.changed;
                             if res.remove {
                                 cmd.remove_material = Some(e);
@@ -3132,5 +3188,99 @@ fn node_has_component(
             .is_some_and(|s| s.slider.is_some()),
         "UiLayer" => world.get::<floptle_ui::UiLayer>(e).is_some(),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Collect every string egui painted this frame (the settings-UI idiom): a
+    /// headless pass that renders zero widgets would otherwise "pass".
+    fn painted_text(output: &egui::FullOutput) -> String {
+        fn walk(shape: &egui::epaint::Shape, out: &mut String) {
+            match shape {
+                egui::epaint::Shape::Text(t) => {
+                    out.push_str(t.galley.text());
+                    out.push('\n');
+                }
+                egui::epaint::Shape::Vec(v) => {
+                    for s in v {
+                        walk(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = String::new();
+        for cs in &output.shapes {
+            walk(&cs.shape, &mut out);
+        }
+        out
+    }
+
+    /// Draw the Material section and hand back what it painted plus how it left
+    /// the material — two frames, because egui needs one to lay out.
+    fn run_material_ui(
+        m: &mut Material,
+        settings: &std::collections::HashMap<String, crate::assets::TexSetting>,
+    ) -> String {
+        let ctx = crate::icons::test_context();
+        let mut name_buf = String::new();
+        let (flsl, sdf) = (crate::shaders::FlslCache::new(), crate::shaders::SdfCache::new());
+        let mut painted = String::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(crate::icons::test_input(), |ui| {
+                let _ = material_props_ui(
+                    ui,
+                    m,
+                    &[],
+                    &[],
+                    Path::new("/project"),
+                    &mut name_buf,
+                    &flsl,
+                    &sdf,
+                    settings,
+                );
+            });
+            painted = painted_text(&out);
+        }
+        painted
+    }
+
+    /// The hand-off the whole feature stands on: slice the TEXTURE once, and a
+    /// material using it inherits the grid, shows the cell picker, and hides the
+    /// tiling rows (a sheet draws one cell, so tiling would sample its
+    /// neighbours). Without the grid, the section is exactly what it always was.
+    #[test]
+    fn the_material_section_inherits_a_textures_sheet_grid() {
+        let sliced = std::collections::HashMap::from([(
+            "textures/face.png".to_string(),
+            crate::assets::TexSetting { sheet_cols: 4, sheet_rows: 4, ..Default::default() },
+        )]);
+        let mut m =
+            Material { texture: Some("textures/face.png".into()), cell: 9, ..Material::default() };
+        let painted = run_material_ui(&mut m, &sliced);
+        assert_eq!((m.sheet_cols, m.sheet_rows), (4, 4), "the material must inherit the grid");
+        assert_eq!(m.cell, 9, "a valid cell survives the sync");
+        assert!(painted.contains("sprite cell (4×4 sheet)"), "no cell picker drawn:\n{painted}");
+        assert!(painted.contains("a sheet draws one cell"), "tiling rows not replaced:\n{painted}");
+
+        // Re-slicing the texture smaller must pull an out-of-range cell back in.
+        let smaller = std::collections::HashMap::from([(
+            "textures/face.png".to_string(),
+            crate::assets::TexSetting { sheet_cols: 2, sheet_rows: 2, ..Default::default() },
+        )]);
+        let painted = run_material_ui(&mut m, &smaller);
+        assert_eq!((m.sheet_cols, m.sheet_rows, m.cell), (2, 2, 3), "cell must clamp into the grid");
+        assert!(painted.contains("sprite cell (2×2 sheet)"), "{painted}");
+
+        // An unsliced texture: no sheet anywhere, and the tiling rows are back.
+        let mut plain =
+            Material { texture: Some("textures/face.png".into()), ..Material::default() };
+        let painted = run_material_ui(&mut plain, &std::collections::HashMap::new());
+        assert!(!plain.is_sheet());
+        assert!(!painted.contains("sprite cell"), "a plain texture must not offer cells:\n{painted}");
+        assert!(painted.contains("tiling"), "the tiling rows must come back:\n{painted}");
     }
 }

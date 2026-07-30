@@ -68,11 +68,11 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field removeTag fun(self: Node, tag: string) Remove a tag (no-op when absent).
 ---@field height number Physics (capsule bodies): standing height - write a smaller value to crouch.
 ---@field text string|nil UI elements: the label's text (write to change it — numbers coerce, so `hp.text = 42` works).
----@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|nil Live component handle (RigidBody / PointLight / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer), nil if the node lacks it.
+---@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Live component handle (RigidBody / PointLight / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer / Material), nil if the node lacks it.
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
 ---@field setShaderParam fun(self: Node, name: string, x: number, y?: number, z?: number, w?: number) Drive a `.flsl` uniform on this node every tick (a GPU uniform write, never a recompile): the node's Material shader, or its UI element's `stage ui` shader (instruments like the navball). Unset lanes are 0.
 ---@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, luminosity, starColor, occluderRadius (occlusion culling: radius of the solid core geometry never pierces — chunks fully behind it skip their draws; keep it BELOW the deepest cave/dig; 0 = off).
----@field setMaterial fun(self: Node, t: table) Construction API — SETUP-TIME, not per-frame: set (and create if absent) the node's Material. It inserts the component and queues a deferred write, so call it on transitions and use `setShaderParam` for values that change every tick. Fields: color/emissive/specular/rim (a colour takes {r,g,b}, {x,y,z}, {1,0.5,0.2} or vec3), emissiveStrength, shininess, specularStrength, rimStrength, unlit (bool), ambient, alpha, texture (path or \"rt:<name>\").
+---@field setMaterial fun(self: Node, t: table) Construction API — SETUP-TIME, not per-frame: set (and create if absent) the node's Material. It inserts the component and queues a deferred write, so call it on transitions and use `setShaderParam` for values that change every tick. Fields: color/emissive/specular/rim (a colour takes {r,g,b}, {x,y,z}, {1,0.5,0.2} or vec3), emissiveStrength, shininess, specularStrength, rimStrength, unlit (bool), ambient, alpha, texture (path or \"rt:<name>\"), sheetCols/sheetRows/cell (spritesheet grid + which cell draws — `cell` is also a live mirror field, see MaterialHandle).
 ---@field setTerrain fun(self: Node, id: number) Construction API: make this node a Terrain volume with the given id (generate its field with `terrain.generatePlanet`).
 ---@field setTerrainGen fun(self: Node, opts: table|nil) Construction API: attach an ON-DEMAND generation spec (same opts table as `terrain.generatePlanet`) — the body's field generates in the background when first approached, so no field file is needed at all (galaxy streaming). Player edits saved under `terrain.saveDir` take priority over regeneration. nil clears the spec.
 ---@field setPrimitive fun(self: Node, shape: string, color?: table) Construction API: make this node a primitive (\"Cube\"/\"Sphere\"/\"Capsule\"/\"Plane\") with an optional {r,g,b} color.
@@ -152,6 +152,16 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field z number Draw order: lowest z first.
 ---@field designHeight number Design units that span the window height.
 ---@field worldSpace number 1 = a panel inside the 3D world at this node's transform; 0 = a screen overlay.
+
+---A Material's live SPRITESHEET frame (`node:getcomponent(\"Material\")`) — the
+---mesh-side twin of a UI image's cell. Slice the texture into a grid in its
+---asset settings, then step the frame every tick:
+---`face:getcomponent(\"Material\").cell = math.floor(t * 8) % 16`.
+---Everything else about a material goes through `node:setMaterial{...}`.
+---@class MaterialHandle
+---@field cell number Which cell of the sheet draws (row-major from the top-left; clamped into the grid).
+---@field sheetCols number Sheet columns (0 = not a sheet — the whole texture).
+---@field sheetRows number Sheet rows.
 
 ---A node's Particle System, controlled from a script via `node:particles()`.
 ---Start/stop the effect at runtime and read whether it's playing.

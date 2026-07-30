@@ -735,12 +735,13 @@ impl EditorTabViewer<'_> {
                             .id_salt(("map_slot_mat", id, i))
                             .default_open(true)
                             .show(ui, |ui| {
-                                let (materials, asset_tree, project_root, flsl, sdf) = (
+                                let (materials, asset_tree, project_root, flsl, sdf, tex_set) = (
                                     &*self.materials,
                                     &*self.asset_tree,
                                     &*self.project_root,
                                     &*self.flsl_cache,
                                     &*self.sdf_cache,
+                                    &*self.texture_settings,
                                 );
                                 if let Some(om) =
                                     self.world.get_mut::<floptle_core::ObjectMaterials>(entity)
@@ -755,6 +756,7 @@ impl EditorTabViewer<'_> {
                                         self.mat_name_buf,
                                         flsl,
                                         sdf,
+                                        tex_set,
                                     );
                                     self.cmd.inspector_changed |= res.changed;
                                 }

@@ -1353,6 +1353,19 @@ pub struct MaterialDoc {
     pub tiling: Option<TilingDoc>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub shader_tiling: std::collections::BTreeMap<String, TilingDoc>,
+    /// Spritesheet: the base texture is a `sheet_cols`×`sheet_rows` grid and
+    /// `cell` (row-major) is what draws. All three skip-serialize at 0, so a
+    /// non-sheet material's RON is byte-identical to a pre-sheet one.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub sheet_cols: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub sheet_rows: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub cell: u32,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 /// RON mirror of [`floptle_core::Tiling`].
@@ -1425,6 +1438,9 @@ impl MaterialDoc {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.to_tiling()))
                 .collect(),
+            sheet_cols: self.sheet_cols,
+            sheet_rows: self.sheet_rows,
+            cell: self.cell,
         }
     }
     pub fn from_material(m: &Material) -> Self {
@@ -1450,6 +1466,9 @@ impl MaterialDoc {
                 .iter()
                 .map(|(k, v)| (k.clone(), TilingDoc::from_tiling(*v)))
                 .collect(),
+            sheet_cols: m.sheet_cols,
+            sheet_rows: m.sheet_rows,
+            cell: m.cell,
         }
     }
 }
@@ -1897,6 +1916,36 @@ mod tests {
         n.ui = None;
         n.visible = true;
         n
+    }
+
+    /// A material's spritesheet survives a save/load, and a material that isn't a
+    /// sheet writes no sheet keys at all — so adding this feature can't churn
+    /// every existing material file in a project's diff.
+    #[test]
+    fn a_materials_spritesheet_round_trips_and_stays_out_of_plain_files() {
+        let m = Material { sheet_cols: 4, sheet_rows: 2, cell: 5, ..Material::default() };
+        let ron = ron::ser::to_string(&MaterialDoc::from_material(&m)).expect("serialize");
+        assert!(ron.contains("sheet_cols:4") || ron.contains("sheet_cols: 4"), "{ron}");
+        let back: MaterialDoc = ron::from_str(&ron).expect("deserialize");
+        let back = back.to_material();
+        assert_eq!((back.sheet_cols, back.sheet_rows, back.cell), (4, 2, 5));
+
+        let plain = ron::ser::to_string(&MaterialDoc::from_material(&Material::default()))
+            .expect("serialize");
+        assert!(!plain.contains("sheet"), "a non-sheet material must not write sheet keys: {plain}");
+        assert!(!plain.contains("cell"), "a non-sheet material must not write a cell: {plain}");
+    }
+
+    /// A pre-spritesheet material file still loads — the fields default to "not a
+    /// sheet", which is the whole-texture behaviour those files were authored with.
+    #[test]
+    fn a_material_file_from_before_spritesheets_still_loads() {
+        let doc: MaterialDoc =
+            ron::from_str("(color:(1,1,1),texture:Some(\"t.png\"),unlit:true)").expect("load");
+        let m = doc.to_material();
+        assert_eq!((m.sheet_cols, m.sheet_rows, m.cell), (0, 0, 0));
+        assert!(!m.is_sheet());
+        assert_eq!(m.cell_uv(), [0.0, 0.0, 1.0, 1.0]);
     }
 
     /// floptle/0046: the whole point of a stable link. Inserting a node ahead of
