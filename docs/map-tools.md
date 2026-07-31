@@ -113,13 +113,19 @@ halves of a cut) come back unpainted, because they are new surfaces.
 
 Two things worth knowing:
 
-- **Undo restores geometry, not paint.** Undoing an extrude brings the face back;
-  the paint that face lost when it became new geometry does not come back with
-  it. Paint before you're done shaping, or expect to touch it up.
+- **Undo takes the paint back too.** Every geometry edit banks the paint that was
+  on the mesh alongside the shape, under those same durable names — so undoing an
+  extrude brings back the face *and* the shading it was carrying, and redo puts it
+  where it was again. Paint whenever you like; Ctrl+Z means what it says.
+  (Anything you painted *after* the edit is never overwritten by a returning
+  surface — live paint always wins.)
 - Saved paint is checked against the geometry it was painted on. If a map mesh
-  changed between the save and the load (a hand-edited sidecar, a restored
-  backup), the editor **refuses** the stale paint and says so rather than
-  scattering it across the wrong faces.
+  changed between the save and the load — a hand-edited `maps/*.ron` sidecar, a
+  restored backup, a file recovered from version control without its partner —
+  the editor **refuses** the stale paint and says so rather than scattering it
+  across the wrong faces. In normal use you will never see it: a scene load
+  adopts map geometry *before* paint, so the paint always has its triangulation
+  to attach to.
 
 ## 6. Keys
 

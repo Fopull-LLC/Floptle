@@ -36,7 +36,7 @@ The first-person recipe — no glue code:
 
 1. **New ▸ ⌖ Camera**; in the Inspector mark it **active**.
 2. Inspector ▸ **➕ Add Component → ◆ Rigidbody**, then set shape **Capsule**.
-3. Drag **`scripts/character.lua`** onto it (drop it on the Inspector, or from Assets).
+3. Drag **`scripts/first_person.lua`** onto it (drop it on the Inspector, or from Assets).
 
 > The Inspector is a **modular component stack**: a node shows only the components it
 > has, and **➕ Add Component** (a searchable menu at the bottom that focuses for typing

@@ -2092,7 +2092,11 @@ enum Snapshot {
     /// A map-mesh edit: `(map id, the whole pre-edit mesh)`. Map meshes are a
     /// few hundred faces, so whole-mesh swaps are cheap and exact — keyed by
     /// the stable map id like terrain/paint (the store, not the ECS).
-    MapMesh(u32, floptle_map::MapMesh),
+    /// The paint that lived on the geometry is carried WITH it: an edit that
+    /// renames surfaces (an extrude, a cut, a delete) costs them their paint,
+    /// and an undo that brought the shape back but not the shading was the
+    /// one place in the editor where Ctrl+Z did not fully undo.
+    MapMesh(u32, floptle_map::MapMesh, Option<Box<crate::map_paint::MapPaintStash>>),
 }
 
 /// Undo/redo stack of whole-scene + terrain snapshots (simple + robust here).
@@ -2942,7 +2946,7 @@ impl ApplicationHandler for Editor {
                         && let Some((id, pre)) = self.map_stroke.take()
                         && self.maps.meshes.get(&id) != Some(&pre)
                     {
-                        self.push_history(Snapshot::MapMesh(id, pre));
+                        self.push_map_history(id, pre);
                     }
                     self.map_stroke = None;
                     if let (Some(anchor), Some(cursor)) = (self.map_box.take(), self.cursor)

@@ -50,6 +50,28 @@ pub(crate) struct MapPaintIdent {
     tris: Vec<Vec<TriKey>>,
 }
 
+/// One map mesh's paint, addressed by the DURABLE names of the surfaces it sits
+/// on rather than by index. That is what makes it survive a round trip through
+/// geometry that stopped existing: an undo restores the mesh, the triangulation
+/// comes back with the same names, and each colour/patch finds its surface again.
+///
+/// Captured before every geometry edit (see `Editor::map_paint_stash`) and
+/// stored in the undo step next to the mesh, so Ctrl+Z takes back the paint the
+/// edit cost you — not just the shape.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MapPaintStash {
+    /// Vertex-paint colour per render vertex.
+    verts: HashMap<VertKey, [u8; 4]>,
+    /// Texture-paint patch per render triangle: `(w, h, tightly packed RGBA)`.
+    tris: HashMap<TriKey, (u32, u32, Vec<u8>)>,
+}
+
+impl MapPaintStash {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.verts.is_empty() && self.tris.is_empty()
+    }
+}
+
 fn face_key(mesh: &MapMesh, face: u32) -> FaceKey {
     use std::hash::{Hash, Hasher};
     let Some(f) = mesh.faces.get(face as usize) else { return 0 };
@@ -106,6 +128,65 @@ impl Editor {
         })
     }
 
+    /// Capture map mesh `id`'s paint under its durable surface names, for an
+    /// undo step. `None` when the node carries no paint (the common case — and
+    /// naming every corner of an unpainted blockout would be pure waste).
+    ///
+    /// Cheap enough to run before every discrete geometry op: a blockout is a
+    /// few hundred faces, and this only ever runs on painted ones.
+    /// `mesh` is the geometry the LIVE paint sits on — the mesh as it was at the
+    /// last GPU build, i.e. the pre-edit one at an edit's push site. (The cached
+    /// `paint_ident` only exists once a painted mesh has been rebuilt at least
+    /// once, so naming it here is what makes "paint a wall, extrude it, undo"
+    /// work the very first time.)
+    pub(crate) fn map_paint_stash(&self, id: u32, mesh: &MapMesh) -> Option<MapPaintStash> {
+        let e = self.map_entity(id)?;
+        if self.world.get::<VertexPaint>(e).is_none() && self.world.get::<TexturePaint>(e).is_none()
+        {
+            return None; // unpainted: naming every corner would be pure waste
+        }
+        let ident = &ident_of(mesh, &floptle_map::triangulate(mesh));
+        let mut out = MapPaintStash::default();
+        if let Some(vp) = self.world.get::<VertexPaint>(e).copied()
+            && let (Some(blocks), Some(raster)) = (self.paint_data.get(&vp.id), self.raster.as_ref())
+        {
+            for (p, keys) in ident.verts.iter().enumerate() {
+                let Some(&(base, count)) = blocks.parts.get(p) else { continue };
+                for (i, k) in keys.iter().enumerate() {
+                    if (i as u32) < count {
+                        out.verts.entry(*k).or_insert_with(|| raster.paint_get(base, i as u32));
+                    }
+                }
+            }
+        }
+        if let Some(tp) = self.world.get::<TexturePaint>(e).copied()
+            && let Some(pt) = self.paint_tex.get(&tp.id)
+        {
+            for (p, keys) in ident.tris.iter().enumerate() {
+                let Some(pp) = pt.parts.get(p) else { continue };
+                for (t, k) in keys.iter().enumerate() {
+                    let Some(cell) = pp.cells.get(t) else { continue };
+                    let (x, y, w, h) = cell_rect(cell, pp.edge);
+                    if out.tris.contains_key(k) {
+                        continue;
+                    }
+                    let mut patch = Vec::with_capacity((w * h * 4) as usize);
+                    for row in 0..h {
+                        let s = (((y + row) * pp.edge + x) * 4) as usize;
+                        let n = (w * 4) as usize;
+                        if s + n <= pp.pixels.len() {
+                            patch.extend_from_slice(&pp.pixels[s..s + n]);
+                        }
+                    }
+                    if patch.len() == (w * h * 4) as usize {
+                        out.tris.insert(*k, (w, h, patch));
+                    }
+                }
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
     /// Re-attach paint to the map meshes rebuilt this frame. Called straight
     /// after `sync_map_meshes`, which is the only place map geometry reaches
     /// the GPU.
@@ -133,24 +214,33 @@ impl Editor {
             }
             let Some(mesh) = self.maps.meshes.get(&id) else { continue };
             let new = ident_of(mesh, &floptle_map::triangulate(mesh));
+            // Paint an undo/redo is putting back (captured under the same names).
+            let restore = self.maps.paint_restore.remove(&id);
             let Some(old) = self.maps.paint_ident.insert(id, new.clone()) else {
                 continue; // first build of this mesh's paint — nothing to carry from
             };
-            if old == new {
+            if old == new && restore.is_none() {
                 continue; // the vertices moved, but they are the same vertices
             }
             // Rebuild the CPU geometry we just dropped: the texture atlas is
             // derived from it, and deriving it from nothing would leave the old
             // paint sitting on the new surface.
             self.ensure_paint_mesh_pub(e);
-            self.carry_map_vertex_paint(e, &old, &new);
-            self.carry_map_texture_paint(e, &key, &old, &new);
+            let restore = restore.unwrap_or_default();
+            self.carry_map_vertex_paint(e, &old, &new, &restore);
+            self.carry_map_texture_paint(e, &key, &old, &new, &restore);
         }
     }
 
     /// Rebuild the node's vertex-paint blocks against the new triangulation,
     /// keeping every colour whose vertex survived.
-    fn carry_map_vertex_paint(&mut self, e: Entity, old: &MapPaintIdent, new: &MapPaintIdent) {
+    fn carry_map_vertex_paint(
+        &mut self,
+        e: Entity,
+        old: &MapPaintIdent,
+        new: &MapPaintIdent,
+        restore: &MapPaintStash,
+    ) {
         let Some(vp) = self.world.get::<VertexPaint>(e).copied() else { return };
         let Some(blocks) = self.paint_data.get(&vp.id).cloned() else { return };
         let mut by_key: HashMap<VertKey, [u8; 4]> = HashMap::new();
@@ -164,6 +254,12 @@ impl Editor {
                     }
                 }
             }
+        }
+        // Undo/redo: surfaces coming BACK have no live colour to carry, so the
+        // step's stash supplies theirs. Live paint always wins — anything you
+        // painted since is never overwritten by a resurrected surface.
+        for (k, c) in &restore.verts {
+            by_key.entry(*k).or_insert(*c);
         }
         let mut out = PaintBlocks::default();
         let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else { return };
@@ -199,6 +295,7 @@ impl Editor {
         key: &str,
         old: &MapPaintIdent,
         new: &MapPaintIdent,
+        restore: &MapPaintStash,
     ) {
         let Some(tp) = self.world.get::<TexturePaint>(e).copied() else { return };
         if !self.paint_tex.contains_key(&tp.id) {
@@ -238,23 +335,29 @@ impl Editor {
             // is unchanged has the same flattened size, so its patch has the
             // same texel size — only its place in the packing moved.
             for (t, k) in new.tris[p].iter().enumerate() {
-                let (Some(&(sp, (sx, sy, sw, sh))), Some(cell)) = (src.get(k), atlas.cells.get(t))
-                else {
-                    continue;
-                };
-                let (Some(from), (dx, dy, dw, dh)) = (old_parts.get(sp), cell_rect(cell, edge))
-                else {
-                    continue;
+                let Some(cell) = atlas.cells.get(t) else { continue };
+                let (dx, dy, dw, dh) = cell_rect(cell, edge);
+                // A live patch (carried across the edit) first; failing that, one
+                // an undo/redo is putting back for a surface that just returned.
+                let (src_pixels, src_edge, sx, sy, sw, sh) = match src.get(k) {
+                    Some(&(sp, (sx, sy, sw, sh))) => {
+                        let Some(from) = old_parts.get(sp) else { continue };
+                        (&from.pixels, from.edge, sx, sy, sw, sh)
+                    }
+                    None => match restore.tris.get(k) {
+                        Some((sw, sh, patch)) => (patch, *sw, 0, 0, *sw, *sh),
+                        None => continue,
+                    },
                 };
                 if (sw, sh) != (dw, dh) {
                     continue; // the triangle changed shape — its paint no longer describes it
                 }
                 for row in 0..dh {
-                    let s = (((sy + row) * from.edge + sx) * 4) as usize;
+                    let s = (((sy + row) * src_edge + sx) * 4) as usize;
                     let d = (((dy + row) * edge + dx) * 4) as usize;
                     let n = (dw * 4) as usize;
-                    if s + n <= from.pixels.len() && d + n <= pixels.len() {
-                        pixels[d..d + n].copy_from_slice(&from.pixels[s..s + n]);
+                    if s + n <= src_pixels.len() && d + n <= pixels.len() {
+                        pixels[d..d + n].copy_from_slice(&src_pixels[s..s + n]);
                     }
                 }
             }

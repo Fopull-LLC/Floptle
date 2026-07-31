@@ -112,8 +112,18 @@ function update(node, dt)
   -- left to normalise here.
   local s, f = input.axis2("Move")
 
-  -- Crouch: the engine resizes the capsule, feet planted.
+  -- Crouch: the engine resizes the capsule, feet planted — so the camera dips
+  -- and your feet stay where they were. The height you write WINS over the
+  -- Rigidbody's authored one for as long as you keep writing it, so these two
+  -- params are the real thing, and either can be anything you like.
   local crouching = input.action("Crouch")
+  -- Standing up under a ledge would put your head through it: if there isn't
+  -- room overhead, stay down until there is.
+  if not crouching and params.stand_height > params.crouch_height then
+    local room = (params.stand_height - params.crouch_height) + 0.1
+    crouching = raycast(node.x, node.y, node.z, ux, uy, uz, params.crouch_height * 0.5 + room)
+      ~= nil
+  end
   if crouching then node.height = params.crouch_height else node.height = params.stand_height end
 
   local speed = params.walk

@@ -59,7 +59,7 @@ Shipped so physics games are buildable in-editor:
   out of the box.
 - **Codeable bodies (Lua)**: a rigidbody node's script reads `node.grounded`,
   reads/writes `node.vx/vy/vz`, and reads `node.up_x/y/z` (−gravity). Default
-  `assets/scripts/character.lua` (RMB look, WASD, Space jump) works on flat ground and
+  `assets/scripts/first_person.lua` (RMB look, WASD, Space jump) works on flat ground and
   around planets.
 - **Gizmos/telegraph**: cyan collider outlines (sphere/capsule), gravity-well gizmos,
   and orange contact crosses telegraphing collisions during Play.

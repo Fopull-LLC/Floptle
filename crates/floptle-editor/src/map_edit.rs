@@ -57,6 +57,12 @@ pub(crate) struct MapStore {
     /// rebuild, so the paint can follow the surfaces that survived an edit.
     /// Only kept for nodes that actually carry paint — see `map_paint`.
     pub(crate) paint_ident: HashMap<u32, crate::map_paint::MapPaintIdent>,
+    /// Paint an undo/redo is putting BACK, keyed by the durable surface names it
+    /// was captured under. Applied by the next `sync_map_paint` (which is where
+    /// the new triangulation first exists to attach it to), and only to surfaces
+    /// the live paint has nothing for — so undoing an extrude repaints the face
+    /// the extrude took away, and leaves everything painted since alone.
+    pub(crate) paint_restore: HashMap<u32, crate::map_paint::MapPaintStash>,
     /// Set when the sidecar for this scene exists but could NOT be read/parsed.
     /// While it is set the store is NOT the authority: unknown ids keep their
     /// nodes empty instead of being healed into boxes, and `save_maps` refuses
@@ -581,7 +587,7 @@ impl Editor {
                         _ => None,
                     }
                 })),
-                crate::Snapshot::MapMesh(id, _) => {
+                crate::Snapshot::MapMesh(id, ..) => {
                     live.insert(*id);
                 }
                 _ => {}
@@ -1463,7 +1469,7 @@ impl Editor {
                     sel.prune(mesh);
                 }
                 self.maps.dirty.insert(id);
-                self.push_history(crate::Snapshot::MapMesh(id, pre));
+                self.push_map_history(id, pre);
                 self.map_knife =
                     next_face.map(|f| MapKnife { face: f, at: floptle_map::CutPoint::Vert(ends_at) });
             }
@@ -2402,7 +2408,7 @@ impl Editor {
         if changed && declined.is_none() {
             sel.prune(mesh);
             self.maps.dirty.insert(id);
-            self.push_history(crate::Snapshot::MapMesh(id, pre));
+            self.push_map_history(id, pre);
             // A pivot move is one gesture across two stores: the geometry
             // snapshot above, and the node transform below (its own step would
             // let undo separate them and shift the node off its mesh).
@@ -2717,7 +2723,7 @@ impl Editor {
             return;
         };
         self.maps.dirty.insert(id);
-        self.push_history(crate::Snapshot::MapMesh(id, pre));
+        self.push_map_history(id, pre);
         let name = self
             .world
             .get::<floptle_core::Name>(entity)

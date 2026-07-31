@@ -442,6 +442,50 @@ mod tests {
         assert!((y - 0.5).abs() < 0.15, "entity settled at y={y}, expected ~0.5");
     }
 
+    /// A controller that writes its own capsule height every frame (every
+    /// character controller does — that is how crouch works) must STAND there,
+    /// not levitate. The per-step component sync used to rebuild the capsule
+    /// from the authored `RigidBody::height`, so re-planting the feet against
+    /// the reverted shape pushed the body up by the same delta every single
+    /// frame: change the script's stand height and you fly into the sky.
+    #[test]
+    fn a_scripted_capsule_height_does_not_levitate_the_body() {
+        let mut terrain = floptle_field::ChunkField::new(1.0);
+        terrain.fill_slab(
+            Vec3::new(-8.0, -8.0, -8.0),
+            Vec3::new(8.0, 8.0, 8.0),
+            0.0,
+            [0.4, 0.6, 0.3],
+        );
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(0.0, 3.0, 0.0)));
+        // Authored 2.0 m tall; the script wants 3.0 — the case that flew away.
+        ecs.insert(
+            e,
+            RigidBody { radius: 0.4, height: 2.0, kind: BodyKind::Capsule, ..Default::default() },
+        );
+        let mut sim = Sim::build(
+            &ecs,
+            &[(DVec3::ZERO, &terrain)],
+            GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)),
+            DVec3::ZERO,
+        );
+        let mut settled = f64::NAN;
+        for i in 0..600 {
+            sim.set_body_height(e.index(), 3.0); // what the script does, every frame
+            sim.sync_dynamic_params(&ecs);
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
+            if i == 299 {
+                settled = ecs.get::<Transform>(e).unwrap().translation.y;
+            }
+        }
+        let y = ecs.get::<Transform>(e).unwrap().translation.y;
+        // Capsule center rests half its height above the floor, and STAYS there.
+        assert!((y - 1.5).abs() < 0.2, "capsule settled at y={y}, expected ~1.5");
+        assert!((y - settled).abs() < 0.02, "body drifted {settled} → {y} while standing still");
+    }
+
     #[test]
     fn step_tick_advances_in_exact_gameplay_ticks() {
         // The netcode-era driver (docs/netcode-design.md §3): step_tick(1/60) must run

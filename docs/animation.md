@@ -92,6 +92,27 @@ Select a node that has a controller (or a rigged model) and open **Window →
   when you turned it on. Use **✚ New…** to start a fresh empty clip (it's added
   to the controller too).
 
+### Two states, one clip
+
+A **state** in a controller is a name plus a pointer to a clip *file*. Nothing
+stops two states pointing at the same file — that is how you reuse one `Hit`
+clip across three attacks, and it is a real authoring choice. But it also means
+those states are **one animation**: key it under either name and both change.
+
+So the ✎ Animating tab says so. A shared clip is marked **⚠ shared** in the
+animation dropdown, and selecting one shows a banner naming every state that
+plays it, with two fixes:
+
+- **Give this state its own copy** — copies the clip to a new file named after
+  the state and repoints only this state at it. The others keep sharing.
+- **Split every shared state** — one click for a whole controller: the first
+  state to use a clip keeps it, everyone else gets their own copy. This is the
+  one to reach for after generating a controller in bulk (a stack of states
+  wired up by hand or by a script often share a handful of placeholder clips),
+  before you start animating.
+
+Neither is automatic: sharing that you *meant* stays shared.
+
 Model-embedded clips that haven't been extracted are previewable but not
 editable — click ⬇ Extract on the model and the timeline opens the extracted
 files instead (no controller needed). Bone-level re-authoring stays in

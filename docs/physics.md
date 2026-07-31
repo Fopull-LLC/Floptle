@@ -70,7 +70,7 @@ Both coexist — a character walks across terrain and onto a mesh seamlessly.
 
 ## 5. The character controller
 
-`scripts/character.lua` is a ready-made first-person controller. Attach it to a **Camera
+`scripts/first_person.lua` is a ready-made first-person controller. Attach it to a **Camera
 node** that has a **Capsule Rigidbody** and mark the camera active. On Play you control
 that capsule (look / move / jump / run / crouch), and the camera rides it. It reads the
 body's velocity, grounded state, and up vector each frame, so it works on flat worlds and

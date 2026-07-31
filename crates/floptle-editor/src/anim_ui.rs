@@ -406,6 +406,54 @@ impl EditorTabViewer<'_> {
         }
     }
 
+    /// Break clip sharing in controller `k`: every state that plays a clip an
+    /// earlier state already plays gets its own copy of that clip file, named
+    /// after the state. With `only = Some(state)`, just that one state is split
+    /// (the rest keep sharing). Returns how many copies were made.
+    ///
+    /// Sharing is a legitimate authoring choice, so this is never automatic —
+    /// but it is one click, because the alternative (hand-editing the `.actl.ron`
+    /// and copying files) is how an afternoon of animation gets lost.
+    fn unshare_clips(&mut self, k: &str, only: Option<&str>) -> usize {
+        // The graph window may hold unsaved edits to this same controller.
+        if self.anim_ui.graph_key.as_deref() == Some(k) {
+            self.flush_graph(true);
+        }
+        let Some(mut cdoc) = self.anim.controller(k).cloned() else { return 0 };
+        let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut split = 0usize;
+        for layer in cdoc.layers.iter_mut() {
+            for st in layer.states.iter_mut() {
+                if st.clip.is_empty() {
+                    continue;
+                }
+                let res = self.anim.resolve_clip_key(&st.clip).unwrap_or_else(|| st.clip.clone());
+                let take_copy = match only {
+                    Some(o) => st.name == o,
+                    None => !claimed.insert(res.clone()),
+                };
+                if !take_copy {
+                    continue;
+                }
+                let Some(mut doc) = self.anim.clip(&res).cloned() else { continue };
+                doc.name = st.name.clone();
+                let key = crate::anim::new_clip_key(self.project_root, &st.name);
+                self.anim.save_clip(self.project_root, &key, &doc);
+                st.clip = key;
+                split += 1;
+            }
+        }
+        if split > 0 {
+            self.anim.save_controller(self.project_root, k, &cdoc);
+            if self.anim_ui.graph_key.as_deref() == Some(k) {
+                self.anim_ui.graph_doc = None; // reload with the new clip refs
+                self.anim_ui.graph_dirty = false;
+            }
+            self.anim_ui.clip_doc = None; // re-resolve against the new key
+        }
+        split
+    }
+
     fn anim_graph_ui(&mut self, ui: &mut egui::Ui) {
         let st = &mut *self.anim_ui;
         // ---- header: controller pick / create + controller-wide knobs ----
@@ -1169,6 +1217,15 @@ impl EditorTabViewer<'_> {
                 _ => Vec::new(),
             },
         };
+        // How many states play each clip FILE. Two states on one file are not two
+        // animations — they are one animation with two names, and editing either
+        // edits both. That used to be invisible; now the list says so.
+        let mut clip_users: HashMap<String, usize> = HashMap::new();
+        for (_, c) in &states {
+            if let Some(k) = self.anim.resolve_clip_key(c) {
+                *clip_users.entry(k).or_default() += 1;
+            }
+        }
         if self.anim_ui.sel_anim.as_ref().is_none_or(|s| !states.iter().any(|(n, _)| n == s)) {
             self.anim_ui.sel_anim = states.first().map(|(n, _)| n.clone());
             self.anim_ui.clip_doc = None;
@@ -1209,8 +1266,19 @@ impl EditorTabViewer<'_> {
             egui::ComboBox::from_id_salt("animating-state")
                 .selected_text(cur.clone())
                 .show_ui(ui, |ui| {
-                    for (n, _) in &states {
-                        if ui.selectable_label(Some(n) == self.anim_ui.sel_anim.as_ref(), n).clicked()
+                    for (n, c) in &states {
+                        // ⚠ = this state plays a clip another state also plays:
+                        // one file, so editing here edits there too.
+                        let shared = self
+                            .anim
+                            .resolve_clip_key(c)
+                            .and_then(|k| clip_users.get(&k).copied())
+                            .unwrap_or(1)
+                            > 1;
+                        let lbl = if shared { format!("{n}  ⚠ shared") } else { n.clone() };
+                        if ui
+                            .selectable_label(Some(n) == self.anim_ui.sel_anim.as_ref(), lbl)
+                            .clicked()
                         {
                             // Recording writes into the CURRENT clip — stop it before
                             // switching so keys can't land in the wrong animation.
@@ -1499,6 +1567,61 @@ impl EditorTabViewer<'_> {
                 .and_then(|k| Some((k.clone(), self.anim.clip(k)?.clone())));
             self.anim_ui.sel_event = None;
             self.anim_ui.sel_prop = None;
+        }
+
+        // ---- shared-clip guard --------------------------------------------
+        // Several states pointing at ONE clip file is legal (a "hit" reused by
+        // three attacks) but it is a single animation: keying it changes every
+        // state that plays it. Left unsaid, that reads as the editor randomly
+        // replacing your work — so say it, and offer the one-click fix.
+        if let (Some(res), Some(k)) = (resolved.clone(), ctl_key.clone()) {
+            let sharers: Vec<String> = states
+                .iter()
+                .filter(|(_, c)| self.anim.resolve_clip_key(c).as_deref() == Some(res.as_str()))
+                .map(|(n, _)| n.clone())
+                .collect();
+            if sharers.len() > 1 {
+                let all_shared =
+                    clip_users.values().filter(|&&n| n > 1).map(|n| n - 1).sum::<usize>();
+                egui::Frame::group(ui.style())
+                    .fill(Color32::from_rgb(60, 46, 20))
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.colored_label(
+                                Color32::from_rgb(240, 190, 100),
+                                format!(
+                                    "⚠ this clip ({res}) is played by {} states — {}. Editing it \
+                                     here changes all of them.",
+                                    sharers.len(),
+                                    sharers.join(", ")
+                                ),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button("Give this state its own copy")
+                                .on_hover_text(
+                                    "copy the clip to a new file named after this state and point \
+                                     only this state at it — the others keep sharing",
+                                )
+                                .clicked()
+                            {
+                                self.unshare_clips(&k, Some(&sel_anim));
+                            }
+                            if ui
+                                .button(format!("Split every shared state ({all_shared})"))
+                                .on_hover_text(
+                                    "every state that shares a clip with an earlier one gets its \
+                                     own copy — the whole controller becomes editable one \
+                                     animation at a time",
+                                )
+                                .clicked()
+                            {
+                                self.unshare_clips(&k, None);
+                            }
+                        });
+                    });
+            }
         }
 
         ui.separator();

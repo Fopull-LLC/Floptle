@@ -170,7 +170,7 @@ local move = slide(slide(move, node.wallNormal), node.groundNormal)
 
 `wallNormal` is the cliff you ran at; `groundNormal` catches a slope you are
 standing on that is still ground but steeper than you want to allow. The shipped
-`first_person.lua`, `character.lua` and `third_person.lua` all do exactly this —
+`first_person.lua` and `third_person.lua` both do exactly this —
 `params.slope_limit` in the Inspector.
 
 One more line pays for itself: while grounded and **not** jumping, drop any
@@ -1682,7 +1682,7 @@ No glue code required:
 
 1. Add a **Camera** node and mark it **Active**.
 2. Give it a **Rigidbody**, shape = **Capsule**.
-3. Attach **`character.lua`**.
+3. Attach **`first_person.lua`**.
 
 Press **Play** — you *are* the capsule. It moves under physics and the camera rides
 along, so you walk the world in first person:
@@ -1721,6 +1721,9 @@ Every project ships these under `scripts/` — open one for a working start:
 | `third_person.lua` | Third-person character body (capsule Rigidbody + a child named `Model` for the visuals; camera-relative movement, auto-turns, drives Idle/Walk/Run/Jump — matches the controller's real state names, e.g. `Idle.001`; slope-forgiving jump) |
 | `third_person_camera.lua` | Orbit camera for the third-person body (mouse orbits, scroll zooms, zoom all the way in for first-person freelook; raycasts so walls never clip the view) |
 | `freelook.lua` | Free-fly camera (right-mouse look, WASD, Shift to boost) |
+| `rts_camera.lua` | Isometric strategy camera (WASD/edge-of-screen panning, wheel zoom, Q/E rotate about the focus point, optional follow + map bounds) |
+| `rts_unit.lua` | A commandable unit: `moveTo(x, y, z)` / `stop()` / `isMoving()`, physics-driven if the node has a Rigidbody, transform-driven if it doesn't, with a selection ring |
+| `rts_commander.lua` | The mouse half of an RTS: click / drag-box to select (Shift adds), right-click the ground to send the selection there in a loose formation |
 | `rotate.lua` | Spin a node about Y |
 | `pulsate.lua` | Animate scale over time |
 | `float.lua` | Bob up and down |

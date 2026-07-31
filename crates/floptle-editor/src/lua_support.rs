@@ -27,6 +27,12 @@ pub(crate) const DEFAULT_SCRIPTS: &[(&str, &str)] = &[
     // input buffering and motion inputs. The worked example for the whole
     // action layer.
     ("fighter.lua", include_str!("../../../assets/scripts/fighter.lua")),
+    // A starting point for strategy games: an isometric camera you pan with
+    // WASD or the screen edge, commandable units, and the mouse layer that
+    // selects and orders them.
+    ("rts_camera.lua", include_str!("../../../assets/scripts/rts_camera.lua")),
+    ("rts_unit.lua", include_str!("../../../assets/scripts/rts_unit.lua")),
+    ("rts_commander.lua", include_str!("../../../assets/scripts/rts_commander.lua")),
 ];
 
 /// EmmyLua type annotations for the engine API, so an external Lua language server

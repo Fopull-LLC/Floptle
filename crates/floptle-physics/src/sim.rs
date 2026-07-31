@@ -27,6 +27,13 @@ struct BodyLink {
     rot0: Quat,
     /// Tilt the node so local +Y tracks the body's up (radial-gravity characters).
     align_up: bool,
+    /// A script-driven capsule height (`node.height = …`), which OUTRANKS the
+    /// authored `RigidBody::height` for as long as it is set. Without it the
+    /// per-step component sync rebuilt the capsule from the authored height
+    /// every step, so a controller writing any other height re-planted the feet
+    /// against a shape that had already snapped back — a fixed push along `up`
+    /// every frame, which is a character that slowly flies into the sky.
+    height_set: Option<f32>,
 }
 
 /// One compound assembly's link back to its ROOT entity. Shape ids inside the
@@ -258,7 +265,14 @@ impl Sim {
                 continue;
             }
             let (b, rot0) = Self::body_from(ecs, e, &rb, world.origin, &layers);
-            map.push(BodyLink { entity: e, body: world.add_body(b), lock_rot: rb.lock_rot, rot0, align_up: rb.align_up });
+            map.push(BodyLink {
+                entity: e,
+                body: world.add_body(b),
+                lock_rot: rb.lock_rot,
+                rot0,
+                align_up: rb.align_up,
+                height_set: None,
+            });
         }
         Self {
             world,
@@ -538,7 +552,14 @@ impl Sim {
         let (b, rot0) = Self::body_from(ecs, e, &rb, self.world.origin, &self.layers);
         let pos = b.pos;
         let bi = self.world.add_body(b);
-        self.map.push(BodyLink { entity: e, body: bi, lock_rot: rb.lock_rot, rot0, align_up: rb.align_up });
+        self.map.push(BodyLink {
+            entity: e,
+            body: bi,
+            lock_rot: rb.lock_rot,
+            rot0,
+            align_up: rb.align_up,
+            height_set: None,
+        });
         // Keep the render-interpolation anchors aligned mid-tick (they rebuild
         // from scratch at the next `step_tick` anyway).
         if self.tick_prev.len() == bi {
@@ -1628,6 +1649,7 @@ impl Sim {
                 }
                 self.map[i].lock_rot = rb.lock_rot;
                 self.map[i].align_up = rb.align_up;
+                let height_set = self.map[i].height_set;
                 // Live layer switches: `node.layer = "Ghost"` (or an Inspector
                 // edit) re-resolves against the play-start layer table.
                 let layer = self.layers.index_for(ecs, ent);
@@ -1671,7 +1693,11 @@ impl Sim {
                 b.shape = match rb.kind {
                     BodyKind::Sphere => BodyShape::Sphere,
                     BodyKind::Capsule => {
-                        let half = (rb.height.max(2.0 * b.radius) * 0.5 - b.radius).max(0.0);
+                        // A script-set height (crouch, or simply a controller
+                        // with its own stand height) outranks the authored one
+                        // — otherwise this rebuild undid it every step.
+                        let h = height_set.unwrap_or(rb.height);
+                        let half = (h.max(2.0 * b.radius) * 0.5 - b.radius).max(0.0);
                         BodyShape::Capsule { half_height: half }
                     }
                     BodyKind::Box => {
@@ -1708,16 +1734,24 @@ impl Sim {
     /// Set a capsule body's total standing height (for crouch). The feet stay planted —
     /// the body shrinks/grows from the top, so the center (and a camera at it) lowers
     /// when crouching. No-op on a sphere body or when the height is unchanged.
+    ///
+    /// The height is REMEMBERED on the link, so the per-step component sync
+    /// (which otherwise rebuilds the capsule from the authored `RigidBody`
+    /// height) leaves it alone. Re-planting the feet against a shape that had
+    /// silently snapped back was a constant push along `up` every frame.
     pub fn set_body_height(&mut self, eid: u32, height: f32) {
-        for l in &self.map {
+        for l in &mut self.map {
             if l.entity.index() == eid {
                 let b = &mut self.world.bodies[l.body];
                 if let BodyShape::Capsule { half_height } = b.shape {
                     let r = b.radius;
                     let new_half = (height.max(2.0 * r) * 0.5 - r).max(0.0);
-                    b.pos += b.up * (new_half - half_height); // keep feet planted
-                    b.prev_pos += b.up * (new_half - half_height); // don't smear the resize
-                    b.shape = BodyShape::Capsule { half_height: new_half };
+                    l.height_set = Some(height);
+                    if new_half != half_height {
+                        b.pos += b.up * (new_half - half_height); // keep feet planted
+                        b.prev_pos += b.up * (new_half - half_height); // don't smear the resize
+                        b.shape = BodyShape::Capsule { half_height: new_half };
+                    }
                 }
                 return;
             }

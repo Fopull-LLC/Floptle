@@ -636,6 +636,25 @@ impl InputMap {
                         },
                     ],
                 },
+                // Swing a camera around what it is looking at (the RTS view's
+                // Q/E, a shoulder button on a pad). An axis, not two actions,
+                // so an analog binding can rotate at a rate.
+                Axis1 {
+                    name: "Turn".into(),
+                    socd: Socd::Neutral,
+                    bindings: vec![
+                        Axis1Binding::Keys {
+                            minus: key(Key::KeyQ),
+                            plus: key(Key::KeyE),
+                            player: None,
+                        },
+                        Axis1Binding::Keys {
+                            minus: pad(PadButton::LeftBumper),
+                            plus: pad(PadButton::RightBumper),
+                            player: None,
+                        },
+                    ],
+                },
                 // Vertical movement for a fly camera: keys, or the triggers.
                 Axis1 {
                     name: "Fly".into(),

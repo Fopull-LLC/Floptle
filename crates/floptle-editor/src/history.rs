@@ -139,6 +139,37 @@ impl Editor {
         Some(cur)
     }
 
+    /// Bank a map-geometry edit: the pre-edit mesh AND the paint that was on it,
+    /// as ONE undo step. Call it with the mesh as it was before the op (the
+    /// paint is still pre-edit at this point — it only re-attaches on the next
+    /// `sync_map_paint`, which is a frame away).
+    pub(crate) fn push_map_history(&mut self, id: u32, pre: floptle_map::MapMesh) {
+        let paint = self.map_paint_stash(id, &pre).map(Box::new);
+        self.push_history(Snapshot::MapMesh(id, pre, paint));
+    }
+
+    /// Restore a map mesh and hand its stashed paint to the next rebuild,
+    /// returning the inverse step (the mesh + paint that were live).
+    fn swap_map_step(
+        &mut self,
+        id: u32,
+        mesh: &floptle_map::MapMesh,
+        paint: Option<Box<crate::map_paint::MapPaintStash>>,
+    ) -> Snapshot {
+        let inverse = self
+            .maps
+            .meshes
+            .get(&id)
+            .cloned()
+            .and_then(|live| self.map_paint_stash(id, &live))
+            .map(Box::new);
+        let cur = self.swap_map_mesh(id, mesh);
+        if let Some(p) = paint {
+            self.maps.paint_restore.insert(id, *p);
+        }
+        Snapshot::MapMesh(id, cur, inverse)
+    }
+
     pub(crate) fn undo(&mut self) {
         if self.playing {
             return; // stop play before editing history
@@ -168,9 +199,9 @@ impl Editor {
                     self.history.redo.push(redo);
                 }
             }
-            Some(Snapshot::MapMesh(id, prev)) => {
-                let cur = self.swap_map_mesh(id, &prev);
-                self.history.redo.push(Snapshot::MapMesh(id, cur));
+            Some(Snapshot::MapMesh(id, prev, paint)) => {
+                let inverse = self.swap_map_step(id, &prev, paint);
+                self.history.redo.push(inverse);
             }
             None => {}
         }
@@ -202,9 +233,9 @@ impl Editor {
                     self.history.undo.push(undo);
                 }
             }
-            Some(Snapshot::MapMesh(id, next)) => {
-                let cur = self.swap_map_mesh(id, &next);
-                self.history.undo.push(Snapshot::MapMesh(id, cur));
+            Some(Snapshot::MapMesh(id, next, paint)) => {
+                let inverse = self.swap_map_step(id, &next, paint);
+                self.history.undo.push(inverse);
             }
             None => {}
         }

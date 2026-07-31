@@ -3193,7 +3193,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node.vz", insert: "node.vz", doc: "Rigidbody velocity Z (m/s)." },
     ApiEntry { label: "node.grounded", insert: "node.grounded", doc: "True while the rigidbody rests on a surface (read-only). Gate jumps on it." },
     ApiEntry { label: "node.groundNormal", insert: "node.groundNormal", doc: "The floor the body is standing on, as a vec3 normal — nil when airborne, so it is exactly node.grounded with the surface attached. Read-only. `node.groundNormal:dot(node.up)` is the cosine of the slope: 1 is flat, 0.5 is 60°. Align a character to the ground, judge a landing, or refuse to walk up something too steep." },
-    ApiEntry { label: "node.wallNormal", insert: "node.wallNormal", doc: "The steepest surface the body is pressed against, as a vec3 normal — the cliff you ran at, the crate you're shoving — or nil when there's nothing but floor. Read-only. This is what stops a controller launching itself: driving into a steep face means the solver pushes the capsule out along a normal that points partly UP, every frame, which reads as being fired into the sky. Take that component out of your movement (see character.lua's `slide`) and you slide along the face instead. Also: wall jumps, wall slides, 'you can't go that way'." },
+    ApiEntry { label: "node.wallNormal", insert: "node.wallNormal", doc: "The steepest surface the body is pressed against, as a vec3 normal — the cliff you ran at, the crate you're shoving — or nil when there's nothing but floor. Read-only. This is what stops a controller launching itself: driving into a steep face means the solver pushes the capsule out along a normal that points partly UP, every frame, which reads as being fired into the sky. Take that component out of your movement (see first_person.lua's `slide`) and you slide along the face instead. Also: wall jumps, wall slides, 'you can't go that way'." },
     ApiEntry { label: "node.up_x", insert: "node.up_x", doc: "Body up (−gravity) X — radial on a planet, so move along it for planet gravity. Read-only." },
     ApiEntry { label: "node.up_y", insert: "node.up_y", doc: "Body up (−gravity) Y (read-only)." },
     ApiEntry { label: "node.up_z", insert: "node.up_z", doc: "Body up (−gravity) Z (read-only)." },
@@ -3633,7 +3633,7 @@ Stop pushing, and what's left is a slide:
 
 …and while grounded and not jumping, drop any upward velocity you did not ask
 for — it came from being pushed out of a slope, and keeping it is how a walk
-turns into a takeoff. The shipped first_person.lua / character.lua /
+turns into a takeoff. The shipped first_person.lua /
 third_person.lua do both, with `slope_limit` in the Inspector.",
     ),
     (
@@ -4155,8 +4155,10 @@ A minimal controller, to show the velocity loop:
 • The Inspector edits a script's params live; errors show at the top of this tab.
 
 Bundled examples (in scripts/): first_person.lua + third_person.lua +
-third_person_camera.lua (see §7), freelook.lua (fly camera), rotate.lua,
-pulsate.lua, float.lua — open one for a working start.",
+third_person_camera.lua (see §7), freelook.lua (fly camera), the RTS trio
+(rts_camera.lua + rts_unit.lua + rts_commander.lua: isometric camera, units
+that take move orders, click/box select), rotate.lua, pulsate.lua, float.lua
+— open one for a working start.",
     ),
 ];
 
