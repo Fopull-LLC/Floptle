@@ -23,12 +23,14 @@
 use glam::{Mat4, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
+mod knife;
 mod ops;
 mod primitives;
 mod raycast;
 mod select;
 mod triangulate;
 
+pub use knife::{knife, nearest_cut_point, CutPoint, KnifeCut};
 pub use ops::{
     bridge_faces, delete_faces, detach_faces, extrude_faces, flip_faces, inset_faces, merge_into,
     recenter, recenter_on, resize, set_face_slot, snap_verts, subdivide_faces, transform_verts,

@@ -15,6 +15,8 @@ otherworldly visuals (Fopull LLC).
 - [multiplayer.md](multiplayer.md) — from a single-player scene to **two machines playing
   together**: which replication mode to pick, prediction, rollback for fighting games,
   testing on one desk, and shipping (relay, dedicated server, interest management).
+- [map-tools.md](map-tools.md) — the **⬢ Map** tool: draw, cut, texture and
+  **paint** blockout levels in the editor, without a round trip to Blender.
 - [image-editor.md](image-editor.md) — the **🖼 Image** tab: draw a texture in the
   engine and watch it change on the mesh (pixels, paint and vectors, one document).
 - [export-builds.md](export-builds.md) — **shipping a build** players can run.

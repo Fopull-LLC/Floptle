@@ -208,11 +208,12 @@ enum PlayState { Editing, Playing, Paused }
 
 This section has narrowed over time (texture painting and the embedded IDE both
 landed after it was written, and the **map-building suite** —
+[`../map-tools.md`](../map-tools.md), designed in
 [`../map-tools-proposal.md`](../map-tools-proposal.md) — added real in-editor
 blockout modeling via the ⬢ Map tool: draw a shape by dragging out its base
 then its height, vertex/edge/face editing with normal-aligned move/rotate/scale
-gizmos, extrude/inset/bridge/subdivide, and per-face materials). What still
-holds:
+gizmos, extrude/inset/bridge/subdivide, a knife, per-face materials, and vertex
++ texture painting that survives geometry edits). What still holds:
 
 - **Character/prop modeling** — sculpt, retopo, precise UV unwrapping, subdiv
   surface work stay in **Blender**, imported via glTF

@@ -484,6 +484,12 @@ impl PaintMeshCache {
         self.parts.get(key)
     }
 
+    /// Drop one model's cached geometry — for meshes the editor itself EDITS
+    /// (blockout nodes), whose triangles change under the brush.
+    pub(crate) fn remove(&mut self, key: &str) {
+        self.parts.remove(key);
+    }
+
     /// Drop every cached model. Called wherever `mesh_registry` is cleared (project
     /// open, scene reload) — geometry the renderer has dropped must not linger here, or
     /// the brush would raycast a stale mesh and paint the wrong vertices.

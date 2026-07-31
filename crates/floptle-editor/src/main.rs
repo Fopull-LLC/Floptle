@@ -63,6 +63,7 @@ mod lua_format;
 mod lua_lint;
 mod lua_support;
 mod map_edit;
+mod map_paint;
 mod map_ui;
 mod matter_catalog;
 mod net;
@@ -329,6 +330,8 @@ struct EditorCmd {
     set_map_mode: Option<map_edit::MapSubMode>,
     /// Arm (or disarm, with `None`) a shape for interactive drawing.
     set_map_arm: Option<Option<map_edit::MapShape>>,
+    /// Arm/disarm the ✂ knife.
+    set_map_knife: Option<bool>,
     /// Detach the selected faces into their own map node.
     map_detach: bool,
     /// Turn the selected map node by N * 90 degrees about its up axis.
@@ -550,6 +553,7 @@ struct EditorTabViewer<'a> {
     map_size_buf: &'a mut Option<Vec3>,
     map_spec_buf: &'a mut Option<floptle_map::ShapeSpec>,
     map_arm: Option<map_edit::MapShape>,
+    map_knife_on: bool,
     map_orient: &'a mut map_edit::MapOrient,
     map_xform: &'a mut map_edit::MapXform,
     map_select_hidden: &'a mut bool,
@@ -1170,8 +1174,15 @@ struct Editor {
     map_drag: Option<map_edit::MapDrag>,
     /// Pre-gesture mesh snapshot, banked as one undo step on release.
     map_stroke: Option<(u32, floptle_map::MapMesh)>,
-    /// Box-select anchor (physical px) while LMB is held on bare space.
+    /// Box-select anchor (physical px) while LMB is held. Every map press
+    /// records one — the release decides whether the gesture was a click (pick
+    /// what is under it) or a drag (apply the box), which is what lets a box
+    /// start ON the mesh instead of only on empty space.
     map_box: Option<Vec2>,
+    /// ✂ Knife armed: clicks cut faces instead of selecting them.
+    map_knife_on: bool,
+    /// The cut waiting for its second click.
+    map_knife: Option<map_edit::MapKnife>,
     /// This frame's sub-object gizmo transform (selection centroid), cached by
     /// the map driver — the render scope's borrows forbid computing it there.
     map_gizmo: Option<floptle_core::Transform>,
@@ -2357,9 +2368,13 @@ impl ApplicationHandler for Editor {
         }
         // Saved paint comes back only now that gpu/raster live in `self` (vertex blocks +
         // texture-paint atlases are GPU allocations — see the NOTE at the scene load above).
+        // Maps FIRST: a blockout node's paint is keyed to its triangulation,
+        // and the triangulation comes out of the map store — loading paint
+        // before the geometry it belongs to would find nothing to attach to
+        // and quietly drop it.
+        self.adopt_maps();
         self.adopt_paint();
         self.adopt_tex_paint();
-        self.adopt_maps();
         let now = Instant::now();
         self.last = Some(now);
         self.started = Some(now);
@@ -2563,9 +2578,13 @@ impl ApplicationHandler for Editor {
                                     && self.image.cancel_pen()
                                 {
                                     // Backed out of an in-progress vector path.
-                                } else if self.map_draw_cancel() || self.map_arm.take().is_some() {
-                                    // Back out of a draw gesture / disarm the
-                                    // shape before anything else claims Escape.
+                                } else if self.map_knife_cancel()
+                                    || self.map_draw_cancel()
+                                    || self.map_arm.take().is_some()
+                                {
+                                    // Back out of a pending cut / a draw gesture,
+                                    // then disarm the knife or the shape, before
+                                    // anything else claims Escape.
                                 } else if self.game_trap || self.script_mouse_lock {
                                     // Free BOTH lock owners — a script that holds the
                                     // mouse (setMouseLocked) must not survive Escape,
@@ -2803,12 +2822,26 @@ impl ApplicationHandler for Editor {
                             if let Some(cursor) = self.cursor {
                                 self.map_draw_begin(cursor);
                             }
+                        } else if self.tool == Tool::MapEdit
+                            && self.map_knife_on
+                            && self.map_target().is_some()
+                        {
+                            // ✂ armed: the click is a cut, not a selection. With
+                            // no map node targeted yet it is NOT — the knife has
+                            // nothing to cut, and swallowing the click would
+                            // leave no way to pick the node you meant to cut.
+                            self.context_menu = None;
+                            if let Some(cursor) = self.cursor {
+                                self.map_knife_click(cursor);
+                            }
                         } else if self.tool == Tool::MapEdit {
                             // Map tool: a gizmo grab drags the SUB-OBJECT selection;
-                            // otherwise clicks pick verts/edges/faces, and a press on
-                            // bare space starts a box-select which falls back to a
-                            // node pick if it turns out to be a click (that fallback
-                            // is the only way to switch between map nodes by eye).
+                            // otherwise the press only ANCHORS, and the release decides
+                            // whether the gesture was a click (pick what's under it) or
+                            // a drag (box-select). Selecting on press is what used to
+                            // confine box-select to empty space — and a blockout that
+                            // fills the screen has none, which is what made picking a
+                            // row of faces a click-at-a-time job.
                             if let (Some(h), Some(e), Some(start_xf)) =
                                 (hovered, self.primary(), self.map_gizmo_xf())
                             {
@@ -2824,20 +2857,7 @@ impl ApplicationHandler for Editor {
                                     });
                                 }
                             } else if let Some(cursor) = self.cursor {
-                                let extend = self.shift || self.ctrl;
-                                if !self.map_click(cursor, extend) {
-                                    if self.map_target().is_some() {
-                                        self.map_box = Some(cursor);
-                                    } else {
-                                        // No map node targeted yet: normal node pick so
-                                        // clicking a map mesh starts editing it.
-                                        match self.pick(cursor) {
-                                            Some(e) if extend => self.select_toggle(e),
-                                            Some(e) => self.select_single(e),
-                                            None => {}
-                                        }
-                                    }
-                                }
+                                self.map_box = Some(cursor);
                             }
                         } else if let (Some(h), Some(e)) = (hovered, self.primary()) {
                             // On a gizmo handle ⏵ start an undoable edit and grab it.
@@ -2928,19 +2948,21 @@ impl ApplicationHandler for Editor {
                     if let (Some(anchor), Some(cursor)) = (self.map_box.take(), self.cursor)
                         && self.tool == Tool::MapEdit
                     {
-                        if (cursor - anchor).length() > 4.0 {
-                            self.map_box_apply(anchor, cursor, self.shift || self.ctrl);
-                        } else {
-                            // A CLICK on bare space (not a box drag): re-pick the
-                            // node, so clicking another map mesh starts editing it
-                            // and clicking empty space steps out. Without this the
-                            // map tool was a one-way street into the first node
-                            // you selected.
-                            let extend = self.shift || self.ctrl;
+                        // Shift adds, Ctrl subtracts — for the box AND the click,
+                        // from the one place that reads the modifiers.
+                        let how = map_edit::SelectMode::of(self.shift, self.ctrl);
+                        if (cursor - anchor).length() > map_edit::MAP_DRAG_PX {
+                            self.map_box_apply(anchor, cursor, how);
+                        } else if !self.map_click(cursor, how) {
+                            // A click that hit no sub-object: re-pick the NODE, so
+                            // clicking another map mesh starts editing it and
+                            // clicking empty space steps out. Without this the map
+                            // tool was a one-way street into the first node you
+                            // selected.
                             match self.pick(cursor) {
-                                Some(e) if extend => self.select_toggle(e),
+                                Some(e) if how.keeps_existing() => self.select_toggle(e),
                                 Some(e) => self.select_single(e),
-                                None if !extend => self.selection.clear(),
+                                None if !how.keeps_existing() => self.selection.clear(),
                                 None => {}
                             }
                         }

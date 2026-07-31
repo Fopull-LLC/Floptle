@@ -16,6 +16,11 @@ pub struct SlotMesh {
     pub indices: Vec<u32>,
     /// Per-TRIANGLE (indices.len()/3 entries) source face index in the MapMesh.
     pub tri_faces: Vec<u32>,
+    /// Per-VERTEX source `(face index, MapMesh vertex index)`. Corners are not
+    /// shared between faces, so this is what lets paint follow the surface
+    /// across a re-triangulation: the editor turns it into a durable key and
+    /// carries the colours over (see `map_paint`).
+    pub vert_src: Vec<(u32, u32)>,
 }
 
 /// Face normal via Newell's method (robust for near-planar n-gons), normalized.
@@ -93,6 +98,7 @@ pub fn triangulate(mesh: &MapMesh) -> Vec<SlotMesh> {
                 sm.positions.push(p.to_array());
                 sm.normals.push(n.to_array());
                 sm.uvs.push(face_uv(p, n));
+                sm.vert_src.push((fi as u32, vi));
             }
             for i in 1..f.verts.len() as u32 - 1 {
                 sm.indices.extend_from_slice(&[base, base + i, base + i + 1]);
@@ -124,6 +130,13 @@ mod tests {
         assert_eq!(s.tri_faces.len(), 12);
         assert_eq!(s.normals.len(), 24);
         assert_eq!(s.uvs.len(), 24);
+        // Every emitted corner says which face and which source vertex it came
+        // from, in step with the positions.
+        assert_eq!(s.vert_src.len(), 24);
+        for (i, &(fi, vi)) in s.vert_src.iter().enumerate() {
+            assert!(m.faces[fi as usize].verts.contains(&vi));
+            assert_eq!(Vec3::from(s.positions[i]), m.verts[vi as usize]);
+        }
         for &i in &s.indices {
             assert!((i as usize) < s.positions.len());
         }

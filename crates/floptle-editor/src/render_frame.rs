@@ -49,6 +49,9 @@ impl Editor {
         // gather below always finds a current `@map/<id>` registry entry; then
         // the Map tool's hover/selection overlay.
         self.sync_map_meshes();
+        // …and re-attach any paint to the surfaces that survived the edit,
+        // before anything draws with a stale block.
+        self.sync_map_paint();
         self.map_edit_frame_update();
 
         // Inspector asset preview: render the spinning model/material (or load the
@@ -1029,12 +1032,15 @@ impl Editor {
                 Matter::MapMesh { id } => {
                     // Renders through the same per-part path as imported models
                     // (parts = material slots), so ObjectMaterials overrides
-                    // keyed by slot name work unchanged. No rig, no paint.
+                    // keyed by slot name work unchanged, and — since parts are
+                    // one-per-slot in the same order the paint cache builds them
+                    // — so does vertex paint. No rig.
                     if let Some(asset) = self.mesh_registry.get(&crate::map_edit::map_key(*id)) {
                         let model = t.render_matrix(cam.world_position);
                         let mp = mat.as_ref().map(material_params);
                         let obj_mats = self.world.get::<floptle_core::ObjectMaterials>(*e);
-                        push_mesh_instances(gpu, raster, asset, None, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, None, *e, skin_variants, &mut skin_scratch, &mut instances, flsl, &mut flsl_draws);
+                        let node_paint = paint_bases.get(e).map(|v| v.as_slice());
+                        push_mesh_instances(gpu, raster, asset, None, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, flsl, &mut flsl_draws);
                     }
                 }
                 // group / terrain / camera / light / gravity / skybox / post render
@@ -1404,6 +1410,7 @@ impl Editor {
         let map_size_buf = &mut self.map_size_buf;
         let map_spec_buf = &mut self.map_spec_buf;
         let map_arm = self.map_arm;
+        let map_knife_on = self.map_knife_on;
         let map_orient = &mut self.map_orient;
         let map_xform = &mut self.map_xform;
         let map_select_hidden = &mut self.map_select_hidden;
@@ -2421,6 +2428,7 @@ impl Editor {
                 map_size_buf,
                 map_spec_buf,
                 map_arm,
+                map_knife_on,
                 map_orient,
                 map_xform,
                 map_select_hidden,
@@ -4884,8 +4892,17 @@ impl Editor {
             // Converts rather than clears — see `set_map_mode`.
             self.set_map_mode(mode);
         }
+        if let Some(on) = cmd.set_map_knife {
+            self.set_map_knife(on);
+            // Cutting needs the tool, same as drawing does.
+            if on && self.tool != Tool::MapEdit {
+                self.set_tool(Tool::MapEdit);
+                self.set_map_knife(true); // set_tool clears it on the way in
+            }
+        }
         if let Some(arm) = cmd.set_map_arm {
             self.map_draw = None;
+            self.set_map_knife(false); // drawing and cutting both own the click
             self.map_arm = arm;
             // Drawing needs the tool: arming from the tab turns it on rather
             // than leaving a button that visibly does nothing.
@@ -6152,9 +6169,10 @@ impl Editor {
                         let model = t.render_matrix(cam.world_position);
                         let mp = mat.as_ref().map(material_params);
                         let obj_mats = self.world.get::<floptle_core::ObjectMaterials>(*ent);
+                        let node_paint = paint_bases.get(ent).map(|v| v.as_slice());
                         push_mesh_instances(
                             gpu, raster, asset, None, model, tex, mp.as_ref(), obj_mats,
-                            &self.texture_registry, None,
+                            &self.texture_registry, node_paint,
                             *ent, &mut self.skin_variants,
                             &mut skin_scratch, &mut instances, flsl, &mut flsl_draws,
                         );

@@ -213,7 +213,99 @@ impl EditorTabViewer<'_> {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
                         let k = |c: crate::map_keys::MapCmd| self.map_keys.label(c);
-                        // One line: mode · gizmo · handles · what's armed.
+                        // The sub-object mode gets THREE chips, not one cycling
+                        // label: the mode you want is one click, and the two you
+                        // aren't in are visible instead of being somewhere in a
+                        // rotation. This is the control you touch most, and it
+                        // lives over the viewport so it never hides behind
+                        // another dock tab.
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            for mode in crate::map_edit::MapSubMode::ALL {
+                                if ui
+                                    .add_sized(
+                                        [66.0, 20.0],
+                                        egui::Button::selectable(
+                                            self.map_mode == mode,
+                                            egui::RichText::new(format!(
+                                                "{} {}",
+                                                mode.glyph(),
+                                                mode.label()
+                                            ))
+                                            .small(),
+                                        ),
+                                    )
+                                    .on_hover_text(format!(
+                                        "select {} — {} (or {} to cycle). Your selection \
+                                         converts rather than being dropped.",
+                                        mode.plural(),
+                                        k(mode.cmd()),
+                                        k(crate::map_keys::MapCmd::ModeCycle),
+                                    ))
+                                    .clicked()
+                                {
+                                    self.cmd.set_map_mode = Some(mode);
+                                }
+                            }
+                            ui.separator();
+                            // Select-everything, one click from the viewport —
+                            // it was a key nobody could guess and a button in a
+                            // panel that might not even be open.
+                            let sel_btn = |ui: &mut egui::Ui, text: &str, hover: String| {
+                                ui.add(
+                                    egui::Button::new(egui::RichText::new(text).small())
+                                        .min_size(egui::vec2(0.0, 20.0)),
+                                )
+                                .on_hover_text(hover)
+                                .clicked()
+                            };
+                            if sel_btn(
+                                ui,
+                                "All",
+                                format!(
+                                    "select every {} in this mesh  ({})",
+                                    self.map_mode.label(),
+                                    k(crate::map_keys::MapCmd::SelectAll)
+                                ),
+                            ) {
+                                self.cmd.map_op = Some(crate::map_edit::MapOp::SelectAll);
+                            }
+                            if sel_btn(
+                                ui,
+                                "None",
+                                format!("clear it  ({})", k(crate::map_keys::MapCmd::SelectNone)),
+                            ) {
+                                self.cmd.map_op = Some(crate::map_edit::MapOp::SelectNone);
+                            }
+                            if sel_btn(
+                                ui,
+                                "Invert",
+                                format!(
+                                    "swap selected for unselected  ({})",
+                                    k(crate::map_keys::MapCmd::SelectInvert)
+                                ),
+                            ) {
+                                self.cmd.map_op = Some(crate::map_edit::MapOp::SelectInvert);
+                            }
+                            ui.separator();
+                            if ui
+                                .add_sized(
+                                    [58.0, 20.0],
+                                    egui::Button::selectable(
+                                        self.map_knife_on,
+                                        egui::RichText::new("✂ Knife").small(),
+                                    ),
+                                )
+                                .on_hover_text(format!(
+                                    "cut a face from one edge or corner to another  ({})",
+                                    k(crate::map_keys::MapCmd::Knife)
+                                ))
+                                .clicked()
+                            {
+                                self.cmd.set_map_knife = Some(!self.map_knife_on);
+                            }
+                        });
+                        // Second line: gizmo · handles · what's armed.
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("⬢").small().weak());
                             let cycle = |ui: &mut egui::Ui, text: &str, hover: String| {
@@ -221,14 +313,6 @@ impl EditorTabViewer<'_> {
                                     .on_hover_text(hover)
                                     .clicked()
                             };
-                            if cycle(
-                                ui,
-                                self.map_mode.label(),
-                                format!("sub-object mode — click or {} to cycle", k(crate::map_keys::MapCmd::ModeCycle)),
-                            ) {
-                                self.cmd.set_map_mode = Some(self.map_mode.next());
-                            }
-                            ui.label(egui::RichText::new("·").weak().small());
                             if cycle(
                                 ui,
                                 self.map_xform.label(),
@@ -323,8 +407,14 @@ impl EditorTabViewer<'_> {
                                 h.push_str("  ·  Esc cancel");
                                 h
                             }
+                            None if self.map_knife_on => {
+                                "✂ click an edge or a corner, then another on the same face  \
+                                 ·  keeps cutting from there  ·  Esc ends the cut"
+                                    .to_string()
+                            }
                             None => format!(
-                                "click to select  ·  drag empty space to box-select  ·  {} extrude  ·  {} inset",
+                                "click to select  ·  drag anywhere to box-select  ·  Shift adds, \
+                                 Ctrl removes  ·  {} extrude  ·  {} inset",
                                 k(crate::map_keys::MapCmd::Extrude),
                                 k(crate::map_keys::MapCmd::Inset),
                             ),
@@ -535,6 +625,25 @@ impl EditorTabViewer<'_> {
                 let r = egui::Rect::from_two_pos(pt(a), pt(b));
                 painter.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(255, 200, 80, 18));
                 painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, sel_col), egui::StrokeKind::Inside);
+            }
+            // ✂ Knife: the pending cut and where it would land. The end point is
+            // drawn as a RING on an existing corner and a dot mid-edge, so you
+            // can see before you click whether the cut reuses a corner or makes
+            // a new one.
+            let cut_col = egui::Color32::from_rgb(255, 120, 120);
+            if let Some((p, on_corner)) = viz.knife_to {
+                if let Some(from) = viz.knife_from {
+                    painter.line_segment([pt(from), pt(p)], egui::Stroke::new(2.0, cut_col));
+                }
+                if on_corner {
+                    painter.circle_stroke(pt(p), 6.0, egui::Stroke::new(2.0, cut_col));
+                } else {
+                    painter.circle_filled(pt(p), 4.0, cut_col);
+                }
+            }
+            if let Some(from) = viz.knife_from {
+                painter.circle_filled(pt(from), 4.0, cut_col);
+                painter.circle_stroke(pt(from), 7.0, egui::Stroke::new(1.5, cut_col));
             }
         }
 

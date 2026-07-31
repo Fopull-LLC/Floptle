@@ -60,11 +60,11 @@ use crate::Editor;
 
 /// Paint textures sample nearest + clamp: crisp retro pixels, and (with the atlas padding)
 /// no filtering bleed across the packed triangle patches.
-const PAINT_SAMPLING: TexSampling = TexSampling { filter: TexFilter::Pixelated, wrap: TexWrap::Clamp };
+pub(crate) const PAINT_SAMPLING: TexSampling = TexSampling { filter: TexFilter::Pixelated, wrap: TexWrap::Clamp };
 
 /// A fresh canvas texel: fully transparent (the overlay shows nothing), with WHITE rgb so
 /// the Multiply/Darken blend modes see the identity when paint first lands on a texel.
-const CLEAR_TEXEL: [u8; 4] = [255, 255, 255, 0];
+pub(crate) const CLEAR_TEXEL: [u8; 4] = [255, 255, 255, 0];
 
 /// The overlay's instance alpha: just under the renderer's opaque cutoff (0.999), so the
 /// overlay routes to the alpha-blended transparent pass. Visually indistinguishable from 1.
@@ -153,7 +153,24 @@ impl Editor {
             );
             // Registering with the atlas's remapped COLOR_0 allocates its paint block, so
             // the overlay's paint is shaded by the mesh's imported per-vertex look.
-            let mesh_id = raster.register(gpu, &atlas.mesh, None);
+            //
+            // A BLOCKOUT's atlas is a dynamic slot instead: its geometry changes
+            // every time the level is edited, and static meshes can never be
+            // freed — so a re-registration per edit of a painted wall would leak
+            // one for the whole session. (Map geometry carries no COLOR_0, so
+            // there is no imported block to lose by taking this path.)
+            let mesh_id = if crate::map_edit::map_key_id(key).is_some() {
+                let id = raster.register_dynamic(
+                    gpu,
+                    atlas.mesh.vertices.len() as u32,
+                    atlas.mesh.indices.len() as u32,
+                    false,
+                );
+                raster.replace_dynamic(gpu, id, &atlas.mesh);
+                id
+            } else {
+                raster.register(gpu, &atlas.mesh, None)
+            };
             let mesh_vp = raster.mesh_paint_base(mesh_id);
             pt.parts.push(PaintPartTex {
                 pixels,

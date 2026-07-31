@@ -22,6 +22,13 @@ pub(crate) fn map_key(id: u32) -> String {
     format!("@map/{id}")
 }
 
+/// The map id behind a `@map/<id>` key — i.e. "is this mesh one the editor
+/// itself edits?", which the paint machinery has to know because such geometry
+/// changes under it.
+pub(crate) fn map_key_id(key: &str) -> Option<u32> {
+    key.strip_prefix("@map/")?.parse().ok()
+}
+
 /// The dev-grid texture every new blockout shape starts with, as the
 /// project-relative ref stored on the node (see [`Editor::map_default_material`]).
 /// A blockout you can read the scale of beats an untextured grey slab: the map
@@ -43,6 +50,13 @@ pub(crate) struct MapStore {
     pub(crate) parts: HashMap<u32, Vec<(MeshId, u16)>>,
     /// Ids whose GPU parts need a rebuild (geometry or slots changed).
     pub(crate) dirty: BTreeSet<u32>,
+    /// Ids rebuilt since paint last looked — the brush's CPU geometry is stale
+    /// and any paint on them has to be re-attached. Drained by `sync_map_paint`.
+    pub(crate) paint_stale: BTreeSet<u32>,
+    /// What every render vertex/triangle of a PAINTED map mesh was at its last
+    /// rebuild, so the paint can follow the surfaces that survived an edit.
+    /// Only kept for nodes that actually carry paint — see `map_paint`.
+    pub(crate) paint_ident: HashMap<u32, crate::map_paint::MapPaintIdent>,
     /// Set when the sidecar for this scene exists but could NOT be read/parsed.
     /// While it is set the store is NOT the authority: unknown ids keep their
     /// nodes empty instead of being healed into boxes, and `save_maps` refuses
@@ -219,7 +233,7 @@ impl MapShape {
 }
 
 /// One material slot's triangulation as uploadable geometry.
-fn slot_mesh_data(sm: &floptle_map::SlotMesh) -> MeshData {
+pub(crate) fn slot_mesh_data(sm: &floptle_map::SlotMesh) -> MeshData {
     MeshData {
         vertices: (0..sm.positions.len())
             .map(|i| Vertex { pos: sm.positions[i], normal: sm.normals[i], uv: sm.uvs[i] })
@@ -379,6 +393,8 @@ impl Editor {
             return; // keep dirty — rebuild once the GPU exists
         };
         let ids: Vec<u32> = std::mem::take(&mut self.maps.dirty).into_iter().collect();
+        // Whatever changed, the paint's view of this geometry is now stale.
+        self.maps.paint_stale.extend(ids.iter().copied());
         for id in ids {
             let Some(mesh) = self.maps.meshes.get(&id) else { continue };
             let slots = floptle_map::triangulate(mesh);
@@ -502,6 +518,8 @@ impl Editor {
         self.maps.parts.clear();
         self.maps.meshes.clear();
         self.maps.dirty.clear();
+        self.maps.paint_stale.clear();
+        self.maps.paint_ident.clear();
         self.maps.load_failed = false;
         let path = self.maps_file_path();
         let text = match std::fs::read_to_string(&path) {
@@ -602,6 +620,12 @@ impl Editor {
 
 // ===== Sub-object editing (Tool::MapEdit) ====================================
 
+/// How far the cursor has to travel between press and release for the gesture
+/// to count as a DRAG rather than a click. Shared by the box-select rectangle
+/// (which only draws past it) and the release handler (which only applies a box
+/// past it), so what you see and what happens can't disagree.
+pub(crate) const MAP_DRAG_PX: f32 = 4.0;
+
 /// Which sub-object kind the Map tool selects.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum MapSubMode {
@@ -626,6 +650,67 @@ impl MapSubMode {
             MapSubMode::Edge => MapSubMode::Face,
             MapSubMode::Face => MapSubMode::Vertex,
         }
+    }
+
+    /// The three modes in switch order, with the glyph the viewport strip and
+    /// the Map tab both label them with — one vocabulary, so the chip you click
+    /// in the viewport is the chip you see in the panel.
+    pub(crate) const ALL: [MapSubMode; 3] =
+        [MapSubMode::Vertex, MapSubMode::Edge, MapSubMode::Face];
+
+    pub(crate) fn glyph(self) -> &'static str {
+        match self {
+            MapSubMode::Vertex => "◆",
+            MapSubMode::Edge => "╱",
+            MapSubMode::Face => "◼",
+        }
+    }
+
+    /// The keybind that jumps straight to this mode.
+    pub(crate) fn cmd(self) -> crate::map_keys::MapCmd {
+        match self {
+            MapSubMode::Vertex => crate::map_keys::MapCmd::ModeVertex,
+            MapSubMode::Edge => crate::map_keys::MapCmd::ModeEdge,
+            MapSubMode::Face => crate::map_keys::MapCmd::ModeFace,
+        }
+    }
+
+    /// Plural noun for counts and button labels ("select every face").
+    pub(crate) fn plural(self) -> &'static str {
+        match self {
+            MapSubMode::Vertex => "vertices",
+            MapSubMode::Edge => "edges",
+            MapSubMode::Face => "faces",
+        }
+    }
+}
+
+/// What a click or a box drag does to the existing sub-object selection.
+///
+/// Shift ADDS and Ctrl SUBTRACTS, which is the convention every modeling tool
+/// shares — and the reason both used to mean "toggle" was that there was only
+/// one code path for them. Toggling is fine for one click and useless for a
+/// box: dragging a box over a region you have half-selected would flip the
+/// overlap back off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SelectMode {
+    Replace,
+    Add,
+    Subtract,
+}
+
+impl SelectMode {
+    /// From the live modifier state.
+    pub(crate) fn of(shift: bool, ctrl: bool) -> Self {
+        match (shift, ctrl) {
+            (_, true) => SelectMode::Subtract,
+            (true, false) => SelectMode::Add,
+            _ => SelectMode::Replace,
+        }
+    }
+
+    pub(crate) fn keeps_existing(self) -> bool {
+        self != SelectMode::Replace
     }
 }
 
@@ -882,6 +967,14 @@ pub(crate) enum MapHover {
     Face(u32),
 }
 
+/// A knife cut waiting for its second click: the face it started on and the
+/// border point it starts from.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MapKnife {
+    pub(crate) face: u32,
+    pub(crate) at: floptle_map::CutPoint,
+}
+
 /// A live sub-object gizmo drag: the dragged verts' pre-drag local positions.
 pub(crate) struct MapDrag {
     pub(crate) verts: Vec<(u32, floptle_core::math::Vec3)>,
@@ -915,6 +1008,12 @@ pub(crate) struct MapViz {
     /// as an arrow. Shown while drawing AND for a selected rising shape, so
     /// "which way is up" is never a guess.
     pub(crate) arrow: Option<(floptle_core::math::Vec2, floptle_core::math::Vec2)>,
+    /// Knife: where the pending cut starts (`None` before the first click),
+    /// where it would end right now, and whether that end is an existing CORNER
+    /// (drawn as a ring — a corner cut adds no vertex, and knowing which you're
+    /// about to get is the whole difference between a clean cut and a sliver).
+    pub(crate) knife_from: Option<floptle_core::math::Vec2>,
+    pub(crate) knife_to: Option<(floptle_core::math::Vec2, bool)>,
 }
 
 /// One Map-tab operation, routed through `EditorCmd` (the tab holds disjoint
@@ -947,6 +1046,8 @@ pub(crate) enum MapOp {
     MaterialFromSelection(String),
     SelectAll,
     SelectNone,
+    /// Everything of the current mode that ISN'T selected, and nothing that is.
+    SelectInvert,
     Grow,
     SelectConnected,
     SelectCoplanar,
@@ -1100,60 +1201,77 @@ impl Editor {
         }
     }
 
-    /// Apply a click at `cursor` to the sub-object selection. `extend` = shift
-    /// or ctrl held (toggle membership). Returns true when the click landed on
-    /// a sub-object (so the caller doesn't fall through to node picking).
-    pub(crate) fn map_click(&mut self, cursor: floptle_core::math::Vec2, extend: bool) -> bool {
+    /// Apply a click at `cursor` to the sub-object selection. Returns true when
+    /// the click landed on a sub-object (so the caller doesn't fall through to
+    /// node picking).
+    pub(crate) fn map_click(&mut self, cursor: floptle_core::math::Vec2, how: SelectMode) -> bool {
         if self.map_sync_sel().is_none() {
             return false;
         }
         let hit = self.map_pick(cursor);
         let Some(sel) = self.map_sel.as_mut() else { return false };
         let Some(hit) = hit else {
-            // Clicked bare space: an un-extended click clears the sub-selection
-            // but stays in map mode (box-select may start here instead).
-            if !extend {
+            // Clicked bare space: a plain click clears the sub-selection but
+            // stays in map mode (box-select may start here instead).
+            if !how.keeps_existing() {
                 sel.clear();
             }
             return false;
         };
-        if !extend {
+        if !how.keeps_existing() {
             sel.clear();
         }
+        // Shift ADDS, Ctrl SUBTRACTS — but a Shift-click on something already
+        // in the selection still toggles it off, because that is the only way
+        // to drop ONE item without a box, and every tool does it.
         match hit {
-            MapHover::Vert(v) => {
-                if extend && sel.verts.contains(&v) {
+            MapHover::Vert(v) => match how {
+                SelectMode::Subtract => {
                     sel.verts.remove(&v);
-                } else {
+                }
+                SelectMode::Add if sel.verts.contains(&v) => {
+                    sel.verts.remove(&v);
+                }
+                _ => {
                     sel.verts.insert(v);
                 }
-            }
+            },
             MapHover::Edge(a, b) => {
                 let k = (a, b);
-                if extend && sel.edges.contains(&k) {
-                    sel.edges.remove(&k);
-                } else {
-                    sel.edges.insert(k);
+                match how {
+                    SelectMode::Subtract => {
+                        sel.edges.remove(&k);
+                    }
+                    SelectMode::Add if sel.edges.contains(&k) => {
+                        sel.edges.remove(&k);
+                    }
+                    _ => {
+                        sel.edges.insert(k);
+                    }
                 }
             }
-            MapHover::Face(f) => {
-                if extend && sel.faces.contains(&f) {
+            MapHover::Face(f) => match how {
+                SelectMode::Subtract => {
                     sel.faces.remove(&f);
-                } else {
+                }
+                SelectMode::Add if sel.faces.contains(&f) => {
+                    sel.faces.remove(&f);
+                }
+                _ => {
                     sel.faces.insert(f);
                 }
-            }
+            },
         }
         true
     }
 
     /// Box-select release: everything of the current mode whose projection
-    /// falls inside the rect joins the selection (`extend` keeps the old set).
+    /// falls inside the rect joins (or leaves) the selection.
     pub(crate) fn map_box_apply(
         &mut self,
         a: floptle_core::math::Vec2,
         b: floptle_core::math::Vec2,
-        extend: bool,
+        how: SelectMode,
     ) {
         let Some((e, id)) = self.map_sync_sel() else { return };
         let Some(mesh) = self.maps.meshes.get(&id) else { return };
@@ -1194,12 +1312,188 @@ impl Editor {
             }
         }
         let Some(sel) = self.map_sel.as_mut() else { return };
-        if !extend {
-            sel.clear();
+        match how {
+            SelectMode::Replace => {
+                sel.clear();
+                sel.verts.extend(verts);
+                sel.edges.extend(edges);
+                sel.faces.extend(faces);
+            }
+            SelectMode::Add => {
+                sel.verts.extend(verts);
+                sel.edges.extend(edges);
+                sel.faces.extend(faces);
+            }
+            SelectMode::Subtract => {
+                for v in verts {
+                    sel.verts.remove(&v);
+                }
+                for e in edges {
+                    sel.edges.remove(&e);
+                }
+                for f in faces {
+                    sel.faces.remove(&f);
+                }
+            }
         }
-        sel.verts.extend(verts);
-        sel.edges.extend(edges);
-        sel.faces.extend(faces);
+    }
+
+    // ---- knife ---------------------------------------------------------------
+
+    /// The cursor ray in `e`'s object space (origin, direction), camera-relative
+    /// like every other pick in the editor (ADR-0015).
+    fn map_local_ray(
+        &self,
+        e: floptle_core::Entity,
+        cursor: floptle_core::math::Vec2,
+    ) -> Option<(floptle_core::math::Vec3, floptle_core::math::Vec3)> {
+        use floptle_core::math::{Vec2, Vec4};
+        let gpu = self.gpu.as_ref()?;
+        let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
+        let cam = self.camera.render_camera();
+        let vp = cam.view_proj(w / h);
+        let inv = vp.inverse();
+        let ndc = Vec2::new(cursor.x / w * 2.0 - 1.0, 1.0 - cursor.y / h * 2.0);
+        let near = inv * Vec4::new(ndc.x, ndc.y, 0.0, 1.0);
+        let far = inv * Vec4::new(ndc.x, ndc.y, 1.0, 1.0);
+        let ro = near.truncate() / near.w;
+        let rd = (far.truncate() / far.w - ro).normalize();
+        let t = floptle_core::world_transform(&self.world, e);
+        let m_inv = t.render_matrix(cam.world_position).inverse();
+        m_inv
+            .is_finite()
+            .then(|| ((m_inv * ro.extend(1.0)).truncate(), (m_inv * rd.extend(0.0)).truncate()))
+    }
+
+    /// Where a knife click would land: the face under the cursor and the point
+    /// on its border the cut would run from/to.
+    ///
+    /// The CORNER snap is done in screen space (within a gizmo handle of a
+    /// projected corner), like every other grab in this editor, so aiming at a
+    /// corner feels the same here as it does in vertex mode. The edge point is
+    /// then solved exactly in object space from the ray hit — projecting the
+    /// edge and interpolating in 2D would drift at grazing angles, which is
+    /// precisely where you cut a wall.
+    pub(crate) fn map_knife_pick(
+        &self,
+        cursor: floptle_core::math::Vec2,
+    ) -> Option<(u32, floptle_map::CutPoint)> {
+        let (e, id) = self.map_target()?;
+        let mesh = self.maps.meshes.get(&id)?;
+        let (ro, rd) = self.map_local_ray(e, cursor)?;
+        let hit = floptle_map::raycast(mesh, ro, rd, f32::MAX)?;
+        let face = mesh.faces.get(hit.face as usize)?;
+        let gpu = self.gpu.as_ref()?;
+        let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
+        let cam = self.camera.render_camera();
+        let vp = cam.view_proj(w / h);
+        let t = floptle_core::world_transform(&self.world, e);
+        let mut best: Option<(f32, u32)> = None;
+        for &v in &face.verts {
+            let Some(p) = mesh.verts.get(v as usize) else { continue };
+            let wp = t.translation + (t.rotation * (t.scale * *p)).as_dvec3();
+            if let Some(s) = crate::viz::project(wp, cam.world_position, vp, w, h) {
+                let d = (s - cursor).length();
+                if d <= crate::gizmo::HANDLE_PX && best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, v));
+                }
+            }
+        }
+        if let Some((_, v)) = best {
+            return Some((hit.face, floptle_map::CutPoint::Vert(v)));
+        }
+        // `0.0` corner-snap radius: corners were handled above, in the units
+        // that actually match how the tool feels.
+        floptle_map::nearest_cut_point(mesh, hit.face, hit.pos, 0.0).map(|c| (hit.face, c))
+    }
+
+    /// One knife click. The first sets the cut's anchor; the second cuts, and
+    /// leaves the anchor on the corner it just made so a groove can be walked
+    /// across a face in one gesture (Esc ends the chain).
+    pub(crate) fn map_knife_click(&mut self, cursor: floptle_core::math::Vec2) {
+        if self.playing {
+            return;
+        }
+        let Some((face, at)) = self.map_knife_pick(cursor) else {
+            self.map_note(
+                floptle_script::LogLevel::Debug,
+                "the knife cuts a face — aim at one (a cut runs from one edge or corner to another)",
+            );
+            return;
+        };
+        let Some(pending) = self.map_knife else {
+            self.map_knife = Some(MapKnife { face, at });
+            return;
+        };
+        let Some((_, id)) = self.map_target() else { return };
+        let Some(pre) = self.maps.meshes.get(&id).cloned() else { return };
+        // The two ends must belong to ONE face. After a cut the anchor sits on a
+        // corner shared by both halves, so accept the face the second click
+        // landed on whenever it owns the anchor — that is what makes chaining
+        // work without asking which half you are on.
+        let anchor_here = |mesh: &MapMesh, f: u32| -> bool {
+            let Some(ring) = mesh.faces.get(f as usize) else { return false };
+            match pending.at {
+                floptle_map::CutPoint::Vert(v) => ring.verts.contains(&v),
+                floptle_map::CutPoint::Edge { a, b, .. } => {
+                    ring.verts.contains(&a) && ring.verts.contains(&b)
+                }
+            }
+        };
+        if face != pending.face && !anchor_here(&pre, face) {
+            // Not one face: rather than refuse and strand the user holding a
+            // stale anchor, restart the cut from where they just clicked.
+            self.map_knife = Some(MapKnife { face, at });
+            self.map_note(
+                floptle_script::LogLevel::Debug,
+                "both ends of a cut have to be on the same face — started a new cut here",
+            );
+            return;
+        }
+        let on = face;
+        let Some(mesh) = self.maps.meshes.get_mut(&id) else { return };
+        match floptle_map::knife(mesh, on, pending.at, at) {
+            Ok(cut) => {
+                let ends_at = cut.v1;
+                // Chain: keep cutting from the corner this cut just made.
+                let next_face = [cut.a, cut.b].into_iter().find(|&f| {
+                    mesh.faces.get(f as usize).is_some_and(|r| r.verts.contains(&ends_at))
+                });
+                if let Some(sel) = self.map_sel.as_mut() {
+                    sel.prune(mesh);
+                }
+                self.maps.dirty.insert(id);
+                self.push_history(crate::Snapshot::MapMesh(id, pre));
+                self.map_knife =
+                    next_face.map(|f| MapKnife { face: f, at: floptle_map::CutPoint::Vert(ends_at) });
+            }
+            // A refusal keeps the anchor: the aim was wrong, not the intent.
+            Err(why) => self.map_note(floptle_script::LogLevel::Warn, format!("knife: {why}")),
+        }
+    }
+
+    /// Esc while the knife is armed: drop the pending cut first, then the tool.
+    /// Returns true when it consumed the key.
+    pub(crate) fn map_knife_cancel(&mut self) -> bool {
+        if self.map_knife.take().is_some() {
+            return true;
+        }
+        if self.map_knife_on {
+            self.map_knife_on = false;
+            return true;
+        }
+        false
+    }
+
+    /// Arm/disarm the knife. Arming disarms shape drawing (they both own the
+    /// click) and drops any half-drawn shape.
+    pub(crate) fn set_map_knife(&mut self, on: bool) {
+        self.map_knife_on = on;
+        self.map_knife = None;
+        if on {
+            self.map_arm = None;
+            self.map_draw = None;
+        }
     }
 
     /// Per-frame driver (before the render gather, like the sculpt/paint
@@ -1221,7 +1515,9 @@ impl Editor {
             self.map_viz = Some(self.map_draw_viz());
             return;
         }
-        self.map_gizmo = self.map_gizmo_xf();
+        // The knife owns the click while it is armed, so the gizmo steps aside —
+        // a handle under the cursor would eat the cut.
+        self.map_gizmo = if self.map_knife_on { None } else { self.map_gizmo_xf() };
         let Some((e, id)) = self.map_sync_sel() else { return };
         let Some(mesh) = self.maps.meshes.get(&id) else { return };
         let Some(gpu) = self.gpu.as_ref() else { return };
@@ -1258,8 +1554,9 @@ impl Editor {
                 }
             }
         }
-        // Hover telegraph (only when the cursor is free — not mid-drag).
-        if self.grabbed.is_none() && self.cursor_over_scene()
+        // Hover telegraph (only when the cursor is free — not mid-drag, and not
+        // while the knife is showing its own snap point instead).
+        if self.grabbed.is_none() && !self.map_knife_on && self.cursor_over_scene()
             && let Some(cursor) = self.cursor {
                 match self.map_pick(cursor) {
                     Some(MapHover::Vert(v)) => {
@@ -1309,8 +1606,25 @@ impl Editor {
                 viz.arrow = Some((a, b)); // local -Z is the high end
             }
         }
-        if let (Some(anchor), Some(cur)) = (self.map_box, self.cursor) {
+        // The rectangle only appears once the press has become a DRAG — every
+        // click now records an anchor (that is what lets a box start on the
+        // mesh itself), and drawing a zero-size box on every click would flash.
+        if let (Some(anchor), Some(cur)) = (self.map_box, self.cursor)
+            && (cur - anchor).length() > MAP_DRAG_PX
+        {
             viz.rect = Some((anchor, cur));
+        }
+        // Knife: the anchor, and the point the next click would cut to. Drawn
+        // live so the cut is aimed BEFORE it is made, not discovered after.
+        if self.map_knife_on {
+            viz.knife_from =
+                self.map_knife.and_then(|k| k.at.position(mesh)).and_then(&project);
+            if let Some(cursor) = self.cursor.filter(|_| self.cursor_over_scene())
+                && let Some((_, at)) = self.map_knife_pick(cursor)
+                && let Some(p) = at.position(mesh).and_then(&project)
+            {
+                viz.knife_to = Some((p, matches!(at, floptle_map::CutPoint::Vert(_))));
+            }
         }
         self.map_viz = Some(viz);
     }
@@ -2001,6 +2315,25 @@ impl Editor {
                 sel.clear();
                 return;
             }
+            MapOp::SelectInvert => {
+                match mode {
+                    MapSubMode::Vertex => {
+                        let had = std::mem::take(&mut sel.verts);
+                        sel.verts =
+                            (0..mesh.verts.len() as u32).filter(|v| !had.contains(v)).collect();
+                    }
+                    MapSubMode::Edge => {
+                        let had = std::mem::take(&mut sel.edges);
+                        sel.edges = mesh.edges().into_iter().filter(|e| !had.contains(e)).collect();
+                    }
+                    MapSubMode::Face => {
+                        let had = std::mem::take(&mut sel.faces);
+                        sel.faces =
+                            (0..mesh.faces.len() as u32).filter(|f| !had.contains(f)).collect();
+                    }
+                }
+                return;
+            }
             MapOp::Grow => {
                 match mode {
                     MapSubMode::Face => {
@@ -2197,6 +2530,7 @@ impl Editor {
         };
         if let Some(shape) = shape_of(cmd) {
             self.map_draw = None;
+            self.set_map_knife(false); // drawing and cutting both own the click
             // Pressing the armed shape's key again disarms it (a toggle, as in
             // every DCC).
             self.map_arm = if self.map_arm == Some(shape) { None } else { Some(shape) };
@@ -2214,6 +2548,7 @@ impl Editor {
             C::ModeFace => self.set_map_mode(MapSubMode::Face),
             C::SelectAll => self.apply_map_op(MapOp::SelectAll),
             C::SelectNone => self.apply_map_op(MapOp::SelectNone),
+            C::SelectInvert => self.apply_map_op(MapOp::SelectInvert),
             C::SelectGrow => self.apply_map_op(MapOp::Grow),
             C::SelectConnected => self.apply_map_op(MapOp::SelectConnected),
             C::SelectCoplanar => self.apply_map_op(MapOp::SelectCoplanar),
@@ -2262,6 +2597,10 @@ impl Editor {
             C::FlipAll => self.apply_map_op(MapOp::FlipAll),
             C::Weld => self.apply_map_op(MapOp::WeldSelected),
             C::SnapToGrid => self.apply_map_op(MapOp::SnapToGrid),
+            C::Knife => {
+                let on = !self.map_knife_on;
+                self.set_map_knife(on);
+            }
             C::CenterPivot => self.apply_map_op(MapOp::CenterPivot),
             C::PivotToSelection => self.apply_map_op(MapOp::PivotToSelection),
             C::NewMaterialFromSelection => {
@@ -2786,6 +3125,88 @@ mod tests {
         // Right-handed: X cross Y == Z.
         let (x, y, z) = (t.rotation * Vec3::X, t.rotation * Vec3::Y, t.rotation * Vec3::Z);
         assert!((x.cross(y) - z).length() < 1e-5);
+    }
+
+    /// "Select every face" has to mean the mode you are IN, and inverting has
+    /// to be the exact complement of it — including the empty and full cases,
+    /// which are the two people actually reach for.
+    #[test]
+    fn select_all_and_invert_answer_in_the_current_mode() {
+        let mut ed = Editor::default();
+        let e = ed.spawn_map_node("Box", MapShape::Box.mesh(MapOpts::default()), None).unwrap();
+        ed.selection = vec![e];
+        let id = match ed.world.get::<floptle_core::Matter>(e) {
+            Some(floptle_core::Matter::MapMesh { id }) => *id,
+            _ => panic!("not a map node"),
+        };
+        let (nf, nv, ne) = {
+            let m = &ed.maps.meshes[&id];
+            (m.faces.len(), m.verts.len(), m.edges().len())
+        };
+
+        // Invert from nothing = everything, in whichever mode is live.
+        ed.apply_map_op(MapOp::SelectInvert);
+        assert_eq!(ed.map_sel.as_ref().unwrap().faces.len(), nf);
+        // …and again = nothing.
+        ed.apply_map_op(MapOp::SelectInvert);
+        assert!(ed.map_sel.as_ref().unwrap().is_empty());
+
+        for (mode, want) in
+            [(MapSubMode::Vertex, nv), (MapSubMode::Edge, ne), (MapSubMode::Face, nf)]
+        {
+            ed.set_map_mode(mode);
+            ed.apply_map_op(MapOp::SelectNone);
+            ed.apply_map_op(MapOp::SelectAll);
+            let s = ed.map_sel.as_ref().unwrap();
+            let got = match mode {
+                MapSubMode::Vertex => s.verts.len(),
+                MapSubMode::Edge => s.edges.len(),
+                MapSubMode::Face => s.faces.len(),
+            };
+            assert_eq!(got, want, "select-all in {mode:?}");
+            // The complement of everything is nothing.
+            ed.apply_map_op(MapOp::SelectInvert);
+            assert!(ed.map_sel.as_ref().unwrap().is_empty(), "invert-all in {mode:?}");
+        }
+
+        // A partial selection inverts to exactly the rest.
+        ed.set_map_mode(MapSubMode::Face);
+        ed.apply_map_op(MapOp::SelectNone);
+        ed.map_sel.as_mut().unwrap().faces.insert(2);
+        ed.apply_map_op(MapOp::SelectInvert);
+        let s = ed.map_sel.as_ref().unwrap();
+        assert_eq!(s.faces.len(), nf - 1);
+        assert!(!s.faces.contains(&2));
+    }
+
+    /// Shift adds, Ctrl removes — and a plain click replaces. The modifiers are
+    /// read in ONE place, so what a click does and what a box does can't drift
+    /// apart.
+    #[test]
+    fn shift_adds_and_ctrl_removes() {
+        assert_eq!(SelectMode::of(false, false), SelectMode::Replace);
+        assert_eq!(SelectMode::of(true, false), SelectMode::Add);
+        assert_eq!(SelectMode::of(false, true), SelectMode::Subtract);
+        // Ctrl wins when both are held: "remove these" is the more specific ask.
+        assert_eq!(SelectMode::of(true, true), SelectMode::Subtract);
+        assert!(!SelectMode::Replace.keeps_existing());
+        assert!(SelectMode::Add.keeps_existing());
+        assert!(SelectMode::Subtract.keeps_existing());
+    }
+
+    /// Every sub-mode is reachable by its own key and says so — the direct
+    /// binds existed before this and nothing in the UI mentioned them.
+    #[test]
+    fn every_sub_mode_has_its_own_key() {
+        let keys = crate::map_keys::MapKeys::default();
+        let mut seen = Vec::new();
+        for mode in MapSubMode::ALL {
+            let c = keys.chord(mode.cmd()).expect("bound");
+            assert!(!seen.contains(&c), "{mode:?} shares a chord");
+            seen.push(c);
+            assert!(!mode.glyph().is_empty());
+            assert!(!mode.plural().is_empty());
+        }
     }
 
     /// Tab must CONVERT the selection, not drop it.

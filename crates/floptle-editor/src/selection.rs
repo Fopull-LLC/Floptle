@@ -38,6 +38,8 @@ impl Editor {
             self.map_box = None;
             self.map_draw = None;
             self.map_arm = None;
+            self.map_knife_on = false;
+            self.map_knife = None;
         }
     }
 

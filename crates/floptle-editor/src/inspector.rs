@@ -578,6 +578,15 @@ pub(crate) fn material_props_ui(
     texture_settings: &std::collections::HashMap<String, crate::assets::TexSetting>,
 ) -> MatEditResult {
     let mut r = MatEditResult::default();
+    // Every picker in here is identified RELATIVE to the Ui it was drawn in.
+    // Absolute ids (`Id::new("mat_tex")`) made two material editors on screen at
+    // once — the Inspector's and the Map tab's per-slot one, which live in
+    // different dock panels and so are both visible — share one popup: opening
+    // either one drew two popups under the same id, and each counted the click
+    // that opened it as a click OUTSIDE the other, so the dropdown shut on the
+    // frame it opened and the texture could never be picked. One salt per call
+    // site is what makes them independent.
+    let salt = ui.id();
 
     // The base texture's spritesheet grid comes from the TEXTURE's asset settings
     // (slice the .png once, every material using it inherits the same cells), so
@@ -610,7 +619,7 @@ pub(crate) fn material_props_ui(
             .unwrap_or_else(|| "none".into());
         if let Some(pick) = crate::ui_widgets::asset_picker(
             ui,
-            egui::Id::new("mat_tex"),
+            salt.with("mat_tex"),
             project_root,
             if cur.is_empty() { "none" } else { &cur },
             Some("none"),
@@ -670,7 +679,7 @@ pub(crate) fn material_props_ui(
     if sc * sr > 1 {
         r.changed |= crate::ui_widgets::sheet_cell_picker(
             ui,
-            ui.id().with("mat_cells"),
+            salt.with("mat_cells"),
             m.texture.as_deref().unwrap_or_default(),
             sc,
             sr,
@@ -697,7 +706,7 @@ pub(crate) fn material_props_ui(
             .unwrap_or_else(|| "Built-in".into());
         if let Some(pick) = crate::ui_widgets::asset_picker(
             ui,
-            egui::Id::new("mat_shader"),
+            salt.with("mat_shader"),
             project_root,
             &cur,
             Some("Built-in"),
@@ -741,7 +750,7 @@ pub(crate) fn material_props_ui(
                                 .unwrap_or_else(|| "none".into());
                             if let Some(pick) = crate::ui_widgets::asset_picker(
                                 ui,
-                                egui::Id::new(("mat_shader_tex", i)),
+                                salt.with(("mat_shader_tex", i)),
                                 project_root,
                                 &cur,
                                 Some("none"),

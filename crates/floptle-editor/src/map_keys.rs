@@ -45,6 +45,7 @@ pub(crate) enum MapCmd {
     ModeFace,
     SelectAll,
     SelectNone,
+    SelectInvert,
     SelectGrow,
     SelectConnected,
     SelectCoplanar,
@@ -67,13 +68,14 @@ pub(crate) enum MapCmd {
     FlipAll,
     Weld,
     SnapToGrid,
+    Knife,
     CenterPivot,
     PivotToSelection,
     NewMaterialFromSelection,
 }
 
 impl MapCmd {
-    pub(crate) const ALL: [MapCmd; 41] = [
+    pub(crate) const ALL: [MapCmd; 43] = [
         MapCmd::DrawBox,
         MapCmd::DrawPlane,
         MapCmd::DrawWedge,
@@ -92,6 +94,7 @@ impl MapCmd {
         MapCmd::ModeFace,
         MapCmd::SelectAll,
         MapCmd::SelectNone,
+        MapCmd::SelectInvert,
         MapCmd::SelectGrow,
         MapCmd::SelectConnected,
         MapCmd::SelectCoplanar,
@@ -112,6 +115,7 @@ impl MapCmd {
         MapCmd::FlipAll,
         MapCmd::Weld,
         MapCmd::SnapToGrid,
+        MapCmd::Knife,
         MapCmd::CenterPivot,
         MapCmd::PivotToSelection,
         MapCmd::NewMaterialFromSelection,
@@ -125,8 +129,10 @@ impl MapCmd {
             | DrawArch | ResolutionDown | ResolutionUp | TurnLeft | TurnRight | TurnAround => {
                 "Draw"
             }
-            ModeCycle | ModeVertex | ModeEdge | ModeFace | SelectAll | SelectNone | SelectGrow
-            | SelectConnected | SelectCoplanar | SelectLoop | ToggleSelectHidden => "Select",
+            ModeCycle | ModeVertex | ModeEdge | ModeFace | SelectAll | SelectNone | SelectInvert
+            | SelectGrow | SelectConnected | SelectCoplanar | SelectLoop | ToggleSelectHidden => {
+                "Select"
+            }
             GizmoCycle | GizmoMove | GizmoRotate | GizmoScale | OrientCycle => "Transform",
             _ => "Modify",
         }
@@ -153,6 +159,7 @@ impl MapCmd {
             ModeFace => "Face mode",
             SelectAll => "Select all",
             SelectNone => "Select none",
+            SelectInvert => "Invert selection",
             SelectGrow => "Grow selection",
             SelectConnected => "Select connected",
             SelectCoplanar => "Select coplanar",
@@ -173,6 +180,7 @@ impl MapCmd {
             FlipAll => "Flip all",
             Weld => "Weld",
             SnapToGrid => "Snap to grid",
+            Knife => "Knife (cut a face)",
             CenterPivot => "Center pivot",
             PivotToSelection => "Pivot to selection",
             NewMaterialFromSelection => "New material for selection",
@@ -201,6 +209,7 @@ impl MapCmd {
             ModeFace => "mode_face",
             SelectAll => "select_all",
             SelectNone => "select_none",
+            SelectInvert => "select_invert",
             SelectGrow => "select_grow",
             SelectConnected => "select_connected",
             SelectCoplanar => "select_coplanar",
@@ -221,6 +230,7 @@ impl MapCmd {
             FlipAll => "flip_all",
             Weld => "weld",
             SnapToGrid => "snap_to_grid",
+            Knife => "knife",
             CenterPivot => "center_pivot",
             PivotToSelection => "pivot_to_selection",
             NewMaterialFromSelection => "new_material",
@@ -418,6 +428,7 @@ impl Default for MapKeys {
                 b(ModeFace, Chord::new(K::KeyM)),
                 b(SelectAll, Chord::new(K::KeyU)),
                 b(SelectNone, Chord::shifted(K::KeyU)),
+                b(SelectInvert, Chord::new(K::Backslash)),
                 b(SelectGrow, Chord::new(K::KeyP)),
                 b(SelectConnected, Chord::shifted(K::KeyP)),
                 b(SelectCoplanar, Chord::shifted(K::KeyO)),
@@ -440,6 +451,8 @@ impl Default for MapKeys {
                 b(FlipAll, Chord::shifted(K::KeyY)),
                 b(Weld, Chord::shifted(K::KeyE)),
                 b(SnapToGrid, Chord::shifted(K::KeyN)),
+                // The knife gets `/` — it looks like the cut it makes.
+                b(Knife, Chord::new(K::Slash)),
                 b(CenterPivot, Chord::shifted(K::KeyT)),
                 b(PivotToSelection, Chord::shifted(K::KeyV)),
                 b(NewMaterialFromSelection, Chord::new(K::Semicolon)),
@@ -584,7 +597,7 @@ mod tests {
     #[test]
     fn every_command_is_bound() {
         let keys = MapKeys::default();
-        assert_eq!(MapCmd::ALL.len(), 41);
+        assert_eq!(MapCmd::ALL.len(), 43);
         assert!(MapCmd::ALL.into_iter().all(|c| keys.chord(c).is_some()));
     }
 

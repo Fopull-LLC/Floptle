@@ -252,12 +252,20 @@ impl EditorTabViewer<'_> {
     fn map_select_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "SELECT");
         row(ui, "mode", |ui| {
-            for mode in [MapSubMode::Vertex, MapSubMode::Edge, MapSubMode::Face] {
+            for mode in MapSubMode::ALL {
+                // Each chip carries its OWN key, not just "Tab cycles" — the
+                // direct binds existed all along and nothing said so.
                 if chip(
                     ui,
                     self.map_mode == mode,
-                    mode.label(),
-                    "Tab cycles — your selection converts, it isn't dropped",
+                    &format!("{}  {}", mode.glyph(), mode.label()),
+                    &format!(
+                        "select {} — {} (or {} to cycle).\nYour selection CONVERTS, it isn't \
+                         dropped: pick a face, switch to vertex, and you're holding its corners.",
+                        mode.plural(),
+                        self.map_keys.label(mode.cmd()),
+                        self.map_keys.label(MapCmd::ModeCycle),
+                    ),
                 ) {
                     self.cmd.set_map_mode = Some(mode);
                 }
@@ -297,11 +305,39 @@ impl EditorTabViewer<'_> {
             }
         });
         row(ui, "", |ui| {
-            if action(ui, true, "All", "select everything in the current mode") {
+            if action(
+                ui,
+                true,
+                &format!("All {}", self.map_mode.plural()),
+                &format!(
+                    "select every {} in this mesh  ({})",
+                    self.map_mode.label(),
+                    self.map_keys.label(MapCmd::SelectAll)
+                ),
+            ) {
                 self.cmd.map_op = Some(MapOp::SelectAll);
             }
-            if action(ui, total > 0, "None", "clear the sub-object selection") {
+            if action(
+                ui,
+                total > 0,
+                "None",
+                &format!(
+                    "clear the sub-object selection  ({})",
+                    self.map_keys.label(MapCmd::SelectNone)
+                ),
+            ) {
                 self.cmd.map_op = Some(MapOp::SelectNone);
+            }
+            if action(
+                ui,
+                true,
+                "Invert",
+                &format!(
+                    "swap selected for unselected  ({})",
+                    self.map_keys.label(MapCmd::SelectInvert)
+                ),
+            ) {
+                self.cmd.map_op = Some(MapOp::SelectInvert);
             }
             if action(ui, total > 0, "Grow", "add the neighbouring ring") {
                 self.cmd.map_op = Some(MapOp::Grow);
@@ -325,6 +361,19 @@ impl EditorTabViewer<'_> {
             ui.checkbox(&mut *self.map_select_hidden, "select through the surface").on_hover_text(
                 "off (default): only sub-objects you can actually see are clickable or \
                  box-selectable — no more grabbing the vertex on the far side of a wall",
+            );
+        });
+        row(ui, "", |ui| {
+            ui.label(
+                RichText::new(
+                    "drag anywhere to box-select  ·  Shift adds  ·  Ctrl removes",
+                )
+                .weak()
+                .small(),
+            )
+            .on_hover_text(
+                "the box starts wherever you press — including on the mesh — so a whole row \
+                 of faces is one drag. A press that doesn't move is a plain click.",
             );
         });
     }
@@ -414,6 +463,33 @@ impl EditorTabViewer<'_> {
                 "turn the whole mesh inside out (fixes a shape rendering inside-out)",
             ) {
                 self.cmd.map_op = Some(MapOp::FlipAll);
+            }
+        });
+        row(ui, "cut", |ui| {
+            let on = self.map_knife_on;
+            if ui
+                .add_sized(
+                    [CHIP_W + 14.0, BTN_H],
+                    egui::Button::selectable(
+                        on,
+                        format!("✂ Knife  {}", self.map_keys.label(MapCmd::Knife)),
+                    ),
+                )
+                .on_hover_text(
+                    "click one edge or corner of a face, then another, and the face splits \
+                     along that line. The cut carries into the faces sharing those edges, so \
+                     the seam stays welded. Keeps cutting from the corner it just made — Esc \
+                     ends the cut, Esc again puts the knife away.",
+                )
+                .clicked()
+            {
+                self.cmd.set_map_knife = Some(!on);
+            }
+            if on {
+                ui.colored_label(
+                    DRAW_ACCENT,
+                    RichText::new("✂ cutting — click a border point").small(),
+                );
             }
         });
         row(ui, "points", |ui| {

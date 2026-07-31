@@ -31,6 +31,30 @@ pub(crate) struct PaintViz {
 /// `pub(crate)`: the texture-paint mirror blocks fill with it too.
 pub(crate) const NEUTRAL_PAINT: [u8; 4] = [128, 128, 128, 255];
 
+/// Where a paintable node's triangles come from.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum PaintSource {
+    /// An imported model, by project-relative path.
+    Asset(String),
+    /// A built-in primitive shape.
+    Primitive(floptle_core::Shape),
+    /// A blockout node's map-store geometry, by map id.
+    Map(u32),
+}
+
+impl PaintSource {
+    /// The `mesh_registry`/paint-cache key. Map meshes reuse the same `@map/<id>`
+    /// key they render under, so the brush and the renderer agree on which
+    /// geometry a node IS.
+    pub(crate) fn key(&self) -> String {
+        match self {
+            PaintSource::Asset(p) => p.clone(),
+            PaintSource::Primitive(s) => format!("@prim/{}", *s as u8),
+            PaintSource::Map(id) => crate::map_edit::map_key(*id),
+        }
+    }
+}
+
 /// A node's paint: one block per mesh part.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PaintBlocks {
@@ -55,15 +79,27 @@ impl Editor {
         }
     }
 
-    /// The mesh-asset key a node paints against, and its part count. Primitives share
-    /// ONE `MeshId` per shape, so they key by shape name — the paint still lands
-    /// per-node because the block is per-node, not per-mesh.
-    pub(crate) fn paint_key(&self, e: Entity) -> Option<(String, bool)> {
+    /// Where a paintable node's CPU geometry comes from. The brush needs real
+    /// triangles, and the three kinds of paintable node keep theirs in three
+    /// different places.
+    pub(crate) fn paint_source(&self, e: Entity) -> Option<PaintSource> {
         match self.world.get::<Matter>(e) {
-            Some(Matter::Mesh { asset_path }) => Some((asset_path.clone(), false)),
-            Some(Matter::Primitive { shape, .. }) => Some((format!("@prim/{}", *shape as u8), true)),
+            Some(Matter::Mesh { asset_path }) => Some(PaintSource::Asset(asset_path.clone())),
+            Some(Matter::Primitive { shape, .. }) => Some(PaintSource::Primitive(*shape)),
+            // Blockout geometry lives in the map store and is re-triangulated on
+            // every edit, so its paint is carried across rebuilds by `map_paint`
+            // rather than being invalidated.
+            Some(Matter::MapMesh { id }) => Some(PaintSource::Map(*id)),
             _ => None,
         }
+    }
+
+    /// The mesh-asset key a node paints against. Primitives share ONE `MeshId`
+    /// per shape, so they key by shape name — the paint still lands per-node
+    /// because the block is per-node, not per-mesh.
+    pub(crate) fn paint_key(&self, e: Entity) -> Option<(String, bool)> {
+        let src = self.paint_source(e)?;
+        Some((src.key(), matches!(src, PaintSource::Primitive(_))))
     }
 
     /// Ensure the CPU geometry for a paintable node is cached, returning its key.
@@ -72,26 +108,35 @@ impl Editor {
     }
 
     fn ensure_paint_mesh(&mut self, e: Entity) -> Option<String> {
-        let (key, is_prim) = self.paint_key(e)?;
+        let src = self.paint_source(e)?;
+        let key = src.key();
         if self.paint_meshes.get(&key).is_some() {
             return Some(key);
         }
-        let data = if is_prim {
-            let shape = match self.world.get::<Matter>(e) {
-                Some(Matter::Primitive { shape, .. }) => *shape,
-                _ => return None,
-            };
-            vec![crate::matter_catalog::primitive_mesh(shape)]
-        } else {
-            // The editor keeps no CPU geometry (MeshAsset holds only MeshIds), so the
-            // brush re-imports ONCE here and caches — never per dab.
-            let path = self.resolve_asset_path(&key);
-            match floptle_assets::import(&path) {
-                Ok(m) => m.parts.into_iter().map(|p| p.mesh).collect(),
-                // Cache the FAILURE too. This runs for every mesh node every frame the
-                // Paint tool is active — an uncached failure would re-hit the disk each
-                // frame forever.
-                Err(_) => Vec::new(),
+        let data = match src {
+            PaintSource::Primitive(shape) => vec![crate::matter_catalog::primitive_mesh(shape)],
+            // The map store already holds the authoring geometry; triangulating
+            // it here gives the brush exactly the vertices the renderer draws,
+            // in the same order, which is what makes a per-vertex block line up.
+            PaintSource::Map(id) => self
+                .maps
+                .meshes
+                .get(&id)
+                .map(|m| {
+                    floptle_map::triangulate(m).iter().map(crate::map_edit::slot_mesh_data).collect()
+                })
+                .unwrap_or_default(),
+            PaintSource::Asset(_) => {
+                // The editor keeps no CPU geometry (MeshAsset holds only MeshIds), so the
+                // brush re-imports ONCE here and caches — never per dab.
+                let path = self.resolve_asset_path(&key);
+                match floptle_assets::import(&path) {
+                    Ok(m) => m.parts.into_iter().map(|p| p.mesh).collect(),
+                    // Cache the FAILURE too. This runs for every mesh node every frame the
+                    // Paint tool is active — an uncached failure would re-hit the disk each
+                    // frame forever.
+                    Err(_) => Vec::new(),
+                }
             }
         };
         let empty = data.is_empty();
@@ -199,7 +244,9 @@ impl Editor {
         let candidates: Vec<Entity> = self
             .world
             .query::<Matter>()
-            .filter(|(_, m)| matches!(m, Matter::Mesh { .. } | Matter::Primitive { .. }))
+            .filter(|(_, m)| {
+                matches!(m, Matter::Mesh { .. } | Matter::Primitive { .. } | Matter::MapMesh { .. })
+            })
             .map(|(e, _)| e)
             .collect();
 

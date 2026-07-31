@@ -344,9 +344,13 @@ impl Editor {
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.set_scene_file(&path);
         self.adopt_terrain();
+        // Maps FIRST: a blockout node's paint is keyed to its triangulation,
+        // and the triangulation comes out of the map store — loading paint
+        // before the geometry it belongs to would find nothing to attach to
+        // and quietly drop it.
+        self.adopt_maps();
         self.adopt_paint();
         self.adopt_tex_paint();
-        self.adopt_maps();
         self.selection.clear();
         self.history = History::default();
         self.mesh_registry.clear();
@@ -378,9 +382,13 @@ impl Editor {
         self.migrate_legacy_post(&doc);
         self.set_scene_file(p);
         self.adopt_terrain();
+        // Maps FIRST: a blockout node's paint is keyed to its triangulation,
+        // and the triangulation comes out of the map store — loading paint
+        // before the geometry it belongs to would find nothing to attach to
+        // and quietly drop it.
+        self.adopt_maps();
         self.adopt_paint();
         self.adopt_tex_paint();
-        self.adopt_maps();
         self.register_scene_meshes();
         self.selection.clear();
         self.selected_asset = None;
@@ -948,9 +956,13 @@ impl Editor {
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.report_scene_wiring(&doc);
         self.adopt_terrain();
+        // Maps FIRST: a blockout node's paint is keyed to its triangulation,
+        // and the triangulation comes out of the map store — loading paint
+        // before the geometry it belongs to would find nothing to attach to
+        // and quietly drop it.
+        self.adopt_maps();
         self.adopt_paint();
         self.adopt_tex_paint();
-        self.adopt_maps();
         self.project = floptle_scene::load_project(&self.project_cfg_path());
         // The action map belongs to the project, so it reloads with it —
         // otherwise the new project's scripts would resolve against the old
@@ -1264,9 +1276,13 @@ impl Editor {
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.adopt_terrain();
+        // Maps FIRST: a blockout node's paint is keyed to its triangulation,
+        // and the triangulation comes out of the map store — loading paint
+        // before the geometry it belongs to would find nothing to attach to
+        // and quietly drop it.
+        self.adopt_maps();
         self.adopt_paint();
         self.adopt_tex_paint();
-        self.adopt_maps();
         self.register_scene_meshes();
         self.selection.clear();
         self.history = History::default();
