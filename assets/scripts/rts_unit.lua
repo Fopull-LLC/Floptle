@@ -10,10 +10,15 @@
 -- script is the half you'll replace first — it is deliberately small, and every
 -- hook a real game wants is a named function on it:
 --
---   moveTo(x, y, z)   walk to a world point (what an order calls)
+--   moveTo(x, y, z)   walk to a WORLD point (what an order calls)
 --   stop()            cancel the current order, here
 --   isMoving()        true while it still has somewhere to be
 --   selected          true while the player has it selected (draws the ring)
+--
+-- Orders are world-space and the unit measures itself with `node.worldX/Z`, so
+-- a unit parented under a container arrives where you clicked. (`node.x` is
+-- LOCAL — comparing that against a world target is how a click-to-move unit
+-- walks past its destination and keeps going forever.)
 --
 -- Attacking, gathering, build queues and formations all hang off `moveTo` +
 -- `isMoving` — give the unit a state variable and act on arrival.
@@ -30,6 +35,11 @@ defaults = {
   -- radius or a crowd will jostle forever trying to stand on one spot.
   --@range 0.1 10 --@units m
   arrive = 0.8,
+  -- Give up if the unit hasn't got measurably closer for this long — walked
+  -- into a wall, ordered somewhere it can't reach, shoved off course. Without
+  -- it a blocked unit pushes forever. 0 disables the guard.
+  --@range 0 30 --@units s
+  give_up_after = 3.0,
   -- Turn rate toward the way it's travelling. 0 leaves the facing alone (for
   -- units whose model is spun by an animation or a turret script instead).
   --@range 0 30 --@units rad/s
@@ -44,13 +54,16 @@ defaults = {
 -- Public state — the commander reads and writes these through a script handle.
 selected = false
 
-local tx, ty, tz = 0.0, 0.0, 0.0
+local tx, tz = 0.0, 0.0
 local has_order = false
+-- Progress watchdog: the closest we have been to this order, and how long ago.
+local best, stalled = math.huge, 0.0
 
---- Order the unit to a world point. `y` is optional (it walks the ground).
-function moveTo(x, y, z)
-  tx, ty, tz = x, y or 0.0, z
+--- Order the unit to a world point. `y` is ignored — units walk the ground.
+function moveTo(x, _y, z)
+  tx, tz = x, z
   has_order = true
+  best, stalled = math.huge, 0.0
 end
 
 --- Cancel the order and stand still.
@@ -62,35 +75,52 @@ function isMoving()
   return has_order
 end
 
+-- A checkbox param arrives as `true`/`false` from the script's defaults but as
+-- 1/0 once it has been saved on a node — and in Lua `0` is TRUE. One helper, so
+-- unticking a box in the Inspector actually turns the thing off.
+local function on(v)
+  return v ~= nil and v ~= false and v ~= 0
+end
+
 local function ring_at(node, r, g, b)
-  local y = node.y - params.ring_radius * 0.5 + 0.05
+  local cx0, cy0, cz0 = node.worldX, node.worldY, node.worldZ
+  local y = cy0 - params.ring_radius * 0.5 + 0.05
   local n = 20
-  local px, pz = node.x + params.ring_radius, node.z
+  local px, pz = cx0 + params.ring_radius, cz0
   for i = 1, n do
     local a = (i / n) * math.pi * 2
-    local cx = node.x + math.cos(a) * params.ring_radius
-    local cz = node.z + math.sin(a) * params.ring_radius
+    local cx = cx0 + math.cos(a) * params.ring_radius
+    local cz = cz0 + math.sin(a) * params.ring_radius
     draw.line(px, y, pz, cx, y, cz, r, g, b)
     px, pz = cx, cz
   end
 end
 
 function update(node, dt)
-  if params.ring and selected then ring_at(node, 0.35, 1.0, 0.5) end
+  if on(params.ring) and selected then ring_at(node, 0.35, 1.0, 0.5) end
 
-  -- Horizontal offset to the order (RTS movement is a ground-plane problem —
-  -- gravity or the ground itself owns the vertical).
-  local dx, dz = 0.0, 0.0
-  if has_order then
-    dx, dz = tx - node.x, tz - node.z
-    if math.sqrt(dx * dx + dz * dz) <= params.arrive then
-      has_order, dx, dz = false, 0.0, 0.0
-    end
-  end
+  -- Horizontal offset to the order, in WORLD space (RTS movement is a
+  -- ground-plane problem — gravity or the ground itself owns the vertical).
   local want_x, want_z = 0.0, 0.0
   if has_order then
-    local len = math.sqrt(dx * dx + dz * dz)
-    want_x, want_z = dx / len * params.speed, dz / len * params.speed
+    local dx, dz = tx - node.worldX, tz - node.worldZ
+    local left = math.sqrt(dx * dx + dz * dz)
+    if left <= params.arrive then
+      has_order = false -- arrived
+    else
+      -- Watchdog: only "making progress" counts as being closer than ever.
+      if left < best - 0.05 then
+        best, stalled = left, 0.0
+      else
+        stalled = stalled + dt
+        if params.give_up_after > 0 and stalled > params.give_up_after then
+          has_order = false -- blocked or unreachable: stop instead of shoving
+        end
+      end
+      if has_order then
+        want_x, want_z = dx / left * params.speed, dz / left * params.speed
+      end
+    end
   end
 
   local body = node:getcomponent("RigidBody")

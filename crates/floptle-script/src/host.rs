@@ -1010,6 +1010,7 @@ impl ScriptHost {
         // screen draws its orbit conics this way). Depth-tested in the scene.
         let draw_lines: Rc<RefCell<Vec<crate::DrawLine>>> = Rc::new(RefCell::new(Vec::new()));
         let draw_tris: Rc<RefCell<Vec<crate::DrawTri>>> = Rc::new(RefCell::new(Vec::new()));
+        let draw_rects: Rc<RefCell<Vec<crate::DrawRect>>> = Rc::new(RefCell::new(Vec::new()));
         {
             let q = draw_lines.clone();
             if let (Ok(f), Ok(t)) = (
@@ -1243,6 +1244,39 @@ impl ScriptHost {
                         },
                     ) {
                         let _ = t.set("disc", f);
+                    }
+                }
+                // ---- screen space -------------------------------------
+                // `draw.rect(x, y, w, h, r,g,b[,a][,radius])` — a filled
+                // rectangle in PIXELS, and `draw.rectOutline(..., [thickness])`
+                // its hollow twin. The pixels are `input.mouse()`'s, so an RTS
+                // marquee is the two corners you dragged between — the 3D line
+                // version of the same box has to be projected onto a ground
+                // plane, which fights the camera angle and misses anything the
+                // plane doesn't pass through.
+                for (name, outline_default) in [("rect", 0.0f32), ("rectOutline", 2.0f32)] {
+                    let q = draw_rects.clone();
+                    type RectArgs =
+                        (f32, f32, f32, f32, f32, f32, f32, Option<f32>, Option<f32>);
+                    if let Ok(f) = lua.create_function(
+                        move |_, (x, y, w, h, r, g, b, a, extra): RectArgs| {
+                            // `extra` is the corner radius on a fill, the border
+                            // thickness on an outline — the one number each wants.
+                            let (outline, radius) = if outline_default > 0.0 {
+                                (extra.unwrap_or(outline_default).max(0.0), 0.0)
+                            } else {
+                                (0.0, extra.unwrap_or(0.0).max(0.0))
+                            };
+                            q.borrow_mut().push(crate::DrawRect {
+                                rect: [x, y, w, h],
+                                color: [r, g, b, a.unwrap_or(1.0)],
+                                outline,
+                                radius,
+                            });
+                            Ok(())
+                        },
+                    ) {
+                        let _ = t.set(name, f);
                     }
                 }
                 let _ = lua.globals().set("draw", t);
@@ -1590,6 +1624,7 @@ impl ScriptHost {
             assembly_cmds,
             draw_lines,
             draw_tris,
+            draw_rects,
             destroy_queue,
             net,
             synced_stores,
@@ -1960,6 +1995,11 @@ impl ScriptHost {
     /// Drain this tick's filled triangles (`draw.tri/cone/disc`).
     pub fn take_draw_tris(&self) -> Vec<crate::DrawTri> {
         std::mem::take(&mut *self.draw_tris.borrow_mut())
+    }
+
+    /// Drain this tick's screen-space rectangles (`draw.rect/rectOutline`).
+    pub fn take_draw_rects(&self) -> Vec<crate::DrawRect> {
+        std::mem::take(&mut *self.draw_rects.borrow_mut())
     }
 
     /// Feed this frame's solved UI element rects in WINDOW physical pixels

@@ -808,6 +808,7 @@ impl Editor {
         // with no map for them to resolve against.
         self.seed_input_map();
         seed_example_shaders(&self.project_root);
+        seed_default_effects(&self.project_root);
         crate::ui_shader_lib::seed_ui_effects(&self.project_root);
         write_lua_support(&self.project_root);
     }
@@ -1384,6 +1385,27 @@ pub(crate) fn open_in_file_manager(path: &Path) {
 /// existing folder only gains examples it doesn't have yet (so new built-ins
 /// arrive with engine updates, edits to seeded files are never overwritten,
 /// and deleting the whole folder is the opt-out that sticks).
+/// Effects the shipped scripts fire by name. Written only if absent, so an
+/// edited copy is never overwritten — and a script that names a missing effect
+/// is a silent no-op, so this is the difference between the RTS starter kit
+/// showing a puff where you clicked and showing nothing.
+pub(crate) fn seed_default_effects(project_root: &Path) {
+    const DEFAULT_EFFECTS: &[(&str, &str)] = &[(
+        "MoveMarker.vfx.ron",
+        include_str!("../../../assets/vfx/MoveMarker.vfx.ron"),
+    )];
+    let dir = project_root.join("vfx");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    for (name, body) in DEFAULT_EFFECTS {
+        let p = dir.join(name);
+        if !p.exists() {
+            let _ = std::fs::write(&p, body);
+        }
+    }
+}
+
 pub(crate) fn seed_example_shaders(project_root: &Path) {
     let dir = project_root.join("shaders").join("examples");
     // The stamp remembers that this project was seeded once — so a missing

@@ -991,6 +991,32 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             // Transform reads.
             {
                 let s = scene.borrow();
+                // `node.worldX/worldY/worldZ` / `node.worldPos` — the position in
+                // WORLD space, composed up the parent chain. Read-only, and the
+                // answer to a whole class of "my unit walked off forever": x/y/z
+                // are LOCAL, so a script that compares a node under a moved
+                // parent against a world-space target never arrives.
+                if matches!(key.as_str(), "worldX" | "worldY" | "worldZ" | "worldPos") {
+                    let Some(tr) = s.transforms.get(&e) else { return Ok(Value::Nil) };
+                    let mut w = tr.translation;
+                    let mut cur = e;
+                    // Depth-capped: a cycle in the parent map must not hang the frame.
+                    for _ in 0..64 {
+                        let Some(&up) = s.parent.get(&cur) else { break };
+                        let Some(ptr) = s.transforms.get(&up) else { break };
+                        // The same composition `world_transform` uses, in f64.
+                        w = ptr.translation + ptr.rotation.as_dquat() * (ptr.scale.as_dvec3() * w);
+                        cur = up;
+                    }
+                    return Ok(match key.as_str() {
+                        "worldX" => Value::Number(w.x),
+                        "worldY" => Value::Number(w.y),
+                        "worldZ" => Value::Number(w.z),
+                        _ => Value::UserData(
+                            lua.create_userdata(crate::math_api::LuaVec3(w))?,
+                        ),
+                    });
+                }
                 if let Some(tr) = s.transforms.get(&e) {
                     match key.as_str() {
                         "x" => return Ok(Value::Number(tr.translation.x)),

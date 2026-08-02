@@ -34,7 +34,32 @@ pub(crate) enum LintKind {
     UnusedLocal,
     /// Approaching LuaJIT's hard per-function upvalue limit.
     UpvaluePressure,
+    /// A raw key poll where a named action would work: `input.pressed("space")`
+    /// instead of `input.justPressed("Jump")`. Advice, not an error — the code
+    /// runs. It just can't be rebound, doesn't reach a gamepad, and reads
+    /// neutral on a networked Predicted node.
+    RawInput,
 }
+
+/// Raw key polls, and the named action that does the same job on every device.
+/// Keyed by the SHIPPED starter map, so the advice names something that already
+/// exists in the project rather than something to go and invent.
+const RAW_INPUT_ADVICE: &[(&str, &str, &str)] = &[
+    // (raw call, key literal, the suggestion)
+    ("pressed", "space", "input.justPressed(\"Jump\")"),
+    ("key", "space", "input.action(\"Jump\")"),
+    ("key", "shift", "input.action(\"Sprint\")"),
+    ("pressed", "shift", "input.justPressed(\"Sprint\")"),
+    ("key", "c", "input.action(\"Crouch\")"),
+    ("pressed", "c", "input.justPressed(\"Crouch\")"),
+    ("pressed", "e", "input.justPressed(\"Interact\")"),
+    ("key", "e", "input.action(\"Interact\")"),
+    ("pressed", "escape", "input.justPressed(\"Pause\")"),
+    ("key", "w", "input.axis2(\"Move\")"),
+    ("key", "a", "input.axis2(\"Move\")"),
+    ("key", "s", "input.axis2(\"Move\")"),
+    ("key", "d", "input.axis2(\"Move\")"),
+];
 
 /// LuaJIT's hard limit (`LJ_MAX_UPVAL`). Not raisable without forking it.
 const UPVALUE_LIMIT: usize = 60;
@@ -385,6 +410,45 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
         });
     }
 
+    // Pass 5: raw key polls. The action map is the recommended path and there is
+    // nothing in the editor that ever says so — you only find out when a player
+    // can't rebind, when the gamepad does nothing, or when a networked character
+    // reads its own keys as neutral. So the advice comes to the code, with the
+    // exact replacement line, at the place that needs it.
+    for (n, raw) in src.lines().enumerate() {
+        // The RAW line: this lint is about the string ARGUMENT, which `code_of`
+        // (rightly, for every other pass) strips out.
+        if raw.contains("--@nolint") {
+            continue;
+        }
+        let code = raw;
+        for (call, key, better) in RAW_INPUT_ADVICE {
+            let needle = format!("input.{call}(");
+            let mut from = 0;
+            while let Some(rel) = code[from..].find(&needle) {
+                let at = from + rel;
+                from = at + needle.len();
+                let rest = code[from..].trim_start();
+                let lit = rest
+                    .strip_prefix('"')
+                    .and_then(|r| r.split('"').next())
+                    .or_else(|| rest.strip_prefix('\'').and_then(|r| r.split('\'').next()));
+                if lit != Some(*key) {
+                    continue;
+                }
+                out.push(Lint {
+                    line: n + 1,
+                    message: format!(
+                        "`input.{call}(\"{key}\")` polls the keyboard directly — {better} does \
+                         the same job through the action map, so it can be rebound, works on a \
+                         gamepad, and survives multiplayer prediction (Project Settings ⏵ Input)"
+                    ),
+                    kind: LintKind::RawInput,
+                });
+            }
+        }
+    }
+
     out.sort_by_key(|l| (l.line, l.message.clone()));
     out.dedup();
     out
@@ -512,6 +576,25 @@ print(used)
     }
 
     /// The upvalue ceiling: warn before LuaJIT's error, and say what to do.
+    /// The nudge everyone needs and nobody gets: raw key polling still works,
+    /// so nothing ever tells you the action map exists until a player asks why
+    /// they can't rebind. The lint names the replacement line, and stays quiet
+    /// about code that is already using actions.
+    #[test]
+    fn a_raw_key_poll_suggests_the_action_that_replaces_it() {
+        let api: Vec<&str> = Vec::new();
+        let ls = lint("function update(node, dt)\n  if input.pressed(\"space\") then jump() end\nend\n", &api);
+        let hit = ls.iter().find(|l| l.kind == LintKind::RawInput).expect("raw poll flagged");
+        assert_eq!(hit.line, 2);
+        assert!(hit.message.contains("input.justPressed(\"Jump\")"), "names the fix: {}", hit.message);
+        // Already on actions: silent.
+        let ok = lint("function update(node, dt)\n  if input.justPressed(\"Jump\") then jump() end\nend\n", &api);
+        assert!(!ok.iter().any(|l| l.kind == LintKind::RawInput));
+        // A key with no shipped action isn't second-guessed.
+        let quiet = lint("function update(node, dt)\n  if input.pressed(\"k\") then k() end\nend\n", &api);
+        assert!(!quiet.iter().any(|l| l.kind == LintKind::RawInput));
+    }
+
     #[test]
     fn upvalue_pressure_warns_before_luajit_errors() {
         let mut src = String::new();

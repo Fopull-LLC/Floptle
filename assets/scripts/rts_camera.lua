@@ -6,8 +6,9 @@
 --
 --   Pan      WASD or the left stick (Move) — along the ground, screen-relative
 --   Edge pan push the mouse to a screen edge
---   Zoom     the wheel or the d-pad (Zoom)
---   Rotate   Q / E or the bumpers (Turn) — swings the view about the focus point
+--   Zoom     the wheel, ↑ / ↓, or the d-pad (Zoom)
+--   Rotate   Q / E, ← / →, or the bumpers (Turn) — swings the view about the
+--            focus point
 --   Fast     hold Sprint (Shift / L3) to pan quicker
 --
 -- Every control is a NAMED ACTION from Project Settings → Input, so this works
@@ -58,6 +59,10 @@ defaults = {
   max_distance = 120,
   --@range 0 40
   zoom_speed = 4,
+  -- Seconds between steps while a zoom key (or the d-pad) is HELD. A wheel
+  -- notch is one step and never waits for this.
+  --@range 0.02 1 --@units s
+  zoom_repeat = 0.07,
   --@header Rotate
   --@range 0 360 --@units degrees/s
   rotate_speed = 90,
@@ -80,6 +85,14 @@ follow = nil
 
 -- Targets the live values ease toward (that's all `smoothing` is).
 local want_x, want_z, want_yaw, want_dist = 0.0, 0.0, 0.0, 40.0
+-- Zoom auto-repeat timer (see the zoom block in `update`).
+local zoom_cool = 0.0
+
+-- A checkbox param is `true`/`false` in these defaults but 1/0 once saved on a
+-- node — and `0` is TRUE in Lua. One helper, so unticking the box works.
+local function on(v)
+  return v ~= nil and v ~= false and v ~= 0
+end
 
 local function clamp(v, lo, hi)
   if v < lo then return lo end
@@ -112,29 +125,41 @@ function update(node, dt)
   -- ---- input ------------------------------------------------------------
   local sx, sy = input.axis2("Move")
 
-  -- Edge pan: only while the cursor is actually over the game view, so a mouse
-  -- resting on your other monitor (or on a HUD panel off the edge) can't shove
-  -- the map sideways forever.
-  if params.edge_pan then
-    local w, h = camera.screenSize()
+  -- Edge pan, measured against the game view's own RECTANGLE — `screenRect`
+  -- gives its top-left as well as its size, in the same pixels `input.mouse()`
+  -- reports. Size alone is not enough: in the editor the view is a docked panel,
+  -- so the cursor's x carries the offset of everything to its left, reads as
+  -- "past the right edge" from the moment you open it, and the camera slides
+  -- away forever. Outside the rect, nothing pans at all.
+  if on(params.edge_pan) then
+    local vx, vy, w, h = camera.screenRect()
     local mx, my = input.mouse()
     local m = params.edge_margin
-    if mx >= 0 and my >= 0 and mx <= w and my <= h then
-      if mx < m then sx = -1 elseif mx > w - m then sx = 1 end
-      if my < m then sy = 1 elseif my > h - m then sy = -1 end
+    if mx >= vx and my >= vy and mx <= vx + w and my <= vy + h then
+      if mx < vx + m then sx = -1 elseif mx > vx + w - m then sx = 1 end
+      if my < vy + m then sy = 1 elseif my > vy + h - m then sy = -1 end
     end
   end
 
   -- ---- zoom & rotate ----------------------------------------------------
-  local scroll = input.axis1("Zoom")
-  if scroll ~= 0 then
+  -- One axis carries both a WHEEL (a spike for a single frame) and HELD keys /
+  -- a d-pad (a steady 1 for as long as you hold). Treated as a rate, a wheel
+  -- notch would be invisible; treated as a step, a held key would fire sixty
+  -- times a second. So: one step per press, then a repeat rate while it stays
+  -- down — the same rule a keyboard's own auto-repeat uses.
+  local zoom = input.axis1("Zoom")
+  zoom_cool = zoom_cool - dt
+  if zoom ~= 0 and zoom_cool <= 0 then
     -- Zoom in proportion to how far out you are: one notch reads the same at
     -- every distance instead of crawling up close and lurching far away.
     want_dist = clamp(
-      want_dist - scroll * params.zoom_speed * (want_dist * 0.05 + 1.0),
+      want_dist - zoom * params.zoom_speed * (want_dist * 0.05 + 1.0),
       params.min_distance,
       params.max_distance
     )
+    zoom_cool = params.zoom_repeat
+  elseif zoom == 0 then
+    zoom_cool = 0 -- released: the next notch is immediate
   end
   local turn = input.axis1("Turn")
   if turn ~= 0 then

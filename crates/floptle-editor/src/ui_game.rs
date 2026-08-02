@@ -555,7 +555,7 @@ impl Editor {
         }
         // World-space layers render in the scene, not as an overlay.
         let (layers, ents) = self.ui_layer_trees(|l| !l.is_world());
-        if layers.is_empty() {
+        if layers.is_empty() && self.script_rects.is_empty() {
             return Vec::new();
         }
         let Some(uir) = self.ui_render.as_ref() else { return Vec::new() };
@@ -578,6 +578,26 @@ impl Editor {
         }
         for t in textures {
             let _ = self.ensure_texture(&t);
+        }
+        // Immediate-mode screen rects (`draw.rect` / `draw.rectOutline`), LAST so
+        // they sit over the HUD — a selection marquee is drawn on top of
+        // everything, by definition. Their pixels are `input.mouse()`'s (window
+        // space); the UI pass works in the viewport's own, hence the offset.
+        if !self.script_rects.is_empty() {
+            let o = self.game_view_origin;
+            let mut dl = floptle_ui::DrawList::default();
+            for r in &self.script_rects {
+                let outline = r.outline;
+                dl.quads.push(floptle_ui::Quad {
+                    rect: [r.rect[0] - o[0], r.rect[1] - o[1], r.rect[2], r.rect[3]],
+                    color: if outline > 0.0 { [0.0; 4] } else { r.color },
+                    border: [outline; 4],
+                    border_color: r.color,
+                    radius: [r.radius; 4],
+                    ..Default::default()
+                });
+            }
+            out.push((dl, 1.0));
         }
         out
     }

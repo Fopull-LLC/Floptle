@@ -418,6 +418,7 @@ impl Editor {
         // full-window cursor space `input.mouse()` reports. A DOCKED game tab
         // feeds its own sub-rect from update_game_viewport instead.
         if game_view {
+            self.game_view_origin = [0.0, 0.0]; // fullscreen play: cursor space IS viewport space
             self.script_host.set_view(floptle_script::ViewInfo {
                 view_proj: view_proj.to_cols_array(),
                 cam_world: [cam.world_position.x, cam.world_position.y, cam.world_position.z],
@@ -4575,6 +4576,7 @@ impl Editor {
             // behind an interpolated camera.
             self.script_lines = self.script_host.take_draw_lines();
             self.script_tris = self.script_host.take_draw_tris();
+            self.script_rects = self.script_host.take_draw_rects();
             // Script debug gizmos queued this frame — by `update` AND `fixedUpdate` —
             // drained once here (drawn by the viewport overlay), plus the multiplayer
             // harness's ghost-client markers.

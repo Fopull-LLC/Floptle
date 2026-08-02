@@ -2378,6 +2378,9 @@ impl EditorTabViewer<'_> {
                     crate::lua_lint::LintKind::AccidentalGlobal => "✎",
                     crate::lua_lint::LintKind::UnusedLocal => "○",
                     crate::lua_lint::LintKind::UpvaluePressure => "▲",
+                    // A suggestion, not a defect — its own mark so the strip
+                    // reads as "here is a better way", not "here is a bug".
+                    crate::lua_lint::LintKind::RawInput => "➜",
                 };
                 if ui
                     .add(

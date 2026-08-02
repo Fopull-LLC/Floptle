@@ -1147,6 +1147,13 @@ struct Editor {
     script_lines: Vec<floptle_script::DrawLine>,
     /// This tick's script-drawn filled triangles (world space, immediate mode).
     script_tris: Vec<floptle_script::DrawTri>,
+    /// Screen-space rectangles queued this frame (`draw.rect` / `draw.rectOutline`).
+    /// Drawn through the game-UI pipeline over the HUD — see `gather_game_ui`.
+    script_rects: Vec<floptle_script::DrawRect>,
+    /// The game viewport's top-left in WINDOW physical pixels — the offset that
+    /// turns `input.mouse()` space (what scripts draw in) into viewport space
+    /// (what the UI pass draws in). Zero when the game fills the window.
+    game_view_origin: [f32; 2],
     /// Billboard particle pass (the VFX sim's draw arm).
     particles: Option<floptle_render::Particles>,
     egui: Option<Egui>,
@@ -2602,7 +2609,23 @@ impl ApplicationHandler for Editor {
                                     // nothing else to cancel in a build
                                 } else if self.anim_ui.drag_from.is_some() {
                                     self.anim_ui.drag_from = None;
-                                } else if self.scene_dirty || self.image.dirty {
+                                }
+                                // …and when there is nothing to cancel, Escape does
+                                // NOTHING. It used to quit the editor, which is a
+                                // catastrophic default for a key every tool binds to
+                                // "back out of this": one stray press while a map mode
+                                // was already disarmed closed the app. Quitting lives
+                                // where quitting belongs — the window's close button,
+                                // File ⏵ Exit, Ctrl+Q.
+                                
+                            }
+                            // Ctrl+Q — the deliberate quit, now that Escape isn't
+                            // one. Two keys together can't be pressed by accident
+                            // the way a lone Escape can, and it still routes through
+                            // the unsaved-changes confirm. Editor only: a build has
+                            // no editor to leave (its window close / Alt+F4 quit it).
+                            KeyCode::KeyQ if self.ctrl && !self.player_mode => {
+                                if self.scene_dirty || self.image.dirty {
                                     self.show_quit_confirm = true;
                                 } else {
                                     event_loop.exit();

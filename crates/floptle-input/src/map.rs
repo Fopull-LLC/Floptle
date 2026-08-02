@@ -634,6 +634,12 @@ impl InputMap {
                             plus: pad(PadButton::DPadUp),
                             player: None,
                         },
+                        // ↑ / ↓ zoom for a strategy camera (see `Turn`).
+                        Axis1Binding::Keys {
+                            minus: key(Key::ArrowDown),
+                            plus: key(Key::ArrowUp),
+                            player: None,
+                        },
                     ],
                 },
                 // Swing a camera around what it is looking at (the RTS view's
@@ -646,6 +652,13 @@ impl InputMap {
                         Axis1Binding::Keys {
                             minus: key(Key::KeyQ),
                             plus: key(Key::KeyE),
+                            player: None,
+                        },
+                        // The arrows too: a top-down camera is played with one
+                        // hand on the mouse, and that hand is not on Q/E.
+                        Axis1Binding::Keys {
+                            minus: key(Key::ArrowLeft),
+                            plus: key(Key::ArrowRight),
                             player: None,
                         },
                         Axis1Binding::Keys {

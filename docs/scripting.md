@@ -515,6 +515,7 @@ hover and click 3-D things you drew:
 | `camera.worldToScreen(x, y, z)` | `sx, sy, depth, onscreen` |
 | `camera.screenToRay(sx, sy)` | `ox,oy,oz, dx,dy,dz` (a world ray from a pixel) |
 | `camera.screenSize()` | `w, h` (game viewport, pixels) |
+| `camera.screenRect()` | `x, y, w, h` — the viewport's rectangle in cursor space. Use this, not `screenSize`, to ask "is the cursor over the game view?": in the editor the view is a docked panel, so `input.mouse()` carries its offset. (An edge-pan camera that compares the cursor's x against the *width* slides away forever the moment the panel is not at x = 0.) |
 | `camera.exists()` | `true` once a live game camera is being fed |
 
 `onscreen` is `false` for points behind the camera or outside the frustum — skip
@@ -1035,6 +1036,39 @@ draw.line(a.x, a.y, a.z, b.x, b.y, b.z, 0.3, 0.85, 1.0)        -- rgb
 draw.line(x1, y1, z1, x2, y2, z2, 0.5, 0.5, 0.6, 0.4)          -- + alpha
 ```
 
+### Screen-space boxes (`draw.rect`, `draw.rectOutline`)
+
+Immediate-mode rectangles in **pixels** — the same pixels `input.mouse()` reports:
+
+```lua
+draw.rect(x, y, w, h, r, g, b [, a] [, radius])        -- filled
+draw.rectOutline(x, y, w, h, r, g, b [, a] [, px])     -- hollow, `px` thick
+```
+
+They draw over the scene *and* over the HUD, in the Game view and in a build.
+This is the whole of an RTS marquee — the two corners you dragged between:
+
+```lua
+function update(node, dt)
+  local mx, my = input.mouse()
+  if input.clicked(0) then press = { x = mx, y = my } end
+  if press and input.button(0) then
+    local x, y = math.min(press.x, mx), math.min(press.y, my)
+    local w, h = math.abs(mx - press.x), math.abs(my - press.y)
+    draw.rect(x, y, w, h, 0.35, 1.0, 0.55, 0.12)        -- translucent fill
+    draw.rectOutline(x, y, w, h, 0.45, 1.0, 0.6, 0.9, 1.5)
+  end
+  if press and not input.button(0) then
+    -- …and a thing is "in the box" when `camera.worldToScreen` puts it there.
+    press = nil
+  end
+end
+```
+
+Doing the same job with 3-D lines means projecting a rectangle onto a ground
+plane, which fights the camera angle and misses anything the plane doesn't pass
+through. `rts_commander.lua` is the worked example.
+
 Immediate mode: a segment lives **one frame** — keep calling it while you want
 it visible (an idle script's lines vanish by themselves). Draw from
 `lateUpdate` when the lines belong to a camera you position there (the solar
@@ -1406,6 +1440,25 @@ end
 
 Inside a script's own functions, `node` always refers to **its** node (so a method
 called from elsewhere still acts on the right object), and `params` is its tunables.
+
+### Where is it *really*? — `node.worldX/worldY/worldZ`
+
+`node.x/y/z` are **local**: for a child, they are measured from its parent. That
+is what you want when you move something, and exactly what you don't want when
+you compare it against a world-space target:
+
+```lua
+-- Read-only, and composed up the whole parent chain (position, rotation, scale).
+local wx, wy, wz = node.worldX, node.worldY, node.worldZ
+local here = node.worldPos                     -- …or all three as a vec3
+
+-- Am I there yet? Measure in WORLD space, always:
+if distance(here, target) < 1.0 then arrived() end
+```
+
+A unit under a container node that compares `node.x` against a world order never
+arrives — it walks past it and keeps going. Use `worldX/Y/Z` for distances,
+targets, and anything you hand to another script; use `x/y/z` to move.
 
 > **Notes.** Node handles expose a node's **local** transform (the same values as the
 > `node` argument). `findScript` returns the *first* matching script — perfect for a

@@ -65,6 +65,23 @@ pub(crate) fn install_camera_api(lua: &Lua, view: Rc<RefCell<ViewInfo>>) {
         }
     }
 
+    // camera.screenRect() -> x, y, w, h — the game viewport IN THE SAME SPACE as
+    // input.mouse() and worldToScreen (which both carry the viewport's offset).
+    // `screenSize` alone can't answer "is the cursor over the game view?": in the
+    // editor the view is a dock panel, so the cursor's x is offset by whatever is
+    // to its left, and comparing it against the WIDTH reads as "past the right
+    // edge" from the moment you open the panel. That is an edge-pan camera that
+    // slides away forever.
+    {
+        let v = view.clone();
+        if let Ok(f) = lua.create_function(move |_, ()| {
+            let v = v.borrow();
+            Ok((v.vp_x, v.vp_y, v.vp_w, v.vp_h))
+        }) {
+            let _ = t.set("screenRect", f);
+        }
+    }
+
     // camera.worldToScreen(x,y,z) -> sx, sy, depth, onscreen.
     // Pixels are in the SAME space as input.mouse() (game-view physical px).
     // `onscreen` is false for points behind the camera or outside the frustum —

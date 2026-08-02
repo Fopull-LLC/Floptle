@@ -411,6 +411,8 @@ impl Editor {
         // actually reported a rect — publishing the placeholder size would have
         // `camera.exists()` answer yes with numbers off by the whole layout.
         if self.game_rect.is_some() {
+            // Screen-space `draw.rect` arrives in this same cursor space.
+            self.game_view_origin = [tab_org[0], tab_org[1]];
             let vp = cam.view_proj(aspect);
             self.script_host.set_view(floptle_script::ViewInfo {
                 view_proj: vp.to_cols_array(),

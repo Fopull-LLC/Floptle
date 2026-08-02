@@ -53,6 +53,24 @@ pub struct DrawLine {
     pub color: [f32; 4],
 }
 
+/// One SCREEN-SPACE rectangle a script queued via `draw.rect` /
+/// `draw.rectOutline` this tick (immediate mode, like the 3D `draw.*` calls).
+///
+/// Pixels are the same space `input.mouse()` and `camera.worldToScreen` use, so
+/// a marquee is literally "the rect between where I pressed and where the cursor
+/// is" — no projection, no ground plane, no camera angle to fight. Drawn through
+/// the game-UI pipeline, over everything, in the Game view and in a build alike.
+#[derive(Clone, Copy, Debug)]
+pub struct DrawRect {
+    /// `[x, y, w, h]` in physical pixels.
+    pub rect: [f32; 4],
+    pub color: [f32; 4],
+    /// Border width in px — `0` fills the rect instead of outlining it.
+    pub outline: f32,
+    /// Corner radius in px.
+    pub radius: f32,
+}
+
 /// One world-space FILLED triangle a script queued via `draw.tri` / `draw.cone`
 /// / `draw.disc` this tick (immediate mode). Drawn by the runtime triangle
 /// layer alongside the lines — solid gizmo geometry, world markers.
@@ -459,6 +477,7 @@ pub struct ScriptHost {
     draw_lines: Rc<RefCell<Vec<DrawLine>>>,
     /// This tick's `draw.tri/cone/disc(...)` filled triangles (immediate mode).
     draw_tris: Rc<RefCell<Vec<DrawTri>>>,
+    draw_rects: Rc<RefCell<Vec<DrawRect>>>,
     /// Per-assembly mirror (`assembly.info`), fed by the driver each frame.
     assembly_info: Rc<RefCell<HashMap<u32, assembly_api::AssemblyInfo>>>,
     /// Per-part contact loads for the last tick (`assembly.impacts`), fed by
@@ -2249,6 +2268,57 @@ end
             "child.x = {}",
             world.get::<Transform>(child).unwrap().translation.x
         );
+    }
+
+    /// `node.worldX/Y/Z` compose the parent chain: a unit under a moved,
+    /// rotated, scaled container has to be able to answer "where am I, really?"
+    /// — comparing a LOCAL x against a world-space order is how a click-to-move
+    /// script walks off into the distance and never arrives.
+    #[test]
+    fn world_position_composes_the_parent_chain() {
+        let dir = std::env::temp_dir().join("floptle_script_test_worldpos");
+        let _ = std::fs::create_dir_all(&dir);
+        // The script checks itself and raises on a mismatch — the host reports
+        // a Lua error, which is what this test reads.
+        write_script(
+            &dir,
+            "probe",
+            "function update(node, dt)\n\
+             \x20 local wx, wz = node.worldX, node.worldZ\n\
+             \x20 if math.abs(wx - 10.0) > 1e-4 or math.abs(wz + 10.0) > 1e-4 then\n\
+             \x20   error('world ' .. wx .. ',' .. wz)\n\
+             \x20 end\n\
+             \x20 if math.abs(node.x - 3.0) > 1e-6 then error('local x moved') end\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let parent = world.spawn();
+        let mut pt = Transform::from_translation(floptle_core::math::DVec3::new(10.0, 1.0, -4.0));
+        pt.rotation = floptle_core::math::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        pt.scale = floptle_core::math::Vec3::splat(2.0);
+        world.insert(parent, pt);
+        let child = world.spawn();
+        world.insert(
+            child,
+            Transform::from_translation(floptle_core::math::DVec3::new(3.0, 0.0, 0.0)),
+        );
+        world.insert(child, floptle_core::Parent(parent));
+        world.insert(
+            child,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "probe".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        // Parent local +X, scaled 2 and yawed 90°, lands 6 along −Z: (10, 1, −10).
+        let want = floptle_core::world_transform(&world, child).translation;
+        assert!((want.x - 10.0).abs() < 1e-6 && (want.z + 10.0).abs() < 1e-6, "{want:?}");
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.016, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
     }
 
     #[test]

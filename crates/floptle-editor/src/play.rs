@@ -533,6 +533,7 @@ impl Editor {
         self.script_host.clear_anim_state();
         self.script_gizmos.clear();
         self.script_lines.clear();
+        self.script_rects.clear();
         // Both directions of the Play toggle wipe action state: a key held
         // while editing must not read as a press the instant Play starts, and a
         // half-finished motion must not survive into (or out of) the session.
@@ -663,6 +664,7 @@ impl Editor {
             self.lod_keep_live.clear(); // keep-live exemptions don't persist runs
             self.compound_coast.clear();
             self.script_lines.clear(); // no stale map lines across runs
+            self.script_rects.clear();
             // Every Play is a FRESH RUN: drop all script instances so top-level
             // script state can't leak across sessions (Ty's ship still thought
             // he was piloting after Stop → Play). `start()` re-fires for all.

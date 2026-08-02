@@ -9,18 +9,21 @@
 --   Sprint (Shift) add to the selection instead of replacing it
 --   Right click    send the selection there, spread into a loose formation
 --
--- The box is drawn on the GROUND rather than as a screen rectangle: it reads
--- correctly at any camera angle, needs no UI nodes, and picks exactly what it
--- outlines. `draw.*` is immediate mode, so it lives exactly as long as the drag.
+-- The selection box is a SCREEN rectangle — `draw.rect` / `draw.rectOutline`
+-- draw in the same pixels the mouse reports, so the box is literally the two
+-- corners you dragged between, and a unit is inside it when its position lands
+-- inside it on screen (`camera.worldToScreen`). No ground plane, no camera
+-- angle, no projection to fight: this is how every RTS does marquee selection.
 --
 -- Everything here goes through rts_unit's small API (`moveTo`, `stop`,
 -- `selected`), so swapping in your own unit script means keeping three names.
 
 defaults = {
   --@header World
-  -- The ground height clicks are resolved against. A click ray is intersected
-  -- with this plane, so it works with no colliders in the scene at all; with
-  -- terrain or blockout under the cursor, the surface hit wins.
+  -- The ground height clicks fall back to. A click ray is intersected with this
+  -- plane when it hits nothing solid, so this works in a scene with no
+  -- colliders at all; with terrain or blockout under the cursor, the real
+  -- surface hit wins.
   --@range -100 100 --@units m
   ground_y = 0,
   --@range 10 10000 --@units m
@@ -29,7 +32,11 @@ defaults = {
   -- Spacing of the arrival grid, so a group doesn't pile onto one point.
   --@range 0 20 --@units m
   formation_spacing = 2.5,
-  -- Seconds the click marker stays on the ground.
+  -- A particle one-shot fired where you ordered the units: the key of any
+  -- effect asset (Assets ⏵ ❋ Particles), or blank for none. The drawn ring
+  -- below happens either way, so a missing effect is never a dead click.
+  marker_effect = "vfx/MoveMarker",
+  -- Seconds the drawn click ring stays on the ground.
   --@range 0 5 --@units s
   marker_time = 0.7,
   --@header Selection
@@ -41,17 +48,17 @@ defaults = {
 -- Public: how many units are selected (a HUD can read this).
 count = 0
 
-local drag = nil -- { sx, sy, wx, wz } while the left button is down
-local marker = nil -- { x, z, t } fading order marker
+local drag = nil -- { x, y } screen pixel the press started at
+local marker = nil -- { x, y, z, t } fading order marker
 
--- Where a screen pixel meets the world: the first thing the ray hits, or the
--- ground plane if it hits nothing (an empty scene still commands correctly).
+-- Where a screen pixel meets the world: the first thing the ray hits, else the
+-- ground plane. Returns x, y, z, node (node = nil when it hit the plane).
 local function pick(mx, my)
   local ox, oy, oz, dx, dy, dz = camera.screenToRay(mx, my)
   if not ox then return nil end
   local hit = raycast(ox, oy, oz, dx, dy, dz, params.pick_range)
   if hit then return hit.x, hit.y, hit.z, hit.node end
-  if dy >= -1e-6 then return nil end -- ray points up/level: never meets the plane
+  if dy >= -1e-6 then return nil end -- ray points up or level: never meets the plane
   local t = (params.ground_y - oy) / dy
   return ox + dx * t, params.ground_y, oz + dz * t, nil
 end
@@ -60,45 +67,37 @@ local function units()
   return findScripts("rts_unit")
 end
 
-local function clear_selection()
-  for _, u in ipairs(units()) do u.selected = false end
-end
-
 function update(node, dt)
   local mx, my = input.mouse()
 
   -- ---- selection ---------------------------------------------------------
   if input.clicked(0) then
-    local x, _, z = pick(mx, my)
-    drag = { sx = mx, sy = my, wx = x or 0, wz = z or 0, world = x ~= nil }
+    drag = { x = mx, y = my }
   end
   if drag and input.button(0) then
-    -- Draw the box being dragged, on the ground, corner to corner.
-    local x, _, z = pick(mx, my)
-    if x and drag.world then
-      local x0, z0, x1, z1 = drag.wx, drag.wz, x, z
-      local y = params.ground_y + 0.05
-      draw.line(x0, y, z0, x1, y, z0, 0.4, 1.0, 0.6)
-      draw.line(x1, y, z0, x1, y, z1, 0.4, 1.0, 0.6)
-      draw.line(x1, y, z1, x0, y, z1, 0.4, 1.0, 0.6)
-      draw.line(x0, y, z1, x0, y, z0, 0.4, 1.0, 0.6)
+    -- The live marquee: a translucent fill plus a bright outline, in pixels.
+    local x, y = math.min(drag.x, mx), math.min(drag.y, my)
+    local w, h = math.abs(mx - drag.x), math.abs(my - drag.y)
+    if w + h > params.drag_threshold then
+      draw.rect(x, y, w, h, 0.35, 1.0, 0.55, 0.12)
+      draw.rectOutline(x, y, w, h, 0.45, 1.0, 0.6, 0.9, 1.5)
     end
   end
   if drag and not input.button(0) then
     local add = input.action("Sprint") -- the shipped Shift binding; rebindable
-    local moved = math.abs(mx - drag.sx) + math.abs(my - drag.sy)
-    if not add then clear_selection() end
-    if moved > params.drag_threshold and drag.world then
-      -- Box: everything whose position falls inside the dragged ground rect.
-      local x, _, z = pick(mx, my)
-      if x then
-        local lo_x, hi_x = math.min(drag.wx, x), math.max(drag.wx, x)
-        local lo_z, hi_z = math.min(drag.wz, z), math.max(drag.wz, z)
-        for _, u in ipairs(units()) do
-          local n = u.node
-          if n.x >= lo_x and n.x <= hi_x and n.z >= lo_z and n.z <= hi_z then
-            u.selected = true
-          end
+    local moved = math.abs(mx - drag.x) + math.abs(my - drag.y)
+    if not add then
+      for _, u in ipairs(units()) do u.selected = false end
+    end
+    if moved > params.drag_threshold then
+      -- Box: every unit whose position projects inside the rectangle.
+      local lo_x, hi_x = math.min(drag.x, mx), math.max(drag.x, mx)
+      local lo_y, hi_y = math.min(drag.y, my), math.max(drag.y, my)
+      for _, u in ipairs(units()) do
+        local n = u.node
+        local sx, sy, _, on = camera.worldToScreen(n.worldX, n.worldY, n.worldZ)
+        if on and sx >= lo_x and sx <= hi_x and sy >= lo_y and sy <= hi_y then
+          u.selected = true
         end
       end
     else
@@ -118,8 +117,8 @@ function update(node, dt)
       for _, u in ipairs(units()) do
         if u.selected then sel[#sel + 1] = u end
       end
-      -- A loose square grid centred on the click, so a group arrives spread
-      -- out instead of fighting over one square metre.
+      -- A loose square grid centred on the click, so a group arrives spread out
+      -- instead of fighting over one square metre.
       local side = math.max(1, math.ceil(math.sqrt(#sel)))
       local step = params.formation_spacing
       for i, u in ipairs(sel) do
@@ -127,7 +126,12 @@ function update(node, dt)
         local row = math.floor((i - 1) / side) - (side - 1) * 0.5
         u.moveTo(x + col * step, y, z + row * step)
       end
-      if #sel > 0 then marker = { x = x, z = z, t = params.marker_time } end
+      if #sel > 0 then
+        marker = { x = x, y = y, z = z, t = params.marker_time }
+        if params.marker_effect ~= "" then
+          spawnEffect(params.marker_effect, x, y + 0.1, z)
+        end
+      end
     end
   end
 
@@ -141,13 +145,14 @@ function update(node, dt)
     if marker.t <= 0 then
       marker = nil
     else
-      local r = 0.6 + (params.marker_time - marker.t) * 2.0 -- expanding pulse
-      local y = params.ground_y + 0.06
+      -- An expanding ring on the ground, under the particle puff.
+      local r = 0.6 + (params.marker_time - marker.t) * 2.0
+      local y = marker.y + 0.06
       local px, pz = marker.x + r, marker.z
       for i = 1, 16 do
         local a = (i / 16) * math.pi * 2
         local cx, cz = marker.x + math.cos(a) * r, marker.z + math.sin(a) * r
-        draw.line(px, y, pz, cx, y, cz, 1.0, 0.85, 0.3)
+        draw.line(px, y, pz, cx, y, cz, 1.0, 0.85, 0.3, marker.t / params.marker_time)
         px, pz = cx, cz
       end
     end
