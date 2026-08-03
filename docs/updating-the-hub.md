@@ -54,13 +54,20 @@ need those — the Hub installs engines for you.
 
 ## Linux
 
-Quit the Hub first, then, with `VERSION` set to the one you downloaded:
+Quit the Hub first. Then either download from the page above and unpack it, or
+do the whole thing in one paste — replace `0.21.2` with the current version:
 
 ```sh
 cd ~/Downloads
-tar -xzf floptle-hub-VERSION-linux-x86_64.tar.gz
+curl -LO https://github.com/Fopull-LLC/Floptle-releases/releases/download/v0.21.2/floptle-hub-0.21.2-linux-x86_64.tar.gz
+tar -xzf floptle-hub-0.21.2-linux-x86_64.tar.gz
 chmod +x floptle-hub
 ```
+
+> `tar: Cannot open: No such file or directory` means the download step didn't
+> happen or the version in the name is wrong. Check the exact filename under
+> **Assets** on the releases page — and check the release you want is actually
+> published, not still building.
 
 That leaves a `floptle-hub` binary in the folder. **Put it wherever your old one
 was** — if you don't know, search for it:
@@ -79,11 +86,14 @@ mkdir -p ~/.local/bin && mv floptle-hub ~/.local/bin/
 
 ## macOS
 
-Quit the Hub first. Double-click the `.tar.gz` to unpack it, or:
+Quit the Hub first. Download from the page above and double-click the `.tar.gz`
+to unpack it, or do it all at once — replace `0.21.2` with the current version,
+and `aarch64` with `x86_64` on an Intel Mac:
 
 ```sh
 cd ~/Downloads
-tar -xzf floptle-hub-VERSION-macos-aarch64.tar.gz   # or -macos-x86_64
+curl -LO https://github.com/Fopull-LLC/Floptle-releases/releases/download/v0.21.2/floptle-hub-0.21.2-macos-aarch64.tar.gz
+tar -xzf floptle-hub-0.21.2-macos-aarch64.tar.gz
 chmod +x floptle-hub
 ```
 
@@ -107,8 +117,17 @@ Move it over your old copy and run it.
 
 ## Windows
 
-Quit the Hub first. Right-click the `.zip` → **Extract All**. Inside is
-`floptle-hub.exe`. Copy it over your old `floptle-hub.exe`, replacing it.
+Quit the Hub first. Download the `.zip` from the page above, right-click it →
+**Extract All**. Inside is `floptle-hub.exe`. Copy it over your old
+`floptle-hub.exe`, replacing it.
+
+Or in PowerShell, replacing `0.21.2` with the current version:
+
+```powershell
+cd ~\Downloads
+Invoke-WebRequest -Uri https://github.com/Fopull-LLC/Floptle-releases/releases/download/v0.21.2/floptle-hub-0.21.2-windows-x86_64.zip -OutFile hub.zip
+Expand-Archive -Path hub.zip -DestinationPath . -Force
+```
 
 > **If Windows blocks it:** you'll get a blue *"Windows protected your PC"*
 > box. Click **More info** → **Run anyway**. This is SmartScreen reacting to an
