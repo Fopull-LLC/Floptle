@@ -213,6 +213,11 @@ struct VersionRow {
     artifact: Option<crate::releases::Artifact>,
     installed: Option<Install>,
     is_default: bool,
+    /// This release shipped a new Hub and the same engine as the one before it. Installable,
+    /// and not a reason to move a project — so it is never labelled "new" in a list of
+    /// engines. False for a release the manifest says nothing about, which is every release
+    /// published before the Hub could tell the difference.
+    hub_only: bool,
 }
 
 impl HubApp {
@@ -564,9 +569,13 @@ impl HubApp {
     }
 
     /// The newest release on the user's channel that is strictly newer than
-    /// everything installed AND ships a bundle for this platform — what the
-    /// update banner offers. None while nothing is installed yet (the Installs
-    /// tab is the front door there, not a nag).
+    /// everything installed, **actually changed the engine**, and ships a bundle for this
+    /// platform — what the update banner offers. None while nothing is installed yet (the
+    /// Installs tab is the front door there, not a nag).
+    ///
+    /// The engine check is why this isn't just "newest > installed". One tag builds the
+    /// engine and the Hub together, so a Hub-only release raises the version number of an
+    /// engine that did not change, and this banner would tell you to go and install it.
     fn update_available(&self) -> Option<crate::releases::ReleaseInfo> {
         let ManifestState::Loaded(m) = &self.manifest else { return None };
         let newest_installed = self
@@ -578,6 +587,7 @@ impl HubApp {
             .into_iter()
             .find(|r| {
                 r.artifact_here().is_some()
+                    && r.changes_engine()
                     && crate::releases::version_key(&r.version) > newest_installed
             })
             .cloned()
@@ -592,6 +602,20 @@ impl HubApp {
     fn newest_release(&self) -> Option<&crate::releases::ReleaseInfo> {
         let ManifestState::Loaded(m) = &self.manifest else { return None };
         m.on_channel_refs(&self.config.settings.channel).into_iter().next()
+    }
+
+    /// Which engine a release actually ships: the newest release below it that changed one.
+    ///
+    /// Only interesting for a Hub-only release, where the answer is not its own version —
+    /// and where saying so out loud ("the same engine as 0.22.0") is the difference between
+    /// a version number that looks wrong and one that explains itself.
+    fn engine_behind(&self, version: &str) -> Option<String> {
+        let ManifestState::Loaded(m) = &self.manifest else { return None };
+        let k = crate::releases::version_key(version);
+        m.on_channel_refs(&self.config.settings.channel)
+            .into_iter()
+            .find(|r| r.changes_engine() && crate::releases::version_key(&r.version) < k)
+            .map(|r| r.version.clone())
     }
 
     /// This Hub's own version, or `None` for a dev build (`0.0.0`), which is never
@@ -696,6 +720,7 @@ impl HubApp {
                     artifact: r.artifact_here().cloned(),
                     installed: None,
                     is_default: default == Some(r.version.as_str()),
+                    hub_only: r.is_hub_only(),
                 });
             }
         }
@@ -710,6 +735,7 @@ impl HubApp {
                     artifact: None,
                     installed: Some(i.clone()),
                     is_default: default == Some(i.version.as_str()),
+                    hub_only: false,
                 }),
             }
         }
@@ -914,15 +940,22 @@ impl HubApp {
         Ok(project)
     }
 
-    /// The newest installed version strictly newer than the project's pinned one — the
-    /// "Upgrade to X" target, if any.
+    /// The newest installed version strictly newer than the project's pinned one **whose
+    /// engine is actually different** — the "Upgrade engine to X" target, if any.
+    ///
+    /// A bigger number is not by itself a reason to migrate a project. A Hub-only release
+    /// carries the same engine as the version before it, so offering to move a project onto
+    /// it is offering a migration with no result — and the version the project ends up
+    /// pinned to then disagrees with the release notes, which say the engine didn't change.
+    /// The manifest knows which releases touched the engine; when it hasn't loaded, fall
+    /// back to comparing numbers, so an offline Hub behaves exactly as it used to.
     fn upgrade_target(&self, project: &Project) -> Option<Install> {
-        let pinned = project.engine_version.clone();
+        let pinned = project.engine_version.as_deref()?;
         self.installs
             .iter()
-            .filter(|i| match &pinned {
-                Some(p) => crate::releases::version_key(&i.version) > crate::releases::version_key(p),
-                None => false,
+            .filter(|i| match &self.manifest {
+                ManifestState::Loaded(m) => m.engine_differs(pinned, &i.version),
+                _ => crate::releases::version_key(&i.version) > crate::releases::version_key(pinned),
             })
             .max_by(|a, b| {
                 crate::releases::version_key(&a.version).cmp(&crate::releases::version_key(&b.version))
@@ -1034,6 +1067,17 @@ impl eframe::App for HubApp {
         egui::Panel::top("tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading(format!("{} Floptle Hub", ico::ROCKET));
+                // THE HUB'S OWN VERSION, ALWAYS IN VIEW. Three different things share one
+                // version number here — the Hub, the engine, and the engine a project is
+                // pinned to — and until this line the only one with its name attached was
+                // on the About tab. Somebody reading "0.22.1" in the Installs list had
+                // nothing on screen telling them it was a different 0.22.1 from the window
+                // they were reading it in.
+                if let Some(v) = Self::hub_version() {
+                    ui.weak(v).on_hover_text(
+                        "the version of the Hub itself — the engine versions in Installs are numbered separately",
+                    );
+                }
                 ui.separator();
                 ui.selectable_value(&mut self.tab, Tab::Projects, format!("{} Projects", ico::PROJECTS));
                 ui.selectable_value(&mut self.tab, Tab::News, format!("{} News", ico::NEWS));
@@ -1405,8 +1449,11 @@ impl HubApp {
                             }
                             if let Some(target) = &upgrades[idx]
                                 && p.exists()
+                                // "⬆ 0.22.1" was a bare number on a screen with three
+                                // different things numbered the same way. Name the one it
+                                // means.
                                 && ui
-                                    .add_enabled(!busy, egui::Button::new(format!("{} {}", ico::UPGRADE, target.version)))
+                                    .add_enabled(!busy, egui::Button::new(format!("{} Engine {}", ico::UPGRADE, target.version)))
                                     .on_hover_text("migrate this project to the newer installed engine")
                                     .clicked()
                             {
@@ -1473,6 +1520,12 @@ impl HubApp {
                 ui.small(format!("{} channel", self.config.settings.channel));
             });
         });
+        // SAY WHICH VERSIONS THESE ARE. "Engine versions" alone left the reader to work out
+        // that the Hub is not in this list and does not update from it — and the Hub's own
+        // updates arrive as a banner, from the same release, wearing the same number.
+        ui.small(egui::RichText::new(
+            "The engine your projects run. The Hub updates itself, separately from this list.",
+        ).weak());
 
         // A running install job, above the split so it stays put while you browse.
         if let Some(job) = &self.job {
@@ -1524,9 +1577,12 @@ impl HubApp {
                 |ui| {
                 egui::ScrollArea::vertical().id_salt("version-list").show(ui, |ui| {
                     for r in &rows {
-                        let is_new = newest_installed
-                            .as_ref()
-                            .is_some_and(|n| crate::releases::version_key(&r.version) > *n);
+                        // "new" means a new ENGINE. A Hub-only release is newer than
+                        // everything installed and still has nothing in it for this list.
+                        let is_new = !r.hub_only
+                            && newest_installed
+                                .as_ref()
+                                .is_some_and(|n| crate::releases::version_key(&r.version) > *n);
 
                         // ONE ROW, ONE HIT TARGET. This used to be a `selectable_label`
                         // for the version and an unclickable line of state under it — so
@@ -1577,6 +1633,8 @@ impl HubApp {
                                     egui::RichText::new("new")
                                         .color(egui::Color32::from_rgb(120, 200, 130)),
                                 );
+                            } else if r.hub_only {
+                                ui.small(egui::RichText::new("Hub only").weak());
                             }
                         });
                         // The release NAME, which the column had no room for before — it is
@@ -1622,6 +1680,20 @@ impl HubApp {
                     }
                 });
             });
+
+            // SAY IT BEFORE THE INSTALL BUTTON, NOT IN THE NOTES BELOW IT. v0.22.1's notes
+            // did say the engine was unchanged — in an "Upgrading" section under several
+            // screens of Hub changes, directly contradicted by the Install button at the
+            // top of the same pane. One line, where the decision is actually made.
+            if r.hub_only {
+                ui.add_space(4.0);
+                ui.small(egui::RichText::new(match self.engine_behind(&r.version) {
+                    Some(v) => format!(
+                        "A Hub release — the engine in it is the same one as {v}, so installing it changes nothing about how your projects run."
+                    ),
+                    None => "A Hub release — it changed the Hub, not the engine.".to_string(),
+                }).weak());
+            }
 
             // BUTTONS YOU CAN HIT. These were egui's defaults — text plus a few pixels of
             // padding, so "Install" was a ~60×20 target for the primary action of the
@@ -2093,7 +2165,10 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let mut app = HubApp::new(Paths::at(tmp.path()));
             let mut m = Manifest { schema: 1, ..Default::default() };
+            // 0.21.1 is HUB-ONLY on purpose: the "Hub only" chip and the line that tells you
+            // which engine is really in it are the whole point of this snapshot.
             for (v, date, title) in [
+                ("0.21.1", "2026-08-03", "Front Page"),
                 ("0.21.0", "2026-08-03", "Who's Playing"),
                 ("0.20.0", "2026-08-02", "Say It Simply"),
                 ("0.19.2", "2026-07-31", "Stay Put"),
@@ -2105,6 +2180,11 @@ mod tests {
                     date: date.into(),
                     notes_url: format!("https://example.invalid/v{v}"),
                     title: title.into(),
+                    changed: if v == "0.21.1" {
+                        vec!["hub".into()]
+                    } else {
+                        vec!["engine".into(), "hub".into()]
+                    },
                     notes: if v == "0.21.0" { body.clone() } else { String::new() },
                     artifacts: [(
                         crate::releases::platform_target(),
@@ -2128,9 +2208,11 @@ mod tests {
             (app, tmp)
         };
 
-        // Both halves of the tab: a release you could install, and one you already have,
-        // whose buttons and empty-notes state are a different screen entirely.
-        for (which, selected) in [("new", "0.21.0"), ("installed", "0.20.0")] {
+        // Both halves of the tab: a release you could install, one you already have (whose
+        // buttons and empty-notes state are a different screen entirely), and a Hub-only
+        // one, which has to explain itself before you reach the Install button.
+        for (which, selected) in [("new", "0.21.0"), ("installed", "0.20.0"), ("hub-only", "0.21.1")]
+        {
             let (mut app, _tmp) = build(selected);
             let mut harness = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(960.0, 620.0))
@@ -2197,6 +2279,78 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/about-update.png");
         harness.render().expect("no GPU?").save(&out).unwrap();
         println!("wrote {}", out.display());
+    }
+
+    /// Ty's report, exactly: 0.22.1 changed only the Hub, and the Projects tab offered to
+    /// migrate every project onto it as if it were a new engine. The offer has to survive
+    /// where it's real (0.21.2 skipped 0.22.0, which WAS an engine release) and disappear
+    /// where it isn't (already on the engine 0.22.1 carries).
+    #[test]
+    fn a_hub_only_release_is_not_offered_as_a_project_upgrade() {
+        use super::*;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = HubApp::new(Paths::at(tmp.path()));
+        let mut m = Manifest { schema: 1, ..Default::default() };
+        for (v, changed) in [
+            ("0.21.2", vec!["engine", "hub"]),
+            ("0.22.0", vec!["engine", "hub"]),
+            ("0.22.1", vec!["hub"]),
+        ] {
+            m.versions.push(crate::releases::ReleaseInfo {
+                version: v.into(),
+                channel: "stable".into(),
+                changed: changed.into_iter().map(String::from).collect(),
+                date: String::new(),
+                notes_url: String::new(),
+                title: String::new(),
+                notes: String::new(),
+                artifacts: Default::default(),
+                hub_artifacts: Default::default(),
+            });
+        }
+        app.manifest = ManifestState::Loaded(m);
+        app.installs = ["0.21.2", "0.22.1"]
+            .into_iter()
+            .map(|v| Install { version: v.into(), path: tmp.path().join("versions").join(v) })
+            .collect();
+
+        let project = |v: &str| Project {
+            name: "p".into(),
+            path: tmp.path().to_path_buf(),
+            engine_version: Some(v.into()),
+            last_opened: None,
+        };
+
+        // Behind by a real engine release — 0.22.0 is inside the range, so the jump to
+        // 0.22.1 genuinely changes the engine and the offer stands.
+        assert_eq!(
+            app.upgrade_target(&project("0.21.2")).map(|i| i.version),
+            Some("0.22.1".into())
+        );
+        // Already on the engine 0.22.1 ships. Nothing to do, and the button that said
+        // otherwise is what made the version numbers look wrong.
+        assert!(app.upgrade_target(&project("0.22.0")).is_none());
+        assert!(app.upgrade_target(&project("0.22.1")).is_none());
+        // An unpinned project is never migrated by this button.
+        assert!(app.upgrade_target(&project_unpinned(tmp.path())).is_none());
+
+        // …and with no manifest (offline, or a first run) it falls back to comparing
+        // numbers, exactly as it did before any of this existed.
+        app.manifest = ManifestState::Idle;
+        assert_eq!(
+            app.upgrade_target(&project("0.22.0")).map(|i| i.version),
+            Some("0.22.1".into())
+        );
+    }
+
+    fn project_unpinned(path: &std::path::Path) -> super::Project {
+        super::Project {
+            name: "p".into(),
+            path: path.to_path_buf(),
+            engine_version: None,
+            last_opened: None,
+        }
     }
 
     #[test]

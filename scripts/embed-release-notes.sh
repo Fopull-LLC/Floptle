@@ -12,6 +12,12 @@
 # reasoning as the notes: it rides a fetch that already happens, so it costs no
 # request and reads from cache offline.
 #
+# …and each entry's `changed` from `docs/releases/scope.json` — whether a release
+# actually touched the engine, the Hub, or both. One tag builds both binaries, so a
+# release that changed only the Hub still ships an engine bundle, and without this
+# the Hub had no way to tell that from a real engine release: it listed one as a new
+# engine to install and offered to migrate every project onto it.
+#
 # WHY THE NOTES TRAVEL WITH THE MANIFEST. The Hub shows a version's notes when
 # you click it, including versions you already have installed and including the
 # ones you are deciding between. Fetching a page per click needs a spinner, an
@@ -33,6 +39,7 @@ set -euo pipefail
 MANIFEST="${1:?usage: embed-release-notes.sh <releases.json> [docs/releases] [docs/news.md]}"
 DOCS="${2:-docs/releases}"
 NEWS="${3:-docs/news.md}"
+SCOPE="$DOCS/scope.json"
 
 [ -f "$MANIFEST" ] || { echo "no such manifest: $MANIFEST" >&2; exit 1; }
 [ -d "$DOCS" ] || { echo "no such notes directory: $DOCS" >&2; exit 1; }
@@ -65,6 +72,25 @@ for ver in $(jq -r '.versions[].version' "$MANIFEST"); do
   filled=$((filled + 1))
 done
 rm -f "$work.body"
+
+# WHAT EACH RELEASE ACTUALLY CHANGED — `docs/releases/scope.json`, backfilled over the whole
+# list for the same reason the notes are: it lets an already-published release be corrected
+# by the next thing that ships, instead of being wrong forever.
+#
+# A version with no entry is left with no `changed` field at all, and every reader treats
+# that as unknown and unknown as "both" — so forgetting a line here degrades to exactly the
+# behaviour that existed before this field, never to a release that hides itself.
+if [ -f "$SCOPE" ]; then
+  jq --slurpfile s "$SCOPE" '
+    ($s[0]) as $scope |
+    .versions |= map(
+      if ($scope[.version] // null) != null then .changed = $scope[.version] else . end
+    )' "$work" > "$work.next"
+  mv "$work.next" "$work"
+  echo "scope: $(jq '[.versions[] | select(.changed)] | length' "$work") of $(jq '.versions | length' "$work") versions declared in $SCOPE"
+else
+  echo "scope: no $SCOPE — every release counts as changing both the engine and the Hub"
+fi
 
 # The news page, verbatim. `--rawfile` for the same reason as the notes above, and
 # the H1 is dropped because the Hub draws its own heading for the tab.

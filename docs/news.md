@@ -1,11 +1,13 @@
 ## Just shipped
 
-**v0.22.1 "Front Page"** is a Hub release — this page is new, the version list
-is a list you can actually click, and every release note ever written has been
-rewritten to be about what it does for you rather than how it was built.
+**v0.22.2 "Which One"** is a Hub release about version numbers. The Hub, the
+engine, and the engine a project is pinned to all wear the same number, and the
+Hub now tells them apart: it shows its own version on every tab, and a release
+that changed only the Hub says so instead of appearing as a new engine to install
+and to move every project onto.
 
-The engine underneath it is **v0.22.0 "Hold Together"** — modelling that behaves
-and levels that survive a scene change.
+The engine underneath it is still **v0.22.0 "Hold Together"** — modelling that
+behaves and levels that survive a scene change.
 
 Loading one scene from another used to bring the level in stripped: untextured
 surfaces, wrong materials, missing paint and collision that didn't match what you
@@ -50,6 +52,9 @@ engine.
 
 ## Recently
 
+- **v0.22.1 "Front Page"** — a News page in the Hub, a version list you can
+  actually click, and every release note ever written rewritten to be about what
+  it does for you rather than how it was built.
 - **v0.21.2** — the Hub updates itself. One button, and being out of date is
   unmissable.
 - **v0.21.1** — function keys reach scripts for the first time, and the Hub shows

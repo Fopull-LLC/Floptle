@@ -47,6 +47,20 @@ pub struct ReleaseInfo {
     /// treats an absent one as "no update available here" rather than an error.
     #[serde(default)]
     pub hub_artifacts: BTreeMap<String, Artifact>,
+    /// Which parts of Floptle this release actually changed: `"engine"`, `"hub"`, or both.
+    ///
+    /// **One tag builds both binaries**, so every release ships an engine bundle and a Hub
+    /// bundle whether or not either of them changed. That is deliberate — a version you can
+    /// pin a project to has to be a version you can install and export with — but it means
+    /// the version number on its own cannot tell you whether there is a new *engine* in it.
+    /// v0.22.1 changed only the Hub, and every reader still saw a new engine to install, a
+    /// banner telling them to install it, and an offer to migrate every project onto it.
+    ///
+    /// **Empty means unknown, and unknown means both.** Every release published before this
+    /// field existed carries none, and a reader that read that as "nothing changed" would
+    /// quietly stop offering the entire back catalogue.
+    #[serde(default)]
+    pub changed: Vec<String>,
 }
 
 impl ReleaseInfo {
@@ -64,6 +78,24 @@ impl ReleaseInfo {
     /// lookup needs, since a build for another machine is the whole point.
     pub fn artifact_for(&self, platform: &str) -> Option<&Artifact> {
         self.artifacts.get(platform)
+    }
+
+    /// Whether this release changed the **engine** — the thing a project pins and runs.
+    /// True when [`changed`](Self::changed) is empty, because unknown means both.
+    pub fn changes_engine(&self) -> bool {
+        self.changed.is_empty() || self.changed.iter().any(|c| c == "engine")
+    }
+
+    /// Whether this release changed the **Hub** — the window you install versions from.
+    /// True when [`changed`](Self::changed) is empty, because unknown means both.
+    pub fn changes_hub(&self) -> bool {
+        self.changed.is_empty() || self.changed.iter().any(|c| c == "hub")
+    }
+
+    /// A release that shipped a new Hub and the same engine as the version before it —
+    /// installable, and not something to move a project onto.
+    pub fn is_hub_only(&self) -> bool {
+        !self.changed.is_empty() && !self.changes_engine()
     }
 }
 
@@ -115,6 +147,32 @@ impl Manifest {
     /// The release for an exact version string.
     pub fn release(&self, version: &str) -> Option<&ReleaseInfo> {
         self.versions.iter().find(|r| r.version == version)
+    }
+
+    /// Whether moving a project from engine `from` to engine `to` actually lands it on a
+    /// different engine — is there any release in `(from, to]` that changed one.
+    ///
+    /// Not the same question as `to > from`. A Hub-only release bumps the number every
+    /// project is measured against without changing a line of the engine, and offering to
+    /// migrate a project onto it is offering work with no result. The *range* matters and a
+    /// single hop doesn't: 0.21.2 → 0.22.1 crosses 0.22.0, which was an engine release, so
+    /// that upgrade is real even though the version it lands on changed only the Hub.
+    ///
+    /// **Unknown means yes.** A version absent from this manifest — a local build, a
+    /// release pulled after the fact, a manifest older than the `changed` field — must not
+    /// silently withdraw an upgrade the user can see they're behind on.
+    pub fn engine_differs(&self, from: &str, to: &str) -> bool {
+        let (lo, hi) = (version_key(from), version_key(to));
+        if hi <= lo {
+            return false;
+        }
+        if !self.versions.iter().any(|r| r.version == to) {
+            return true;
+        }
+        self.versions.iter().any(|r| {
+            let k = version_key(&r.version);
+            k > lo && k <= hi && r.changes_engine()
+        })
     }
 }
 
@@ -205,5 +263,39 @@ mod tests {
         assert_eq!(r.artifact_for("macos-aarch64").unwrap().sha256, "bb");
         assert!(r.artifact_for("linux-x86_64").is_none(), "absent platform is None, not a panic");
         assert!(m.release("9.9.9").is_none());
+    }
+
+    /// The v0.22.1 situation, which is what this field exists for: a release that shipped a
+    /// new Hub and the same engine, listed as a new engine version to install and to move
+    /// every project onto.
+    #[test]
+    fn a_hub_only_release_is_not_an_engine_release() {
+        let json = r#"{ "versions": [
+            { "version": "0.21.2", "channel": "stable", "artifacts": {} },
+            { "version": "0.22.0", "channel": "stable", "changed": ["engine", "hub"], "artifacts": {} },
+            { "version": "0.22.1", "channel": "stable", "changed": ["hub"], "artifacts": {} } ] }"#;
+        let m = Manifest::parse(json).unwrap();
+
+        let hub_only = m.release("0.22.1").unwrap();
+        assert!(!hub_only.changes_engine());
+        assert!(hub_only.changes_hub());
+        assert!(hub_only.is_hub_only());
+
+        // Unknown is BOTH, so the whole back catalogue keeps behaving as it always has.
+        let old = m.release("0.21.2").unwrap();
+        assert!(old.changes_engine() && old.changes_hub());
+        assert!(!old.is_hub_only(), "unknown is not a claim that the engine held still");
+
+        // The range, not the endpoint. 0.21.2 → 0.22.1 crosses 0.22.0, so it is a real
+        // upgrade even though 0.22.1 itself changed only the Hub…
+        assert!(m.engine_differs("0.21.2", "0.22.1"));
+        // …and 0.22.0 → 0.22.1 is not, which is the offer that made no sense.
+        assert!(!m.engine_differs("0.22.0", "0.22.1"));
+        assert!(!m.engine_differs("0.22.1", "0.22.1"));
+        assert!(!m.engine_differs("0.22.1", "0.21.2"), "never offer a downgrade");
+
+        // A version this manifest never heard of — a local build — must not quietly
+        // withdraw an upgrade the user can see they are behind on.
+        assert!(m.engine_differs("0.21.2", "0.23.0"));
     }
 }
