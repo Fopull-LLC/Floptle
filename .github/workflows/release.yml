@@ -174,16 +174,29 @@ jobs:
           ENTRY=$(jq -n --arg v "$VER" --arg c "$CHAN" --arg d "$(date +%F)" --arg n "https://github.com/$PUBLIC_REPO/releases/tag/$TAG" --argjson a "$ARTIFACTS" --argjson h "$HUB_ARTIFACTS" \
             '{version:$v, channel:$c, date:$d, notes_url:$n, artifacts:$a, hub_artifacts:$h}')
           # Start from the PUBLIC manifest if one is published, else empty.
-          EXISTING='{"schema":1,"channels":{},"versions":[]}'
-          if gh release download manifest --repo "$PUBLIC_REPO" --pattern releases.json --dir prev 2>/dev/null; then
-            EXISTING=$(cat prev/releases.json)
+          #
+          # READ FROM A FILE, NOT FROM ARGV. This was `--argjson m "$EXISTING"` with the
+          # whole manifest in a shell variable, and it worked right up until the manifest
+          # grew release notes: Linux caps a SINGLE argv entry at 128 KB (MAX_ARG_STRLEN)
+          # no matter how large ARG_MAX is, and the manifest passed 240 KB. The failure is
+          # `jq: Argument list too long` from the kernel, before jq runs — so it says
+          # nothing about which argument, and it only appears on the release AFTER the one
+          # that grew the file. `--slurpfile` reads it directly and has no size limit.
+          mkdir -p prev
+          if ! gh release download manifest --repo "$PUBLIC_REPO" --pattern releases.json --dir prev 2>/dev/null; then
+            echo '{"schema":1,"channels":{},"versions":[]}' > prev/releases.json
           fi
-          jq -n --argjson m "$EXISTING" --argjson e "$ENTRY" --arg v "$VER" --arg c "$CHAN" '
+          jq -n --slurpfile m prev/releases.json --argjson e "$ENTRY" --arg v "$VER" --arg c "$CHAN" '
+            ($m[0]) as $prev |
             {
               schema: 1,
-              channels: (($m.channels // {}) | .[$c] = ((((.[$c] // []) + [$v]) | unique))),
-              versions: (((($m.versions // []) | map(select(.version != $v))) + [$e]))
+              channels: (($prev.channels // {}) | .[$c] = ((((.[$c] // []) + [$v]) | unique))),
+              versions: (((($prev.versions // []) | map(select(.version != $v))) + [$e]))
             }' > releases.json
+          # A merge that silently dropped the history would publish a manifest listing one
+          # version, and every Hub in the world would show one version. Cheap to assert.
+          test "$(jq '.versions | length' releases.json)" -ge "$(jq '.versions | length' prev/releases.json)" \
+            || { echo "::error::the merge lost versions"; exit 1; }
           # Fill every entry's notes from docs/releases/ — this version's, and any older
           # one published before the manifest carried notes at all. See the script header.
           scripts/embed-release-notes.sh releases.json docs/releases

@@ -45,13 +45,20 @@ for ver in $(jq -r '.versions[].version' "$MANIFEST"); do
   # The name in quotes on the H1, if it has one — `# Floptle v0.21.0 — "Who's Playing"`.
   title="$(head -n 1 "$doc" | sed -n 's/.*[“"]\(.*\)[”"].*/\1/p')"
   # Everything after the H1, with the blank line that followed it trimmed.
-  body="$(tail -n +2 "$doc" | sed '/./,$!d')"
-  jq --arg v "$ver" --arg t "$title" --arg n "$body" \
+  #
+  # Via a FILE and `--rawfile`, not a shell variable and `--arg`. A single argv entry
+  # is capped at 128 KB on Linux however big ARG_MAX is, and the failure — `Argument
+  # list too long`, raised by the kernel before the program starts — names no argument
+  # and appears only once something has grown past the limit. The release workflow lost
+  # a build to exactly that; there is no reason for a second site to be able to.
+  tail -n +2 "$doc" | sed '/./,$!d' > "$work.body"
+  jq --arg v "$ver" --arg t "$title" --rawfile n "$work.body" \
     '.versions |= map(if .version == $v then .title = $t | .notes = $n else . end)' \
     "$work" > "$work.next"
   mv "$work.next" "$work"
   filled=$((filled + 1))
 done
+rm -f "$work.body"
 
 mv "$work" "$MANIFEST"
 
