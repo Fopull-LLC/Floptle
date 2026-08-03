@@ -1,7 +1,11 @@
 ## Just shipped
 
-**v0.22.0 "Hold Together"** — modelling that behaves and levels that survive a
-scene change.
+**v0.22.1 "Front Page"** is a Hub release — this page is new, the version list
+is a list you can actually click, and every release note ever written has been
+rewritten to be about what it does for you rather than how it was built.
+
+The engine underneath it is **v0.22.0 "Hold Together"** — modelling that behaves
+and levels that survive a scene change.
 
 Loading one scene from another used to bring the level in stripped: untextured
 surfaces, wrong materials, missing paint and collision that didn't match what you
