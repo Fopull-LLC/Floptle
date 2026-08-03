@@ -1,0 +1,62 @@
+// RCS BLOCK — the small four-way thruster cluster you dock with. Mounts on a
+// flank like a fin (radial_orient faces its nozzles outward, +X), rings with
+// symmetry, and feeds the shared translation authority: the pilot pushes the
+// whole craft sideways/up/fore with IJKL+HN instead of pitching the nose at
+// the problem. A pipe cross is exactly the silhouette — a hub with four
+// nozzles — at a fraction of its authored size.
+//
+// "RCS Plume" is the firing tell: a small flame + light the controller plays
+// while the block is thrusting and stops the instant the stick is centred.
+[
+    (
+        name: "PartRCS",
+        transform: (
+            translation: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (0.30, 0.30, 0.30),
+        ),
+        matter: Mesh(
+            asset_path: "models/space-kit/pipe_cross.glb",
+        ),
+        material: Some((
+            color: (0.62, 0.64, 0.7),
+            shader: Some("shaders/hullPanels.flsl"),
+            shader_params: {
+                "baseColor": (0.62, 0.64, 0.7, 1.0),
+            },
+        )),
+        scripts: [],
+        rigidbody: Some((
+            boxed: true,
+            mode: Kinematic,
+            radius: 0.2,
+            height: 0.4,
+            half_extents: (0.16, 0.16, 0.16),
+            restitution: 0.05,
+            friction: 0.6,
+            gravity: true,
+            lock_pos: (false, false, false),
+            lock_rot: (false, false, false),
+            mass: 0.08,
+        )),
+    ),
+    (
+        name: "RCS Plume",
+        transform: (
+            translation: (0.6, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (0.22, 0.22, 0.22),
+        ),
+        matter: PointLight(
+            color: (0.72, 0.86, 1.0),
+            intensity: 0.0,
+            range: 5.0,
+        ),
+        scripts: [],
+        particles: Some((
+            asset: "vfx/Flame",
+            play_on_start: false,
+        )),
+        parent: Some(0),
+    ),
+]

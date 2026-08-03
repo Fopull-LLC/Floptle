@@ -1,0 +1,350 @@
+InputMap(
+    actions: [
+        Action(
+            name: "Jump",
+            bindings: [
+                Binding(
+                    source: Key(Space),
+                ),
+                Binding(
+                    source: Pad(
+                        id: Any,
+                        ctrl: Button(South),
+                    ),
+                ),
+            ],
+        ),
+        Action(
+            name: "Fire",
+            bindings: [
+                Binding(
+                    source: Mouse(Left),
+                ),
+                Binding(
+                    source: Pad(
+                        id: Any,
+                        ctrl: Axis(RightZ),
+                    ),
+                ),
+            ],
+        ),
+        Action(
+            name: "Interact",
+            bindings: [
+                Binding(
+                    source: Key(KeyE),
+                ),
+                Binding(
+                    source: Pad(
+                        id: Any,
+                        ctrl: Button(West),
+                    ),
+                ),
+            ],
+        ),
+        Action(
+            name: "Sprint",
+            bindings: [
+                Binding(
+                    source: Key(ShiftLeft),
+                ),
+                Binding(
+                    source: Pad(
+                        id: Any,
+                        ctrl: Button(LeftStick),
+                    ),
+                ),
+            ],
+        ),
+        Action(
+            name: "Crouch",
+            bindings: [
+                Binding(
+                    source: Key(KeyC),
+                ),
+                Binding(
+                    source: Pad(
+                        id: Any,
+                        ctrl: Button(East),
+                    ),
+                ),
+            ],
+        ),
+        Action(
+            name: "Pause",
+            bindings: [
+                Binding(
+                    source: Key(Escape),
+                ),
+                Binding(
+                    source: Pad(
+                        id: Any,
+                        ctrl: Button(Start),
+                    ),
+                ),
+            ],
+        ),
+        Action(
+            name: "LookEnable",
+            bindings: [
+                Binding(
+                    source: Mouse(Right),
+                ),
+                Binding(
+                    source: Pad(
+                        id: Any,
+                        ctrl: Button(RightStick),
+                    ),
+                ),
+            ],
+        ),
+        Action(
+            name: "ShiftLock",
+            bindings: [
+                Binding(
+                    source: Key(ShiftLeft),
+                ),
+                Binding(
+                    source: Pad(
+                        id: Any,
+                        ctrl: Button(RightStick),
+                    ),
+                ),
+            ],
+        ),
+    ],
+    axes1: [
+        Axis1(
+            name: "Zoom",
+            socd: Neutral,
+            bindings: [
+                Analog(
+                    source: MouseAxis(ScrollY),
+                    deadzone: 0.0,
+                    curve: Linear,
+                ),
+                Keys(
+                    minus: Pad(
+                        id: Any,
+                        ctrl: Button(DPadDown),
+                    ),
+                    plus: Pad(
+                        id: Any,
+                        ctrl: Button(DPadUp),
+                    ),
+                ),
+            ],
+        ),
+        Axis1(
+            name: "Fly",
+            socd: Neutral,
+            bindings: [
+                Keys(
+                    minus: Key(ControlLeft),
+                    plus: Key(Space),
+                ),
+                Analog(
+                    source: Pad(
+                        id: Any,
+                        ctrl: Axis(RightZ),
+                    ),
+                    deadzone: 0.1,
+                    curve: Linear,
+                ),
+                Analog(
+                    source: Pad(
+                        id: Any,
+                        ctrl: Axis(LeftZ),
+                    ),
+                    deadzone: 0.1,
+                    invert: true,
+                    curve: Linear,
+                ),
+            ],
+        ),
+        Axis1(
+            name: "Turn",
+            socd: Neutral,
+            bindings: [
+                Keys(
+                    minus: Key(KeyQ),
+                    plus: Key(KeyE),
+                ),
+                Keys(
+                    minus: Pad(
+                        id: Any,
+                        ctrl: Button(LeftBumper),
+                    ),
+                    plus: Pad(
+                        id: Any,
+                        ctrl: Button(RightBumper),
+                    ),
+                ),
+            ],
+        ),
+    ],
+    axes2: [
+        Axis2(
+            name: "Move",
+            socd: Neutral,
+            bindings: [
+                Keys(
+                    up: Key(KeyW),
+                    down: Key(KeyS),
+                    left: Key(KeyA),
+                    right: Key(KeyD),
+                ),
+                Stick(
+                    id: Any,
+                    x: LeftStickX,
+                    y: LeftStickY,
+                    deadzone: 0.15,
+                    curve: Linear,
+                ),
+            ],
+        ),
+        Axis2(
+            name: "Look",
+            socd: Neutral,
+            bindings: [
+                Mouse(
+                    sensitivity: 0.006,
+                    gate: [
+                        Mouse(Right),
+                    ],
+                ),
+                Stick(
+                    id: Any,
+                    x: RightStickX,
+                    y: RightStickY,
+                    deadzone: 0.12,
+                    sensitivity: 2.5,
+                    curve: Expo,
+                ),
+            ],
+        ),
+        Axis2(
+            name: "LookFree",
+            socd: Neutral,
+            bindings: [
+                Mouse(
+                    sensitivity: 0.006,
+                ),
+                Stick(
+                    id: Any,
+                    x: RightStickX,
+                    y: RightStickY,
+                    deadzone: 0.12,
+                    sensitivity: 2.5,
+                    curve: Expo,
+                ),
+            ],
+        ),
+    ],
+    motions: [
+        Motion(
+            name: "qcf",
+            dirs: [
+                2,
+                3,
+                6,
+            ],
+            window: 12,
+        ),
+        Motion(
+            name: "qcb",
+            dirs: [
+                2,
+                1,
+                4,
+            ],
+            window: 12,
+        ),
+        Motion(
+            name: "dp",
+            dirs: [
+                6,
+                2,
+                3,
+            ],
+            window: 14,
+        ),
+        Motion(
+            name: "rdp",
+            dirs: [
+                4,
+                2,
+                1,
+            ],
+            window: 14,
+        ),
+        Motion(
+            name: "hcf",
+            dirs: [
+                4,
+                1,
+                2,
+                3,
+                6,
+            ],
+            window: 22,
+        ),
+        Motion(
+            name: "hcb",
+            dirs: [
+                6,
+                3,
+                2,
+                1,
+                4,
+            ],
+            window: 22,
+        ),
+        Motion(
+            name: "dd",
+            dirs: [
+                2,
+                5,
+                2,
+            ],
+            window: 16,
+        ),
+        Motion(
+            name: "ff",
+            dirs: [
+                6,
+                5,
+                6,
+            ],
+            window: 14,
+        ),
+        Motion(
+            name: "bb",
+            dirs: [
+                4,
+                5,
+                4,
+            ],
+            window: 14,
+        ),
+        Motion(
+            name: "chargeF",
+            dirs: [
+                4,
+                6,
+            ],
+            window: 10,
+            charge: 40,
+        ),
+        Motion(
+            name: "chargeU",
+            dirs: [
+                2,
+                8,
+            ],
+            window: 10,
+            charge: 40,
+        ),
+    ],
+    players: 1,
+)

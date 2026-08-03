@@ -90,6 +90,12 @@ __pycache__/
 /builds/
 builds.zip
 
+# Source-art archives dropped at the repo root while working (texture/VFX packs
+# and the like). They are INPUTS to the assets under assets/ and each is tens of
+# megabytes — the same call as builds.zip above. Unpacked art that the engine
+# actually loads is committed; the archive it came out of is not.
+/*.zip
+
 # --- Dev capture scratch ------------------------------------------------------
 # Ad-hoc screenshots and render probes people drop at the repo root while
 # debugging. The named *_probe.png rule above only catches the ones that follow

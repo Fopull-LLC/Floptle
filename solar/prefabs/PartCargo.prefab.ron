@@ -1,0 +1,43 @@
+// CARGO BAY — the hold. A stack part in the tank footprint (rocket_sidesA is
+// native 1x1x1, so scale (1.0, 1.2, 1.0) is a 1.0-wide, 1.2-tall bay and the
+// collider half-box is exactly half of that), finished in a working amber so a
+// loaded craft reads as a hauler from across the pad rather than another tank.
+//
+// Capacity lives in the builder's registry (`cargo = 250`, kilograms) — the
+// vessel pools every bay it carries into one hold, and what's inside is added to
+// the craft's flying mass, so a full return trip really does climb worse than
+// the one that went out.
+[
+    (
+        name: "PartCargo",
+        transform: (
+            translation: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            scale: (1.0, 1.2, 1.0),
+        ),
+        matter: Mesh(
+            asset_path: "models/space-kit/rocket_sidesA.glb",
+        ),
+        material: Some((
+            color: (0.78, 0.55, 0.22),
+            shader: Some("shaders/hullPanels.flsl"),
+            shader_params: {
+                "baseColor": (0.78, 0.55, 0.22, 1.0),
+            },
+        )),
+        scripts: [],
+        rigidbody: Some((
+            boxed: true,
+            mode: Kinematic,
+            radius: 0.5,
+            height: 2.0,
+            half_extents: (0.5, 0.5, 0.5),
+            restitution: 0.05,
+            friction: 0.6,
+            gravity: true,
+            lock_pos: (false, false, false),
+            lock_rot: (false, false, false),
+            mass: 0.9,
+        )),
+    ),
+]
