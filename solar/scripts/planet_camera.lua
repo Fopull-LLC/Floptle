@@ -35,25 +35,15 @@ cam_x, cam_y, cam_z = 0.0, 0.0, 0.0
 local target
 local pitch = nil
 -- The yaw reference direction, parallel-transported across the planet surface.
-local rx, ry, rz = 0.0, 0.0, -1.0
+local ref = vec3(0, 0, -1)
 -- The camera's up, SLEW-LIMITED toward −gravity. On foot it tracks fast (level
 -- horizon as you walk); while FLYING it tracks GENTLY, so it follows the planet's
 -- local vertical as you fly around the body (no more "upside-down on the far
 -- side") yet spreads the discontinuous −gravity flip at an SOI hand-off into an
 -- easy reorient instead of a jarring snap — see the up-slew below.
-local cup_x, cup_y, cup_z = nil, nil, nil
+local cup = nil
 
 local PITCH_LIMIT = math.pi * 0.5 - 0.08
-
-local function norm(x, y, z)
-  local l = math.sqrt(x * x + y * y + z * z)
-  if l < 1e-6 then return 0, 0, 0, 0 end
-  return x / l, y / l, z / l, l
-end
-
-local function cross(ax, ay, az, bx, by, bz)
-  return ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
-end
 
 local ship
 local was_piloting = false
@@ -108,10 +98,10 @@ function lateUpdate(node, dt)
 
   -- Desired local up from the body (−gravity). Fallback: away from the origin
   -- (the planet sits at 0,0,0) if the body state isn't available yet.
-  local dux, duy, duz = target.up_x, target.up_y, target.up_z
-  if not dux or (dux == 0 and duy == 0 and duz == 0) then
-    dux, duy, duz = norm(target.x, target.y, target.z)
-    if dux == 0 and duy == 0 and duz == 0 then dux, duy, duz = 0, 1, 0 end
+  local want_up = target.up
+  if not want_up or want_up:length() == 0 then
+    want_up = target.pos:normalized()
+    if want_up:length() == 0 then want_up = vec3(0, 1, 0) end
   end
   -- Slew-limit the up so a gravity/SOI transfer can't SNAP the view. Crossing an
   -- SOI boundary flips −gravity to point at a DIFFERENT body (the field is
@@ -121,31 +111,20 @@ function lateUpdate(node, dt)
   -- ends up upside-down on the far side — but the instantaneous SOI flip is spread
   -- over ~a second into a smooth reorient instead of a snap. ON FOOT it tracks
   -- fast so the horizon stays level as you walk around the planet.
-  if not cup_x then cup_x, cup_y, cup_z = dux, duy, duz end
-  local slew = piloting and 1.5 or 8.0
-  if slew > 0 then
-    local cd = math.max(-1, math.min(1, dux * cup_x + duy * cup_y + duz * cup_z))
-    local ang = math.acos(cd)
-    if ang > 1e-4 then
-      local t = math.min(1, slew * dt / ang)
-      cup_x, cup_y, cup_z =
-        norm(cup_x + (dux - cup_x) * t, cup_y + (duy - cup_y) * t, cup_z + (duz - cup_z) * t)
-    end
+  if not cup then cup = want_up end
+  if cup:angleTo(want_up) > 1e-4 then
+    cup = ease(cup, want_up, piloting and 1.5 or 8.0, dt):normalized()
   end
-  local ux, uy, uz = cup_x, cup_y, cup_z
+  local up = cup
 
   -- Parallel-transport the yaw reference: project the previous reference onto
   -- the new tangent plane. Walking around the planet turns the frame WITH the
   -- surface, so the camera never rolls wildly or flips at the equator.
-  local d = rx * ux + ry * uy + rz * uz
-  local l
-  rx, ry, rz, l = norm(rx - ux * d, ry - uy * d, rz - uz * d)
-  if l < 1e-4 then
+  ref = ref:flatten(up)
+  if ref:length() == 0 then
     -- Degenerate (reference was parallel to up): pick any tangent.
-    rx, ry, rz = norm(cross(ux, uy, uz, 1, 0, 0))
-    if rx == 0 and ry == 0 and rz == 0 then
-      rx, ry, rz = norm(cross(ux, uy, uz, 0, 0, 1))
-    end
+    ref = up:cross(vec3(1, 0, 0)):normalized()
+    if ref:length() == 0 then ref = up:cross(vec3(0, 0, 1)):normalized() end
   end
 
   -- Mouse steers while looking (RMB / shift lock); yaw rotates the reference
@@ -154,21 +133,15 @@ function lateUpdate(node, dt)
   input.setMouseLocked(looking)
   if looking then
     local dx, dy = input.mouse_delta()
-    local s = params.sensitivity * 0.01
-    local a = -dx * s
-    local ca, sa = math.cos(a), math.sin(a)
-    local cx, cy, cz = cross(ux, uy, uz, rx, ry, rz)
-    rx, ry, rz = norm(rx * ca + cx * sa, ry * ca + cy * sa, rz * ca + cz * sa)
-    pitch = pitch - dy * s
-    if pitch > PITCH_LIMIT then pitch = PITCH_LIMIT end
-    if pitch < -PITCH_LIMIT then pitch = -PITCH_LIMIT end
+    local sens = params.sensitivity * 0.01
+    -- Yaw spins the reference about the LOCAL up, not about world +Y — which
+    -- is the whole reason this camera exists.
+    ref = ref:rotatedAround(up, -dx * sens)
+    pitch = math.clamp(pitch - dy * sens, -PITCH_LIMIT, PITCH_LIMIT)
   end
 
   -- View direction in the local frame: reference tilted by pitch toward up.
-  local cp, sp = math.cos(pitch), math.sin(pitch)
-  local fx = rx * cp + ux * sp
-  local fy = ry * cp + uy * sp
-  local fz = rz * cp + uz * sp
+  local fwd = (ref * math.cos(pitch) + up * math.sin(pitch)):normalized()
 
   -- Look-at point: the character's head (along LOCAL up, not world Y). A
   -- piloted VESSEL's center is its CAPSULE, composed HERE from the node's
@@ -176,24 +149,18 @@ function lateUpdate(node, dt)
   -- pass it sits exactly on the ship this frame draws — a fixedUpdate world
   -- position lags the rails carry (offset + jitter), and a gravity-up height
   -- guess slides off the hull the moment the vessel pitches.
-  local hx, hy, hz
+  local head
   if vpiloting and vessel and vessel.podLY and target then
-    local cy, sy = math.cos(target.yaw), math.sin(target.yaw)
-    local cx2, sx2 = math.cos(target.pitch), math.sin(target.pitch)
-    local cz, sz = math.cos(target.roll), math.sin(target.roll)
-    local lx, ly, lz = vessel.podLX or 0, vessel.podLY, vessel.podLZ or 0
-    hx = target.x + (cy * cz + sy * sx2 * sz) * lx + (-cy * sz + sy * sx2 * cz) * ly + (sy * cx2) * lz
-    hy = target.y + (cx2 * sz) * lx + (cx2 * cz) * ly + (-sx2) * lz
-    hz = target.z + (-sy * cz + cy * sx2 * sz) * lx + (sy * sz + cy * sx2 * cz) * ly + (cy * cx2) * lz
+    -- `toWorld` composes the vessel's own rotation for us — the nine-term
+    -- YXZ expansion this used to spell out by hand.
+    head = target:toWorld(vec3(vessel.podLX or 0, vessel.podLY, vessel.podLZ or 0))
   else
-    hx = target.x + ux * params.height
-    hy = target.y + uy * params.height
-    hz = target.z + uz * params.height
+    head = target.pos + up * params.height
   end
 
   -- Wall clip: cast from the head back toward the camera, ignore the player.
   local back = params.distance
-  local hit = raycast(hx, hy, hz, -fx, -fy, -fz, params.distance + 0.3, target)
+  local hit = raycast(head, -fwd, params.distance + 0.3, target)
   -- The wall clip must see WALLS only: the player's hull and the ship (and the
   -- astronaut parked INSIDE the ship while flying) are not walls — clipping on
   -- them glued the camera to the hull.
@@ -216,49 +183,28 @@ function lateUpdate(node, dt)
     target.visible = back >= 0.7
   end
 
-  local px = hx - fx * back
-  local py = hy - fy * back
-  local pz = hz - fz * back
+  local place = head - fwd * back
   -- SCREEN SHAKE: the vessel publishes cam.shake (liftoff rumble, buffeting,
   -- crashes). Jitter the camera position along its right/up so the view rattles
   -- while the look target holds steady. Squared for an ease-in (small = subtle).
   local sh = save.get("cam.shake") or 0.0
   if sh > 0.002 then
     local amp = sh * sh * 0.5
-    local jr = (math.random() * 2 - 1) * amp
-    local ju = (math.random() * 2 - 1) * amp
-    px = px + rx * jr + ux * ju
-    py = py + ry * jr + uy * ju
-    pz = pz + rz * jr + uz * ju
+    place = place
+      + ref * ((math.random() * 2 - 1) * amp)
+      + up * ((math.random() * 2 - 1) * amp)
   end
-  node.x, node.y, node.z = px, py, pz
+  node.pos = place
 
-  -- Orient the camera node: engine Euler order is YXZ (yaw, pitch, roll).
-  -- yaw/pitch place the forward; roll aligns the camera's up with the LOCAL
-  -- up (projected ⊥ forward) so the horizon reads level on the planet.
-  local yaw2 = math.atan2(-fx, -fz)
-  local pit2 = math.asin(math.max(-1, math.min(1, fy)))
-  -- Desired camera up: local up made perpendicular to the view direction.
-  local du = ux * fx + uy * fy + uz * fz
-  local wx, wy, wz = norm(ux - fx * du, uy - fy * du, uz - fz * du)
-  if wx == 0 and wy == 0 and wz == 0 then wx, wy, wz = 0, 1, 0 end
-  -- Undo yaw (about Y) then pitch (about X) to read the roll left over.
-  local cy2, sy2 = math.cos(-yaw2), math.sin(-yaw2)
-  local ax = wx * cy2 + wz * sy2
-  local ay = wy
-  local az = -wx * sy2 + wz * cy2
-  local cx2, sx2 = math.cos(-pit2), math.sin(-pit2)
-  local by = ay * cx2 - az * sx2
-  local bz2 = ay * sx2 + az * cx2
-  local _ = bz2
-  node.yaw, node.pitch, node.roll = yaw2, pit2, math.atan2(-ax, by)
+  -- Point the camera down `fwd` with the LOCAL up overhead, so the horizon
+  -- reads level all the way around the planet. `lookAt` with an `up` sets the
+  -- roll too — that is the entire twenty-line undo-yaw-then-pitch dance.
+  node:lookAt(place + fwd, up)
 
   -- Publish the basis for the walker + dig tool.
-  fwd_x, fwd_y, fwd_z = fx, fy, fz
-  cam_x, cam_y, cam_z = px, py, pz
-  local fd = fx * ux + fy * uy + fz * uz
-  flat_x, flat_y, flat_z = norm(fx - ux * fd, fy - uy * fd, fz - uz * fd)
-  if flat_x == 0 and flat_y == 0 and flat_z == 0 then
-    flat_x, flat_y, flat_z = rx, ry, rz
-  end
+  fwd_x, fwd_y, fwd_z = fwd.x, fwd.y, fwd.z
+  cam_x, cam_y, cam_z = place.x, place.y, place.z
+  local flat = fwd:flatten(up)
+  if flat:length() == 0 then flat = ref end
+  flat_x, flat_y, flat_z = flat.x, flat.y, flat.z
 end

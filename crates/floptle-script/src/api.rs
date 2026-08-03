@@ -13,6 +13,85 @@ use mlua::{Lua, Table, Value};
 use crate::env::{as_num, new_component_handle, new_node_handle, new_script_handle};
 use crate::{AnimCmd, AnimInfo, Shared, VfxCmd};
 
+/// How far up a parent chain the world composers walk before giving up. A cycle
+/// in the parent map must cost a frame nothing, not hang it.
+const MAX_PARENT_DEPTH: usize = 64;
+
+/// A node's transform composed all the way up the parent chain — the same
+/// composition `floptle_core::world_transform` performs, against the script
+/// host's live mirror (which carries this frame's writes; the ECS does not yet).
+pub(crate) fn world_transform_of(s: &crate::SceneMirror, e: u32) -> floptle_core::Transform {
+    let mut w = s.transforms.get(&e).copied().unwrap_or(floptle_core::Transform::IDENTITY);
+    let mut cur = e;
+    for _ in 0..MAX_PARENT_DEPTH {
+        let Some(&up) = s.parent.get(&cur) else { break };
+        let Some(ptr) = s.transforms.get(&up) else { break };
+        w = ptr.mul_transform(&w);
+        cur = up;
+    }
+    w
+}
+
+/// The composed world transform of `e`'s PARENT (identity when it has none) —
+/// the frame a world position has to be brought back through to become a local
+/// one.
+pub(crate) fn parent_world_of(s: &crate::SceneMirror, e: u32) -> floptle_core::Transform {
+    match s.parent.get(&e) {
+        Some(&p) => world_transform_of(s, p),
+        None => floptle_core::Transform::IDENTITY,
+    }
+}
+
+/// A node's LOCAL transform as the script currently sees it: the handle's live
+/// raw `x`/`y`/`z` when this is the script's own node — possibly written earlier
+/// in this same hook — otherwise the mirror.
+///
+/// The own-node handle carries raw position fields (that is what makes
+/// `node.x = node.x + 1` a plain table write), so the mirror is a frame behind
+/// for the duration of a hook. Reading world space without this rule is how
+/// `node.pos = p; log(node.worldX)` answers about where the node USED to be.
+fn live_local_of(s: &crate::SceneMirror, this: &Table, e: u32) -> floptle_core::Transform {
+    let mut t = s.transforms.get(&e).copied().unwrap_or(floptle_core::Transform::IDENTITY);
+    if let (Ok(x), Ok(y), Ok(z)) =
+        (this.raw_get::<f64>("x"), this.raw_get::<f64>("y"), this.raw_get::<f64>("z"))
+    {
+        t.translation = glam::DVec3::new(x, y, z);
+    }
+    t
+}
+
+/// [`world_transform_of`], but honouring a handle's live local position.
+pub(crate) fn world_transform_of_handle(
+    s: &crate::SceneMirror,
+    this: &Table,
+    e: u32,
+) -> floptle_core::Transform {
+    parent_world_of(s, e).mul_transform(&live_local_of(s, this, e))
+}
+
+/// The world position of whatever a Lua value refers to: a node handle (through
+/// its parent chain, live local included) or any plain `{x=,y=,z=}` / vec3,
+/// which is already a world point.
+fn world_pos_of_value(s: &crate::SceneMirror, v: &Value) -> Option<glam::DVec3> {
+    if let Value::Table(t) = v
+        && let Ok(e) = t.raw_get::<u32>("__id")
+    {
+        return Some(world_transform_of_handle(s, t, e).translation);
+    }
+    crate::math_api::vec3_of(v)
+}
+
+/// Wrap into (−π, π]: the shortest way round, which is the whole point of a
+/// turn-towards step.
+fn wrap_pi_f64(a: f64) -> f64 {
+    let tau = std::f64::consts::TAU;
+    let mut x = (a + std::f64::consts::PI).rem_euclid(tau) - std::f64::consts::PI;
+    if x <= -std::f64::consts::PI {
+        x += tau;
+    }
+    x
+}
+
 /// Build a Lua colour: `{ r = , g = , b = , a = }`, also indexable `[1]`..`[4]`.
 ///
 /// A plain table rather than a userdata, so it prints, serialises, compares and
@@ -997,17 +1076,13 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 // are LOCAL, so a script that compares a node under a moved
                 // parent against a world-space target never arrives.
                 if matches!(key.as_str(), "worldX" | "worldY" | "worldZ" | "worldPos") {
-                    let Some(tr) = s.transforms.get(&e) else { return Ok(Value::Nil) };
-                    let mut w = tr.translation;
-                    let mut cur = e;
-                    // Depth-capped: a cycle in the parent map must not hang the frame.
-                    for _ in 0..64 {
-                        let Some(&up) = s.parent.get(&cur) else { break };
-                        let Some(ptr) = s.transforms.get(&up) else { break };
-                        // The same composition `world_transform` uses, in f64.
-                        w = ptr.translation + ptr.rotation.as_dquat() * (ptr.scale.as_dvec3() * w);
-                        cur = up;
+                    if !s.transforms.contains_key(&e) {
+                        return Ok(Value::Nil);
                     }
+                    // Live local position when this is the script's own node, so
+                    // `node.pos = p` is visible to `node.worldX` on the very next
+                    // line rather than one hook later.
+                    let w = world_transform_of_handle(&s, &this, e).translation;
                     return Ok(match key.as_str() {
                         "worldX" => Value::Number(w.x),
                         "worldY" => Value::Number(w.y),
@@ -2448,6 +2523,263 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         }
     }
 
+    // ---- orientation, local ↔ world, movement ---------------------------------------
+    //
+    // The half of the API that used to be written out longhand in every script:
+    // `atan2` with two minus signs, a four-line project-onto-plane, and an
+    // inverse-parent-transform nobody wanted to derive. Each one names the
+    // intent, so it cannot get the sign wrong.
+    //
+    // They all go through the handle's own `__index`/`__newindex` (`this.get` /
+    // `this.set`, never `raw_*`), so the own-node-vs-mirror rule, the body
+    // teleport queue and the read-your-writes behaviour stay in ONE place.
+    {
+        // node:lookAt(target [, up]) — point at a node handle or a world point.
+        // Sets yaw + pitch; roll only when you pass an `up` (and then it is
+        // whatever puts that up over the node's head — a level horizon on a
+        // planet, in one call instead of twenty lines of undo-yaw-then-pitch).
+        //
+        // WORLD space on both ends: the node's own world position against the
+        // target's, then the angles written back as the LOCAL yaw/pitch the
+        // fields are. Under an unrotated parent (the overwhelmingly common
+        // case) those coincide; under a rotated one, aim with `:lookAt` on the
+        // parent or read `node:worldForward()` to see what actually happened.
+        let scene = shared.scene.clone();
+        methods.set(
+            "lookAt",
+            lua.create_function(move |_, (this, target, up): (Table, Value, Option<Value>)| {
+                let e: u32 = this.raw_get("__id")?;
+                // A node handle aims at where it WORLD is; a bare vec3 is taken
+                // as the world point it plainly is.
+                let (t, here) = {
+                    let s = scene.borrow();
+                    let Some(t) = world_pos_of_value(&s, &target) else {
+                        return Err(mlua::Error::RuntimeError(
+                            "node:lookAt(target [, up]) — target is a node or a vec3".into(),
+                        ));
+                    };
+                    (t, world_transform_of_handle(&s, &this, e).translation)
+                };
+                let up = match up {
+                    Some(u) => Some(crate::math_api::vec3_of(&u).ok_or_else(|| {
+                        mlua::Error::RuntimeError("node:lookAt's up is a vec3".into())
+                    })?),
+                    None => None,
+                };
+                let (yaw, pitch, roll) = crate::math_api::look_rotation(t - here, up);
+                this.set("yaw", yaw)?;
+                this.set("pitch", pitch)?;
+                if up.is_some() {
+                    this.set("roll", roll)?;
+                }
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // node:turnTowards(target, maxRadians) — the shortest-arc step toward
+        // facing something, capped. Pass `rate * dt` and the turn is
+        // frame-rate independent; the ±π seam is handled (`math.approachAngle`),
+        // which is where every hand-written version went the long way round.
+        // The target may be a node, a world point, or a DIRECTION vector.
+        let scene = shared.scene.clone();
+        methods.set(
+            "turnTowards",
+            lua.create_function(move |_, (this, target, max): (Table, Value, f64)| {
+                let e: u32 = this.raw_get("__id")?;
+                // A node handle or a point is somewhere to face; a short vector
+                // that isn't a position would be ambiguous, so the rule is
+                // simple and stated: handles resolve to their world position,
+                // everything else is taken as a DIRECTION.
+                let dir = match &target {
+                    Value::Table(tt) if tt.raw_get::<u32>("__id").is_ok() => {
+                        let s = scene.borrow();
+                        world_pos_of_value(&s, &target).unwrap_or_default()
+                            - world_transform_of_handle(&s, &this, e).translation
+                    }
+                    _ => crate::math_api::vec3_of(&target).ok_or_else(|| {
+                        mlua::Error::RuntimeError(
+                            "node:turnTowards(target, maxRadians) — target is a node, a world \
+                             point or a direction"
+                                .into(),
+                        )
+                    })?,
+                };
+                if dir.length_squared() < 1e-18 {
+                    return Ok(()); // nowhere to turn: leave the facing alone
+                }
+                let step = |cur: f64, want: f64| -> f64 {
+                    let d = wrap_pi_f64(want - cur);
+                    if d.abs() <= max.abs() { want } else { cur + d.signum() * max.abs() }
+                };
+                let yaw: f64 = this.get("yaw").unwrap_or(0.0);
+                let pitch: f64 = this.get("pitch").unwrap_or(0.0);
+                this.set("yaw", step(yaw, crate::math_api::yaw_of(dir)))?;
+                this.set("pitch", step(pitch, crate::math_api::pitch_of(dir)))?;
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // node:toWorld(v) / node:toLocal(v) — a point through this node's own
+        // frame (its position, rotation AND scale, composed up the parent
+        // chain). "Where is the muzzle?" is `gun:toWorld(vec3(0, 0, -1.2))`.
+        let scene = shared.scene.clone();
+        let f = lua.create_function(move |lua, (this, v, to_local): (Table, Value, bool)| {
+            let e: u32 = this.raw_get("__id")?;
+            let Some(v) = crate::math_api::vec3_of(&v) else {
+                return Err(mlua::Error::RuntimeError(
+                    "node:toWorld/toLocal take a vec3 (or anything with x/y/z)".into(),
+                ));
+            };
+            let w = world_transform_of_handle(&scene.borrow(), &this, e);
+            let p = if to_local {
+                w.inv_mul(&floptle_core::Transform::from_translation(v)).translation
+            } else {
+                w.mul_transform(&floptle_core::Transform::from_translation(v)).translation
+            };
+            Ok(Value::UserData(lua.create_userdata(crate::math_api::LuaVec3(p))?))
+        })?;
+        let to_world = f.clone();
+        methods.set(
+            "toWorld",
+            lua.create_function(move |_, (this, v): (Table, Value)| {
+                to_world.call::<Value>((this, v, false))
+            })?,
+        )?;
+        methods.set(
+            "toLocal",
+            lua.create_function(move |_, (this, v): (Table, Value)| {
+                f.call::<Value>((this, v, true))
+            })?,
+        )?;
+    }
+    {
+        // node:setWorldPos(v) — put a node at a WORLD point without deriving the
+        // parent inverse by hand. Through `Transform::inv_mul`, the componentwise
+        // TRS inverse: a matrix decomposition attributes a mirrored parent's
+        // negative determinant to X regardless of which axis is actually
+        // flipped, so a child of a mirrored character would land off by a
+        // reflection.
+        let scene = shared.scene.clone();
+        methods.set(
+            "setWorldPos",
+            lua.create_function(move |_, (this, v): (Table, Value)| {
+                let e: u32 = this.raw_get("__id")?;
+                let Some(v) = crate::math_api::vec3_of(&v) else {
+                    return Err(mlua::Error::RuntimeError(
+                        "node:setWorldPos takes a vec3 (or anything with x/y/z)".into(),
+                    ));
+                };
+                let local = parent_world_of(&scene.borrow(), e)
+                    .inv_mul(&floptle_core::Transform::from_translation(v))
+                    .translation;
+                this.set("pos", crate::math_api::LuaVec3(local))?;
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        // node:worldForward() / worldRight() / worldUp() — the node's axes after
+        // the parent chain. `node.forward` is the LOCAL one: a gun barrel
+        // parented to an arm points where the ARM says, not where the gun's own
+        // rotation says, and shooting along the local forward misses.
+        let scene = shared.scene.clone();
+        for (name, axis) in
+            [("worldForward", Vec3::NEG_Z), ("worldRight", Vec3::X), ("worldUp", Vec3::Y)]
+        {
+            let scene = scene.clone();
+            methods.set(
+                name,
+                lua.create_function(move |lua, this: Table| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let r = world_transform_of(&scene.borrow(), e).rotation * axis;
+                    Ok(Value::UserData(lua.create_userdata(crate::math_api::LuaVec3(
+                        glam::DVec3::new(r.x as f64, r.y as f64, r.z as f64),
+                    ))?))
+                })?,
+            )?;
+        }
+    }
+    {
+        // node:distanceTo(other) and node:distanceFlat(other [, up]) — measured
+        // in WORLD space, because that is the answer people mean. `distance(a,
+        // b)` compares LOCAL positions, which reads correctly right up until one
+        // of the two is parented and then quietly answers about the wrong frame.
+        // `distanceFlat` drops the component along `up` (default +Y): the "have
+        // I arrived?" test for anything that walks on ground it doesn't control
+        // the height of.
+        let scene = shared.scene.clone();
+        let f = lua.create_function(
+            move |_, (this, other, up, flat): (Table, Value, Option<Value>, bool)| {
+                let e: u32 = this.raw_get("__id")?;
+                let s = scene.borrow();
+                let a = world_transform_of_handle(&s, &this, e).translation;
+                let b = world_pos_of_value(&s, &other).ok_or_else(|| {
+                    mlua::Error::RuntimeError("node:distanceTo takes a node or a vec3".into())
+                })?;
+                let d = b - a;
+                if !flat {
+                    return Ok(d.length());
+                }
+                let up = match up {
+                    Some(u) => crate::math_api::vec3_of(&u)
+                        .and_then(|u| u.try_normalize())
+                        .unwrap_or(glam::DVec3::Y),
+                    None => glam::DVec3::Y,
+                };
+                Ok((d - up * d.dot(up)).length())
+            },
+        )?;
+        let plain = f.clone();
+        methods.set(
+            "distanceTo",
+            lua.create_function(move |_, (this, other): (Table, Value)| {
+                plain.call::<f64>((this, other, Value::Nil, false))
+            })?,
+        )?;
+        methods.set(
+            "distanceFlat",
+            lua.create_function(move |_, (this, other, up): (Table, Value, Value)| {
+                f.call::<f64>((this, other, up, true))
+            })?,
+        )?;
+    }
+    {
+        // node:moveTowards(target, maxDelta) — walk toward a WORLD point at a
+        // speed, never overshooting it. Pass `speed * dt`. Returns true once it
+        // has arrived, so `if node:moveTowards(goal, s * dt) then ... end` is the
+        // whole patrol step. World-space and placed with setWorldPos, so a node
+        // under a container arrives where you actually pointed.
+        let scene = shared.scene.clone();
+        methods.set(
+            "moveTowards",
+            lua.create_function(move |_, (this, target, max): (Table, Value, f64)| {
+                let e: u32 = this.raw_get("__id")?;
+                let (here, goal, parent) = {
+                    let s = scene.borrow();
+                    let goal = world_pos_of_value(&s, &target).ok_or_else(|| {
+                        mlua::Error::RuntimeError(
+                            "node:moveTowards(target, maxDelta) — target is a node or a vec3"
+                                .into(),
+                        )
+                    })?;
+                    (
+                        world_transform_of_handle(&s, &this, e).translation,
+                        goal,
+                        parent_world_of(&s, e),
+                    )
+                };
+                let next = crate::math_api::towards(here, goal, max);
+                let local = parent
+                    .inv_mul(&floptle_core::Transform::from_translation(next))
+                    .translation;
+                this.set("pos", crate::math_api::LuaVec3(local))?;
+                Ok((next - goal).length() < 1e-9)
+            })?,
+        )?;
+    }
+
     lua.set_named_registry_value("floptle_node_methods", methods)?;
 
     // ---- script metatable -----------------------------------------------------------
@@ -2523,6 +2855,17 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         "componentref",
         lua.create_function(|_, name: String| {
             Ok(format!("{}{name}", crate::env::COMPREF_PREFIX))
+        })?,
+    )?;
+    // moveTowards(node, target, maxDelta) — the free-function spelling of
+    // `node:moveTowards`, so it reads the same way as `dirTo` and `distance`
+    // beside it. One implementation; this is a forward.
+    lua.globals().set(
+        "moveTowards",
+        lua.create_function(|lua, (node, target, max): (Table, Value, f64)| {
+            let methods: Table = lua.named_registry_value("floptle_node_methods")?;
+            let f: mlua::Function = methods.get("moveTowards")?;
+            f.call::<bool>((node, target, max))
         })?,
     )?;
     {

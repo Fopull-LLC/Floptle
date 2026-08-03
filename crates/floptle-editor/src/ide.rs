@@ -73,6 +73,20 @@ pub(crate) struct IdeState {
     pub(crate) format_on_save: bool,
     /// The Docs page's filter box.
     pub(crate) docs_search: String,
+    /// Which Docs page is showing: the guides, the API browser, or the shader
+    /// stdlib. The API reference used to live below 2,500 lines of guide, which
+    /// is a reference nobody browses — it was only ever reachable by searching
+    /// for something you already knew the name of.
+    pub(crate) docs_page: DocsPage,
+}
+
+/// The three things the Docs tab is: a guide, a reference, a shader reference.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum DocsPage {
+    #[default]
+    Guides,
+    Api,
+    Shaders,
 }
 
 /// One "find all references" result: the file, its display name, the 1-based line, and
@@ -1247,17 +1261,36 @@ impl EditorTabViewer<'_> {
         }
     }
 
-    /// The Docs landing page: a search box over the sectioned scripting guide +
-    /// the categorized API reference + IDE shortcuts.
+    /// The Docs landing page: three pages behind one search box — the sectioned
+    /// guide, the **API browser**, and the shader stdlib.
+    ///
+    /// They used to be one endless scroll with the reference at the bottom,
+    /// which meant the only way to reach an API entry was to search for a name
+    /// you already knew. A reference you cannot *browse* teaches nobody the
+    /// thing they didn't know existed, and "the engine has a scheduler and
+    /// nobody knows" was the actual complaint that started this work.
     fn docs_page_ui(&mut self, ui: &mut egui::Ui) {
-        // A filter box up top: the guides and the API reference both narrow to
-        // matching entries, so devs can comb for exactly what they need.
+        // The page switch, then a filter box that narrows whichever page is up.
         ui.horizontal(|ui| {
+            for (page, label) in [
+                (DocsPage::Guides, "📖 Guides"),
+                (DocsPage::Api, "⚙ API"),
+                (DocsPage::Shaders, "◈ Shaders"),
+            ] {
+                if ui.selectable_label(self.ide.docs_page == page, label).clicked() {
+                    self.ide.docs_page = page;
+                }
+            }
+            ui.separator();
             ui.label("🔍");
             ui.add(
                 egui::TextEdit::singleline(&mut self.ide.docs_search)
-                    .hint_text("search the docs — try \"friction\", \"jump\", \"crossfade\", \"mouse\"")
-                    .desired_width(320.0),
+                    .hint_text(match self.ide.docs_page {
+                        DocsPage::Api => "search the API — \"look\", \"jump\", \"tween\", \"http\"",
+                        DocsPage::Shaders => "search the shader stdlib",
+                        DocsPage::Guides => "search the guides — \"friction\", \"crossfade\", \"mouse\"",
+                    })
+                    .desired_width(300.0),
             );
             if !self.ide.docs_search.is_empty() && ui.small_button("✖").clicked() {
                 self.ide.docs_search.clear();
@@ -1267,8 +1300,9 @@ impl EditorTabViewer<'_> {
         let q = self.ide.docs_search.trim().to_ascii_lowercase();
         let searching = !q.is_empty();
         let mut hits = 0usize;
+        let page = self.ide.docs_page;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.strong("Guides");
+          if page == DocsPage::Guides {
             for (n, (title, body)) in DOC_SECTIONS.iter().enumerate() {
                 if searching
                     && !title.to_ascii_lowercase().contains(&q)
@@ -1282,11 +1316,16 @@ impl EditorTabViewer<'_> {
                 let hdr = if searching { hdr.open(Some(true)) } else { hdr.default_open(n == 0) };
                 hdr.show(ui, |ui| self.doc_body_ui(ui, body));
             }
-            ui.add_space(10.0);
-            ui.separator();
-            ui.strong("API reference");
-            ui.small("Everything here also pops up as you type in a script (Tab accepts, ↑↓ chooses).");
-            ui.add_space(4.0);
+          }
+          if page == DocsPage::Api {
+            ui.small(
+                "Every name the engine provides. The same table drives autocomplete as you \
+                 type (Tab accepts, ↑↓ chooses) and the hover docs in the editor — click a \
+                 name or an example to copy it.",
+            );
+            ui.add_space(6.0);
+            // Groups open by default here: this is a BROWSER, and a wall of
+            // closed headers is a table of contents, not a reference.
             for cat in API_CATEGORIES {
                 let entries: Vec<&ApiEntry> = LUA_API
                     .iter()
@@ -1301,29 +1340,49 @@ impl EditorTabViewer<'_> {
                     continue;
                 }
                 hits += entries.len();
-                let hdr = egui::CollapsingHeader::new(format!("{cat}  ({})", entries.len()))
-                    .id_salt(("api_cat", cat));
-                let hdr = if searching { hdr.open(Some(true)) } else { hdr.default_open(false) };
+                let hdr = egui::CollapsingHeader::new(
+                    egui::RichText::new(format!("{cat}  ({})", entries.len())).strong(),
+                )
+                .id_salt(("api_cat", cat));
+                let hdr = if searching { hdr.open(Some(true)) } else { hdr.default_open(true) };
                 hdr.show(ui, |ui| {
                     for e in entries {
-                        ui.monospace(
-                            egui::RichText::new(e.label)
-                                .color(egui::Color32::from_rgb(78, 201, 176)),
-                        );
+                        // The name copies on click — the shortest path from
+                        // "what was that called?" to having it in your script.
+                        let name = ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new(e.label)
+                                        .monospace()
+                                        .color(egui::Color32::from_rgb(78, 201, 176)),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("click to copy");
+                        if name.clicked() {
+                            ui.ctx().copy_text(e.label.to_string());
+                        }
                         ui.indent(("api_doc", e.label), |ui| {
                             inline_doc_label(ui, e.doc, &egui::FontId::monospace(12.0));
                             // A worked example beats a signature — the signature is
                             // already in the line above.
                             if let Some(ex) = api_example(e.label) {
                                 self.doc_body_ui(ui, &indent_block(ex));
+                                if ui
+                                    .small_button("⧉ copy example")
+                                    .on_hover_text("copy this snippet to the clipboard")
+                                    .clicked()
+                                {
+                                    ui.ctx().copy_text(ex.to_string());
+                                }
                             }
                         });
-                        ui.add_space(2.0);
+                        ui.add_space(4.0);
                     }
                 });
             }
-            ui.add_space(10.0);
-            ui.separator();
+          }
+          if page == DocsPage::Shaders {
             ui.strong("Shader stdlib (.flsl)");
             ui.small(
                 "Custom material looks (ADR-0007): Assets → right-click → ◈ New Shader, then \
@@ -1383,10 +1442,11 @@ impl EditorTabViewer<'_> {
                     }
                 });
             }
+          }
             if searching && hits == 0 {
                 ui.add_space(8.0);
                 ui.label(format!(
-                    "No matches for \"{}\" — try a broader word (e.g. \"move\", \"light\", \"spin\").",
+                    "No matches for \"{}\" on this page — try a broader word, or another tab.",
                     self.ide.docs_search.trim()
                 ));
             }
@@ -1864,7 +1924,7 @@ impl EditorTabViewer<'_> {
             let rel = p - output.galley_pos;
             let cc = output.galley.cursor_from_pos(rel);
             let word = word_at(&self.ide.open[i].text, cc.index.0);
-            if let Some(api) = LUA_API.iter().find(|a| a.label == word) {
+            if let Some(api) = api_entry_for(&word) {
                 let example = api_example(api.label);
                 output.response.response.clone().on_hover_ui_at_pointer(|ui| {
                     ui.set_max_width(420.0);
@@ -2851,8 +2911,17 @@ const API_CATEGORIES: &[&str] = &[
     "script basics — lifecycle, params, log",
     "node — transform & body fields",
     "node — methods & handles",
+    "vectors, directions & easing",
     "scene lookups & raycast",
+    "references — wire nodes in the Inspector",
     "input — keyboard & mouse",
+    "drawing — draw.*",
+    // These two were routed to by `api_category` but never listed here, so the
+    // whole UI surface — `ui.make`, `ui.on`, the pointer hooks, `color` — was
+    // absent from the reference for as long as it has existed. Forty-three
+    // entries you could only find by already knowing their names, which is the
+    // discoverability complaint this release is about, in miniature.
+    "game UI — text, buttons & hooks",
     "networking — net.*, synced",
     "terrain — runtime sculpt & queries",
     "persistence — save.*",
@@ -2897,6 +2966,33 @@ fn api_category(label: &str) -> &'static str {
         "game UI — text, buttons & hooks"
     } else if matches!(label, "noderef" | "scriptref" | "componentref") {
         "references — wire nodes in the Inspector"
+    } else if label.starts_with("draw.") {
+        "drawing — draw.*"
+    } else if label.starts_with("vec3") || label.starts_with("vec2") || matches!(
+        label,
+        "distance"
+            | "dirTo"
+            | "yawOf"
+            | "pitchOf"
+            | "dirFromYaw"
+            | "lookRotation"
+            | "ease"
+            | "smoothDamp"
+            | "moveTowards"
+            | "node:lookAt"
+            | "node:turnTowards"
+            | "node:moveTowards"
+            | "node:toWorld"
+            | "node:toLocal"
+            | "node:setWorldPos"
+            | "node:worldForward"
+            | "node:worldRight"
+            | "node:worldUp"
+            | "node:distanceTo"
+            | "node:distanceFlat"
+            | "node.worldPos"
+    ) {
+        "vectors, directions & easing"
     } else if label.starts_with("node:") {
         "node — methods & handles"
     } else if label.starts_with("node.") {
@@ -3070,10 +3166,110 @@ const API_EXAMPLES: &[(&str, &str)] = &[
         "-- a live uniform write: safe every tick, never recompiles\nnode:setShaderParam(\"cell\", math.floor(time * 8) % 16)",
     ),
     (
+        "node:lookAt",
+        "-- point at a node or a world point; the up makes the horizon level\nnode:lookAt(find(\"Enemy\"))\nnode:lookAt(aimPoint, node.up)   -- roll set too, for a planet camera",
+    ),
+    (
+        "node:turnTowards",
+        "-- swing round at a rate instead of snapping. Short way, always.\nnode:turnTowards(find(\"Enemy\"), params.turn_rate * dt)\nnode:turnTowards(node.vel, 6 * dt)   -- or: face where you're going",
+    ),
+    (
+        "dirTo",
+        "local aim = dirTo(node, find(\"Enemy\"))\nspawn(\"Bullet\", node.pos + aim * 1.5, function(b) b.vel = aim * 60 end)",
+    ),
+    (
+        "dirFromYaw",
+        "-- the yaw/pitch -> direction pair, with the right signs\nlocal look = dirFromYaw(node.yaw, node.pitch)\nnode.pos = head - look * distance   -- an orbit camera, in one line",
+    ),
+    (
+        "yawOf",
+        "-- which way is that? (atan2(-x, -z), once and correctly)\nlocal heading = math.deg(yawOf(node.vel))",
+    ),
+    (
+        "lookRotation",
+        "-- the angles, without applying them\nnode.yaw, node.pitch, node.roll = lookRotation(forward, node.up)",
+    ),
+    (
+        "ease",
+        "-- the same feel at 30 fps and at 240 (this is what \"smoothing\" is)\nfunction lateUpdate(node, dt)\n  node.pos = ease(node.pos, target.pos + offset, params.smoothing, dt)\nend",
+    ),
+    (
+        "smoothDamp",
+        "-- a follow with momentum: it keeps moving after the target stops\ncamX, camVX = smoothDamp(camX, target.worldX, camVX, 0.25, dt)",
+    ),
+    (
+        "moveTowards",
+        "-- a patrol, in two lines: it returns true on arrival\nif node:moveTowards(waypoints[i], params.speed * dt) then\n  i = i % #waypoints + 1\nend",
+    ),
+    (
+        "node:toWorld",
+        "-- composes position, rotation AND scale up the whole parent chain\nlocal muzzle = gun:toWorld(vec3(0, 0, -1.2))\nspawn(\"Bullet\", muzzle, function(b) b.vel = gun:worldForward() * 60 end)",
+    ),
+    (
+        "node:setWorldPos",
+        "-- land on a world point whatever this node is parented to\nnode:setWorldPos(hit.node:toWorld(vec3(0, 1, 0)))",
+    ),
+    (
+        "node:distanceTo",
+        "-- WORLD space, so a unit under a container measures the real gap\nif node:distanceTo(player) < params.aggro then chase(player) end",
+    ),
+    (
+        "node.worldPos",
+        "-- x/y/z are LOCAL; this is where it really is\nif node.worldPos:distance(order) < params.arrive then arrived() end",
+    ),
+    (
+        "vec3:flatten",
+        "-- \"forward along the ground\" — on a flat world AND on a planet\nlocal up = node.up or vec3(0, 1, 0)\nlocal fwd = dirFromYaw(node.yaw):flatten(up)\nlocal right = fwd:cross(up)",
+    ),
+    (
+        "draw.text",
+        "-- a HUD with no UI tree; align says which edge x is\ndraw.text(24, 24, \"HP \" .. hp, 22, 1, 0.4, 0.4)\ndraw.text(w - 24, 24, string.format(\"%.0f fps\", 1 / dt), 18, 1, 1, 1, 0.7, \"right\")",
+    ),
+    (
+        "draw.circle",
+        "-- x, y is the CENTRE\ndraw.circle(mx, my, 6, 0.3, 1.0, 0.5, 0.9)\ndraw.circleOutline(mx, my, 18, 0.3, 1.0, 0.5, 0.5, 2)",
+    ),
+    (
         "terrain.dig",
         "if input.clicked(\"left\") then\n  local hit = raycast(node.pos, node.forward, 6)\n  if hit then terrain.dig(hit.x, hit.y, hit.z, 1.5) end\nend",
     ),
 ];
+
+/// The API entry a hovered identifier refers to, if any.
+///
+/// Hovering `node:lookAt` is the easy case, and the only one the exact match
+/// used to handle. The cases that matter are the ones people actually write:
+/// `target:lookAt` (the receiver is a variable, not literally `node`),
+/// `v:flatten` (the reference calls it `vec3:flatten`), `player.worldPos`. So:
+/// try the literal word, then fall back to the MEMBER name — with the same
+/// separator, and only when that is unambiguous. A hover that guesses wrong is
+/// worse than no hover.
+fn api_entry_for(word: &str) -> Option<&'static ApiEntry> {
+    if let Some(a) = LUA_API.iter().find(|a| a.label == word) {
+        return Some(a);
+    }
+    // `foo:bar` / `foo.bar` — the LAST separator, so `a.b:c` resolves on `c`.
+    let sep = word.rfind([':', '.'])?;
+    let (member, ch) = (&word[sep + 1..], word.as_bytes()[sep] as char);
+    if member.is_empty() {
+        return None;
+    }
+    let mut hit = None;
+    for a in LUA_API {
+        let Some(i) = a.label.rfind([':', '.']) else { continue };
+        if a.label.as_bytes()[i] as char != ch || &a.label[i + 1..] != member {
+            continue;
+        }
+        // Two different namespaces claim this member (`audio.play` vs a
+        // hypothetical `music.play`): say nothing rather than pick one. An
+        // exact receiver match, though, would already have been found above.
+        if hit.is_some() {
+            return None;
+        }
+        hit = Some(a);
+    }
+    hit
+}
 
 /// Indent a snippet by four spaces, which is how [`EditorTabViewer::doc_body_ui`]
 /// recognises a code block.
@@ -3243,7 +3439,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "input.lockMouse", insert: "input.lockMouse(", doc: "input.lockMouse() — pin the cursor to the window center and hide it (FPS / free-look mouselook without holding a button). Read motion with input.mouse_delta(). Released on Stop." },
     ApiEntry { label: "input.unlockMouse", insert: "input.unlockMouse(", doc: "input.unlockMouse() — release the cursor back to the desktop and show it again." },
     ApiEntry { label: "input.setMouseLocked", insert: "input.setMouseLocked(", doc: "input.setMouseLocked(true/false) — lock or unlock the mouse from a boolean (e.g. a menu toggle)." },
-    ApiEntry { label: "raycast", insert: "raycast(", doc: "raycast(ox,oy,oz, dx,dy,dz, max [, ignore]) — cast a ray against the terrain + mesh colliders AND every physics body (players, crates). Returns a hit {x,y,z, nx,ny,nz, distance, node} or nil — node is the hit body's node handle (nil for static geometry). Your own node's body is excluded; pass a node as `ignore` to skip its body too. The last arg can instead be an options table: raycast(..., { ignore = target, layers = {\"Ground\"} }) — layers (name or array, Project Settings → Layers) filters what the ray can hit; a misspelled layer is an error. Use for ground checks, line-of-sight, shooting." },
+    ApiEntry { label: "raycast", insert: "raycast(", doc: "raycast(origin, dir, max [, ignore]) — or raycast(ox,oy,oz, dx,dy,dz, max [, ignore]). Cast a ray against the terrain + mesh colliders AND every physics body (players, crates). Returns a hit {x,y,z, nx,ny,nz, distance, node} or nil — node is the hit body's node handle (nil for static geometry). Your own node's body is excluded; pass a node as `ignore` to skip its body too. The last arg can instead be an options table: raycast(..., { ignore = target, layers = {\"Ground\"} }) — layers (name or array, Project Settings → Layers) filters what the ray can hit; a misspelled layer is an error. Use for ground checks, line-of-sight, shooting." },
     ApiEntry { label: "gizmo", insert: "gizmo", doc: "Immediate-mode debug drawing (play mode): gizmo.line/ray/sphere/point show for ONE frame in the Scene view (never the Game view; the viewport gizmos toggle hides them). Call every frame you want a shape visible." },
     ApiEntry { label: "gizmo.line", insert: "gizmo.line(", doc: "gizmo.line(x1,y1,z1, x2,y2,z2 [, r,g,b]) — a world-space debug line for one frame. Color is 0–1 floats (default green)." },
     ApiEntry { label: "gizmo.ray", insert: "gizmo.ray(", doc: "gizmo.ray(ox,oy,oz, dx,dy,dz [, len [, r,g,b]]) — a debug ray: origin + direction. With `len` the direction is normalized and the ray is that long — mirrors raycast(...), perfect for visualizing ground checks / line-of-sight." },
@@ -3326,9 +3522,40 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node.pos", insert: "node.pos", doc: "The node's position as a vec3 (read/write): node.pos = node.pos + dir * dt. Accepts anything with x/y/z." },
     ApiEntry { label: "node.tickPos", insert: "node.tickPos", doc: "The body's TICK pose as a vec3 (read/write) — where the simulation says it is, as opposed to node.pos, which is the interpolated pose the camera renders. Inside fixedUpdate use this one: move with node.tickPos = node.tickPos + vec3(d, 0, 0) and build hurtboxes from it. `node.x = node.x + d` in fixedUpdate teleports the body onto its VISUAL position, so the model slides and the hitbox doesn't follow. In a rollback match this is the difference between a hit registering and not." },
     ApiEntry { label: "node.tickYaw", insert: "node.tickYaw", doc: "The body's tick-domain yaw (read/write) — node.yaw's simulation-truth counterpart, for facing a fighter inside fixedUpdate." },
-    ApiEntry { label: "vec3", insert: "vec3(", doc: "vec3(x, y, z) — a 3-vector VALUE with real operators: a + b, a - b, v * 2, -v, a == b. Methods: :length(), :lengthSquared(), :normalized(), :dot(o), :cross(o), :lerp(o, t), :distance(o). vec3() = zero, vec3(s) = splat, vec3(other) = copy. Anything that takes a vector also takes a {x=,y=,z=} table or a node handle." },
+    ApiEntry { label: "vec3", insert: "vec3(", doc: "vec3(x, y, z) — a 3-vector VALUE with real operators: a + b, a - b, v * 2, -v, a == b. Methods: :length(), :lengthSquared(), :normalized(), :dot(o), :cross(o), :lerp(o, t), :distance(o), :flatten(up), :withX/:withY/:withZ(n), :rotatedY(rad), :rotatedAround(axis, rad), :towards(o, maxDelta), :angleTo(o). vec3() = zero, vec3(s) = splat, vec3(other) = copy. Anything that takes a vector also takes a {x=,y=,z=} table or a node handle." },
+    ApiEntry { label: "vec3:flatten", insert: ":flatten(", doc: "v:flatten(up) — the part of v that lies in the plane PERPENDICULAR to up, renormalised. THE planet-safe move: \"forward along the ground\" is dirFromYaw(node.yaw):flatten(node.up) whatever the local vertical is, and on a flat world :flatten() (default +Y) is the familiar \"drop the Y\". Straight up or down leaves nothing in the plane → vec3(0,0,0), never a NaN." },
+    ApiEntry { label: "vec3:withY", insert: ":withY(", doc: "v:withX(n) / v:withY(n) / v:withZ(n) — the same vector with one component replaced. node.vel:withY(0) keeps your fall speed out of a horizontal speed clamp." },
+    ApiEntry { label: "vec3:rotatedY", insert: ":rotatedY(", doc: "v:rotatedY(rad) — spun about world +Y (the yaw of a flat world). For any other axis use v:rotatedAround(axis, rad)." },
+    ApiEntry { label: "vec3:rotatedAround", insert: ":rotatedAround(", doc: "v:rotatedAround(axis, rad) — Rodrigues rotation about ANY axis, which is what a planet camera's yaw actually is (about the LOCAL up, not about +Y)." },
+    ApiEntry { label: "vec3:towards", insert: ":towards(", doc: "v:towards(other, maxDelta) — step toward another point without ever overshooting it: math.approach, for positions. Pass `speed * dt`." },
+    ApiEntry { label: "vec3:angleTo", insert: ":angleTo(", doc: "v:angleTo(other) — the unsigned angle between two directions, in radians. Clamped before the acos, so parallel vectors give 0 and a zero vector gives 0 — never a NaN." },
     ApiEntry { label: "vec2", insert: "vec2(", doc: "vec2(x, y) — a 2-vector value (UI/screen math), same operators and methods as vec3 (minus cross)." },
     ApiEntry { label: "distance", insert: "distance(", doc: "distance(a, b) — distance between two points: vec3/vec2 values, {x=,y=,z=} tables, or NODE handles (distance(node, target) just works). Also distance(x1,y1,z1, x2,y2,z2) for raw numbers." },
+    // ---- directions & orientation (0.20.0) ------------------------------------
+    // The corner of the API people used to write out longhand. Every doc line
+    // here names the arithmetic it replaces, because that is how someone
+    // recognises the thing they were about to type by hand.
+    ApiEntry { label: "node:lookAt", insert: "node:lookAt(", doc: "node:lookAt(target [, up]) — point this node at another node or a world point. Sets yaw + pitch and leaves roll alone; pass an `up` and it sets the roll too, to whatever puts that up over the node's head (a level horizon on a planet — the twenty-line undo-yaw-then-pitch dance, in one call). Measured in WORLD space on both ends." },
+    ApiEntry { label: "node:turnTowards", insert: "node:turnTowards(", doc: "node:turnTowards(target, maxRadians) — turn toward something by at most that much, the SHORT way round (the ±pi seam is handled). Pass `rate * dt` for a frame-rate-independent turn. A node handle or a world point is somewhere to face; any other vector is taken as a DIRECTION, so node:turnTowards(node.vel, 6 * dt) steers a unit to face where it is going. A zero-length direction leaves the facing alone." },
+    ApiEntry { label: "dirTo", insert: "dirTo(", doc: "dirTo(from, to) — the UNIT direction from one thing to another. Both may be a vec3, a {x=,y=,z=} table or a NODE handle, so dirTo(node, target) is the whole sentence. Same point twice → vec3(0,0,0), never a NaN." },
+    ApiEntry { label: "yawOf", insert: "yawOf(", doc: "yawOf(dir) — the yaw that faces along a direction. This is atan2(-x, -z) (engine forward is −Z), once and with the right signs. Zero direction → 0." },
+    ApiEntry { label: "pitchOf", insert: "pitchOf(", doc: "pitchOf(dir) — the pitch that faces along a direction, positive looking up. asin, clamped, so a denormalised vector can't produce a NaN." },
+    ApiEntry { label: "dirFromYaw", insert: "dirFromYaw(", doc: "dirFromYaw(yaw [, pitch]) — the unit direction those angles face: the inverse of yawOf/pitchOf. Without a pitch you get the ground direction, which is what movement wants; with one you get a camera's view direction." },
+    ApiEntry { label: "lookRotation", insert: "lookRotation(", doc: "lookRotation(dir [, up]) -> yaw, pitch, roll — the angles that face `dir`, WITHOUT applying them (node:lookAt applies them). Three returns, so `node.yaw, node.pitch, node.roll = lookRotation(f, up)` is one line. No up = roll 0." },
+    ApiEntry { label: "ease", insert: "ease(", doc: "ease(a, b, rate, dt) — frame-rate-independent exponential ease: `a` covers a rate-dependent FRACTION of the remaining distance each second, so 30 fps and 240 fps feel identical. Numbers or vectors. rate <= 0 snaps. This is what a camera's \"smoothing\" knob is; three shipped camera scripts each defined it privately before it lived here." },
+    ApiEntry { label: "smoothDamp", insert: "smoothDamp(", doc: "smoothDamp(current, target, vel, smoothTime, dt) -> value, vel — a critically-damped spring: unlike ease it has MOMENTUM, so a follow keeps moving for a moment after the target stops. Lua has no reference parameters, so the velocity comes back as the second return: camX, camVX = smoothDamp(camX, wantX, camVX, 0.25, dt). Numbers or vectors." },
+    ApiEntry { label: "moveTowards", insert: "moveTowards(", doc: "moveTowards(node, target, maxDelta) — walk a node toward a WORLD point at a speed, never overshooting it. Pass `speed * dt`. Returns true once it has arrived, so `if moveTowards(node, goal, s * dt) then` is the whole patrol step. Also spelled node:moveTowards(target, maxDelta)." },
+    ApiEntry { label: "node:moveTowards", insert: "node:moveTowards(", doc: "node:moveTowards(target, maxDelta) — the method spelling of moveTowards(node, …). World-space and placed through the parent inverse, so a node under a container arrives where you actually pointed." },
+    // ---- local ↔ world --------------------------------------------------------
+    ApiEntry { label: "node:setWorldPos", insert: "node:setWorldPos(", doc: "node:setWorldPos(v) — put this node at a WORLD point, whatever it is parented to, without deriving the parent inverse by hand. Goes through the componentwise TRS inverse, so it stays exact under a MIRRORED (negative-scale) parent, where a matrix decomposition puts the flip on the wrong axis." },
+    ApiEntry { label: "node:toWorld", insert: "node:toWorld(", doc: "node:toWorld(v) — a point in this node's own frame, converted to world space: its position, rotation AND scale, composed up the whole parent chain. \"Where is the muzzle?\" is gun:toWorld(vec3(0, 0, -1.2))." },
+    ApiEntry { label: "node:toLocal", insert: "node:toLocal(", doc: "node:toLocal(v) — the inverse of node:toWorld: a world point expressed in this node's frame." },
+    ApiEntry { label: "node:worldForward", insert: "node:worldForward()", doc: "node:worldForward() — the node's forward AFTER the parent chain. node.forward is the LOCAL one: a gun barrel parented to a swinging arm points where the ARM says, so shooting along node.forward misses. Also node:worldRight() and node:worldUp()." },
+    ApiEntry { label: "node:worldRight", insert: "node:worldRight()", doc: "node:worldRight() — the node's +X axis after the parent chain." },
+    ApiEntry { label: "node:worldUp", insert: "node:worldUp()", doc: "node:worldUp() — the node's +Y axis after the parent chain (not the same as node.up, which is the body's −gravity up)." },
+    ApiEntry { label: "node:distanceTo", insert: "node:distanceTo(", doc: "node:distanceTo(other) — distance to a node or a point, measured in WORLD space, which is the answer people mean. `distance(a, b)` compares LOCAL positions — correct right up until one of the two is parented, and then quietly about the wrong frame." },
+    ApiEntry { label: "node:distanceFlat", insert: "node:distanceFlat(", doc: "node:distanceFlat(other [, up]) — distance ignoring the up axis (default +Y): the \"have I arrived?\" test for anything that walks on ground it doesn't control the height of. Pass an up for a planet." },
+    ApiEntry { label: "node.worldPos", insert: "node.worldPos", doc: "The node's position in WORLD space as a vec3, composed up the parent chain (read-only; node.worldX/worldY/worldZ are the components). node.x/y/z are LOCAL — comparing those against a world target is how a unit under a container walks past its destination and keeps going." },
     ApiEntry { label: "onCollisionEnter", insert: "function onCollisionEnter(node, other, hit)\n  \nend", doc: "function onCollisionEnter(node, other, hit) — fires the tick this node's body STARTS touching something solid (a collider or another body). `other` = the other node's handle (check other:hasTag(\"...\") / other.name); hit = { x, y, z, nx, ny, nz } (world contact point + normal). Also onCollisionStay (every tick while touching) and onCollisionExit (on separation)." },
     ApiEntry { label: "onCollisionExit", insert: "function onCollisionExit(node, other, hit)\n  \nend", doc: "function onCollisionExit(node, other, hit) — fires the tick the touch ends (hit = the last known contact)." },
     ApiEntry { label: "onTriggerEnter", insert: "function onTriggerEnter(node, other, hit)\n  \nend", doc: "function onTriggerEnter(node, other, hit) — fires the tick a body enters a TRIGGER (the \"trigger\" switch on a Collider or Rigidbody: it stops blocking, events still fire — a Kinematic trigger rigidbody = a moving pickup). The portal/pickup/checkpoint hook — pair with a string param: scene.load(params.destination). Also onTriggerStay / onTriggerExit." },
@@ -3337,6 +3564,9 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node.id", insert: "node.id", doc: "A stable numeric id for this node." },
     ApiEntry { label: "node.parent", insert: "node.parent", doc: "The parent node handle, or nil. A handle has the same fields (x/y/z, …) so you can read/write another node." },
     ApiEntry { label: "node:setShaderParam", insert: "node:setShaderParam(", doc: "node:setShaderParam(\"glow\", 2.5) / node:setShaderParam(\"nose\", x, y, z) — drive a .flsl uniform on this node every tick (a GPU uniform write, never a recompile). Targets the node's Material shader, or its UI element's `stage ui` shader (the navball pattern: a script feeds an instrument's uniforms each tick). Unset lanes are 0." },
+    ApiEntry { label: "draw.text", insert: "draw.text(", doc: "draw.text(x, y, s, size, r,g,b [, a] [, align]) — a string on the SCREEN, in the pixels input.mouse() reports, without building a UI tree: a damage number, a frame-time readout, the count under a selection box. The engine measures and lays out the glyphs with the same font stack ui.make uses. align is \"left\" (default) | \"center\" | \"right\", and x is that edge. Immediate mode: re-draw it every frame you want it." },
+    ApiEntry { label: "draw.circle", insert: "draw.circle(", doc: "draw.circle(x, y, radius, r,g,b [, a]) — a filled circle in screen pixels, x/y its CENTRE. draw.circleOutline(..., [px]) is the hollow twin. Same immediate-mode rules as draw.rect: over the scene, over the HUD, one frame each." },
+    ApiEntry { label: "draw.circleOutline", insert: "draw.circleOutline(", doc: "draw.circleOutline(x, y, radius, r,g,b [, a] [, px]) — a hollow circle, `px` thick (default 2)." },
     ApiEntry { label: "draw.line", insert: "draw.line(", doc: "draw.line(x1,y1,z1, x2,y2,z2, r,g,b [, a]) — queue one world-space 3D line for THIS frame (immediate mode: re-draw every lateUpdate — the camera pass — while wanted). Drawn OVER the scene, never occluded — the KSP-style map draws its orbit conics with these." },
     ApiEntry { label: "node:getparent", insert: "node:getparent()", doc: "The parent node handle, or nil (same as node.parent)." },
     ApiEntry { label: "node:children", insert: "node:children()", doc: "An array of this node's child handles." },
@@ -4275,6 +4505,55 @@ Prose with `inline code` in it.
         }
         assert!(painted.contains("A heading"), "headings must render:\n{painted}");
         assert!(painted.contains("inline code"), "inline code must render:\n{painted}");
+    }
+
+    /// Every API entry lands in a category the browser actually displays.
+    ///
+    /// `api_category` has a catch-all arm, so a new group name that isn't in
+    /// `API_CATEGORIES` doesn't fail to compile — it just silently drops every
+    /// entry routed to it out of the browser.
+    #[test]
+    fn every_api_entry_lands_in_a_displayed_category() {
+        let mut missing: Vec<(&str, &str)> = Vec::new();
+        for e in LUA_API {
+            let cat = api_category(e.label);
+            if !API_CATEGORIES.contains(&cat) {
+                missing.push((e.label, cat));
+            }
+        }
+        assert!(missing.is_empty(), "entries routed to a group the browser never draws: {missing:?}");
+        // …and every category has something in it, or it's a header for nothing.
+        for cat in API_CATEGORIES {
+            assert!(
+                LUA_API.iter().any(|e| api_category(e.label) == *cat),
+                "the API browser draws an empty group: {cat}"
+            );
+        }
+    }
+
+    /// Hover resolves the identifiers people actually type, not just the ones
+    /// spelled exactly like the reference.
+    ///
+    /// `target:lookAt(...)` is the same call as `node:lookAt(...)`, and a hover
+    /// that only matched the literal string `node:lookAt` explained nothing
+    /// about the line under the cursor. Ambiguity is the other half: when two
+    /// namespaces claim a member name, saying nothing beats guessing.
+    #[test]
+    fn hover_resolves_a_member_name_on_any_receiver() {
+        // The exact case still works.
+        assert_eq!(api_entry_for("node:lookAt").map(|a| a.label), Some("node:lookAt"));
+        // …and so does the same call on a variable, which is how it gets written.
+        assert_eq!(api_entry_for("target:lookAt").map(|a| a.label), Some("node:lookAt"));
+        assert_eq!(api_entry_for("enemy:distanceTo").map(|a| a.label), Some("node:distanceTo"));
+        assert_eq!(api_entry_for("player.worldPos").map(|a| a.label), Some("node.worldPos"));
+        // A vec3 method, whose reference label names the type, not a variable.
+        assert_eq!(api_entry_for("fwd:flatten").map(|a| a.label), Some("vec3:flatten"));
+        // The separator has to match: `node.lookAt` is not `node:lookAt`.
+        assert!(api_entry_for("thing.lookAt").is_none());
+        // A bare word that is not an entry stays unexplained.
+        assert!(api_entry_for("myLocalVariable").is_none());
+        assert!(api_entry_for("").is_none());
+        assert!(api_entry_for("foo.").is_none());
     }
 
     /// The two new guide sections must exist and stay findable by the words a

@@ -113,6 +113,114 @@ so setting a field moves the object.
 | `node.scale` | Uniform scale (shortcut for all axes) |
 | `node.scale_x` `node.scale_y` `node.scale_z` | Per-axis scale |
 
+### 3.1 Directions & orientation
+
+Pointing at things used to be the one corner of the API you had to write out
+longhand — `atan2` with two minus signs, a four-line project-onto-plane. Each of
+these names the intent instead, and none of them can get the sign wrong.
+
+| Call | What it does |
+|---|---|
+| `node:lookAt(target [, up])` | Face a node or a world point. Sets yaw + pitch; with an `up`, the roll too |
+| `node:turnTowards(target, maxRadians)` | Turn toward it by at most that much — the short way round. Pass `rate * dt` |
+| `dirTo(from, to)` | The unit direction between two things (nodes, points, anything with x/y/z) |
+| `yawOf(dir)` / `pitchOf(dir)` | The angles that face along a direction |
+| `dirFromYaw(yaw [, pitch])` | …and back again: the direction those angles face |
+| `lookRotation(dir [, up])` | → `yaw, pitch, roll`, without applying them |
+
+```lua
+function update(node, dt)
+  local enemy = find("Enemy")
+  -- Snap to face it…
+  node:lookAt(enemy)
+  -- …or swing round at 3 rad/s, which is what a turret actually wants.
+  node:turnTowards(enemy, 3 * dt)
+
+  -- Fire along the way you're facing:
+  local hit = raycast(node.pos, dirTo(node, enemy), 50)
+end
+```
+
+`turnTowards` takes a **node** (or a world point) as somewhere to face, and any
+other vector as a **direction** — so `node:turnTowards(node.vel, 6 * dt)` steers a
+unit to face where it is going.
+
+> Nothing here produces a NaN. A zero-length direction leaves the facing alone,
+> `yawOf(vec3(0,0,0))` is `0`, and `dirTo(p, p)` is `vec3(0,0,0)`.
+
+### 3.2 On the ground, on any planet — `:flatten(up)`
+
+"Forward, but along the ground" is a projection onto the plane perpendicular to
+up. On a flat world that is "drop the Y"; on a planet, up is radial and changes
+as you walk. One method covers both:
+
+```lua
+local up = node.up or vec3(0, 1, 0)   -- -gravity: Y on a flat world, radial on a planet
+local fwd = dirFromYaw(node.yaw):flatten(up)
+local right = fwd:cross(up)           -- already in the plane, already unit length
+
+node.vel = (fwd * forwardInput + right * strafeInput) * speed + up * node.vel:dot(up)
+```
+
+That is the whole of `first_person.lua`'s movement basis, and it runs unchanged
+on a planet. `:flatten()` with no argument uses +Y.
+
+### 3.3 Local ↔ world
+
+`node.x/y/z` are **local** — measured from the parent. Handy for moving something,
+wrong for comparing it against a world target (see
+[§8](#where-is-it-really--nodeworldxworldyworldz)). The full set:
+
+| Call | Meaning |
+|---|---|
+| `node.worldX/worldY/worldZ`, `node.worldPos` | Where it really is (read-only) |
+| `node:setWorldPos(v)` | Put it at a world point, whatever it's parented to |
+| `node:toWorld(v)` / `node:toLocal(v)` | A point through this node's own frame |
+| `node:worldForward()` / `worldRight()` / `worldUp()` | Its axes after the parent chain |
+| `node:distanceTo(other)` | Distance in **world** space, to a node or a point |
+| `node:distanceFlat(other [, up])` | …ignoring the up axis (default +Y) |
+
+```lua
+-- Where is the muzzle? The gun is parented to an arm that is parented to a
+-- character — toWorld composes all of it, including scale.
+local muzzle = gun:toWorld(vec3(0, 0, -1.2))
+spawn("Bullet", muzzle, function(b) b.vel = gun:worldForward() * 60 end)
+```
+
+`node.forward` is the node's **local** forward. A gun barrel on a swinging arm
+points where the *arm* says, so shooting along `node.forward` misses — that is
+what `worldForward()` is for.
+
+### 3.4 Getting there — movement & easing
+
+| Call | Meaning |
+|---|---|
+| `node:moveTowards(target, maxDelta)` | Walk toward a world point without overshooting. Returns `true` on arrival |
+| `moveTowards(node, target, maxDelta)` | The same thing, spelled as a free function |
+| `ease(a, b, rate, dt)` | Frame-rate-independent exponential ease. Numbers **or** vectors |
+| `smoothDamp(cur, target, vel, smoothTime, dt)` | → `value, vel` — a critically-damped spring, with momentum |
+| `v:towards(other, maxDelta)` | The vector version of `math.approach` |
+
+```lua
+-- A patrol, in two lines.
+function update(node, dt)
+  if node:moveTowards(waypoints[i], params.speed * dt) then
+    i = i % #waypoints + 1
+  end
+end
+
+-- A camera follow that feels the same at 30 fps and at 240.
+function lateUpdate(node, dt)
+  node.pos = ease(node.pos, target.pos + offset, params.smoothing, dt)
+end
+```
+
+`ease` moves a *fraction of what's left* each second, so it never quite arrives
+and never overshoots — that is what makes it frame-rate independent, and why
+three shipped camera scripts each defined it privately before it lived here.
+`smoothDamp` is the one to reach for when the follow should keep moving for a
+moment after the target stops.
+
 ## 4. `node` — the physics body
 
 These extra fields appear **only when the node has a Rigidbody** (Inspector →
@@ -1036,13 +1144,28 @@ draw.line(a.x, a.y, a.z, b.x, b.y, b.z, 0.3, 0.85, 1.0)        -- rgb
 draw.line(x1, y1, z1, x2, y2, z2, 0.5, 0.5, 0.6, 0.4)          -- + alpha
 ```
 
-### Screen-space boxes (`draw.rect`, `draw.rectOutline`)
+### Screen-space shapes & text (`draw.rect`, `draw.circle`, `draw.text`)
 
-Immediate-mode rectangles in **pixels** — the same pixels `input.mouse()` reports:
+Immediate-mode drawing in **pixels** — the same pixels `input.mouse()` reports:
 
 ```lua
 draw.rect(x, y, w, h, r, g, b [, a] [, radius])        -- filled
 draw.rectOutline(x, y, w, h, r, g, b [, a] [, px])     -- hollow, `px` thick
+draw.circle(x, y, radius, r, g, b [, a])               -- x,y is the CENTRE
+draw.circleOutline(x, y, radius, r, g, b [, a] [, px])
+draw.text(x, y, s, size, r, g, b [, a] [, align])      -- align: "left"|"center"|"right"
+```
+
+`draw.text` is measured and laid out by the engine with the same font stack
+`ui.make` uses, so a damage number, a frame-time readout or a count under a
+selection box needs no UI tree and no idea how wide an `m` is. `align` says
+which edge `x` is:
+
+```lua
+-- a HUD in three lines
+draw.text(24, 24, "HP " .. hp, 22, 1, 0.4, 0.4)
+draw.circle(40, 80, 12, 0.3, 1, 0.5, 0.8)
+draw.text(w - 24, 24, string.format("%.1f fps", 1 / dt), 18, 1, 1, 1, 0.7, "right")
 ```
 
 They draw over the scene *and* over the HUD, in the Game view and in a build.
@@ -2328,6 +2451,11 @@ node.pos = node.pos + dir * params.speed * dt
 | `a + b`, `a - b`, `v * 2`, `v / 2`, `-v`, `a == b` | operators |
 | `v:length()`, `v:lengthSquared()`, `v:normalized()` | measure / unit |
 | `a:dot(b)`, `a:cross(b)`, `a:lerp(b, t)`, `a:distance(b)` | the classics |
+| `v:flatten(up)` | project onto the plane ⟂ `up`, renormalised — ["on any planet"](#32-on-the-ground-on-any-planet--flattenup) |
+| `v:withX(n)`, `v:withY(n)`, `v:withZ(n)` | the same vector with one component replaced |
+| `v:rotatedY(rad)`, `v:rotatedAround(axis, rad)` | spun about +Y, or about any axis |
+| `v:towards(other, maxDelta)` | step toward, never overshooting |
+| `v:angleTo(other)` | the unsigned angle between two directions (0, never NaN) |
 | `vec2(x, y)` | the 2D version (UI/screen math; same surface, no cross) |
 | `node.pos` | the node's position **as** a vec3 — read/write |
 
@@ -2376,6 +2504,8 @@ always will — they're just not what the docs teach any more.
 | `math.wrapAngle(a)` · `math.deltaAngle(a, b)` | fold into (−π, π] · the **short** way round |
 | `math.approachAngle(cur, target, maxDelta)` | "turn to face", correct across the seam |
 | `math.pingPong(t, len)` | 0 → len → 0, forever |
+| `ease(a, b, rate, dt)` | frame-rate-independent exponential ease — numbers **or** vectors |
+| `smoothDamp(cur, target, vel, time, dt)` | → `value, vel` — a critically-damped spring, with momentum |
 
 ```lua
 -- a turret that turns the short way and never overshoots

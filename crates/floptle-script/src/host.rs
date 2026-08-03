@@ -396,9 +396,49 @@ impl ScriptHost {
             let so = sim_origin.clone();
             let cur = net.current.clone();
             let lt = layer_table.clone();
-            type Args = (f64, f64, f64, f64, f64, f64, f64, Option<Value>);
-            if let Ok(f) = lua.create_function(move |lua,
-                (ox, oy, oz, dx, dy, dz, max, ignore): Args| {
+            if let Ok(f) = lua.create_function(move |lua, args: mlua::MultiValue| {
+                // Two spellings, one ray: the vector form
+                // `raycast(origin, dir, max [, ignore])` — origin may be a NODE
+                // handle — and the original six-number form. The docs have
+                // taught the vector one since 0.17; it only became true here.
+                let a: Vec<Value> = args.into_iter().collect();
+                let num = |v: Option<&Value>| -> Option<f64> {
+                    match v {
+                        Some(Value::Number(n)) => Some(*n),
+                        Some(Value::Integer(i)) => Some(*i as f64),
+                        _ => None,
+                    }
+                };
+                let (ox, oy, oz, dx, dy, dz, max, ignore) = if a.len() >= 3
+                    && matches!(a[0], Value::Table(_) | Value::UserData(_))
+                {
+                    let (Some(o), Some(d)) = (
+                        crate::math_api::vec3_of(&a[0]),
+                        crate::math_api::vec3_of(&a[1]),
+                    ) else {
+                        return Err(mlua::Error::RuntimeError(
+                            "raycast(origin, dir, max [, ignore]) — origin and dir are vec3s \
+                             (or a node, or anything with x/y/z)"
+                                .into(),
+                        ));
+                    };
+                    let Some(max) = num(a.get(2)) else {
+                        return Err(mlua::Error::RuntimeError(
+                            "raycast(origin, dir, max) — max is a distance in metres".into(),
+                        ));
+                    };
+                    (o.x, o.y, o.z, d.x, d.y, d.z, max, a.get(3).cloned())
+                } else {
+                    let n: Vec<f64> = a.iter().take(7).map(|v| num(Some(v)).unwrap_or(f64::NAN)).collect();
+                    if n.len() < 7 || n.iter().any(|v| v.is_nan()) {
+                        return Err(mlua::Error::RuntimeError(
+                            "raycast(origin, dir, max [, ignore]) or \
+                             raycast(ox,oy,oz, dx,dy,dz, max [, ignore])"
+                                .into(),
+                        ));
+                    }
+                    (n[0], n[1], n[2], n[3], n[4], n[5], n[6], a.get(7).cloned())
+                };
                 let origin = *so.borrow();
                 let o = (glam::DVec3::new(ox, oy, oz) - origin).as_vec3();
                 let dir = glam::Vec3::new(dx as f32, dy as f32, dz as f32);
@@ -1011,6 +1051,7 @@ impl ScriptHost {
         let draw_lines: Rc<RefCell<Vec<crate::DrawLine>>> = Rc::new(RefCell::new(Vec::new()));
         let draw_tris: Rc<RefCell<Vec<crate::DrawTri>>> = Rc::new(RefCell::new(Vec::new()));
         let draw_rects: Rc<RefCell<Vec<crate::DrawRect>>> = Rc::new(RefCell::new(Vec::new()));
+        let draw_texts: Rc<RefCell<Vec<crate::DrawText>>> = Rc::new(RefCell::new(Vec::new()));
         {
             let q = draw_lines.clone();
             if let (Ok(f), Ok(t)) = (
@@ -1277,6 +1318,69 @@ impl ScriptHost {
                         },
                     ) {
                         let _ = t.set(name, f);
+                    }
+                }
+                // `draw.circle(x, y, radius, r,g,b[,a])` and its outline twin —
+                // a rect with a corner radius of half its side IS a circle to
+                // the UI quad shader, so a debug ring, a minimap blip or a
+                // reticle costs nothing new. `x, y` is the CENTRE, which is what
+                // anyone drawing a circle has in hand.
+                for (name, outline_default) in [("circle", 0.0f32), ("circleOutline", 2.0f32)] {
+                    let q = draw_rects.clone();
+                    type CircleArgs = (f32, f32, f32, f32, f32, f32, Option<f32>, Option<f32>);
+                    if let Ok(f) = lua.create_function(
+                        move |_, (x, y, rad, r, g, b, a, extra): CircleArgs| {
+                            let rad = rad.max(0.0);
+                            let outline = if outline_default > 0.0 {
+                                extra.unwrap_or(outline_default).max(0.0)
+                            } else {
+                                0.0
+                            };
+                            q.borrow_mut().push(crate::DrawRect {
+                                rect: [x - rad, y - rad, rad * 2.0, rad * 2.0],
+                                color: [r, g, b, a.unwrap_or(1.0)],
+                                outline,
+                                radius: rad,
+                            });
+                            Ok(())
+                        },
+                    ) {
+                        let _ = t.set(name, f);
+                    }
+                }
+                // `draw.text(x, y, s, size, r,g,b[,a][,align])` — a string on
+                // the screen without building a UI tree: a damage number, a
+                // frame-time readout, the count under a selection box. The
+                // renderer measures and lays out the glyphs (the same font
+                // stack `ui.make` uses), so a script never has to know how wide
+                // an 'm' is. `align` is "left" (default) | "center" | "right",
+                // and x is that edge.
+                {
+                    let q = draw_texts.clone();
+                    type TextArgs =
+                        (f32, f32, String, Option<f32>, Option<f32>, Option<f32>, Option<f32>, Option<f32>, Option<String>);
+                    if let Ok(f) = lua.create_function(
+                        move |_, (x, y, s, size, r, g, b, a, align): TextArgs| {
+                            q.borrow_mut().push(crate::DrawText {
+                                pos: [x, y],
+                                text: s,
+                                size: size.unwrap_or(16.0).max(1.0),
+                                color: [
+                                    r.unwrap_or(1.0),
+                                    g.unwrap_or(1.0),
+                                    b.unwrap_or(1.0),
+                                    a.unwrap_or(1.0),
+                                ],
+                                align: match align.as_deref() {
+                                    Some("center") | Some("centre") => 1,
+                                    Some("right") => 2,
+                                    _ => 0,
+                                },
+                            });
+                            Ok(())
+                        },
+                    ) {
+                        let _ = t.set("text", f);
                     }
                 }
                 let _ = lua.globals().set("draw", t);
@@ -1625,6 +1729,7 @@ impl ScriptHost {
             draw_lines,
             draw_tris,
             draw_rects,
+            draw_texts,
             destroy_queue,
             net,
             synced_stores,
@@ -2000,6 +2105,11 @@ impl ScriptHost {
     /// Drain this tick's screen-space rectangles (`draw.rect/rectOutline`).
     pub fn take_draw_rects(&self) -> Vec<crate::DrawRect> {
         std::mem::take(&mut *self.draw_rects.borrow_mut())
+    }
+
+    /// Drain this tick's screen-space strings (`draw.text`).
+    pub fn take_draw_texts(&self) -> Vec<crate::DrawText> {
+        std::mem::take(&mut *self.draw_texts.borrow_mut())
     }
 
     /// Feed this frame's solved UI element rects in WINDOW physical pixels

@@ -71,6 +71,23 @@ pub struct DrawRect {
     pub radius: f32,
 }
 
+/// One screen-space string a script queued via `draw.text` this tick.
+///
+/// A separate queue from [`DrawRect`] because text has to reach the glyph
+/// layout the UI renderer already owns — the script says *what* and *where*,
+/// and never has to know how wide an 'm' is.
+#[derive(Clone, Debug)]
+pub struct DrawText {
+    /// Top-left in physical pixels — the same space `input.mouse()` reports.
+    pub pos: [f32; 2],
+    pub text: String,
+    pub size: f32,
+    pub color: [f32; 4],
+    /// `0` left (x is the left edge), `1` centre, `2` right — the alignment
+    /// that makes a right-hand HUD column line up without measuring anything.
+    pub align: u8,
+}
+
 /// One world-space FILLED triangle a script queued via `draw.tri` / `draw.cone`
 /// / `draw.disc` this tick (immediate mode). Drawn by the runtime triangle
 /// layer alongside the lines — solid gizmo geometry, world markers.
@@ -478,6 +495,7 @@ pub struct ScriptHost {
     /// This tick's `draw.tri/cone/disc(...)` filled triangles (immediate mode).
     draw_tris: Rc<RefCell<Vec<DrawTri>>>,
     draw_rects: Rc<RefCell<Vec<DrawRect>>>,
+    draw_texts: Rc<RefCell<Vec<DrawText>>>,
     /// Per-assembly mirror (`assembly.info`), fed by the driver each frame.
     assembly_info: Rc<RefCell<HashMap<u32, assembly_api::AssemblyInfo>>>,
     /// Per-part contact loads for the last tick (`assembly.impacts`), fed by
@@ -970,6 +988,114 @@ mod shipped_script_tests {
             if let Err(e) = lua.load(*body).set_name(*name).into_function() {
                 panic!("{name} does not compile:\n{e}");
             }
+        }
+    }
+
+    /// The solar demo's scripts must compile too.
+    ///
+    /// They are not shipped into new projects, so `SHIPPED_SCRIPTS` doesn't
+    /// cover them — but they are the largest body of real Lua in the repo, they
+    /// are what the demo project runs, and a syntax error in one only surfaces
+    /// when someone opens the scene it is attached to. Read from disk rather
+    /// than `include_str!` so adding a script to the demo needs no edit here.
+    #[test]
+    fn the_solar_demo_scripts_compile() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../solar/scripts");
+        let Ok(rd) = std::fs::read_dir(&dir) else { return };
+        let lua = mlua::Lua::new();
+        let mut n = 0;
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("lua") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("readable");
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            n += 1;
+            if let Err(e) = lua.load(&src).set_name(&name).into_function() {
+                panic!("{name} does not compile:\n{e}");
+            }
+        }
+        assert!(n > 10, "expected the solar demo's scripts, saw {n}");
+    }
+
+    /// …and every controller/camera example must RUN — `start` and a few frames
+    /// of `update`/`lateUpdate` against a node with a physics body — without a
+    /// single runtime error.
+    ///
+    /// Compiling is not the same as working: a script that calls a method on a
+    /// nil `node.up`, passes a vec3 where a number is wanted, or spells an API
+    /// name that no longer exists compiles perfectly and dies on frame one. The
+    /// 0.20.0 rewrite of these five to the readability API is exactly the kind
+    /// of change that needs a gate stronger than `into_function()`.
+    #[test]
+    fn shipped_controller_scripts_run_without_errors() {
+        use crate::ScriptHost;
+        use floptle_core::transform::Transform;
+        use floptle_core::{Scripts, World};
+        use std::collections::HashMap;
+        use std::io::Write;
+
+        // The ones that drive a node every frame; the rest are UI/demo pieces
+        // with scene dependencies a bare world can't stand in for.
+        const DRIVERS: &[&str] = &[
+            "first_person",
+            "third_person",
+            "third_person_camera",
+            "rts_camera",
+            "rts_unit",
+            "freelook",
+            "float",
+            "rotate",
+            "pulsate",
+        ];
+
+        let dir = std::env::temp_dir().join(format!("floptle-smoke-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, body) in SHIPPED_SCRIPTS {
+            let mut f = std::fs::File::create(dir.join(name)).unwrap();
+            f.write_all(body.as_bytes()).unwrap();
+        }
+
+        for kind in DRIVERS {
+            let mut world = World::default();
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(e, floptle_core::Name("Player".into()));
+            world.insert(e, floptle_core::Matter::Empty);
+            world.insert(e, floptle_core::RigidBody::default());
+            world.insert(
+                e,
+                Scripts(vec![floptle_core::ScriptInst {
+                    kind: (*kind).into(),
+                    enabled: true,
+                    params: vec![],
+                    refs: Vec::new(),
+                    strs: Vec::new(),
+                }]),
+            );
+            let mut host = ScriptHost::new();
+            // The body bridge the physics step would publish: standing on flat
+            // ground, moving, with a real up. Without it `node.vel` is nil and
+            // every controller is testing something other than itself.
+            let mut bodies = HashMap::new();
+            bodies.insert(
+                e.index(),
+                crate::BodyState {
+                    vel: [0.5, 0.0, -1.0],
+                    up: [0.0, 1.0, 0.0],
+                    grounded: true,
+                    height: 2.0,
+                    pos: [0.0, 0.0, 0.0],
+                    ground_normal: Some([0.0, 1.0, 0.0]),
+                    wall_normal: None,
+                },
+            );
+            host.set_bodies(bodies);
+            for _ in 0..3 {
+                host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+            }
+            assert!(host.errors().is_empty(), "{kind}.lua: {:?}", host.errors());
         }
     }
 }
@@ -2316,6 +2442,199 @@ end
         // Parent local +X, scaled 2 and yawed 90°, lands 6 along −Z: (10, 1, −10).
         let want = floptle_core::world_transform(&world, child).translation;
         assert!((want.x - 10.0).abs() < 1e-6 && (want.z + 10.0).abs() < 1e-6, "{want:?}");
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.016, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    }
+
+    /// A checkbox tunable reads as a real boolean inside a RUNNING script —
+    /// not as the 1/0 it is stored as, and not as a truthy `0`.
+    ///
+    /// `env::params_table` has done this since the boolean round-trip fix, but
+    /// only a unit test of that function said so, which is why three shipped
+    /// examples still carried a private `on(v)` helper to defend against a
+    /// problem the engine had already solved. This is the end-to-end statement
+    /// that lets those helpers stay deleted: `if params.thing then` is correct
+    /// on its own, from a script, with the box unticked.
+    #[test]
+    fn an_unticked_checkbox_param_is_false_inside_a_running_script() {
+        let dir = std::env::temp_dir().join("floptle_script_test_checkbox");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "box",
+            "defaults = { ring = true }\n\
+             function update(node, dt)\n\
+             \x20 if params.ring then node.x = 1 else node.x = -1 end\n\
+             \x20 if type(params.ring) ~= 'boolean' then error('not a boolean: ' .. type(params.ring)) end\n\
+             end\n",
+        );
+        for (stored, want_x) in [(0.0, -1.0), (1.0, 1.0)] {
+            let mut world = World::default();
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(
+                e,
+                Scripts(vec![floptle_core::ScriptInst {
+                    kind: "box".into(),
+                    enabled: true,
+                    params: vec![("ring".into(), stored)],
+                    refs: Vec::new(),
+                    strs: Vec::new(),
+                }]),
+            );
+            let mut host = ScriptHost::new();
+            host.run(&mut world, &dir, 0.016, 0.0);
+            assert!(host.errors().is_empty(), "stored={stored}: {:?}", host.errors());
+            assert_eq!(
+                world.get::<Transform>(e).unwrap().translation.x,
+                want_x,
+                "a stored {stored} must read as {}",
+                stored != 0.0
+            );
+        }
+    }
+
+    /// The local ↔ world set, against the frame that breaks a naive
+    /// implementation: a parent that is moved, ROTATED and SCALED.
+    ///
+    /// `node:setWorldPos` and `node:moveTowards` go back through
+    /// `Transform::inv_mul` rather than decomposing a matrix — the componentwise
+    /// TRS inverse, whose doc comment explains why the matrix route puts a
+    /// mirrored parent's negative determinant on the wrong axis. The mirrored
+    /// case is the last assertion here, and it is the one that would silently
+    /// pass with the wrong maths on an un-mirrored parent.
+    #[test]
+    fn local_and_world_conversions_survive_a_rotated_scaled_parent() {
+        let dir = std::env::temp_dir().join("floptle_script_test_localworld");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "probe",
+            "function update(node, dt)\n\
+             \x20 local function near(a, b, what)\n\
+             \x20   if math.abs(a - b) > 1e-4 then error(what .. ': ' .. a .. ' ~= ' .. b) end\n\
+             \x20 end\n\
+             \x20 -- toWorld/toLocal round trip through the whole chain.\n\
+             \x20 local back = node:toLocal(node:toWorld(vec3(1, 2, 3)))\n\
+             \x20 near(back.x, 1, 'toLocal x') near(back.y, 2, 'toLocal y') near(back.z, 3, 'toLocal z')\n\
+             \x20 -- The node's own origin in world space is node.worldPos.\n\
+             \x20 local o = node:toWorld(vec3(0, 0, 0))\n\
+             \x20 near(o.x, node.worldX, 'origin x') near(o.z, node.worldZ, 'origin z')\n\
+             \x20 -- worldForward composes the parent's rotation; node.forward does not.\n\
+             \x20 near(node:worldForward():length(), 1, 'forward is unit')\n\
+             \x20 near(node:worldForward().x, -1, 'parent yaw 90 turns -Z into -X')\n\
+             \x20 -- setWorldPos: ask for a world point, land on it.\n\
+             \x20 node:setWorldPos(vec3(2, 7, -3))\n\
+             \x20 near(node.worldX, 2, 'set x') near(node.worldY, 7, 'set y') near(node.worldZ, -3, 'set z')\n\
+             \x20 -- distanceTo/Flat are WORLD measurements.\n\
+             \x20 near(node:distanceTo(vec3(2, 7, -3)), 0, 'distanceTo self')\n\
+             \x20 near(node:distanceFlat(vec3(2, 99, -3)), 0, 'distanceFlat ignores up')\n\
+             \x20 near(node:distanceTo(vec3(2, 99, -3)), 92, 'distanceTo does not')\n\
+             \x20 -- moveTowards steps in world space and never overshoots.\n\
+             \x20 node:moveTowards(vec3(2, 7, 7), 4)\n\
+             \x20 near(node.worldZ, 1, 'moveTowards stepped 4 of 10')\n\
+             \x20 local arrived = node:moveTowards(vec3(2, 7, 7), 999)\n\
+             \x20 near(node.worldZ, 7, 'moveTowards landed exactly')\n\
+             \x20 if not arrived then error('moveTowards should report arrival') end\n\
+             end\n",
+        );
+        // Two runs: an ordinary parent, then a MIRRORED one (negative Y scale).
+        for mirror in [false, true] {
+            let mut world = World::default();
+            let parent = world.spawn();
+            let mut pt =
+                Transform::from_translation(floptle_core::math::DVec3::new(10.0, 1.0, -4.0));
+            pt.rotation = floptle_core::math::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+            pt.scale = if mirror {
+                floptle_core::math::Vec3::new(2.0, -1.5, 2.0)
+            } else {
+                floptle_core::math::Vec3::splat(2.0)
+            };
+            world.insert(parent, pt);
+            let child = world.spawn();
+            world.insert(
+                child,
+                Transform::from_translation(floptle_core::math::DVec3::new(3.0, 0.5, 0.0)),
+            );
+            world.insert(child, floptle_core::Parent(parent));
+            world.insert(
+                child,
+                Scripts(vec![floptle_core::ScriptInst {
+                    kind: "probe".into(),
+                    enabled: true,
+                    params: vec![],
+                    refs: Vec::new(),
+                    strs: Vec::new(),
+                }]),
+            );
+            let mut host = ScriptHost::new();
+            host.run(&mut world, &dir, 0.016, 0.0);
+            assert!(
+                host.errors().is_empty(),
+                "mirror={mirror} errors: {:?}",
+                host.errors()
+            );
+        }
+    }
+
+    /// `node:lookAt` and `node:turnTowards` — the two names that replace an
+    /// `atan2` with two minus signs and a shortest-arc dance across the ±π seam.
+    #[test]
+    fn look_at_faces_the_target_and_turn_towards_takes_the_short_way() {
+        let dir = std::env::temp_dir().join("floptle_script_test_lookat");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "aim",
+            "function update(node, dt)\n\
+             \x20 local function near(a, b, what)\n\
+             \x20   if math.abs(a - b) > 1e-4 then error(what .. ': ' .. a .. ' ~= ' .. b) end\n\
+             \x20 end\n\
+             \x20 -- Straight down -Z is yaw 0; the target is a plain world point.\n\
+             \x20 node:lookAt(vec3(0, 0, -10))\n\
+             \x20 near(node.yaw, 0, 'yaw at a -Z target')\n\
+             \x20 near(node.pitch, 0, 'pitch at a level target')\n\
+             \x20 -- A NODE handle aims at where that node WORLD is.\n\
+             \x20 node:lookAt(find('Target'))\n\
+             \x20 near(node.yaw, math.pi / 2, 'yaw at a -X target')\n\
+             \x20 -- Looking up: +Y target, pitch positive.\n\
+             \x20 node:lookAt(vec3(0, 10, -10))\n\
+             \x20 near(node.pitch, math.pi / 4, 'pitch at a raised target')\n\
+             \x20 -- turnTowards steps by at most maxRadians, the SHORT way across\n\
+             \x20 -- the seam: from -170 deg toward +170 deg is +20, not -340.\n\
+             \x20 node.yaw = math.rad(-170)\n\
+             \x20 node.pitch = 0\n\
+             \x20 node:turnTowards(dirFromYaw(math.rad(170)), math.rad(5))\n\
+             \x20 near(math.deg(node.yaw), -175, 'turnTowards went the long way')\n\
+             \x20 -- A big enough step lands exactly on the target angle.\n\
+             \x20 node:turnTowards(dirFromYaw(math.rad(170)), math.pi)\n\
+             \x20 near(math.abs(math.deg(node.yaw)), 170, 'turnTowards should arrive')\n\
+             \x20 -- A zero direction leaves the facing alone (no NaN, no snap).\n\
+             \x20 local was = node.yaw\n\
+             \x20 node:turnTowards(vec3(0, 0, 0), 1)\n\
+             \x20 near(node.yaw, was, 'a zero direction must not move the facing')\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let target = world.spawn();
+        world.insert(
+            target,
+            Transform::from_translation(floptle_core::math::DVec3::new(-10.0, 0.0, 0.0)),
+        );
+        world.insert(target, floptle_core::Name("Target".into()));
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "aim".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
         let mut host = ScriptHost::new();
         host.run(&mut world, &dir, 0.016, 0.0);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());

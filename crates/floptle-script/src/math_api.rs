@@ -95,6 +95,61 @@ impl UserData for LuaVec3 {
                 .ok_or_else(|| mlua::Error::RuntimeError("distance takes a vector".into()))?;
             Ok(v.0.distance(o))
         });
+        // ---- the orientation methods ----------------------------------------
+        // `v:flatten(up)` — the part of `v` that lies in the plane ⟂ `up`,
+        // renormalised. THE planet-safe move: "forward along the ground" is
+        // `node.forward:flatten(node.up)` whatever the local vertical is, and on
+        // a flat world `flatten(vec3(0,1,0))` is the familiar "drop the Y".
+        // Straight up/down (nothing left after the projection) → vec3(0,0,0),
+        // never a NaN — check it with `if f:length() > 0`.
+        methods.add_method("flatten", |_, v, up: Option<Value>| {
+            let up = match up {
+                Some(u) => vec3_of(&u)
+                    .ok_or_else(|| mlua::Error::RuntimeError("flatten takes a vector".into()))?,
+                None => glam::DVec3::Y,
+            };
+            Ok(LuaVec3(flatten(v.0, up)))
+        });
+        // The "same vector but one component" trio — `node.vel:withY(0)` keeps
+        // your fall speed out of a horizontal speed clamp.
+        methods.add_method("withX", |_, v, n: f64| Ok(LuaVec3(glam::DVec3::new(n, v.0.y, v.0.z))));
+        methods.add_method("withY", |_, v, n: f64| Ok(LuaVec3(glam::DVec3::new(v.0.x, n, v.0.z))));
+        methods.add_method("withZ", |_, v, n: f64| Ok(LuaVec3(glam::DVec3::new(v.0.x, v.0.y, n))));
+        // `v:rotatedY(rad)` — spun about world +Y (the yaw of a flat world).
+        methods.add_method("rotatedY", |_, v, rad: f64| {
+            let (s, c) = rad.sin_cos();
+            Ok(LuaVec3(glam::DVec3::new(
+                v.0.x * c + v.0.z * s,
+                v.0.y,
+                -v.0.x * s + v.0.z * c,
+            )))
+        });
+        // `v:rotatedAround(axis, rad)` — Rodrigues about ANY axis, which is what
+        // a planet camera's yaw actually is (about the local up, not about Y).
+        methods.add_method("rotatedAround", |_, v, (axis, rad): (Value, f64)| {
+            let a = vec3_of(&axis)
+                .ok_or_else(|| mlua::Error::RuntimeError("rotatedAround takes a vector".into()))?;
+            let Some(a) = a.try_normalize() else { return Ok(LuaVec3(v.0)) };
+            let (s, c) = rad.sin_cos();
+            Ok(LuaVec3(v.0 * c + a.cross(v.0) * s + a * a.dot(v.0) * (1.0 - c)))
+        });
+        // `v:towards(other, maxDelta)` — step toward another point without ever
+        // overshooting it (`math.approach`, for positions).
+        methods.add_method("towards", |_, v, (o, max_delta): (Value, f64)| {
+            let o = vec3_of(&o)
+                .ok_or_else(|| mlua::Error::RuntimeError("towards takes a vector".into()))?;
+            Ok(LuaVec3(towards(v.0, o, max_delta)))
+        });
+        // `v:angleTo(other)` — the unsigned angle between two directions, in
+        // radians. Clamped before the acos, so parallel vectors give 0, not NaN.
+        methods.add_method("angleTo", |_, v, o: Value| {
+            let o = vec3_of(&o)
+                .ok_or_else(|| mlua::Error::RuntimeError("angleTo takes a vector".into()))?;
+            match (v.0.try_normalize(), o.try_normalize()) {
+                (Some(a), Some(b)) => Ok(a.dot(b).clamp(-1.0, 1.0).acos()),
+                _ => Ok(0.0),
+            }
+        });
         methods.add_meta_function(MetaMethod::Add, |_, (a, b): (Value, Value)| {
             match (vec3_of(&a), vec3_of(&b)) {
                 (Some(a), Some(b)) => Ok(LuaVec3(a + b)),
@@ -292,6 +347,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
 
     install_math_helpers(lua)?;
     install_table_helpers(lua)?;
+    install_direction_helpers(lua)?;
 
     // ---- color -----------------------------------------------------------
     // A plain `{r, g, b, a}` table (also indexable [1]..[4]) rather than a
@@ -592,6 +648,221 @@ fn install_math_helpers(lua: &Lua) -> mlua::Result<()> {
     Ok(())
 }
 
+// ---- the direction primitives, in Rust, once ----------------------------------
+//
+// Every one of these was written out longhand in the engine's own example
+// scripts, and the longhand is where the sign errors live. They are `pub(crate)`
+// because the node methods (`node:lookAt`, `node:turnTowards`, `node:moveTowards`
+// in `api.rs`) are the same arithmetic applied to a transform.
+
+/// The part of `v` in the plane ⟂ `up`, renormalised. Zero when `v` is parallel
+/// to `up` — a direction with nothing left in the plane, not a NaN.
+pub(crate) fn flatten(v: glam::DVec3, up: glam::DVec3) -> glam::DVec3 {
+    let Some(up) = up.try_normalize() else { return v.try_normalize().unwrap_or(glam::DVec3::ZERO) };
+    (v - up * v.dot(up)).try_normalize().unwrap_or(glam::DVec3::ZERO)
+}
+
+/// Step from `a` toward `b` by at most `max_delta`, landing exactly on `b`
+/// rather than overshooting it (the bug in every hand-rolled version).
+pub(crate) fn towards(a: glam::DVec3, b: glam::DVec3, max_delta: f64) -> glam::DVec3 {
+    let d = b - a;
+    let len = d.length();
+    let step = max_delta.abs();
+    if len <= step || len < 1e-12 { b } else { a + d / len * step }
+}
+
+/// The yaw that points along `dir`. Engine forward is −Z, so this is
+/// `atan2(-x, -z)` — the pair of minus signs that four shipped scripts each
+/// had to get right on their own.
+pub(crate) fn yaw_of(dir: glam::DVec3) -> f64 {
+    if dir.x.abs() < 1e-12 && dir.z.abs() < 1e-12 { 0.0 } else { (-dir.x).atan2(-dir.z) }
+}
+
+/// The pitch that points along `dir` (positive = looking up).
+pub(crate) fn pitch_of(dir: glam::DVec3) -> f64 {
+    match dir.try_normalize() {
+        Some(d) => d.y.clamp(-1.0, 1.0).asin(),
+        None => 0.0,
+    }
+}
+
+/// The unit direction a node with this yaw and pitch faces.
+pub(crate) fn dir_from_yaw(yaw: f64, pitch: f64) -> glam::DVec3 {
+    let (sy, cy) = yaw.sin_cos();
+    let (sp, cp) = pitch.sin_cos();
+    glam::DVec3::new(-sy * cp, sp, -cy * cp)
+}
+
+/// The (yaw, pitch, roll) that faces `dir` with `up` overhead — the engine's
+/// YXZ Euler order, which is what a node's `yaw`/`pitch`/`roll` fields are.
+///
+/// Without an `up` the roll is 0. With one, the roll is whatever it takes to put
+/// that up over the camera's head — the twenty lines of undo-yaw-then-pitch that
+/// keeps a planet camera's horizon level.
+pub(crate) fn look_rotation(dir: glam::DVec3, up: Option<glam::DVec3>) -> (f64, f64, f64) {
+    let Some(f) = dir.try_normalize() else { return (0.0, 0.0, 0.0) };
+    let (yaw, pitch) = (yaw_of(f), pitch_of(f));
+    let Some(up) = up else { return (yaw, pitch, 0.0) };
+    // The wanted camera-up: `up` made perpendicular to the view direction.
+    let w = match (up - f * up.dot(f)).try_normalize() {
+        Some(w) => w,
+        None => return (yaw, pitch, 0.0),
+    };
+    // Undo the yaw (about Y), then the pitch (about X); the roll is what is left.
+    let (sy, cy) = (-yaw).sin_cos();
+    let a = glam::DVec3::new(w.x * cy + w.z * sy, w.y, -w.x * sy + w.z * cy);
+    let (sp, cp) = (-pitch).sin_cos();
+    let by = a.y * cp - a.z * sp;
+    (yaw, pitch, (-a.x).atan2(by))
+}
+
+/// Frame-rate-independent exponential ease: `a` moves a `rate`-dependent
+/// FRACTION of the remaining distance each second, so 30 fps and 240 fps feel
+/// identical. `rate <= 0` snaps.
+pub(crate) fn ease_scalar(a: f64, b: f64, rate: f64, dt: f64) -> f64 {
+    if rate <= 0.0 { b } else { a + (b - a) * (1.0 - (-rate * dt).exp()) }
+}
+
+/// Install `dirTo`, `yawOf`, `pitchOf`, `dirFromYaw`, `lookRotation`, `ease` and
+/// `smoothDamp` — the vocabulary of "which way is that, and how do I get there".
+fn install_direction_helpers(lua: &Lua) -> mlua::Result<()> {
+    let g = lua.globals();
+
+    // dirTo(from, to) — the unit direction from one thing to another. Both
+    // arguments may be a vec3, a {x=,y=,z=} table, or a NODE HANDLE, so
+    // `dirTo(node, target)` is the whole sentence. Same point twice →
+    // vec3(0,0,0), never a NaN that quietly poisons a transform.
+    g.set(
+        "dirTo",
+        lua.create_function(|_, (from, to): (Value, Value)| {
+            match (vec3_of(&from), vec3_of(&to)) {
+                (Some(a), Some(b)) => {
+                    Ok(LuaVec3((b - a).try_normalize().unwrap_or(glam::DVec3::ZERO)))
+                }
+                _ => Err(mlua::Error::RuntimeError(
+                    "dirTo(from, to) takes vectors or nodes (things with x/y/z)".into(),
+                )),
+            }
+        })?,
+    )?;
+    g.set(
+        "yawOf",
+        lua.create_function(|_, v: Value| {
+            let v = vec3_of(&v)
+                .ok_or_else(|| mlua::Error::RuntimeError("yawOf takes a direction".into()))?;
+            Ok(yaw_of(v))
+        })?,
+    )?;
+    g.set(
+        "pitchOf",
+        lua.create_function(|_, v: Value| {
+            let v = vec3_of(&v)
+                .ok_or_else(|| mlua::Error::RuntimeError("pitchOf takes a direction".into()))?;
+            Ok(pitch_of(v))
+        })?,
+    )?;
+    // dirFromYaw(yaw [, pitch]) — the inverse of yawOf/pitchOf. The pitch
+    // argument is what a camera needs; without it you get the ground direction.
+    g.set(
+        "dirFromYaw",
+        lua.create_function(|_, (yaw, pitch): (f64, Option<f64>)| {
+            Ok(LuaVec3(dir_from_yaw(yaw, pitch.unwrap_or(0.0))))
+        })?,
+    )?;
+    // lookRotation(dir [, up]) -> yaw, pitch, roll — the angles WITHOUT applying
+    // them (node:lookAt applies them). Three returns, so
+    // `node.yaw, node.pitch, node.roll = lookRotation(f, up)` is one line.
+    g.set(
+        "lookRotation",
+        lua.create_function(|_, (dir, up): (Value, Option<Value>)| {
+            let dir = vec3_of(&dir).ok_or_else(|| {
+                mlua::Error::RuntimeError("lookRotation takes a direction".into())
+            })?;
+            let up = match up {
+                Some(u) => Some(vec3_of(&u).ok_or_else(|| {
+                    mlua::Error::RuntimeError("lookRotation's up is a vector".into())
+                })?),
+                None => None,
+            };
+            Ok(look_rotation(dir, up))
+        })?,
+    )?;
+    // ease(a, b, rate, dt) — the frame-rate-independent exponential ease three
+    // camera scripts each defined privately. Works on numbers AND vectors, so a
+    // follow position and a follow distance ease the same way.
+    g.set(
+        "ease",
+        lua.create_function(|lua, (a, b, rate, dt): (Value, Value, f64, f64)| {
+            if let (Some(a), Some(b)) = (num_of(&a), num_of(&b)) {
+                return Ok(Value::Number(ease_scalar(a, b, rate, dt)));
+            }
+            match (vec3_of(&a), vec3_of(&b)) {
+                (Some(a), Some(b)) => {
+                    let t = if rate <= 0.0 { 1.0 } else { 1.0 - (-rate * dt).exp() };
+                    Ok(Value::UserData(lua.create_userdata(LuaVec3(a + (b - a) * t))?))
+                }
+                _ => Err(mlua::Error::RuntimeError(
+                    "ease(a, b, rate, dt) takes two numbers or two vectors".into(),
+                )),
+            }
+        })?,
+    )?;
+    // smoothDamp(current, target, vel, smoothTime, dt) -> value, vel — the
+    // critically-damped spring a camera follow wants: it has MOMENTUM, so it
+    // does not stop dead the instant the target does. Lua has no reference
+    // parameters, so the velocity comes back as the second return:
+    //   camX, camVX = smoothDamp(camX, wantX, camVX, 0.25, dt)
+    // Numbers or vectors, like `ease`.
+    g.set(
+        "smoothDamp",
+        lua.create_function(
+            |lua, (cur, target, vel, smooth_time, dt): (Value, Value, Value, f64, f64)| {
+                let st = smooth_time.max(1e-4);
+                // Game Programming Gems 4 §1.10, the stable discrete form.
+                let omega = 2.0 / st;
+                let x = omega * dt;
+                let exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x);
+                let step = |cur: f64, target: f64, vel: f64| -> (f64, f64) {
+                    let change = cur - target;
+                    let temp = (vel + omega * change) * dt;
+                    let new_vel = (vel - omega * temp) * exp;
+                    let out = target + (change + temp) * exp;
+                    // Never overshoot the target from the near side.
+                    if (target - cur > 0.0) == (out > target) {
+                        (target, (target - cur) / dt.max(1e-9))
+                    } else {
+                        (out, new_vel)
+                    }
+                };
+                if let (Some(c), Some(t), Some(v)) = (num_of(&cur), num_of(&target), num_of(&vel)) {
+                    let (o, nv) = step(c, t, v);
+                    return Ok((Value::Number(o), Value::Number(nv)));
+                }
+                match (vec3_of(&cur), vec3_of(&target), vec3_of(&vel)) {
+                    (Some(c), Some(t), Some(v)) => {
+                        let (x, vx) = step(c.x, t.x, v.x);
+                        let (y, vy) = step(c.y, t.y, v.y);
+                        let (z, vz) = step(c.z, t.z, v.z);
+                        Ok((
+                            Value::UserData(
+                                lua.create_userdata(LuaVec3(glam::DVec3::new(x, y, z)))?,
+                            ),
+                            Value::UserData(
+                                lua.create_userdata(LuaVec3(glam::DVec3::new(vx, vy, vz)))?,
+                            ),
+                        ))
+                    }
+                    _ => Err(mlua::Error::RuntimeError(
+                        "smoothDamp(cur, target, vel, smoothTime, dt) takes numbers or vectors"
+                            .into(),
+                    )),
+                }
+            },
+        )?,
+    )?;
+    Ok(())
+}
+
 /// Wrap an angle into (−π, π].
 fn wrap_pi(a: f64) -> f64 {
     let tau = std::f64::consts::TAU;
@@ -811,6 +1082,158 @@ mod helper_tests {
         let a = n("return math.approachAngle(math.rad(350), math.rad(10), math.rad(5))");
         let off = super::wrap_pi(a - 355f64.to_radians());
         assert!(off.abs() < 1e-9, "approachAngle went the long way: {a} (off by {off})");
+    }
+
+    /// The direction vocabulary. Every assertion here is a line that used to be
+    /// written out longhand in a shipped example script — including the two
+    /// minus signs in `atan2(-x, -z)` that nothing but a test can keep honest.
+    #[test]
+    fn directions_round_trip_and_never_produce_nan() {
+        let lua = lua();
+        let n = |src: &str| -> f64 { lua.load(src).call::<f64>(()).expect(src) };
+        let s = |src: &str| -> String { lua.load(src).call::<String>(()).expect(src) };
+
+        // Engine forward is −Z: yaw 0 looks down −Z, +90° looks down −X.
+        assert_eq!(s("return tostring(dirFromYaw(0))"), "vec3(-0, 0, -1)");
+        let y = n("return yawOf(vec3(0, 0, -1))");
+        assert!(y.abs() < 1e-12, "yaw of forward should be 0, got {y}");
+        let y = n("return yawOf(vec3(-1, 0, 0))");
+        assert!((y - std::f64::consts::FRAC_PI_2).abs() < 1e-9, "yaw of −X: {y}");
+        // yawOf ∘ dirFromYaw is the identity for every quarter turn.
+        for deg in [0.0, 37.0, 90.0, 179.0, -140.0] {
+            let r = deg * std::f64::consts::PI / 180.0;
+            let back = n(&format!("return yawOf(dirFromYaw({r}))"));
+            assert!(super::wrap_pi(back - r).abs() < 1e-9, "yaw round trip at {deg}°: {back}");
+        }
+        // …and with pitch, both ways.
+        let p = n("return pitchOf(dirFromYaw(1.0, 0.3))");
+        assert!((p - 0.3).abs() < 1e-9, "pitch round trip: {p}");
+        // A zero direction answers 0, not NaN — the whole point of the guards.
+        assert_eq!(n("return yawOf(vec3(0, 0, 0))"), 0.0);
+        assert_eq!(n("return pitchOf(vec3(0, 0, 0))"), 0.0);
+        assert_eq!(s("return tostring(dirTo(vec3(1,2,3), vec3(1,2,3)))"), "vec3(0, 0, 0)");
+        // dirTo is unit length and points the right way.
+        assert_eq!(s("return tostring(dirTo(vec3(0,0,0), vec3(0,0,-5)))"), "vec3(0, 0, -1)");
+        // …and it takes anything with x/y/z, which is what makes `dirTo(node, target)` read.
+        assert_eq!(
+            s("return tostring(dirTo({x=0,y=0,z=0}, {x=3,y=0,z=0}))"),
+            "vec3(1, 0, 0)"
+        );
+    }
+
+    /// `flatten` is the four-line project-onto-plane that appeared in
+    /// `first_person.lua` twice and `planet_camera.lua` twice.
+    #[test]
+    fn flatten_projects_onto_the_tangent_plane() {
+        let lua = lua();
+        let s = |src: &str| -> String { lua.load(src).call::<String>(()).expect(src) };
+        let n = |src: &str| -> f64 { lua.load(src).call::<f64>(()).expect(src) };
+
+        // Looking down at 45° on a flat world: the ground direction is due −Z.
+        assert_eq!(
+            s("return tostring(vec3(0, -1, -1):flatten(vec3(0, 1, 0)))"),
+            "vec3(0, 0, -1)"
+        );
+        // The result is always unit length…
+        let l = n("return vec3(0.3, -9, -0.1):flatten(vec3(0,1,0)):length()");
+        assert!((l - 1.0).abs() < 1e-12, "flatten renormalises: {l}");
+        // …on ANY up, which is what makes it planet-safe.
+        let d = n("return vec3(1, 0, 0):flatten(vec3(1, 0, 0):normalized()):length()");
+        assert_eq!(d, 0.0, "straight along up leaves nothing in the plane");
+        let up = "vec3(0.6, 0.8, 0)";
+        let dot = n(&format!("return vec3(1, 0, 0):flatten({up}):dot({up})"));
+        assert!(dot.abs() < 1e-12, "flattened is perpendicular to up: {dot}");
+        // Default up is +Y, so the flat-world spelling stays short.
+        assert_eq!(s("return tostring(vec3(0, 5, -1):flatten())"), "vec3(0, 0, -1)");
+    }
+
+    /// `lookRotation` with an `up` is the twenty-line undo-yaw-then-pitch dance
+    /// in `planet_camera.lua`. The test that matters: apply the angles and the
+    /// node's own up must come back out.
+    #[test]
+    fn look_rotation_puts_the_given_up_over_the_head() {
+        // Rebuild the basis the engine would from (yaw, pitch, roll) and check
+        // the local +Y lands on the up we asked for.
+        for (dir, up) in [
+            (glam::DVec3::new(0.0, 0.0, -1.0), glam::DVec3::new(0.0, 1.0, 0.0)),
+            (glam::DVec3::new(1.0, 0.0, 0.0), glam::DVec3::new(0.0, 0.0, 1.0)),
+            (glam::DVec3::new(0.3, 0.5, -0.8), glam::DVec3::new(-0.2, 0.9, 0.1)),
+        ] {
+            let (yaw, pitch, roll) = super::look_rotation(dir, Some(up));
+            let q = glam::DQuat::from_euler(glam::EulerRot::YXZ, yaw, pitch, roll);
+            let f = q * glam::DVec3::NEG_Z;
+            let u = q * glam::DVec3::Y;
+            assert!(f.dot(dir.normalize()) > 1.0 - 1e-9, "forward: {f} vs {dir}");
+            // The camera up must be the given up with the forward part removed.
+            let want = (up - dir.normalize() * up.dot(dir.normalize())).normalize();
+            assert!(u.dot(want) > 1.0 - 1e-9, "up: {u} vs {want}");
+        }
+        // Without an up, the roll is left at zero.
+        let (_, _, roll) = super::look_rotation(glam::DVec3::new(1.0, 1.0, 1.0), None);
+        assert_eq!(roll, 0.0);
+    }
+
+    /// `ease` and `smoothDamp` — the two smoothing shapes, and the properties
+    /// that make them safe to reach for: frame-rate independence and no
+    /// overshoot.
+    #[test]
+    fn easing_is_frame_rate_independent_and_never_overshoots() {
+        let lua = lua();
+        let n = |src: &str| -> f64 { lua.load(src).call::<f64>(()).expect(src) };
+
+        // One 1-second step and sixty 1/60-second steps land in the same place —
+        // the property the private copies in three camera scripts existed for.
+        let one = n("return ease(0, 10, 3, 1)");
+        let many = n("local v = 0 for _ = 1, 60 do v = ease(v, 10, 3, 1/60) end return v");
+        assert!((one - many).abs() < 1e-9, "ease drifted with dt: {one} vs {many}");
+        assert_eq!(n("return ease(0, 10, 0, 1)"), 10.0, "rate 0 snaps");
+        // Vectors ease component-wise.
+        assert_eq!(n("return ease(vec3(0,0,0), vec3(10,0,0), 0, 1).x"), 10.0);
+        // smoothDamp arrives, and stays arrived.
+        let v = n(
+            "local x, v = 0, 0\n\
+             for _ = 1, 300 do x, v = smoothDamp(x, 5, v, 0.2, 1/60) end\n\
+             return x",
+        );
+        assert!((v - 5.0).abs() < 1e-6, "smoothDamp should settle on the target: {v}");
+        // It has momentum, so it is NOT the same curve as ease — if it were,
+        // there would be no reason for both.
+        let sd = n("local x, v = 0, 0 x, v = smoothDamp(x, 1, v, 0.2, 1/60) return x");
+        assert!(sd > 0.0 && sd < 0.1, "first smoothDamp step is gentle: {sd}");
+    }
+
+    /// The small vector methods, each of which replaced a line of arithmetic in
+    /// a shipped script.
+    #[test]
+    fn the_small_vector_methods_do_what_they_say() {
+        let lua = lua();
+        let s = |src: &str| -> String { lua.load(src).call::<String>(()).expect(src) };
+        let n = |src: &str| -> f64 { lua.load(src).call::<f64>(()).expect(src) };
+
+        assert_eq!(s("return tostring(vec3(1,2,3):withY(0))"), "vec3(1, 0, 3)");
+        assert_eq!(s("return tostring(vec3(1,2,3):withX(9))"), "vec3(9, 2, 3)");
+        assert_eq!(s("return tostring(vec3(1,2,3):withZ(9))"), "vec3(1, 2, 9)");
+        // rotatedY by a quarter turn: −Z becomes −X (the engine's yaw sense).
+        let v = n("local v = vec3(0,0,-1):rotatedY(math.pi/2) return v.x");
+        assert!((v + 1.0).abs() < 1e-9, "rotatedY quarter turn: x={v}");
+        // rotatedAround an arbitrary axis keeps length and honours the angle.
+        let l = n("return vec3(1,2,3):rotatedAround(vec3(0.3,0.5,0.8), 1.1):length()");
+        assert!((l - (14f64).sqrt()).abs() < 1e-9, "rotation preserves length: {l}");
+        // …and about +Y it agrees with rotatedY.
+        let d = n(
+            "local a = vec3(1,0,-2):rotatedY(0.7)\n\
+             local b = vec3(1,0,-2):rotatedAround(vec3(0,1,0), 0.7)\n\
+             return a:distance(b)",
+        );
+        assert!(d < 1e-9, "rotatedY and rotatedAround(+Y) disagree by {d}");
+        // towards never overshoots, and lands exactly.
+        assert_eq!(s("return tostring(vec3(0,0,0):towards(vec3(10,0,0), 99))"), "vec3(10, 0, 0)");
+        assert_eq!(s("return tostring(vec3(0,0,0):towards(vec3(10,0,0), 2.5))"), "vec3(2.5, 0, 0)");
+        // angleTo is clamped before the acos: parallel is 0, not NaN.
+        assert_eq!(n("return vec3(1,0,0):angleTo(vec3(2,0,0))"), 0.0);
+        let a = n("return vec3(1,0,0):angleTo(vec3(0,1,0))");
+        assert!((a - std::f64::consts::FRAC_PI_2).abs() < 1e-12, "perpendicular: {a}");
+        assert_eq!(n("return vec3(0,0,0):angleTo(vec3(0,1,0))"), 0.0);
     }
 
     /// The list helpers, and the two behaviours worth pinning: `find` takes a

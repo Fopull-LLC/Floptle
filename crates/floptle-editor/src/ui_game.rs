@@ -555,7 +555,7 @@ impl Editor {
         }
         // World-space layers render in the scene, not as an overlay.
         let (layers, ents) = self.ui_layer_trees(|l| !l.is_world());
-        if layers.is_empty() && self.script_rects.is_empty() {
+        if layers.is_empty() && self.script_rects.is_empty() && self.script_texts.is_empty() {
             return Vec::new();
         }
         let Some(uir) = self.ui_render.as_ref() else { return Vec::new() };
@@ -576,6 +576,34 @@ impl Editor {
             }
             out.push((dl, scale));
         }
+        // `draw.text` — measured HERE with the real font, so the script only ever
+        // says where the anchor is and which edge it is. A run laid out in a rect
+        // exactly its own size can't wrap or clip, whatever the string turns out
+        // to be. Measured while the font stack is still borrowed, drawn below.
+        let script_text_runs: Vec<floptle_ui::TextRun> = self
+            .script_texts
+            .iter()
+            .map(|t| {
+                let spec = floptle_ui::TextSpec {
+                    text: t.text.clone(),
+                    size: t.size,
+                    ..Default::default()
+                };
+                let [w, h] = uir.measure_spec(&spec);
+                let x = match t.align {
+                    1 => t.pos[0] - w * 0.5,
+                    2 => t.pos[0] - w,
+                    _ => t.pos[0],
+                };
+                floptle_ui::TextRun {
+                    rect: [x, t.pos[1], w, h],
+                    text: t.text.clone(),
+                    size: t.size,
+                    color: t.color,
+                    ..Default::default()
+                }
+            })
+            .collect();
         for t in textures {
             let _ = self.ensure_texture(&t);
         }
@@ -583,7 +611,7 @@ impl Editor {
         // they sit over the HUD — a selection marquee is drawn on top of
         // everything, by definition. Their pixels are `input.mouse()`'s (window
         // space); the UI pass works in the viewport's own, hence the offset.
-        if !self.script_rects.is_empty() {
+        if !self.script_rects.is_empty() || !self.script_texts.is_empty() {
             let o = self.game_view_origin;
             let mut dl = floptle_ui::DrawList::default();
             for r in &self.script_rects {
@@ -596,6 +624,11 @@ impl Editor {
                     radius: [r.radius; 4],
                     ..Default::default()
                 });
+            }
+            for mut r in script_text_runs {
+                r.rect[0] -= o[0];
+                r.rect[1] -= o[1];
+                dl.texts.push(r);
             }
             out.push((dl, 1.0));
         }

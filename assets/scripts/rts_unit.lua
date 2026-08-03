@@ -75,13 +75,6 @@ function isMoving()
   return has_order
 end
 
--- A checkbox param arrives as `true`/`false` from the script's defaults but as
--- 1/0 once it has been saved on a node — and in Lua `0` is TRUE. One helper, so
--- unticking a box in the Inspector actually turns the thing off.
-local function on(v)
-  return v ~= nil and v ~= false and v ~= 0
-end
-
 local function ring_at(node, r, g, b)
   local cx0, cy0, cz0 = node.worldX, node.worldY, node.worldZ
   local y = cy0 - params.ring_radius * 0.5 + 0.05
@@ -97,14 +90,14 @@ local function ring_at(node, r, g, b)
 end
 
 function update(node, dt)
-  if on(params.ring) and selected then ring_at(node, 0.35, 1.0, 0.5) end
+  if params.ring and selected then ring_at(node, 0.35, 1.0, 0.5) end
 
   -- Horizontal offset to the order, in WORLD space (RTS movement is a
   -- ground-plane problem — gravity or the ground itself owns the vertical).
-  local want_x, want_z = 0.0, 0.0
+  local want = vec3(0, 0, 0)
   if has_order then
-    local dx, dz = tx - node.worldX, tz - node.worldZ
-    local left = math.sqrt(dx * dx + dz * dz)
+    local goal = vec3(tx, node.worldY, tz)
+    local left = node:distanceFlat(goal)
     if left <= params.arrive then
       has_order = false -- arrived
     else
@@ -118,7 +111,7 @@ function update(node, dt)
         end
       end
       if has_order then
-        want_x, want_z = dx / left * params.speed, dz / left * params.speed
+        want = dirTo(node.worldPos, goal):flatten() * params.speed
       end
     end
   end
@@ -126,19 +119,16 @@ function update(node, dt)
   local body = node:getcomponent("RigidBody")
   if body then
     -- Physics unit: steer the body's own velocity and leave the vertical to
-    -- the sim, so units stay on the ground, collide, and ride slopes.
-    local k = 1.0 - math.exp(-params.accel * dt) -- frame-rate-independent approach
-    node.vx = node.vx + (want_x - node.vx) * k
-    node.vz = node.vz + (want_z - node.vz) * k
+    -- the sim, so units stay on the ground, collide, and ride slopes. `ease` is
+    -- the frame-rate-independent approach — the same at 30 fps and 240.
+    node.vel = ease(node.vel:withY(0), want, params.accel, dt):withY(node.vel.y)
   else
-    node.x = node.x + want_x * dt
-    node.z = node.z + want_z * dt
+    node.pos = node.pos + want * dt
   end
 
-  -- Face where it is going (never snap a facing from a standstill).
-  if params.turn_speed > 0 and (want_x ~= 0 or want_z ~= 0) then
-    local want_yaw = math.atan2(-want_x, -want_z) -- engine forward is −Z (atan2: LuaJIT/5.1)
-    local d = (want_yaw - node.yaw + math.pi) % (math.pi * 2) - math.pi
-    node.yaw = node.yaw + d * math.min(1.0, params.turn_speed * dt)
+  -- Face where it is going (never snap a facing from a standstill). One call,
+  -- and it can't get the sign or the ±pi seam wrong.
+  if params.turn_speed > 0 and want:length() > 0 then
+    node:turnTowards(want, params.turn_speed * dt)
   end
 end

@@ -4577,6 +4577,7 @@ impl Editor {
             self.script_lines = self.script_host.take_draw_lines();
             self.script_tris = self.script_host.take_draw_tris();
             self.script_rects = self.script_host.take_draw_rects();
+            self.script_texts = self.script_host.take_draw_texts();
             // Script debug gizmos queued this frame — by `update` AND `fixedUpdate` —
             // drained once here (drawn by the viewport overlay), plus the multiplayer
             // harness's ghost-client markers.

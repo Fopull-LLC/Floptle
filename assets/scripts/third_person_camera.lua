@@ -111,33 +111,26 @@ function lateUpdate(node, dt)
   end
 
   -- The point we look at / stand in: the character's head.
-  local hx = target.x
-  local hy = target.y + params.height
-  local hz = target.z
+  local head = target.pos + vec3(0, params.height, 0)
 
   if firstPerson then
     -- First person: sit at head height and free-look.
-    node.x, node.y, node.z = hx, hy, hz
+    node.pos = head
     return
   end
 
-  -- Orbit: back away from the head along the view direction (yaw/pitch),
-  -- engine forward = −Z. fy uses sin(pitch) so looking up raises the view.
-  local cp = math.cos(node.pitch)
-  local fx = -math.sin(node.yaw) * cp
-  local fy = math.sin(node.pitch)
-  local fz = -math.cos(node.yaw) * cp
+  -- Orbit: back away from the head along the view direction. `dirFromYaw` is
+  -- the yaw/pitch → direction pair, once and with the right signs.
+  local look = dirFromYaw(node.yaw, node.pitch)
 
   -- Don't clip through walls: cast from the head back toward the camera.
   -- `target` rides along as the ignore — rays hit physics bodies too, and the
   -- character's own capsule must never count as an obstruction.
   local back = params.distance
-  local hit = raycast(hx, hy, hz, -fx, -fy, -fz, params.distance + 0.3, target)
+  local hit = raycast(head, -look, params.distance + 0.3, target)
   if hit and hit.distance then
     back = math.max(params.min_distance, hit.distance - 0.3)
   end
 
-  node.x = hx - fx * back
-  node.y = hy - fy * back
-  node.z = hz - fz * back
+  node.pos = head - look * back
 end

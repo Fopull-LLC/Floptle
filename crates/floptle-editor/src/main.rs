@@ -1150,6 +1150,9 @@ struct Editor {
     /// Screen-space rectangles queued this frame (`draw.rect` / `draw.rectOutline`).
     /// Drawn through the game-UI pipeline over the HUD — see `gather_game_ui`.
     script_rects: Vec<floptle_script::DrawRect>,
+    /// Screen-space strings queued this frame (`draw.text`), drawn through the
+    /// same game-UI pipeline so they get the real font stack and layout.
+    script_texts: Vec<floptle_script::DrawText>,
     /// The game viewport's top-left in WINDOW physical pixels — the offset that
     /// turns `input.mouse()` space (what scripts draw in) into viewport space
     /// (what the UI pass draws in). Zero when the game fills the window.

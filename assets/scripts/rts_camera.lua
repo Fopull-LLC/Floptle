@@ -88,24 +88,6 @@ local want_x, want_z, want_yaw, want_dist = 0.0, 0.0, 0.0, 40.0
 -- Zoom auto-repeat timer (see the zoom block in `update`).
 local zoom_cool = 0.0
 
--- A checkbox param is `true`/`false` in these defaults but 1/0 once saved on a
--- node — and `0` is TRUE in Lua. One helper, so unticking the box works.
-local function on(v)
-  return v ~= nil and v ~= false and v ~= 0
-end
-
-local function clamp(v, lo, hi)
-  if v < lo then return lo end
-  if v > hi then return hi end
-  return v
-end
-
--- Frame-rate-independent exponential ease: the same feel at 30 and 240 fps.
-local function ease(a, b, rate, dt)
-  if rate <= 0 then return b end
-  return a + (b - a) * (1.0 - math.exp(-rate * dt))
-end
-
 -- Point the view at a place on the ground (and stop following anything).
 function focusOn(x, z)
   want_x, want_z, focus_x, focus_z = x, z, x, z
@@ -114,7 +96,7 @@ end
 
 function start(node)
   want_yaw, yaw_now = math.rad(params.yaw), math.rad(params.yaw)
-  want_dist = clamp(params.distance, params.min_distance, params.max_distance)
+  want_dist = math.clamp(params.distance, params.min_distance, params.max_distance)
   dist_now = want_dist
   -- Frame whatever is under the camera you placed, so Play doesn't teleport the
   -- view somewhere unrelated to the shot you set up in the editor.
@@ -131,7 +113,7 @@ function update(node, dt)
   -- so the cursor's x carries the offset of everything to its left, reads as
   -- "past the right edge" from the moment you open it, and the camera slides
   -- away forever. Outside the rect, nothing pans at all.
-  if on(params.edge_pan) then
+  if params.edge_pan then
     local vx, vy, w, h = camera.screenRect()
     local mx, my = input.mouse()
     local m = params.edge_margin
@@ -152,7 +134,7 @@ function update(node, dt)
   if zoom ~= 0 and zoom_cool <= 0 then
     -- Zoom in proportion to how far out you are: one notch reads the same at
     -- every distance instead of crawling up close and lurching far away.
-    want_dist = clamp(
+    want_dist = math.clamp(
       want_dist - zoom * params.zoom_speed * (want_dist * 0.05 + 1.0),
       params.min_distance,
       params.max_distance
@@ -173,35 +155,31 @@ function update(node, dt)
     follow = nil -- taking the wheel drops any follow
     local speed = params.pan_speed * (want_dist / 40.0) -- zoomed out = broader strokes
     if input.action("Sprint") then speed = speed * params.fast_pan end
-    local c, s = math.cos(yaw_now), math.sin(yaw_now)
     -- Ground forward for this yaw (engine forward is −Z), and its right.
-    want_x = want_x + (-s * sy + c * sx) * speed * dt
-    want_z = want_z + (-c * sy - s * sx) * speed * dt
+    local fwd = dirFromYaw(yaw_now)
+    local right = fwd:cross(vec3(0, 1, 0))
+    local step = (fwd * sy + right * sx) * (speed * dt)
+    want_x, want_z = want_x + step.x, want_z + step.z
   elseif follow then
     want_x, want_z = follow.x, follow.z
   end
   if params.bounds > 0 then
-    want_x = clamp(want_x, -params.bounds, params.bounds)
-    want_z = clamp(want_z, -params.bounds, params.bounds)
+    want_x = math.clamp(want_x, -params.bounds, params.bounds)
+    want_z = math.clamp(want_z, -params.bounds, params.bounds)
   end
 
   -- ---- ease, then place the camera --------------------------------------
+  -- `ease` is the engine's frame-rate-independent exponential ease: the same
+  -- feel at 30 fps and at 240 (that is all `smoothing` is).
   local r = params.smoothing
   focus_x = ease(focus_x, want_x, r, dt)
   focus_z = ease(focus_z, want_z, r, dt)
   yaw_now = ease(yaw_now, want_yaw, r, dt)
   dist_now = ease(dist_now, want_dist, r, dt)
 
-  local pitch = math.rad(clamp(params.pitch, 15, 89))
-  local cp, sp = math.cos(pitch), math.sin(pitch)
   -- Look direction for (yaw, −pitch); the camera sits back along it.
-  local fx = -math.sin(yaw_now) * cp
-  local fy = -sp
-  local fz = -math.cos(yaw_now) * cp
-  node.x = focus_x - fx * dist_now
-  node.y = params.ground_y - fy * dist_now
-  node.z = focus_z - fz * dist_now
-  node.yaw = yaw_now
-  node.pitch = -pitch
-  node.roll = 0
+  local pitch = math.rad(math.clamp(params.pitch, 15, 89))
+  local look = dirFromYaw(yaw_now, -pitch)
+  node.pos = vec3(focus_x, params.ground_y, focus_z) - look * dist_now
+  node.yaw, node.pitch, node.roll = yaw_now, -pitch, 0
 end

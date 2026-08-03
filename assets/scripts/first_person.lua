@@ -57,12 +57,6 @@ defaults = {
   debug_ray = false,
 }
 
-local function normalize(x, y, z)
-  local l = math.sqrt(x * x + y * y + z * z)
-  if l < 1e-6 then return 0, 0, 0 end
-  return x / l, y / l, z / l
-end
-
 -- Don't push into a surface you can't walk up.
 --
 -- The solver resolves an overlap by pushing the capsule out along the surface
@@ -72,13 +66,13 @@ end
 -- part out of the movement and what's left is a slide along it.
 --
 -- `n` is a contact normal (`node.wallNormal` / `node.groundNormal`, either may
--- be nil), `u*` is the body's up, `steep` is cos(slope limit).
-local function slide(mx, my, mz, n, ux, uy, uz, steep)
-  if not n then return mx, my, mz end
-  if n.x * ux + n.y * uy + n.z * uz >= steep then return mx, my, mz end -- walkable
-  local into = mx * n.x + my * n.y + mz * n.z
-  if into >= 0 then return mx, my, mz end -- already moving away from it
-  return mx - n.x * into, my - n.y * into, mz - n.z * into
+-- be nil), `up` is the body's up, `steep` is cos(slope limit).
+local function slide(move, n, up, steep)
+  if not n then return move end
+  if n:dot(up) >= steep then return move end -- walkable
+  local into = move:dot(n)
+  if into >= 0 then return move end -- already moving away from it
+  return move - n * into
 end
 
 function update(node, dt)
@@ -95,17 +89,14 @@ function update(node, dt)
   if node.pitch < -lim then node.pitch = -lim end
 
   -- "up" = −gravity (Y on a flat world, radial on a planet).
-  local ux, uy, uz = node.up_x, node.up_y, node.up_z
+  local up = node.up or vec3(0, 1, 0)
 
-  -- Forward/right from YAW only (engine forward = −Z), flattened onto the
-  -- surface so you move along the ground even while looking up or down.
-  local cy, sy = math.cos(node.yaw), math.sin(node.yaw)
-  local fx, fy, fz = -sy, 0.0, -cy
-  local rx, ry, rz = cy, 0.0, -sy
-  local fd = fx * ux + fy * uy + fz * uz
-  fx, fy, fz = normalize(fx - ux * fd, fy - uy * fd, fz - uz * fd)
-  local rd = rx * ux + ry * uy + rz * uz
-  rx, ry, rz = normalize(rx - ux * rd, ry - uy * rd, rz - uz * rd)
+  -- Where "forward" is on the ground you are standing on: the yaw direction
+  -- FLATTENED onto the surface, so you walk along it even while looking up or
+  -- down — and on a planet, all the way around. `right` falls out of the cross
+  -- product, already in the plane and already unit length.
+  local fwd = dirFromYaw(node.yaw):flatten(up)
+  local right = fwd:cross(up)
 
   -- Movement: WASD or the left stick. Already deadzoned, SOCD-resolved, and
   -- clamped to the unit disk, so diagonals aren't faster and there is nothing
@@ -121,8 +112,7 @@ function update(node, dt)
   -- room overhead, stay down until there is.
   if not crouching and params.stand_height > params.crouch_height then
     local room = (params.stand_height - params.crouch_height) + 0.1
-    crouching = raycast(node.x, node.y, node.z, ux, uy, uz, params.crouch_height * 0.5 + room)
-      ~= nil
+    crouching = raycast(node.pos, up, params.crouch_height * 0.5 + room) ~= nil
   end
   if crouching then node.height = params.crouch_height else node.height = params.stand_height end
 
@@ -138,22 +128,23 @@ function update(node, dt)
   -- and shouldn't rob you of a jump.
   local grounded = node.grounded
   if not grounded and params.ground_ray > 0 then
-    grounded = raycast(node.x, node.y, node.z, -ux, -uy, -uz, params.ground_ray) ~= nil
+    grounded = raycast(node.pos, -up, params.ground_ray) ~= nil
   end
 
   -- Debug view of that probe, drawn with the `gizmo` API (immediate mode — call
   -- it every frame you want it visible): green while grounded, red in the air.
   if params.debug_ray and params.ground_ray > 0 then
+    local down = -up
     if grounded then
-      gizmo.ray(node.x, node.y, node.z, -ux, -uy, -uz, params.ground_ray, 0.3, 1.0, 0.4)
+      gizmo.ray(node.x, node.y, node.z, down.x, down.y, down.z, params.ground_ray, 0.3, 1.0, 0.4)
     else
-      gizmo.ray(node.x, node.y, node.z, -ux, -uy, -uz, params.ground_ray, 1.0, 0.35, 0.3)
+      gizmo.ray(node.x, node.y, node.z, down.x, down.y, down.z, params.ground_ray, 1.0, 0.35, 0.3)
     end
   end
 
   -- READ the body's velocity, keep its vertical (gravity/jump) part, MODIFY
   -- the horizontal part, WRITE it back — physics integrates it next step.
-  local vup = node.vx * ux + node.vy * uy + node.vz * uz
+  local vup = node.vel:dot(up)
   if grounded and input.justPressed("Jump") then
     vup = params.jump
   elseif node.grounded and vup > 0 then
@@ -164,18 +155,14 @@ function update(node, dt)
     vup = 0
   end
 
-  local mx = (fx * f + rx * s) * speed
-  local my = (fy * f + ry * s) * speed
-  local mz = (fz * f + rz * s) * speed
+  local move = (fwd * f + right * s) * speed
 
   -- Slopes: refuse to climb anything steeper than `slope_limit` and slide
   -- along it instead. `wallNormal` is the steepest surface the body is pressed
   -- against (the cliff you ran at); `groundNormal` is what it's standing on.
   local steep = math.cos(math.rad(params.slope_limit))
-  mx, my, mz = slide(mx, my, mz, node.wallNormal, ux, uy, uz, steep)
-  mx, my, mz = slide(mx, my, mz, node.groundNormal, ux, uy, uz, steep)
+  move = slide(move, node.wallNormal, up, steep)
+  move = slide(move, node.groundNormal, up, steep)
 
-  node.vx = mx + ux * vup
-  node.vy = my + uy * vup
-  node.vz = mz + uz * vup
+  node.vel = move + up * vup
 end
