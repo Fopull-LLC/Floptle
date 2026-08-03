@@ -2,10 +2,15 @@
 #
 # Fill every manifest entry's `title` and `notes` from `docs/releases/vX.Y.Z.md`.
 #
-#   scripts/embed-release-notes.sh releases.json [docs/releases]
+#   scripts/embed-release-notes.sh releases.json [docs/releases] [docs/news.md]
 #
 # Rewrites the file in place. Versions with no matching doc are left exactly as
 # they are, so this is safe to run over a manifest of any age.
+#
+# Also embeds `docs/news.md` as the manifest's top-level `news` — what the engine
+# is working on and working towards, which the Hub shows on its News tab. Same
+# reasoning as the notes: it rides a fetch that already happens, so it costs no
+# request and reads from cache offline.
 #
 # WHY THE NOTES TRAVEL WITH THE MANIFEST. The Hub shows a version's notes when
 # you click it, including versions you already have installed and including the
@@ -25,8 +30,9 @@
 # — "Who's Playing"` line in the body would print the release name twice.
 set -euo pipefail
 
-MANIFEST="${1:?usage: embed-release-notes.sh <releases.json> [docs/releases]}"
+MANIFEST="${1:?usage: embed-release-notes.sh <releases.json> [docs/releases] [docs/news.md]}"
 DOCS="${2:-docs/releases}"
+NEWS="${3:-docs/news.md}"
 
 [ -f "$MANIFEST" ] || { echo "no such manifest: $MANIFEST" >&2; exit 1; }
 [ -d "$DOCS" ] || { echo "no such notes directory: $DOCS" >&2; exit 1; }
@@ -59,6 +65,20 @@ for ver in $(jq -r '.versions[].version' "$MANIFEST"); do
   filled=$((filled + 1))
 done
 rm -f "$work.body"
+
+# The news page, verbatim. `--rawfile` for the same reason as the notes above, and
+# the H1 is dropped because the Hub draws its own heading for the tab.
+if [ -f "$NEWS" ]; then
+  sed '1{/^# /d;}' "$NEWS" | sed '/./,$!d' > "$work.news"
+  jq --rawfile n "$work.news" '.news = $n' "$work" > "$work.next"
+  mv "$work.next" "$work"
+  rm -f "$work.news"
+  echo "news: embedded $(wc -c < "$NEWS") bytes from $NEWS"
+else
+  # Never an error. A manifest with no news shows no news; a release that fails
+  # because a prose file moved would be a worse trade than a quiet News tab.
+  echo "news: no $NEWS — leaving the manifest's news field as it is"
+fi
 
 mv "$work" "$MANIFEST"
 

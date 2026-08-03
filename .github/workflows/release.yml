@@ -199,8 +199,9 @@ jobs:
             || { echo "::error::the merge lost versions"; exit 1; }
           # Fill every entry's notes from docs/releases/ — this version's, and any older
           # one published before the manifest carried notes at all. See the script header.
-          scripts/embed-release-notes.sh releases.json docs/releases
-          jq '{schema, channels, versions: [.versions[] | {version, title, notes: (.notes | length), engine: (.artifacts | keys), hub: (.hub_artifacts // {} | keys)}]}' releases.json
+          # …and docs/news.md as the top-level `news`, which the Hub's News tab shows.
+          scripts/embed-release-notes.sh releases.json docs/releases docs/news.md
+          jq '{schema, channels, news: (.news | length), versions: [.versions[] | {version, title, notes: (.notes | length), engine: (.artifacts | keys), hub: (.hub_artifacts // {} | keys)}]}' releases.json
 
       # The release notes ARE docs/releases/<tag>.md. One file, written once, shown on the
       # GitHub release page and inside the Hub — rather than a page nobody reads saying

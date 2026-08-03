@@ -17,6 +17,7 @@ const COMPANY: &str = "Fopull LLC";
 const WEBSITE_URL: &str = "https://fopull.com/";
 const REPO_URL: &str = "https://github.com/Fopull-LLC/Floptle";
 const RELEASES_URL: &str = "https://github.com/Fopull-LLC/Floptle-releases/releases";
+const DOCS_URL: &str = "https://github.com/Fopull-LLC/Floptle/tree/main/docs";
 const ISSUES_URL: &str = "https://github.com/Fopull-LLC/Floptle/issues";
 
 /// UI glyphs — every one is verified present in egui's bundled fonts (Ubuntu / NotoEmoji /
@@ -25,7 +26,12 @@ const ISSUES_URL: &str = "https://github.com/Fopull-LLC/Floptle/issues";
 /// as tofu — fullwidth plus (U+FF0B), the light check (U+2713), the multiplication-x
 /// (U+2715), and any emoji carrying a U+FE0F variation selector. Prefer U+2795 / U+2714 /
 /// U+2716 instead.
+///
+/// `every_icon_is_drawable` asserts that against the real font stack, so this is now a
+/// checked claim rather than a warning to be careful. It was a warning for four releases
+/// and two glyphs still shipped as boxes.
 mod ico {
+    pub const NEWS: &str = "📰";
     pub const NEW: &str = "➕";
     pub const OPEN: &str = "▶";
     pub const UPGRADE: &str = "⬆";
@@ -52,6 +58,7 @@ mod ico {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Projects,
+    News,
     Installs,
     Settings,
     About,
@@ -576,6 +583,17 @@ impl HubApp {
             .cloned()
     }
 
+    /// The newest release on the user's channel, whatever is installed.
+    ///
+    /// Not [`update_available`](Self::update_available): that one answers "should you be
+    /// nagged", so it is None when you are current and None before your first install.
+    /// The News tab wants the newest release unconditionally — "this is the latest and
+    /// you have it" is a useful thing for a news page to say.
+    fn newest_release(&self) -> Option<&crate::releases::ReleaseInfo> {
+        let ManifestState::Loaded(m) = &self.manifest else { return None };
+        m.on_channel_refs(&self.config.settings.channel).into_iter().next()
+    }
+
     /// This Hub's own version, or `None` for a dev build (`0.0.0`), which is never
     /// "out of date".
     fn hub_version() -> Option<&'static str> {
@@ -1018,6 +1036,7 @@ impl eframe::App for HubApp {
                 ui.heading(format!("{} Floptle Hub", ico::ROCKET));
                 ui.separator();
                 ui.selectable_value(&mut self.tab, Tab::Projects, format!("{} Projects", ico::PROJECTS));
+                ui.selectable_value(&mut self.tab, Tab::News, format!("{} News", ico::NEWS));
                 ui.selectable_value(&mut self.tab, Tab::Installs, format!("{} Installs", ico::INSTALLS));
                 ui.selectable_value(&mut self.tab, Tab::Settings, format!("{} Settings", ico::SETTINGS));
                 ui.selectable_value(&mut self.tab, Tab::About, format!("{} About", ico::ABOUT));
@@ -1200,6 +1219,7 @@ impl eframe::App for HubApp {
 
         egui::CentralPanel::default().show(ui, |ui| match self.tab {
             Tab::Projects => self.projects_tab(ui),
+            Tab::News => self.news_tab(ui),
             Tab::Installs => self.installs_tab(ui),
             Tab::Settings => self.settings_tab(ui),
             Tab::About => self.about_tab(ui),
@@ -1488,10 +1508,18 @@ impl HubApp {
 
         // Two columns, hand-allocated rather than an egui SidePanel: a panel wants to be
         // a child of a window or another panel, and this is already inside the tab body.
+        //
+        // The list takes a QUARTER of the tab rather than a fixed 196 px. At 196 the
+        // column was narrower than the thing it lists on a wide window — a stripe of
+        // version numbers pinned to the edge with the notes sprawling beside it — and on
+        // a narrow one the state word wrapped under the date. A share of the width reads
+        // as a column at any size. The bounds stop it becoming a stripe on an ultrawide
+        // or eating the notes on a small window.
         let split_height = ui.available_height();
+        let list_w = (ui.available_width() * 0.26).clamp(220.0, 320.0);
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
-                egui::vec2(196.0, split_height),
+                egui::vec2(list_w, split_height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                 egui::ScrollArea::vertical().id_salt("version-list").show(ui, |ui| {
@@ -1499,43 +1527,78 @@ impl HubApp {
                         let is_new = newest_installed
                             .as_ref()
                             .is_some_and(|n| crate::releases::version_key(&r.version) > *n);
-                        let mut label = egui::RichText::new(&r.version);
-                        if r.installed.is_some() {
-                            label = label.strong();
+
+                        // ONE ROW, ONE HIT TARGET. This used to be a `selectable_label`
+                        // for the version and an unclickable line of state under it — so
+                        // the actual target was the width of the text "0.21.0" and one
+                        // line tall, with dead space around it that looked clickable and
+                        // wasn't. The whole card takes the click now: full column width,
+                        // both lines, and the padding.
+                        let row_h = if r.title.is_empty() { 42.0 } else { 46.0 };
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), row_h),
+                            egui::Sense::click(),
+                        );
+                        let active = r.version == selected;
+                        if active || resp.hovered() {
+                            let v = ui.visuals();
+                            ui.painter().rect_filled(
+                                rect,
+                                4.0,
+                                if active { v.selection.bg_fill } else { v.widgets.hovered.bg_fill },
+                            );
                         }
-                        let resp = ui.selectable_label(r.version == selected, label);
-                        // The state marks sit on the same line, right-aligned, so the
-                        // column reads as a list of versions and not a table of glyphs.
-                        // WORDS, NOT GLYPHS. The Hub ships egui's default fonts, which
-                        // have no ● and no ✔ — both draw as an empty box, and a list of
-                        // empty boxes is worse than no marker at all. "installed" also
-                        // needs no legend.
-                        ui.scope(|ui| {
-                            ui.style_mut().spacing.item_spacing = egui::vec2(5.0, 0.0);
-                            ui.horizontal(|ui| {
-                                ui.add_space(4.0);
-                                if r.is_default {
-                                    ui.small(
-                                        egui::RichText::new("default")
-                                            .color(ui.visuals().hyperlink_color)
-                                            .strong(),
-                                    );
-                                } else if r.installed.is_some() {
-                                    ui.small(egui::RichText::new("installed").strong());
-                                } else if is_new {
-                                    ui.small(
-                                        egui::RichText::new("new").color(egui::Color32::from_rgb(120, 200, 130)),
-                                    );
-                                }
-                                if !r.date.is_empty() {
-                                    ui.weak(egui::RichText::new(&r.date).small());
-                                }
-                            });
+                        let mut inner = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(rect.shrink2(egui::vec2(8.0, 5.0)))
+                                .layout(egui::Layout::top_down(egui::Align::Min)),
+                        );
+                        inner.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            let mut label = egui::RichText::new(&r.version);
+                            if r.installed.is_some() {
+                                label = label.strong();
+                            }
+                            ui.label(label);
+                            // WORDS, NOT GLYPHS. The Hub ships egui's default fonts, which
+                            // have no ● and no ✔ — both draw as an empty box, and a list of
+                            // empty boxes is worse than no marker at all. "installed" also
+                            // needs no legend.
+                            if r.is_default {
+                                ui.small(
+                                    egui::RichText::new("default")
+                                        .color(ui.visuals().hyperlink_color)
+                                        .strong(),
+                                );
+                            } else if r.installed.is_some() {
+                                ui.small(egui::RichText::new("installed").strong());
+                            } else if is_new {
+                                ui.small(
+                                    egui::RichText::new("new")
+                                        .color(egui::Color32::from_rgb(120, 200, 130)),
+                                );
+                            }
+                        });
+                        // The release NAME, which the column had no room for before — it is
+                        // what somebody actually remembers a version by.
+                        inner.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            if !r.title.is_empty() {
+                                ui.weak(egui::RichText::new(format!("“{}”", r.title)).small());
+                            }
+                            if !r.date.is_empty() {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.weak(egui::RichText::new(&r.date).small());
+                                    },
+                                );
+                            }
                         });
                         if resp.clicked() {
                             select = Some(r.version.clone());
                         }
-                        ui.add_space(3.0);
+                        ui.add_space(2.0);
                     }
                 });
                 },
@@ -1560,37 +1623,61 @@ impl HubApp {
                 });
             });
 
+            // BUTTONS YOU CAN HIT. These were egui's defaults — text plus a few pixels of
+            // padding, so "Install" was a ~60×20 target for the primary action of the
+            // whole tab. A minimum size makes every one of them a deliberate object
+            // rather than a word with a box round it, and the row gets breathing space
+            // above and below so it stops reading as part of the heading.
+            // A broken install is a sentence, not a chip wedged between two buttons. On
+            // its own line it reads; inline it looked like a third control.
+            if let Some(inst) = &r.installed
+                && !inst.is_valid()
+            {
+                ui.add_space(6.0);
+                ui.colored_label(
+                    egui::Color32::LIGHT_RED,
+                    format!("{} this install is incomplete — uninstall it and install it again", ico::WARN),
+                );
+            }
+
+            ui.add_space(8.0);
+            let btn = |ui: &mut egui::Ui, label: String| {
+                ui.add_sized([132.0, 30.0], egui::Button::new(label))
+            };
             ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
                 match (&r.installed, &r.artifact) {
                     (Some(inst), _) => {
-                        if !inst.is_valid() {
-                            ui.colored_label(
-                                egui::Color32::LIGHT_RED,
-                                format!("{} this install is incomplete", ico::WARN),
-                            );
-                        }
-                        if !r.is_default && ui.button(format!("{} Set default", ico::STAR)).clicked() {
+                        if !r.is_default && btn(ui, format!("{} Set default", ico::STAR)).clicked() {
                             set_default = Some(r.version.clone());
                         }
-                        if ui
-                            .button(format!("{} Show files", ico::REVEAL))
+                        if btn(ui, format!("{} Show files", ico::REVEAL))
                             .on_hover_text("show this install in your file manager")
                             .clicked()
                         {
                             reveal = Some(inst.path.clone());
                         }
-                        if ui.button(format!("{} Uninstall", ico::REMOVE)).clicked() {
+                        if btn(ui, format!("{} Uninstall", ico::REMOVE)).clicked() {
                             uninstall = Some(inst.clone());
                         }
                     }
                     (None, Some(art)) => {
                         if ui
-                            .add_enabled(!busy, egui::Button::new(format!("{} Install", ico::INSTALL)))
+                            .add_enabled_ui(!busy, |ui| {
+                                ui.add_sized(
+                                    [132.0, 30.0],
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{} Install", ico::INSTALL))
+                                            .strong(),
+                                    ),
+                                )
+                            })
+                            .inner
                             .clicked()
                         {
                             to_install = Some((r.version.clone(), art.clone()));
                         }
-                        ui.small(format!("{:.0} MB", art.size as f64 / 1_048_576.0));
+                        ui.weak(format!("{:.0} MB download", art.size as f64 / 1_048_576.0));
                     }
                     (None, None) => {
                         ui.small(format!(
@@ -1601,6 +1688,7 @@ impl HubApp {
                     }
                 }
             });
+            ui.add_space(4.0);
 
             ui.add_space(6.0);
             ui.separator();
@@ -1665,6 +1753,120 @@ impl HubApp {
         }
         if let Some((v, art)) = to_install {
             self.start_install(v, art);
+        }
+    }
+
+    /// What the engine is working on, working towards, and just shipped.
+    ///
+    /// Release notes answer "what changed in 0.22.0". They cannot answer "is this thing
+    /// alive and where is it going", which is what somebody deciding whether to build on
+    /// an engine wants to know, and which they would otherwise go looking for on a
+    /// website. It rides `releases.json`, so it costs no extra request and reads from
+    /// cache with the network off.
+    fn news_tab(&mut self, ui: &mut egui::Ui) {
+        let news = match &self.manifest {
+            ManifestState::Loaded(m) => m.news.clone(),
+            _ => String::new(),
+        };
+        let latest = self.newest_release().map(|r| {
+            (r.version.clone(), r.title.clone(), r.hub_artifact_here().is_some())
+        });
+        let installed_latest = latest.as_ref().is_some_and(|(v, _, _)| {
+            self.installs.iter().any(|i| &i.version == v)
+        });
+        let mut go_installs = false;
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.strong(format!("{} What's happening", ico::NEWS));
+            let loading = matches!(self.manifest, ManifestState::Loading(_));
+            if ui
+                .add_enabled(!loading, egui::Button::new(format!("{} Refresh", ico::REFRESH)))
+                .clicked()
+            {
+                self.start_manifest_fetch();
+            }
+            if loading {
+                ui.spinner();
+            }
+        });
+        ui.add_space(8.0);
+
+        egui::ScrollArea::vertical().id_salt("news").show(ui, |ui| {
+            ui.set_max_width((ui.available_width() - 8.0).max(200.0));
+
+            // The latest release as a card at the top, with the one action that follows
+            // from reading about it. News that tells you a version exists and then makes
+            // you find the Installs tab yourself is news that wasted your time.
+            if let Some((version, title, _)) = &latest {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width() - 16.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.heading(format!("Floptle {version}"));
+                        if !title.is_empty() {
+                            ui.heading(egui::RichText::new(format!("“{title}”")).weak());
+                        }
+                    });
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                        if installed_latest {
+                            ui.weak("This is the newest release, and you have it.");
+                        } else if ui
+                            .add_sized(
+                                [176.0, 32.0],
+                                egui::Button::new(
+                                    egui::RichText::new(format!("{} Get {version}", ico::INSTALL))
+                                        .strong(),
+                                ),
+                            )
+                            .clicked()
+                        {
+                            go_installs = true;
+                        }
+                        if ui.add_sized([148.0, 32.0], egui::Button::new("Read the notes")).clicked()
+                        {
+                            go_installs = true;
+                        }
+                    });
+                });
+                ui.add_space(12.0);
+            }
+
+            if news.trim().is_empty() {
+                // Honest about which of the two it is. A Hub that has never reached the
+                // network and one whose manifest predates this field look identical from
+                // here, and only the first is worth acting on.
+                ui.weak(match self.manifest {
+                    ManifestState::Loaded(_) => {
+                        "No news in this version list yet — it arrives with the next release."
+                    }
+                    ManifestState::Loading(_) => "fetching…",
+                    _ => "Couldn't reach the version list, so there's no news to show.",
+                });
+                ui.add_space(8.0);
+                ui.hyperlink_to(format!("{} releases on the web", ico::GLOBE), RELEASES_URL);
+            } else {
+                crate::notes::render(ui, &news);
+            }
+
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                ui.hyperlink_to(format!("{} All releases", ico::GLOBE), RELEASES_URL);
+                ui.hyperlink_to(format!("{} Documentation", ico::BOOK), DOCS_URL);
+                ui.hyperlink_to(format!("{} Report a problem", ico::BUG), ISSUES_URL);
+            });
+            ui.add_space(12.0);
+        });
+
+        if go_installs {
+            if let Some((v, _, _)) = latest {
+                self.selected_version = Some(v);
+            }
+            self.tab = Tab::Installs;
         }
     }
 
@@ -1936,6 +2138,37 @@ mod tests {
             harness.run();
             let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join(format!("../../target/installs-tab-{which}.png"));
+            std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+            harness.render().expect("no GPU?").save(&out).unwrap();
+            println!("wrote {}", out.display());
+        }
+
+        // The News tab, with the real docs/news.md — so the snapshot shows the page
+        // somebody will actually read, and the 📰 in the tab strip gets LOOKED AT. The
+        // Hub's fonts have holes in them and a tofu box passes every non-visual test
+        // there is: right layout, right string, rectangular pixels.
+        {
+            let (mut app, _tmp) = build("0.21.0");
+            let news = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/news.md"),
+            )
+            .unwrap_or_default();
+            if let ManifestState::Loaded(m) = &mut app.manifest {
+                m.news = news;
+            }
+            app.tab = Tab::News;
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(960.0, 720.0))
+                .build_ui(move |ui| {
+                    // The whole chrome, not just the body: the tab strip is where the new
+                    // glyph lives.
+                    use eframe::App as _;
+                    let mut frame = eframe::Frame::_new_kittest();
+                    app.ui(ui, &mut frame);
+                });
+            harness.run();
+            let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/news-tab.png");
             std::fs::create_dir_all(out.parent().unwrap()).unwrap();
             harness.render().expect("no GPU?").save(&out).unwrap();
             println!("wrote {}", out.display());

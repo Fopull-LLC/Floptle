@@ -76,6 +76,17 @@ pub struct Manifest {
     pub channels: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub versions: Vec<ReleaseInfo>,
+    /// What the engine is working on and working towards, in Markdown — `docs/news.md`,
+    /// embedded by the publish workflow the same way release notes are.
+    ///
+    /// Release notes answer "what changed in this version". This answers "is this project
+    /// alive, and where is it going", which somebody deciding whether to build on an engine
+    /// asks first and which no changelog can tell them. It rides the manifest the Hub
+    /// already fetches, so it costs no request and works from cache offline. Empty when the
+    /// manifest predates this — every reader treats that as "no news to show", never an
+    /// error.
+    #[serde(default)]
+    pub news: String,
 }
 
 impl Manifest {
