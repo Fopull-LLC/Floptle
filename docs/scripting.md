@@ -32,6 +32,8 @@ it up immediately.
 20. [Collision & trigger events](#20-collision--trigger-events)
 21. [Prefabs: `spawn` & `destroy`](#21-prefabs-spawn--destroy)
 22. [Terrain: `terrain.sculpt`, `dig` & queries](#22-terrain-terrainsculpt-dig--queries)
+22a. [Water: volumes, buoyancy & `water.*`](#22a-water-volumes-buoyancy--water)
+22b. [Scatter: thousands of props from a seed](#22b-scatter-thousands-of-props-from-a-seed)
 23. [Saving: `save.set`, `save.get` & slots](#23-saving-saveset-saveget--slots)
 24. [The web: `http.*` & `json.*`](#24-the-web-http--json) — full page: [web-api.md](web-api.md)
 
@@ -696,6 +698,42 @@ Use it for ground checks, line-of-sight, shooting, or dropping objects onto a su
 (The built-in `node.grounded` already does a robust contact check for the character;
 raycast is the general-purpose tool for everything else.)
 
+### Shape queries — `overlapSphere`, `spherecast`, `capsulecast`
+
+A ray answers *what is along this line*. A melee swing, an explosion or a
+"can I fit there" asks a different question — *what is inside this volume* — and
+a fan of rays answers it badly: it misses anything thinner than the fan and
+cannot tell you how deep the overlap was.
+
+```lua
+-- Everything within 2 m of the sword, deepest overlap first.
+for _, hit in ipairs(overlapSphere(swordTip, 2.0, { layers = "Enemies" })) do
+  combat.hurt(hit.node, 25)
+end
+
+-- A thrown rock: a swept sphere hits what a ray squeaks past.
+local h = spherecast(node.pos, vel:normalized(), 0.4, 30, { layers = {"Ground","Props"} })
+
+-- "Can I actually walk there", asked with the shape that will be walking.
+local blocked = capsulecast(node.pos, moveDir, 0.4, 0.9, 1.5)
+```
+
+| call | result |
+|---|---|
+| `overlapSphere(center, radius [, opts])` | a **list** of hits, deepest overlap first (empty when nothing is inside) |
+| `spherecast(origin, dir, radius, max [, opts])` | the first hit, or `nil` |
+| `capsulecast(origin, dir, radius, halfHeight, max [, opts])` | the first hit, or `nil` |
+
+Hits carry the same fields a `raycast` hit does — `x/y/z`, `nx/ny/nz`,
+`distance` and `node` — so a script that handles one handles the others. For an
+overlap, `distance` is the **penetration depth** rather than a travel distance.
+`opts` is the same table `raycast` takes, and your own body is skipped for you.
+
+These are cheap here for a structural reason: every collider already answers a
+signed distance, so an overlap is one distance test and a swept sphere is the
+ray march with the radius subtracted. Unlike a ray, they also see **sensors** —
+a hitbox usually does want to know it swept a trigger volume.
+
 ### Debug gizmos
 
 Draw one-frame debug shapes over the viewport straight from code. They show in
@@ -1009,6 +1047,7 @@ end
 | Handle | Fields |
 |---|---|
 | `node.text` | The element's label text — read/write; writing a number is fine (`label.text = 42`). `nil` on nodes without a UI text. Writing to a UI element without a text spec creates one. |
+| `node.texture` | The element's image texture, as a project asset path — read/write (`slot.texture = "textures/ui/portrait.png"`). `nil` on elements with no image; writing to one without an image slot creates it, so a bare element becomes a sprite. Raises if you assign something that isn't a string. |
 | `getcomponent("UiElement")` | `visible` (1/0), `opacity`, `posX` `posY` (free position or pin offset, design units), `width` `height` (the number in the axis's sizing mode: px value, % fraction, or grow weight; `nil` on a *fit* axis — writing one makes it fixed px), `radius`, `border`, `fillR/G/B/A`, `textSize`, `textR/G/B/A`, `tintR/G/B/A`, `scrollY` (scroll views only: scroll position, 0 = top). |
 | `getcomponent("UiSlider")` | `value`, `min`, `max` — on a slider (track) element. `value` is clamped to the range at draw time. |
 | `getcomponent("UiLayer")` | `enabled` (1/0 — an off layer draws nothing), `z`, `designHeight`. |
@@ -1016,6 +1055,23 @@ end
 Handles are `nil` when the node lacks the component — a node without an Element spec
 has no `"UiElement"`, only slider tracks have `"UiSlider"`, only layers have
 `"UiLayer"`.
+
+> **`textSize` is not like the others.** `opacity`, `posX` and `tintR` are free to
+> animate: they change numbers the GPU already has. **A text size is a cost.**
+> Glyphs are rasterized and cached per `(font, character, pixel size)`, so every
+> distinct size a project asks for buys a whole alphabet — and it is the *pixel*
+> size, so a layer authored at `designHeight: 720` and played at 1440p rasterizes
+> a second complete set at double the size.
+>
+> Writing `el.textSize = x` from `update` therefore rasterizes an alphabet **per
+> intermediate value**: a half-second size pop is ~30 alphabets at the largest
+> size in the project, for one flourish.
+>
+> The atlas grows rather than failing (and reports what it dropped), so this is a
+> memory and hitching cost, not lost text — but it is a real one. For a size
+> transition, animate **`scale`** instead: it is a vertex transform on glyphs that
+> are already cached, and it costs nothing. Pick a small set of text sizes and
+> reuse them across screens.
 
 ### Shader-drawn elements (`stage ui` .flsl) & `setShaderParam`
 
@@ -2226,8 +2282,8 @@ function onRpc.swing(args, peer)                  -- runs on the SERVER
 end
 ```
 
-Inside the `net.rewind` closure, **raycasts see every networked body where
-that player saw it**, and **other scripts' `synced` vars read the values from
+Inside the `net.rewind` closure, **raycasts and shape queries see every
+networked body where that player saw it**, and **other scripts' `synced` vars read the values from
 that same tick** — so a parry window that was open on the attacker's screen
 counts, even if it just closed at server time. Everything snaps back to the
 present when the closure returns (it also passes through return values, so
@@ -2399,10 +2455,80 @@ onRpc("requestNextMap", function(sender)
 end)
 ```
 
-State that must survive a scene change (scores, inventory) lives in your
-scripts' hands: stash it via an RPC/`synced` pattern before switching, or keep
-it on the server's manager script — node state itself does not survive (the
-old scene's nodes are gone).
+### Additive loads: `{ additive = true }`
+
+A plain `scene.load` replaces the world. **Additive** layers a scene on top of
+the running one — nothing is torn down, no script restarts, and the new nodes
+join the live physics sim the way a `spawn(...)`ed prefab does:
+
+```lua
+scene.load("rooms/armoury", { additive = true })   -- layer it in
+scene.unload("rooms/armoury")                      -- and take it away again
+```
+
+This is how you stream a level in pieces, bring in a UI overlay without losing
+the world behind it, or keep a hub scene resident while a mission loads.
+
+- An additive scene brings **nodes only** — no second sun, skybox or
+  post-processing chain. A world has one environment, and the base scene owns
+  it.
+- `scene.unload(name)` removes exactly what the matching `load` brought, plus
+  anything you parented under it (a projectile fired inside a room leaves with
+  the room rather than becoming a child of nothing). The scene you opened is
+  never a candidate — you cannot unload the world out from under yourself.
+- Additive loads and unloads are **local**, so a client may do them in a
+  session. Only a full swap is the server's alone.
+- Several in one frame is fine and they all happen, in order. A full
+  `scene.load` in the same frame ends the queue: everything behind it named a
+  world that is about to stop existing.
+
+### `node.persistent` — surviving the swap
+
+```lua
+node.persistent = true       -- this node, and everything under it, outlives a swap
+```
+
+A persistent node keeps its **entity**, its components, its physics body *and
+its running script*. `start` does not re-fire, because the node never stopped
+existing — the state in your script's locals is still there on the other side.
+The DontDestroyOnLoad equivalent, for a HUD, a music player, a party, a
+save-game manager.
+
+It's a subtree rule: marking a folder carries everything under it. And it's a
+**runtime** flag — set it from a script, not in a scene file; a node is only
+persistent relative to a swap that happens while the game runs.
+
+Two edges worth knowing:
+
+- If a survivor was parented to a node that did *not* survive, it is re-rooted
+  and keeps its world pose — where the player last saw it.
+- If a survivor carried a Lighting/Skybox/PostProcess node, the incoming
+  scene's copy wins. The scene you loaded owns the environment.
+
+### `scene.onLoaded` — the loading-screen hook
+
+```lua
+function start(node)
+    node.persistent = true                    -- outlive the load you're covering
+    scene.onLoaded(function(name, additive)
+        if not additive then hide(node) end   -- the new world is whole
+    end)
+end
+```
+
+The callback fires **after** the world is whole — a loading screen's job is to
+go away once the thing it was covering exists, so being told any earlier would
+be a lie. It receives the scene's name and whether it arrived additively.
+
+A subscription dies with the script that made it, which is why the example
+marks the node persistent first: something has to outlive the load to be told
+about it. (For an additive load the loader survives by definition, so no
+marking is needed.)
+
+State that must survive a scene change (scores, inventory) has two homes now:
+a **persistent node's script**, or — in multiplayer — the server's manager
+script via an RPC/`synced` pattern. Ordinary node state still does not survive;
+the old scene's nodes are gone.
 
 ---
 
@@ -2733,7 +2859,43 @@ end
 | `terrain.paint(x,y,z, radius, r,g,b [, strength])` | recolor the surface (0–1 colors) |
 | `terrain.paintTexture(x,y,z, radius, slot)` | paint a palette texture slot (1-based; 0 clears) |
 | `terrain.query(x,y,z)` → `d` | signed distance to the nearest terrain surface (negative = inside rock); `nil` with no terrain |
+| `terrain.slotAt(x,y,z)` → `slot` | the texture-palette slot at a point — *what the rock is made of*; `nil` where untextured |
 | `terrain.height(x, z)` → `y` | world Y of the highest surface under (x,z); `nil` if none |
+| `terrain.yields()` → `list` | the reports for edits that have **landed** since the last call (drained) |
+
+### What a dig removed
+
+`sculpt` and `dig` return an **id**, not a result — the edit is queued and
+applied after the script pass, so nothing has been dug yet at the moment they
+return. The measured report arrives through `terrain.yields()` on a later frame,
+carrying that id:
+
+```lua
+local pending = {}
+
+function update(node, dt)
+  if input.pressed("mouse1") then
+    local h = raycast(cam, dir, 50)
+    if h then pending[terrain.dig(h.x, h.y, h.z, 2.0)] = true end
+  end
+  for _, y in ipairs(terrain.yields()) do
+    if pending[y.id] then
+      pending[y.id] = nil
+      for slot, volume in pairs(y.slots) do
+        inventory.add(ORE[slot], volume)       -- what it was, and how much
+      end
+    end
+  end
+end
+```
+
+Each report is `{ id, removed, added, untextured, slots = { [slot] = volume } }`,
+in **world cubic units**. `removed == untextured + sum(slots)`, so a caller can
+check its own arithmetic, and the volumes are additive: sum them over a shaft and
+you get the volume that actually left the field — a careful shaft and a sloppy
+cavern differ by the truth rather than by the number of dabs. An edit that moved
+nothing reports zero rather than not reporting, so "I dug air" is
+distinguishable from "the report hasn't arrived".
 
 Notes:
 
@@ -2747,6 +2909,171 @@ Notes:
   RPC that repeats the call on clients (`net.rpc("dig", {x=…}, …)` →
   `onRpc.dig` calls `terrain.dig` locally). The local test harness (ghost
   client) doesn't support terrain edits yet and will say so in the Console.
+
+---
+
+## 22a. Water: volumes, buoyancy & `water.*`
+
+A **Water Volume** node is a body of water the engine simulates: things float
+in it, are dragged by it, and the world goes murky when the camera is under it.
+Add one from the Inspector's type menu (`≈ Water Volume`).
+
+Two shapes:
+
+- **Sea** — a sphere about the node. A planet's ocean: "up" is different at
+  every point on it, which is why this is not a very large flat pool.
+- **Pool** — an oriented box. A lake, a tank, a flooded room. Rotate the node
+  and the surface tilts with it. Its **sides are walls**: standing beside a pool
+  at the same height as its water is not standing in it.
+
+### What the engine does
+
+**Buoyancy** is Archimedes, per shape. Whether a thing floats is its own
+density against the water's — mass over volume, both of which the engine
+already knows — so a wooden crate bobs and a lead ball sinks with no flags to
+set. On an assembly the push is applied at **each part's own position**, so a
+hull that lands flat floats and the same hull nose-down sinks its nose and
+rights itself. A single force at the centre of mass would give you a craft that
+bobs but never rights itself.
+
+**Drag is quadratic**, which is what makes a gentle touchdown float and a
+60 m/s belly-flop stop hard without either being a special case.
+
+**Underwater** replaces the scene's fog with the volume's tint and visibility.
+Because it goes through the one fog channel every draw path already reads,
+meshes, terrain, SDF matter and particles go murky *together* rather than one
+of them staying crisp. It works in the editor viewport too, so tuning the tint
+isn't guesswork.
+
+**Frozen** is a state, not a second system. A frozen sea applies no buoyancy,
+no drag and no underwater look; add a `Collidable` surface and it becomes
+walkable ground. A script can thaw it.
+
+### What a script does
+
+The engine floats things. What being *wet* means — swimming, drowning, a
+flooded engine, a gauge going red, the music ducking — is the game's, and all
+of it is the same question with different answers:
+
+```lua
+local d = water.depthAt(node.pos)          -- metres below the surface, 0 in air
+if d > 0 then
+  swimming = true
+end
+```
+
+```lua
+-- The detailed answer, when you need more than the depth.
+local w = water.at(node.pos)
+if w then
+  -- w.depth, w.density, w.frozen, w.node, and w.up — the direction OUT of the
+  -- water, which is radial on a sea and NOT −gravity in a tilted tank.
+  node.vel = node.vel + w.up * (kick * dt)
+end
+```
+
+| Call | Answers |
+| --- | --- |
+| `water.depthAt(x, y, z)` | metres below the surface; `0` in air. Takes a vec3 or a node too. |
+| `water.at(x, y, z)` | `nil` in air, else `{depth, density, frozen, node, up}`. |
+| `water.isUnderwater(x, y, z)` | the yes/no, when that's all you wanted. |
+| `water.setFrozen(node, on)` | freeze or thaw a volume. |
+| `water.volumes()` | every water node in the scene. |
+
+`water.depthAt` and the solver answer from the **same geometry**, so a swim
+state can't disagree with the physics floating it — which is exactly what
+happened when a game carried its own `seaDepth()` against a sea radius it had
+to keep in step with the sphere it drew.
+
+### Not yet
+
+The surface is a translucent, tinted, specular volume sized to what the solver
+uses. It has **no waves, no shoreline softening against terrain and no
+depth-based tint from outside** — an authorable `.flsl` water surface is still
+to come. Underwater is a fog/colour grade, not refraction.
+
+## 22b. Scatter: thousands of props from a seed
+
+`scatter.create{...}` declares a rule; the engine places and draws every
+instance from it, GPU-instanced, with **no scene node anywhere in it**.
+
+The division of labour is the point. Your generator keeps deciding *what grows
+where* — it rolls the species, reads the climate, picks the palette. The engine
+decides where each instance stands and draws them all.
+
+```lua
+forest = scatter.create{
+  asset   = "assets/models/pine.glb",
+  seed    = worldSeed,
+  center  = planet.pos, radius = planet.radius,   -- a planet's surface
+  perChunk = 32, chunk = 24,
+  scaleMin = 0.8, scaleMax = 1.6,
+  lod = {
+    { asset = "assets/models/pine.glb",     distance = 60 },
+    { asset = "assets/models/pine_far.glb", distance = 220 },
+  },
+  fade = 12,
+}
+```
+
+Leave out `radius` and give `halfX`/`halfZ` instead for a flat region — a
+level, an island, a lawn.
+
+### Determinism is the design
+
+Every instance is `hash(seed, chunk, index)` and nothing else. Three things fall
+out of that, and all three are requirements rather than conveniences:
+
+- **Walk away and back and the same trees stand in the same places.** A chunk is
+  recomputed, never remembered.
+- **A multiplayer session never replicates scenery.** Same seed, same chunk,
+  same instances, on every machine.
+- **"This one is gone" is storable.** An instance id is stable, so a removal set
+  is a handful of numbers — not the position of every plant you ever saw.
+
+### Placement and LOD
+
+Props are dropped onto the **real surface**: the engine casts down from above
+each one and settles it on whatever is actually there, taking that ground's
+normal so a hillside's trees lean with the hill. A prop with no ground under it
+is dropped rather than left hanging in the air over a canyon.
+
+**Digging the ground out from under one re-settles it**, because placement was
+never remembered in the first place.
+
+LOD bands **cross-dissolve** rather than switching — the pop at a band boundary
+is the thing everyone notices about scatter and nothing else about it. Past the
+last band's distance an instance is culled.
+
+### Harvesting
+
+```lua
+-- What is near the tool tip?
+local hits = scatter.near(forest, node.pos + node.forward * 2, 2.5)
+if hits[1] then
+  scatter.remove(forest, hits[1].id)      -- and it stays gone
+  inventory.add("wood", hits[1].scale * 4)
+end
+```
+
+| Call | Does |
+| --- | --- |
+| `scatter.create{...}` | declare a source; returns its id |
+| `scatter.near(id, point, radius)` | instances around a point, nearest first: `{id, distance, pos, scale, param}` |
+| `scatter.remove(id, instanceId)` | remove one, permanently |
+| `scatter.restore(id [, instanceId])` | put one back, or all of them (regrowth) |
+| `scatter.removed(id)` | the ids this source has lost — **this** is what you save |
+| `scatter.destroy(id)` | drop the whole source |
+
+`param` is a stable per-instance 0..1 you can map to a variant or a yield. It
+also rides the albedo, so one species gets a spread of shades without a material
+per plant.
+
+### Not yet
+
+**No per-instance colliders.** You cannot walk into a scattered tree and a
+raycast will not hit one — aim with `scatter.near`, which is a proximity query,
+not a ray. Prototypes are **mesh assets**, not prefabs or script-built subtrees.
 
 ## 23. Saving: `save.set`, `save.get` & slots
 

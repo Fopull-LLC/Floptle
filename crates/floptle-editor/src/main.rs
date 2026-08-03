@@ -86,6 +86,7 @@ mod render_frame;
 mod rollback;
 mod rollback_session;
 mod rig_overrides;
+mod scatter_draw;
 mod scene_ops;
 mod space;
 mod script_actions;
@@ -692,6 +693,8 @@ struct EditorTabViewer<'a> {
     /// Selected particle track's emitter/force gizmo (colored screen segments).
     particle_gizmo: &'a [(Vec2, Vec2, [f32; 3])],
     show_gizmos: &'a mut bool,
+    /// Which plane the Scene view is locked to (2D authoring).
+    view_lock: &'a mut floptle_render::ViewLock,
     gizmo_filter: &'a mut GizmoFilter,
     grabbed: Option<Handle>,
     tool: Tool,
@@ -1013,6 +1016,9 @@ fn main() {
         player_mode,
         game_title,
         crash_prompt: (!player_mode).then(report::take_last_crash).flatten(),
+        // No Console tab in a build, so warnings and errors go to stderr
+        // instead of into a Vec nobody can read (floptle/0051).
+        console: ConsoleState { mirror_to_stderr: player_mode, ..Default::default() },
         ..Default::default()
     };
     if let Some(p) = project_path {
@@ -1382,6 +1388,9 @@ struct Editor {
     /// atlas keeps sun shadows + SDF AO through each terrain's shadow proxy (`w = 3` =
     /// in-field-but-not-drawn). This map is the per-terrain GPU slot set.
     terrain_render: HashMap<Entity, crate::terrain_edit::TerrainRender>,
+    /// Resolved scatter chunks (`floptle/0036`), so props are dropped onto the
+    /// real ground once per chunk instead of once per prop per frame.
+    scatter_cache: crate::scatter_draw::ScatterCache,
     /// Chunks whose voxels changed since the last remesh, per terrain — the regional
     /// remesh queue a brush dab (or undo swap) feeds. Drained every frame by
     /// `sync_terrain_meshes`.
@@ -2021,9 +2030,10 @@ struct Editor {
     /// it — Stop restores from here so unsaved sculpts survive Play and a
     /// mid-play scene switch can't leak another scene's terrain into this one.
     play_terrains: Option<PlayTerrains>,
-    /// A `scene.load(...)` a script queued this frame — performed at the top of
-    /// the NEXT frame (never mid-frame under the running scripts).
-    pending_scene: Option<String>,
+    /// The `scene.load` / `scene.unload` calls scripts queued this frame —
+    /// performed at the top of the NEXT frame, in order (never mid-frame under
+    /// the running scripts).
+    pending_scene: Vec<floptle_script::SceneRequest>,
     /// The display's refresh period, seconds (0 = unknown) — dt snaps to whole
     /// multiples of it so scheduler noise never reaches the simulation clock.
     refresh_period: f32,

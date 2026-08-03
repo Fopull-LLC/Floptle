@@ -36,7 +36,7 @@ pub mod retro;
 pub mod tris;
 pub mod ui;
 
-pub use camera::{FlyCamera, Input};
+pub use camera::{FlyCamera, Input, ViewLock};
 pub use device::Gpu;
 pub use frame::{Projection, RenderCamera};
 pub use grid::Grid;

@@ -667,6 +667,28 @@ pub enum MatterDoc {
         #[serde(default = "default_range")]
         radius: f32,
     },
+    /// A body of water — a planet's sea (`pool: false`) or a lake/tank.
+    /// Every knob defaults, so a hand-written `WaterVolume()` is a plain sea.
+    WaterVolume {
+        #[serde(default)]
+        pool: bool,
+        #[serde(default = "default_range")]
+        radius: f32,
+        #[serde(default = "default_pool_half")]
+        half_extents: [f32; 3],
+        #[serde(default = "default_water_density")]
+        density: f32,
+        #[serde(default = "one_f32")]
+        drag: f32,
+        #[serde(default = "one_f32")]
+        angular_drag: f32,
+        #[serde(default)]
+        frozen: bool,
+        #[serde(default = "default_water_tint")]
+        tint: [f32; 3],
+        #[serde(default = "default_water_visibility")]
+        visibility: f32,
+    },
     /// An authored SDF shape — its Material's sdf-stage `.flsl` is the geometry.
     FieldShape {
         #[serde(default = "one_f32")]
@@ -780,6 +802,29 @@ fn default_range() -> f32 {
     10.0
 }
 
+/// A tank you could stand in — 10 m across, 4 m deep.
+fn default_pool_half() -> [f32; 3] {
+    [5.0, 2.0, 5.0]
+}
+
+/// Fresh water, kg/m³. The one number that decides whether a given hull floats,
+/// so the default is the one everybody's intuition is calibrated to.
+fn default_water_density() -> f32 {
+    1000.0
+}
+
+/// A green-blue you can see through — deliberately not "ocean blue", which
+/// reads as a filter rather than as water.
+fn default_water_tint() -> [f32; 3] {
+    [0.10, 0.32, 0.38]
+}
+
+/// Metres of underwater visibility. Short enough to feel like water, long
+/// enough to swim in.
+fn default_water_visibility() -> f32 {
+    28.0
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub enum ShapeDoc {
     Cube,
@@ -812,6 +857,27 @@ impl From<&Matter> for MatterDoc {
                 radial: *mode == GravityMode::Radial,
                 strength: *strength,
                 radius: *radius,
+            },
+            Matter::WaterVolume {
+                kind,
+                radius,
+                half_extents,
+                density,
+                drag,
+                angular_drag,
+                frozen,
+                tint,
+                visibility,
+            } => MatterDoc::WaterVolume {
+                pool: *kind == floptle_core::WaterKind::Pool,
+                radius: *radius,
+                half_extents: *half_extents,
+                density: *density,
+                drag: *drag,
+                angular_drag: *angular_drag,
+                frozen: *frozen,
+                tint: *tint,
+                visibility: *visibility,
             },
             Matter::FieldShape { radius } => MatterDoc::FieldShape { radius: *radius },
             Matter::Skybox { color, size, texture, tint, shader, shader_params } => {
@@ -879,6 +945,31 @@ impl MatterDoc {
                 mode: if *radial { GravityMode::Radial } else { GravityMode::Down },
                 strength: *strength,
                 radius: *radius,
+            },
+            MatterDoc::WaterVolume {
+                pool,
+                radius,
+                half_extents,
+                density,
+                drag,
+                angular_drag,
+                frozen,
+                tint,
+                visibility,
+            } => Matter::WaterVolume {
+                kind: if *pool {
+                    floptle_core::WaterKind::Pool
+                } else {
+                    floptle_core::WaterKind::Sea
+                },
+                radius: *radius,
+                half_extents: *half_extents,
+                density: *density,
+                drag: *drag,
+                angular_drag: *angular_drag,
+                frozen: *frozen,
+                tint: *tint,
+                visibility: *visibility,
             },
             MatterDoc::FieldShape { radius } => Matter::FieldShape { radius: *radius },
             MatterDoc::Skybox { color, size, texture, tint, shader, shader_params } => {
@@ -1743,15 +1834,21 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     e
 }
 
-pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
+/// Spawn a doc's nodes and wire their hierarchy — the part that is the same
+/// whether a scene is being opened or layered on top of another one. Returns
+/// the entities in `doc.nodes` order.
+///
+/// Deliberately does NOT create the per-scene singletons (lighting, skybox,
+/// post-processing): those belong to whichever scene is the base.
+pub fn spawn_nodes(nodes: &[NodeDoc], world: &mut World) -> Vec<floptle_core::Entity> {
     // First pass: spawn each node (keeping the index→entity map for parent links).
-    let mut ents = Vec::with_capacity(doc.nodes.len());
-    for node in &doc.nodes {
+    let mut ents = Vec::with_capacity(nodes.len());
+    for node in nodes {
         ents.push(spawn_node(node, world));
     }
     // Second pass: link parents (skip out-of-range / self references).
-    let by_id = node_id_positions(&doc.nodes);
-    for (i, node) in doc.nodes.iter().enumerate() {
+    let by_id = node_id_positions(nodes);
+    for (i, node) in nodes.iter().enumerate() {
         if let Some(p) = resolve_parent(node, &by_id)
             && p < ents.len() && p != i {
                 world.insert(ents[i], floptle_core::Parent(ents[p]));
@@ -1759,7 +1856,7 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
     }
     // Third pass: bone attachments (target = the parent linked above; resolved by the
     // editor's resolve_attachments each frame, which fixes the identity transform).
-    for (i, node) in doc.nodes.iter().enumerate() {
+    for (i, node) in nodes.iter().enumerate() {
         if let (Some(att), Some(p)) = (&node.attachment, resolve_parent(node, &by_id))
             && p < ents.len()
             && p != i
@@ -1774,6 +1871,73 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
             );
         }
     }
+    ents
+}
+
+/// Layer a scene's nodes on top of a world that is already running — the
+/// `scene.load(name, { additive = true })` path.
+///
+/// Two differences from [`spawn_into`], both of them the whole point:
+///
+/// * **No singletons.** An additive scene brings no second sun, skybox or
+///   post-processing chain. A world has one environment; a second Lighting node
+///   would silently win or lose depending on query order, which is the kind of
+///   bug that reads as "the additive scene broke my lighting".
+/// * **Everything is tagged** with `tag`, so [`despawn_tagged`] can take exactly
+///   these nodes away again and nothing else.
+pub fn spawn_additive(
+    doc: &SceneDoc,
+    world: &mut World,
+    tag: &str,
+) -> Vec<floptle_core::Entity> {
+    let ents = spawn_nodes(&doc.nodes, world);
+    for &e in &ents {
+        world.insert(e, floptle_core::SceneTag(tag.to_string()));
+    }
+    ents
+}
+
+/// Remove every node an additive load tagged with `tag`. Returns how many went.
+///
+/// Children first is not required — the ECS has no ordering constraint — but a
+/// node whose PARENT is being removed goes too even if it was spawned later by
+/// something else (a projectile parented to an additive room leaves with the
+/// room, rather than becoming a child of nothing).
+pub fn despawn_tagged(world: &mut World, tag: &str) -> usize {
+    let direct: Vec<floptle_core::Entity> = world
+        .query::<floptle_core::SceneTag>()
+        .filter(|(_, t)| t.0 == tag)
+        .map(|(e, _)| e)
+        .collect();
+    if direct.is_empty() {
+        return 0;
+    }
+    let doomed: std::collections::HashSet<floptle_core::Entity> = direct.iter().copied().collect();
+    // Anything parented (at any depth) under a doomed node goes with it.
+    let mut all = doomed.clone();
+    for (e, _) in world.query::<floptle_core::Matter>() {
+        let mut cur = e;
+        for _ in 0..64 {
+            let Some(floptle_core::Parent(p)) = world.get::<floptle_core::Parent>(cur).copied()
+            else {
+                break;
+            };
+            if doomed.contains(&p) {
+                all.insert(e);
+                break;
+            }
+            cur = p;
+        }
+    }
+    let n = all.len();
+    for e in all {
+        world.despawn(e);
+    }
+    n
+}
+
+pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
+    spawn_nodes(&doc.nodes, world);
     let light = world.spawn();
     world.insert(light, Name("Lighting".into()));
     world.insert(light, doc.lighting.to_light());
@@ -2448,6 +2612,110 @@ mod tests {
             world2.query::<Matter>().filter(|(_, m)| matches!(m, Matter::Skybox { .. })).collect();
         assert_eq!(skies.len(), 1, "self-heal must not duplicate an authored Skybox");
         assert_eq!(*skies[0].1, authored, "sky shader + knob overrides lost in round-trip");
+    }
+
+    /// A scene doc for additive tests: two roots, one with a child.
+    fn layer_doc(name: &str) -> SceneDoc {
+        let mut d = demo();
+        d.name = name.into();
+        d.nodes = vec![plain("root", 1, None), plain("child", 2, Some(1)), plain("other", 3, None)];
+        d
+    }
+
+    /// An additive load brings NODES and nothing else. A second sun, a second
+    /// skybox or a second post-processing chain would leave the world's
+    /// environment decided by query order — the failure reads as "the additive
+    /// scene broke my lighting", which is nobody's first guess.
+    #[test]
+    fn an_additive_load_brings_no_second_environment() {
+        let mut world = World::new();
+        spawn_into(&layer_doc("base"), &mut world);
+        let lights_before = world.query::<floptle_core::Light>().count();
+        let skies_before =
+            world.query::<Matter>().filter(|(_, m)| matches!(m, Matter::Skybox { .. })).count();
+        let posts_before = world
+            .query::<Matter>()
+            .filter(|(_, m)| matches!(m, Matter::PostProcess { .. }))
+            .count();
+        assert_eq!((lights_before, skies_before, posts_before), (1, 1, 1), "base scene singletons");
+
+        spawn_additive(&layer_doc("props"), &mut world, "props");
+
+        assert_eq!(world.query::<floptle_core::Light>().count(), 1, "a second Lighting node");
+        assert_eq!(
+            world.query::<Matter>().filter(|(_, m)| matches!(m, Matter::Skybox { .. })).count(),
+            1,
+            "a second Skybox"
+        );
+        assert_eq!(
+            world.query::<Matter>().filter(|(_, m)| matches!(m, Matter::PostProcess { .. })).count(),
+            1,
+            "a second PostProcess"
+        );
+    }
+
+    /// `unload` takes back exactly what the matching `load` brought, and the
+    /// base scene is never a candidate — you cannot unload the world you opened
+    /// out from under yourself.
+    #[test]
+    fn unload_removes_its_own_layer_and_only_that() {
+        let mut world = World::new();
+        spawn_into(&layer_doc("base"), &mut world);
+        let base = world.len();
+
+        spawn_additive(&layer_doc("props"), &mut world, "props");
+        spawn_additive(&layer_doc("enemies"), &mut world, "enemies");
+        assert_eq!(world.len(), base + 6, "two three-node layers");
+
+        assert_eq!(despawn_tagged(&mut world, "props"), 3);
+        assert_eq!(world.len(), base + 3, "only the props layer went");
+
+        // An unknown tag is a no-op, not a world-clearing wildcard.
+        assert_eq!(despawn_tagged(&mut world, "nothing-by-that-name"), 0);
+        assert_eq!(world.len(), base + 3);
+
+        assert_eq!(despawn_tagged(&mut world, "enemies"), 3);
+        assert_eq!(world.len(), base, "back to the base scene exactly");
+    }
+
+    /// A node parented under an additive layer leaves WITH the layer, even
+    /// though nothing tagged it — otherwise unloading a room leaves the
+    /// projectile fired inside it orphaned, drawing at a pose derived from a
+    /// parent that no longer exists.
+    #[test]
+    fn unload_takes_children_spawned_into_the_layer() {
+        let mut world = World::new();
+        spawn_into(&layer_doc("base"), &mut world);
+        let base = world.len();
+        let ents = spawn_additive(&layer_doc("room"), &mut world, "room");
+
+        // Something the GAME spawned later, parented into the room.
+        let bullet = world.spawn();
+        world.insert(bullet, Transform::IDENTITY);
+        world.insert(bullet, Matter::Empty);
+        world.insert(bullet, floptle_core::Name("bullet".into()));
+        world.insert(bullet, floptle_core::Parent(ents[0]));
+        assert!(world.get::<floptle_core::SceneTag>(bullet).is_none(), "untagged on purpose");
+
+        assert_eq!(despawn_tagged(&mut world, "room"), 4, "3 tagged + the child");
+        assert_eq!(world.len(), base);
+        assert!(!world.is_alive(bullet), "an orphan is worse than a removal");
+    }
+
+    /// Persistence is a SUBTREE rule: marking a folder carries everything under
+    /// it. A child left behind when its parent survived would be the same trap
+    /// as a visible child under a disabled parent.
+    #[test]
+    fn persistence_is_inherited_down_the_subtree() {
+        let mut world = World::new();
+        let ents = spawn_nodes(&layer_doc("base").nodes, &mut world);
+        let (root, child, other) = (ents[0], ents[1], ents[2]);
+        assert!(!floptle_core::is_persistent(&world, root));
+
+        world.insert(root, floptle_core::Persistent);
+        assert!(floptle_core::is_persistent(&world, root));
+        assert!(floptle_core::is_persistent(&world, child), "a child of a keeper is a keeper");
+        assert!(!floptle_core::is_persistent(&world, other), "and a sibling is not");
     }
 }
 

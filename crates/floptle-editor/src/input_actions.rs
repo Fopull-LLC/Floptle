@@ -206,11 +206,23 @@ impl Editor {
         match floptle_input::load_map(&self.project_root) {
             Ok(Some(map)) => self.script_host.set_input_map(map),
             Ok(None) => self.script_host.set_input_map(InputMap::starter()),
-            Err(e) => self.console.push(
-                floptle_script::LogLevel::Error,
-                format!("input.ron: {e}"),
-                None,
-            ),
+            // The map already in memory stays — a bad edit must not leave the
+            // game with no bindings at all. Say which one is actually running,
+            // though: "it kept working" and "your edit took" look identical
+            // from the player's side (floptle/0051).
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("input.ron: {e}"),
+                    None,
+                );
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    "keeping the bindings already loaded — the game is NOT wearing input.ron"
+                        .into(),
+                    None,
+                );
+            }
         }
     }
 

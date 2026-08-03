@@ -1693,6 +1693,106 @@ impl EditorTabViewer<'_> {
                                         .changed();
                                 }
                             }
+                            Matter::WaterVolume {
+                                kind,
+                                radius,
+                                half_extents,
+                                density,
+                                drag,
+                                angular_drag,
+                                frozen,
+                                tint,
+                                visibility,
+                            } => {
+                                use floptle_core::WaterKind;
+                                ui.label("water volume");
+                                ui.small(
+                                    "buoyancy, drag and an underwater look. A Sea is a sphere \
+                                     about this node (a planet's ocean); a Pool is an oriented \
+                                     box — rotate the node and the surface tilts with it.",
+                                );
+                                ui.horizontal(|ui| {
+                                    for k in WaterKind::ALL {
+                                        if ui.selectable_label(*kind == k, k.label()).clicked()
+                                            && *kind != k
+                                        {
+                                            *kind = k;
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                });
+                                match kind {
+                                    WaterKind::Sea => {
+                                        cmd.inspector_changed |= ui
+                                            .add(
+                                                egui::Slider::new(radius, 1.0..=100_000.0)
+                                                    .logarithmic(true)
+                                                    .text("sea radius"),
+                                            )
+                                            .changed();
+                                    }
+                                    WaterKind::Pool => {
+                                        for (i, label) in ["half X", "half Y (depth)", "half Z"]
+                                            .iter()
+                                            .enumerate()
+                                        {
+                                            cmd.inspector_changed |= ui
+                                                .add(
+                                                    egui::Slider::new(
+                                                        &mut half_extents[i],
+                                                        0.1..=1000.0,
+                                                    )
+                                                    .logarithmic(true)
+                                                    .text(*label),
+                                                )
+                                                .changed();
+                                        }
+                                    }
+                                }
+                                cmd.inspector_changed |= ui
+                                    .add(
+                                        egui::Slider::new(density, 1.0..=5000.0)
+                                            .text("density kg/m³"),
+                                    )
+                                    .on_hover_text(
+                                        "1000 = fresh water. What decides whether a given hull \
+                                         floats is this against the hull's own density, so a \
+                                         denser sea carries heavier craft.",
+                                    )
+                                    .changed();
+                                cmd.inspector_changed |=
+                                    ui.add(egui::Slider::new(drag, 0.0..=10.0).text("drag")).changed();
+                                cmd.inspector_changed |= ui
+                                    .add(egui::Slider::new(angular_drag, 0.0..=10.0).text("spin drag"))
+                                    .changed();
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.label("underwater tint");
+                                    cmd.inspector_changed |=
+                                        ui.color_edit_button_rgb(tint).changed();
+                                });
+                                cmd.inspector_changed |= ui
+                                    .add(
+                                        egui::Slider::new(visibility, 1.0..=500.0)
+                                            .logarithmic(true)
+                                            .text("visibility m"),
+                                    )
+                                    .on_hover_text(
+                                        "How far you can see from inside. Replaces the scene's \
+                                         own fog while the camera is under, so meshes, terrain \
+                                         and particles go murky together.",
+                                    )
+                                    .changed();
+                                ui.separator();
+                                cmd.inspector_changed |= ui
+                                    .checkbox(frozen, "frozen")
+                                    .on_hover_text(
+                                        "A frozen sea is not a fluid: no buoyancy, no drag, no \
+                                         underwater state. Add a Collidable surface and it \
+                                         becomes walkable ground. A script can thaw it.",
+                                    )
+                                    .changed();
+                            }
                             Matter::Skybox { color, size, texture, tint, shader, shader_params } => {
                                 ui.label("skybox");
                                 ui.small("the scene environment, drawn behind everything. Rotate this node (or a script) to spin the sky.");

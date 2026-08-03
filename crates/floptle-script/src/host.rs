@@ -528,6 +528,44 @@ impl ScriptHost {
             }
         }
 
+        // Shape queries — the volume half of the same question `raycast` asks,
+        // sharing its collider/hull loans (so they are rewound inside
+        // `net.rewind` for free) and its options table (roadmap B2).
+        crate::shape_api::install_shape_api(
+            &lua,
+            crate::shape_api::QueryShared {
+                colliders: colliders.clone(),
+                hulls: hulls.clone(),
+                sim_origin: sim_origin.clone(),
+                current: net.current.clone(),
+                layers: layer_table.clone(),
+            },
+        );
+
+        // `water.*` — the volume half of `floptle/0038`. The engine floats
+        // things; a game still decides what being wet MEANS, and every one of
+        // those decisions is the same question with a different answer.
+        let water_volumes: Rc<RefCell<Vec<crate::water_api::WaterInfo>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let water_freeze: Rc<RefCell<Vec<(u32, bool)>>> = Rc::new(RefCell::new(Vec::new()));
+        crate::water_api::install_water_api(
+            &lua,
+            crate::water_api::WaterShared {
+                volumes: water_volumes.clone(),
+                freeze: water_freeze.clone(),
+            },
+        );
+
+        // `scatter.*` — thousands of props from a seed (`floptle/0036`). The
+        // game keeps deciding what grows where; the engine draws them.
+        let scatter_sources: crate::scatter_api::Sources = Rc::new(RefCell::new(Vec::new()));
+        let scatter_next_id: Rc<std::cell::Cell<u32>> = Rc::new(std::cell::Cell::new(0));
+        crate::scatter_api::install_scatter_api(
+            &lua,
+            scatter_sources.clone(),
+            scatter_next_id.clone(),
+        );
+
         // `gizmo.*` — immediate-mode debug drawing: world-space lines, rays, spheres
         // and points that show for ONE frame in the Scene view (never the Game view;
         // the viewport's gizmo toggle hides them). Colors are optional 0–1 floats.
@@ -666,15 +704,57 @@ impl ScriptHost {
         // the engine performs between frames (in multiplayer only the SERVER
         // may switch — clients follow automatically); `scene.current()` is the
         // running scene's name; `scene.list()` enumerates the project's scenes.
-        let scene_request: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let scene_request: crate::SceneQueue = Rc::new(RefCell::new(Vec::new()));
+        let scene_loaded: Rc<RefCell<Vec<(u32, mlua::RegistryKey)>>> =
+            Rc::new(RefCell::new(Vec::new()));
         let scene_name: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
         if let Ok(t) = lua.create_table() {
             let q = scene_request.clone();
             let _ = t.set(
                 "load",
+                lua.create_function(move |_, (name, opts): (String, Option<Table>)| {
+                    // `{ additive = true }` layers the scene on top of the
+                    // running one instead of replacing it. Anything else in the
+                    // table is ignored rather than rejected, so the option set
+                    // can grow without breaking a script that passed a table.
+                    let additive = opts
+                        .and_then(|o| o.get::<Option<bool>>("additive").ok().flatten())
+                        .unwrap_or(false);
+                    let req = if additive {
+                        crate::SceneRequest::Additive { name }
+                    } else {
+                        crate::SceneRequest::Load { name }
+                    };
+                    let mut q = q.borrow_mut();
+                    // A full swap ends the frame's queue: everything already
+                    // asked for named the world that is about to stop existing.
+                    if req.is_swap() {
+                        q.clear();
+                    }
+                    q.push(req);
+                    Ok(())
+                })
+                .ok(),
+            );
+            let q = scene_request.clone();
+            let _ = t.set(
+                "unload",
                 lua.create_function(move |_, name: String| {
-                    // Last call this frame wins — one transition per frame.
-                    *q.borrow_mut() = Some(name);
+                    q.borrow_mut().push(crate::SceneRequest::Unload { name });
+                    Ok(())
+                })
+                .ok(),
+            );
+            let subs = scene_loaded.clone();
+            let cur = net.current.clone();
+            let _ = t.set(
+                "onLoaded",
+                lua.create_function(move |lua, f: mlua::Function| {
+                    let owner = cur.borrow().as_ref().map(|(e, _)| *e).unwrap_or(0);
+                    match lua.create_registry_value(f) {
+                        Ok(k) => subs.borrow_mut().push((owner, k)),
+                        Err(e) => return Err(e),
+                    }
                     Ok(())
                 })
                 .ok(),
@@ -1504,6 +1584,7 @@ impl ScriptHost {
             material_changes: Rc::new(RefCell::new(HashMap::new())),
             visible_changes: Rc::new(RefCell::new(HashMap::new())),
             enabled_changes: Rc::new(RefCell::new(HashMap::new())),
+            persistent_changes: Rc::new(RefCell::new(HashMap::new())),
             layer_changes: Rc::new(RefCell::new(HashMap::new())),
             tag_changes: Rc::new(RefCell::new(HashMap::new())),
             layer_table: layer_table.clone(),
@@ -1512,6 +1593,7 @@ impl ScriptHost {
             ui_focus: ui_focus.clone(),
             component_changes: Rc::new(RefCell::new(HashMap::new())),
             component_colors: Rc::new(RefCell::new(HashMap::new())),
+            component_strs: Rc::new(RefCell::new(HashMap::new())),
             rich_sets: Rc::new(RefCell::new(Vec::new())),
             anim_info: Rc::new(RefCell::new(HashMap::new())),
             anim_commands: Rc::new(RefCell::new(Vec::new())),
@@ -1586,6 +1668,9 @@ impl ScriptHost {
         let terrain_save_dir: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let terrain_warm: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         let terrain_flush: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
+        let terrain_yields: Rc<RefCell<Vec<crate::terrain_api::TerrainYield>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let terrain_op_id: Rc<std::cell::Cell<u64>> = Rc::new(std::cell::Cell::new(0));
         crate::terrain_api::install_terrain_api(
             &lua,
             terrain_ops.clone(),
@@ -1597,6 +1682,10 @@ impl ScriptHost {
                 warm: terrain_warm.clone(),
                 flush: terrain_flush.clone(),
                 root: project_root.clone(),
+            },
+            crate::terrain_api::TerrainReceipts {
+                yields: terrain_yields.clone(),
+                next_op_id: terrain_op_id.clone(),
             },
         );
         // The `save.*` persistent store (roadmap A2).
@@ -1694,6 +1783,7 @@ impl ScriptHost {
             hulls,
             sim_origin,
             terrain_ops,
+            terrain_yields,
             terrain_generates,
             terrain_save_dir,
             terrain_warm,
@@ -1706,6 +1796,7 @@ impl ScriptHost {
             material_changes: shared.material_changes.clone(),
             visible_changes: shared.visible_changes.clone(),
             enabled_changes: shared.enabled_changes.clone(),
+            persistent_changes: shared.persistent_changes.clone(),
             layer_changes: shared.layer_changes.clone(),
             tag_changes: shared.tag_changes.clone(),
             layer_table,
@@ -1713,6 +1804,7 @@ impl ScriptHost {
             ui_style_changes: shared.ui_style_changes.clone(),
             component_changes: shared.component_changes.clone(),
             component_colors: shared.component_colors.clone(),
+            component_strs: shared.component_strs.clone(),
             materials: Rc::new(RefCell::new(HashMap::new())),
             project_root,
             save_state,
@@ -1726,6 +1818,10 @@ impl ScriptHost {
             mouse_lock,
             param_writes: RefCell::new(Vec::new()),
             scene_request,
+            scene_loaded,
+            water_volumes,
+            water_freeze,
+            scatter_sources,
             scene_name,
             ui_focus,
             ui_focus_request,
@@ -1777,10 +1873,64 @@ impl ScriptHost {
         }
     }
 
-    /// Drain a `scene.load(...)` request queued by a script this frame (last call
-    /// wins). The driver performs the switch between frames.
-    pub fn take_scene_request(&mut self) -> Option<String> {
-        self.scene_request.borrow_mut().take()
+    /// Drain the `scene.load` / `scene.unload` requests queued this frame, in
+    /// the order they were made. The driver performs them between frames.
+    pub fn take_scene_requests(&mut self) -> Vec<crate::SceneRequest> {
+        std::mem::take(&mut *self.scene_request.borrow_mut())
+    }
+
+    /// Fire every live `scene.onLoaded(fn)` subscription with the name of the
+    /// scene that just finished loading and whether it arrived additively.
+    ///
+    /// Runs AFTER the world is whole — a loading screen's whole job is to go
+    /// away once the thing it was covering exists, so being told early would be
+    /// worse than not being told.
+    pub fn fire_scene_loaded(&mut self, world: &mut World, name: &str, additive: bool) {
+        let subs: Vec<(u32, mlua::RegistryKey)> =
+            std::mem::take(&mut *self.scene_loaded.borrow_mut());
+        if subs.is_empty() {
+            return;
+        }
+        self.sync_scene(world);
+        let mut kept = Vec::with_capacity(subs.len());
+        for (owner, key) in subs {
+            // A subscription whose owning script no longer exists is dead
+            // weight — the swap it was waiting for is the thing that took it.
+            if !self.envs.borrow().keys().any(|(e, _)| *e == owner) {
+                let _ = self.lua.remove_registry_value(key);
+                continue;
+            }
+            let Ok(f) = self.lua.registry_value::<mlua::Function>(&key) else { continue };
+            if let Err(err) = f.call::<()>((name, additive)) {
+                self.record_error("scene", format!("scene.onLoaded: {err}"));
+            }
+            kept.push((owner, key));
+        }
+        self.scene_loaded.borrow_mut().extend(kept);
+        self.flush_writes(world);
+    }
+
+    /// The scatter sources scripts have declared — what the driver resolves
+    /// into instances and draws each frame.
+    pub fn scatter_sources(&self) -> std::cell::Ref<'_, Vec<floptle_core::scatter::ScatterSource>> {
+        self.scatter_sources.borrow()
+    }
+
+    /// Drop every scatter source — a SCENE SWITCH. A source names a region of
+    /// the world that is about to stop existing.
+    pub fn clear_scatter(&mut self) {
+        self.scatter_sources.borrow_mut().clear();
+    }
+
+    /// Publish the scene's bodies of water, before scripts run — what
+    /// `water.depthAt` and friends answer from.
+    pub fn set_water_volumes(&mut self, v: Vec<crate::water_api::WaterInfo>) {
+        *self.water_volumes.borrow_mut() = v;
+    }
+
+    /// Drain `water.setFrozen(node, on)` calls made this frame.
+    pub fn take_water_freezes(&mut self) -> Vec<(u32, bool)> {
+        std::mem::take(&mut *self.water_freeze.borrow_mut())
     }
 
     /// Publish the engine's current UI focus, before scripts run.
@@ -1925,36 +2075,110 @@ impl ScriptHost {
     /// against the new world, and every `start` re-fires. Compiled sources stay
     /// cached (rebuilding is per-instance, not per-file).
     pub fn reset_instances(&mut self) {
+        self.reset_instances_keeping(&std::collections::HashSet::new());
+    }
+
+    /// [`Self::reset_instances`], except that instances (and the UI
+    /// subscriptions they own) belonging to the entities in `keep` are left
+    /// running untouched.
+    ///
+    /// This is what `node.persistent` costs the script host. A persistent node
+    /// keeps its ENTITY across the swap — the driver despawns the old scene in
+    /// place rather than building a new world, so the surviving index cannot be
+    /// handed out again while it is alive — and because instances are keyed by
+    /// entity index, keeping the instance keeps the running script: its state,
+    /// its coroutines, its `synced` values. `start` does not re-fire, which is
+    /// the difference between "survives" and "is rebuilt".
+    ///
+    /// A subscription is kept only when EVERY entity it names survives. A
+    /// binding whose element belonged to the old scene would otherwise drive
+    /// whatever node inherits that index next.
+    pub fn reset_instances_keeping(&mut self, keep: &std::collections::HashSet<u32>) {
         // Pending timers belong to the old session — a scene switch drops them.
+        // (Including a persistent node's: a timer is a promise about a world.)
         self.sched.borrow_mut().clear();
         let all: Vec<_> = self.instances.drain().collect();
         for (k, inst) in all {
+            if keep.contains(&k.0) {
+                self.instances.insert(k, inst);
+                continue;
+            }
             let _ = self.lua.remove_registry_value(inst.env);
             self.drop_net_instance(&k);
         }
-        self.envs.borrow_mut().clear();
+        self.envs.borrow_mut().retain(|(e, _), _| keep.contains(e));
         // Bindings point at the OLD scene's entity indices, which the new
         // scene will reuse. Left in place they would drive the wrong nodes.
-        for b in self.ui_bindings.borrow_mut().drain(..) {
-            let _ = self.lua.remove_registry_value(b.f);
+        {
+            let mut binds = self.ui_bindings.borrow_mut();
+            let mut i = 0;
+            while i < binds.len() {
+                if keep.contains(&binds[i].e) {
+                    i += 1;
+                } else {
+                    let b = binds.remove(i);
+                    let _ = self.lua.remove_registry_value(b.f);
+                }
+            }
         }
         // Same reasoning for made screens: their described trees and their
         // behaviour closures both name the OLD scene's entity indices, which
         // the new scene reuses from zero.
-        for req in self.ui_makes.borrow_mut().drain(..) {
-            for (_, _, f) in req.hooks {
-                let _ = self.lua.remove_registry_value(f);
+        {
+            let mut makes = self.ui_makes.borrow_mut();
+            let mut i = 0;
+            while i < makes.len() {
+                if keep.contains(&makes[i].container) {
+                    i += 1;
+                } else {
+                    let req = makes.remove(i);
+                    for (_, _, f) in req.hooks {
+                        let _ = self.lua.remove_registry_value(f);
+                    }
+                }
             }
         }
-        for (_, f) in self.ui_handlers.borrow_mut().drain() {
-            let _ = self.lua.remove_registry_value(f);
+        {
+            let mut handlers = self.ui_handlers.borrow_mut();
+            let dead: Vec<_> =
+                handlers.keys().filter(|(e, _)| !keep.contains(e)).cloned().collect();
+            for k in dead {
+                if let Some(f) = handlers.remove(&k) {
+                    let _ = self.lua.remove_registry_value(f);
+                }
+            }
         }
         // …and `ui.on` listeners, which name old entity indices on both sides:
-        // the element they watch AND the script that owns them.
-        for l in self.ui_listeners.borrow_mut().drain(..) {
-            let _ = self.lua.remove_registry_value(l.f);
+        // the element they watch AND the script that owns them. BOTH have to
+        // survive for the listener to mean anything.
+        {
+            let mut ls = self.ui_listeners.borrow_mut();
+            let mut i = 0;
+            while i < ls.len() {
+                if keep.contains(&ls[i].e) && keep.contains(&ls[i].owner.0) {
+                    i += 1;
+                } else {
+                    let l = ls.remove(i);
+                    let _ = self.lua.remove_registry_value(l.f);
+                }
+            }
         }
         self.ui_listener_checks.borrow_mut().clear();
+        // `scene.onLoaded` subscriptions follow their owner, so a persistent
+        // loading screen is still listening on the other side of the swap —
+        // which is the only place a loading screen is any use.
+        {
+            let mut subs = self.scene_loaded.borrow_mut();
+            let mut i = 0;
+            while i < subs.len() {
+                if keep.contains(&subs[i].0) {
+                    i += 1;
+                } else {
+                    let (_, f) = subs.remove(i);
+                    let _ = self.lua.remove_registry_value(f);
+                }
+            }
+        }
         // Queued spawn/destroy requests must not leak across a scene switch
         // (their entities/prefabs belong to the old scene's session).
         for req in self.spawn_requests.borrow_mut().drain(..) {
@@ -2789,6 +3013,17 @@ impl ScriptHost {
     /// Drain the terrain edits scripts queued this pass (`terrain.sculpt/dig/paint`).
     /// The editor applies each to the authority field, the sim's collider copy, the
     /// remesh queue and the shadow proxy — the same pipeline as an editor brush dab.
+    /// Post the measured result of an applied op back to the scripts, to be read
+    /// by `terrain.yields()` on the next pass (floptle/0037).
+    pub fn push_terrain_yield(&self, y: crate::TerrainYield) {
+        let mut q = self.terrain_yields.borrow_mut();
+        // A game that never calls `terrain.yields()` must not grow a list
+        // forever; the cap is far above any real frame's worth of edits.
+        if q.len() < 4096 {
+            q.push(y);
+        }
+    }
+
     pub fn take_terrain_ops(&self) -> Vec<crate::TerrainOp> {
         std::mem::take(&mut self.terrain_ops.borrow_mut())
     }
@@ -3542,6 +3777,17 @@ impl ScriptHost {
                     }
                 }
             }
+            // `node.persistent = …`. Same shape as `enabled`, opposite polarity:
+            // presence IS the flag, so `false` removes the marker.
+            for (eid, on) in self.persistent_changes.borrow().iter() {
+                if let Some(&ent) = scene.ents.get(eid) {
+                    if *on {
+                        world.insert(ent, floptle_core::Persistent);
+                    } else {
+                        world.remove::<floptle_core::Persistent>(ent);
+                    }
+                }
+            }
             // `node.layer = ...` (pre-validated): "Default" removes the
             // component (absence IS Default — keeps scene files clean).
             for (eid, layer) in self.layer_changes.borrow().iter() {
@@ -3592,6 +3838,15 @@ impl ScriptHost {
                     crate::apply_component_color(world, ent, comp, field, *c);
                 }
             }
+            // String-valued component writes — `el.texture = "portraits/sae.png"`
+            // and friends. The apply side has existed since the animation
+            // system's property tracks used it; until 0052 nothing in Lua could
+            // reach it, so a portrait assignment did nothing at all, silently.
+            for ((eid, comp, field), s) in self.component_strs.borrow().iter() {
+                if let Some(&ent) = scene.ents.get(eid) {
+                    crate::apply_component_field_str(world, ent, comp, field, s);
+                }
+            }
             // `node:setShaderParam(name, ...)`: fold into the node's UI element
             // (when it has a `stage ui` shader) or its Material's params. The
             // per-frame shader drivers see the change and upload a uniform
@@ -3613,12 +3868,14 @@ impl ScriptHost {
         self.material_changes.borrow_mut().clear();
         self.visible_changes.borrow_mut().clear();
         self.enabled_changes.borrow_mut().clear();
+        self.persistent_changes.borrow_mut().clear();
         self.layer_changes.borrow_mut().clear();
         self.tag_changes.borrow_mut().clear();
         self.ui_text_changes.borrow_mut().clear();
         self.ui_style_changes.borrow_mut().clear();
         self.component_changes.borrow_mut().clear();
         self.component_colors.borrow_mut().clear();
+        self.component_strs.borrow_mut().clear();
     }
 
     /// Fire UI-interaction hooks on a node's scripts: for each `(entity, hook)`
@@ -3718,11 +3975,13 @@ impl ScriptHost {
         s.models.clear();
         s.visible.clear();
         s.disabled.clear();
+        s.persistent.clear();
         s.layers.clear();
         s.tags.clear();
         s.components.clear();
         s.ui_texts.clear();
         s.ui_styles.clear();
+        s.ui_textures.clear();
         for (e, tr) in world.query::<Transform>() {
             let id = e.index();
             s.order.push(id);
@@ -3737,6 +3996,11 @@ impl ScriptHost {
                 }
                 if !spec.style.is_empty() {
                     s.ui_styles.insert(id, spec.style.clone());
+                }
+                if let Some(img) = spec.image.as_ref()
+                    && !img.texture.is_empty()
+                {
+                    s.ui_textures.insert(id, img.texture.clone());
                 }
             }
             // Mirror the numeric fields scripts can reach via node:getcomponent(...).
@@ -3756,6 +4020,9 @@ impl ScriptHost {
             }
             if world.get::<floptle_core::Disabled>(e).is_some() {
                 s.disabled.insert(id);
+            }
+            if world.get::<floptle_core::Persistent>(e).is_some() {
+                s.persistent.insert(id);
             }
             if let Some(l) = world.get::<floptle_core::Layer>(e) {
                 s.layers.insert(id, l.0.clone());

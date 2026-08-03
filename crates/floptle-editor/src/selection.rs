@@ -253,6 +253,7 @@ impl Editor {
                 | Matter::Camera { .. }
                 | Matter::PointLight { .. }
                 | Matter::GravityVolume { .. }
+                | Matter::WaterVolume { .. }
                 | Matter::Skybox { .. }
                 | Matter::PostProcess { .. } => None,
             };

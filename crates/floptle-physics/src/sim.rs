@@ -449,6 +449,7 @@ impl Sim {
         b.restitution = rb.restitution;
         b.friction = rb.friction;
         b.use_gravity = rb.gravity;
+        b.mass = rb.mass.max(1e-4);
         b.lock_pos = rb.lock_pos;
         b.layer = layers.index_for(ecs, e);
         b.kinematic = rb.mode == floptle_core::BodyMode::Kinematic;

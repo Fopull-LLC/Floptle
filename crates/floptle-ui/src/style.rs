@@ -38,8 +38,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Blend, Case, Corners, FrameSpec, GlowSpec, Gradient, GrainSpec, ShadowSpec, Sides, TextShadow,
-    TextStroke,
+    Blend, Case, Corners, FrameSpec, GlowSpec, Gradient, GradientKind, GrainSpec, ShadowSpec, Sides,
+    TextShadow, TextStroke,
 };
 
 // ---------------------------------------------------------------------------
@@ -93,6 +93,53 @@ pub struct StyleGlow {
     pub radius: f32,
     #[serde(default)]
     pub spread: f32,
+}
+
+/// A gradient whose far stop can be a token.
+///
+/// A gradient is nearly always *this surface fading to nothing* or *this
+/// surface fading to the one below it*, and both of those are named colours by
+/// definition — so this is the field most likely to want a token, and it was
+/// the last one that could not have it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StyleGradient {
+    #[serde(default)]
+    pub kind: GradientKind,
+    /// The far colour. `None` means **the fill at alpha 0** — "fade this out",
+    /// which is the commonest value by a distance and the one most easily got
+    /// wrong: writing it by hand needs the near colour's RGB repeated exactly,
+    /// or the fade travels through the wrong hue on its way to transparent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<ColorRef>,
+    #[serde(default)]
+    pub angle: f32,
+    #[serde(default = "half_f32")]
+    pub mid: f32,
+    #[serde(default = "one_f32")]
+    pub radius: f32,
+}
+
+fn half_f32() -> f32 {
+    0.5
+}
+fn one_f32() -> f32 {
+    1.0
+}
+
+/// A text outline whose colour can be a token.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StyleStroke {
+    pub color: ColorRef,
+    #[serde(default = "one_f32")]
+    pub width: f32,
+}
+
+/// A text drop shadow whose colour can be a token.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StyleTextShadow {
+    pub color: ColorRef,
+    #[serde(default)]
+    pub offset: [f32; 2],
 }
 
 /// A number: either written out, or the name of a project token.
@@ -356,7 +403,7 @@ pub struct StyleBlock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill: Option<ColorRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gradient: Option<Gradient>,
+    pub gradient: Option<StyleGradient>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<CornerRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -398,9 +445,9 @@ pub struct StyleBlock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_stroke: Option<TextStroke>,
+    pub text_stroke: Option<StyleStroke>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_shadow: Option<TextShadow>,
+    pub text_shadow: Option<StyleTextShadow>,
     // --- text field (only reach an element with a `field`) ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caret_color: Option<ColorRef>,
@@ -577,6 +624,14 @@ pub struct StyleRuntime {
     /// the first time it steps, so later passes over the same frame don't
     /// charge `dt` again.
     frame: u64,
+    /// `style:` names no sheet defines, accumulated as they are met.
+    ///
+    /// An element naming a style that does not exist draws unstyled and says
+    /// nothing, which is the most common failure after a rename and the hardest
+    /// to see — the element looks *authored*, just wrong. Collected here rather
+    /// than logged from the walk so `floptle-ui` keeps knowing nothing about
+    /// consoles; whoever owns one drains it with [`Self::take_missing_styles`].
+    missing: std::collections::BTreeSet<String>,
 }
 
 impl StyleRuntime {
@@ -597,6 +652,14 @@ impl StyleRuntime {
     /// or 3× speed depending on which views happen to be open.
     pub fn begin_frame(&mut self) {
         self.frame = self.frame.wrapping_add(1);
+    }
+
+    /// Take the `style:` names met since the last call that no sheet defines.
+    ///
+    /// Draining means each name is reported once per reload rather than once
+    /// per frame — a missing style is met again every frame it is on screen.
+    pub fn take_missing_styles(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.missing).into_iter().collect()
     }
 
     /// Drop entries for elements that no longer exist, so a long session
@@ -713,17 +776,34 @@ fn overlay(mut a: Animated, block: &StyleBlock, tk: &Tokens) -> Animated {
     if let Some(v) = block.tracking {
         a.tracking = v;
     }
-    if let Some(g) = block.gradient {
-        a.grad_to = g.to;
+    if let Some(g) = &block.gradient {
+        // Resolved AFTER `a.fill`, because the default far stop is the fill at
+        // alpha 0 — which is what "fade this out" means, and what a hand-written
+        // literal most often gets subtly wrong.
+        a.grad_to = match &g.to {
+            Some(c) => tk.color(c),
+            None => [a.fill[0], a.fill[1], a.fill[2], 0.0],
+        };
     }
     a
 }
 
 /// Apply the discrete (non-interpolated) parts of a block straight onto a spec.
 fn apply_discrete(spec: &mut crate::ElementSpec, block: &StyleBlock, tk: &Tokens) {
-    if let Some(g) = block.gradient {
+    if let Some(g) = &block.gradient {
         let s = spec.shape.get_or_insert_with(Default::default);
-        s.gradient = Some(g);
+        // `to` is filled in by `apply_animated` from the resolved animated set
+        // (it interpolates with the fill); this carries the discrete parts.
+        s.gradient = Some(Gradient {
+            kind: g.kind,
+            to: match &g.to {
+                Some(c) => tk.color(c),
+                None => [0.0; 4],
+            },
+            angle: g.angle,
+            mid: g.mid,
+            radius: g.radius,
+        });
     }
     if let Some(sh) = &block.shadow {
         spec.shape.get_or_insert_with(Default::default).shadow = Some(ShadowSpec {
@@ -760,15 +840,15 @@ fn apply_discrete(spec: &mut crate::ElementSpec, block: &StyleBlock, tk: &Tokens
     {
         t.font = tk.font(f);
     }
-    if let Some(st) = block.text_stroke
+    if let Some(st) = &block.text_stroke
         && let Some(t) = &mut spec.text
     {
-        t.stroke = Some(st);
+        t.stroke = Some(TextStroke { color: tk.color(&st.color), width: st.width });
     }
-    if let Some(sh) = block.text_shadow
+    if let Some(sh) = &block.text_shadow
         && let Some(t) = &mut spec.text
     {
-        t.shadow = Some(sh);
+        t.shadow = Some(TextShadow { color: tk.color(&sh.color), offset: sh.offset });
     }
     if let Some(f) = &mut spec.field {
         // Discrete rather than animated: a caret that cross-fades its colour
@@ -845,6 +925,12 @@ pub fn apply_styles(
         rt: &mut StyleRuntime,
         dt: f32,
     ) {
+        if !n.spec.style.is_empty()
+            && sheet.get(&n.spec.style).is_none()
+            && !rt.missing.contains(&n.spec.style)
+        {
+            rt.missing.insert(n.spec.style.clone());
+        }
         if !n.spec.style.is_empty()
             && let Some(style) = sheet.get(&n.spec.style)
         {
@@ -966,6 +1052,94 @@ mod tests {
         let input = StateInput { hovered: Some(1), ..Default::default() };
         assert_eq!(UiState::pick(1, &spec, &input), UiState::Hover);
         assert_eq!(UiState::pick(1, &spec, &StateInput::default()), UiState::Selected);
+    }
+
+    /// A `style:` naming nothing has to be reportable. It is the commonest
+    /// thing a rename breaks and the hardest to spot, because the element
+    /// still draws — it just draws the way it was authored, which looks
+    /// deliberate (floptle/0051).
+    #[test]
+    fn a_style_name_in_no_sheet_is_collected_once() {
+        let mut roots = vec![
+            node(1, ElementSpec { style: "button".into(), ..Default::default() }),
+            node(2, ElementSpec { style: "ghost".into(), ..Default::default() }),
+            node(3, ElementSpec { style: "ghost".into(), ..Default::default() }),
+            node(4, ElementSpec::default()),
+        ];
+        let mut rt = StyleRuntime::default();
+        // Styled twice, as a real frame does (hit test, then draw).
+        for _ in 0..2 {
+            apply_styles(&mut roots, &button_sheet(), &tokens(), &StateInput::default(), &mut rt, 0.0);
+        }
+        // "button" IS in the sheet; "ghost" is not, and two elements share it.
+        assert_eq!(rt.take_missing_styles(), vec!["ghost".to_string()]);
+        // Draining means the report is once per reload, not once per frame.
+        assert!(rt.take_missing_styles().is_empty());
+    }
+
+    /// floptle/0053: `shadow` and `glow` could name a token and these three
+    /// could not, so one `to: "gold-none"` failed the WHOLE file and took every
+    /// style in the project with it.
+    #[test]
+    fn a_gradient_stroke_and_text_shadow_all_take_tokens() {
+        let src = r#"{
+            "card": (
+                base: (
+                    fill: "accent",
+                    gradient: (kind: Linear, to: "bg", angle: 90.0),
+                    text_stroke: (color: "accent", width: 2.0),
+                    text_shadow: (color: "bg", offset: (0.0, 2.0)),
+                ),
+            ),
+        }"#;
+        let sheet = StyleSheet::parse(src).expect("a token in all three parses");
+        let base = &sheet.styles["card"].base;
+        assert_eq!(base.gradient.as_ref().unwrap().to, Some(ColorRef::Token("bg".into())));
+        assert_eq!(base.text_stroke.as_ref().unwrap().color, ColorRef::Token("accent".into()));
+        assert_eq!(base.text_shadow.as_ref().unwrap().color, ColorRef::Token("bg".into()));
+
+        // …and they resolve to the token's value on a real element.
+        let mut roots = vec![node(
+            1,
+            ElementSpec {
+                style: "card".into(),
+                shape: Some(ShapeSpec::default()),
+                text: Some(TextSpec { text: "hi".into(), ..Default::default() }),
+                ..Default::default()
+            },
+        )];
+        let mut rt = StyleRuntime::default();
+        apply_styles(&mut roots, &sheet, &tokens(), &StateInput::default(), &mut rt, 1.0);
+        let spec = &roots[0].spec;
+        let bg = tokens().colors["bg"];
+        assert_eq!(spec.shape.as_ref().unwrap().gradient.unwrap().to, bg);
+        assert_eq!(spec.text.as_ref().unwrap().stroke.unwrap().color, tokens().colors["accent"]);
+        assert_eq!(spec.text.as_ref().unwrap().shadow.unwrap().color, bg);
+    }
+
+    /// Omitting `to` means "fade this out": the fill at alpha 0. Writing that by
+    /// hand needs the near colour's RGB repeated exactly, and getting it wrong
+    /// sends the fade through the wrong hue on the way to transparent.
+    #[test]
+    fn a_gradient_with_no_far_stop_fades_the_fill_out() {
+        let src = r#"{
+            "fade": ( base: ( fill: "accent", gradient: (kind: Linear) ) ),
+        }"#;
+        let sheet = StyleSheet::parse(src).expect("parses without a `to`");
+        let mut roots = vec![node(
+            1,
+            ElementSpec { style: "fade".into(), shape: Some(ShapeSpec::default()), ..Default::default() },
+        )];
+        let mut rt = StyleRuntime::default();
+        apply_styles(&mut roots, &sheet, &tokens(), &StateInput::default(), &mut rt, 1.0);
+        let sh = roots[0].spec.shape.as_ref().unwrap();
+        let accent = tokens().colors["accent"];
+        assert_eq!(sh.fill, accent);
+        assert_eq!(
+            sh.gradient.unwrap().to,
+            [accent[0], accent[1], accent[2], 0.0],
+            "the far stop is the fill at alpha 0 — same hue, no alpha"
+        );
     }
 
     #[test]

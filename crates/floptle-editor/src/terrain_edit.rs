@@ -1114,8 +1114,36 @@ impl Editor {
     /// dig/paint/paintTexture` — Terrain 2.0 P6). Call after reclaiming the sim's
     /// colliders and BEFORE stepping physics, so a dig affects the same tick.
     pub(crate) fn drain_script_terrain_ops(&mut self) {
-        for op in self.script_host.take_terrain_ops() {
+        let ops = self.script_host.take_terrain_ops();
+        if ops.is_empty() {
+            return;
+        }
+        // The ground under a scatter chunk just moved, so the props standing on
+        // it are at the old height. Forget those chunks and they re-settle onto
+        // the new surface — SC3's "digging the ground out from under one drops
+        // or despawns it", for free, because placement was never remembered in
+        // the first place. Collected BEFORE the edits, since the sources list
+        // is borrowed from the script host and the edits do not change it.
+        let dirty: Vec<(DVec3, f64)> = {
+            let sources = self.script_host.scatter_sources();
+            if sources.is_empty() {
+                Vec::new()
+            } else {
+                ops.iter()
+                    .filter(|o| o.affects_geometry())
+                    .map(|o| (DVec3::new(o.pos[0], o.pos[1], o.pos[2]), o.radius as f64))
+                    .collect()
+            }
+        };
+        for op in ops {
             self.apply_terrain_op(&op);
+        }
+        if !dirty.is_empty() {
+            let sources: Vec<floptle_core::scatter::ScatterSource> =
+                self.script_host.scatter_sources().clone();
+            for (p, r) in dirty {
+                self.scatter_cache.invalidate_near(&sources, p, r);
+            }
         }
     }
 
@@ -1148,14 +1176,39 @@ impl Editor {
         let r_local = op.radius / ts;
         let profile = BrushProfile::default();
         let t = self.terrains.get_mut(&e).unwrap();
+        let mut measured = None;
         let touched = match op.mode {
-            M::Raise => t.field.sculpt(Brush::Raise, local, r_local, op.strength, profile),
-            M::Lower => t.field.sculpt(Brush::Lower, local, r_local, op.strength, profile),
-            M::Smooth => t.field.sculpt(Brush::Smooth, local, r_local, op.strength, profile),
-            M::Flatten => t.field.sculpt(Brush::Flatten, local, r_local, op.strength, profile),
+            M::Raise | M::Lower | M::Smooth | M::Flatten => {
+                let brush = match op.mode {
+                    M::Raise => Brush::Raise,
+                    M::Lower => Brush::Lower,
+                    M::Smooth => Brush::Smooth,
+                    _ => Brush::Flatten,
+                };
+                let (touched, y) =
+                    t.field.sculpt_measured(brush, local, r_local, op.strength, profile);
+                measured = Some(y);
+                touched
+            }
             M::Paint(c) => t.field.paint(local, r_local, op.strength, c, profile),
             M::PaintTexture(slot) => t.field.paint_texture(local, r_local, slot),
         };
+        // Report BEFORE the empty-touch bail: a dab that moved nothing has to
+        // report zero rather than nothing, or a game cannot tell "I dug air"
+        // from "the report is still coming" (floptle/0037). Volumes are measured
+        // in the field's local units, so a scaled terrain converts by scale³.
+        if let Some(y) = measured
+            && op.id != 0
+        {
+            let w = f64::from(ts).powi(3);
+            self.script_host.push_terrain_yield(floptle_script::TerrainYield {
+                id: op.id,
+                removed: y.removed * w,
+                added: y.added * w,
+                untextured: y.untextured * w,
+                slots: y.slots.into_iter().map(|(s, v)| (s, v * w)).collect(),
+            });
+        }
         if touched.is_empty() {
             return;
         }

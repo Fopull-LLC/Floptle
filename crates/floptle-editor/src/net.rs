@@ -707,7 +707,24 @@ impl Editor {
     /// client (they load + rebind), rebuild the session against the new scene;
     /// a JOINED client = refused (the server drives scenes — ask it via an
     /// RPC). Runs at the top of a frame, never mid-frame under the scripts.
-    pub(crate) fn perform_scene_request(&mut self, req: &str) {
+    pub(crate) fn perform_scene_request(&mut self, req: &floptle_script::SceneRequest) {
+        use floptle_script::SceneRequest;
+        // Additive loads and unloads are LOCAL: they add or remove scenery on
+        // top of the scene everyone agreed on, and the session's identity (its
+        // announced scene, its NetIds, its slot order) is untouched. A client
+        // may do them; a swap is still the server's alone.
+        match req {
+            SceneRequest::Additive { name } => {
+                self.perform_scene_additive(name);
+                return;
+            }
+            SceneRequest::Unload { name } => {
+                self.perform_scene_unload(name);
+                return;
+            }
+            SceneRequest::Load { .. } => {}
+        }
+        let req = req.name();
         if self.net_play_client.is_some() {
             self.console.push(
                 floptle_script::LogLevel::Warn,
@@ -781,6 +798,11 @@ impl Editor {
         } else {
             self.net_apply_offline_slots();
         }
+        // Tell whatever survived the swap that the new world is whole. Last,
+        // deliberately: a loading screen's job is to go away once the thing it
+        // was covering exists, so being told any earlier would be a lie.
+        let name = self.scene_name.clone();
+        self.script_host.fire_scene_loaded(&mut self.world, &name, false);
     }
 
     /// Host a REAL session on a UDP port (QUIC): other machines running the
@@ -1363,7 +1385,7 @@ impl Editor {
         let _ = hs.host.take_spawn_effects();
         let _ = hs.host.take_model_changes();
         let _ = hs.host.take_mouse_lock();
-        if hs.host.take_scene_request().is_some() {
+        if !hs.host.take_scene_requests().is_empty() {
             self.console.push(
                 floptle_script::LogLevel::Warn,
                 "[server] scene.load isn't supported in the in-editor remote-player harness \

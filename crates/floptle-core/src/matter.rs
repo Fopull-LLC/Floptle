@@ -310,6 +310,31 @@ impl Default for RigidBody {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Disabled;
 
+/// Marks a node (and everything under it) as surviving a scene swap — the
+/// DontDestroyOnLoad equivalent. A persistent node keeps its entity, its
+/// components, its physics body AND its running scripts: `start` does not
+/// re-fire, because the node never stopped existing.
+///
+/// A marker for the same reason [`Disabled`] is one: presence = persistent, and
+/// the ordinary node (which is every node in every scene written so far) costs
+/// nothing and serializes to nothing.
+///
+/// **The whole subtree goes with it.** Carrying a music player across a scene
+/// change and leaving its audio source behind would be a trap, and the useful
+/// unit — a HUD, a party, a save-game manager — is a folder, not a leaf.
+///
+/// This is a RUNTIME flag: it is set from a script (`node.persistent = true`),
+/// not authored in a scene file. A node is only ever persistent relative to a
+/// swap that happens while the game runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Persistent;
+
+/// The scene an additively-loaded node came from — what `scene.unload(name)`
+/// removes. Absence means "belongs to the base scene", so the nodes the editor
+/// opened are never candidates for unloading.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SceneTag(pub String);
+
 /// Marks a `Matter::Mesh` node as a STATIC collider you can walk on — the editor bakes
 /// its triangles (in world space) into the physics sim at Play. The model isn't a
 /// dynamic body; it's environment geometry (a level/map). Presence = collidable.
@@ -571,6 +596,43 @@ pub enum Matter {
     /// A gravity source for the physics sim — `Down` for normal-style level gravity,
     /// `Radial` for a planet (Mario-Galaxy) gravity well centered on the node.
     GravityVolume { mode: GravityMode, strength: f32, radius: f32 },
+    /// A body of water (`floptle/0038`): a planet's sea (`Sea`, a sphere of
+    /// `radius` about the node) or a lake / tank / flooded room (`Pool`, an
+    /// oriented box of `half_extents` — the node's rotation orients it, so a
+    /// tilted tank has a tilted surface).
+    ///
+    /// The node's transform places it. Everything else is what the water *is*:
+    /// how dense (whether a given hull floats), how much it resists motion, how
+    /// it looks from inside, and whether it is currently frozen — because a
+    /// frozen sea should be a state of this node rather than a second kind of
+    /// node the game has to keep in step with it.
+    WaterVolume {
+        kind: WaterKind,
+        /// `Sea`: the sea's radius. Ignored by `Pool`.
+        radius: f32,
+        /// `Pool`: half-extents of the box. Ignored by `Sea`.
+        half_extents: [f32; 3],
+        /// kg/m³. Fresh water ≈ 1000, seawater ≈ 1025, and an alien ocean is
+        /// whatever you say it is — a denser sea floats heavier hulls.
+        density: f32,
+        /// Quadratic drag coefficient — how hard the water resists moving
+        /// through it. Quadratic is what makes a gentle touchdown float and a
+        /// 60 m/s belly-flop stop hard, without either being a special case.
+        drag: f32,
+        /// Angular drag — what stops a dropped craft spinning forever.
+        angular_drag: f32,
+        /// FROZEN: no buoyancy, no drag, no underwater state. Pair with a
+        /// collider for the surface and the sea becomes walkable ground.
+        frozen: bool,
+        /// The colour everything fades toward when the camera is under. This is
+        /// where the wrongness of an alien ocean lives.
+        tint: [f32; 3],
+        /// How far you can see underwater, in metres. The scene's own fog is
+        /// replaced by this while submerged, so meshes, terrain, SDF matter and
+        /// particles all go murky together instead of one of them staying
+        /// crisp.
+        visibility: f32,
+    },
     /// An authored SDF shape (ADR-0007 Sdf stage): its Material's `.flsl`
     /// shader IS the geometry, raymarched as part of the scene field (up to 4
     /// per scene). `radius` bounds the shape in LOCAL units — the march,
@@ -635,6 +697,25 @@ impl Matter {
         }
     }
 
+    /// A default body of water: a fresh-water pool you could swim in.
+    ///
+    /// `Pool` rather than `Sea` as the starting shape because a new water node
+    /// is nearly always a test — dropping a sphere-sea into a level makes the
+    /// whole scene wet, which is a confusing first thing to see.
+    pub fn default_water() -> Self {
+        Matter::WaterVolume {
+            kind: WaterKind::Pool,
+            radius: 10.0,
+            half_extents: [5.0, 2.0, 5.0],
+            density: 1000.0,
+            drag: 1.0,
+            angular_drag: 1.0,
+            frozen: false,
+            tint: [0.10, 0.32, 0.38],
+            visibility: 28.0,
+        }
+    }
+
     /// The default post-processing node: chain on, screen-space ambient occlusion
     /// at a gentle strength, bloom and vignette off (matching the old project-wide
     /// defaults).
@@ -671,6 +752,29 @@ pub enum AoMode {
     Sdf,
 }
 
+/// The shape of a [`Matter::WaterVolume`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WaterKind {
+    /// A planet's sea: a sphere about the node. "Up" is different at every
+    /// point on it, which is why this is not a very large flat pool.
+    #[default]
+    Sea,
+    /// A lake, a tank, a flooded room: an oriented box with a flat top. Its
+    /// sides are WALLS — standing beside a pool at the same height as its water
+    /// is not standing in it.
+    Pool,
+}
+
+impl WaterKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            WaterKind::Sea => "Sea (sphere)",
+            WaterKind::Pool => "Pool (box)",
+        }
+    }
+    pub const ALL: [WaterKind; 2] = [WaterKind::Sea, WaterKind::Pool];
+}
+
 /// How a [`Matter::GravityVolume`] pulls bodies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GravityMode {
@@ -694,6 +798,21 @@ pub fn is_disabled(world: &crate::ecs::World, e: crate::ecs::Entity) -> bool {
     let mut cur = e;
     for _ in 0..64 {
         if world.get::<Disabled>(cur).is_some() {
+            return true;
+        }
+        let Some(Parent(p)) = world.get::<Parent>(cur).copied() else { break };
+        cur = p;
+    }
+    false
+}
+
+/// True if `e` or any ancestor is marked [`Persistent`] — the subtree rule, the
+/// same walk [`is_disabled`] does and for the same reason: the useful unit is a
+/// folder, and a child left behind when its parent survived would be a trap.
+pub fn is_persistent(world: &crate::ecs::World, e: crate::ecs::Entity) -> bool {
+    let mut cur = e;
+    for _ in 0..64 {
+        if world.get::<Persistent>(cur).is_some() {
             return true;
         }
         let Some(Parent(p)) = world.get::<Parent>(cur).copied() else { break };

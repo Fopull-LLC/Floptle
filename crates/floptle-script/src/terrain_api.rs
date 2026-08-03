@@ -26,6 +26,44 @@ pub struct TerrainOp {
     pub radius: f32,
     pub strength: f32,
     pub mode: TerrainOpMode,
+    /// Ties this op to the yield report it produces when it lands. Ops are
+    /// QUEUED and applied after the script pass, so a dig cannot return what it
+    /// removed — the edit has not happened yet. It returns this instead, and the
+    /// measured report arrives through `terrain.yields()` (floptle/0037).
+    pub id: u64,
+}
+
+impl TerrainOp {
+    /// True if this op moves the SURFACE rather than only its colour.
+    ///
+    /// Anything standing on the ground — a scattered tree, a placed building —
+    /// only has to be re-settled when the ground itself moved. Repainting a
+    /// hillside must not cost a re-resolve of every prop on it.
+    pub fn affects_geometry(&self) -> bool {
+        !matches!(
+            self.mode,
+            TerrainOpMode::Paint(_) | TerrainOpMode::PaintTexture(_)
+        )
+    }
+}
+
+/// The op-id counter and the inbox measured reports land in — the two halves of
+/// "a queued edit tells you what it did".
+pub(crate) struct TerrainReceipts {
+    pub yields: Rc<RefCell<Vec<TerrainYield>>>,
+    pub next_op_id: Rc<std::cell::Cell<u64>>,
+}
+
+/// What one applied op actually moved, in WORLD cubic units.
+#[derive(Clone, Debug, Default)]
+pub struct TerrainYield {
+    pub id: u64,
+    pub removed: f64,
+    pub added: f64,
+    /// `removed` split by texture-palette slot.
+    pub slots: Vec<(u8, f64)>,
+    /// The part of `removed` that carried no palette slot.
+    pub untextured: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -61,8 +99,10 @@ pub(crate) fn install_terrain_api(
     colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>>,
     logs: Rc<RefCell<Vec<crate::ScriptLog>>>,
     stream: TerrainStreamShared,
+    receipts: TerrainReceipts,
 ) {
     let TerrainStreamShared { save_dir, warm, flush, root } = stream;
+    let TerrainReceipts { yields, next_op_id } = receipts;
     let Ok(t) = lua.create_table() else { return };
 
     // terrain.deleteSaveDir(path) — delete a save slot's PERSISTED TERRAIN from
@@ -169,11 +209,16 @@ pub(crate) fn install_terrain_api(
         }
     }
 
-    // Shared push-with-cap helper.
+    // Shared push-with-cap helper. Stamps the op's id and hands it back, so
+    // every edit verb can return the receipt its yield will arrive under.
     let push = {
         let ops = ops.clone();
         let logs = logs.clone();
-        move |op: TerrainOp| {
+        let ids = next_op_id.clone();
+        move |mut op: TerrainOp| -> u64 {
+            op.id = ids.get().wrapping_add(1);
+            ids.set(op.id);
+            let id = op.id;
             let mut q = ops.borrow_mut();
             if q.len() >= MAX_OPS_PER_FRAME {
                 if q.len() == MAX_OPS_PER_FRAME {
@@ -186,9 +231,11 @@ pub(crate) fn install_terrain_api(
                     });
                     q.push(op); // sentinel push so the warning fires once
                 }
-                return;
+                // A dropped op yields nothing; 0 is the "no receipt" id.
+                return 0;
             }
             q.push(op);
+            id
         }
     };
 
@@ -209,13 +256,13 @@ pub(crate) fn install_terrain_api(
                     )))
                 }
             };
-            push(TerrainOp {
+            Ok(push(TerrainOp {
                 pos: [x, y, z],
                 radius: (radius as f32).clamp(0.05, MAX_RADIUS),
                 strength: strength.unwrap_or(1.0).clamp(0.0, 1.0) as f32,
                 mode,
-            });
-            Ok(())
+                id: 0,
+            }))
         }) {
             let _ = t.set("sculpt", f);
         }
@@ -227,13 +274,13 @@ pub(crate) fn install_terrain_api(
         let push = push.clone();
         type Args = (f64, f64, f64, f64, Option<f64>);
         if let Ok(f) = lua.create_function(move |_, (x, y, z, radius, strength): Args| {
-            push(TerrainOp {
+            Ok(push(TerrainOp {
                 pos: [x, y, z],
                 radius: (radius as f32).clamp(0.05, MAX_RADIUS),
                 strength: strength.unwrap_or(1.0).clamp(0.0, 1.0) as f32,
                 mode: TerrainOpMode::Lower,
-            });
-            Ok(())
+                id: 0,
+            }))
         }) {
             let _ = t.set("dig", f);
         }
@@ -250,6 +297,7 @@ pub(crate) fn install_terrain_api(
                     radius: (radius as f32).clamp(0.05, MAX_RADIUS),
                     strength: strength.unwrap_or(1.0).clamp(0.0, 1.0) as f32,
                     mode: TerrainOpMode::Paint([r as f32, g as f32, b as f32]),
+                    id: 0,
                 });
                 Ok(())
             })
@@ -269,6 +317,7 @@ pub(crate) fn install_terrain_api(
                 radius: (radius as f32).clamp(0.05, MAX_RADIUS),
                 strength: 1.0,
                 mode: TerrainOpMode::PaintTexture((slot.max(0.0) as u8).min(32)),
+                id: 0,
             });
             Ok(())
         }) {
@@ -310,6 +359,65 @@ pub(crate) fn install_terrain_api(
             Ok(())
         }) {
             let _ = t.set("generatePlanet", f);
+        }
+    }
+
+    // terrain.yields() → the reports for edits that have LANDED since the last
+    // call, drained. An op is queued and applied after the script pass, so the
+    // report for a dab arrives on the following frame; the id `dig` returned
+    // ties the two together (floptle/0037).
+    {
+        let ys = yields.clone();
+        if let Ok(f) = lua.create_function(move |lua, ()| {
+            let out = lua.create_table()?;
+            for (i, y) in ys.borrow_mut().drain(..).enumerate() {
+                let r = lua.create_table()?;
+                r.set("id", y.id)?;
+                r.set("removed", y.removed)?;
+                r.set("added", y.added)?;
+                r.set("untextured", y.untextured)?;
+                let slots = lua.create_table()?;
+                for (slot, vol) in &y.slots {
+                    slots.set(*slot, *vol)?;
+                }
+                r.set("slots", slots)?;
+                out.set(i + 1, r)?;
+            }
+            Ok(out)
+        }) {
+            let _ = t.set("yields", f);
+        }
+    }
+
+    // terrain.slotAt(x,y,z) → the texture-palette slot at a world point, or nil
+    // where the field is untextured. The material half of the question
+    // `terrain.query` answers the distance half of: survey before you cut, and
+    // let a footstep know what it is standing on.
+    {
+        let cols = colliders.clone();
+        if let Ok(f) = lua.create_function(move |_, (x, y, z): (f64, f64, f64)| {
+            let mut best: Option<(f32, Option<u8>)> = None;
+            for c in cols.borrow().iter() {
+                let Some(t) = c.shape.chunk_terrain() else { continue };
+                let s = t.scale.max(1e-6);
+                let local = (t.rot.inverse()
+                    * Vec3::new(
+                        (x - c.anchor.x) as f32,
+                        (y - c.anchor.y) as f32,
+                        (z - c.anchor.z) as f32,
+                    ))
+                    / s;
+                // Nearest terrain wins, the same rule an op uses to choose which
+                // field it lands on — so a survey and the dig that follows it
+                // cannot disagree about which terrain they meant.
+                let d = t.field.d(local).abs() * s;
+                if best.as_ref().is_none_or(|b| d < b.0) {
+                    best = Some((d, t.field.slot_at(local)));
+                }
+            }
+            Ok(best.and_then(|b| b.1))
+        }) {
+            let _ = t.set("slotAt", f);
         }
     }
 

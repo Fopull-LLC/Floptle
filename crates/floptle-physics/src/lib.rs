@@ -39,6 +39,7 @@ mod compound;
 mod gravity;
 mod shapes;
 mod sim;
+mod water;
 mod world;
 
 pub use body::*;
@@ -47,6 +48,7 @@ pub use compound::*;
 pub use gravity::*;
 pub use shapes::*;
 pub use sim::*;
+pub use water::*;
 pub use world::*;
 
 #[cfg(test)]

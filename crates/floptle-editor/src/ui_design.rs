@@ -606,7 +606,13 @@ pub(crate) fn block_from(spec: &ElementSpec) -> floptle_ui::StyleBlock {
     if let Some(sh) = &spec.shape {
         b.fill = Some(ColorRef::Lit(sh.fill));
         b.border_color = Some(ColorRef::Lit(sh.border_color));
-        b.gradient = sh.gradient;
+        b.gradient = sh.gradient.map(|g| floptle_ui::StyleGradient {
+            kind: g.kind,
+            to: Some(ColorRef::Lit(g.to)),
+            angle: g.angle,
+            mid: g.mid,
+            radius: g.radius,
+        });
         b.radius = Some(floptle_ui::CornerRef::Lit(sh.radius));
         b.border = Some(sh.border);
         // Literal colours: this lifts what is ON the element, and the element
@@ -644,8 +650,14 @@ pub(crate) fn block_from(spec: &ElementSpec) -> floptle_ui::StyleBlock {
         if !t.font.is_empty() {
             b.font = Some(t.font.clone());
         }
-        b.text_stroke = t.stroke;
-        b.text_shadow = t.shadow;
+        b.text_stroke = t.stroke.map(|st| floptle_ui::StyleStroke {
+            color: ColorRef::Lit(st.color),
+            width: st.width,
+        });
+        b.text_shadow = t.shadow.map(|sh| floptle_ui::StyleTextShadow {
+            color: ColorRef::Lit(sh.color),
+            offset: sh.offset,
+        });
     }
     if let Some(st) = &spec.stack {
         b.pad = Some(NumRef::Lit(st.pad));

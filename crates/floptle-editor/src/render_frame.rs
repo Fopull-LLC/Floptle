@@ -32,7 +32,7 @@ use crate::dock::{EditorTab, default_dock, focus_scripting_tab};
 use crate::gizmo::{build_gizmo, Tool};
 use crate::hierarchy::{node_new_menu};
 use crate::prefs::{DEFAULT_PLAY_TINT, GridConfig, code_theme_path, engine_theme_path, open_external_editor, save_external_editor, save_grid, save_play_tint, save_prefer_external, save_theme_index};
-use crate::shading::{blob_default_material, blob_mat_arrays, collect_point_lights, collect_shadow_proxies, fog_uniforms, material_params, post_process_uniforms, shadow_uniforms, skybox_uniforms, vol_fog_uniforms};
+use crate::shading::{blob_default_material, blob_mat_arrays, collect_point_lights, collect_shadow_proxies, material_params, post_process_uniforms, shadow_uniforms, skybox_uniforms, vol_fog_uniforms};
 use crate::terrain_ui::{NewTerrainCfg, TerrainFill};
 use crate::theme::{CODE_THEMES, ENGINE_THEMES};
 use crate::viz::{CameraGizmo, EmitterViz, ForceViz, box_lines, camera_frustum_lines, cursor_ground, gravity_volume_lines, light_dir_lines, mesh_collider_wire_local, oriented_box_lines, particle_gizmo_lines, point_light_lines, project, rigidbody_lines, terrain_collider_wire};
@@ -865,7 +865,8 @@ impl Editor {
         // raster meshes cast — both ride the raymarch globals, which the raster pass
         // reads too through the shared field bind group.
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
-        let (fog_color, fog_params) = fog_uniforms(&light_node);
+        let (fog_color, fog_params) =
+            crate::shading::fog_uniforms_at(&light_node, &self.world, cam.world_position);
         let (atmo_meta, atmo_color, atmo_body, atmo_params) =
             crate::shading::atmo_uniforms(&self.world, cam.world_position);
         let (star_meta, star_pos, star_color) =
@@ -1020,6 +1021,53 @@ impl Editor {
                         }
                     }
                 }
+                // WATER (`floptle/0038`). Drawn as a translucent, specular
+                // surface sized to the volume the SOLVER uses, so what you see
+                // is what floats you — the sea and the buoyancy can't drift
+                // apart, which is exactly what happened while the ocean was a
+                // hand-placed sphere the game kept in step by hand.
+                //
+                // A frozen sea drops the translucency and the shine: ice is a
+                // surface you stand on, and it should not look like something
+                // you could swim through.
+                Matter::WaterVolume {
+                    kind, radius, half_extents, frozen, tint, ..
+                } => {
+                    use floptle_core::WaterKind;
+                    let (shape, fit) = match kind {
+                        // The built-in sphere is r = 0.85 and the cube is
+                        // half = 0.7; scale the node's own transform so the
+                        // drawn surface lands exactly on the volume's extent.
+                        WaterKind::Sea => (
+                            floptle_core::Shape::Sphere,
+                            floptle_core::math::Vec3::splat(radius / 0.85),
+                        ),
+                        WaterKind::Pool => (
+                            floptle_core::Shape::Cube,
+                            floptle_core::math::Vec3::from(*half_extents) / 0.7,
+                        ),
+                    };
+                    if let Some(&mesh) = self.mesh_ids.get(shape as usize) {
+                        let mut wt = t;
+                        wt.scale *= fit;
+                        let model = wt.render_matrix(cam.world_position);
+                        let mut mp = MaterialParams::flat(*tint);
+                        if *frozen {
+                            mp.alpha = 1.0;
+                            mp.specular_strength = 0.15;
+                            mp.shininess = 8.0;
+                        } else {
+                            mp.alpha = 0.55;
+                            // Specular is what makes water read as water at a
+                            // distance where no wave is more than a pixel.
+                            mp.specular_strength = 0.9;
+                            mp.shininess = 96.0;
+                            mp.specular = [1.0, 1.0, 1.0];
+                        }
+                        mp.paint_base = raster.mesh_paint_base(mesh);
+                        instances.push((mesh, tex, instance_of_mat(model, &mp)));
+                    }
+                }
                 Matter::Blob { scale } => {
                     // Blobs render in the raymarch pass — a custom fragment
                     // shader doesn't apply (the Sdf stage is their world).
@@ -1079,6 +1127,50 @@ impl Editor {
             self.mesh_ids[floptle_core::Shape::Sphere as usize],
             &mut instances,
         );
+
+        // SCATTER (`floptle/0036`): thousands of props from a seed, resolved to
+        // instances and drawn through the ordinary raster path — so they get the
+        // ordinary lighting, fog and shadows, including the underwater fog that
+        // makes a shoreline forest go murky at the same rate as its ground.
+        // Nothing here is a scene node.
+        {
+            let sources: Vec<floptle_core::scatter::ScatterSource> =
+                self.script_host.scatter_sources().clone();
+            if !sources.is_empty() {
+                let eye = cam.world_position;
+                let sim = self.sim.as_ref();
+                let mut ground = |from: DVec3, dir: Vec3, max: f32| {
+                    let sim = sim?;
+                    let o = (from - sim.world.origin).as_vec3();
+                    sim.world
+                        .raycast(o, dir, max)
+                        .map(|h| (h.distance, Vec3::from(h.normal)))
+                };
+                let mut mesh_of = |asset: &str| {
+                    self.mesh_registry
+                        .get(asset)
+                        .and_then(|a| a.parts.first().copied())
+                        .map(|m| (m, None))
+                };
+                // A hard cap, logged nowhere and needing none: a source with a
+                // silly density costs a frame-rate dip, never a frame that
+                // never ends.
+                const SCATTER_BUDGET: usize = 20_000;
+                let base = MaterialParams::flat([1.0, 1.0, 1.0]);
+                crate::scatter_draw::build_instances(
+                    &mut self.scatter_cache,
+                    &sources,
+                    eye,
+                    &mut mesh_of,
+                    &mut ground,
+                    &base,
+                    SCATTER_BUDGET,
+                    &mut instances,
+                );
+            } else if self.scatter_cache.len() > 0 {
+                self.scatter_cache.clear();
+            }
+        }
 
         // Undo any transient scene-binding animation preview now that the draw list
         // is built — the ECS goes back to authored transforms before UI/undo/save.
@@ -1300,6 +1392,7 @@ impl Editor {
                     | Matter::Camera { .. }
                     | Matter::PointLight { .. }
                     | Matter::GravityVolume { .. }
+                    | Matter::WaterVolume { .. }
                     | Matter::Skybox { .. }
                     | Matter::PostProcess { .. } => {}
                 }
@@ -1535,6 +1628,7 @@ impl Editor {
         let mesh_wire = self.mesh_wire_gizmo.as_slice();
         let particle_gizmo = self.particle_gizmo.as_slice();
         let show_gizmos = &mut self.show_gizmos;
+        let mut view_lock = self.camera.lock;
         let gizmo_filter = &mut self.gizmo_filter;
         let grabbed = self.grabbed;
         let tool = self.tool;
@@ -2536,6 +2630,7 @@ impl Editor {
                 mesh_wire,
                 particle_gizmo,
                 show_gizmos,
+                view_lock: &mut view_lock,
                 gizmo_filter,
                 grabbed,
                 tool,
@@ -2584,31 +2679,44 @@ impl Editor {
                 // A build has nothing to restore TO — no header, and Escape
                 // belongs to the game (cursor release), not the layout.
                 if !player_mode {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .button(format!("⛶ Restore  ·  {}", ft.title()))
-                            .on_hover_text(
-                                "double-click a tab to toggle fullscreen · Esc to restore",
-                            )
-                            .clicked()
-                        {
-                            exit = true;
-                        }
-                        ui.small("fullscreen — double-click a tab or press Esc to restore");
+                    // A PANEL, not a bare `ui.horizontal`. A plain row paints no
+                    // background of its own, so the strip it occupied stayed
+                    // transparent and the 3D surface render showed through it —
+                    // a band of scene along the top edge of every maximized tab,
+                    // whichever tab it was. A panel fills itself, the same way
+                    // the menu bar above it always has.
+                    egui::Panel::top("fullscreen_header").show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(format!("⛶ Restore  ·  {}", ft.title()))
+                                .on_hover_text(
+                                    "double-click a tab to toggle fullscreen · Esc to restore",
+                                )
+                                .clicked()
+                            {
+                                exit = true;
+                            }
+                            ui.small("double-click a tab or press Esc to restore");
+                        });
                     });
-                    ui.separator();
                     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         exit = true;
                     }
                 }
                 // Scene/Game are transparent (the 3D shows through); every other tab
                 // needs an opaque fill so the surface render doesn't bleed behind it.
+                // Everything from here down belongs to the tab — take the whole
+                // remaining rect rather than letting a stray margin leave a seam.
+                let body = ui.available_rect_before_wrap();
                 if !matches!(ft, EditorTab::Scene | EditorTab::Game) {
                     let bg = ui.style().visuals.panel_fill;
-                    ui.painter().rect_filled(ui.available_rect_before_wrap(), 0.0, bg);
+                    ui.painter().rect_filled(body, 0.0, bg);
                 }
                 let mut t = ft;
-                egui_dock::TabViewer::ui(&mut viewer, ui, &mut t);
+                let mut body_ui = ui.new_child(
+                    egui::UiBuilder::new().max_rect(body).layout(*ui.layout()),
+                );
+                egui_dock::TabViewer::ui(&mut viewer, &mut body_ui, &mut t);
                 if exit {
                     *viewer.fullscreen_tab = None;
                 }
@@ -2621,6 +2729,9 @@ impl Editor {
             if *viewer.game_gizmos != game_gizmos_before {
                 crate::prefs::save_game_gizmos(*viewer.game_gizmos);
             }
+            // The Scene view's plane lock, chosen in the viewport toolbar.
+            // `set_lock` snaps the camera square without moving it.
+            view_lock = *viewer.view_lock;
 
             // Viewport drop: spawn a model when an asset is released over the Scene
             // tab (panel drops — script-on-node — are consumed by those tabs first).
@@ -3407,6 +3518,9 @@ impl Editor {
             // (Terrain tools live in the dockable Terrain tab now; the gizmo paints
             // inside the Scene tab, clipped to its rect.)
         });
+        if view_lock != self.camera.lock {
+            self.camera.set_lock(view_lock);
+        }
         egui.state.handle_platform_output(&window, full_output.platform_output);
         // egui-winit's cursor-icon handling calls set_cursor_visible(true) whenever
         // the hover icon changes — un-hiding a cursor the game grabbed. Re-assert
@@ -4203,8 +4317,15 @@ impl Editor {
             // A scene transition a script queued LAST frame happens first —
             // at a frame boundary, never mid-frame under the scripts that
             // asked for it (offline/host = switch; joined client = refused).
-            if let Some(req) = self.pending_scene.take() {
+            for req in std::mem::take(&mut self.pending_scene) {
+                let swap = req.is_swap();
                 self.perform_scene_request(&req);
+                // A full swap ends the queue: the requests behind it named the
+                // world that no longer exists, and the new scene's own `start`
+                // is the right place to ask for anything else.
+                if swap {
+                    break;
+                }
             }
             // Pausing freezes the clock AND the frame delta scripts see, so
             // dt-driven motion stops too (not just `time`-driven motion).
@@ -4301,6 +4422,10 @@ impl Editor {
             self.script_host.set_project_root(self.project_root.clone());
             // The running scene's name, for `scene.current()`.
             self.script_host.set_scene_name(&self.scene_name);
+            // The scene's bodies of water, in WORLD coordinates — `water.depthAt`
+            // answers the same question the solver does, from the same geometry,
+            // so a swim state can never disagree with the physics floating it.
+            self.script_host.set_water_volumes(crate::shading::water_infos(&self.world));
             self.script_host.set_materials(
                 self.materials.iter().map(|(n, d)| (n.clone(), d.to_material())).collect(),
             );
@@ -4343,8 +4468,35 @@ impl Editor {
             if let Some(want) = self.script_host.take_ui_focus_request() {
                 self.ui_focus_set(want);
             }
-            if let Some(req) = self.script_host.take_scene_request() {
-                self.pending_scene = Some(req);
+            self.pending_scene.extend(self.script_host.take_scene_requests());
+            // `water.setFrozen(node, on)` — freezing is a STATE, so it lands on
+            // the node and the physics field is rebuilt from it. The rebuild
+            // preserves live velocities, so a sea freezing under a swimmer does
+            // not fling them.
+            let freezes = self.script_host.take_water_freezes();
+            if !freezes.is_empty() {
+                let mut changed = false;
+                for (eid, on) in freezes {
+                    let Some(e) =
+                        self.world.query::<Matter>().map(|(e, _)| e).find(|e| e.index() == eid)
+                    else {
+                        continue;
+                    };
+                    match self.world.get_mut::<Matter>(e) {
+                        Some(Matter::WaterVolume { frozen, .. }) => {
+                            changed |= *frozen != on;
+                            *frozen = on;
+                        }
+                        _ => self.console.push(
+                            floptle_script::LogLevel::Warn,
+                            "water.setFrozen: that node is not a Water Volume".into(),
+                            None,
+                        ),
+                    }
+                }
+                if changed {
+                    self.rebuild_sim();
+                }
             }
             // GPU-load any models a script swapped via `node.model` (the Matter is
             // already updated by run; re-importing here means the new mesh renders
@@ -5043,6 +5195,7 @@ impl Editor {
                 MatterDoc::Camera { .. } => "Camera",
                 MatterDoc::PointLight { .. } => "Point Light",
                 MatterDoc::GravityVolume { .. } => "Gravity Volume",
+                MatterDoc::WaterVolume { .. } => "Water Volume",
                 MatterDoc::FieldShape { .. } => "Field Shape",
                 MatterDoc::Skybox { .. } => "Skybox",
                 MatterDoc::PostProcess { .. } => "Post Processing",
@@ -6225,7 +6378,8 @@ impl Editor {
         let li = light_node.intensity;
         let (pl_count, pl_pos, pl_col) = collect_point_lights(&self.world, cam.world_position);
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
-        let (fog_color, fog_params) = fog_uniforms(&light_node);
+        let (fog_color, fog_params) =
+            crate::shading::fog_uniforms_at(&light_node, &self.world, cam.world_position);
         let (atmo_meta, atmo_color, atmo_body, atmo_params) =
             crate::shading::atmo_uniforms(&self.world, cam.world_position);
         let (star_meta, star_pos, star_color) =

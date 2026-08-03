@@ -26,6 +26,7 @@
 pub mod ecs;
 pub mod event;
 pub mod frames;
+pub mod scatter;
 pub mod layers;
 pub mod material;
 pub mod math;
@@ -41,10 +42,11 @@ pub use ecs::{Entity, World};
 pub use layers::Layers;
 pub use material::{Material, ObjectMaterials, Tiling};
 pub use matter::{
-    is_disabled, world_transform, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, CastShadow,
+    is_disabled, is_persistent, world_transform, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, CastShadow,
     CelestialBody, Collidable, Disabled, GravityMode, Layer, Light, Made, Matter, MeshCollider, Name,
     Parent,
-    ParticleSystem, RepeatIndex, RigidBody, Shape, Spin, Tags, TerrainGen, TexturePaint, Trigger, VertexPaint,
+    ParticleSystem, Persistent, RepeatIndex, RigidBody, SceneTag, Shape, Spin, Tags, TerrainGen,
+    TexturePaint, Trigger, VertexPaint, WaterKind,
     Visible,
 };
 pub use net::{NetId, Replicated, ReplicationMode};

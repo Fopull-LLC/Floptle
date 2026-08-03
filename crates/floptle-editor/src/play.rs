@@ -3,7 +3,6 @@
 
 use floptle_core::Entity;
 use floptle_core::Matter;
-use floptle_core::World;
 use floptle_core::ScriptInst;
 use floptle_core::Scripts;
 use floptle_core::math::DVec3;
@@ -95,6 +94,71 @@ impl Editor {
                 mu: b.mu as f32,
                 soi: soi as f32,
                 body_r: b.body_radius as f32,
+            });
+        }
+        field
+    }
+
+    /// Build the sim's water field from the scene's WaterVolume nodes
+    /// (`floptle/0038`) — the same shape as [`Self::build_gravity_field`], and
+    /// for the same reason: a body asks the world one question and gets one
+    /// answer, whether the water is a planet's ocean or a fish tank.
+    ///
+    /// Centres are converted into the sim frame in f64 here, so a sea placed
+    /// far out is exact (ADR-0015), and the sea's own radius survives the
+    /// node's scale — scaling a sea node scales the sea.
+    pub(crate) fn build_water_field(
+        world: &floptle_core::World,
+        origin: DVec3,
+    ) -> floptle_physics::WaterField {
+        use floptle_core::{Matter, WaterKind};
+        let mut field = floptle_physics::WaterField::default();
+        for (e, m) in world.query::<Matter>() {
+            let Matter::WaterVolume {
+                kind,
+                radius,
+                half_extents,
+                density,
+                drag,
+                angular_drag,
+                frozen,
+                ..
+            } = m
+            else {
+                continue;
+            };
+            if floptle_core::is_disabled(world, e) {
+                continue;
+            }
+            let wt = floptle_core::world_transform(world, e);
+            let center = (wt.translation - origin).as_vec3();
+            let shape = match kind {
+                WaterKind::Sea => floptle_physics::WaterShape::Sphere {
+                    center,
+                    // A sea scales with its node uniformly — a non-uniform
+                    // scale on a sphere has no single honest radius, so the
+                    // largest axis wins rather than silently averaging.
+                    radius: radius * wt.scale.max_element().max(1e-4),
+                },
+                WaterKind::Pool => floptle_physics::WaterShape::Box {
+                    center,
+                    half: Vec3::new(
+                        half_extents[0] * wt.scale.x,
+                        half_extents[1] * wt.scale.y,
+                        half_extents[2] * wt.scale.z,
+                    )
+                    .abs()
+                    .max(Vec3::splat(1e-4)),
+                    rot: wt.rotation,
+                },
+            };
+            field.volumes.push(floptle_physics::WaterVolume {
+                shape,
+                density: density.max(1e-3),
+                drag: drag.max(0.0),
+                angular_drag: angular_drag.max(0.0),
+                frozen: *frozen,
+                entity: e.index(),
             });
         }
         field
@@ -271,6 +335,8 @@ impl Editor {
         // Add static colliders (any node flagged "Collidable", plus legacy mesh
         // colliders) so a character can walk on / bump into them, not just terrain.
         self.add_static_colliders(&mut sim);
+        // Water is a static field like gravity, sampled per step (`floptle/0038`).
+        sim.world.water = Self::build_water_field(&self.world, origin);
         self.script_host.set_layers(sim.layers().clone());
         sim
     }
@@ -297,6 +363,10 @@ impl Editor {
             floptle_physics::Sim::build_layered(world, &terrain_vols, gravity, origin, layers);
         drop(terrain_vols);
         self.add_static_colliders_for_world(world, &mut sim);
+        // The shadow's authority is that it runs the SAME physics — which now
+        // includes the same water. A referee whose seas were dry would call
+        // every splashdown a desync.
+        sim.world.water = Self::build_water_field(world, origin);
         sim
     }
 
@@ -579,7 +649,7 @@ impl Editor {
             // Stop fill the editor scene's terrain nodes with the PLAYED
             // scene's fields (the next save then overwrote the real terrain
             // on disk — real lost work).
-            self.pending_scene = None;
+            self.pending_scene.clear();
             // Did a `scene.load` actually happen? The live name is the played scene's and
             // the snapshot holds the pre-Play one, so a difference IS the switch. Worth
             // knowing because the switch now reloads the paint stores (it has to — see
@@ -676,7 +746,7 @@ impl Editor {
                     .collect(),
                 self.terrain_textures.clone(),
             ));
-            self.pending_scene = None;
+            self.pending_scene.clear();
             self.play_t = 0.0;
             self.paused = false;
             self.terrain_mirror_warned = false; // fresh Play, fresh one-shot warning
@@ -862,18 +932,76 @@ impl Editor {
                 return None;
             }
         };
+        // WHAT SURVIVES. `node.persistent` marks a subtree as outliving the
+        // swap — a HUD, a party, a save-game manager, the music. Collected
+        // before anything is torn down, because the answer is about the world
+        // that is still standing.
+        let keepers: Vec<floptle_core::Entity> = self
+            .world
+            .query::<floptle_core::Matter>()
+            .map(|(e, _)| e)
+            .filter(|&e| floptle_core::is_persistent(&self.world, e))
+            .collect();
+        let keep_ids: std::collections::HashSet<u32> =
+            keepers.iter().map(|e| e.index()).collect();
         // Tear down the old scene's play runtimes…
         self.reset_anim_bindings();
         self.anim.clear_instances();
         self.vfx.clear_instances();
         self.script_host.clear_anim_state();
-        self.script_host.reset_instances();
+        self.script_host.reset_instances_keeping(&keep_ids);
+        // A scatter source names a region of the world that is about to stop
+        // existing, and its resolved chunks were dropped onto ground that is
+        // about to be replaced.
+        self.script_host.clear_scatter();
+        self.scatter_cache.clear();
         self.script_gizmos.clear();
         let mixer = self.project.mixer.clone();
         self.audio.stop_play(&mixer);
         // …swap the world…
-        self.world = World::new();
+        //
+        // DESPAWN IN PLACE rather than `World::new()`, so a persistent node
+        // keeps its ENTITY. That is not a micro-optimisation — script
+        // instances, UI bindings and net handlers are all keyed by entity
+        // index, and a survivor that came back under a different index would
+        // have to be rebuilt, which is exactly what "persistent" promises it
+        // won't be. The ECS hands out freed indices from a free list, so the
+        // incoming scene cannot be given an index a survivor is still holding.
+        let doomed: Vec<floptle_core::Entity> = {
+            let alive: Vec<floptle_core::Entity> = self
+                .world
+                .query::<floptle_core::transform::Transform>()
+                .map(|(e, _)| e)
+                .collect();
+            alive.into_iter().filter(|e| !keep_ids.contains(&e.index())).collect()
+        };
+        for e in doomed {
+            self.world.despawn(e);
+        }
+        // A survivor parented to a node that did NOT survive is now a child of
+        // nothing, and `world_transform` would fold in a transform that no
+        // longer exists. Re-root it: it keeps the world pose it had, which is
+        // where the player last saw it.
+        for &e in &keepers {
+            let Some(floptle_core::Parent(p)) = self.world.get::<floptle_core::Parent>(e).copied()
+            else {
+                continue;
+            };
+            if self.world.is_alive(p) {
+                continue;
+            }
+            let world_pose = floptle_core::world_transform(&self.world, e);
+            self.world.remove::<floptle_core::Parent>(e);
+            self.world.insert(e, world_pose);
+        }
         floptle_scene::spawn_into(&doc, &mut self.world);
+        // The incoming scene brings its own Lighting/Skybox/PostProcess. If a
+        // survivor carried one too, the world now has two and query order picks
+        // the winner — drop the survivor's, since the scene you just loaded is
+        // the one whose environment you meant.
+        if !keepers.is_empty() {
+            self.drop_duplicate_scene_singletons(&keep_ids);
+        }
         self.set_scene_file(&path);
         self.adopt_terrain();
         // THE OUT-OF-DOCUMENT STORES, which a scene switch has to reload exactly as
@@ -916,6 +1044,173 @@ impl Editor {
             None,
         );
         Some(self.scene_rel_or_default())
+    }
+
+    /// After a swap that carried persistent nodes across: if a survivor brought
+    /// a scene singleton (lighting, skybox, post-processing) and the incoming
+    /// scene supplied its own, drop the survivor's copy.
+    ///
+    /// The rule is "the scene you loaded owns the environment". Two Lighting
+    /// nodes is not an error the engine can resolve sensibly — whichever the
+    /// query reaches first wins, which reads as a scene whose lighting depends
+    /// on load order.
+    fn drop_duplicate_scene_singletons(&mut self, kept: &std::collections::HashSet<u32>) {
+        let lights: Vec<floptle_core::Entity> =
+            self.world.query::<floptle_core::Light>().map(|(e, _)| e).collect();
+        if lights.len() > 1 {
+            for e in lights.into_iter().filter(|e| kept.contains(&e.index())) {
+                self.world.despawn(e);
+            }
+        }
+        for want_sky in [true, false] {
+            let found: Vec<floptle_core::Entity> = self
+                .world
+                .query::<floptle_core::Matter>()
+                .filter(|(_, m)| {
+                    if want_sky {
+                        matches!(m, floptle_core::Matter::Skybox { .. })
+                    } else {
+                        matches!(m, floptle_core::Matter::PostProcess { .. })
+                    }
+                })
+                .map(|(e, _)| e)
+                .collect();
+            if found.len() > 1 {
+                for e in found.into_iter().filter(|e| kept.contains(&e.index())) {
+                    self.world.despawn(e);
+                }
+            }
+        }
+    }
+
+    /// `scene.load(name, { additive = true })` — layer a scene on top of the
+    /// running one instead of replacing it.
+    ///
+    /// Nothing is torn down: no script restarts, no physics rebuild from
+    /// scratch, no audio stop. The new nodes are spawned into the live world,
+    /// tagged with the scene they came from, and wired into the running sim the
+    /// same way a `spawn(...)`ed prefab is — which is what makes this cheap
+    /// enough to use for streaming a level in pieces.
+    pub(crate) fn perform_scene_additive(&mut self, req: &str) {
+        let Some(path) = self.resolve_scene_request(req) else {
+            self.console.push(
+                floptle_script::LogLevel::Error,
+                format!("scene.load(\"{req}\", {{additive = true}}): no such scene (looked in scenes/)"),
+                None,
+            );
+            return;
+        };
+        let doc = match floptle_scene::load(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("scene.load(\"{req}\", {{additive = true}}): {e}"),
+                    None,
+                );
+                return;
+            }
+        };
+        // The TAG is the request string as written, so `scene.unload` takes the
+        // same name back. Loading the same scene twice is allowed and both
+        // copies carry the tag — `unload` then removes both, which is the only
+        // answer that isn't arbitrary.
+        let tag = req.trim().to_string();
+        let ents = floptle_scene::spawn_additive(&doc, &mut self.world, &tag);
+        if ents.is_empty() {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!("scene.load(\"{req}\", {{additive = true}}): the scene has no nodes"),
+                None,
+            );
+            return;
+        }
+        // Meshes need GPU parts before they can draw; map/paint sidecars are
+        // keyed by SCENE NAME and belong to the base scene, so an additive
+        // layer deliberately does not touch them.
+        self.register_scene_meshes();
+        // Physics: the same incremental wiring a spawned prefab gets. Bodies
+        // first, then compounds — `add_body_for` refuses an assembly's parts,
+        // and `add_compound_for` claims the whole hierarchy at its root.
+        if let Some(sim) = self.sim.as_mut() {
+            for &e in &ents {
+                sim.add_body_for(e, &self.world);
+            }
+            for &e in &ents {
+                sim.add_compound_for(e, &self.world);
+            }
+        }
+        // Static colliders and gravity sources are built wholesale from the
+        // world, so they need the rebuild — which preserves live velocities and
+        // compound state (see `rebuild_sim`), so nothing in flight is disturbed.
+        if ents.iter().any(|&e| {
+            self.world.get::<floptle_core::Collidable>(e).is_some()
+                || self.world.get::<floptle_core::MeshCollider>(e).is_some()
+                || matches!(
+                    self.world.get::<floptle_core::Matter>(e),
+                    Some(floptle_core::Matter::GravityVolume { .. })
+                )
+        }) {
+            self.rebuild_sim();
+        }
+        // Audio sources in the layer start now; the running scene's voices are
+        // untouched (`start_play` is additive over live voices).
+        let mixer = self.project.mixer.clone();
+        let root = self.project_root.clone();
+        self.audio.start_play(&self.world, &root, &mixer);
+        self.vfx.start_play(&self.world);
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            format!("⏵ scene + {tag} ({} nodes)", ents.len()),
+            None,
+        );
+        // The layer's own scripts have not run yet — they start on the next
+        // frame's pass, like any node that appears mid-play. `onLoaded` fires
+        // here anyway: the nodes exist, which is what the caller asked about.
+        self.script_host.fire_scene_loaded(&mut self.world, &tag, true);
+    }
+
+    /// `scene.unload(name)` — remove an additively-loaded layer.
+    ///
+    /// Only nodes an additive load tagged are candidates: the scene you opened
+    /// can never be unloaded out from under you, and a node the game spawned
+    /// itself is the game's to destroy.
+    pub(crate) fn perform_scene_unload(&mut self, req: &str) {
+        let tag = req.trim().to_string();
+        let doomed: Vec<floptle_core::Entity> = self
+            .world
+            .query::<floptle_core::SceneTag>()
+            .filter(|(_, t)| t.0 == tag)
+            .map(|(e, _)| e)
+            .collect();
+        if doomed.is_empty() {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!("scene.unload(\"{req}\"): no additively-loaded scene by that name"),
+                None,
+            );
+            return;
+        }
+        let n = floptle_scene::despawn_tagged(&mut self.world, &tag);
+        // Everything keyed by entity has to let go: physics bodies, audio
+        // voices, effects, and the scripts that were running on them.
+        self.rebuild_sim();
+        let mixer = self.project.mixer.clone();
+        self.audio.stop_play(&mixer);
+        let root = self.project_root.clone();
+        self.audio.start_play(&self.world, &root, &mixer);
+        self.vfx.clear_instances();
+        self.vfx.start_play(&self.world);
+        self.reset_anim_bindings();
+        self.paint_meshes.clear();
+        self.mesh_wire_cache.clear();
+        self.register_scene_meshes();
+        self.selection.retain(|e| self.world.is_alive(*e));
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            format!("⏵ scene − {tag} ({n} nodes)"),
+            None,
+        );
     }
 
     /// A script's declared `defaults`, cached by file mtime so we only re-parse the Lua

@@ -31,7 +31,8 @@ pub use paint::{
 };
 pub use style::{
     apply_styles, ColorRef, CornerRef, Ease, NumRef, StateInput, Style, StyleBlock, StyleGlow,
-    StyleRuntime, StyleShadow, StyleSheet, Tokens, Transition, UiState,
+    StyleGradient, StyleRuntime, StyleShadow, StyleSheet, StyleStroke, StyleTextShadow, Tokens,
+    Transition, UiState,
 };
 pub use nav::Dir4;
 pub use text::{Case, Overflow, TextShadow, TextStroke};

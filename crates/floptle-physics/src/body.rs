@@ -99,6 +99,13 @@ pub struct Body {
     /// it is allowed to be. The supported rollback profile
     /// (`docs/rollback-netcode-design.md` §3).
     pub pushbox_only: bool,
+    /// Mass, kg — from the node's `RigidBody::mass`.
+    ///
+    /// The depenetration solver is mass-independent (a simple body is pushed
+    /// out of geometry, not negotiated with), so this exists for the forces
+    /// that genuinely need it: buoyancy compares the body's density against the
+    /// water's, which is the difference between a cork and a cannonball.
+    pub mass: f32,
 }
 
 impl Body {
@@ -125,6 +132,17 @@ impl Body {
             sensor: false,
             driven: false,
             pushbox_only: false,
+            mass: 1.0,
+        }
+    }
+
+    /// The radius of a sphere enclosing this body — what displaces water when
+    /// the shape has no radius of its own (a box).
+    pub(crate) fn bounding_radius(&self) -> f32 {
+        match self.shape {
+            BodyShape::Sphere => self.radius,
+            BodyShape::Capsule { half_height } => half_height + self.radius,
+            BodyShape::Box { half } => half.length(),
         }
     }
 

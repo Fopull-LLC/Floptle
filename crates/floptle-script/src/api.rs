@@ -1011,9 +1011,11 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let body_changes = shared.body_changes.clone();
         let ui_text_changes = shared.ui_text_changes.clone();
         let ui_style_changes = shared.ui_style_changes.clone();
+        let node_strs_r = shared.component_strs.clone();
         let ui_focus = shared.ui_focus.clone();
         let layer_changes = shared.layer_changes.clone();
         let enabled_changes = shared.enabled_changes.clone();
+        let persistent_changes = shared.persistent_changes.clone();
         let tag_changes = shared.tag_changes.clone();
         let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
             let e: u32 = this.raw_get("__id")?;
@@ -1169,6 +1171,18 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         .unwrap_or_else(|| !scene.borrow().disabled.contains(&e));
                     return Ok(Value::Boolean(v));
                 }
+                // Whether the node survives a scene swap (read-your-writes, as
+                // above). Reports what was SET on this node — the subtree rule
+                // means a child of a persistent folder also survives, but it is
+                // the folder that carries the flag.
+                "persistent" => {
+                    let v = persistent_changes
+                        .borrow()
+                        .get(&e)
+                        .copied()
+                        .unwrap_or_else(|| scene.borrow().persistent.contains(&e));
+                    return Ok(Value::Boolean(v));
+                }
                 // The node's collision/query layer, by name ("Default" when unset) —
                 // read-your-writes within the frame via the pending-changes map.
                 "layer" => {
@@ -1204,6 +1218,20 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         .get(&e)
                         .cloned()
                         .or_else(|| scene.borrow().ui_texts.get(&e).cloned());
+                    return Ok(match t {
+                        Some(t) => Value::String(lua.create_string(&t)?),
+                        None => Value::Nil,
+                    });
+                }
+                // A UI image's texture path (nil on elements with no image).
+                // Readable as well as writable, so `node.texture` behaves like
+                // `node.text` rather than being a write-only corner.
+                "texture" => {
+                    let t = node_strs_r
+                        .borrow()
+                        .get(&(e, "UiElement".to_string(), "texture".to_string()))
+                        .cloned()
+                        .or_else(|| scene.borrow().ui_textures.get(&e).cloned());
                     return Ok(match t {
                         Some(t) => Value::String(lua.create_string(&t)?),
                         None => Value::Nil,
@@ -1367,11 +1395,13 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let material_changes = shared.material_changes.clone();
         let visible_changes = shared.visible_changes.clone();
         let enabled_changes = shared.enabled_changes.clone();
+        let persistent_changes = shared.persistent_changes.clone();
         let layer_changes = shared.layer_changes.clone();
         let tag_changes = shared.tag_changes.clone();
         let layer_table = shared.layer_table.clone();
         let ui_text_changes = shared.ui_text_changes.clone();
         let ui_style_changes = shared.ui_style_changes.clone();
+        let node_strs = shared.component_strs.clone();
         let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
             let e: u32 = this.raw_get("__id")?;
             // `node.pos = vec3(...)` (or any {x=,y=,z=} / node) — the own-node
@@ -1603,6 +1633,19 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     }
                     return Ok(());
                 }
+                // Carry the node — and everything under it — across a scene
+                // swap: the DontDestroyOnLoad equivalent. Its scripts keep
+                // running rather than re-`start`ing, because the node never
+                // stopped existing.
+                "persistent" => {
+                    let Value::Boolean(b) = val else {
+                        return Err(mlua::Error::RuntimeError(
+                            "node.persistent takes a boolean".into(),
+                        ));
+                    };
+                    persistent_changes.borrow_mut().insert(e, b);
+                    return Ok(());
+                }
                 // `node.layer = "Enemies"` — validated against the project's
                 // layer table NOW, so a typo errors at the assignment (never a
                 // silently-Default node). Applied to the ECS after the pass;
@@ -1648,6 +1691,23 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     if let Value::String(s) = &val {
                         ui_style_changes.borrow_mut().insert(e, s.to_string_lossy().to_string());
                     }
+                    return Ok(());
+                }
+                // `node.texture = "textures/ui/portrait.png"` — the UI image's
+                // texture, creating the image slot if the element has none, so
+                // a bare element can become a sprite. Raises on a non-string
+                // rather than dropping it: this write did NOTHING for months and
+                // nobody could tell, which is the whole of floptle/0052.
+                "texture" => {
+                    let Value::String(s) = &val else {
+                        return Err(mlua::Error::RuntimeError(
+                            "node.texture takes an asset path (a string)".into(),
+                        ));
+                    };
+                    node_strs.borrow_mut().insert(
+                        (e, "UiElement".to_string(), "texture".to_string()),
+                        s.to_string_lossy().to_string(),
+                    );
                     return Ok(());
                 }
                 // UI element text: numbers coerce (hp counters write numbers directly).
@@ -1735,6 +1795,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         {
             let changes = shared.component_changes.clone();
             let colors = shared.component_colors.clone();
+            let strs = shared.component_strs.clone();
             let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
                 let e: u32 = this.raw_get("__id")?;
                 let comp: String = this.raw_get("__comp")?;
@@ -1753,13 +1814,23 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     colors.borrow_mut().insert((e, comp, key), c);
                     return Ok(());
                 }
+                // A string is a path or a label: a UI image's texture, a
+                // Material's texture, a text element's string. This used to
+                // raise "must be a number, a boolean or a color", which was the
+                // one path that failed LOUDLY and it pointed nowhere useful
+                // (floptle/0052).
+                if let Value::String(s) = &val {
+                    strs.borrow_mut().insert((e, comp, key), s.to_string_lossy().to_string());
+                    return Ok(());
+                }
                 let n = match val {
                     Value::Number(n) => n,
                     Value::Integer(n) => n as f64,
                     Value::Boolean(b) => f64::from(u8::from(b)),
                     _ => {
                         return Err(mlua::Error::RuntimeError(format!(
-                            "component field '{key}' must be a number, a boolean or a color"
+                            "component field '{key}' must be a number, a boolean, a string or a \
+                             color"
                         )));
                     }
                 };

@@ -73,6 +73,10 @@ impl AnchoredCollider {
 /// a `f64` world point. Near the origin (the default), the two frames coincide.
 pub struct PhysicsWorld {
     pub gravity: GravityField,
+    /// The scene's bodies of water (`floptle/0038`). Built from the scene's
+    /// WaterVolume nodes each Play, exactly like `gravity` — and just as static
+    /// per step, which is what keeps `Sim::step_body_tick` bit-for-bit exact.
+    pub water: crate::water::WaterField,
     pub colliders: Vec<AnchoredCollider>,
     pub bodies: Vec<Body>,
     /// Contacts resolved on the most recent `step` (cleared each step), sim frame.
@@ -106,6 +110,7 @@ impl Default for PhysicsWorld {
     fn default() -> Self {
         Self {
             gravity: GravityField::default(),
+            water: crate::water::WaterField::default(),
             colliders: Vec::new(),
             bodies: Vec::new(),
             contacts: Vec::new(),
@@ -277,6 +282,177 @@ pub fn raycast_hulls(
     None
 }
 
+/// One thing a shape query found.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShapeHit {
+    /// The body or collider's ECS entity index (`None` for anonymous colliders).
+    pub eid: Option<u32>,
+    /// The closest point on the queried shape's surface to the thing it found.
+    pub point: [f32; 3],
+    /// Outward normal at `point`, pointing away from what was hit.
+    pub normal: [f32; 3],
+    /// Overlap depth for an overlap query; travel distance for a cast.
+    pub distance: f32,
+}
+
+/// Everything a sphere of `radius` at `center` intersects.
+///
+/// Cheap by construction and exactly in this engine's idiom: every collider
+/// already answers a signed distance, so "does this overlap" is
+/// `distance(center) < radius` — no separate broadphase, no new geometry
+/// kernels. Sensors are included (a hitbox wants to know it swept a trigger
+/// volume); the ray queries skip them because a camera ray must pass through a
+/// portal trigger, which is a different question.
+pub fn overlap_sphere_colliders(
+    colliders: &[AnchoredCollider],
+    center: Vec3,
+    radius: f32,
+    mask: u32,
+) -> Vec<ShapeHit> {
+    let mut out = Vec::new();
+    for c in colliders {
+        if (mask >> c.layer) & 1 == 0 {
+            continue;
+        }
+        let d = c.distance(center);
+        if d < radius {
+            let n = c.normal(center);
+            out.push(ShapeHit {
+                eid: c.eid,
+                point: (center - n * d).into(),
+                normal: n.into(),
+                distance: radius - d,
+            });
+        }
+    }
+    out
+}
+
+/// Everything a sphere of `radius` at `center` intersects among BODY hulls.
+///
+/// This is the half a melee hitbox cares about, and the half lag compensation
+/// moves: inside `net.rewind` the hulls handed in are the rewound ones, so an
+/// overlap sees the world as the attacker saw it — the promise the netcode
+/// design made for shape queries and only raycast had kept.
+pub fn overlap_sphere_hulls(
+    hulls: &[BodyHull],
+    center: Vec3,
+    radius: f32,
+    exclude: &[u32],
+    mask: u32,
+) -> Vec<ShapeHit> {
+    let mut out = Vec::new();
+    for h in hulls {
+        if exclude.contains(&h.eid) || (mask >> h.layer) & 1 == 0 {
+            continue;
+        }
+        let d = h.distance(center);
+        if d < radius {
+            let n = h.normal(center);
+            out.push(ShapeHit {
+                eid: Some(h.eid),
+                point: (center - n * d).into(),
+                normal: n.into(),
+                distance: radius - d,
+            });
+        }
+    }
+    out
+}
+
+/// Sweep a sphere of `radius` along a ray; the first thing it touches.
+///
+/// The same march `raycast_colliders` runs, with the radius subtracted from
+/// every distance — which is what makes a swept sphere free here: an SDF's
+/// `d - r` IS the sphere's distance field. `exclude` and `mask` behave exactly
+/// as they do for a ray, so `{layers = …}` means the same thing for both.
+#[allow(clippy::too_many_arguments)]
+pub fn spherecast(
+    colliders: &[AnchoredCollider],
+    hulls: &[BodyHull],
+    origin: Vec3,
+    dir: Vec3,
+    radius: f32,
+    max_dist: f32,
+    exclude: &[u32],
+    mask: u32,
+) -> Option<ShapeHit> {
+    let rd = dir.try_normalize()?;
+    let r = radius.max(0.0);
+    let mut t = 0.0f32;
+    for _ in 0..512 {
+        if t > max_dist {
+            return None;
+        }
+        let p = origin + rd * t;
+        let mut dmin = f32::MAX;
+        let mut best: Option<(Option<u32>, Vec3)> = None;
+        for c in colliders {
+            if (mask >> c.layer) & 1 == 0 || c.sensor {
+                continue;
+            }
+            let d = c.distance(p) - r;
+            if d < dmin {
+                dmin = d;
+                best = Some((c.eid, c.normal(p)));
+            }
+        }
+        for h in hulls {
+            if exclude.contains(&h.eid) || (mask >> h.layer) & 1 == 0 {
+                continue;
+            }
+            let d = h.distance(p) - r;
+            if d < dmin {
+                dmin = d;
+                best = Some((Some(h.eid), h.normal(p)));
+            }
+        }
+        let (eid, n) = best?; // nothing testable in range at all
+        if dmin < 0.02 {
+            // The contact is on the swept sphere's surface, not its centre.
+            return Some(ShapeHit {
+                eid,
+                point: (p - n * r).into(),
+                normal: n.into(),
+                distance: t,
+            });
+        }
+        // Same floor as the ray march: an SDF that reports a huge sentinel far
+        // from any surface must not let the sweep step over thin geometry.
+        t += dmin.clamp(0.02, 1.0);
+    }
+    None
+}
+
+/// Sweep a vertical capsule (the shape a character actually is) along a ray.
+///
+/// Approximated as spheres at the two cap centres, which is exact for the caps
+/// and conservative along the barrel — and matches how the solver treats a
+/// capsule body, so a cast agrees with the movement it is predicting.
+#[allow(clippy::too_many_arguments)]
+pub fn capsulecast(
+    colliders: &[AnchoredCollider],
+    hulls: &[BodyHull],
+    origin: Vec3,
+    dir: Vec3,
+    radius: f32,
+    half_height: f32,
+    up: Vec3,
+    max_dist: f32,
+    exclude: &[u32],
+    mask: u32,
+) -> Option<ShapeHit> {
+    let u = up.try_normalize().unwrap_or(Vec3::Y);
+    let h = (half_height - radius).max(0.0);
+    let a = spherecast(colliders, hulls, origin + u * h, dir, radius, max_dist, exclude, mask);
+    let b = spherecast(colliders, hulls, origin - u * h, dir, radius, max_dist, exclude, mask);
+    match (a, b) {
+        (Some(a), Some(b)) => Some(if a.distance <= b.distance { a } else { b }),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    }
+}
+
 impl PhysicsWorld {
     pub fn new(gravity: GravityField) -> Self {
         Self { gravity, ..Default::default() }
@@ -407,6 +583,75 @@ impl PhysicsWorld {
     /// POSITIONAL correction and a VELOCITY impulse through the generalized
     /// inverse mass `1/m + ((I⁻¹(r×n))×r)·n` — the standard rigid contact
     /// response, which is what lets an off-center contact torque the body.
+    /// Buoyancy + drag on one compound, shape by shape.
+    ///
+    /// Each shape's push is applied at the shape's own world position, so the
+    /// lever arm about the centre of mass is real and a lopsided hull rights
+    /// itself for free. Angular drag is applied once, to the whole body,
+    /// scaled by how much of it is wet — a craft half out of the water should
+    /// not be damped like a submarine.
+    fn apply_water_to_compound(&mut self, ci: usize, dt: f32) {
+        let (com, orient, mass, n) = {
+            let c = &self.compounds[ci];
+            (c.pos, c.orient, c.mass, c.shapes.len())
+        };
+        if n == 0 {
+            return;
+        }
+        let g = self.gravity.accel_at(com, &self.colliders);
+        let mut wet_shapes = 0usize;
+        for si in 0..n {
+            let (offset, radius, share) = {
+                let s = &self.compounds[ci].shapes[si];
+                let r = match s.geom {
+                    crate::ShapeGeom::Sphere { radius } => radius,
+                    crate::ShapeGeom::Capsule { radius, half_height } => radius + half_height,
+                    crate::ShapeGeom::Box { half } => half.length(),
+                };
+                // The shape's share of the body's mass decides whether IT
+                // floats — a heavy engine block low in a hull should pull that
+                // end down even when the light nose is buoyant.
+                (s.offset, r, s.mass.max(1e-4))
+            };
+            let p = com + orient * offset;
+            // The shape's own velocity, not the body's: a spinning craft's
+            // submerged end is moving through the water even when the centre
+            // of mass is not, and that is what damps the spin.
+            let c = &self.compounds[ci];
+            let v = c.vel + c.ang_vel.cross(p - com);
+            let Some(a) = crate::water::buoyancy_accel(&self.water, p, radius, share, v, g, dt)
+            else {
+                continue;
+            };
+            wet_shapes += 1;
+            // `a` is per-shape-mass; turn it back into a force so the whole
+            // body's response is the sum, applied at the shape's position.
+            let force = a * share;
+            let c = &mut self.compounds[ci];
+            c.vel += force / mass * dt;
+            let torque = (p - com).cross(force);
+            let ang_acc = c.world_inv_inertia() * torque;
+            c.ang_vel += ang_acc * dt;
+        }
+        if wet_shapes == 0 {
+            return;
+        }
+        // Angular drag, once, proportional to how much of the craft is under.
+        // Exponential rather than subtractive so it can never flip the spin.
+        let wet = wet_shapes as f32 / n as f32;
+        let k = self
+            .water
+            .volumes
+            .iter()
+            .find(|v| !v.frozen)
+            .map(|v| v.angular_drag)
+            .unwrap_or(0.0);
+        if k > 0.0 {
+            let c = &mut self.compounds[ci];
+            c.ang_vel *= 1.0 / (1.0 + k * wet * dt);
+        }
+    }
+
     pub fn step_compound(&mut self, ci: usize, dt: f32) {
         let dt = dt.clamp(0.0, 0.1);
         if !self.compounds[ci].active {
@@ -440,6 +685,18 @@ impl PhysicsWorld {
             c.ang_vel += ang_acc * dt;
             c.force = Vec3::ZERO;
             c.torque = Vec3::ZERO;
+        }
+        // WATER, per SHAPE. A hull that lands flat floats; the same hull
+        // nose-down sinks its nose and rights itself — and that difference is
+        // entirely about WHERE the displaced volume is, so each shape's push is
+        // applied at its own position and the inertia tensor turns the
+        // asymmetry into torque. One force at the centre of mass gives a craft
+        // that bobs but never rights itself, which reads as a trampoline.
+        if !self.water.is_empty() {
+            self.apply_water_to_compound(ci, dt);
+        }
+        {
+            let c = &mut self.compounds[ci];
 
             c.pos += c.vel * dt;
             if c.ang_vel.length_squared() > 1e-12 {
@@ -668,6 +925,31 @@ impl PhysicsWorld {
                 self.bodies[bi].up = (-g).normalize();
             }
             self.bodies[bi].vel += g * dt;
+            // WATER. Applied as an acceleration alongside gravity, from the
+            // same static field, so a body in a sea is still one body against
+            // the world — nothing here reads another body, and the rollback
+            // contract holds. A single-shape body gets one sample at its
+            // centre; the per-shape treatment that lets a hull right itself is
+            // the compound path's, because a capsule has no orientation worth
+            // torquing.
+            if !self.water.is_empty() {
+                let b = &self.bodies[bi];
+                let (_, _, r) = b.sample_centers();
+                // A box body has no sphere radius; use its bounding sphere so
+                // a crate still displaces something.
+                let r = if r > 0.0 { r } else { b.bounding_radius() };
+                if let Some(a) = crate::water::buoyancy_accel(
+                    &self.water,
+                    b.pos,
+                    r,
+                    b.mass,
+                    b.vel,
+                    g,
+                    dt,
+                ) {
+                    self.bodies[bi].vel += a * dt;
+                }
+            }
             let v = self.bodies[bi].vel;
             self.bodies[bi].pos += v * dt;
             self.bodies[bi].grounded = false;
@@ -871,5 +1153,110 @@ mod hull_tests {
         let hulls = [capsule_at(1, 5.0)];
         assert!(raycast_hulls(&hulls, Vec3::ZERO, Vec3::Y, 100.0, &[], !0).is_none());
         assert!(raycast_hulls(&hulls, Vec3::new(0.0, 1.0, 0.0), Vec3::X, 2.0, &[], !0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod shape_query_tests {
+    use super::*;
+    use crate::BodyShape;
+
+    fn hull(eid: u32, at: Vec3, radius: f32) -> BodyHull {
+        BodyHull { eid, pos: at, radius, shape: BodyShape::Sphere, up: Vec3::Y, layer: 0 }
+    }
+
+    /// The question `raycast` could not answer: what is INSIDE this volume. A
+    /// fan of rays misses anything thinner than the fan and cannot report depth.
+    #[test]
+    fn overlap_sphere_finds_every_body_inside_it_and_nothing_outside() {
+        let hulls = [
+            hull(1, Vec3::new(0.0, 0.0, 0.0), 0.5), // dead centre
+            hull(2, Vec3::new(1.8, 0.0, 0.0), 0.5), // just inside the rim
+            hull(3, Vec3::new(6.0, 0.0, 0.0), 0.5), // well outside
+        ];
+        let hits = overlap_sphere_hulls(&hulls, Vec3::ZERO, 2.0, &[], !0);
+        let mut ids: Vec<u32> = hits.iter().filter_map(|h| h.eid).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2]);
+        // Depth is reported, and the centred body is deeper than the rim one.
+        let d1 = hits.iter().find(|h| h.eid == Some(1)).unwrap().distance;
+        let d2 = hits.iter().find(|h| h.eid == Some(2)).unwrap().distance;
+        assert!(d1 > d2, "the body at the centre overlaps more deeply ({d1} vs {d2})");
+    }
+
+    /// `exclude` and the layer mask mean exactly what they do for a ray, because
+    /// a hitbox centred on you must not report you.
+    #[test]
+    fn overlap_honours_exclude_and_the_layer_mask() {
+        let mut a = hull(1, Vec3::ZERO, 0.5);
+        a.layer = 2;
+        let b = hull(2, Vec3::new(0.5, 0.0, 0.0), 0.5); // layer 0
+        let hulls = [a, b];
+        assert_eq!(overlap_sphere_hulls(&hulls, Vec3::ZERO, 2.0, &[1], !0).len(), 1);
+        // Only layer 2.
+        let only2 = overlap_sphere_hulls(&hulls, Vec3::ZERO, 2.0, &[], 1 << 2);
+        assert_eq!(only2.len(), 1);
+        assert_eq!(only2[0].eid, Some(1));
+    }
+
+    /// **The lag-compensation property.** The design promised rewound overlaps
+    /// and only `raycast` kept it. These take the hull set as an argument, so
+    /// inside `net.rewind` — which hands over rewound hulls — an overlap sees
+    /// the world as the attacker saw it. Same query, two worlds, two answers.
+    #[test]
+    fn an_overlap_sees_whatever_world_it_is_handed() {
+        let live = [hull(7, Vec3::new(5.0, 0.0, 0.0), 0.5)]; // has since run away
+        let rewound = [hull(7, Vec3::new(0.4, 0.0, 0.0), 0.5)]; // where it was
+        let swing = Vec3::ZERO;
+        assert!(
+            overlap_sphere_hulls(&live, swing, 1.5, &[], !0).is_empty(),
+            "against the live world the swing misses"
+        );
+        assert_eq!(
+            overlap_sphere_hulls(&rewound, swing, 1.5, &[], !0)
+                .first()
+                .and_then(|h| h.eid),
+            Some(7),
+            "against the rewound world it connects — which is what the attacker saw"
+        );
+    }
+
+    /// A swept sphere hits things a ray down the same line passes beside — the
+    /// whole reason a thrown object is not a ray.
+    #[test]
+    fn a_swept_sphere_catches_what_a_ray_squeaks_past() {
+        // Offset from the ray line by more than the body's radius…
+        let hulls = [hull(1, Vec3::new(5.0, 0.9, 0.0), 0.5)];
+        let (o, d) = (Vec3::ZERO, Vec3::X);
+        assert!(
+            raycast_hulls(&hulls, o, d, 20.0, &[], !0).is_none(),
+            "a bare ray misses it"
+        );
+        let hit = spherecast(&[], &hulls, o, d, 0.6, 20.0, &[], !0)
+            .expect("a sphere of radius 0.6 does not");
+        assert_eq!(hit.eid, Some(1));
+        assert!(hit.distance > 0.0 && hit.distance < 6.0, "and stops at it: {}", hit.distance);
+    }
+
+    /// A cast that starts pointing at nothing reports nothing, rather than
+    /// marching to the horizon and inventing a hit.
+    #[test]
+    fn a_cast_into_empty_space_misses() {
+        let hulls = [hull(1, Vec3::new(0.0, 0.0, 40.0), 0.5)];
+        assert!(spherecast(&[], &hulls, Vec3::ZERO, Vec3::X, 0.5, 10.0, &[], !0).is_none());
+        assert!(spherecast(&[], &[], Vec3::ZERO, Vec3::X, 0.5, 10.0, &[], !0).is_none());
+    }
+
+    /// A capsule sweep catches what its ENDS meet, not just its middle — the
+    /// difference between "can I walk there" and "is my navel clear".
+    #[test]
+    fn a_capsule_sweep_catches_what_only_its_head_meets() {
+        // A body at head height only; a sphere cast from the centre misses it.
+        let hulls = [hull(1, Vec3::new(4.0, 1.6, 0.0), 0.5)];
+        let (o, d) = (Vec3::ZERO, Vec3::X);
+        assert!(spherecast(&[], &hulls, o, d, 0.4, 10.0, &[], !0).is_none());
+        let hit = capsulecast(&[], &hulls, o, d, 0.4, 1.8, Vec3::Y, 10.0, &[], !0)
+            .expect("the capsule's top cap reaches it");
+        assert_eq!(hit.eid, Some(1));
     }
 }

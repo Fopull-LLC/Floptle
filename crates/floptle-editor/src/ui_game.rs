@@ -362,6 +362,7 @@ impl Editor {
         let mut tokens = floptle_ui::Tokens::default();
         let mut sheet = floptle_ui::StyleSheet::default();
         let mut clashes = Vec::new();
+        let (mut tokens_failed, mut styles_failed) = (false, false);
         let files = Self::scan_ui_style_files(&self.project_root);
         for (path, _) in &files {
             let Ok(text) = std::fs::read_to_string(path) else { continue };
@@ -369,20 +370,26 @@ impl Editor {
             if name.ends_with(".tokens.ron") {
                 match floptle_ui::Tokens::parse(&text) {
                     Ok(t) => tokens.merge(t),
-                    Err(e) => self.console.push(
-                        floptle_script::LogLevel::Error,
-                        format!("ui tokens {name}: {e}"),
-                        None,
-                    ),
+                    Err(e) => {
+                        tokens_failed = true;
+                        self.console.push(
+                            floptle_script::LogLevel::Error,
+                            format!("ui tokens {name}: {e}"),
+                            None,
+                        );
+                    }
                 }
             } else {
                 match floptle_ui::StyleSheet::parse(&text) {
                     Ok(s) => clashes.extend(sheet.merge(s)),
-                    Err(e) => self.console.push(
-                        floptle_script::LogLevel::Error,
-                        format!("ui styles {name}: {e}"),
-                        None,
-                    ),
+                    Err(e) => {
+                        styles_failed = true;
+                        self.console.push(
+                            floptle_script::LogLevel::Error,
+                            format!("ui styles {name}: {e}"),
+                            None,
+                        );
+                    }
                 }
             }
         }
@@ -392,6 +399,35 @@ impl Editor {
                 format!("ui style \"{name}\" is defined in more than one sheet — the last one wins"),
                 None,
             );
+        }
+        // A one-key typo must not cost the whole look. One file failing to parse
+        // used to drop every style in the project — thirty styles inert because
+        // of one line — which reads as "the restyle did nothing" rather than as
+        // a parse error. Keep the last sheet that DID load, and say so, the way
+        // the input map already does (floptle/0051).
+        if styles_failed && !self.ui_styles.styles.is_empty() {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "keeping the last style sheet that loaded ({} styles) — the game is NOT \
+                     wearing the file above",
+                    self.ui_styles.styles.len()
+                ),
+                None,
+            );
+            sheet = std::mem::take(&mut self.ui_styles);
+        }
+        if tokens_failed && !self.ui_tokens.colors.is_empty() {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "keeping the last tokens that loaded ({} colours) — the game is NOT wearing \
+                     the file above",
+                    self.ui_tokens.colors.len()
+                ),
+                None,
+            );
+            tokens = std::mem::take(&mut self.ui_tokens);
         }
         self.ui_tokens = tokens;
         self.ui_styles = sheet;
@@ -484,6 +520,20 @@ impl Editor {
         let (sheet, tokens) = (&self.ui_styles, &self.ui_tokens);
         let dt = self.ui_style_dt;
         floptle_ui::apply_styles(roots, sheet, tokens, &input, &mut self.ui_style_rt, dt);
+        // An element naming a style no sheet defines draws unstyled and used to
+        // say nothing — the commonest thing to break in a rename, and invisible
+        // (the element looks authored, just wrong). Drained, so each name is
+        // reported once rather than every frame it is on screen.
+        for name in self.ui_style_rt.take_missing_styles() {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "ui style \"{name}\" is not in any .uistyle.ron — the elements asking for it \
+                     draw unstyled"
+                ),
+                None,
+            );
+        }
     }
 
     /// Every enabled UI layer `want` accepts, as a STYLED node tree, z-sorted

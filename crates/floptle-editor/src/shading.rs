@@ -223,6 +223,119 @@ pub(crate) fn fog_uniforms(l: &Light) -> ([f32; 4], [f32; 4]) {
     )
 }
 
+/// The WaterVolume the point `p` is inside, if any: `(tint, visibility)`.
+///
+/// Deliberately computed from the ECS rather than from the physics sim, so it
+/// answers in the editor viewport too — you can see what a sea looks like from
+/// inside without entering Play, which is the only way tuning the tint is not
+/// guesswork. Deepest volume wins, matching the physics rule exactly.
+pub(crate) fn underwater_at(
+    world: &floptle_core::World,
+    p: floptle_core::math::DVec3,
+) -> Option<([f32; 3], f32)> {
+    use floptle_core::{Matter, WaterKind};
+    let mut best: Option<(f64, [f32; 3], f32)> = None;
+    for (e, m) in world.query::<Matter>() {
+        let Matter::WaterVolume {
+            kind, radius, half_extents, frozen, tint, visibility, ..
+        } = m
+        else {
+            continue;
+        };
+        // A frozen sea has no inside to be in, and a switched-off node is off
+        // for the look as well as for the physics.
+        if *frozen || floptle_core::is_disabled(world, e) {
+            continue;
+        }
+        let wt = floptle_core::world_transform(world, e);
+        let depth = match kind {
+            WaterKind::Sea => {
+                let r = (*radius * wt.scale.max_element().max(1e-4)) as f64;
+                r - (p - wt.translation).length()
+            }
+            WaterKind::Pool => {
+                let half = floptle_core::math::Vec3::new(
+                    half_extents[0] * wt.scale.x,
+                    half_extents[1] * wt.scale.y,
+                    half_extents[2] * wt.scale.z,
+                )
+                .abs()
+                .as_dvec3();
+                let local = wt.rotation.inverse().as_dquat() * (p - wt.translation);
+                if local.x.abs() > half.x || local.z.abs() > half.z || local.y < -half.y {
+                    continue;
+                }
+                half.y - local.y
+            }
+        };
+        if depth > 0.0 && best.is_none_or(|(d, ..)| depth > d) {
+            best = Some((depth, *tint, visibility.max(0.5)));
+        }
+    }
+    best.map(|(_, tint, vis)| (tint, vis))
+}
+
+/// Mirror the scene's WaterVolume nodes for scripts, in WORLD coordinates.
+///
+/// The transform is folded in here rather than in Lua so the script answer and
+/// the solver's come from the same geometry — a scaled or rotated tank is one
+/// shape, not two that have to be kept in step.
+pub(crate) fn water_infos(
+    world: &floptle_core::World,
+) -> Vec<floptle_script::water_api::WaterInfo> {
+    use floptle_core::{Matter, WaterKind};
+    let mut out = Vec::new();
+    for (e, m) in world.query::<Matter>() {
+        let Matter::WaterVolume { kind, radius, half_extents, density, frozen, .. } = m else {
+            continue;
+        };
+        if floptle_core::is_disabled(world, e) {
+            continue;
+        }
+        let wt = floptle_core::world_transform(world, e);
+        let q = wt.rotation.as_dquat();
+        out.push(floptle_script::water_api::WaterInfo {
+            entity: e.index(),
+            sea: *kind == WaterKind::Sea,
+            center: wt.translation.to_array(),
+            radius: (*radius * wt.scale.max_element().max(1e-4)) as f64,
+            half: [
+                (half_extents[0] * wt.scale.x).abs().max(1e-4) as f64,
+                (half_extents[1] * wt.scale.y).abs().max(1e-4) as f64,
+                (half_extents[2] * wt.scale.z).abs().max(1e-4) as f64,
+            ],
+            rot: [q.x, q.y, q.z, q.w],
+            density: *density,
+            frozen: *frozen,
+        });
+    }
+    out
+}
+
+/// [`fog_uniforms`], overridden while the camera is under water.
+///
+/// The scene's own fog is REPLACED rather than added to: underwater is a
+/// different medium, not the same air with more of it. Going through the one
+/// fog channel every draw path already reads is what makes meshes, terrain, SDF
+/// matter and particles go murky *together* — a separate underwater pass would
+/// have had to be taught about each of them, and would have missed one.
+pub(crate) fn fog_uniforms_at(
+    l: &Light,
+    world: &floptle_core::World,
+    cam: floptle_core::math::DVec3,
+) -> ([f32; 4], [f32; 4]) {
+    match underwater_at(world, cam) {
+        Some((tint, vis)) => (
+            [tint[0], tint[1], tint[2], if l.fog_dither { l.fog_dither_strength.clamp(0.0, 1.0) } else { 0.0 }],
+            // Start close to the eye: water attenuates from the first
+            // centimetre, and a start distance would give you a crisp bubble of
+            // clear water around the camera that moves with you.
+            [vis * 0.05, vis, 1.0, 0.0],
+        ),
+        None => fog_uniforms(l),
+    }
+}
+
 /// Harvest up to 32 proxy shadow occluders from the world's collider shapes —
 /// how DYNAMIC raster meshes CAST sun shadows without being in the SDF field.
 /// Mirrors the physics build: a RigidBody node casts its body shape; a Collidable

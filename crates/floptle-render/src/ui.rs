@@ -11,7 +11,7 @@
 //! technical necessity like the untextured-cube checker, not a look). Project
 //! fonts land in a later phase.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::device::Gpu;
 use crate::raster::{Raster, TexId};
@@ -277,7 +277,100 @@ struct Glyph {
     advance: f32,
 }
 
-const ATLAS_SIZE: u32 = 1024;
+/// A resident glyph plus the frame it was last drawn on.
+#[derive(Clone, Copy)]
+struct GlyphEntry {
+    g: Glyph,
+    last_used: u64,
+}
+
+/// One packing shelf: a horizontal band `h` tall, filled left to right from
+/// `x`.
+#[derive(Clone, Copy)]
+struct Shelf {
+    y: u32,
+    h: u32,
+    x: u32,
+}
+
+/// The glyph atlas's shelf packer, with no GPU in it.
+///
+/// Placing into the *shortest shelf that still fits* (rather than the one most
+/// recently opened) is what stops an 11 px alphabet from paying 48 px of row
+/// height because it happened to interleave with a heading — the single change
+/// that bought back most of the atlas the old forward-only cursor was wasting.
+#[derive(Default)]
+struct ShelfPacker {
+    shelves: Vec<Shelf>,
+    /// The first free row below every open shelf — where the next one opens.
+    skyline: u32,
+    size: u32,
+}
+
+impl ShelfPacker {
+    fn new(size: u32) -> Self {
+        // The ▯ box owns the top-left corner of every atlas, so the first
+        // shelf opens below it.
+        ShelfPacker { shelves: Vec::new(), skyline: NOTDEF_PX + 1, size }
+    }
+
+    /// Reserve space for a `w`×`h` bitmap, returning its top-left texel.
+    /// One texel of padding on each axis keeps linear sampling off the
+    /// neighbouring glyph.
+    fn reserve(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        // A shelf this glyph nearly fills. Plain best-fit would drop an 11 px
+        // letter into the 48 px row a heading opened and charge it the full 48
+        // — which is the waste the old packer was criticised for, just chosen
+        // more carefully.
+        if let Some(at) = self.take(w, h, true) {
+            return Some(at);
+        }
+        // Otherwise a fresh shelf of exactly this height.
+        if self.skyline + h < self.size && w < self.size {
+            let y = self.skyline;
+            self.skyline += h + 1;
+            self.shelves.push(Shelf { y, h, x: w + 1 });
+            return Some((0, y));
+        }
+        // No rows left to open: now a wasteful shelf beats no glyph at all.
+        self.take(w, h, false)
+    }
+
+    /// The shortest open shelf with room for `w`×`h`. With `snug`, only shelves
+    /// the glyph fills to at least three quarters are considered.
+    fn take(&mut self, w: u32, h: u32, snug: bool) -> Option<(u32, u32)> {
+        let mut best: Option<usize> = None;
+        for (i, s) in self.shelves.iter().enumerate() {
+            if s.h < h || s.x + w + 1 > self.size {
+                continue;
+            }
+            if snug && h * 4 < s.h * 3 {
+                continue;
+            }
+            if best.is_none_or(|b| s.h < self.shelves[b].h) {
+                best = Some(i);
+            }
+        }
+        let i = best?;
+        let s = &mut self.shelves[i];
+        let at = (s.x, s.y);
+        s.x += w + 1;
+        Some(at)
+    }
+}
+
+/// The atlas starts here and doubles on demand.
+const ATLAS_START: u32 = 1024;
+/// Never grow past this, whatever the device claims it can allocate: 4096²
+/// of R8 is 16 MB, and a project needing more has a content problem a bigger
+/// texture only postpones.
+const ATLAS_CAP: u32 = 4096;
+/// The reserved "no glyph here" box, in texels, at the atlas's top-left.
+const NOTDEF_PX: u32 = 16;
+/// A glyph unused for this many frames is dropped by the next compaction —
+/// about ten seconds, so changing resolution twice does not leave three
+/// complete alphabets resident forever.
+const STALE_FRAMES: u64 = 600;
 
 /// Mirrors `ui.wgsl`'s Globals.
 #[repr(C)]
@@ -316,12 +409,32 @@ pub struct Ui {
     fonts: Vec<fontdue::Font>,
     /// Asset path → index into `fonts` (None = failed to parse, use fallback).
     font_ids: HashMap<String, Option<usize>>,
-    glyphs: HashMap<(usize, char, u32), Option<Glyph>>,
-    // Shelf packer cursor.
-    shelf: (u32, u32, u32),
+    /// Every glyph currently resident in the atlas, with the frame it was last
+    /// drawn on — the staleness `maintain` evicts by.
+    glyphs: HashMap<(usize, char, u32), GlyphEntry>,
+    /// Where the next glyph goes.
+    packer: ShelfPacker,
+    /// The atlas's current edge length. Doubles (up to `atlas_max`) rather than
+    /// failing shut; see [`Ui::maintain`].
+    atlas_size: u32,
+    /// The largest edge length this device will allocate.
+    atlas_max: u32,
+    /// Bumped by `set_time`, i.e. once per rendered frame.
+    frame: u64,
+    /// Set when a glyph could not be placed. Resolved at the NEXT frame's first
+    /// `pack`, never mid-frame — glyphs already drawn this frame hold UVs into
+    /// the current atlas, and repacking under them would smear the text.
+    overflowed: bool,
+    /// The frame `maintain` last did work, so it runs at most once per frame.
+    maintained_frame: u64,
+    /// The frame the last staleness sweep ran, so it is periodic rather than
+    /// a full-map scan every frame.
+    last_sweep: u64,
+    /// Pixel sizes already warned about, so a full atlas reports each size once
+    /// instead of once per process.
+    warned_sizes: HashSet<u32>,
     instance_buf: wgpu::Buffer,
     instance_cap: u32,
-    atlas_full_warned: bool,
     quad_vbuf: wgpu::Buffer,
     quad_ibuf: wgpu::Buffer,
     // UI-shader support (`stage ui` .flsl elements): the shared bind layouts
@@ -329,6 +442,8 @@ pub struct Ui {
     // per-element param bindings.
     globals_layout: wgpu::BindGroupLayout,
     tex_layout: wgpu::BindGroupLayout,
+    /// The element sampler, kept so a grown atlas can be re-bound.
+    tex_sampler: wgpu::Sampler,
     params_layout: wgpu::BindGroupLayout,
     shaders: Vec<UiShader>,
     shader_binds: Vec<UiShaderBinding>,
@@ -599,17 +714,9 @@ impl Ui {
         let white_bind = make_tex_bind(&white, "ui-white");
 
         // Glyph atlas: coverage in the red channel; the shader reads `.r`.
-        let atlas = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("ui-atlas"),
-            size: wgpu::Extent3d { width: ATLAS_SIZE, height: ATLAS_SIZE, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
+        let atlas = make_atlas(device, ATLAS_START);
         let atlas_bind = make_tex_bind(&atlas, "ui-atlas");
+        write_notdef(&gpu.queue, &atlas);
 
         let font = fontdue::Font::from_bytes(
             include_bytes!("../fonts/Roboto-Regular.ttf") as &[u8],
@@ -750,14 +857,21 @@ impl Ui {
             fonts: vec![font],
             font_ids: HashMap::new(),
             glyphs: HashMap::new(),
-            shelf: (0, 0, 0),
+            packer: ShelfPacker::new(ATLAS_START),
+            atlas_size: ATLAS_START,
+            atlas_max: ATLAS_CAP.min(gpu.device.limits().max_texture_dimension_2d),
+            frame: 0,
+            overflowed: false,
+            maintained_frame: 0,
+            last_sweep: 0,
+            warned_sizes: HashSet::new(),
             instance_buf,
             instance_cap: 1024,
-            atlas_full_warned: false,
             quad_vbuf,
             quad_ibuf,
             globals_layout,
             tex_layout,
+            tex_sampler: sampler,
             params_layout,
             shaders: Vec::new(),
             shader_binds: Vec::new(),
@@ -1028,8 +1142,18 @@ impl Ui {
     }
 
     /// Scene time for `stage ui` shaders' `time` input (Globals.viewport.w).
+    ///
+    /// Also the frame tick: this is called once per rendered frame, before any
+    /// packing, and the glyph cache dates its entries by it.
     pub fn set_time(&mut self, t: f32) {
         self.time = t;
+        self.frame += 1;
+    }
+
+    /// How much of the glyph atlas is spoken for, 0..1 — the number the budget
+    /// script in a project should not have to compute for itself.
+    pub fn atlas_utilisation(&self) -> f32 {
+        self.packer.skyline as f32 / self.atlas_size as f32
     }
 
     /// Register a project font (.ttf/.otf bytes) under its asset path. Parse
@@ -1086,62 +1210,151 @@ impl Ui {
         [w, h]
     }
 
-    /// Rasterize-or-fetch a glyph at an exact pixel size.
-    fn glyph(&mut self, gpu: &Gpu, fid: usize, c: char, px: u32) -> Option<Glyph> {
-        if let Some(g) = self.glyphs.get(&(fid, c, px)) {
-            return *g;
-        }
+    /// Rasterize `c` and place it in the atlas. `None` when it will not fit.
+    fn rasterize_into_atlas(&mut self, gpu: &Gpu, fid: usize, c: char, px: u32) -> Option<Glyph> {
         let (metrics, bitmap) = self.fonts[fid].rasterize(c, px as f32);
-        let g = if metrics.width == 0 || metrics.height == 0 {
-            // Whitespace: advance only.
-            Some(Glyph {
+        if metrics.width == 0 || metrics.height == 0 {
+            // Whitespace: advance only, no atlas space at all.
+            return Some(Glyph {
                 uv: [0.0; 4],
                 size: [0.0, 0.0],
                 offset: [0.0, 0.0],
                 advance: metrics.advance_width,
-            })
-        } else {
-            let (w, h) = (metrics.width as u32, metrics.height as u32);
-            let (mut cx, mut cy, mut row_h) = self.shelf;
-            if cx + w + 1 > ATLAS_SIZE {
-                cx = 0;
-                cy += row_h + 1;
-                row_h = 0;
+            });
+        }
+        let (w, h) = (metrics.width as u32, metrics.height as u32);
+        let (cx, cy) = self.packer.reserve(w, h)?;
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.atlas,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: cx, y: cy, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bitmap,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: None },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        let s = self.atlas_size as f32;
+        Some(Glyph {
+            uv: [cx as f32 / s, cy as f32 / s, (cx + w) as f32 / s, (cy + h) as f32 / s],
+            size: [metrics.width as f32, metrics.height as f32],
+            offset: [metrics.xmin as f32, -(metrics.ymin as f32) - metrics.height as f32],
+            advance: metrics.advance_width,
+        })
+    }
+
+    /// The ▯ every unplaceable glyph draws as. A missing letter that renders as
+    /// nothing reads as a label somebody left blank on purpose; a box reads as
+    /// a bug, which is what it is. Sized from the font's own metrics so a run of
+    /// them keeps the layout the text would have had.
+    fn notdef_glyph(&self, fid: usize, c: char, px: u32) -> Glyph {
+        let advance = self.fonts[fid].metrics(c, px as f32).advance_width;
+        let s = self.atlas_size as f32;
+        let e = NOTDEF_PX as f32 / s;
+        let h = px as f32 * 0.62;
+        Glyph {
+            uv: [0.0, 0.0, e, e],
+            size: [(advance - px as f32 * 0.12).max(1.0), h],
+            offset: [px as f32 * 0.06, -h],
+            advance,
+        }
+    }
+
+    /// Rasterize-or-fetch a glyph at an exact pixel size.
+    ///
+    /// Never fails shut: an atlas with no room left flags itself for [`Self::maintain`]
+    /// and hands back the ▯ box for the rest of the frame, so the worst case is one
+    /// frame of visible boxes followed by a bigger (or compacted) atlas.
+    fn glyph(&mut self, gpu: &Gpu, fid: usize, c: char, px: u32) -> Glyph {
+        let frame = self.frame;
+        if let Some(e) = self.glyphs.get_mut(&(fid, c, px)) {
+            e.last_used = frame;
+            return e.g;
+        }
+        let Some(g) = self.rasterize_into_atlas(gpu, fid, c, px) else {
+            self.overflowed = true;
+            if self.warned_sizes.insert(px) {
+                log::warn!(
+                    "ui glyph atlas ({0}×{0}) is full — '{c}' at {px} px could not be placed. \
+                     Text at this size draws as ▯ until the atlas grows. Each distinct PIXEL \
+                     size costs a whole alphabet, so check for an animated textSize or a \
+                     resolution that doubled every size.",
+                    self.atlas_size
+                );
             }
-            if cy + h + 1 > ATLAS_SIZE {
-                if !self.atlas_full_warned {
-                    log::warn!("ui glyph atlas full — some text will not render");
-                    self.atlas_full_warned = true;
-                }
-                self.glyphs.insert((fid, c, px), None);
-                return None;
-            }
-            gpu.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.atlas,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d { x: cx, y: cy, z: 0 },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &bitmap,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(w),
-                    rows_per_image: None,
-                },
-                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            );
-            self.shelf = (cx + w + 1, cy, row_h.max(h));
-            let s = ATLAS_SIZE as f32;
-            Some(Glyph {
-                uv: [cx as f32 / s, cy as f32 / s, (cx + w) as f32 / s, (cy + h) as f32 / s],
-                size: [metrics.width as f32, metrics.height as f32],
-                offset: [metrics.xmin as f32, -(metrics.ymin as f32) - metrics.height as f32],
-                advance: metrics.advance_width,
-            })
+            return self.notdef_glyph(fid, c, px);
         };
-        self.glyphs.insert((fid, c, px), g);
+        self.glyphs.insert((fid, c, px), GlyphEntry { g, last_used: frame });
         g
+    }
+
+    /// Grow or compact the atlas, at most once per frame and never mid-frame.
+    ///
+    /// Called at the top of `pack`, which is the first thing a frame does with
+    /// glyphs — so the repack lands before anything samples the new layout, and
+    /// UVs handed out last frame are already on the screen behind us.
+    fn maintain(&mut self, gpu: &Gpu) {
+        if self.maintained_frame == self.frame {
+            return;
+        }
+        let stale = self.frame.saturating_sub(self.last_sweep) >= STALE_FRAMES
+            && self.glyphs.values().any(|e| self.frame - e.last_used >= STALE_FRAMES);
+        if !self.overflowed && !stale {
+            return;
+        }
+        self.maintained_frame = self.frame;
+        if self.overflowed && self.atlas_size < self.atlas_max {
+            // Room to grow: keep every glyph, just give them a bigger sheet.
+            let size = (self.atlas_size * 2).min(self.atlas_max);
+            log::info!("ui glyph atlas grew to {size}×{size}");
+            self.atlas_size = size;
+            self.repack(gpu, false);
+        } else {
+            // Already as big as it gets (or just a periodic sweep): drop what
+            // nothing has drawn lately and repack the rest.
+            self.repack(gpu, true);
+            self.last_sweep = self.frame;
+        }
+        self.overflowed = false;
+    }
+
+    /// Rebuild the atlas at `self.atlas_size`, re-rasterizing the glyphs worth
+    /// keeping. Tallest first, so the shelves come out packed rather than
+    /// striped with the leftovers of whatever order they were first drawn in.
+    fn repack(&mut self, gpu: &Gpu, drop_stale: bool) {
+        let frame = self.frame;
+        let mut keep: Vec<(usize, char, u32)> = self
+            .glyphs
+            .iter()
+            .filter(|(_, e)| !drop_stale || frame - e.last_used < STALE_FRAMES)
+            .map(|(k, _)| *k)
+            .collect();
+        // Height is monotonic in pixel size for a given font, and sorting by the
+        // key avoids re-rasterizing everything twice just to measure it.
+        keep.sort_unstable_by(|a, b| b.2.cmp(&a.2).then(a.cmp(b)));
+
+        self.atlas = make_atlas(&gpu.device, self.atlas_size);
+        self.atlas_bind = make_tex_bind_with(
+            &gpu.device,
+            &self.tex_layout,
+            &self.tex_sampler,
+            &self.atlas,
+            "ui-atlas",
+        );
+        write_notdef(&gpu.queue, &self.atlas);
+        self.packer = ShelfPacker::new(self.atlas_size);
+
+        let old = std::mem::take(&mut self.glyphs);
+        for k in keep {
+            let last_used = old[&k].last_used;
+            if let Some(g) = self.rasterize_into_atlas(gpu, k.0, k.1, k.2) {
+                self.glyphs.insert(k, GlyphEntry { g, last_used });
+            }
+            // A glyph that will not fit even in the fresh atlas is simply left
+            // out; it comes back as a ▯ and re-triggers growth next frame.
+        }
+        self.warned_sizes.clear();
     }
 
     /// Pack a layer's draw list into instances + batches. `scale` maps design
@@ -1160,6 +1373,8 @@ impl Ui {
         instances: &mut Vec<UiInstance>,
         batches: &mut Vec<UiBatch>,
     ) {
+        // Resolve last frame's overflow before anything reads a UV this frame.
+        self.maintain(gpu);
         let clip_px = |clip: &Option<floptle_ui::Clip>| -> ([f32; 4], f32) {
             match clip {
                 Some(c) => (
@@ -1493,7 +1708,7 @@ impl Ui {
                 for (line, &run_w) in lines.iter().zip(&widths) {
                     let mut pen_x = shift[0] + field_shift + align_x(t.align, rect_px, run_w);
                     for c in line.chars() {
-                        let Some(g) = self.glyph(gpu, fid, c, px) else { continue };
+                        let g = self.glyph(gpu, fid, c, px);
                         if g.size[0] > 0.0 {
                             let rect =
                                 [pen_x + g.offset[0], baseline + g.offset[1], g.size[0], g.size[1]];
@@ -1724,5 +1939,245 @@ impl Ui {
             }
         }
         gpu.queue.submit([encoder.finish()]);
+    }
+}
+
+/// Allocate a `size`×`size` R8 glyph atlas.
+fn make_atlas(device: &wgpu::Device, size: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("ui-atlas"),
+        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+/// The element bind group for a texture — the standalone form of `Ui::new`'s
+/// `make_tex_bind`, callable after construction (a grown atlas needs re-binding).
+fn make_tex_bind_with(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    tex: &wgpu::Texture,
+    label: &str,
+) -> wgpu::BindGroup {
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+        ],
+    })
+}
+
+/// Draw the ▯ box into the atlas's reserved top-left corner: a hollow square
+/// with a two-texel border. Every atlas carries one, at a fixed place, so the
+/// fallback is available even at the moment there is no room for anything else.
+fn write_notdef(queue: &wgpu::Queue, atlas: &wgpu::Texture) {
+    const N: usize = NOTDEF_PX as usize;
+    let mut px = [0u8; N * N];
+    for y in 0..N {
+        for x in 0..N {
+            let edge = x < 2 || y < 2 || x >= N - 2 || y >= N - 2;
+            px[y * N + x] = if edge { 255 } else { 0 };
+        }
+    }
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: atlas,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &px,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(NOTDEF_PX),
+            rows_per_image: None,
+        },
+        wgpu::Extent3d { width: NOTDEF_PX, height: NOTDEF_PX, depth_or_array_layers: 1 },
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bug this file's atlas work exists for: the old packer was one
+    /// forward cursor, so every glyph landed in a row as tall as the tallest
+    /// glyph that had happened to open it. Interleaving two sizes — exactly
+    /// what a HUD with a heading and body text does — paid the tall one's
+    /// height for both.
+    #[test]
+    fn a_small_glyph_does_not_pay_a_tall_row_s_height() {
+        let mut p = ShelfPacker::new(1024);
+        // A heading glyph opens a 48-tall shelf, then body text follows.
+        p.reserve(30, 48).unwrap();
+        for _ in 0..20 {
+            p.reserve(8, 11).unwrap();
+        }
+        // Two shelves: one 48 tall, one 11 tall. The old cursor would have put
+        // all 21 glyphs in the 48-tall row.
+        assert_eq!(p.shelves.len(), 2);
+        assert_eq!(p.shelves[1].h, 11);
+        // And the 11 px glyphs sit in the short one.
+        assert!(p.shelves[1].x > 20 * 8, "body text packed into the short shelf");
+    }
+
+    /// Best-fit picks the SHORTEST shelf that clears the glyph, not the first
+    /// or the newest — a 12 px glyph offered a 48 and a 14 takes the 14.
+    #[test]
+    fn best_fit_takes_the_shortest_shelf_that_fits() {
+        let mut p = ShelfPacker::new(1024);
+        p.reserve(10, 48).unwrap();
+        p.reserve(10, 14).unwrap();
+        p.reserve(10, 30).unwrap();
+        let (_, y) = p.reserve(10, 12).unwrap();
+        let fourteen = p.shelves.iter().find(|s| s.h == 14).unwrap();
+        assert_eq!(y, fourteen.y, "a 12 px glyph belongs in the 14 px shelf");
+    }
+
+    /// Glyphs never overlap, and never overlap the reserved ▯ box — the two
+    /// properties that make a placement correct at all.
+    #[test]
+    fn placements_never_overlap_or_touch_the_notdef_box() {
+        let mut p = ShelfPacker::new(256);
+        let mut boxes: Vec<(u32, u32, u32, u32)> = Vec::new();
+        // A spread of sizes in a deliberately awkward order.
+        for (i, &(w, h)) in
+            [(9, 12), (24, 31), (5, 7), (18, 22), (40, 48), (6, 9), (12, 16)].iter().cycle().take(60).enumerate()
+        {
+            let w = w + (i as u32 % 3);
+            let Some((x, y)) = p.reserve(w, h) else { break };
+            assert!(x + w <= 256 && y + h <= 256, "inside the atlas");
+            assert!(y > NOTDEF_PX, "below the reserved ▯ corner");
+            for &(bx, by, bw, bh) in &boxes {
+                let apart = x + w <= bx || bx + bw <= x || y + h <= by || by + bh <= y;
+                assert!(apart, "({x},{y},{w},{h}) overlaps ({bx},{by},{bw},{bh})");
+            }
+            boxes.push((x, y, w, h));
+        }
+        assert!(boxes.len() > 20, "packed a useful number before filling up");
+    }
+
+    /// Failing shut is now a bounded, reported event rather than a silent one:
+    /// `reserve` says no instead of handing back a placement off the edge.
+    #[test]
+    fn a_full_atlas_refuses_rather_than_placing_out_of_bounds() {
+        let mut p = ShelfPacker::new(64);
+        let mut n = 0;
+        while p.reserve(20, 20).is_some() {
+            n += 1;
+            assert!(n < 100, "reserve never stops");
+        }
+        assert!(n > 0, "some glyphs fit before it filled");
+        assert_eq!(p.reserve(20, 20), None, "and it stays refused");
+        // A glyph wider than the whole atlas is refused too, not wrapped.
+        assert_eq!(ShelfPacker::new(64).reserve(200, 8), None);
+    }
+
+    /// Utilisation is what a project's budget script had to reimplement in
+    /// Python; the engine should be the one that knows.
+    #[test]
+    fn a_fresh_packer_is_almost_empty() {
+        let p = ShelfPacker::new(1024);
+        assert!(p.skyline < 32, "only the ▯ corner is spoken for");
+    }
+
+    /// The old packer was one forward cursor: every glyph joined the current
+    /// row, and the row was as tall as the tallest glyph in it. Transcribed
+    /// here so the improvement is a measurement rather than a claim.
+    fn forward_cursor_skyline(sizes: &[u32], size: u32) -> u32 {
+        let font = fontdue::Font::from_bytes(
+            include_bytes!("../fonts/Roboto-Regular.ttf") as &[u8],
+            fontdue::FontSettings::default(),
+        )
+        .unwrap();
+        let (mut cx, mut cy, mut row_h) = (0u32, 0u32, 0u32);
+        for c in ' '..='~' {
+            for &px in sizes {
+                let m = font.metrics(c, px as f32);
+                let (w, h) = (m.width as u32, m.height as u32);
+                if w == 0 || h == 0 {
+                    continue;
+                }
+                if cx + w + 1 > size {
+                    cx = 0;
+                    cy += row_h + 1;
+                    row_h = 0;
+                }
+                cx += w + 1;
+                row_h = row_h.max(h);
+            }
+        }
+        cy + row_h + 1
+    }
+
+    /// A real project's text — the printable ASCII range at eight sizes, which
+    /// is what the card measured Fofighter's HUD and training room at, and
+    /// which used to reach ~51% at 1388p and OVERFLOW at 4K. Interleaved by
+    /// character (not grouped by size), because that is the order a UI actually
+    /// asks for glyphs in and the order the old packer was worst at.
+    #[test]
+    fn a_real_ui_s_alphabet_fits_with_room_to_spare() {
+        let font = fontdue::Font::from_bytes(
+            include_bytes!("../fonts/Roboto-Regular.ttf") as &[u8],
+            fontdue::FontSettings::default(),
+        )
+        .unwrap();
+        // Eight sizes, then the same eight doubled — a 720p design height shown
+        // on a 1440p screen, which is exactly how the bug was found.
+        let sizes: Vec<u32> = [11u32, 13, 16, 20, 24, 32, 40, 48]
+            .iter()
+            .flat_map(|&s| [s, s * 2])
+            .collect();
+
+        let fill = |size: u32| {
+            let mut p = ShelfPacker::new(size);
+            let (mut placed, mut refused) = (0, 0);
+            for c in ' '..='~' {
+                for &px in &sizes {
+                    let m = font.metrics(c, px as f32);
+                    let (w, h) = (m.width as u32, m.height as u32);
+                    if w == 0 || h == 0 {
+                        continue;
+                    }
+                    match p.reserve(w, h) {
+                        Some(_) => placed += 1,
+                        None => refused += 1,
+                    }
+                }
+            }
+            (p.skyline, placed, refused)
+        };
+
+        let (rows_1k, placed, refused_1k) = fill(1024);
+        let old_rows = forward_cursor_skyline(&sizes, 1024);
+        let (rows_2k, _, refused_2k) = fill(2048);
+        println!(
+            "16 sizes x printable ASCII = {} glyphs\n  \
+             forward cursor: {old_rows} rows of 1024 (needs {:.1}x the atlas)\n  \
+             shelf packer:   {rows_1k} rows, {refused_1k} refused at 1024\n  \
+             shelf packer:   {rows_2k} rows, {refused_2k} refused at 2048",
+            placed + refused_1k,
+            old_rows as f32 / 1024.0,
+        );
+
+        // The packer is worth having on its own: less than half the rows.
+        assert!(
+            rows_1k * 2 < old_rows,
+            "shelf packing must more than halve the footprint ({rows_1k} vs {old_rows})"
+        );
+        // But it is NOT sufficient, and that is the point — a sixteen-size
+        // project overruns 1024² however well it is packed. Growing the atlas
+        // is what actually stops text disappearing.
+        assert!(refused_1k > 0, "this set is genuinely too big for 1024 — that is the premise");
+        assert_eq!(refused_2k, 0, "and it fits comfortably once the atlas doubles");
     }
 }

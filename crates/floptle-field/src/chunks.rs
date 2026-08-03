@@ -228,6 +228,20 @@ impl ChunkField {
 
     // ---- sampling: border-transparent, chunks are invisible to readers -------
 
+    /// The texture-palette slot at a world position — the material the
+    /// generator wrote when it laid down strata, ore pockets and cave seams.
+    ///
+    /// `None` for untextured voxels (slot 0, and the legacy 255 sentinel), so a
+    /// caller can tell "plain rock" from "slot 255". The read half of what
+    /// `paint_texture` writes: until floptle/0037 the palette was write-only
+    /// from script, so a mining game could not ask what it had just dug.
+    pub fn slot_at(&self, p: Vec3) -> Option<u8> {
+        match self.color(p)[3] {
+            0 | 255 => None,
+            s => Some(s),
+        }
+    }
+
     /// The stored distance at a GLOBAL voxel index. Absent chunks read as open air.
     /// This is the only voxel accessor; aprons and cross-chunk gradients come free (T3).
     #[inline]
@@ -462,6 +476,37 @@ impl ChunkField {
         }
     }
 
+}
+
+/// How much material a sculpt moved, and what it was made of.
+///
+/// Volumes are in the field's own (local) cubic units; a caller that has scaled
+/// its terrain node converts by the scale cubed. Additive across dabs: summing
+/// `removed` over a shaft gives the volume that left the field.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SculptYield {
+    /// Solid volume that left the field.
+    pub removed: f64,
+    /// Solid volume that arrived (a `Raise` dab).
+    pub added: f64,
+    /// `removed`, split by texture-palette slot.
+    pub slots: std::collections::BTreeMap<u8, f64>,
+    /// The part of `removed` that carried no palette slot — plain rock. Kept
+    /// separate rather than folded into a slot so `removed` always equals
+    /// `untextured + sum(slots)` and a caller can check its own arithmetic.
+    pub untextured: f64,
+}
+
+/// The fraction of a voxel that is solid, from its signed distance: the linear
+/// surface approximation the mesher already implies. Clamped, so voxels well
+/// inside or well outside contribute a whole unit or nothing and the sum over a
+/// region is the region's volume.
+#[inline]
+fn occupancy(d: f32, voxel: f32) -> f32 {
+    (0.5 - d / voxel).clamp(0.0, 1.0)
+}
+
+impl ChunkField {
     /// Apply a sculpt brush; returns the chunk coords whose voxels changed (the remesh
     /// set). Mirrors the dense [`crate::Terrain::sculpt`] semantics, including
     /// [`BrushProfile`], so sculpting feels identical.
@@ -473,10 +518,38 @@ impl ChunkField {
         strength: f32,
         profile: BrushProfile,
     ) -> Vec<[i32; 3]> {
+        self.sculpt_measured(brush, center, radius, strength, profile).0
+    }
+
+    /// [`Self::sculpt`], plus **how much material moved and what it was made of**.
+    ///
+    /// A dig that says nothing about what it removed leaves a mining game
+    /// guessing: the palette slot each voxel carries is what the generator wrote
+    /// when it laid down strata, ore pockets and cave seams, and it was
+    /// write-only from script (floptle/0037).
+    ///
+    /// Volume comes from each voxel's **occupancy** — the fraction of it that is
+    /// solid, `clamp(0.5 - d/voxel, 0, 1)` — differenced across the write. That
+    /// makes it additive by construction: sum the reports over a shaft and you
+    /// get the volume that actually left the field, because every voxel is
+    /// counted once and monotonically. Slots are read BEFORE the write, so the
+    /// material reported is the material that was there.
+    pub fn sculpt_measured(
+        &mut self,
+        brush: Brush,
+        center: Vec3,
+        radius: f32,
+        strength: f32,
+        profile: BrushProfile,
+    ) -> (Vec<[i32; 3]>, SculptYield) {
         match brush {
-            Brush::Paint => return Vec::new(),
-            Brush::Smooth => return self.smooth(center, radius, strength, profile),
-            Brush::Flatten => return self.flatten(center, radius, strength, profile),
+            Brush::Paint => return (Vec::new(), SculptYield::default()),
+            Brush::Smooth => {
+                return (self.smooth(center, radius, strength, profile), SculptYield::default());
+            }
+            Brush::Flatten => {
+                return (self.flatten(center, radius, strength, profile), SculptYield::default());
+            }
             _ => {}
         }
         // CSG, not accumulation. The obvious brush — nudge every voxel toward
@@ -498,6 +571,8 @@ impl ChunkField {
         let k = (1.0 - profile.hardness.clamp(0.0, 1.0)) * radius * 0.5;
         let (lo, hi) = self.voxel_range(center, radius);
         let mut touched = Vec::new();
+        let mut yielded = SculptYield::default();
+        let vox_vol = f64::from(self.voxel).powi(3);
         for iz in lo[2]..=hi[2] {
             for iy in lo[1]..=hi[1] {
                 for ix in lo[0]..=hi[0] {
@@ -519,6 +594,22 @@ impl ChunkField {
                     if (next - cur).abs() < 1e-6 {
                         continue;
                     }
+                    // Read the slot before the write; the material reported has
+                    // to be the material that was standing there.
+                    let d_occ = occupancy(cur, self.voxel) - occupancy(next, self.voxel);
+                    let moved = f64::from(d_occ) * vox_vol;
+                    if moved > 0.0 {
+                        yielded.removed += moved;
+                        let slot = self.color_at([ix, iy, iz])[3];
+                        // 255 is the legacy "untextured" sentinel, not slot 255.
+                        if slot != 0 && slot != 255 {
+                            *yielded.slots.entry(slot).or_default() += moved;
+                        } else {
+                            yielded.untextured += moved;
+                        }
+                    } else {
+                        yielded.added -= moved;
+                    }
                     self.set_voxel([ix, iy, iz], next, None);
                     touched.push(chunk_of([ix, iy, iz]));
                 }
@@ -527,7 +618,7 @@ impl ChunkField {
         touched.sort_unstable();
         touched.dedup();
         self.compact(&touched);
-        touched
+        (touched, yielded)
     }
 
     /// Paint surface colour without touching the shape.
@@ -2174,5 +2265,133 @@ mod tests {
         f.sculpt(Brush::Raise, Vec3::new(60.0, 0.0, 0.0), 6.0, 1.0, BrushProfile::default());
         let (_, hi2) = f.bounds().unwrap();
         assert!(hi2.x >= 60.0, "sculpting outward must grow the bounds ({} < 60)", hi2.x);
+    }
+}
+
+#[cfg(test)]
+mod yield_tests {
+    use super::*;
+
+    /// The measurement has to be ADDITIVE: sum the reports over a shaft and you
+    /// get the volume that actually left the field. A mining game that pays out
+    /// per dab needs a careful shaft and a sloppy cavern to differ by the truth,
+    /// not by the dab count (floptle/0037).
+    #[test]
+    fn summed_yield_equals_the_volume_that_left_the_field() {
+        let mut f = ChunkField::new(0.5);
+        // A solid block to cut into.
+        f.fill_with(
+            Vec3::splat(-40.0),
+            Vec3::splat(40.0),
+            |p: Vec3| p.y - 20.0,
+            |_| [0.5, 0.5, 0.5],
+        );
+
+        let solid = |f: &ChunkField| -> f64 {
+            // Ground truth: total occupancy over the region we touch.
+            let mut v = 0.0;
+            let n = 60;
+            for iz in -n..=n {
+                for iy in -n..=n {
+                    for ix in -n..=n {
+                        v += f64::from(occupancy(f.voxel_at([ix, iy, iz]), f.voxel));
+                    }
+                }
+            }
+            v * f64::from(f.voxel).powi(3)
+        };
+
+        let before = solid(&f);
+        let mut reported = 0.0;
+        // A shaft: eight overlapping dabs straight down.
+        for i in 0..8 {
+            let c = Vec3::new(0.0, 18.0 - i as f32 * 1.2, 0.0);
+            let (_, y) = f.sculpt_measured(Brush::Lower, c, 3.0, 1.0, BrushProfile::default());
+            reported += y.removed - y.added;
+        }
+        let actual = before - solid(&f);
+        assert!(actual > 0.0, "the shaft removed something");
+        let err = (reported - actual).abs() / actual;
+        assert!(
+            err < 0.02,
+            "summed yield {reported:.3} must match the volume removed {actual:.3} (err {:.2}%)",
+            err * 100.0
+        );
+    }
+
+    /// Removal is attributed to the palette slot that was standing there, and
+    /// the parts add up — `removed == untextured + sum(slots)` is what lets a
+    /// caller check its own arithmetic.
+    #[test]
+    fn yield_is_split_by_the_palette_slot_that_was_there() {
+        let mut f = ChunkField::new(0.5);
+        f.fill_with(
+            Vec3::splat(-40.0),
+            Vec3::splat(40.0),
+            |p: Vec3| p.y - 20.0,
+            |_| [0.5, 0.5, 0.5],
+        );
+        f.fill_texture(4);
+        // A seam of a different material, NARROWER than the dig that follows,
+        // so the report has to distinguish the two materials rather than just
+        // naming whichever one it met first.
+        f.paint_texture(Vec3::new(0.0, 19.0, 0.0), 1.0, 9);
+
+        let (_, y) = f.sculpt_measured(
+            Brush::Lower,
+            Vec3::new(0.0, 19.0, 0.0),
+            3.0,
+            1.0,
+            BrushProfile::default(),
+        );
+        assert!(y.removed > 0.0, "it dug something");
+        let parts: f64 = y.untextured + y.slots.values().sum::<f64>();
+        assert!(
+            (parts - y.removed).abs() < 1e-9,
+            "removed {} must equal untextured {} + slots {}",
+            y.removed,
+            y.untextured,
+            y.slots.values().sum::<f64>()
+        );
+        assert!(y.slots.contains_key(&9), "the painted seam is reported: {:?}", y.slots);
+        assert!(y.slots.contains_key(&4), "so is the rock around it: {:?}", y.slots);
+    }
+
+    /// A dab that changes nothing reports ZERO, not nothing — "I dug air" has to
+    /// be distinguishable from "the report has not arrived".
+    #[test]
+    fn a_dab_that_moves_nothing_reports_zero() {
+        let mut f = ChunkField::new(0.5);
+        f.fill_with(
+            Vec3::splat(-40.0),
+            Vec3::splat(40.0),
+            |p: Vec3| p.y - 20.0,
+            |_| [0.5, 0.5, 0.5],
+        );
+        // Far above the surface, in open air.
+        let (_, y) =
+            f.sculpt_measured(Brush::Lower, Vec3::new(0.0, 80.0, 0.0), 2.0, 1.0, BrushProfile::default());
+        assert_eq!(y.removed, 0.0);
+        assert_eq!(y.added, 0.0);
+        assert!(y.slots.is_empty());
+    }
+
+    /// The palette read is the point query the card asks for: `None` where the
+    /// field is untextured, so "plain rock" and "slot 255" stay distinct.
+    #[test]
+    fn slot_at_reads_what_paint_texture_wrote() {
+        let mut f = ChunkField::new(0.5);
+        f.fill_with(
+            Vec3::splat(-40.0),
+            Vec3::splat(40.0),
+            |p: Vec3| p.y - 20.0,
+            |_| [0.5, 0.5, 0.5],
+        );
+        let hit = Vec3::new(0.0, 19.5, 0.0);
+        assert_eq!(f.slot_at(hit), None, "an untextured field answers None");
+        f.fill_texture(3);
+        assert_eq!(f.slot_at(hit), Some(3));
+        f.paint_texture(hit, 6.0, 7);
+        assert_eq!(f.slot_at(hit), Some(7));
     }
 }

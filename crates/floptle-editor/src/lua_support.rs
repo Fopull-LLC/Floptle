@@ -66,6 +66,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field up_y number Physics: body up (−gravity) Y.
 ---@field up_z number Physics: body up (−gravity) Z.
 ---@field visible boolean Show / hide this node's geometry (Inspector eye toggle).
+---@field persistent boolean Carry this node — and everything under it — across a `scene.load` swap. Its scripts keep RUNNING (`start` does not re-fire), because the node never stopped existing.
 ---@field pos Vec3 The node's position as a vec3 (read/write: `node.pos = node.pos + dir * dt`). Accepts any {x=,y=,z=} value.
 ---@field vel Vec3 The body's velocity as a vec3 (read/write) — one write instead of vx/vy/vz: `node.vel = node.vel + node.up * jump`.
 ---@field up Vec3 The body's up as a vec3 (−gravity): Y on flat ground, RADIAL on a planet. The direction to jump in wherever you're standing.
@@ -1095,8 +1096,26 @@ scene = {}
 ---against it, and every script's `start` re-fires — exactly like the scene
 ---booting fresh. Accepts a name (\"arena\"), a scenes-relative path
 ---(\"arenas/desert\"), or a project-relative path (\"scenes/arena.ron\").
+---
+---With `{ additive = true }` the scene is LAYERED on top of the running one
+---instead of replacing it: nothing is torn down, no script restarts, and the
+---new nodes join the live physics sim. An additive scene brings nodes only —
+---no second lighting, skybox or post-processing node.
 ---@param name string
-function scene.load(name) end
+---@param opts? { additive?: boolean }
+function scene.load(name, opts) end
+---Remove an additively-loaded scene (and anything parented under it). The
+---base scene — the one you opened — is never a candidate.
+---@param name string
+function scene.unload(name) end
+---Be told when a scene has finished loading — AFTER the world is whole, which
+---is when a loading screen's job is done. The callback receives the scene's
+---name and whether it arrived additively.
+---
+---The subscription dies with the script that made it, so a node covering a
+---full swap must set `node.persistent = true` to be around for the answer.
+---@param fn fun(name: string, additive: boolean)
+function scene.onLoaded(fn) end
 ---The running scene's name (its file stem, e.g. \"first\").
 ---@return string
 function scene.current() end
@@ -1104,6 +1123,82 @@ function scene.current() end
 ---subfolders kept, e.g. \"arenas/desert\").
 ---@return string[]
 function scene.list() end
+
+---Thousands of props from a seed, GPU-instanced and never scene nodes. Your
+---generator keeps deciding WHAT grows where; the engine places and draws it.
+---@class Scatter
+scatter = {}
+---Declare a scatter source; returns its id. `asset` (a mesh path) or a `lod`
+---list is required; everything else defaults.
+---
+---Give `center` + `radius` for a planet's surface, or `center` + `halfX`/`halfZ`
+---for a flat region.
+---@param opts { asset?: string, lod?: { asset: string, distance: number }[], seed?: number, center?: Vec3, radius?: number, halfX?: number, halfZ?: number, perChunk?: number, chunk?: number, align?: string, scaleMin?: number, scaleMax?: number, range?: number, fade?: number, collide?: boolean }
+---@return integer
+function scatter.create(opts) end
+---Instances within `radius` of a point, nearest first. What a harvest verb aims
+---with — a proximity query, not a ray.
+---@param id integer
+---@param point Vec3
+---@param radius? number
+---@return { id: integer, distance: number, pos: Vec3, scale: number, param: number }[]
+function scatter.near(id, point, radius) end
+---Remove one instance, permanently. By ID, so it survives the chunk streaming
+---out and back in.
+---@param id integer
+---@param instanceId integer
+---@return boolean
+function scatter.remove(id, instanceId) end
+---Put one instance back, or all of them — what regrowth is made of.
+---@param id integer
+---@param instanceId? integer
+---@return integer restored
+function scatter.restore(id, instanceId) end
+---The instance ids this source has lost. Save THIS (a handful of numbers), not
+---every prop you ever saw.
+---@param id integer
+---@return integer[]
+function scatter.removed(id) end
+---Drop a whole source.
+---@param id integer
+---@return boolean
+function scatter.destroy(id) end
+
+---The scene's bodies of water. The engine floats things and drags them; what
+---being WET means — swimming, drowning, a flooded engine, a gauge going red —
+---is the game's, and all of it comes from one number: the depth.
+---@class Water
+water = {}
+---Metres below the nearest water surface; 0 in air. Takes (x, y, z), a vec3,
+---or a node. The same rule the solver uses, so a swim state can never disagree
+---with the physics floating you.
+---@param x number|Vec3|Node
+---@param y? number
+---@param z? number
+---@return number
+function water.depthAt(x, y, z) end
+---nil in air, else `{depth, density, frozen, node, up}` — `up` being the
+---direction OUT of the water (radial on a sea; NOT −gravity in a tilted tank).
+---@param x number|Vec3|Node
+---@param y? number
+---@param z? number
+---@return { depth: number, density: number, frozen: boolean, node: Node, up: Vec3 }|nil
+function water.at(x, y, z) end
+---The yes/no, when that is all you wanted.
+---@param x number|Vec3|Node
+---@param y? number
+---@param z? number
+---@return boolean
+function water.isUnderwater(x, y, z) end
+---Freeze or thaw a water volume. Frozen water applies no buoyancy, no drag and
+---no underwater look — pair it with a Collidable surface and a sea becomes
+---walkable ground.
+---@param node Node
+---@param frozen boolean
+function water.setFrozen(node, frozen) end
+---Every water volume in the scene, as nodes.
+---@return Node[]
+function water.volumes() end
 
 ---Runtime terrain editing + queries (Terrain 2.0). Edits queue and land the
 ---same tick (collision updates with the surface). World coordinates.
@@ -1120,6 +1215,7 @@ terrain = {}
 ---@param radius number
 ---@param strength? number
 ---@param mode? string
+---@return number id an id for the yield report this edit will produce
 function terrain.sculpt(x, y, z, radius, strength, mode) end
 ---Dig a hole — sugar for `terrain.sculpt(x, y, z, radius, strength, \"lower\")`.
 ---@param x number
@@ -1127,6 +1223,7 @@ function terrain.sculpt(x, y, z, radius, strength, mode) end
 ---@param z number
 ---@param radius number
 ---@param strength? number
+---@return number id an id for the yield report this edit will produce
 function terrain.dig(x, y, z, radius, strength) end
 ---Recolor the terrain surface inside the brush ball (r/g/b are 0..1).
 ---@param x number
@@ -1200,6 +1297,47 @@ function terrain.deleteSaveDir(path) end
 ---@param z number
 ---@return number|nil
 function terrain.query(x, y, z) end
+---The texture-palette slot at a world point — what the rock there is made of —
+---or nil where the field carries no slot.
+---@param x number
+---@param y number
+---@param z number
+---@return number|nil
+function terrain.slotAt(x, y, z) end
+---Everything inside a sphere: a list of hits, deepest overlap first. Hits carry
+---the same fields a raycast hit does; `distance` is the PENETRATION DEPTH.
+---Sees sensors (a hitbox wants to know it swept a trigger) and, inside
+---`net.rewind`, sees the rewound world.
+---@param center Vec3
+---@param radius number
+---@param opts? table { ignore = node, layers = \"Ground\" or a list of names }
+---@return table[]
+function overlapSphere(center, radius, opts) end
+---Sweep a sphere along a ray; the first thing it touches, or nil. Catches what a
+---bare ray squeaks past.
+---@param origin Vec3
+---@param dir Vec3
+---@param radius number
+---@param max number
+---@param opts? table
+---@return table|nil
+function spherecast(origin, dir, radius, max, opts) end
+---Sweep an upright capsule — the shape a character actually is — along a ray.
+---@param origin Vec3
+---@param dir Vec3
+---@param radius number
+---@param halfHeight number
+---@param max number
+---@param opts? table
+---@return table|nil
+function capsulecast(origin, dir, radius, halfHeight, max, opts) end
+---Reports for terrain edits that have LANDED since the last call (drained).
+---Each entry is { id, removed, added, untextured, slots = { [slot] = volume } }
+---in world cubic units; `removed` equals `untextured` plus the slot volumes.
+---An edit is queued and applied after the script pass, so a report arrives on a
+---later frame than the `terrain.dig` that asked for it — match them by `id`.
+---@return table[]
+function terrain.yields() end
 ---World Y of the highest terrain surface under (x,z), or nil when no terrain
 ---is hit there.
 ---@param x number

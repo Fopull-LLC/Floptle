@@ -221,10 +221,22 @@ is the loop the system exists for; use it.
 | Text | `text_color`, `text_size`, `tracking`, `line_height`, `case`, `font`, `text_stroke`, `text_shadow` |
 | Layout | `pad`, `gap` (on a stack) |
 
-`fill`, `border_color`, `text_color` and `tint` take a colour token or a
-literal. `text_size` takes a `text` token or a number; `pad`/`gap` take a
+**Every colour a style can set takes a token or a literal** — `fill`,
+`border_color`, `text_color`, `tint`, the caret/selection/placeholder colours,
+and the colour inside `shadow`, `glow`, `gradient.to`, `text_stroke` and
+`text_shadow`. `text_size` takes a `text` token or a number; `pad`/`gap` take a
 `spacing` token or a number; `radius` takes a number, a `radii` token, or four
 numbers `(TL, TR, BR, BL)`.
+
+```ron
+gradient: (kind: Linear, to: "bg", angle: 90.0),      // fade to a named colour
+gradient: (kind: Linear, angle: 90.0),                // …or omit `to` entirely
+```
+
+Leaving `to` out means **the fill at alpha 0** — "fade this out", which is the
+value a gradient wants most of the time. It is also the one that is easy to get
+wrong by hand: written as a literal it needs the fill's RGB repeated exactly, and
+any drift sends the fade through a different hue on its way to transparent.
 
 Layout *placement* is deliberately absent: a style says what things look like,
 not where they go. Where they go is the designer's, in the viewport.

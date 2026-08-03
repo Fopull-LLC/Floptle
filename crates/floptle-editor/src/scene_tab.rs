@@ -436,6 +436,42 @@ impl EditorTabViewer<'_> {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             ui.toggle_value(self.show_gizmos, "◎ Gizmos")
                                 .on_hover_text("show viewport gizmos/overlays (H)");
+                            // Plane lock — square the view to XY/ZY/XZ and keep
+                            // it there. Building a 2D game in a 3D editor
+                            // otherwise means re-achieving "flat" after every
+                            // drag; locked, mouse-look does nothing and the
+                            // movement keys slide you around the plane.
+                            let lock = *self.view_lock;
+                            ui.menu_button(
+                                if lock.is_locked() {
+                                    format!("▦ {}", lock.label())
+                                } else {
+                                    "▦ View".to_string()
+                                },
+                                |ui| {
+                                    for l in floptle_render::ViewLock::ALL {
+                                        if ui
+                                            .selectable_label(lock == l, l.label())
+                                            .clicked()
+                                        {
+                                            *self.view_lock = l;
+                                            ui.close();
+                                        }
+                                    }
+                                    ui.separator();
+                                    ui.small(
+                                        "A locked view ignores mouse-look. Middle-drag pans, \
+                                         the wheel zooms, and W/A/S/D slide around the plane \
+                                         (Space/Ctrl step along the view axis).",
+                                    );
+                                },
+                            )
+                            .response
+                            .on_hover_text(
+                                "lock the Scene view square to a plane — for 2D and for \
+                                 blockout work",
+                            );
+                            ui.separator();
                             ui.menu_button("⏷", |ui| {
                                 ui.add_enabled_ui(*self.show_gizmos, |ui| {
                                     let f = &mut *self.gizmo_filter;

@@ -21,6 +21,16 @@ pub(crate) struct ConsoleState {
     pub(crate) show_error: bool,
     pub(crate) search: String,
     pub(crate) collapse: bool,
+    /// Also write warnings and errors to stderr, because there is no Console tab
+    /// to read them in: `--play` and every exported build.
+    ///
+    /// This is the whole of floptle/0051. A malformed `.uistyle.ron` was
+    /// *diagnosed* correctly and then filed somewhere the running game could not
+    /// show it, which is indistinguishable from "the restyle didn't help" — the
+    /// worst failure mode a look-lives-in-two-files feature could have. Gating
+    /// one line here covers every producer at once (styles, tokens, the input
+    /// map, assets, scripts) instead of patching each call site.
+    pub(crate) mirror_to_stderr: bool,
 }
 
 impl Default for ConsoleState {
@@ -32,6 +42,7 @@ impl Default for ConsoleState {
             show_error: true,
             search: String::new(),
             collapse: true,
+            mirror_to_stderr: false,
         }
     }
 }
@@ -45,6 +56,23 @@ impl ConsoleState {
                 last.count += 1;
                 return;
             }
+        // Merging above doubles as the flood guard: a per-frame repeat prints
+        // once, not sixty times a second.
+        if self.mirror_to_stderr {
+            let tag = match level {
+                floptle_script::LogLevel::Error => Some("error"),
+                floptle_script::LogLevel::Warn => Some("warning"),
+                // `print` output is the game's own business; only problems are
+                // worth forcing onto a player's terminal.
+                floptle_script::LogLevel::Debug => None,
+            };
+            if let Some(tag) = tag {
+                match &source {
+                    Some((file, line)) => eprintln!("floptle: {tag}: {file}:{line}: {msg}"),
+                    None => eprintln!("floptle: {tag}: {msg}"),
+                }
+            }
+        }
         self.entries.push(ConsoleEntry { level, msg, source, count: 1 });
         const MAX: usize = 2000;
         if self.entries.len() > MAX {

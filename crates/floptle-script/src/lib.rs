@@ -115,6 +115,10 @@ type ComponentWrites = Rc<RefCell<HashMap<(u32, String, String), f64>>>;
 /// separate map because `borderR` already means the right border width — one
 /// namespace would have made a colour assignment resize an edge.
 type ComponentColorWrites = Rc<RefCell<HashMap<(u32, String, String), [f32; 4]>>>;
+/// `node:getcomponent(...).field = "some/path.png"` writes: the string-valued
+/// counterpart of [`ComponentWrites`], for the fields a number cannot express
+/// (a UI image's texture, a Material's texture, a text element's string).
+type ComponentStrWrites = Rc<RefCell<HashMap<(u32, String, String), String>>>;
 
 /// One live `ui.bind(node, prop, fn)`: the engine calls `fn` once a frame and
 /// writes what it returns.
@@ -130,6 +134,41 @@ pub(crate) struct UiBinding {
 }
 
 type UiBindings = Rc<RefCell<Vec<UiBinding>>>;
+
+/// One queued `scene.*` transition, drained by the driver between frames.
+///
+/// A LIST rather than a single slot, because additive loads compose: a level
+/// that brings in its terrain, its props and its music in one `start` is three
+/// requests and all three must happen. A full swap is still last-one-wins —
+/// the driver stops at the first one it performs, since everything queued
+/// behind it named the world that just stopped existing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SceneRequest {
+    /// `scene.load(name)` — replace the world.
+    Load { name: String },
+    /// `scene.load(name, { additive = true })` — layer on top of it.
+    Additive { name: String },
+    /// `scene.unload(name)` — take an additive layer away again.
+    Unload { name: String },
+}
+
+impl SceneRequest {
+    /// The scene this request names, whichever kind it is.
+    pub fn name(&self) -> &str {
+        match self {
+            SceneRequest::Load { name }
+            | SceneRequest::Additive { name }
+            | SceneRequest::Unload { name } => name,
+        }
+    }
+    /// True for the kind that replaces the world (the one a session must
+    /// announce, and the one that ends everything queued behind it).
+    pub fn is_swap(&self) -> bool {
+        matches!(self, SceneRequest::Load { .. })
+    }
+}
+
+type SceneQueue = Rc<RefCell<Vec<SceneRequest>>>;
 
 /// Queued `ui.make(container, tree)` calls, drained by the driver.
 type UiMakes = Rc<RefCell<Vec<ui_make::MakeRequest>>>;
@@ -180,12 +219,15 @@ mod net_api;
 pub mod rollback_api;
 mod preprocess;
 mod save_api;
+mod scatter_api;
 mod sched_api;
+mod shape_api;
 mod assembly_api;
 mod space_api;
 mod terrain_api;
 pub mod ui_make;
 mod view_api;
+pub mod water_api;
 
 pub(crate) use api::install_handle_api;
 /// Live ECS field appliers, reused by the animation system's property tracks.
@@ -201,7 +243,7 @@ pub use net_api::{
 };
 pub use assembly_api::{AssemblyCmd, AssemblyImpact, AssemblyInfo};
 pub use space_api::{SpaceBodyInfo, SpaceInfo};
-pub use terrain_api::{TerrainOp, TerrainOpMode};
+pub use terrain_api::{TerrainOp, TerrainOpMode, TerrainYield};
 pub use rollback_api::{ScriptState, MAX_STATE_DEPTH};
 pub use view_api::ViewInfo;
 
@@ -342,6 +384,8 @@ pub struct ScriptHost {
     /// Terrain edits queued by `terrain.sculpt/dig/paint(...)` this frame, drained by
     /// the editor after the script pass (applied to the authority field + sim copy).
     terrain_ops: Rc<RefCell<Vec<terrain_api::TerrainOp>>>,
+    /// Measured yield reports posted back by the engine after ops are applied.
+    terrain_yields: Rc<RefCell<Vec<terrain_api::TerrainYield>>>,
     /// `terrain.generatePlanet(id, opts)` requests — heavyweight whole-field
     /// generations the editor runs on a background thread.
     terrain_generates: Rc<RefCell<Vec<(u32, floptle_field::procgen::PlanetFill)>>>,
@@ -376,6 +420,9 @@ pub struct ScriptHost {
     /// `node.enabled = …` — switches the node (and its subtree) off/on. Separate from
     /// `visible`: that one only stops the draw, this also stops physics and scripts.
     enabled_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    /// `node.persistent = …` — whether the node (and its subtree) survives a
+    /// scene swap. Applied as a `Persistent` marker; absence means "ordinary".
+    persistent_changes: Rc<RefCell<HashMap<u32, bool>>>,
     /// `node.layer = "Name"` writes (entity index → validated layer name),
     /// applied as a `Layer` component after `run` ("Default" removes it).
     layer_changes: Rc<RefCell<HashMap<u32, String>>>,
@@ -395,6 +442,7 @@ pub struct ScriptHost {
     /// `node:getcomponent(name).field = value` writes, flushed to the ECS after `run`.
     component_changes: ComponentWrites,
     component_colors: ComponentColorWrites,
+    component_strs: ComponentStrWrites,
     ui_bindings: UiBindings,
     /// `ui.make(...)` calls this pass, drained by the driver's spawn drain.
     ui_makes: UiMakes,
@@ -450,10 +498,24 @@ pub struct ScriptHost {
     /// AND strings; only DECLARED tunables persist (a key in `defaults` or the
     /// stored params).
     param_writes: RefCell<Vec<(u32, String, String, ParamWrite)>>,
-    /// A pending `scene.load(...)` request (last call this frame wins). The
-    /// driver drains it and performs the switch between frames — locally when
+    /// Pending `scene.load(...)` / `scene.unload(...)` requests. The driver
+    /// drains them and performs each between frames — locally when
     /// offline/hosting, over the wire to every client in a session.
-    scene_request: Rc<RefCell<Option<String>>>,
+    scene_request: SceneQueue,
+    /// `scene.onLoaded(fn)` subscriptions, as `(owner entity, callback)`. The
+    /// owner is recorded so a subscription dies with the script that made it —
+    /// otherwise a swap would leave every old scene's loading screen listening.
+    /// A PERSISTENT node's subscription survives, which is the entire point:
+    /// something has to outlive the load to be told about it.
+    scene_loaded: Rc<RefCell<Vec<(u32, mlua::RegistryKey)>>>,
+    /// Every WaterVolume in the scene, refreshed by the driver before scripts
+    /// run — what `water.depthAt` / `water.at` read.
+    water_volumes: Rc<RefCell<Vec<water_api::WaterInfo>>>,
+    /// `water.setFrozen(node, on)` requests, drained by the driver.
+    water_freeze: Rc<RefCell<Vec<(u32, bool)>>>,
+    /// Scatter sources scripts declared (`floptle/0036`) — resolved into
+    /// drawable instances by the driver, never into scene nodes.
+    scatter_sources: scatter_api::Sources,
     /// The running scene's name, fed by the driver — what `scene.current()` reads.
     scene_name: Rc<RefCell<String>>,
     /// The focused UI element, fed by the engine each frame: what
@@ -744,12 +806,19 @@ pub(crate) struct SceneMirror {
     ui_texts: HashMap<u32, String>,
     /// UI elements' current style name (so a script can read `node.style`).
     ui_styles: HashMap<u32, String>,
+    /// UI images' current texture path (so a script can READ `node.texture`,
+    /// not just write it — the asymmetry was half of floptle/0052).
+    ui_textures: HashMap<u32, String>,
     /// Nodes that carry an explicit `Visible` component (so a script can read
     /// `node.visible`; absent = visible by default).
     visible: HashMap<u32, bool>,
     /// Nodes carrying `floptle_core::Disabled` THEMSELVES (not inherited) — what
     /// `node.enabled` reads back. Inheritance is resolved by the engine, not mirrored.
     disabled: std::collections::HashSet<u32>,
+    /// Nodes carrying `floptle_core::Persistent` THEMSELVES — what
+    /// `node.persistent` reads back. Same rule as `disabled`: the subtree
+    /// inheritance is the engine's to resolve, not the mirror's to duplicate.
+    persistent: std::collections::HashSet<u32>,
     /// Nodes with an explicit `Layer` component, by layer NAME (absent =
     /// "Default"). Read by `node.layer`.
     layers: HashMap<u32, String>,
@@ -847,6 +916,9 @@ struct Shared {
     /// `node.enabled = …` — switches the node (and its subtree) off/on. Separate from
     /// `visible`: that one only stops the draw, this also stops physics and scripts.
     enabled_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    /// `node.persistent = …` — whether the node (and its subtree) survives a
+    /// scene swap. Applied as a `Persistent` marker; absence means "ordinary".
+    persistent_changes: Rc<RefCell<HashMap<u32, bool>>>,
     /// `node.layer = "Name"` writes (entity index → layer name, pre-validated
     /// against the project's layer table), applied as a `Layer` component.
     layer_changes: Rc<RefCell<HashMap<u32, String>>>,
@@ -871,6 +943,7 @@ struct Shared {
     /// flushed to the ECS after `run` (and read back the same frame).
     component_changes: ComponentWrites,
     component_colors: ComponentColorWrites,
+    component_strs: ComponentStrWrites,
     /// Construction-API writes (`setCelestial`/`setMaterial`/`setTerrain`/
     /// `setPrimitive`), applied in the flush.
     rich_sets: Rc<RefCell<Vec<(u32, RichSet)>>>,
@@ -3711,6 +3784,115 @@ end
             world.get::<Transform>(e).unwrap().translation.y,
             2.0,
             "…and lateUpdate runs again, which is the whole point"
+        );
+    }
+
+    /// floptle/0052: `node.texture = "..."` did NOTHING — not an error, not a
+    /// warning, no return value. A character-select strip assigned portraits
+    /// that way for months and showed the placeholder on every slot.
+    #[test]
+    fn script_sets_and_reads_a_ui_element_texture() {
+        let dir = std::env::temp_dir().join("floptle_script_test_ui_texture");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "portrait",
+            "function update(node, dt)\n  \
+               node.texture = \"textures/ui/sae.png\"\n  \
+               readback = node.texture\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        // A bare element with NO image slot — the write has to create one, the
+        // way a sprite frame-swap track does.
+        world.insert(e, floptle_ui::ElementSpec::default());
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "portrait".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let spec = world.get::<floptle_ui::ElementSpec>(e).expect("element");
+        assert_eq!(
+            spec.image.as_ref().map(|i| i.texture.as_str()),
+            Some("textures/ui/sae.png"),
+            "the write must reach the ECS, not vanish"
+        );
+    }
+
+    /// The shape queries exist as globals and answer from Lua — the Rust unit
+    /// tests prove the geometry, this proves a script can actually reach it.
+    #[test]
+    fn shape_queries_are_callable_from_lua() {
+        let dir = std::env::temp_dir().join("floptle_script_test_shape_api");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "probe",
+            "function update(node, dt)\n  \
+               kinds = type(overlapSphere) .. type(spherecast) .. type(capsulecast)\n  \
+               n = #overlapSphere(vec3(0, 0, 0), 5)\n  \
+               miss = spherecast(vec3(0, 0, 0), vec3(1, 0, 0), 0.5, 10)\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "probe".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        // No colliders lent, so the answers are "nothing" — but they must be
+        // ANSWERS (an empty list, a nil) rather than an error about a missing
+        // global, which is what a query nobody wired would give.
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    }
+
+    /// The other half: a non-string raises instead of being dropped. A write
+    /// that silently does nothing is the disease; the wrong portrait was the
+    /// symptom.
+    #[test]
+    fn a_non_string_texture_raises() {
+        let dir = std::env::temp_dir().join("floptle_script_test_ui_texture_bad");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "bad", "function update(node, dt)\n  node.texture = 42\nend\n");
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, floptle_ui::ElementSpec::default());
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "bad".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(
+            host.errors().iter().any(|e| e.contains("texture")),
+            "a bad texture write must say so: {:?}",
+            host.errors()
         );
     }
 
