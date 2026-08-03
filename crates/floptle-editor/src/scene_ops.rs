@@ -120,6 +120,7 @@ impl Editor {
             .world
             .get::<floptle_core::CelestialBody>(e)
             .map(floptle_scene::CelestialBodyDoc::from_body);
+        let disabled = self.world.get::<floptle_core::Disabled>(e).is_some();
         let mesh_collider = self.world.get::<floptle_core::MeshCollider>(e).is_some();
         // Carry the paint KEY, not a copy of the colors: the pasted node points at the
         // same block and forks it only if painted (copy-on-write, proposal §9.0). So
@@ -160,6 +161,7 @@ impl Editor {
             object_materials,
             rigidbody,
             celestial,
+            disabled,
             mesh_collider,
             paint,
             tex_paint,
@@ -228,6 +230,9 @@ impl Editor {
         }
         if node.mesh_collider {
             self.world.insert(e, floptle_core::MeshCollider);
+        }
+        if node.disabled {
+            self.world.insert(e, floptle_core::Disabled);
         }
         if node.collidable {
             self.world.insert(e, floptle_core::Collidable);
@@ -308,6 +313,7 @@ impl Editor {
             object_materials: Default::default(),
             rigidbody: None,
             celestial: None,
+            disabled: false,
             mesh_collider: false,
             paint: None,
             tex_paint: None,
@@ -361,6 +367,7 @@ impl Editor {
                 object_materials: Default::default(),
                 rigidbody: None,
                 celestial: None,
+                disabled: false,
                 mesh_collider: false,
                 paint: None,
                 tex_paint: None,

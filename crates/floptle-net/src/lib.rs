@@ -272,6 +272,7 @@ mod tests {
             id: None,
             parent_id: None,
             terrain_gen: None,
+            disabled: false,
             name: "arrow".into(),
             transform: floptle_scene::TransformDoc {
                 translation: [5.0, 1.0, 0.0],

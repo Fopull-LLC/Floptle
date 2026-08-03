@@ -45,6 +45,115 @@ pub(crate) fn newell(mesh: &MapMesh, face: &Face) -> Vec3 {
     n
 }
 
+/// Split one face into triangles, as local corner indices (0..k) into `face.verts`.
+///
+/// **Not a fan from corner 0**, which is what this used to be and what made editing
+/// feel broken. A fan is only correct for a face that is both convex and planar, and
+/// dragging a single vertex destroys either property:
+///
+/// - **Concave** — a fan emits triangles that leave the polygon entirely, so the face
+///   visibly spills outside its own outline.
+/// - **Non-planar** — every triangle shares corner 0, so the whole face creases around
+///   that one corner. Which corner is "first" is an artifact of how the face happened to
+///   be built, so the same drag on two faces of the same shape folds them differently,
+///   and dragging corner 0 itself deforms the face in a way dragging any other corner
+///   does not. That asymmetry is the "folding/glitching" — it is not a rendering
+///   artifact, the triangles really are those shapes.
+///
+/// So: a quad takes its **shorter diagonal** (the standard choice — it minimizes the
+/// crease on a warped quad and is symmetric under corner rotation), and anything larger
+/// is **ear-clipped** in the face's own plane, which handles concave outlines correctly.
+/// Ear clipping can fail on a self-intersecting projection; that falls back to the fan,
+/// because a wrong-looking face beats a missing one.
+fn face_tris(mesh: &MapMesh, face: &Face, n: Vec3) -> Vec<[u32; 3]> {
+    let k = face.verts.len();
+    let p = |i: usize| mesh.verts[face.verts[i] as usize];
+    if k == 3 {
+        return vec![[0, 1, 2]];
+    }
+    if k == 4 {
+        // Shorter diagonal. Equal lengths keep 0–2 so a planar quad is unchanged.
+        return if p(0).distance_squared(p(2)) <= p(1).distance_squared(p(3)) {
+            vec![[0, 1, 2], [0, 2, 3]]
+        } else {
+            vec![[1, 2, 3], [1, 3, 0]]
+        };
+    }
+
+    // Project onto the face plane. `u`/`v` are right-handed about `n`, so a CCW
+    // outline in 3D stays CCW in 2D and the winding checks below mean what they say.
+    let u = if n.x.abs() < 0.9 { Vec3::X.cross(n) } else { Vec3::Y.cross(n) }
+        .try_normalize()
+        .unwrap_or(Vec3::X);
+    let v = n.cross(u);
+    let o = p(0);
+    let pts: Vec<[f32; 2]> =
+        (0..k).map(|i| [(p(i) - o).dot(u), (p(i) - o).dot(v)]).collect();
+    let cross = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
+        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    };
+    // ON an edge counts as inside. A strict test looks more permissive and is wrong:
+    // the reflex corner of an L sits exactly on the diagonal of the ear you would cut
+    // across the notch, so a strict test calls it "outside", accepts the ear, and lays
+    // a triangle over the hole — the very artifact this function exists to stop.
+    let inside = |a: [f32; 2], b: [f32; 2], c: [f32; 2], q: [f32; 2]| {
+        cross(a, b, q) >= 0.0 && cross(b, c, q) >= 0.0 && cross(c, a, q) >= 0.0
+    };
+
+    let mut idx: Vec<u32> = (0..k as u32).collect();
+    let mut out = Vec::with_capacity(k - 2);
+    let mut guard = 0;
+    while idx.len() > 3 {
+        guard += 1;
+        if guard > k * k {
+            out.clear();
+            break; // self-intersecting or degenerate — fall back below
+        }
+        let m = idx.len();
+        // Only REFLEX corners can invalidate an ear, and only reflex corners are worth
+        // testing with the inclusive rule above — testing every corner that way would
+        // reject ears whose neighbours merely touch them, which is most of them.
+        let reflex: Vec<bool> = (0..m)
+            .map(|j| {
+                let (a, b, c) = (
+                    pts[idx[(j + m - 1) % m] as usize],
+                    pts[idx[j] as usize],
+                    pts[idx[(j + 1) % m] as usize],
+                );
+                cross(a, b, c) <= 0.0
+            })
+            .collect();
+        let mut clipped = false;
+        for i in 0..m {
+            let (ia, ib, ic) = (idx[(i + m - 1) % m], idx[i], idx[(i + 1) % m]);
+            let (a, b, c) = (pts[ia as usize], pts[ib as usize], pts[ic as usize]);
+            if cross(a, b, c) <= 0.0 {
+                continue; // reflex corner (or collinear) — not an ear
+            }
+            let blocked = (0..m).any(|j| {
+                let v = idx[j];
+                reflex[j] && v != ia && v != ib && v != ic && inside(a, b, c, pts[v as usize])
+            });
+            if blocked {
+                continue;
+            }
+            out.push([ia, ib, ic]);
+            idx.remove(i);
+            clipped = true;
+            break;
+        }
+        if !clipped {
+            out.clear();
+            break;
+        }
+    }
+    if out.is_empty() {
+        return (1..k as u32 - 1).map(|i| [0, i, i + 1]).collect();
+    }
+    out.push([idx[0], idx[1], idx[2]]);
+    out
+}
+
 /// Dominant-axis planar projection: 1 local unit = 1 UV tile, axis pairs chosen
 /// for upright, unmirrored walls and floors (see `triangulate` docs).
 fn face_uv(p: Vec3, n: Vec3) -> [f32; 2] {
@@ -65,9 +174,9 @@ fn face_uv(p: Vec3, n: Vec3) -> [f32; 2] {
 /// - One `SlotMesh` per slot index that has at least one face, ordered by
 ///   slot index ascending. Out-of-range face slots clamp to 0.
 /// - Vertices are NOT shared between faces (flat shading: every corner gets
-///   the face normal). Within one face, corners are emitted once and the face
-///   is fan-triangulated: `(0, i, i+1)` over the face's corner order, which
-///   preserves CCW winding.
+///   the face normal). Within one face, corners are emitted once and the face is
+///   split by [`face_tris`] — shorter diagonal for a quad, ear clipping above that
+///   — which preserves CCW winding and does not fold on a concave or warped face.
 /// - `uvs` are a dominant-axis planar projection of the local position: pick
 ///   the normal's largest |component| axis, project onto the other two axes,
 ///   1 unit = 1 UV tile. Exact axis pairs (box mapping — upright, unmirrored
@@ -100,8 +209,8 @@ pub fn triangulate(mesh: &MapMesh) -> Vec<SlotMesh> {
                 sm.uvs.push(face_uv(p, n));
                 sm.vert_src.push((fi as u32, vi));
             }
-            for i in 1..f.verts.len() as u32 - 1 {
-                sm.indices.extend_from_slice(&[base, base + i, base + i + 1]);
+            for [a, b, c] in face_tris(mesh, f, n) {
+                sm.indices.extend_from_slice(&[base + a, base + b, base + c]);
                 sm.tri_faces.push(fi as u32);
             }
         }
@@ -202,6 +311,108 @@ mod tests {
                 assert_eq!(uv, [-p.x, -p.y]);
             }
         }
+    }
+
+    /// Total triangle area must equal the polygon's own area. A fan from corner 0 on a
+    /// CONCAVE face emits triangles that stick out past the outline, so the total comes
+    /// out larger — that overspill is what "the face folds over itself" looks like.
+    #[test]
+    fn a_concave_face_does_not_spill_outside_its_outline() {
+        // An L, CCW in the XZ plane (normal +Y). Corner 2 is reflex.
+        let m = MapMesh {
+            verts: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 1.0),
+                Vec3::new(1.0, 0.0, 1.0),
+                Vec3::new(1.0, 0.0, 2.0),
+                Vec3::new(0.0, 0.0, 2.0),
+            ],
+            faces: vec![Face { verts: vec![0, 5, 4, 3, 2, 1], slot: 0 }],
+            slots: vec!["Default".into()],
+            spec: None,
+        };
+        let s = &triangulate(&m)[0];
+        assert_eq!(s.tri_faces.len(), 4, "an L is 4 triangles");
+        let mut area = 0.0f32;
+        for t in 0..s.tri_faces.len() {
+            let [i0, i1, i2] = [
+                s.indices[t * 3] as usize,
+                s.indices[t * 3 + 1] as usize,
+                s.indices[t * 3 + 2] as usize,
+            ];
+            let (a, b, c) = (
+                Vec3::from(s.positions[i0]),
+                Vec3::from(s.positions[i1]),
+                Vec3::from(s.positions[i2]),
+            );
+            area += (b - a).cross(c - a).length() * 0.5;
+        }
+        // The L covers 3 unit squares. The old fan gave 4 — a whole extra square of
+        // geometry laid over the notch.
+        assert!((area - 3.0).abs() < 1e-4, "covered {area}, want 3.0");
+
+        // …and every triangle still winds with the face.
+        let fnorm = face_normal(&m, &m.faces[0]);
+        for t in 0..s.tri_faces.len() {
+            let [i0, i1, i2] = [
+                s.indices[t * 3] as usize,
+                s.indices[t * 3 + 1] as usize,
+                s.indices[t * 3 + 2] as usize,
+            ];
+            let (a, b, c) = (
+                Vec3::from(s.positions[i0]),
+                Vec3::from(s.positions[i1]),
+                Vec3::from(s.positions[i2]),
+            );
+            assert!((b - a).cross(c - a).dot(fnorm) > 0.0, "tri {t} winds backwards");
+        }
+    }
+
+    /// A warped quad must split the same way regardless of which corner is listed
+    /// first. The fan could not: it always creased around corner 0, so rotating the
+    /// corner order — or dragging corner 0 rather than corner 2 — changed the shape.
+    #[test]
+    fn a_warped_quad_splits_the_same_way_whichever_corner_is_first() {
+        let corners = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(3.0, 0.0, 0.0),
+            Vec3::new(3.0, 1.0, 1.0), // lifted: the quad is no longer planar
+            Vec3::new(0.0, 0.0, 1.0),
+        ];
+        // The diagonal actually chosen, as a pair of world positions.
+        let diagonal_of = |rot: usize| {
+            let verts: Vec<Vec3> = (0..4).map(|i| corners[(i + rot) % 4]).collect();
+            let m = MapMesh {
+                verts,
+                faces: vec![Face { verts: vec![0, 1, 2, 3], slot: 0 }],
+                slots: vec!["Default".into()],
+                spec: None,
+            };
+            let s = &triangulate(&m)[0];
+            assert_eq!(s.tri_faces.len(), 2);
+            // The shared edge of the two triangles IS the diagonal.
+            let tri: Vec<Vec<usize>> = (0..2)
+                .map(|t| (0..3).map(|k| s.indices[t * 3 + k] as usize).collect())
+                .collect();
+            let mut shared: Vec<Vec3> = tri[0]
+                .iter()
+                .filter(|i| tri[1].contains(i))
+                .map(|&i| Vec3::from(s.positions[i]))
+                .collect();
+            shared.sort_by(|a, b| a.to_array().partial_cmp(&b.to_array()).unwrap());
+            shared
+        };
+        let base = diagonal_of(0);
+        assert_eq!(base.len(), 2, "the two triangles share exactly one edge");
+        for rot in 1..4 {
+            assert_eq!(diagonal_of(rot), base, "corner order {rot} chose a different diagonal");
+        }
+        // And it is genuinely the SHORTER one: 0–2 spans the lift, 1–3 does not.
+        assert!(
+            base[0].distance(base[1]) < corners[0].distance(corners[2]) - 1e-4,
+            "picked the long diagonal"
+        );
     }
 
     #[test]

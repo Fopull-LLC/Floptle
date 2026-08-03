@@ -40,10 +40,23 @@ you're holding its four corners.
 Drag-anywhere matters more than it sounds: a blockout fills the screen, so a
 box-select that could only start on empty space could rarely start at all.
 
-Growing a selection: **Grow** (one more ring), **Connected** (the whole shell),
-**Coplanar** (the flat region a face sits in), **Edge loop** (run an edge
-selection through its quad loops), and **Select** on a material slot (every face
-wearing it).
+Growing a selection: **Grow** (one more ring), **Shrink** (take the outer ring
+back off), **Connected** (the whole shell), **Coplanar** (the flat region a face
+sits in), **Edge loop** (run an edge selection through its quad loops), and
+**Select** on a material slot (every face wearing it).
+
+**Warped faces** selects every face whose corners no longer sit in one plane.
+After a few edits, a face that looks wrong is usually a warped one, and this is
+how you find it without hunting by eye. Triangles are never warped, so they never
+show up here.
+
+### Right-click for what you can do
+
+Right-clicking in the viewport lists the operations that apply to what you have
+selected — extrude, inset, subdivide, bridge, flip, split off, delete, weld,
+snap — plus the whole Select menu and the vertex/edge/face switch. Everything
+that isn't applicable is greyed out rather than hidden, so the menu is also the
+answer to "why can't I bridge these?" (bridge takes exactly two faces).
 
 **Select through the surface** (off by default) decides whether sub-objects
 hidden behind the mesh are clickable. Off means you stop grabbing the vertex on
@@ -52,7 +65,9 @@ the far side of a wall.
 ## 3. Shape it
 
 - **⬆ Extrude** (`E`) pushes the selected faces out along their own normal —
-  walls out of a floor. With grid snap on, it steps by the grid.
+  walls out of a floor. With grid snap on, it steps by the grid. Selecting
+  *every* face of a closed shape has no direction to go, so it declines rather
+  than guessing one.
 - **⊡ Inset** (`I`) shrinks a copy of each face inside its own border. Inset then
   extrude carves a recess (a window, a doorway).
 - **⊞ Subdivide**, **⇌ Bridge** (join two faces with a tube of walls),

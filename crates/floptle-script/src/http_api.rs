@@ -625,7 +625,7 @@ pub(crate) fn install_http_api(
 
 /// Hand a URL to the platform's browser. The Hub does the same for its own
 /// hyperlinks; this is the one call, kept here so a script can use it.
-fn open_in_browser(url: &str) -> std::io::Result<()> {
+pub fn open_in_browser(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     let cmd = ("xdg-open", vec![url]);
     #[cfg(target_os = "macos")]

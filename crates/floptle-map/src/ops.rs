@@ -74,7 +74,16 @@ pub fn extrude_faces(mesh: &mut MapMesh, faces: &[u32], distance: f32) -> Vec<u3
     for &fi in &sel {
         nsum += newell(mesh, &mesh.faces[fi]);
     }
-    let dir = nsum.try_normalize().unwrap_or(Vec3::Y);
+    // A CLOSED selection has no direction to go. Every face of a box sums to zero, so
+    // "select all, press E" used to normalize a zero vector, fall back to +Y, and
+    // translate the entire shell upward — while making no walls (nothing is a boundary
+    // edge) and leaving every original vertex behind as an orphan that still draws as a
+    // dot and still box-selects. That reads exactly like "the tool invented vertices".
+    // Refusing is the honest answer: there is no such thing as extruding a closed solid
+    // along its own normals.
+    let Some(dir) = nsum.try_normalize() else {
+        return Vec::new();
+    };
 
     // Count canonical edges across the selection to find boundary edges, and
     // remember each boundary edge in its owning face's traversal direction.
@@ -506,6 +515,16 @@ pub fn weld(mesh: &mut MapMesh, verts: &[u32], eps: f32) -> usize {
         while f.verts.len() > 1 && f.verts.first() == f.verts.last() {
             f.verts.pop();
         }
+        // …and any corner that repeats NON-consecutively, which `dedup` cannot see.
+        // Welding two opposite corners of a quad leaves the ring [r, b, r, d]: three
+        // distinct indices, so the `>= 3` keep-test below passed it, but the ring is a
+        // BOWTIE. Its Newell sum is zero, so the normal fell back to +Y and every
+        // triangle came out degenerate — an invisible, un-pickable, zero-area face that
+        // still held its vertices alive and still polluted edge lists, loops and
+        // select-invert. Keeping the first run and dropping the rest turns it back into
+        // an honest polygon (or into something the retain below removes).
+        let mut seen = BTreeSet::new();
+        f.verts.retain(|v| seen.insert(*v));
     }
     mesh.faces.retain(|f| {
         f.verts.iter().collect::<BTreeSet<_>>().len() >= 3
@@ -596,6 +615,50 @@ pub fn subdivide_faces(mesh: &mut MapMesh, faces: &[u32]) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Extruding a CLOSED selection has no direction, and used to translate the whole
+    /// shell along +Y while leaving every original vertex behind as an orphan — which
+    /// looks like the tool inventing loose vertices.
+    #[test]
+    fn extruding_a_whole_closed_shell_is_refused_not_guessed() {
+        let mut m = crate::box_mesh(Vec3::ONE);
+        let before = m.clone();
+        let all: Vec<u32> = (0..m.faces.len() as u32).collect();
+        let made = extrude_faces(&mut m, &all, 1.0);
+        assert!(made.is_empty(), "a closed shell has no extrude direction");
+        assert_eq!(m.verts.len(), before.verts.len(), "no orphan vertices were added");
+        assert_eq!(m.faces.len(), before.faces.len());
+        assert_eq!(m.verts, before.verts, "the shell did not move");
+    }
+
+    /// Welding two corners of one face that are NOT neighbours leaves a bowtie ring.
+    /// `dedup` only sees consecutive repeats, so it survived as a zero-area face that
+    /// drew nothing, picked nothing, and kept its vertices in every edge and loop query.
+    #[test]
+    fn welding_opposite_corners_does_not_leave_an_invisible_bowtie() {
+        // One quad, and two opposite corners close enough to weld together.
+        let mut m = MapMesh {
+            verts: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.001, 0.0, 0.0), // ~ on top of vert 0
+                Vec3::new(0.0, 0.0, 1.0),
+            ],
+            faces: vec![Face { verts: vec![0, 1, 2, 3], slot: 0 }],
+            slots: vec!["Default".into()],
+            spec: None,
+        };
+        let n = weld(&mut m, &[0, 2], 0.05);
+        assert_eq!(n, 1, "one pair welded");
+        m.validate().expect("still a valid mesh");
+        for f in &m.faces {
+            let distinct: BTreeSet<_> = f.verts.iter().collect();
+            assert_eq!(distinct.len(), f.verts.len(), "a corner repeats in ring {:?}", f.verts);
+            // …and whatever survived has real area, rather than being a zero-area ghost.
+            let n = crate::face_normal(&m, f);
+            assert!(n.is_finite() && n.length() > 0.5, "degenerate face survived");
+        }
+    }
     use crate::{box_mesh, face_normal, plane};
     use glam::{Mat4, Vec2, Vec3};
 

@@ -298,6 +298,18 @@ impl Default for RigidBody {
     }
 }
 
+/// Marks a node (and everything under it) as SWITCHED OFF: it doesn't draw, doesn't
+/// collide, and its scripts don't run.
+///
+/// A marker rather than an `enabled: bool` field, so the common case — every node in
+/// every scene ever written — costs nothing and serializes to nothing. Presence = off.
+///
+/// **The whole subtree goes with it.** Disabling a folder is the useful operation
+/// (turn off a room, a variant, a debug rig), and a child that kept drawing under a
+/// disabled parent would be the same trap as a hidden parent with visible children.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Disabled;
+
 /// Marks a `Matter::Mesh` node as a STATIC collider you can walk on — the editor bakes
 /// its triangles (in world space) into the physics sim at Play. The model isn't a
 /// dynamic body; it's environment geometry (a level/map). Presence = collidable.
@@ -671,6 +683,25 @@ pub enum GravityMode {
 /// The absolute (world) transform of `e`: its local [`Transform`] composed under
 /// every ancestor's, so a parent's placement carries its descendants. Roots return
 /// their own transform. The walk is bounded to guard against accidental cycles.
+/// Is this node switched off — either itself, or because something above it is?
+///
+/// [`Disabled`] is inherited, and it is inherited HERE rather than pushed down into
+/// children on toggle: a node that stored its own resolved state would need every
+/// re-parent, spawn and paste to remember to recompute it, and the one that forgot
+/// would leave an invisible node nobody could turn back on. Walking up is cheap
+/// (scene depth, bounded like `world_transform`) and cannot go stale.
+pub fn is_disabled(world: &crate::ecs::World, e: crate::ecs::Entity) -> bool {
+    let mut cur = e;
+    for _ in 0..64 {
+        if world.get::<Disabled>(cur).is_some() {
+            return true;
+        }
+        let Some(Parent(p)) = world.get::<Parent>(cur).copied() else { break };
+        cur = p;
+    }
+    false
+}
+
 pub fn world_transform(world: &crate::ecs::World, e: crate::ecs::Entity) -> crate::transform::Transform {
     use crate::transform::Transform;
     let mut t = world.get::<Transform>(e).copied().unwrap_or(Transform::IDENTITY);

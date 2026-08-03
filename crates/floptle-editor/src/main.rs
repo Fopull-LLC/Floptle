@@ -74,6 +74,8 @@ mod paint_tex_io;
 mod paint_ui;
 mod play;
 mod prefab;
+mod report;
+pub(crate) use report::{open_issue_tracker, DOCS_URL, ISSUES_URL};
 mod shader_graph;
 mod shader_preview;
 mod shaders;
@@ -141,6 +143,10 @@ pub(crate) type PlayTerrains = (Vec<(u32, floptle_field::ChunkField)>, Vec<Strin
 struct EditorCmd {
     add: Option<MatterDoc>,
     delete: bool,
+    /// Switch these nodes on/off (`floptle_core::Disabled`). The bool is the TARGET
+    /// state, decided once by the caller, so a mixed selection lands all one way
+    /// instead of each node flipping to the opposite of whatever it happened to be.
+    set_enabled: Option<(Vec<Entity>, bool)>,
     duplicate: bool,
     copy: bool,
     paste: bool,
@@ -165,6 +171,8 @@ struct EditorCmd {
     open_folder: Option<PathBuf>,
     /// Autosave recovery prompt answered: true = restore it, false = discard.
     autosave_action: Option<bool>,
+    /// Crash-report prompt answered: true = open the tracker, false = dismiss.
+    crash_report: Option<bool>,
     /// A script file dropped onto a specific hierarchy node (path, entity).
     drop_script_on: Option<(String, Entity)>,
     /// Save a material as a named preset under assets/materials/.
@@ -583,6 +591,8 @@ struct EditorTabViewer<'a> {
     fullscreen_tab: &'a mut Option<EditorTab>,
     /// Folders collapsed in the Hierarchy (hide their children).
     collapsed: &'a mut std::collections::HashSet<Entity>,
+    /// One-shot: fold every parent on the first draw after a scene load.
+    hier_fold_pending: &'a mut bool,
     /// Per rigged-Mesh entity: its structure nodes (objects + bones), for the
     /// hierarchy's expandable Objects/Bones groups + the inspector object/rig lists
     /// and bone-attach picker.
@@ -858,6 +868,8 @@ fn json_string_field(json: &str, key: &str) -> Option<String> {
 
 fn main() {
     env_logger::init();
+    // Before anything can crash: a panic leaves a note the next launch offers to file.
+    report::install_panic_hook();
     // CLI surface the Hub (docs/hub-proposal.md) drives. --version / --new / --migrate run
     // HEADLESS (no window or GPU) and exit; a positional path opens that project instead
     // of the default `assets/`.
@@ -992,8 +1004,17 @@ fn main() {
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     // Gizmos/overlays on by default (toggle in the viewport) — but never in a build.
-    let mut editor =
-        Editor { show_gizmos: !player_mode, player_mode, game_title, ..Default::default() };
+    //
+    // The crash note is read (and deleted) here, so one crash asks once. Not in a
+    // shipped game: a player has no use for a backtrace and no tracker to file it on,
+    // and the prompt would be the first thing they saw after a bad launch.
+    let mut editor = Editor {
+        show_gizmos: !player_mode,
+        player_mode,
+        game_title,
+        crash_prompt: (!player_mode).then(report::take_last_crash).flatten(),
+        ..Default::default()
+    };
     if let Some(p) = project_path {
         editor.project_root = p;
     }
@@ -1593,6 +1614,9 @@ struct Editor {
     /// Folder nodes collapsed in the Hierarchy (their children are hidden). Toggle
     /// with the triangle or Enter on a selected folder.
     collapsed: std::collections::HashSet<Entity>,
+    /// Set by `set_scene_file`; the Hierarchy folds every parent once and clears it.
+    /// See the note there — a freshly opened scene should not be a wall of rows.
+    hier_fold_pending: bool,
     /// The engine Console: captured script logs/warnings/errors + its view filters.
     console: ConsoleState,
     /// Player-input state fed to scripts (the Lua `input` API), accumulated from
@@ -1805,6 +1829,10 @@ struct Editor {
     /// An autosave NEWER than the scene file was found at load — the recovery
     /// prompt is up ("restore unsaved work?"); holds the autosave path.
     autosave_prompt: Option<PathBuf>,
+    /// A crash note the PREVIOUS run left behind (see `report.rs`). Shown once, at
+    /// startup, because the moment a report is worth most is the one where the window
+    /// that would have asked for it no longer exists.
+    crash_prompt: Option<String>,
     /// An export waiting on a background job — fetching a published engine
     /// template, or (source checkouts only) building one. Polled each frame;
     /// the export finishes when its binary lands.
@@ -2448,6 +2476,34 @@ impl ApplicationHandler for Editor {
                 self.ctrl = mods.state().control_key();
                 self.shift = mods.state().shift_key();
                 self.input.boost = self.shift;
+            }
+            // LOSING FOCUS RELEASES EVERYTHING.
+            //
+            // A key held when the window goes away sends its release to whoever took
+            // focus, not to us — hold Ctrl and alt-tab, or press a compositor shortcut,
+            // or click a link that opens a browser (which signing in to Foverse does),
+            // and `self.ctrl` stays true forever. After that the editor reads plain keys
+            // as Ctrl chords: `V` pastes, the map tool's keys (gated on `!ctrl`) do
+            // nothing, and the fly camera (same gate) stops moving — until a restart.
+            //
+            // egui already does exactly this for its own copy of the keyboard, with a
+            // comment describing the same failure, which is why menus and text fields
+            // keep working while our shortcuts do not. We keep a SECOND copy — these
+            // modifiers, the raw key set scripts read, and the fly-camera booleans — and
+            // it needs the same treatment or the two disagree until the process ends.
+            WindowEvent::Focused(false) => {
+                self.ctrl = false;
+                self.shift = false;
+                // Publish the releases rather than dropping them: a running game polling
+                // `input.released("w")` must see the edge, and one polling `input.key("w")`
+                // must stop seeing it held. Silently clearing would stick a script's
+                // character in a permanent walk.
+                for name in std::mem::take(&mut self.input_keys) {
+                    self.input_keys_released.insert(name.clone());
+                    self.tick_keys_released.insert(name);
+                }
+                self.reset_action_state();
+                self.input = Default::default();
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;

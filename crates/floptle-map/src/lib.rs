@@ -40,6 +40,7 @@ pub use primitives::{arch, box_mesh, cylinder, plane, sphere, stairs, wedge, Sha
 pub use raycast::{raycast, FaceHit};
 pub use select::{
     connected_faces, coplanar_faces, edge_loop, faces_with_slot, front_facing, grow_faces,
+    non_planar_faces, shrink_faces,
 };
 pub use triangulate::{face_normal, triangulate, SlotMesh};
 

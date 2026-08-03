@@ -132,6 +132,9 @@ impl Editor {
                 ents.push(e);
             }
         }
+        // A switched-off node is off for physics too. Leaving an invisible wall standing
+        // where a disabled node used to be is the bug people spend an evening on.
+        ents.retain(|e| !floptle_core::is_disabled(&self.world, *e));
         for e in ents {
             let wt = floptle_core::world_transform(&self.world, e);
             // Anchor each collider on its own node (full f64) and bake geometry
@@ -577,12 +580,32 @@ impl Editor {
             // scene's fields (the next save then overwrote the real terrain
             // on disk — real lost work).
             self.pending_scene = None;
+            // Did a `scene.load` actually happen? The live name is the played scene's and
+            // the snapshot holds the pre-Play one, so a difference IS the switch. Worth
+            // knowing because the switch now reloads the paint stores (it has to — see
+            // `switch_scene_during_play`), and those have no snapshot to come back from.
+            let switched =
+                self.play_scene_name.as_ref().is_some_and(|(name, _)| *name != self.scene_name);
             if let Some((name, rel)) = self.play_scene_name.take() {
                 self.scene_name = name;
                 self.scene_rel = rel;
             }
             if let Some(snap) = self.play_snapshot.take() {
                 self.restore(snap);
+            }
+            // Paint belongs to the scene it was painted on. A switch swapped these for the
+            // played scene's, and unlike terrain and map geometry they are far too big to
+            // snapshot per Play — texture paint is images — so they come back off disk.
+            //
+            // The cost is narrow and worth naming: paint edited but NOT saved before
+            // pressing Play, in a session where a script then switched scenes, reverts to
+            // what is on disk. Leaving another scene's paint loaded instead would be worse
+            // and much harder to notice. Nothing is written here, so nothing is destroyed.
+            if switched {
+                self.adopt_paint();
+                self.adopt_tex_paint();
+                self.paint_meshes.clear();
+                self.mesh_wire_cache.clear();
             }
             // Terrain fields live OUTSIDE the scene doc, so the snapshot above
             // doesn't carry them — bring back the exact pre-Play fields (+
@@ -853,6 +876,30 @@ impl Editor {
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.set_scene_file(&path);
         self.adopt_terrain();
+        // THE OUT-OF-DOCUMENT STORES, which a scene switch has to reload exactly as
+        // opening a scene does.
+        //
+        // Map geometry, vertex paint and texture paint live in sidecars keyed by SCENE
+        // NAME, not in the scene .ron. `set_scene_file` above just repointed every one of
+        // those paths at the new scene — but until these run, the in-memory stores still
+        // hold the previous scene's contents, and map node ids start at 0 in every scene,
+        // so they collide rather than come up empty. A node whose id survives draws the
+        // *other* scene's geometry under the *other* scene's slot names; a node whose id
+        // doesn't gets seeded with a default box. Either way the per-face materials in the
+        // scene .ron are keyed by slot NAME and match nothing, so the map renders grey.
+        // Colliders are baked from the same store, so the collision follows the picture.
+        //
+        // This was missing here and present in all five editor entry points, which is why
+        // a map looks right when you open its scene and wrong when a game loads it.
+        //
+        // Maps FIRST: paint is keyed to a triangulation that comes out of the map store.
+        self.adopt_maps();
+        self.adopt_paint();
+        self.adopt_tex_paint();
+        // `adopt_maps` frees its own GPU parts, but these two caches are keyed by mesh id
+        // and would hand the new scene the old one's CPU geometry to paint and to wire.
+        self.paint_meshes.clear();
+        self.mesh_wire_cache.clear();
         self.register_scene_meshes();
         self.selection.clear();
         self.grabbed = None;

@@ -966,6 +966,12 @@ impl Editor {
             if matches!(self.world.get::<floptle_core::Visible>(*e), Some(floptle_core::Visible(false))) {
                 continue;
             }
+            // Switched OFF (the Hierarchy/Inspector toggle) — this node or an ancestor.
+            // Unlike `Visible`, this also takes the node out of physics and stops its
+            // scripts; see `floptle_core::Disabled`.
+            if floptle_core::is_disabled(&self.world, *e) {
+                continue;
+            }
             // The active camera's layer cull mask (fullscreen game view only).
             if let Some(lt) = &game_layer_table
                 && (game_cull_mask >> lt.index_for(&self.world, *e)) & 1 == 0
@@ -1426,6 +1432,7 @@ impl Editor {
         let bone_selection = &mut self.bone_selection;
         let pivot_edit = &mut self.pivot_edit;
         let collapsed = &mut self.collapsed;
+        let hier_fold_pending = &mut self.hier_fold_pending;
         let console = &mut self.console;
         let preview_zoom = &mut self.preview_zoom;
         let preview_spin = &mut self.preview_spin;
@@ -1653,6 +1660,7 @@ impl Editor {
         let export_status = &self.export_status;
         let export_done = self.export_done.clone();
         let autosave_prompt = self.autosave_prompt.clone();
+        let crash_prompt = self.crash_prompt.clone();
         let scene_name_now = self.scene_name.clone();
         let net_latency_ticks = &mut self.net_latency_ticks;
         let net_loss = &mut self.net_loss;
@@ -1824,6 +1832,29 @@ impl Editor {
                             cmd.reset_layout = true;
                             ui.close();
                         }
+                    });
+                    // HELP, and specifically somewhere to REPORT things. The tracker used
+                    // to appear once, in the Hub's About tab, which is not where anybody
+                    // is standing when something goes wrong.
+                    ui.menu_button("Help", |ui| {
+                        if ui
+                            .button("🐛 Report a bug")
+                            .on_hover_text(crate::ISSUES_URL)
+                            .clicked()
+                        {
+                            crate::open_issue_tracker(None);
+                            ui.close();
+                        }
+                        if ui.button("📖 Scripting docs").clicked() {
+                            let _ = floptle_script::open_in_browser(crate::DOCS_URL);
+                            ui.close();
+                        }
+                        if ui.button("🌐 fopull.com").clicked() {
+                            let _ = floptle_script::open_in_browser("https://fopull.com/");
+                            ui.close();
+                        }
+                        ui.separator();
+                        ui.label(egui::RichText::new(format!("Floptle {}", env!("CARGO_PKG_VERSION"))).small());
                     });
                     ui.separator();
                     let play_label = if playing { "⏹ Stop  (F1)" } else { "⏵ Play  (F1)" };
@@ -2448,6 +2479,7 @@ impl Editor {
                 pivot_edit,
                 fullscreen_tab,
                 collapsed,
+                hier_fold_pending,
                 bone_names: &bone_names,
                 console,
                 preview: preview_view.clone(),
@@ -2676,6 +2708,42 @@ impl Editor {
                 }
             }
 
+            // ---- last run crashed ----
+            if let Some(note) = &crash_prompt {
+                let first = note.lines().find(|l| l.starts_with("panic:")).unwrap_or("").to_string();
+                egui::Window::new("⚠ Floptle crashed last time")
+                    .resizable(false)
+                    .collapsible(false)
+                    .default_width(460.0)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(
+                            "The previous session ended in a crash. A report was saved — \
+                             sending it is the single most useful thing you can do about it.",
+                        );
+                        if !first.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(&first).monospace().small());
+                        }
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button("🐛 Report it")
+                                .on_hover_text(
+                                    "opens the issue tracker with the version, platform and \
+                                     backtrace already filled in — you can read and edit it \
+                                     before posting. Nothing is sent automatically.",
+                                )
+                                .clicked()
+                            {
+                                cmd.crash_report = Some(true);
+                            }
+                            if ui.button("Not now").clicked() {
+                                cmd.crash_report = Some(false);
+                            }
+                        });
+                    });
+            }
+
             // ---- autosave recovery (a newer autosave than the scene file) ----
             if let Some(auto) = &autosave_prompt {
                 let age = std::fs::metadata(auto)
@@ -2844,7 +2912,98 @@ impl Editor {
                     .fixed_pos(pos)
                     .show(ui.ctx(), |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.set_max_width(150.0);
+                            ui.set_max_width(190.0);
+                            // ---- ⬢ Map tool: the operations for what's selected ----
+                            //
+                            // Right-click is where people look for "what can I do to
+                            // this?" — every one of these was previously a key you had
+                            // to already know, or a button on a panel that may not even
+                            // be open. Same `MapOp`s the panel emits, so there is one
+                            // implementation and no stale subset.
+                            if tool == Tool::MapEdit {
+                                let sel = map_sel.as_ref();
+                                let nv = sel.map_or(0, |s| s.verts.len());
+                                let ne = sel.map_or(0, |s| s.edges.len());
+                                let nf = sel.map_or(0, |s| s.faces.len());
+                                let any = nv + ne + nf > 0;
+                                // Chosen here, applied after the closures — `cmd` is
+                                // borrowed by the outer menu.
+                                let mut pick: Option<crate::map_edit::MapOp> = None;
+                                let mut detach = false;
+                                let mut mode_pick: Option<crate::map_edit::MapSubMode> = None;
+                                ui.label(
+                                    egui::RichText::new(match map_mode {
+                                        crate::map_edit::MapSubMode::Vertex => format!("{nv} vertices"),
+                                        crate::map_edit::MapSubMode::Edge => format!("{ne} edges"),
+                                        crate::map_edit::MapSubMode::Face => format!("{nf} faces"),
+                                    })
+                                    .small()
+                                    .weak(),
+                                );
+                                ui.separator();
+                                let op = |ui: &mut egui::Ui,
+                                              label: &str,
+                                              tip: &str,
+                                              on: bool,
+                                              o: crate::map_edit::MapOp,
+                                              pick: &mut Option<crate::map_edit::MapOp>| {
+                                    if ui.add_enabled(on, egui::Button::new(label)).on_hover_text(tip).clicked() {
+                                        *pick = Some(o);
+                                    }
+                                };
+                                if map_mode == crate::map_edit::MapSubMode::Face {
+                                    op(ui, "Extrude  (E)", "push the selected faces out along their average normal", nf > 0, crate::map_edit::MapOp::Extrude, &mut pick);
+                                    op(ui, "Inset  (I)", "a smaller copy of each face inside itself", nf > 0, crate::map_edit::MapOp::Inset, &mut pick);
+                                    op(ui, "Subdivide", "split each face into four", nf > 0, crate::map_edit::MapOp::Subdivide, &mut pick);
+                                    op(ui, "Bridge", "join two face outlines with a tube", nf == 2, crate::map_edit::MapOp::Bridge, &mut pick);
+                                    op(ui, "Flip", "reverse the winding — turn a face inside out", nf > 0, crate::map_edit::MapOp::FlipFaces, &mut pick);
+                                    if ui.add_enabled(nf > 0, egui::Button::new("Detach")).on_hover_text("split the selected faces off into their own map node").clicked() {
+                                        detach = true;
+                                    }
+                                    op(ui, "Delete faces  (Del)", "remove them, leaving a hole", nf > 0, crate::map_edit::MapOp::DeleteFaces, &mut pick);
+                                } else {
+                                    op(ui, "Weld selected", "merge vertices closer than the weld radius into one", nv > 1 || ne > 0, crate::map_edit::MapOp::WeldSelected, &mut pick);
+                                    op(ui, "Snap to grid", "move the selection onto the grid", any, crate::map_edit::MapOp::SnapToGrid, &mut pick);
+                                }
+                                ui.separator();
+                                ui.menu_button("Select", |ui| {
+                                    op(ui, "All", "", true, crate::map_edit::MapOp::SelectAll, &mut pick);
+                                    op(ui, "None", "", any, crate::map_edit::MapOp::SelectNone, &mut pick);
+                                    op(ui, "Invert", "everything of this kind that isn't selected", true, crate::map_edit::MapOp::SelectInvert, &mut pick);
+                                    ui.separator();
+                                    op(ui, "Grow", "add the neighbouring ring", any, crate::map_edit::MapOp::Grow, &mut pick);
+                                    op(ui, "Shrink", "drop the outermost ring", any, crate::map_edit::MapOp::Shrink, &mut pick);
+                                    op(ui, "Linked", "everything connected to the selection", any, crate::map_edit::MapOp::SelectConnected, &mut pick);
+                                    op(ui, "Coplanar", "faces lying in the same plane", nf > 0, crate::map_edit::MapOp::SelectCoplanar, &mut pick);
+                                    op(ui, "Edge loop", "run along the quad loop", ne > 0, crate::map_edit::MapOp::SelectLoop, &mut pick);
+                                    ui.separator();
+                                    op(ui, "Warped faces", "faces whose corners no longer lie in one plane — the ones that look folded", true, crate::map_edit::MapOp::SelectNonPlanar, &mut pick);
+                                });
+                                ui.menu_button("Mode", |ui| {
+                                    for m in [
+                                        crate::map_edit::MapSubMode::Vertex,
+                                        crate::map_edit::MapSubMode::Edge,
+                                        crate::map_edit::MapSubMode::Face,
+                                    ] {
+                                        if ui.radio(map_mode == m, m.label()).clicked() {
+                                            mode_pick = Some(m);
+                                        }
+                                    }
+                                });
+                                if let Some(o) = pick {
+                                    cmd.map_op = Some(o);
+                                    cmd.close_menu = true;
+                                }
+                                if detach {
+                                    cmd.map_detach = true;
+                                    cmd.close_menu = true;
+                                }
+                                if let Some(m) = mode_pick {
+                                    cmd.set_map_mode = Some(m);
+                                    cmd.close_menu = true;
+                                }
+                                ui.separator();
+                            }
                             if hit.is_some() {
                                 if ui.button("Duplicate  (Ctrl+D)").clicked() {
                                     cmd.duplicate = true;
@@ -4856,6 +5015,20 @@ impl Editor {
         if cmd.delete {
             self.delete_selected();
         }
+        if let Some((ents, on)) = cmd.set_enabled {
+            self.record();
+            for e in ents {
+                if on {
+                    self.world.remove::<floptle_core::Disabled>(e);
+                } else {
+                    self.world.insert(e, floptle_core::Disabled);
+                }
+            }
+            self.scene_dirty = true;
+            // Physics is built from the world at Play; a mid-Play toggle has to rebuild
+            // or the switched-off node keeps colliding with nothing on screen.
+            self.rebuild_sim();
+        }
         if let Some(m) = cmd.add {
             let name = match &m {
                 MatterDoc::Primitive { shape: ShapeDoc::Sphere, .. } => "Sphere",
@@ -5935,6 +6108,14 @@ impl Editor {
             let target = if dir.as_os_str().is_empty() { self.project_root.clone() } else { dir };
             crate::project::open_in_file_manager(&target);
         }
+        if let Some(send) = cmd.crash_report {
+            if let Some(note) = self.crash_prompt.take()
+                && send
+            {
+                crate::open_issue_tracker(Some(&note));
+            }
+            self.crash_prompt = None;
+        }
         if let Some(restore) = cmd.autosave_action {
             if restore {
                 self.restore_autosave();
@@ -6094,6 +6275,9 @@ impl Editor {
         let mut skin_scratch: Vec<floptle_render::Vertex> = Vec::new();
         for (ent, matter) in &ents {
             if matches!(self.world.get::<floptle_core::Visible>(*ent), Some(floptle_core::Visible(false))) {
+                continue;
+            }
+            if floptle_core::is_disabled(&self.world, *ent) {
                 continue;
             }
             // Camera cull mask: skip nodes on layers this camera doesn't render.

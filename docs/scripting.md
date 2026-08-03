@@ -901,6 +901,23 @@ if input.pressed("h") then node.visible = not node.visible end
 > These work through the **node handle** too, so a manager script can re-skin any node it
 > reaches: `find("Player"):getchild("Body").model = assets.getFile("models/hurt.glb")`.
 
+### `node.enabled` — switch a node off entirely
+
+Stronger than `visible`. A disabled node doesn't draw, doesn't collide, and its
+scripts don't run — **and neither does anything below it**, so one call turns off a
+whole room, weapon loadout or debug rig.
+
+```lua
+find("Tutorial Room").enabled = false      -- the room, its props and their scripts
+find("Boss").enabled = true                -- and back
+```
+
+Also on the node's right-click menu in the Hierarchy (⏵ Disable), where a switched-off
+node greys out, and it saves with the scene.
+
+> **A node can't re-enable itself** — its scripts aren't running to do it. Something
+> else has to, which is the same rule as any other object you've turned off.
+
 ### `node:getcomponent(name)` — tweak component fields live
 
 Every tunable the Inspector shows on a **Rigidbody** or **Point Light** is also

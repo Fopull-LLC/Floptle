@@ -84,6 +84,12 @@ pub struct NodeDoc {
     /// Marks a Mesh node as a static walkable collider (its triangles collide at Play).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mesh_collider: bool,
+    /// Switched off: no draw, no collision, no scripts — for this node and everything
+    /// under it. Stored INVERTED (`disabled`, skipped when false) so the overwhelmingly
+    /// common case adds nothing to a scene file and every scene ever written still
+    /// loads meaning "on".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
     /// Stable key for this node's vertex paint, if it has any. The colors themselves
     /// live in `<project>/paint/<scene>.vpaint` — per-vertex arrays don't belong in a
     /// scene `.ron`, the same call terrain fields make.
@@ -1686,6 +1692,9 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if node.mesh_collider {
         world.insert(e, floptle_core::MeshCollider);
     }
+    if node.disabled {
+        world.insert(e, floptle_core::Disabled);
+    }
     if node.collidable {
         world.insert(e, floptle_core::Collidable);
     }
@@ -1834,6 +1843,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let celestial =
             world.get::<floptle_core::CelestialBody>(e).map(CelestialBodyDoc::from_body);
         let mesh_collider = world.get::<floptle_core::MeshCollider>(e).is_some();
+        let disabled = world.get::<floptle_core::Disabled>(e).is_some();
         let collidable = world.get::<floptle_core::Collidable>(e).is_some();
         let paint = world.get::<floptle_core::VertexPaint>(e).map(|p| p.id);
         let tex_paint = world.get::<floptle_core::TexturePaint>(e).map(|p| p.id);
@@ -1876,6 +1886,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             rigidbody,
             celestial,
             mesh_collider,
+            disabled,
             paint,
             tex_paint,
             terrain_gen,
@@ -2126,6 +2137,7 @@ mod tests {
                         occluder_radius: 48.0, // exercise the occluder round-trip
                     }),
                     mesh_collider: true, // exercise the mesh-collider round-trip
+                    disabled: true,      // …and the disabled one
                     paint: None,
                     tex_paint: None,
                     // exercise the genspec round-trip (G2 on-demand terrain)
@@ -2210,6 +2222,7 @@ mod tests {
                     rigidbody: None,
                     celestial: None,
                     mesh_collider: false,
+                    disabled: false,
                     paint: None,
                     tex_paint: None,
                     collidable: false,
@@ -2243,6 +2256,7 @@ mod tests {
                     rigidbody: None,
                     celestial: None,
                     mesh_collider: false,
+                    disabled: false,
                     paint: None,
                     tex_paint: None,
                     collidable: false,
@@ -2273,6 +2287,7 @@ mod tests {
                     rigidbody: None,
                     celestial: None,
                     mesh_collider: false,
+                    disabled: false,
                     paint: None,
                     tex_paint: None,
                     collidable: false,
@@ -2349,6 +2364,9 @@ mod tests {
             "celestial elements lost in round-trip: {cb:?}"
         );
         assert!(cube.mesh_collider, "mesh_collider flag lost in round-trip");
+        // A switched-off node has to come back switched off, or opening a scene turns
+        // everything the author disabled back on — silently, and all at once.
+        assert!(cube.disabled, "disabled flag lost in round-trip");
         assert!(cube.collidable, "collidable flag lost in round-trip");
         assert!(!cube.visible, "visible flag lost in round-trip");
         assert!(!cube.cast_shadow, "cast_shadow opt-out lost in round-trip");

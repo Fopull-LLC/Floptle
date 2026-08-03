@@ -930,6 +930,15 @@ impl Editor {
             .strip_prefix(&self.project_root)
             .map(|r| r.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| format!("scenes/{}.ron", self.scene_name));
+        // A new scene's tree starts FOLDED. Every path that replaces the world comes
+        // through here, so this is the one place that has to say so — the alternative was
+        // six call sites and a seventh added later that forgot.
+        //
+        // `collapsed` is opt-in, so an empty set means "everything open", and a scene of
+        // any size opened as a fully-expanded wall of rows. Seeding happens in the
+        // Hierarchy itself, where the parent⏵children map already exists.
+        self.hier_fold_pending = true;
+        self.collapsed.clear();
     }
 
     /// `scene_rel`, or the `scenes/<name>.ron` convention if it was never set.
@@ -1499,6 +1508,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         rigidbody: None,
         celestial: None,
         mesh_collider: false,
+        disabled: false,
         paint: None,
         tex_paint: None,
         collidable: false,

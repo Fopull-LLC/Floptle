@@ -188,6 +188,57 @@ pub fn grow_faces(mesh: &MapMesh, faces: &[u32]) -> Vec<u32> {
     out.into_iter().collect()
 }
 
+/// The selection minus its outer ring: every face that still has a neighbour outside
+/// the selection is dropped. The counterpart to [`grow_faces`], and the reason grow was
+/// only half a tool — you could widen a selection and never narrow it again.
+pub fn shrink_faces(mesh: &MapMesh, faces: &[u32]) -> Vec<u32> {
+    let adj = edge_faces(mesh);
+    let sel: BTreeSet<u32> =
+        faces.iter().copied().filter(|&f| (f as usize) < mesh.faces.len()).collect();
+    sel.iter()
+        .copied()
+        .filter(|&f| {
+            let face = &mesh.faces[f as usize];
+            let k = face.verts.len();
+            (0..k).all(|i| {
+                // A border edge (only this face uses it) is an outside too — a face on
+                // the mesh's rim is on the selection's rim.
+                match adj.get(&key(face.verts[i], face.verts[(i + 1) % k])) {
+                    Some(fs) => fs.len() > 1 && fs.iter().all(|n| sel.contains(n)),
+                    None => false,
+                }
+            })
+        })
+        .collect()
+}
+
+/// Faces whose corners no longer lie in one plane, by more than `tol` (local units of
+/// deviation from the face's own best-fit plane).
+///
+/// Diagnostic, and the reason it exists: a warped face is the thing that *looks* wrong
+/// after an edit, and until now there was no way to find one except by eye. Triangles
+/// and faces with no area are never reported — a triangle is planar by definition.
+pub fn non_planar_faces(mesh: &MapMesh, tol: f32) -> Vec<u32> {
+    let mut out = Vec::new();
+    for (fi, f) in mesh.faces.iter().enumerate() {
+        if f.verts.len() < 4 {
+            continue;
+        }
+        let n = crate::face_normal(mesh, f);
+        let Some(&v0) = f.verts.first() else { continue };
+        let o = mesh.verts[v0 as usize];
+        let worst = f
+            .verts
+            .iter()
+            .map(|&v| (mesh.verts[v as usize] - o).dot(n).abs())
+            .fold(0.0f32, f32::max);
+        if worst > tol {
+            out.push(fi as u32);
+        }
+    }
+    out
+}
+
 /// Every face reachable from the selection across shared edges (the whole
 /// connected shell).
 pub fn connected_faces(mesh: &MapMesh, faces: &[u32]) -> Vec<u32> {

@@ -248,8 +248,14 @@ impl Sim {
         // If the node is *also* flagged `Collidable`/`MeshCollider`, that marker is
         // ignored here (and the editor skips adding a static collider for it), so a
         // body never fights a static shape sitting on top of it.
-        let found: Vec<(Entity, RigidBody)> =
-            ecs.query::<RigidBody>().map(|(e, rb)| (e, *rb)).collect();
+        // A switched-off node has no body — same rule the editor applies to its static
+        // colliders, and it has to be applied here too or a disabled rigidbody keeps
+        // falling, pushing and reporting collisions while drawing nothing.
+        let found: Vec<(Entity, RigidBody)> = ecs
+            .query::<RigidBody>()
+            .filter(|(e, _)| !floptle_core::is_disabled(ecs, *e))
+            .map(|(e, rb)| (e, *rb))
+            .collect();
         // ASSEMBLY pass first: a Dynamic RigidBody with `assembly` set roots a
         // COMPOUND built from its RigidBody-bearing descendants — those part
         // nodes become the compound's shapes and are claimed OUT of the plain

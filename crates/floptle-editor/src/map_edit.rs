@@ -1096,6 +1096,11 @@ pub(crate) enum MapOp {
     Grow,
     SelectConnected,
     SelectCoplanar,
+    /// Drop the selection's outer ring — the counterpart to `Grow`.
+    Shrink,
+    /// Every face whose corners no longer lie in one plane. A diagnostic: a warped face
+    /// is what looks wrong after an edit, and this is how you find it.
+    SelectNonPlanar,
     SelectSlot(u16),
     /// Extend an edge selection along its quad loops.
     SelectLoop,
@@ -2466,6 +2471,42 @@ impl Editor {
                 }
                 changed = false;
             }
+            MapOp::Shrink => {
+                match mode {
+                    MapSubMode::Face => {
+                        let kept = floptle_map::shrink_faces(mesh, &faces);
+                        sel.faces = kept.into_iter().collect();
+                    }
+                    _ => {
+                        // Vert/edge: drop anything touching a face that isn't fully
+                        // inside the selection — the same "lose the rim" idea.
+                        let verts = sel.drag_verts(mesh);
+                        let rim: std::collections::BTreeSet<u32> = mesh
+                            .faces
+                            .iter()
+                            .filter(|f| !f.verts.iter().all(|v| verts.contains(v)))
+                            .flat_map(|f| f.verts.iter().copied())
+                            .collect();
+                        sel.verts.retain(|v| !rim.contains(v));
+                        sel.edges.retain(|(a, b)| !rim.contains(a) && !rim.contains(b));
+                    }
+                }
+                changed = false;
+            }
+            MapOp::SelectNonPlanar => {
+                // Tolerance in local units. Small enough to catch a face you would
+                // notice, large enough that float noise on a flat wall isn't "warped".
+                let warped = floptle_map::non_planar_faces(mesh, 1e-3);
+                if warped.is_empty() {
+                    declined = Some("every face is flat".into());
+                } else {
+                    sel.clear();
+                    sel.faces.extend(warped.iter().copied());
+                    sel.convert(mesh, mode);
+                    declined = Some(format!("{} warped face(s) selected", warped.len()));
+                }
+                changed = false;
+            }
             MapOp::SelectCoplanar => {
                 if faces.is_empty() {
                     declined = Some("select a face to spread across its flat region".into());
@@ -2925,6 +2966,7 @@ mod tests {
             rigidbody: None,
             celestial: None,
             mesh_collider: false,
+            disabled: false,
             paint: None,
             tex_paint: None,
             collidable: false,

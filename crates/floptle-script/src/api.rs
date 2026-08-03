@@ -1013,6 +1013,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let ui_style_changes = shared.ui_style_changes.clone();
         let ui_focus = shared.ui_focus.clone();
         let layer_changes = shared.layer_changes.clone();
+        let enabled_changes = shared.enabled_changes.clone();
         let tag_changes = shared.tag_changes.clone();
         let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
             let e: u32 = this.raw_get("__id")?;
@@ -1157,6 +1158,15 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 // Whether the node's geometry is drawn (true unless explicitly hidden).
                 "visible" => {
                     let v = scene.borrow().visible.get(&e).copied().unwrap_or(true);
+                    return Ok(Value::Boolean(v));
+                }
+                // Read-your-writes within the frame, then the scene mirror.
+                "enabled" => {
+                    let v = enabled_changes
+                        .borrow()
+                        .get(&e)
+                        .copied()
+                        .unwrap_or_else(|| !scene.borrow().disabled.contains(&e));
                     return Ok(Value::Boolean(v));
                 }
                 // The node's collision/query layer, by name ("Default" when unset) —
@@ -1356,6 +1366,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let model_changes = shared.model_changes.clone();
         let material_changes = shared.material_changes.clone();
         let visible_changes = shared.visible_changes.clone();
+        let enabled_changes = shared.enabled_changes.clone();
         let layer_changes = shared.layer_changes.clone();
         let tag_changes = shared.tag_changes.clone();
         let layer_table = shared.layer_table.clone();
@@ -1579,6 +1590,16 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 "visible" => {
                     if let Value::Boolean(b) = val {
                         visible_changes.borrow_mut().insert(e, b);
+                    }
+                    return Ok(());
+                }
+                // Switch the node — and everything under it — off or on. Stronger than
+                // `visible`, which only stops the draw: this also takes the node out of
+                // physics and stops its scripts. A node cannot re-enable ITSELF (its
+                // scripts aren't running); something else has to.
+                "enabled" => {
+                    if let Value::Boolean(b) = val {
+                        enabled_changes.borrow_mut().insert(e, b);
                     }
                     return Ok(());
                 }

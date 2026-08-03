@@ -1503,6 +1503,7 @@ impl ScriptHost {
             model_changes: Rc::new(RefCell::new(HashMap::new())),
             material_changes: Rc::new(RefCell::new(HashMap::new())),
             visible_changes: Rc::new(RefCell::new(HashMap::new())),
+            enabled_changes: Rc::new(RefCell::new(HashMap::new())),
             layer_changes: Rc::new(RefCell::new(HashMap::new())),
             tag_changes: Rc::new(RefCell::new(HashMap::new())),
             layer_table: layer_table.clone(),
@@ -1704,6 +1705,7 @@ impl ScriptHost {
             model_changes: shared.model_changes.clone(),
             material_changes: shared.material_changes.clone(),
             visible_changes: shared.visible_changes.clone(),
+            enabled_changes: shared.enabled_changes.clone(),
             layer_changes: shared.layer_changes.clone(),
             tag_changes: shared.tag_changes.clone(),
             layer_table,
@@ -3176,8 +3178,15 @@ impl ScriptHost {
         self.sync_scene(world);
 
         // Snapshot (entity, scripts) so we can mutate Transforms while iterating.
-        let work: Vec<(Entity, Scripts)> =
-            world.query::<Scripts>().map(|(e, s)| (e, s.clone())).collect();
+        // A switched-off node's scripts do not run — not its `update`, not its
+        // `start`, and (because the node is out of the sim too) not its collision
+        // hooks. `Disabled` is inherited, so turning off a folder turns off every
+        // script under it.
+        let work: Vec<(Entity, Scripts)> = world
+            .query::<Scripts>()
+            .filter(|(e, _)| !floptle_core::is_disabled(world, *e))
+            .map(|(e, s)| (e, s.clone()))
+            .collect();
         // Pass 1: build/refresh every environment so cross-references (findScript, etc.)
         // resolve regardless of which script ticks first.
         for (e, scripts) in &work {
@@ -3233,8 +3242,15 @@ impl ScriptHost {
         // correction double-fires every pending timer. Before the script pass, so
         // a timer's effects are visible to this tick's `fixedUpdate`s.
         crate::sched_api::tick(&self.sched, &self.logs, dt as f64);
-        let work: Vec<(Entity, Scripts)> =
-            world.query::<Scripts>().map(|(e, s)| (e, s.clone())).collect();
+        // A switched-off node's scripts do not run — not its `update`, not its
+        // `start`, and (because the node is out of the sim too) not its collision
+        // hooks. `Disabled` is inherited, so turning off a folder turns off every
+        // script under it.
+        let work: Vec<(Entity, Scripts)> = world
+            .query::<Scripts>()
+            .filter(|(e, _)| !floptle_core::is_disabled(world, *e))
+            .map(|(e, s)| (e, s.clone()))
+            .collect();
         self.run_pass(world, &work, dt, time, Pass::Fixed, floptle_input::Domain::Tick);
         self.flush_writes(world);
     }
@@ -3248,8 +3264,15 @@ impl ScriptHost {
     pub fn run_late(&mut self, world: &mut World, dt: f32, time: f32) {
         // Re-mirror: physics writeback just moved transforms.
         self.sync_scene(world);
-        let work: Vec<(Entity, Scripts)> =
-            world.query::<Scripts>().map(|(e, s)| (e, s.clone())).collect();
+        // A switched-off node's scripts do not run — not its `update`, not its
+        // `start`, and (because the node is out of the sim too) not its collision
+        // hooks. `Disabled` is inherited, so turning off a folder turns off every
+        // script under it.
+        let work: Vec<(Entity, Scripts)> = world
+            .query::<Scripts>()
+            .filter(|(e, _)| !floptle_core::is_disabled(world, *e))
+            .map(|(e, s)| (e, s.clone()))
+            .collect();
         self.run_pass(world, &work, dt, time, Pass::Late, floptle_input::Domain::Frame);
         self.flush_writes(world);
     }
@@ -3507,6 +3530,18 @@ impl ScriptHost {
                     world.insert(ent, Visible(*shown));
                 }
             }
+            // `node.enabled = …`. Absence IS enabled, so turning one on REMOVES the
+            // marker rather than storing a `true` — same rule as `layer`, and it keeps
+            // scene files free of a field that means nothing.
+            for (eid, on) in self.enabled_changes.borrow().iter() {
+                if let Some(&ent) = scene.ents.get(eid) {
+                    if *on {
+                        world.remove::<floptle_core::Disabled>(ent);
+                    } else {
+                        world.insert(ent, floptle_core::Disabled);
+                    }
+                }
+            }
             // `node.layer = ...` (pre-validated): "Default" removes the
             // component (absence IS Default — keeps scene files clean).
             for (eid, layer) in self.layer_changes.borrow().iter() {
@@ -3577,6 +3612,7 @@ impl ScriptHost {
         }
         self.material_changes.borrow_mut().clear();
         self.visible_changes.borrow_mut().clear();
+        self.enabled_changes.borrow_mut().clear();
         self.layer_changes.borrow_mut().clear();
         self.tag_changes.borrow_mut().clear();
         self.ui_text_changes.borrow_mut().clear();
@@ -3681,6 +3717,7 @@ impl ScriptHost {
         s.dirty.clear();
         s.models.clear();
         s.visible.clear();
+        s.disabled.clear();
         s.layers.clear();
         s.tags.clear();
         s.components.clear();
@@ -3716,6 +3753,9 @@ impl ScriptHost {
             }
             if let Some(v) = world.get::<Visible>(e) {
                 s.visible.insert(id, v.0);
+            }
+            if world.get::<floptle_core::Disabled>(e).is_some() {
+                s.disabled.insert(id);
             }
             if let Some(l) = world.get::<floptle_core::Layer>(e) {
                 s.layers.insert(id, l.0.clone());

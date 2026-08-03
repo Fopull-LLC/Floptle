@@ -62,6 +62,21 @@ impl<'a> EditorTabViewer<'a> {
             }
         }
 
+        // FOLD EVERY PARENT, ONCE, on the first draw after a scene load. Done here
+        // rather than at load time because this is where the parent⏵children map
+        // exists — and doing it from the six places that replace the world would be
+        // six chances to forget.
+        if *self.hier_fold_pending {
+            *self.hier_fold_pending = false;
+            self.collapsed.extend(children.keys().copied());
+            // …except the roots' own top level stays readable: a scene whose nodes all
+            // hang off one folder would otherwise open as a single collapsed row, which
+            // is the opposite problem.
+            if roots.len() == 1 {
+                self.collapsed.remove(&roots[0]);
+            }
+        }
+
         // The flat VISIBLE row order (DFS, collapsed subtrees skipped) — the
         // range for Shift-click select, matching the Assets browser.
         let mut visible: Vec<Entity> = Vec::new();
@@ -268,11 +283,22 @@ impl EditorTabViewer<'_> {
                 } else {
                     ui.add_space(12.0);
                 }
-                let text = if selected {
-                    egui::RichText::new(format!("{icon} {name}")).strong().color(ui.visuals().selection.stroke.color)
+                // A switched-off node reads as off at a glance, and so does everything
+                // under it — otherwise the only clue that a whole subtree is inert is
+                // that nothing happens.
+                let off_self = self.world.get::<floptle_core::Disabled>(e).is_some();
+                let off = off_self || floptle_core::is_disabled(self.world, e);
+                let label = if off_self {
+                    format!("{icon} {name}  (off)")
                 } else {
-                    egui::RichText::new(format!("{icon} {name}"))
+                    format!("{icon} {name}")
                 };
+                let text = if selected {
+                    egui::RichText::new(label).strong().color(ui.visuals().selection.stroke.color)
+                } else {
+                    egui::RichText::new(label)
+                };
+                let text = if off { text.weak().italics() } else { text };
                 ui.add(egui::Label::new(text).selectable(false).sense(egui::Sense::click_and_drag()))
             })
             .inner;
@@ -361,6 +387,27 @@ impl EditorTabViewer<'_> {
                 ui.close();
             }
             ui.separator();
+            // The target state is decided from THIS row and applied to the whole
+            // selection, so a mixed selection ends up uniform rather than inverted
+            // node by node.
+            let targets: Vec<Entity> =
+                if self.selection.contains(&e) && self.selection.len() > 1 {
+                    self.selection.clone()
+                } else {
+                    vec![e]
+                };
+            let off = self.world.get::<floptle_core::Disabled>(e).is_some();
+            let label = if off { "◉ Enable" } else { "◎ Disable" };
+            if ui
+                .button(label)
+                .on_hover_text(
+                    "a disabled node doesn't draw, doesn't collide and its scripts                      don't run — and neither do anything under it",
+                )
+                .clicked()
+            {
+                self.cmd.set_enabled = Some((targets, off));
+                ui.close();
+            }
             if ui.button("Duplicate  (Ctrl+D)").clicked() {
                 self.cmd.duplicate = true;
                 ui.close();

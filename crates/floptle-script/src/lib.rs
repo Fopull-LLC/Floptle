@@ -173,6 +173,7 @@ mod audio_api;
 mod env;
 mod host;
 mod http_api;
+pub use http_api::open_in_browser;
 mod input_api;
 mod math_api;
 mod net_api;
@@ -372,6 +373,9 @@ pub struct ScriptHost {
     material_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node.visible = ...` writes (entity index → shown), applied as a `Visible` component.
     visible_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    /// `node.enabled = …` — switches the node (and its subtree) off/on. Separate from
+    /// `visible`: that one only stops the draw, this also stops physics and scripts.
+    enabled_changes: Rc<RefCell<HashMap<u32, bool>>>,
     /// `node.layer = "Name"` writes (entity index → validated layer name),
     /// applied as a `Layer` component after `run` ("Default" removes it).
     layer_changes: Rc<RefCell<HashMap<u32, String>>>,
@@ -743,6 +747,9 @@ pub(crate) struct SceneMirror {
     /// Nodes that carry an explicit `Visible` component (so a script can read
     /// `node.visible`; absent = visible by default).
     visible: HashMap<u32, bool>,
+    /// Nodes carrying `floptle_core::Disabled` THEMSELVES (not inherited) — what
+    /// `node.enabled` reads back. Inheritance is resolved by the engine, not mirrored.
+    disabled: std::collections::HashSet<u32>,
     /// Nodes with an explicit `Layer` component, by layer NAME (absent =
     /// "Default"). Read by `node.layer`.
     layers: HashMap<u32, String>,
@@ -837,6 +844,9 @@ struct Shared {
     material_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node.visible = ...` writes (entity index → shown), applied as a `Visible` component.
     visible_changes: Rc<RefCell<HashMap<u32, bool>>>,
+    /// `node.enabled = …` — switches the node (and its subtree) off/on. Separate from
+    /// `visible`: that one only stops the draw, this also stops physics and scripts.
+    enabled_changes: Rc<RefCell<HashMap<u32, bool>>>,
     /// `node.layer = "Name"` writes (entity index → layer name, pre-validated
     /// against the project's layer table), applied as a `Layer` component.
     layer_changes: Rc<RefCell<HashMap<u32, String>>>,
