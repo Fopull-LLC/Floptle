@@ -127,6 +127,9 @@ jobs:
     env:
       PUBLIC_REPO: Fopull-LLC/Floptle-releases
     steps:
+      # For docs/releases/<tag>.md — the release notes, which are both the body of
+      # the GitHub release and (embedded below) what the Hub shows for a version.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -162,7 +165,25 @@ jobs:
               channels: (($m.channels // {}) | .[$c] = ((((.[$c] // []) + [$v]) | unique))),
               versions: (((($m.versions // []) | map(select(.version != $v))) + [$e]))
             }' > releases.json
-          cat releases.json
+          # Fill every entry's notes from docs/releases/ — this version's, and any older
+          # one published before the manifest carried notes at all. See the script header.
+          scripts/embed-release-notes.sh releases.json docs/releases
+          jq '{schema, channels, versions: [.versions[] | {version, title, notes: (.notes | length)}]}' releases.json
+
+      # The release notes ARE docs/releases/<tag>.md. One file, written once, shown on the
+      # GitHub release page and inside the Hub — rather than a page nobody reads saying
+      # "Automated release v0.21.0" beside a document that says what actually changed.
+      - name: Resolve the release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          if [ -f "docs/releases/$TAG.md" ]; then
+            cp "docs/releases/$TAG.md" NOTES.md
+          else
+            echo "::warning::docs/releases/$TAG.md is missing — the release page will carry a stub."
+            printf 'Floptle %s\n\nDownload the floptle-hub archive for your platform; the Hub installs engine versions.\n' "$TAG" > NOTES.md
+          fi
 
       # Archive of record on the private repo — always happens, and is what
       # scripts/publish-public.sh mirrors when RELEASES_TOKEN isn't set.
@@ -175,7 +196,7 @@ jobs:
           TAG="$GITHUB_REF_NAME"; REPO="${{ github.repository }}"
           shopt -s nullglob
           BUNDLES=(artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip)
-          gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes "Automated release $TAG" || true
+          gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file NOTES.md || true
           gh release upload "$TAG" "${BUNDLES[@]}" releases.json --clobber --repo "$REPO"
 
       - name: Publish to the public releases repo
@@ -192,7 +213,7 @@ jobs:
           TAG="$GITHUB_REF_NAME"
           shopt -s nullglob
           BUNDLES=(artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip)
-          gh release create "$TAG" --repo "$PUBLIC_REPO" --title "$TAG" --notes "Floptle $TAG — download the floptle-hub archive for your platform; the Hub installs engine versions." || true
+          gh release create "$TAG" --repo "$PUBLIC_REPO" --title "$TAG" --notes-file NOTES.md || true
           gh release upload "$TAG" "${BUNDLES[@]}" releases.json --clobber --repo "$PUBLIC_REPO"
           # A stable 'manifest' release so the Hub's default manifest URL always resolves to
           # the newest list (releases/download/manifest/releases.json). It's a PRERELEASE

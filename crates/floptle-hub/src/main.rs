@@ -10,6 +10,7 @@ mod app;
 mod config;
 mod install;
 mod launch;
+mod notes;
 mod registry;
 mod releases;
 

@@ -2441,6 +2441,9 @@ impl EditorTabViewer<'_> {
                     // A suggestion, not a defect — its own mark so the strip
                     // reads as "here is a better way", not "here is a bug".
                     crate::lua_lint::LintKind::RawInput => "➜",
+                    // This one IS a defect, and a total one: the hook raises on
+                    // its first sum, so the script does nothing whatsoever.
+                    crate::lua_lint::LintKind::HookSignature => "✖",
                 };
                 if ui
                     .add(

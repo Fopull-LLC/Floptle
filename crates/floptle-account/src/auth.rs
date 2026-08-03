@@ -326,6 +326,17 @@ pub fn access_token_expiry(jwt: &str) -> Option<u64> {
     claims.get("exp")?.as_u64()
 }
 
+/// The `iss` (issuer) claim of a JWT access token, read **without verifying the signature**.
+/// Only used to notice that a stored session was minted by a *different* provider than the
+/// one we're now configured for — see [`Session::issued_by`]. `None` if the token isn't a JWT
+/// or carries no string `iss`.
+pub fn access_token_issuer(jwt: &str) -> Option<String> {
+    let payload = jwt.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some(claims.get("iss")?.as_str()?.to_string())
+}
+
 /// True when `url`'s host is fopull.com (or a subdomain) — the only host, besides a local dev
 /// instance, that the access token may be attached to. Mirrors `releases::is_github_host`
 /// (strips scheme, userinfo, and port) so a crafted URL can't smuggle the token elsewhere.
@@ -396,6 +407,24 @@ impl Session {
         match self.name.as_deref() {
             Some(n) if !n.trim().is_empty() => n,
             _ => self.display_name(),
+        }
+    }
+
+    /// Whether this session could plausibly have come from the provider at `base`.
+    ///
+    /// A token is only meaningful to the instance that minted it: its own database holds the
+    /// account, and its own key signed the token. So a session left behind by a provider we
+    /// no longer point at is not a session at all — refreshing it earns `invalid_grant` and
+    /// using it earns `401`, on every call, forever. Comparing the token's `iss` host to the
+    /// configured one catches that at startup instead of on first use.
+    ///
+    /// **Uncertainty keeps you signed in.** A token that isn't a JWT, or carries no `iss`,
+    /// answers `true`: the normal refresh path handles a genuinely dead session, and signing
+    /// somebody out over an unreadable field would be the worse mistake of the two.
+    pub fn issued_by(&self, base: &str) -> bool {
+        match access_token_issuer(&self.access_token).as_deref().and_then(host_of) {
+            Some(issuer) => Some(issuer) == host_of(base),
+            None => true,
         }
     }
 
@@ -621,6 +650,38 @@ mod tests {
         let jwt = format!("h.{payload}.s");
         assert_eq!(access_token_expiry(&jwt), Some(1893456000));
         assert_eq!(access_token_expiry("not-a-jwt"), None);
+    }
+
+    /// The `dev-auth.fopull.com` failure, in miniature: the retired instance had its own
+    /// database and its own signing key, so a session it minted is not a session on
+    /// production — it can only 401.
+    #[test]
+    fn a_session_from_another_provider_is_not_ours() {
+        let jwt = |iss: &str| {
+            let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"iss":"{iss}","sub":"u1"}}"#).as_bytes());
+            format!("h.{payload}.s")
+        };
+        let session = |token: String| Session {
+            sub: "u1".into(),
+            name: None,
+            email: None,
+            tier: "free".into(),
+            access_token: token,
+            refresh_token: Some("r".into()),
+        };
+
+        assert_eq!(access_token_issuer(&jwt("https://fopull.com")).as_deref(), Some("https://fopull.com"));
+        assert!(session(jwt("https://fopull.com")).issued_by("https://fopull.com"));
+        // Compared by HOST, so a trailing slash or a path on the configured base is not a
+        // reason to sign somebody out.
+        assert!(session(jwt("https://fopull.com")).issued_by("https://fopull.com/"));
+        assert!(!session(jwt("https://dev-auth.fopull.com")).issued_by("https://fopull.com"));
+
+        // Unreadable stays signed in: the refresh path handles a genuinely dead session,
+        // and signing somebody out over a field we couldn't parse is the worse mistake.
+        assert!(session("opaque-not-a-jwt".into()).issued_by("https://fopull.com"));
+        let no_iss = URL_SAFE_NO_PAD.encode(br#"{"sub":"u1"}"#);
+        assert!(session(format!("h.{no_iss}.s")).issued_by("https://fopull.com"));
     }
 
     #[test]

@@ -13,6 +13,12 @@ pub use floptle_dist::DEFAULT_MANIFEST_URL;
 const LEGACY_MANIFEST_URL: &str =
     "https://github.com/Fopull-LLC/Floptle/releases/download/manifest/releases.json";
 
+/// The Phase-1 dev provider. It was a hand-run script over a throwaway sqlite database; it is
+/// switched off and it is not coming back, so a config still holding it can only ever fail to
+/// sign in. Treated as a **known-dead value** rather than as a URL somebody might have meant:
+/// anything else the user typed is still respected.
+const RETIRED_AUTH_HOST: &str = "dev-auth.fopull.com";
+
 /// Resolved per-OS directories. `data` holds `versions/` (installed bundles) + `cache/`
 /// (downloaded archives); `config` holds `hub.json`.
 #[derive(Clone, Debug)]
@@ -147,6 +153,14 @@ impl HubConfig {
         {
             cfg.settings.manifest_url = DEFAULT_MANIFEST_URL.to_string();
         }
+        // The Phase-1 sign-in server. A NEW DEFAULT DOES NOT FIX THIS on its own:
+        // the value is persisted, so the installs that carry the dead host are
+        // exactly the ones that have run before — which is everyone who ever
+        // signed in. Rewritten on load rather than left for the user to notice,
+        // because "502" is not a sentence anybody can act on.
+        if cfg.settings.auth_base_url.contains(RETIRED_AUTH_HOST) {
+            cfg.settings.auth_base_url = default_auth_base_url();
+        }
         cfg
     }
 
@@ -199,6 +213,28 @@ mod tests {
         assert_eq!(back.projects.len(), 1);
         assert_eq!(back.projects[0].name, "My Game");
         assert_eq!(back.settings.default_version.as_deref(), Some("0.3.0"));
+    }
+
+    #[test]
+    fn the_retired_sign_in_host_is_migrated_off_on_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::at(tmp.path());
+        std::fs::create_dir_all(&paths.config).unwrap();
+        std::fs::write(
+            paths.config_file(),
+            r#"{"settings":{"auth_base_url":"https://dev-auth.fopull.com"},"projects":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(HubConfig::load(&paths).settings.auth_base_url, "https://fopull.com");
+
+        // Anything the user actually chose is still theirs — a local dev provider
+        // is a supported target, and self-healing must not mean overruling.
+        std::fs::write(
+            paths.config_file(),
+            r#"{"settings":{"auth_base_url":"http://localhost:8000"},"projects":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(HubConfig::load(&paths).settings.auth_base_url, "http://localhost:8000");
     }
 
     #[test]

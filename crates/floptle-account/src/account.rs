@@ -130,6 +130,13 @@ impl Account {
         let me = self.clone();
         let _ = std::thread::Builder::new().name("floptle-account-restore".into()).spawn(move || {
             let Some(session) = me.store.load() else { return };
+            // Minted by a provider we no longer point at — see `Session::issued_by`. It can
+            // only 401, so it is forgotten rather than shown as a signed-in player whose
+            // every call fails. The Hub shares this entry and applies the same rule.
+            if !session.issued_by(&me.base) {
+                let _ = me.store.clear();
+                return;
+            }
             if let Ok(mut i) = me.inner.lock() {
                 // A sign-in that started in the meantime wins — it is the more
                 // recent statement of what the player wants.

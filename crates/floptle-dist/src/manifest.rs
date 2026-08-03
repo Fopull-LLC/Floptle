@@ -23,6 +23,20 @@ pub struct ReleaseInfo {
     pub date: String,
     #[serde(default)]
     pub notes_url: String,
+    /// The release's name — `"Who's Playing"` — as `docs/releases/vX.Y.Z.md` titles it.
+    #[serde(default)]
+    pub title: String,
+    /// The release notes themselves, in Markdown, lifted verbatim from
+    /// `docs/releases/vX.Y.Z.md` by the publish workflow.
+    ///
+    /// **Carried in the manifest rather than fetched per version.** The alternative is a
+    /// request every time somebody clicks a version, which needs a spinner, an error state
+    /// and a network connection to read notes for an engine already on the disk. One fetch
+    /// at startup buys the whole history offline. It grows — a few KB per release against a
+    /// manifest that is already the gate on a 12 MB download — and if that ever stops being
+    /// true, the fix is to trim OLD entries here, not to make the common case slower.
+    #[serde(default)]
+    pub notes: String,
     #[serde(default)]
     pub artifacts: BTreeMap<String, Artifact>,
 }

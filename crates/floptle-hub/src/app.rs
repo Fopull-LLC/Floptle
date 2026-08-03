@@ -36,8 +36,6 @@ mod ico {
     pub const OK: &str = "✔";
     pub const WARN: &str = "⚠";
     pub const CLOSE: &str = "✖";
-    pub const DEFAULT_ON: &str = "●";
-    pub const DEFAULT_OFF: &str = "○";
     pub const STAR: &str = "⭐";
     pub const PROJECTS: &str = "📁";
     pub const INSTALLS: &str = "📦";
@@ -176,6 +174,23 @@ pub struct HubApp {
     /// thread; only the one-time startup load runs inline.
     session: Option<auth::Session>,
     auth_job: Option<AuthJob>,
+    /// Which version's release notes the Installs tab is showing. `None` until the list
+    /// first has something in it, then the newest — the release somebody opening this tab
+    /// is nearly always asking about.
+    selected_version: Option<String>,
+}
+
+/// One version in the Installs list — see [`HubApp::version_rows`].
+struct VersionRow {
+    version: String,
+    date: String,
+    title: String,
+    notes: String,
+    notes_url: String,
+    /// The bundle for THIS platform, if the release ships one.
+    artifact: Option<crate::releases::Artifact>,
+    installed: Option<Install>,
+    is_default: bool,
 }
 
 impl HubApp {
@@ -190,7 +205,22 @@ impl HubApp {
         let token = std::env::var("FLOPTLE_HUB_TOKEN").unwrap_or_default();
         // Restore a previously signed-in account from the OS keyring (one-time, before the
         // window is interactive).
-        let session = auth::KeyringStore::default().load();
+        //
+        // A session from a DIFFERENT provider is dropped here rather than carried in. The
+        // retired dev instance had its own database and its own signing key, so a session
+        // it minted names an account that does not exist on production: every refresh
+        // answers `invalid_grant` and every call answers `401`. Presenting it as signed in
+        // would be a window that shows a name and then fails at everything, which is worse
+        // than showing the sign-in button. Clearing the store too, so the *game* side —
+        // which shares this keyring entry — doesn't find it either.
+        let store = auth::KeyringStore::default();
+        let session = store.load().filter(|s| {
+            let ours = s.issued_by(&config.settings.auth_base_url);
+            if !ours {
+                let _ = store.clear();
+            }
+            ours
+        });
         let mut app = Self {
             paths,
             config,
@@ -208,6 +238,7 @@ impl HubApp {
             manifest_fetched_at: std::time::Instant::now(),
             session,
             auth_job: None,
+            selected_version: None,
         };
         app.refresh_projects();
         // Fetch the available-versions list up front so the Installs tab is populated without
@@ -525,6 +556,51 @@ impl HubApp {
                 r.artifact_here().is_some()
                     && crate::releases::version_key(&r.version) > newest_installed
             })
+    }
+
+    /// One row of the Installs list: every version this Hub knows about, from either
+    /// side, newest first.
+    ///
+    /// **Merged rather than two lists.** A version can be installed and absent from the
+    /// manifest (a local build, or a release pulled after the fact), or listed and not
+    /// installed, and the question the user has is "what about 0.21.0?" — one row per
+    /// version answers it, where two lists made them check both and work out which of
+    /// the two 0.21.0s they were looking at.
+    fn version_rows(&self) -> Vec<VersionRow> {
+        let mut rows: Vec<VersionRow> = Vec::new();
+        let default = self.config.settings.default_version.as_deref();
+
+        if let ManifestState::Loaded(m) = &self.manifest {
+            for r in m.on_channel(&self.config.settings.channel) {
+                rows.push(VersionRow {
+                    version: r.version.clone(),
+                    date: r.date.clone(),
+                    title: r.title.clone(),
+                    notes: r.notes.clone(),
+                    notes_url: r.notes_url.clone(),
+                    artifact: r.artifact_here().cloned(),
+                    installed: None,
+                    is_default: default == Some(r.version.as_str()),
+                });
+            }
+        }
+        for i in &self.installs {
+            match rows.iter_mut().find(|r| r.version == i.version) {
+                Some(row) => row.installed = Some(i.clone()),
+                None => rows.push(VersionRow {
+                    version: i.version.clone(),
+                    date: String::new(),
+                    title: String::new(),
+                    notes: String::new(),
+                    notes_url: String::new(),
+                    artifact: None,
+                    installed: Some(i.clone()),
+                    is_default: default == Some(i.version.as_str()),
+                }),
+            }
+        }
+        rows.sort_by_key(|r| std::cmp::Reverse(crate::releases::version_key(&r.version)));
+        rows
     }
 
     // ---- background jobs ---------------------------------------------------
@@ -1138,118 +1214,244 @@ impl HubApp {
         }
     }
 
+    /// Versions, and what each one was. A list on the left, the selected release's
+    /// notes on the right.
+    ///
+    /// The notes are the point of the redesign. The Hub used to show a version as a
+    /// number, a date and an Install button, which told somebody deciding whether to
+    /// upgrade precisely nothing — the answer lived on a GitHub page they had to go and
+    /// find. They ship in the manifest now (`docs/releases/vX.Y.Z.md`, embedded at
+    /// publish time), so every release explains itself here, including the ones already
+    /// installed and the ones from before this existed.
     fn installs_tab(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        ui.strong(format!("{} Installed engines", ico::INSTALLS));
-        if self.installs.is_empty() {
-            ui.small("None installed yet — pick one from Available below.");
-        } else {
-            let mut set_default = None;
-            let mut uninstall = None;
-            let mut reveal = None;
-            for i in &self.installs {
-                ui.horizontal(|ui| {
-                    let is_default = self.config.settings.default_version.as_deref() == Some(i.version.as_str());
-                    let (dot, tail) = if is_default { (ico::DEFAULT_ON, "  (default)") } else { (ico::DEFAULT_OFF, "") };
-                    ui.label(format!("{dot} {}{tail}", i.version));
-                    if !i.is_valid() {
-                        ui.colored_label(egui::Color32::LIGHT_RED, format!("{} invalid", ico::WARN));
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(ico::REMOVE).on_hover_text("uninstall this engine").clicked() {
-                            uninstall = Some(i.clone());
-                        }
-                        if ui.button(ico::REVEAL).on_hover_text("show this install in your file manager").clicked() {
-                            reveal = Some(i.path.clone());
-                        }
-                        if !is_default && ui.button(format!("{} Set default", ico::STAR)).clicked() {
-                            set_default = Some(i.version.clone());
-                        }
-                    });
-                });
-            }
-            if let Some(v) = set_default {
-                self.config.settings.default_version = Some(v);
-                self.save();
-            }
-            if let Some(p) = reveal
-                && let Err(e) = launch::reveal(&p)
-            {
-                self.toast = Some((e, true));
-            }
-            if let Some(i) = uninstall {
-                let _ = std::fs::remove_dir_all(&i.path);
-                if self.config.settings.default_version.as_deref() == Some(i.version.as_str()) {
-                    self.config.settings.default_version = None;
-                }
-                self.rescan_installs();
-                self.save();
-                self.toast = Some((format!("uninstalled {}", i.version), false));
-            }
+        let rows = self.version_rows();
+
+        // Default the selection to the newest version there is. Somebody opening this
+        // tab is nearly always asking about the newest release, and an empty right-hand
+        // pane on arrival would make the notes look like something you have to hunt for.
+        if self.selected_version.as_ref().is_none_or(|v| !rows.iter().any(|r| &r.version == v)) {
+            self.selected_version = rows.first().map(|r| r.version.clone());
         }
 
-        ui.separator();
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.strong("Available");
+            ui.strong("Engine versions");
             let loading = matches!(self.manifest, ManifestState::Loading(_));
-            if ui.add_enabled(!loading, egui::Button::new(format!("{} Check for versions", ico::REFRESH))).clicked() {
+            if ui
+                .add_enabled(!loading, egui::Button::new(format!("{} Check for versions", ico::REFRESH)))
+                .clicked()
+            {
                 self.start_manifest_fetch();
             }
-            ui.label(format!("channel: {}", self.config.settings.channel));
+            if loading {
+                ui.spinner();
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(6.0);
+                ui.small(format!("{} channel", self.config.settings.channel));
+            });
         });
 
-        // A running install job.
+        // A running install job, above the split so it stays put while you browse.
         if let Some(job) = &self.job {
-            ui.horizontal(|ui| {
-                ui.label(format!("installing {} — {}", job.version, job.line));
+            ui.add_space(2.0);
+            ui.small(format!("installing {} — {}", job.version, job.line));
+            ui.add(egui::ProgressBar::new(job.frac).desired_height(6.0));
+        }
+        if let ManifestState::Error(e) = &self.manifest {
+            ui.colored_label(egui::Color32::LIGHT_RED, format!("{} could not load versions: {e}", ico::WARN));
+        }
+        ui.add_space(6.0);
+
+        if rows.is_empty() {
+            ui.label(match self.manifest {
+                ManifestState::Loading(_) => "fetching the version list…",
+                _ => "No versions yet — check for versions to see what there is to install.",
             });
-            ui.add(egui::ProgressBar::new(job.frac).show_percentage());
+            return;
         }
 
-        let mut to_install = None;
-        match &self.manifest {
-            ManifestState::Idle => {
-                ui.label("Click “Check for versions” to fetch the release list.");
-            }
-            ManifestState::Loading(_) => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("fetching…");
-                });
-            }
-            ManifestState::Error(e) => {
-                ui.colored_label(egui::Color32::LIGHT_RED, format!("could not load versions: {e}"));
-            }
-            ManifestState::Loaded(m) => {
-                let channel = self.config.settings.channel.clone();
-                let releases = m.on_channel(&channel);
-                if releases.is_empty() {
-                    ui.label(format!("no versions on the '{channel}' channel"));
-                }
-                for r in &releases {
-                    let installed = self.installs.iter().any(|i| i.version == r.version);
-                    ui.horizontal(|ui| {
-                        ui.label(&r.version);
-                        if !r.date.is_empty() {
-                            ui.small(&r.date);
+        // Actions are collected and applied AFTER the panes: every one of them mutates
+        // `self`, and the panes are holding a borrow of the row list built from it.
+        let mut to_install: Option<(String, crate::releases::Artifact)> = None;
+        let mut set_default: Option<String> = None;
+        let mut uninstall: Option<Install> = None;
+        let mut reveal: Option<PathBuf> = None;
+        let mut select: Option<String> = None;
+
+        let newest_installed =
+            self.installs.iter().map(|i| crate::releases::version_key(&i.version)).max();
+        let selected = self.selected_version.clone().unwrap_or_default();
+        let busy = self.job.is_some();
+
+        // Two columns, hand-allocated rather than an egui SidePanel: a panel wants to be
+        // a child of a window or another panel, and this is already inside the tab body.
+        let split_height = ui.available_height();
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(196.0, split_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                egui::ScrollArea::vertical().id_salt("version-list").show(ui, |ui| {
+                    for r in &rows {
+                        let is_new = newest_installed
+                            .as_ref()
+                            .is_some_and(|n| crate::releases::version_key(&r.version) > *n);
+                        let mut label = egui::RichText::new(&r.version);
+                        if r.installed.is_some() {
+                            label = label.strong();
                         }
-                        match r.artifact_here() {
-                            None => {
-                                ui.small(format!("(no build for {})", crate::releases::platform_target()));
-                            }
-                            Some(art) => {
-                                if installed {
-                                    ui.colored_label(egui::Color32::LIGHT_GREEN, format!("installed {}", ico::OK));
-                                } else if self.job.is_none()
-                                    && ui.button(format!("{} Install", ico::INSTALL)).clicked()
-                                {
-                                    to_install = Some((r.version.clone(), art.clone()));
+                        let resp = ui.selectable_label(r.version == selected, label);
+                        // The state marks sit on the same line, right-aligned, so the
+                        // column reads as a list of versions and not a table of glyphs.
+                        // WORDS, NOT GLYPHS. The Hub ships egui's default fonts, which
+                        // have no ● and no ✔ — both draw as an empty box, and a list of
+                        // empty boxes is worse than no marker at all. "installed" also
+                        // needs no legend.
+                        ui.scope(|ui| {
+                            ui.style_mut().spacing.item_spacing = egui::vec2(5.0, 0.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(4.0);
+                                if r.is_default {
+                                    ui.small(
+                                        egui::RichText::new("default")
+                                            .color(ui.visuals().hyperlink_color)
+                                            .strong(),
+                                    );
+                                } else if r.installed.is_some() {
+                                    ui.small(egui::RichText::new("installed").strong());
+                                } else if is_new {
+                                    ui.small(
+                                        egui::RichText::new("new").color(egui::Color32::from_rgb(120, 200, 130)),
+                                    );
                                 }
-                            }
+                                if !r.date.is_empty() {
+                                    ui.weak(egui::RichText::new(&r.date).small());
+                                }
+                            });
+                        });
+                        if resp.clicked() {
+                            select = Some(r.version.clone());
                         }
-                    });
+                        ui.add_space(3.0);
+                    }
+                });
+                },
+            );
+            ui.separator();
+            ui.vertical(|ui| {
+            let Some(r) = rows.iter().find(|r| r.version == selected) else { return };
+            // A right margin, so a heading or a wrapped line never runs into the edge
+            // of the window.
+            ui.set_max_width((ui.available_width() - 8.0).max(120.0));
+
+            ui.horizontal(|ui| {
+                ui.heading(&r.version);
+                if !r.title.is_empty() {
+                    ui.heading(egui::RichText::new(format!("“{}”", r.title)).weak());
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(6.0);
+                    if !r.date.is_empty() {
+                        ui.small(&r.date);
+                    }
+                });
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                match (&r.installed, &r.artifact) {
+                    (Some(inst), _) => {
+                        if !inst.is_valid() {
+                            ui.colored_label(
+                                egui::Color32::LIGHT_RED,
+                                format!("{} this install is incomplete", ico::WARN),
+                            );
+                        }
+                        if !r.is_default && ui.button(format!("{} Set default", ico::STAR)).clicked() {
+                            set_default = Some(r.version.clone());
+                        }
+                        if ui
+                            .button(format!("{} Show files", ico::REVEAL))
+                            .on_hover_text("show this install in your file manager")
+                            .clicked()
+                        {
+                            reveal = Some(inst.path.clone());
+                        }
+                        if ui.button(format!("{} Uninstall", ico::REMOVE)).clicked() {
+                            uninstall = Some(inst.clone());
+                        }
+                    }
+                    (None, Some(art)) => {
+                        if ui
+                            .add_enabled(!busy, egui::Button::new(format!("{} Install", ico::INSTALL)))
+                            .clicked()
+                        {
+                            to_install = Some((r.version.clone(), art.clone()));
+                        }
+                        ui.small(format!("{:.0} MB", art.size as f64 / 1_048_576.0));
+                    }
+                    (None, None) => {
+                        ui.small(format!(
+                            "{} no build for {} in this release",
+                            ico::WARN,
+                            crate::releases::platform_target()
+                        ));
+                    }
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.separator();
+
+            egui::ScrollArea::vertical().id_salt(("notes", &r.version)).show(ui, |ui| {
+                if r.notes.trim().is_empty() {
+                    ui.add_space(10.0);
+                    // Honest about WHY rather than silent: the six earliest releases
+                    // predate release notes entirely, and a blank pane reads as a Hub
+                    // that failed to load something.
+                    ui.weak("No release notes for this version.");
+                    if !r.notes_url.is_empty() {
+                        ui.add_space(4.0);
+                        ui.hyperlink_to(
+                            format!("{} the release page", ico::GLOBE),
+                            r.notes_url.clone(),
+                        );
+                    }
+                } else {
+                    crate::notes::render(ui, &r.notes);
+                    if !r.notes_url.is_empty() {
+                        ui.add_space(10.0);
+                        ui.hyperlink_to(
+                            format!("{} this release on the web", ico::GLOBE),
+                            r.notes_url.clone(),
+                        );
+                    }
+                    ui.add_space(12.0);
+                }
+            });
+            });
+        });
+
+        if let Some(v) = select {
+            self.selected_version = Some(v);
+        }
+        if let Some(v) = set_default {
+            self.config.settings.default_version = Some(v);
+            self.save();
+        }
+        if let Some(p) = reveal
+            && let Err(e) = launch::reveal(&p)
+        {
+            self.toast = Some((e, true));
+        }
+        if let Some(i) = uninstall {
+            let _ = std::fs::remove_dir_all(&i.path);
+            if self.config.settings.default_version.as_deref() == Some(i.version.as_str()) {
+                self.config.settings.default_version = None;
             }
+            self.rescan_installs();
+            self.save();
+            self.toast = Some((format!("uninstalled {}", i.version), false));
         }
         if let Some((v, art)) = to_install {
             self.start_install(v, art);
@@ -1380,6 +1582,79 @@ impl HubApp {
 #[cfg(test)]
 mod tests {
     use super::pin_engine_version;
+
+    /// Render the Installs tab to a PNG so a layout change can be LOOKED AT.
+    ///
+    /// Ignored: it needs a GPU, and CI has none. Run it deliberately —
+    /// `cargo test -p floptle-hub -- --ignored --nocapture` — and open the path it
+    /// prints. The same rule as the render crate's `*_probe` examples: a visual change
+    /// that was only reasoned about is a visual change that was not checked.
+    #[test]
+    #[ignore = "renders a PNG for eyeballing; needs a GPU"]
+    fn snapshot_the_installs_tab() {
+        use super::*;
+
+        // A manifest with the real v0.21.0 notes, so the snapshot shows what a release
+        // actually looks like rather than filler that happens to fit.
+        let notes = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/releases/v0.21.0.md"),
+        )
+        .unwrap();
+        let body = notes.split_once('\n').map(|(_, b)| b.trim_start()).unwrap_or("").to_string();
+
+        let build = |selected: &str| {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut app = HubApp::new(Paths::at(tmp.path()));
+            let mut m = Manifest { schema: 1, ..Default::default() };
+            for (v, date, title) in [
+                ("0.21.0", "2026-08-03", "Who's Playing"),
+                ("0.20.0", "2026-08-02", "Say It Simply"),
+                ("0.19.2", "2026-07-31", "Stay Put"),
+                ("0.19.1", "2026-07-31", "Say Which"),
+            ] {
+                m.versions.push(crate::releases::ReleaseInfo {
+                    version: v.into(),
+                    channel: "stable".into(),
+                    date: date.into(),
+                    notes_url: format!("https://example.invalid/v{v}"),
+                    title: title.into(),
+                    notes: if v == "0.21.0" { body.clone() } else { String::new() },
+                    artifacts: [(
+                        crate::releases::platform_target(),
+                        crate::releases::Artifact {
+                            url: "u".into(),
+                            sha256: "s".into(),
+                            size: 13_400_000,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                });
+            }
+            app.manifest = ManifestState::Loaded(m);
+            app.installs =
+                vec![Install { version: "0.20.0".into(), path: tmp.path().join("versions/0.20.0") }];
+            app.config.settings.default_version = Some("0.20.0".into());
+            app.selected_version = Some(selected.to_string());
+            // The temp dir has to outlive the render — the paths are read while drawing.
+            (app, tmp)
+        };
+
+        // Both halves of the tab: a release you could install, and one you already have,
+        // whose buttons and empty-notes state are a different screen entirely.
+        for (which, selected) in [("new", "0.21.0"), ("installed", "0.20.0")] {
+            let (mut app, _tmp) = build(selected);
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(960.0, 620.0))
+                .build_ui(move |ui| app.installs_tab(ui));
+            harness.run();
+            let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../../target/installs-tab-{which}.png"));
+            std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+            harness.render().expect("no GPU?").save(&out).unwrap();
+            println!("wrote {}", out.display());
+        }
+    }
 
     #[test]
     fn pin_corrects_a_stale_engine_version() {

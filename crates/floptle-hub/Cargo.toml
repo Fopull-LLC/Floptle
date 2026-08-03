@@ -36,3 +36,8 @@ floptle-dist = { path = "../floptle-dist" }
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
+# Renders a tab to a PNG so a layout change can be LOOKED AT rather than reasoned
+# about — the same rule as the render crate's `*_probe` examples. Only used by
+# `#[ignore]`d snapshot tests, which need a GPU and so never run in CI.
+egui_kittest = { version = "0.35", features = ["wgpu", "snapshot"] }
+image = { workspace = true }

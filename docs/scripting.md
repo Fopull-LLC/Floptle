@@ -533,8 +533,21 @@ Available while playing.
 | `input.scroll()` | wheel delta this frame |
 | `input.setMouseLocked(true)` | pin + hide the cursor (FPS mouselook); `false` releases. Also `input.lockMouse()` / `input.unlockMouse()` |
 
-Key names: `a`–`z`, `0`–`9`, `space`, `enter`, `escape`, `tab`, `backspace`,
-`delete`, `shift`, `ctrl`, `alt`, `,`, `.`, and arrows `left` `right` `up` `down`.
+Key names are **the same names the action map's key picker shows** (Project
+Settings ⏵ Input) — one list, so a key you can bind is a key you can poll:
+
+- `a`–`z`, `0`–`9`, `f1`–`f12`
+- `space` `enter` `escape` `tab` `backspace` `delete` `insert` `home` `end`
+  `pageup` `pagedown`
+- `shift` `ctrl` `alt` `super` `capslock` (left and right collapse onto one name)
+- arrows `left` `right` `up` `down`
+- `,` `.` `/` `;` `'` `` ` `` `[` `]` `\` `-` `=`
+- numpad `num0`–`num9` `num+` `num-` `num*` `num/` `num.`
+
+> Before **0.21.1** the raw-key half of that list stopped at the arrows, so
+> `input.pressed("f9")` — and every numpad, bracket and navigation key — was
+> permanently `false` while the *same* key bound fine in Settings. If you worked
+> around it, the workaround is no longer needed.
 
 A locked cursor is genuinely pinned to the window center (hardware lock where
 the OS supports it, per-frame re-centering where it doesn't) — read motion with
@@ -1953,6 +1966,11 @@ open it in the **Scripting** tab — a small but real code editor:
   - **upvalue pressure** — LuaJIT allows **60** upvalues per function and every
     file-scope `local` is one; at 50 you get a warning whose message names the
     fix (group related state into one table).
+  - **a hook that forgot the node** — `function update(dt)` looks right and is
+    wrong: every lifecycle hook is called with the **node first** (§3), so `dt`
+    is bound to the node and the first arithmetic on it raises, every frame,
+    before anything visible has happened. From the outside that isn't an error,
+    it's a script that does nothing at all.
 
   `--@nolint` silences a line; on its own line it silences the file.
 

@@ -465,24 +465,18 @@ struct EditorCmd {
 }
 
 /// Lowercase name for a key, for the script `input` API (`input.key("w")`).
+///
+/// Derived from the action layer's table rather than written out again. It used to be its own
+/// list and had quietly fallen a long way behind: no function key, no numpad, no bracket,
+/// nothing beyond the arrows. A script asking for `input.pressed("f9")` got a permanent
+/// `false` — the key never had a name to match against — while the *same* key was bindable in
+/// the Settings tab, because that path went through [`action_key`]. Two tables answering the
+/// same question is how that happens, so now there is one.
+///
+/// The overlapping subset is byte-identical by construction (`script_name` documents that
+/// contract), so no existing script changes meaning.
 fn key_name(code: KeyCode) -> Option<&'static str> {
-    use KeyCode::*;
-    Some(match code {
-        KeyA => "a", KeyB => "b", KeyC => "c", KeyD => "d", KeyE => "e", KeyF => "f",
-        KeyG => "g", KeyH => "h", KeyI => "i", KeyJ => "j", KeyK => "k", KeyL => "l",
-        KeyM => "m", KeyN => "n", KeyO => "o", KeyP => "p", KeyQ => "q", KeyR => "r",
-        KeyS => "s", KeyT => "t", KeyU => "u", KeyV => "v", KeyW => "w", KeyX => "x",
-        KeyY => "y", KeyZ => "z",
-        Digit0 => "0", Digit1 => "1", Digit2 => "2", Digit3 => "3", Digit4 => "4",
-        Digit5 => "5", Digit6 => "6", Digit7 => "7", Digit8 => "8", Digit9 => "9",
-        Space => "space", Enter | NumpadEnter => "enter", Escape => "escape", Tab => "tab",
-        Backspace => "backspace", Delete => "delete",
-        ShiftLeft | ShiftRight => "shift", ControlLeft | ControlRight => "ctrl",
-        AltLeft | AltRight => "alt",
-        Comma => ",", Period => ".",
-        ArrowLeft => "left", ArrowRight => "right", ArrowUp => "up", ArrowDown => "down",
-        _ => return None,
-    })
+    crate::input_actions::action_key(code).map(|k| k.script_name())
 }
 
 /// Map a top-row number key to its digit (1-9), else `None`.

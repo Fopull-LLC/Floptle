@@ -28,6 +28,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "accesskit_consumer"
+version = "0.35.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53cf47daed85312e763fbf85ceca136e0d7abc68e0a7e12abe11f48172bc3b10"
+dependencies = [
+ "accesskit",
+ "hashbrown 0.16.1",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -166,6 +176,12 @@ dependencies = [
  "once_cell_polyfill",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "arbitrary"
@@ -574,6 +590,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "colored"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
+dependencies = [
+ "lazy_static",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -720,6 +746,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
+name = "crossbeam-deque"
+version = "0.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5181e0de7b61eb03a81e347d6dd8797bae9da5146707b51077e2d71a54ec0ceb"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -800,6 +845,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "dify"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90ce0fb972943b4e88cd03b8f92953df0c71bb05e0bde8e5b684895d808013cc"
+dependencies = [
+ "anyhow",
+ "colored",
+ "getopts",
+ "image",
+ "rayon",
 ]
 
 [[package]]
@@ -1037,6 +1095,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui_kittest"
+version = "0.35.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "002c31e1f41461ce206333ffbd2e07563b79e87eb71c27e026151d12ee7b78e0"
+dependencies = [
+ "dify",
+ "eframe",
+ "egui",
+ "egui-wgpu",
+ "image",
+ "kittest",
+ "log",
+ "open",
+ "pollster",
+ "serde",
+ "tempfile",
+ "toml",
+ "wgpu",
+]
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1263,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-account"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
@@ -1277,14 +1356,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-anim"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "floptle-core",
 ]
 
 [[package]]
 name = "floptle-assets"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "floptle-anim",
  "floptle-core",
@@ -1296,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-audio"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "cpal",
  "env_logger",
@@ -1309,14 +1388,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-core"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "glam",
 ]
 
 [[package]]
 name = "floptle-dist"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "directories",
  "flate2",
@@ -1331,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-editor"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "egui",
  "egui-wgpu",
@@ -1372,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-field"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "floptle-core",
  "serde",
@@ -1380,15 +1459,17 @@ dependencies = [
 
 [[package]]
 name = "floptle-hub"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "directories",
  "eframe",
+ "egui_kittest",
  "env_logger",
  "flate2",
  "floptle-account",
  "floptle-dist",
  "floptle-scene",
+ "image",
  "log",
  "serde",
  "serde_json",
@@ -1400,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-image"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "image",
  "ron",
@@ -1409,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-input"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "env_logger",
  "floptle-core",
@@ -1421,7 +1502,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-map"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "glam",
  "serde",
@@ -1429,7 +1510,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-matter"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "floptle-core",
  "floptle-field",
@@ -1439,7 +1520,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-net"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "bytes",
  "floptle-core",
@@ -1455,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-physics"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "floptle-core",
  "floptle-field",
@@ -1464,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-proof"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "bytemuck",
  "env_logger",
@@ -1477,14 +1558,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-relay"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "floptle-net",
 ]
 
 [[package]]
 name = "floptle-render"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "bytemuck",
  "floptle-core",
@@ -1506,7 +1587,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-rules"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "floptle-core",
  "floptle-field",
@@ -1514,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-runtime"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "env_logger",
  "floptle-anim",
@@ -1538,7 +1619,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-scene"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "floptle-audio",
  "floptle-core",
@@ -1550,7 +1631,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-script"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "floptle-account",
  "floptle-audio",
@@ -1570,14 +1651,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-shader"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "naga",
 ]
 
 [[package]]
 name = "floptle-ui"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "ron",
  "serde",
@@ -1585,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-vfx"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "floptle-core",
  "floptle-render",
@@ -1748,6 +1829,15 @@ checksum = "1bd49230192a3797a9a4d6abe9b3eed6f7fa4c8a8a4947977c6f80025f92cbd8"
 dependencies = [
  "rustix 1.1.4",
  "windows-link",
+]
+
+[[package]]
+name = "getopts"
+version = "0.2.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
+dependencies = [
+ "unicode-width",
 ]
 
 [[package]]
@@ -2301,6 +2391,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "is-docker"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "928bae27f42bc99b60d9ac7334e3a21d10ad8f1835a4e12ec3ec0464765ed1b3"
+dependencies = [
+ "once_cell",
+]
+
+[[package]]
+name = "is-wsl"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "173609498df190136aa7dea1a91db051746d339e18476eed5ca40521f02d7aa5"
+dependencies = [
+ "is-docker",
+ "once_cell",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2451,6 +2560,16 @@ name = "khronos_api"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
+
+[[package]]
+name = "kittest"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90ceaa75eb0036a32b6b9833962eb18137449e9817e2e586006471925b727fd5"
+dependencies = [
+ "accesskit",
+ "accesskit_consumer",
+]
 
 [[package]]
 name = "kurbo"
@@ -3191,6 +3310,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "open"
+version = "5.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0b3d059e795d52b8a72fef45658620edd4d9c359b338564aa14391ffa511ed5"
+dependencies = [
+ "is-wsl",
+ "libc",
+]
+
+[[package]]
 name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3681,6 +3810,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rayon"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "rcgen"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4019,6 +4168,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "serde_spanned"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
+dependencies = [
+ "serde_core",
 ]
 
 [[package]]
@@ -4554,6 +4712,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml"
+version = "1.1.4+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
+dependencies = [
+ "serde_core",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_parser",
+ "winnow",
+]
+
+[[package]]
 name = "toml_datetime"
 version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4576,9 +4747,9 @@ dependencies = [
 
 [[package]]
 name = "toml_parser"
-version = "1.1.2+spec-1.1.0"
+version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
+checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow",
 ]

@@ -435,10 +435,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn action_keys_agree_with_the_legacy_raw_key_names() {
-        // Both tables are filled from one winit event; if they disagreed, a
-        // script mixing `input.key("w")` and an action bound to W would see
-        // contradictory answers on the same frame.
+    fn action_keys_agree_with_the_raw_key_names() {
+        // Both answers come from one winit event; if they disagreed, a script mixing
+        // `input.key("w")` and an action bound to W would see contradictory answers on
+        // the same frame.
         for (code, name) in [
             (KeyCode::KeyW, "w"),
             (KeyCode::Space, "space"),
@@ -454,7 +454,35 @@ mod tests {
         ] {
             let key = action_key(code).unwrap_or_else(|| panic!("{code:?} unmapped"));
             assert_eq!(key.script_name(), name, "{code:?}");
-            assert_eq!(crate::key_name(code), Some(name), "{code:?} legacy table");
+            assert_eq!(crate::key_name(code), Some(name), "{code:?} raw table");
+        }
+    }
+
+    /// The version of the test above used to enumerate only keys BOTH tables already had,
+    /// so it passed for a year while `input.pressed("f9")` was permanently false: the raw
+    /// table simply had no name for a function key, a numpad key or a bracket, and a script
+    /// asking for one got the same answer as a script asking for a key nobody pressed.
+    ///
+    /// Checking the families that were missing is the assertion that would have caught it.
+    #[test]
+    fn every_bindable_key_has_a_script_name_too() {
+        let families = [
+            (KeyCode::F1, "f1"),
+            (KeyCode::F9, "f9"),
+            (KeyCode::F12, "f12"),
+            (KeyCode::Home, "home"),
+            (KeyCode::PageDown, "pagedown"),
+            (KeyCode::Insert, "insert"),
+            (KeyCode::BracketLeft, "["),
+            (KeyCode::Minus, "-"),
+            (KeyCode::Slash, "/"),
+            (KeyCode::Backquote, "`"),
+            (KeyCode::Numpad5, "num5"),
+            (KeyCode::SuperLeft, "super"),
+            (KeyCode::CapsLock, "capslock"),
+        ];
+        for (code, name) in families {
+            assert_eq!(crate::key_name(code), Some(name), "{code:?} is bindable but unnameable");
         }
     }
 

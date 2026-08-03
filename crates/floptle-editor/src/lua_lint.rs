@@ -39,7 +39,20 @@ pub(crate) enum LintKind {
     /// runs. It just can't be rebound, doesn't reach a gamepad, and reads
     /// neutral on a networked Predicted node.
     RawInput,
+    /// A lifecycle hook whose first parameter is named like a delta time.
+    /// **Every hook takes the node first**, so `function update(dt)` binds the
+    /// node to `dt`, and the first arithmetic that touches it raises — every
+    /// frame, before anything visible has happened.
+    HookSignature,
 }
+
+/// Hooks the engine calls as `(node, dt)`, and `start`, which gets `(node)`.
+/// A single parameter here named like a duration is the mistake this catches.
+const NODE_FIRST_HOOKS: &[&str] =
+    &["start", "update", "fixedUpdate", "lateUpdate", "onStart", "onUpdate", "onLateUpdate"];
+
+/// Names that mean "elapsed seconds" to everyone who has written a game loop.
+const DELTA_NAMES: &[&str] = &["dt", "delta", "deltaTime", "delta_time", "elapsed", "step"];
 
 /// Raw key polls, and the named action that does the same job on every device.
 /// Keyed by the SHIPPED starter map, so the advice names something that already
@@ -238,12 +251,38 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
             && (t.starts_with("function ") || t.starts_with("local function ") || t.contains("function("))
             && let Some(close) = t[open..].find(')')
         {
-            for p in t[open + 1..open + close].split(',') {
-                let p = p.trim();
-                if !p.is_empty() && p.chars().all(is_ident_char) {
+            let params: Vec<&str> =
+                t[open + 1..open + close].split(',').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+            for p in &params {
+                if p.chars().all(is_ident_char) {
                     declared.push((p.to_string(), n + 1));
                     param_decls.push((p.to_string(), n + 1));
                 }
+            }
+            // THE NODE COMES FIRST, ALWAYS. A hook declared `update(dt)` gets
+            // the node bound to `dt`; nothing complains until the first sum,
+            // and then it raises every frame. Read from the outside that is a
+            // script which does nothing at all — no panel, no movement, no
+            // clue — so it is worth a line in the warnings strip.
+            if let Some(name) = t.strip_prefix("function ").map(|r| r[..r.find('(').unwrap_or(0)].trim())
+                && NODE_FIRST_HOOKS.contains(&name)
+                && params.len() == 1
+                && DELTA_NAMES.iter().any(|d| d.eq_ignore_ascii_case(params[0]))
+            {
+                let fixed = if name == "start" {
+                    format!("function {name}(node)")
+                } else {
+                    format!("function {name}(node, {})", params[0])
+                };
+                out.push(Lint {
+                    line: n + 1,
+                    message: format!(
+                        "`{name}` is called with the NODE first — `{}` here is the node, not a \
+                         number, and the first arithmetic on it raises every frame. Write `{fixed}`",
+                        params[0]
+                    ),
+                    kind: LintKind::HookSignature,
+                });
             }
         }
         if let Some(rest) = t.strip_prefix("for ") {
@@ -593,6 +632,37 @@ print(used)
         // A key with no shipped action isn't second-guessed.
         let quiet = lint("function update(node, dt)\n  if input.pressed(\"k\") then k() end\nend\n", &api);
         assert!(!quiet.iter().any(|l| l.kind == LintKind::RawInput));
+    }
+
+    #[test]
+    fn a_hook_that_forgot_the_node_is_flagged() {
+        // The real one, from Fofighter's account panel: the hook raised on
+        // `bindFor + dt` every frame, and what the player saw was a key that
+        // did nothing.
+        let hits = lint("function update(dt)\n  print(dt)\nend\n", API);
+        let hit = hits.iter().find(|l| l.kind == LintKind::HookSignature).expect("flagged");
+        assert_eq!(hit.line, 1);
+        assert!(hit.message.contains("function update(node, dt)"), "names the fix: {}", hit.message);
+
+        // `start` gets only the node, so its fix has no second parameter.
+        let s = lint("function start(delta)\nend\n", API);
+        let sh = s.iter().find(|l| l.kind == LintKind::HookSignature).expect("flagged");
+        assert!(sh.message.contains("function start(node)"), "{}", sh.message);
+
+        // Correct signatures, a hook that ignores dt, and a plain function whose
+        // one argument really is a duration: all silent.
+        for ok in [
+            "function update(node, dt)\n  print(dt)\nend\n",
+            "function update(node)\nend\n",
+            "function lateUpdate(me, dt)\n  print(dt)\nend\n",
+            "local function tick(dt)\n  print(dt)\nend\n",
+            "function ease(dt)\n  return dt\nend\n",
+        ] {
+            assert!(
+                !lint(ok, API).iter().any(|l| l.kind == LintKind::HookSignature),
+                "false positive on {ok:?}"
+            );
+        }
     }
 
     #[test]
