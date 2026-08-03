@@ -13,6 +13,7 @@ mod launch;
 mod notes;
 mod registry;
 mod releases;
+mod selfupdate;
 
 use app::HubApp;
 use config::Paths;
@@ -24,6 +25,10 @@ pub use floptle_account::auth;
 
 fn main() -> eframe::Result<()> {
     env_logger::init();
+
+    // Sweep the binary a previous self-update moved aside. Startup is the one moment
+    // nothing has it open — on Windows that is the *only* moment it can be deleted.
+    selfupdate::clean_leftovers();
 
     let paths = Paths::resolve().unwrap_or_else(|| {
         // No home dir (unusual) — fall back to a `.floptle-hub` next to the cwd.

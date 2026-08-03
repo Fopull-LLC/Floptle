@@ -178,6 +178,22 @@ pub struct HubApp {
     /// first has something in it, then the newest — the release somebody opening this tab
     /// is nearly always asking about.
     selected_version: Option<String>,
+    /// A running self-update, and whether the banner is hidden.
+    ///
+    /// **Hidden for this session only, never persisted.** The engine banner remembers a
+    /// dismissal per version, which is right for "there is a newer engine you may or may
+    /// not want". It is wrong for "the app you are using is out of date": one idle click
+    /// would silence that forever. This comes back next launch, and the chip in the tab
+    /// bar never goes away at all.
+    hub_update_job: Option<HubUpdateJob>,
+    hub_update_hidden: bool,
+}
+
+/// A running self-update. Same shape as [`InstallJob`] — the UI renders them alike.
+struct HubUpdateJob {
+    rx: Receiver<crate::selfupdate::Progress>,
+    line: String,
+    frac: f32,
 }
 
 /// One version in the Installs list — see [`HubApp::version_rows`].
@@ -185,7 +201,6 @@ struct VersionRow {
     version: String,
     date: String,
     title: String,
-    notes: String,
     notes_url: String,
     /// The bundle for THIS platform, if the release ships one.
     artifact: Option<crate::releases::Artifact>,
@@ -239,6 +254,8 @@ impl HubApp {
             session,
             auth_job: None,
             selected_version: None,
+            hub_update_job: None,
+            hub_update_hidden: false,
         };
         app.refresh_projects();
         // Fetch the available-versions list up front so the Installs tab is populated without
@@ -550,12 +567,93 @@ impl HubApp {
             .iter()
             .map(|i| crate::releases::version_key(&i.version))
             .max()?;
-        m.on_channel(&self.config.settings.channel)
+        m.on_channel_refs(&self.config.settings.channel)
             .into_iter()
             .find(|r| {
                 r.artifact_here().is_some()
                     && crate::releases::version_key(&r.version) > newest_installed
             })
+            .cloned()
+    }
+
+    /// This Hub's own version, or `None` for a dev build (`0.0.0`), which is never
+    /// "out of date".
+    fn hub_version() -> Option<&'static str> {
+        let v = env!("CARGO_PKG_VERSION");
+        (v != "0.0.0").then_some(v)
+    }
+
+    /// A newer **Hub** on the user's channel that ships a Hub bundle for this platform.
+    ///
+    /// Separate from [`update_available`](Self::update_available), which is about the
+    /// engine. They move together in practice — one tag builds both — but they are
+    /// different questions: one is "there's a new engine to install", the other is "the
+    /// window you are looking at is old", and only the second can go stale silently.
+    fn hub_update_available(&self) -> Option<crate::releases::ReleaseInfo> {
+        let ManifestState::Loaded(m) = &self.manifest else { return None };
+        let mine = crate::releases::version_key(Self::hub_version()?);
+        m.on_channel_refs(&self.config.settings.channel)
+            .into_iter()
+            .find(|r| r.hub_artifact_here().is_some() && crate::releases::version_key(&r.version) > mine)
+            .cloned()
+    }
+
+    fn start_hub_update(&mut self, artifact: crate::releases::Artifact) {
+        if self.hub_update_job.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let paths = self.paths.clone();
+        // The same session token the engine installs use — so a private-repo manifest can
+        // be tested end to end rather than only up to the Hub's own bundle.
+        let token = self.token_opt().map(str::to_string);
+        std::thread::spawn(move || {
+            crate::selfupdate::update(&artifact, &paths, token.as_deref(), &tx)
+        });
+        self.hub_update_job = Some(HubUpdateJob { rx, line: "starting…".into(), frac: 0.0 });
+    }
+
+    /// Drain the self-update worker. On success the Hub **relaunches and exits** — there
+    /// is no in-place reload of a binary, and leaving the old one running beside a new
+    /// one on disk is how a user ends up reporting a bug that was fixed.
+    fn poll_hub_update(&mut self, ctx: &egui::Context) {
+        let Some(job) = &mut self.hub_update_job else { return };
+        let mut done: Option<PathBuf> = None;
+        let mut failed = None;
+        while let Ok(p) = job.rx.try_recv() {
+            match p {
+                crate::selfupdate::Progress::Downloading { done: d, total } => {
+                    job.frac = if total > 0 { d as f32 / total as f32 } else { 0.0 };
+                    job.line = format!("downloading {:.0}%", job.frac * 100.0);
+                }
+                crate::selfupdate::Progress::Verifying => {
+                    job.line = "verifying".into();
+                }
+                crate::selfupdate::Progress::Swapping => {
+                    job.frac = 1.0;
+                    job.line = "installing".into();
+                }
+                crate::selfupdate::Progress::Done(exe) => done = Some(exe),
+                crate::selfupdate::Progress::Failed(e) => failed = Some(e),
+            }
+        }
+        if let Some(e) = failed {
+            self.hub_update_job = None;
+            self.toast = Some((format!("could not update the Hub: {e}"), true));
+            return;
+        }
+        if let Some(exe) = done {
+            self.hub_update_job = None;
+            match crate::selfupdate::relaunch(&exe) {
+                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(e) => {
+                    self.toast = Some((
+                        format!("{e} — the new Hub is installed, start it again yourself"),
+                        true,
+                    ));
+                }
+            }
+        }
     }
 
     /// One row of the Installs list: every version this Hub knows about, from either
@@ -571,12 +669,11 @@ impl HubApp {
         let default = self.config.settings.default_version.as_deref();
 
         if let ManifestState::Loaded(m) = &self.manifest {
-            for r in m.on_channel(&self.config.settings.channel) {
+            for r in m.on_channel_refs(&self.config.settings.channel) {
                 rows.push(VersionRow {
                     version: r.version.clone(),
                     date: r.date.clone(),
                     title: r.title.clone(),
-                    notes: r.notes.clone(),
                     notes_url: r.notes_url.clone(),
                     artifact: r.artifact_here().cloned(),
                     installed: None,
@@ -591,7 +688,6 @@ impl HubApp {
                     version: i.version.clone(),
                     date: String::new(),
                     title: String::new(),
-                    notes: String::new(),
                     notes_url: String::new(),
                     artifact: None,
                     installed: Some(i.clone()),
@@ -881,6 +977,7 @@ impl eframe::App for HubApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_manifest();
         self.poll_install();
+        self.poll_hub_update(ctx);
         self.poll_proc();
         self.poll_auth(ctx);
         // Long-running Hubs re-check for new releases every few hours, so the
@@ -924,8 +1021,113 @@ impl eframe::App for HubApp {
                 ui.selectable_value(&mut self.tab, Tab::Installs, format!("{} Installs", ico::INSTALLS));
                 ui.selectable_value(&mut self.tab, Tab::Settings, format!("{} Settings", ico::SETTINGS));
                 ui.selectable_value(&mut self.tab, Tab::About, format!("{} About", ico::ABOUT));
+
+                // THE CHIP THAT NEVER GOES AWAY. Both banners below can be put away — one
+                // for the session, one for a version — and this cannot be put away at
+                // all. It stays until the update is actually installed. That is the
+                // difference between "we told you once" and "you cannot be running
+                // something out of date without knowing it".
+                //
+                // The Hub outranks the engine when both are stale, because an old Hub is
+                // what would stop you fixing the other one.
+                let hub_new = self.hub_update_available();
+                let engine_new = hub_new.is_none().then(|| self.update_available()).flatten();
+                if let Some((label, hint, tab)) = hub_new
+                    .as_ref()
+                    .map(|r| {
+                        (
+                            format!("{} Hub {} ready", ico::UPGRADE, r.version),
+                            "a newer Floptle Hub is available — click for what's in it",
+                            Tab::About,
+                        )
+                    })
+                    .or_else(|| {
+                        engine_new.as_ref().map(|r| {
+                            (
+                                format!("{} Floptle {}", ico::UPGRADE, r.version),
+                                "a newer engine is available — click to see what's in it",
+                                Tab::Installs,
+                            )
+                        })
+                    })
+                {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(4.0);
+                        if ui
+                            .button(
+                                egui::RichText::new(label)
+                                    .color(egui::Color32::from_rgb(120, 200, 130)),
+                            )
+                            .on_hover_text(hint)
+                            .clicked()
+                        {
+                            self.tab = tab;
+                            self.hub_update_hidden = false;
+                            if tab == Tab::Installs
+                                && let Some(r) = &engine_new
+                            {
+                                self.selected_version = Some(r.version.clone());
+                            }
+                        }
+                    });
+                }
             });
         });
+
+        // THE HUB ITSELF IS OUT OF DATE. Above the engine banner, because an old Hub is
+        // the thing that would stop the rest of this working — and it is the one update a
+        // user cannot perform any other way without leaving the app.
+        if let Some(r) = self.hub_update_available()
+            && !self.hub_update_hidden
+        {
+            let mut go: Option<crate::releases::Artifact> = None;
+            let blocked = crate::selfupdate::can_self_update().err();
+            egui::Panel::top("hub-update-banner").show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(120, 200, 130),
+                        format!("{} Floptle Hub {} is available", ico::UPGRADE, r.version),
+                    );
+                    if !r.title.is_empty() {
+                        ui.small(format!("“{}”", r.title));
+                    }
+                    match (&blocked, &self.hub_update_job) {
+                        (_, Some(job)) => {
+                            ui.small(&job.line);
+                            ui.add(egui::ProgressBar::new(job.frac).desired_width(120.0).desired_height(8.0));
+                        }
+                        (None, None) => {
+                            if ui
+                                .button(format!("{} Update and restart", ico::INSTALL))
+                                .on_hover_text("downloads it, checks it, and reopens the Hub")
+                                .clicked()
+                                && let Some(a) = r.hub_artifact_here().cloned()
+                            {
+                                go = Some(a);
+                            }
+                            if ui.small_button("What's new").clicked() {
+                                self.tab = Tab::About;
+                            }
+                            if ui.small_button("Later").on_hover_text("until you next open the Hub").clicked() {
+                                self.hub_update_hidden = true;
+                            }
+                        }
+                        // Can't self-update here — say why, and point at the download
+                        // rather than showing a button that would fail.
+                        (Some(b), None) => {
+                            ui.small(b.message());
+                            ui.hyperlink_to("download", RELEASES_URL);
+                            if ui.small_button("Later").clicked() {
+                                self.hub_update_hidden = true;
+                            }
+                        }
+                    }
+                });
+            });
+            if let Some(a) = go {
+                self.start_hub_update(a);
+            }
+        }
 
         // UPDATE BANNER: a new engine version on the user's channel, newer than
         // anything installed, with a bundle for this platform. One click
@@ -1403,8 +1605,16 @@ impl HubApp {
             ui.add_space(6.0);
             ui.separator();
 
+            // Looked up now rather than carried on every row: the rows are rebuilt every
+            // frame and the notes are a few KB each, so copying all of them to draw one
+            // was ~240 KB per frame of pure waste.
+            let notes = match &self.manifest {
+                ManifestState::Loaded(m) => m.release(&r.version).map(|x| x.notes.as_str()),
+                _ => None,
+            }
+            .unwrap_or("");
             egui::ScrollArea::vertical().id_salt(("notes", &r.version)).show(ui, |ui| {
-                if r.notes.trim().is_empty() {
+                if notes.trim().is_empty() {
                     ui.add_space(10.0);
                     // Honest about WHY rather than silent: the six earliest releases
                     // predate release notes entirely, and a blank pane reads as a Hub
@@ -1418,7 +1628,7 @@ impl HubApp {
                         );
                     }
                 } else {
-                    crate::notes::render(ui, &r.notes);
+                    crate::notes::render(ui, notes);
                     if !r.notes_url.is_empty() {
                         ui.add_space(10.0);
                         ui.hyperlink_to(
@@ -1545,6 +1755,81 @@ impl HubApp {
             ui.label(if v == "0.0.0" { "dev build".to_string() } else { format!("version {v}") });
             ui.small(format!("platform: {}", crate::releases::platform_target()));
         });
+        ui.add_space(8.0);
+
+        // WHETHER THIS HUB IS CURRENT, answered plainly. "version 0.21.1" alone is a fact
+        // nobody can act on — it only means something next to the version that exists.
+        let update = self.hub_update_available();
+        let mut go: Option<crate::releases::Artifact> = None;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            match (&update, Self::hub_version()) {
+                (None, Some(_)) => match self.manifest {
+                    ManifestState::Loaded(_) => {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(egui::Color32::LIGHT_GREEN, ico::OK);
+                            ui.label("This is the newest Hub.");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.add_space(4.0);
+                                if ui.small_button(format!("{} Check again", ico::REFRESH)).clicked() {
+                                    self.start_manifest_fetch();
+                                }
+                            });
+                        });
+                    }
+                    _ => {
+                        ui.horizontal(|ui| {
+                            ui.small("haven't been able to check for a newer Hub yet");
+                            if ui.small_button(format!("{} Check now", ico::REFRESH)).clicked() {
+                                self.start_manifest_fetch();
+                            }
+                        });
+                    }
+                },
+                (None, None) => {
+                    ui.small("A dev build never updates itself — cargo owns this binary.");
+                }
+                (Some(r), _) => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(120, 200, 130),
+                            egui::RichText::new(format!("Hub {} is available", r.version)).strong(),
+                        );
+                        if !r.title.is_empty() {
+                            ui.label(egui::RichText::new(format!("“{}”", r.title)).weak());
+                        }
+                        match (crate::selfupdate::can_self_update(), &self.hub_update_job) {
+                            (_, Some(job)) => {
+                                ui.small(&job.line);
+                                ui.add(egui::ProgressBar::new(job.frac).desired_width(140.0).desired_height(8.0));
+                            }
+                            (Ok(_), None) => {
+                                if ui.button(format!("{} Update and restart", ico::INSTALL)).clicked()
+                                    && let Some(a) = r.hub_artifact_here().cloned()
+                                {
+                                    go = Some(a);
+                                }
+                            }
+                            (Err(b), None) => {
+                                ui.small(b.message());
+                                ui.hyperlink_to("download it", RELEASES_URL);
+                            }
+                        }
+                    });
+                    if !r.notes.trim().is_empty() {
+                        ui.add_space(4.0);
+                        egui::ScrollArea::vertical().max_height(220.0).id_salt("hub-update-notes").show(
+                            ui,
+                            |ui| crate::notes::render(ui, &r.notes),
+                        );
+                    }
+                }
+            }
+        });
+        if let Some(a) = go {
+            self.start_hub_update(a);
+        }
+
         ui.add_space(10.0);
         ui.separator();
         ui.add_space(6.0);
@@ -1629,6 +1914,7 @@ mod tests {
                     )]
                     .into_iter()
                     .collect(),
+                    hub_artifacts: Default::default(),
                 });
             }
             app.manifest = ManifestState::Loaded(m);
@@ -1654,6 +1940,30 @@ mod tests {
             harness.render().expect("no GPU?").save(&out).unwrap();
             println!("wrote {}", out.display());
         }
+
+        // And the About tab, which is where "is this Hub current" gets answered. Needs a
+        // release NEWER than this build carrying a HUB artifact, or the honest answer is
+        // "up to date" and the card under test never draws.
+        let (mut app, _tmp) = build("0.21.0");
+        if let ManifestState::Loaded(m) = &mut app.manifest {
+            let mut newer = m.versions[0].clone();
+            newer.version = "99.0.0".into();
+            newer.title = "Later Than This".into();
+            newer.date = "2026-09-01".into();
+            newer.hub_artifacts.insert(
+                crate::releases::platform_target(),
+                crate::releases::Artifact { url: "u".into(), sha256: "s".into(), size: 6_200_000 },
+            );
+            m.versions.insert(0, newer);
+        }
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(960.0, 620.0))
+            .build_ui(move |ui| app.about_tab(ui));
+        harness.run();
+        let out =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/about-update.png");
+        harness.render().expect("no GPU?").save(&out).unwrap();
+        println!("wrote {}", out.display());
     }
 
     #[test]

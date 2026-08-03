@@ -39,12 +39,25 @@ pub struct ReleaseInfo {
     pub notes: String,
     #[serde(default)]
     pub artifacts: BTreeMap<String, Artifact>,
+    /// The **Hub's own** bundles, keyed the same way — how the Hub finds its own updates.
+    ///
+    /// A separate map rather than a second entry in `artifacts`, because these answer a
+    /// different question: `artifacts` is "which engine can I install", this is "am I out
+    /// of date". Releases published before v0.21.2 carry none, which is why every reader
+    /// treats an absent one as "no update available here" rather than an error.
+    #[serde(default)]
+    pub hub_artifacts: BTreeMap<String, Artifact>,
 }
 
 impl ReleaseInfo {
     /// The artifact for THIS host's platform, if this release ships one.
     pub fn artifact_here(&self) -> Option<&Artifact> {
         self.artifacts.get(super::platform_target().as_str())
+    }
+
+    /// The **Hub** bundle for this host's platform, if this release ships one.
+    pub fn hub_artifact_here(&self) -> Option<&Artifact> {
+        self.hub_artifacts.get(super::platform_target().as_str())
     }
 
     /// The artifact for an arbitrary platform key — what an export template
@@ -72,8 +85,18 @@ impl Manifest {
 
     /// Releases on `channel`, newest first.
     pub fn on_channel(&self, channel: &str) -> Vec<ReleaseInfo> {
-        let mut v: Vec<ReleaseInfo> =
-            self.versions.iter().filter(|r| r.channel == channel).cloned().collect();
+        self.on_channel_refs(channel).into_iter().cloned().collect()
+    }
+
+    /// The same list without copying anything.
+    ///
+    /// Worth having since [`ReleaseInfo::notes`] arrived: an entry used to be a version
+    /// string and three URLs, and is now that plus a few KB of Markdown. Anything asking
+    /// a *question* of the list — "is there a newer one?", asked several times per frame
+    /// by the update checks — must not clone the whole history to answer it.
+    pub fn on_channel_refs(&self, channel: &str) -> Vec<&ReleaseInfo> {
+        let mut v: Vec<&ReleaseInfo> =
+            self.versions.iter().filter(|r| r.channel == channel).collect();
         v.sort_by_key(|r| std::cmp::Reverse(version_key(&r.version)));
         v
     }
