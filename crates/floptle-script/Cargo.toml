@@ -22,3 +22,7 @@ mlua = { version = "0.10", features = ["luajit", "vendored"] }
 floptle-net = { path = "../floptle-net" }
 ron = { workspace = true }
 serde = { workspace = true }
+# `http.*` / `json.*` (proposal §4): blocking requests on worker threads, never
+# on the frame thread. ureq is already what the Hub and the dist pipeline use.
+serde_json = { workspace = true }
+ureq = { workspace = true }

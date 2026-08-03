@@ -2916,6 +2916,7 @@ const API_CATEGORIES: &[&str] = &[
     "references — wire nodes in the Inspector",
     "input — keyboard & mouse",
     "drawing — draw.*",
+    "the web — http.*, json.*",
     // These two were routed to by `api_category` but never listed here, so the
     // whole UI surface — `ui.make`, `ui.on`, the pointer hooks, `color` — was
     // absent from the reference for as long as it has existed. Forty-three
@@ -2968,6 +2969,8 @@ fn api_category(label: &str) -> &'static str {
         "references — wire nodes in the Inspector"
     } else if label.starts_with("draw.") {
         "drawing — draw.*"
+    } else if label.starts_with("http.") || label.starts_with("json.") || label == "openUrl" {
+        "the web — http.*, json.*"
     } else if label.starts_with("vec3") || label.starts_with("vec2") || matches!(
         label,
         "distance"
@@ -3220,6 +3223,22 @@ const API_EXAMPLES: &[(&str, &str)] = &[
     (
         "vec3:flatten",
         "-- \"forward along the ground\" — on a flat world AND on a planet\nlocal up = node.up or vec3(0, 1, 0)\nlocal fwd = dirFromYaw(node.yaw):flatten(up)\nlocal right = fwd:cross(up)",
+    ),
+    (
+        "http.get",
+        "-- non-blocking: the callback runs on a later tick, on the main thread\nhttp.get(params.api .. \"/me/cards\", {\n  headers = { Authorization = \"Bearer \" .. token },\n}, function(res)\n  if not res.ok then return log(\"failed: \" .. tostring(res.error)) end\n  for _, card in ipairs(res.json.cards or {}) do addCard(card) end\nend)",
+    ),
+    (
+        "http.post",
+        "-- a TABLE body is sent as JSON; no json.encode dance needed\nhttp.post(params.api .. \"/me/loadout\", { deck = deckId }, function(res)\n  if not res.ok then log(\"the server said no: \" .. res.body) end\nend)",
+    ),
+    (
+        "json.decode",
+        "-- bad input is a VALUE, not an error\nlocal save, why = json.decode(text)\nif not save then return log(\"corrupt save: \" .. why) end",
+    ),
+    (
+        "openUrl",
+        "-- the player approves the pairing on your real site\nopenUrl(res.json.verify_url)",
     ),
     (
         "draw.text",
@@ -3564,6 +3583,16 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node.id", insert: "node.id", doc: "A stable numeric id for this node." },
     ApiEntry { label: "node.parent", insert: "node.parent", doc: "The parent node handle, or nil. A handle has the same fields (x/y/z, …) so you can read/write another node." },
     ApiEntry { label: "node:setShaderParam", insert: "node:setShaderParam(", doc: "node:setShaderParam(\"glow\", 2.5) / node:setShaderParam(\"nose\", x, y, z) — drive a .flsl uniform on this node every tick (a GPU uniform write, never a recompile). Targets the node's Material shader, or its UI element's `stage ui` shader (the navball pattern: a script feeds an instrument's uniforms each tick). Unset lanes are 0." },
+    // ---- the web (0.20.0) ------------------------------------------------------
+    ApiEntry { label: "http.get", insert: "http.get(\"\", function(res)\n  \nend)", doc: "http.get(url [, opts], function(res) end) — fetch a URL. NON-BLOCKING: the callback runs on a later tick on the MAIN thread, so it is safe to touch nodes from it and a slow server can never stall a frame. opts = { headers = {...}, timeout = 10, json = true }. res = { ok, status, body, json, error } — `ok` is a 2xx with no error; a 404 still hands you `body`, because that is where an API explains itself. Play only." },
+    ApiEntry { label: "http.post", insert: "http.post(\"\", {}, function(res)\n  \nend)", doc: "http.post(url, body [, opts], function(res) end) — same rules as http.get, plus a body: a STRING is sent as-is, a TABLE is encoded as JSON for you. http.put and http.delete round out the set." },
+    ApiEntry { label: "http.put", insert: "http.put(\"\", {}, function(res)\n  \nend)", doc: "http.put(url, body [, opts], function(res) end) — as http.post, with PUT." },
+    ApiEntry { label: "http.delete", insert: "http.delete(\"\", function(res)\n  \nend)", doc: "http.delete(url [, opts], function(res) end) — as http.get, with DELETE." },
+    ApiEntry { label: "http.inFlight", insert: "http.inFlight()", doc: "http.inFlight() — how many requests are still waiting on a reply. Up to 8 may be in flight and 20 may start per second; past that, calls fail fast with res.error and the cap announces itself once in the Console. A cap you are hitting is nearly always a request inside update()." },
+    ApiEntry { label: "http.cancelAll", insert: "http.cancelAll()", doc: "http.cancelAll() — forget every pending callback. Stop and scene.load do this for you: a callback closes over nodes from the scene that asked, and delivering it into a fresh session is how one run inherits the previous one's network." },
+    ApiEntry { label: "json.encode", insert: "json.encode(", doc: "json.encode(value) — a Lua value as a JSON string. A table with a [1] is an ARRAY, anything else is an object (that is the only rule Lua's single table type can support). http.post takes a table body directly, so you rarely need this by hand." },
+    ApiEntry { label: "json.decode", insert: "json.decode(", doc: "json.decode(s) -> value, err — parse JSON. Bad input returns nil AND a message rather than raising: a reply from someone else\'s server is data, not a bug in your script. JSON null becomes nil, so a null field reads exactly like a missing one." },
+    ApiEntry { label: "openUrl", insert: "openUrl(", doc: "openUrl(url) — open an http:// or https:// address in the player\'s own browser. The device-code sign-in flow needs it: the player approves the pairing on your real site, so the game never sees a password and needs no secret baked into it. Play only; if the platform refuses, the URL is logged instead so the player can still get there." },
     ApiEntry { label: "draw.text", insert: "draw.text(", doc: "draw.text(x, y, s, size, r,g,b [, a] [, align]) — a string on the SCREEN, in the pixels input.mouse() reports, without building a UI tree: a damage number, a frame-time readout, the count under a selection box. The engine measures and lays out the glyphs with the same font stack ui.make uses. align is \"left\" (default) | \"center\" | \"right\", and x is that edge. Immediate mode: re-draw it every frame you want it." },
     ApiEntry { label: "draw.circle", insert: "draw.circle(", doc: "draw.circle(x, y, radius, r,g,b [, a]) — a filled circle in screen pixels, x/y its CENTRE. draw.circleOutline(..., [px]) is the hollow twin. Same immediate-mode rules as draw.rect: over the scene, over the HUD, one frame each." },
     ApiEntry { label: "draw.circleOutline", insert: "draw.circleOutline(", doc: "draw.circleOutline(x, y, radius, r,g,b [, a] [, px]) — a hollow circle, `px` thick (default 2)." },

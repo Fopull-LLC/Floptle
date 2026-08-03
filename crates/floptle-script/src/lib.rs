@@ -171,6 +171,7 @@ mod api;
 mod audio_api;
 mod env;
 mod host;
+mod http_api;
 mod input_api;
 mod math_api;
 mod net_api;
@@ -496,6 +497,12 @@ pub struct ScriptHost {
     draw_tris: Rc<RefCell<Vec<DrawTri>>>,
     draw_rects: Rc<RefCell<Vec<DrawRect>>>,
     draw_texts: Rc<RefCell<Vec<DrawText>>>,
+    /// The `http.*` bridge: callbacks waiting on a reply, the caps, and the
+    /// session generation that keeps a stale reply out of a fresh Play.
+    http: Rc<RefCell<http_api::HttpState>>,
+    /// True while the tick pass is running — `http.*` warns once when called
+    /// from there, because nothing about a reply's timing can be replayed.
+    http_in_fixed: Rc<std::cell::Cell<bool>>,
     /// Per-assembly mirror (`assembly.info`), fed by the driver each frame.
     assembly_info: Rc<RefCell<HashMap<u32, assembly_api::AssemblyInfo>>>,
     /// Per-part contact loads for the last tick (`assembly.impacts`), fed by
@@ -970,6 +977,7 @@ const SHIPPED_SCRIPTS: &[(&str, &str)] = &[
     ("ui_demo_field.lua", include_str!("../../../assets/scripts/ui_demo_field.lua")),
     ("ui_demo_row.lua", include_str!("../../../assets/scripts/ui_demo_row.lua")),
     ("ui_demo_slot.lua", include_str!("../../../assets/scripts/ui_demo_slot.lua")),
+    ("web_login.lua", include_str!("../../../assets/scripts/web_login.lua")),
 ];
 
 #[cfg(test)]

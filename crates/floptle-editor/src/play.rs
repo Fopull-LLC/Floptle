@@ -542,6 +542,8 @@ impl Editor {
         if self.playing {
             self.playing = false;
             self.paused = false;
+            // Everything on the wire belonged to the session that just ended.
+            self.script_host.set_playing(false);
             self.play_stream_hold = false;
             // Make the revert EXPLICIT — "where did my tweaks go" is a classic
             // lost-work surprise: Play-mode changes are a simulation, not edits.
@@ -713,6 +715,8 @@ impl Editor {
             let root = self.project_root.clone();
             self.audio.start_play(&self.world, &root, &mixer);
             self.playing = true;
+            // `http.*` and `openUrl` come alive with the session and not before.
+            self.script_host.set_playing(true);
             // Outside a session, only player slot #1 takes input: extra
             // Predicted nodes (multiplayer slots) idle instead of mirroring
             // the keyboard into every copy of the controller.

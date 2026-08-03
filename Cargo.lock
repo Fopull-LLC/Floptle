@@ -1551,6 +1551,8 @@ dependencies = [
  "mlua",
  "ron",
  "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

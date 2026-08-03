@@ -719,6 +719,10 @@ impl Editor {
             );
             return;
         }
+        // A scene transition ends every conversation the old scene started: a
+        // reply's callback closes over its nodes, and this world is about to
+        // stop having them.
+        self.script_host.cancel_web_requests();
         // Leaving a scene with a save slot active (exit-to-menu): the slot's
         // terrain edits must be on disk BEFORE the world unloads — the flush a
         // script queued this same frame hasn't run yet, and the background

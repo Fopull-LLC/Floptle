@@ -206,6 +206,10 @@ pub fn run(args: ServerArgs) -> i32 {
         floptle_core::math::DVec3::ZERO,
     );
     let mut host = floptle_script::ScriptHost::new();
+    // A dedicated server IS a running session, so `http.*` is live here — and
+    // this is the one place it's unambiguously the right tool: the AUTHORITY
+    // talking to your web API is exactly how a client stops needing to.
+    host.set_playing(true);
     host.set_input_map(map);
     host.set_layers(sim.layers().clone());
     let scripts = root.join("scripts");

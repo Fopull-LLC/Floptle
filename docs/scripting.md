@@ -33,6 +33,7 @@ it up immediately.
 21. [Prefabs: `spawn` & `destroy`](#21-prefabs-spawn--destroy)
 22. [Terrain: `terrain.sculpt`, `dig` & queries](#22-terrain-terrainsculpt-dig--queries)
 23. [Saving: `save.set`, `save.get` & slots](#23-saving-saveset-saveget--slots)
+24. [The web: `http.*` & `json.*`](#24-the-web-http--json) — full page: [web-api.md](web-api.md)
 
 ---
 
@@ -2818,3 +2819,30 @@ ARE world-frame — subtracting a parent's from a child's gives the child's
 orbital motion (what the map draws). Crossing an SOI boundary re-expresses your
 velocity in the new frame automatically, keeping world velocity continuous.
 
+---
+
+## 24. The web: `http.*` & `json.*`
+
+Non-blocking requests to your own server, so a game can have an account, a card
+list, a leaderboard or a shop. The callback runs on a later frame **on the main
+thread**, so it is safe to touch nodes from it.
+
+```lua
+http.get(url [, opts], function(res) end)
+http.post(url, body [, opts], function(res) end)   -- a TABLE body is sent as JSON
+-- opts = { headers = {...}, timeout = 10, json = true }
+-- res  = { ok, status, body, json, error }
+
+json.encode(t)   json.decode(s)   -- decode returns nil, err rather than raising
+openUrl(url)     -- open the player's own browser (the sign-in flow needs it)
+```
+
+Play only; Stop and `scene.load` cancel everything in flight; a call from
+`fixedUpdate` warns, because a reply's timing can never be replayed.
+
+**[docs/web-api.md](web-api.md) is the full page** — the `res` table in detail,
+the device-code sign-in flow (`assets/scripts/web_login.lua`), the rate limits,
+and the one rule that makes an account-backed game possible at all:
+
+> **The server decides what the player owns.** The client asks; it never
+> announces. Anything a client can announce, a modified client can announce.

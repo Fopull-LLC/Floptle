@@ -1538,6 +1538,18 @@ impl ScriptHost {
         // session state in, `net.on` handler registry, `net.rewind` (§7).
         let synced_stores: Rc<RefCell<HashMap<(u32, String), Table>>> =
             Rc::new(RefCell::new(HashMap::new()));
+        // `http.*` / `json.*` / `openUrl` (proposal §4): requests run on worker
+        // threads, replies are delivered in the FRAME pass on this thread.
+        let http: Rc<RefCell<crate::http_api::HttpState>> =
+            Rc::new(RefCell::new(crate::http_api::HttpState::new()));
+        let http_in_fixed: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+        crate::http_api::install_http_api(
+            &lua,
+            http.clone(),
+            logs.clone(),
+            http_in_fixed.clone(),
+        );
+
         // The rollback `replaying` flag (§4) — shared so `net.replaying()` can
         // answer it, which is the escape hatch for any cosmetic the engine's
         // queue gating can't see (a script writing a material, say).
@@ -1739,6 +1751,8 @@ impl ScriptHost {
             driver_skip: std::collections::HashSet::new(),
             replaying,
             replay_marks: None,
+            http,
+            http_in_fixed,
         }
     }
 
@@ -2105,6 +2119,24 @@ impl ScriptHost {
     /// Drain this tick's screen-space rectangles (`draw.rect/rectOutline`).
     pub fn take_draw_rects(&self) -> Vec<crate::DrawRect> {
         std::mem::take(&mut *self.draw_rects.borrow_mut())
+    }
+
+    /// Play started / stopped. `http.*` and `openUrl` refuse outside Play, and
+    /// Stop cancels every request in flight — a callback from the last session
+    /// closes over nodes that no longer exist, so delivering it into a fresh
+    /// Play is how one run inherits the previous one's network.
+    pub fn set_playing(&self, playing: bool) {
+        self.http.borrow_mut().set_playing(playing);
+    }
+
+    /// A scene load mid-session: same rule as Stop for anything on the wire.
+    pub fn cancel_web_requests(&self) {
+        self.http.borrow_mut().cancel_all();
+    }
+
+    /// How many web requests are still waiting on a reply (`http.inFlight()`).
+    pub fn web_requests_in_flight(&self) -> usize {
+        self.http.borrow().in_flight()
     }
 
     /// Drain this tick's screen-space strings (`draw.text`).
@@ -3139,6 +3171,11 @@ impl ScriptHost {
                 }
             }
         }
+        // Web replies land HERE — the frame pass, never the tick pass. A reply
+        // arrives when it arrives, so a rollback replay must never see one.
+        // Before `update`, so a callback's writes are visible to the same frame.
+        crate::http_api::set_now(&self.http, time as f64);
+        crate::http_api::drain(&self.lua, &self.http, &self.logs);
         // Pass 2: run each script's start/update.
         self.run_pass(world, &work, dt, time, Pass::Frame, floptle_input::Domain::Frame);
         // Bindings run AFTER every `update`, so a label always shows this
@@ -3343,6 +3380,9 @@ impl ScriptHost {
         // runs. It is passed in rather than derived from `pass` because the
         // prediction paths run an `update` pass on the TICK clock.
         self.input_domain.set(domain);
+        // `http.*` warns when it is called from the tick pass — a reply arrives
+        // when it arrives, which no replay can reproduce.
+        self.http_in_fixed.set(pass == Pass::Fixed);
         for (e, scripts) in work {
             if self.script_skip.contains(&e.index()) {
                 continue; // networked: this node's state arrives in snapshots

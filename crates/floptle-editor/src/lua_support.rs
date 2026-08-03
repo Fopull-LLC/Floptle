@@ -33,6 +33,11 @@ pub(crate) const DEFAULT_SCRIPTS: &[(&str, &str)] = &[
     ("rts_camera.lua", include_str!("../../../assets/scripts/rts_camera.lua")),
     ("rts_unit.lua", include_str!("../../../assets/scripts/rts_unit.lua")),
     ("rts_commander.lua", include_str!("../../../assets/scripts/rts_commander.lua")),
+    // Talking to a website: the device-code sign-in flow, written against a
+    // configurable `api` param so it points at YOUR server. The worked example
+    // for `http.*` and for the one rule that makes an account-backed game
+    // possible at all — the server decides what the player owns.
+    ("web_login.lua", include_str!("../../../assets/scripts/web_login.lua")),
 ];
 
 /// EmmyLua type annotations for the engine API, so an external Lua language server
