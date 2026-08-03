@@ -21,6 +21,17 @@
 ---@field up_z number Physics: body up (−gravity) Z.
 ---@field visible boolean Show / hide this node's geometry (Inspector eye toggle).
 ---@field pos Vec3 The node's position as a vec3 (read/write: `node.pos = node.pos + dir * dt`). Accepts any {x=,y=,z=} value.
+---@field vel Vec3 The body's velocity as a vec3 (read/write) — one write instead of vx/vy/vz: `node.vel = node.vel + node.up * jump`.
+---@field up Vec3 The body's up as a vec3 (−gravity): Y on flat ground, RADIAL on a planet. The direction to jump in wherever you're standing.
+---@field groundNormal Vec3|nil The floor the body stands on (read-only) — nil while airborne. `groundNormal:dot(node.up)` is the cosine of the slope.
+---@field wallNormal Vec3|nil The steepest surface the body is pressed against (read-only), or nil when there's only floor. Stop pushing into it and a walk into a cliff stops launching you into the sky.
+---@field forward Vec3 The node's facing as a vec3, from its rotation (−Z forward, like the camera). Works on anything with a transform.
+---@field right Vec3 The node's +X axis as a vec3. Pairs with `forward` for camera-relative movement.
+---@field size Vec3 The whole scale as a vec3 (read/write). `node.scale` stays the uniform shortcut and also accepts a vec3.
+---@field tickX number Physics: the BODY's world X at the start of this tick. Not node.x — that's the INTERPOLATED render pose between ticks, so reading it in fixedUpdate is frame-rate dependent and no rollback replay can reproduce it. Writing this teleports the body without touching the transform.
+---@field tickY number Physics: the body's world Y at the start of this tick (read/write).
+---@field tickZ number Physics: the body's world Z at the start of this tick (read/write).
+---@field tickPos Vec3 Physics: the body's tick pose as a vec3 (read/write). Build hurtboxes from THIS, and move a fighter with `node.tickPos = node.tickPos + vec3(d, 0, 0)` — `node.x = node.x + d` inside fixedUpdate teleports the body onto its VISUAL position, so the model slides and the hitbox doesn't.
 ---@field layer string Collision/query layer, by project-defined NAME ("Default" when unset). Assigning a name the project doesn't define is an ERROR — add layers in Project Settings.
 ---@field tags string[] The node's tags (a fresh array each read). Assign a whole array to replace; use addTag/removeTag for single edits.
 ---@field hasTag fun(self: Node, tag: string): boolean Whether the node carries this exact tag.
@@ -29,11 +40,11 @@
 ---@field removeTag fun(self: Node, tag: string) Remove a tag (no-op when absent).
 ---@field height number Physics (capsule bodies): standing height - write a smaller value to crouch.
 ---@field text string|nil UI elements: the label's text (write to change it — numbers coerce, so `hp.text = 42` works).
----@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|nil Live component handle (RigidBody / PointLight / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer), nil if the node lacks it.
+---@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Live component handle (RigidBody / PointLight / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer / Material), nil if the node lacks it.
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
 ---@field setShaderParam fun(self: Node, name: string, x: number, y?: number, z?: number, w?: number) Drive a `.flsl` uniform on this node every tick (a GPU uniform write, never a recompile): the node's Material shader, or its UI element's `stage ui` shader (instruments like the navball). Unset lanes are 0.
 ---@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, luminosity, starColor, occluderRadius (occlusion culling: radius of the solid core geometry never pierces — chunks fully behind it skip their draws; keep it BELOW the deepest cave/dig; 0 = off).
----@field setMaterial fun(self: Node, t: table) Construction API: set (and create if absent) the node's Material. Fields: color/emissive/specular/rim {r,g,b}, emissiveStrength, shininess, specularStrength, rimStrength, unlit (bool), ambient, alpha, texture (path or "rt:<name>").
+---@field setMaterial fun(self: Node, t: table) Construction API — SETUP-TIME, not per-frame: set (and create if absent) the node's Material. It inserts the component and queues a deferred write, so call it on transitions and use `setShaderParam` for values that change every tick. Fields: color/emissive/specular/rim (a colour takes {r,g,b}, {x,y,z}, {1,0.5,0.2} or vec3), emissiveStrength, shininess, specularStrength, rimStrength, unlit (bool), ambient, alpha, texture (path or "rt:<name>"), sheetCols/sheetRows/cell (spritesheet grid + which cell draws — `cell` is also a live mirror field, see MaterialHandle).
 ---@field setTerrain fun(self: Node, id: number) Construction API: make this node a Terrain volume with the given id (generate its field with `terrain.generatePlanet`).
 ---@field setTerrainGen fun(self: Node, opts: table|nil) Construction API: attach an ON-DEMAND generation spec (same opts table as `terrain.generatePlanet`) — the body's field generates in the background when first approached, so no field file is needed at all (galaxy streaming). Player edits saved under `terrain.saveDir` take priority over regeneration. nil clears the spec.
 ---@field setPrimitive fun(self: Node, shape: string, color?: table) Construction API: make this node a primitive ("Cube"/"Sphere"/"Capsule"/"Plane") with an optional {r,g,b} color.
@@ -113,6 +124,16 @@
 ---@field z number Draw order: lowest z first.
 ---@field designHeight number Design units that span the window height.
 ---@field worldSpace number 1 = a panel inside the 3D world at this node's transform; 0 = a screen overlay.
+
+---A Material's live SPRITESHEET frame (`node:getcomponent("Material")`) — the
+---mesh-side twin of a UI image's cell. Slice the texture into a grid in its
+---asset settings, then step the frame every tick:
+---`face:getcomponent("Material").cell = math.floor(t * 8) % 16`.
+---Everything else about a material goes through `node:setMaterial{...}`.
+---@class MaterialHandle
+---@field cell number Which cell of the sheet draws (row-major from the top-left; clamped into the grid).
+---@field sheetCols number Sheet columns (0 = not a sheet — the whole texture).
+---@field sheetRows number Sheet rows.
 
 ---A node's Particle System, controlled from a script via `node:particles()`.
 ---Start/stop the effect at runtime and read whether it's playing.
@@ -310,6 +331,186 @@ function clicked(node) end
 ---@param node Node
 function hoverStart(node) end
 
+---UI hook: keyboard/gamepad focus arrived here. What focus LOOKS like is your
+---style's `focus` block; this is for the rest — a sound, a preview, a
+---description panel. Pair with `focusExit`.
+---@param node Node
+function focusEnter(node) end
+
+---UI hook: the `UiCancel` action (Escape / B) while this element has focus.
+---@param node Node
+function cancelled(node) end
+
+---UI text-field hook: Enter in a focused field. Read the value with `node.text`.
+---A field fires this INSTEAD of `clicked`, so a field inside a button doesn't
+---also run the button.
+---@param node Node
+function submitted(node) end
+
+---UI text-field hook: the value changed (typing, paste, backspace). Once per
+---frame however many keystrokes landed.
+---@param node Node
+function changed(node) end
+
+---UI hook: a `draggable` element was picked up. The engine does NOT move it and
+---draws no ghost — a card that tilts and an item that snaps to a grid are both
+---drags, so the look is yours. Also: `dragMove`, `dragCancel`, `dropped`, and on
+---the target `dragEnter` / `dragOver` / `dragLeave` / `dropped`.
+---@param node Node
+function dragStart(node) end
+
+---UI hook: a completed drag. Fires on BOTH ends — the target that now has it and
+---the source that gave it away. `ui.dragging()` / `ui.dropTarget()` name the pair.
+---@param node Node
+function dropped(node) end
+
+---The game-UI runtime: focus and drags. Everything else about an element is a
+---component (`node:getcomponent`); these two are engine state, because a focus
+---ring that survived into a saved scene would be a bug.
+---@class Ui
+ui = {}
+---Move the keyboard/gamepad focus. `ui.focus(nil)` drops it. Focusing a text
+---field starts editing it.
+---@param node Node|nil
+function ui.focus(node) end
+---The focused element, or nil — or, given an element, whether it is the focused
+---one. Also readable per-node as `node.focused`.
+---@param element Node|nil
+---@return Node|boolean|nil
+function ui.focused(element) end
+---Listen to an element from a script that does NOT live on it.
+---
+---A `clicked` function answers for the node its script is on, so a menu of eight
+---buttons wants eight script files — each three lines long, each really saying
+---"tell the menu". This puts all eight in the menu's own script, where the
+---state they change already lives.
+---
+---The handler is called `fn(element, hook)`, so one function can serve a whole
+---row of buttons. Registering again for the same element and hook REPLACES,
+---which makes calling it from `update` harmless. A listener dies with its
+---element or with the script that registered it, and a hot reload re-registers.
+---@param element Node
+---@param hook string clicked|pressed|released|hoverStart|hoverEnd|changed|submitted|cancelled|focusEnter|focusExit|dragStart|dragMove|dragEnter|dragOver|dragLeave|dragCancel|dropped
+---@param fn fun(element: Node, hook: string)
+function ui.on(element, hook, fn) end
+---Stop listening: every hook this script has on the element, or just one.
+---Only this script's own — two managers on one button must not be able to
+---unregister each other.
+---@param element Node
+---@param hook string|nil
+function ui.off(element, hook) end
+---Did this element fire `clicked` this frame? The polling half of `ui.on`, for
+---a manager that already has an `update`. Both read the same event list, so a
+---poll and a hook can never disagree about what happened.
+---@param element Node
+---@return boolean
+function ui.clicked(element) end
+---Did LMB go down on this element this frame?
+---@param element Node
+---@return boolean
+function ui.pressed(element) end
+---Did LMB come back up this frame (on or off the element)?
+---@param element Node
+---@return boolean
+function ui.released(element) end
+---Did this text field's value change this frame?
+---@param element Node
+---@return boolean
+function ui.changed(element) end
+---Was Enter pressed in this focused text field this frame?
+---@param element Node
+---@return boolean
+function ui.submitted(element) end
+---Did this element fire that hook this frame? Any hook by name.
+---@param element Node
+---@param hook string
+---@return boolean
+function ui.event(element, hook) end
+---Everything that happened on the UI this frame, as `{ node = , event = }`
+---rows, optionally filtered to one hook. Lets one manager handle a whole screen
+---without naming a single element.
+---@param hook string|nil
+---@return table[]
+function ui.events(hook) end
+---The element under the pointer, or nil — or, given an element, whether the
+---pointer is over it. A STATE, not an event: true for as long as it is true
+---(`hoverStart` / `hoverEnd` are the edges).
+---@param element Node|nil
+---@return Node|boolean|nil
+function ui.hovered(element) end
+---The element the pointer is holding down, or nil — or, given an element,
+---whether it is being held. Hold-to-charge, press-and-hold repeat, a dip while
+---pressed.
+---@param element Node|nil
+---@return Node|boolean|nil
+function ui.held(element) end
+---The element being dragged, or nil — live for the whole drag and for the frame
+---the `dropped` hooks run on. There is no separate payload channel: a node
+---already carries params, a name and tags, so ask it what it is.
+---@return Node|nil
+function ui.dragging() end
+---The drop target the drag is currently over, or nil.
+---@return Node|nil
+function ui.dropTarget() end
+---Say a relationship once instead of writing an `update` that keeps it true:
+---the engine calls `fn` once a frame, after every update, and writes what it
+---returns. A string or number goes to `text`; a `color(...)` to a colour field;
+---a number or boolean to whichever component actually has that field (so
+---`"value"` finds the slider). Re-binding the same property replaces it.
+---@param node Node
+---@param property string
+---@param fn fun(): any
+function ui.bind(node, property, fn) end
+---Drop every binding on a node, or just one property's.
+---@param node Node
+---@param property string|nil
+function ui.unbind(node, property) end
+---Build a UI subtree from data and reconcile it with the one already there.
+---
+---An element is `{ "kind", prop = value, ..., children }`, where kind is one of
+---box / row / col / text / image / button / field / slider / scroll. Give a
+---container `items = {...}` and a function child to get one child per item —
+---the function receives `(item, i)` and may return nil to skip. `key = "id"`
+---is how a row keeps its entity through a re-sort, and `onClicked = function(node) end`
+---(any UI hook, `on` + its name) carries behaviour inline.
+---
+---Call it again when the data changes: only the difference is spawned and
+---destroyed, so the rows that stay keep their hover, their scroll, their
+---transitions and what was typed into them. A property the table stops
+---mentioning goes back to default. Play only; a mistyped property raises.
+---@param container Node
+---@param tree table
+function ui.make(container, tree) end
+
+---A colour: `color(r, g, b [, a])`, `color(gray [, a])`, or `color(other, a)`
+---to copy with a new alpha. Channels are 0..1 and alpha defaults to 1, so
+---`color(1, 0, 0)` is opaque red. It is a plain `{r, g, b, a}` table (also
+---indexable `[1]`..`[4]`), so it prints, saves and compares — and any
+---`{1, 0, 0}` your project already had is already a colour.
+---
+---Assign one whole: `el.fill = color(1, 0.85, 0.35)`. Also `textColor`,
+---`borderColor`, `tint`, `groupTint`, `caretColor`, `selectionColor`,
+---`placeholderColor`.
+---@overload fun(gray: number, a: number|nil): table
+---@overload fun(other: table, a: number|nil): table
+---@param r number
+---@param g number
+---@param b number
+---@param a number|nil
+---@return table
+function color(r, g, b, a) end
+---`color.hex("#ff8800")` — 6 or 8 hex digits. A 3-digit shorthand is refused
+---rather than guessed at.
+---@param s string
+---@return table
+function color.hex(s) end
+---Blend two colours per channel; `t` is clamped to 0..1.
+---@param a table
+---@param b table
+---@param t number
+---@return table
+function color.lerp(a, b, t) end
+
 ---Multiplayer (docs/netcode-design.md). Mark nodes with the Networked component,
 ---declare synced vars with a top-level `replicated = { hp = 100 }` table (read/
 ---write them as `synced.hp` — the server owns them), handle remote calls with
@@ -320,8 +521,21 @@ net = {}
 ---rendezvous relay: you get a LOBBY CODE, friends join with it, nobody
 ---port-forwards. `port = n` hosts directly on UDP (QUIC) for LAN/self-host.
 ---Neither: the in-editor loopback harness.
----@param opts { maxPlayers: integer, port: integer, relay: string }|nil
+---@param opts { maxPlayers: integer, port: integer, relay: string, interest: number, interestBudget: integer, inputDelay: integer }|nil
 function net.host(opts) end
+---Set the rollback input delay in TICKS (clamped to 6), for the NEXT match.
+---
+---Rollback holds your own input a few ticks so the opponent's has time to
+---arrive. Too low and theirs lands after the tick that needed it, on every
+---tick, so the driver guesses and re-simulates — correct, and five times the
+---work. Omit it and the host derives one from the worst peer's measured RTT
+---(2 on a LAN, 5 across a country).
+---
+---Fixed for a session on purpose: adaptive delay hides a bad connection by
+---changing how the game feels while you are playing it. Call this between
+---matches — the roster re-announce restarts the driver on a fresh origin.
+---@param ticks integer
+function net.setInputDelay(ticks) end
 ---Join a session: `"relay://relayaddr/CODE"` = a lobby code through a
 ---relay (no port-forwarding), `"quic://host:port"` = a server directly,
 ---`"local://"` = the in-editor test harness.
@@ -343,6 +557,24 @@ function net.peers() end
 ---@param peer integer|nil
 ---@return number
 function net.ping(peer) end
+---How a join attempt is going: "offline", "connecting", "joined" or
+---"refused". Second return is WHY, on "refused" — the relay's own words,
+---e.g. "no lobby QK7RM".
+---
+---Wait on this, not on net.role(): joining does not block, so role reads
+---"client" from the frame you called net.join, whether or not that code
+---matched any lobby.
+---@return string state
+---@return string|nil reason
+function net.joinState() end
+---The lobby code friends type in to join, on a host that used
+---`net.host{ relay = ... }`. Put it on your own lobby screen.
+---
+---nil until the relay answers (poll it, don't read it once), and nil for good
+---on a client or a direct/LAN host — there is no code there, joiners use the
+---address.
+---@return string|nil
+function net.lobbyCode() end
 ---Send a named remote call. On the server it goes to clients (all, or `to`);
 ---on a client it goes to the server. Args: scalars + tables (≤4 deep, ≤1KB).
 ---Handle with `function onRpc.name(args, sender) end`.
@@ -375,6 +607,43 @@ function net.spawn(path, opts) end
 ---SERVER ONLY: despawn a replicated runtime object everywhere.
 ---@param node Node
 function net.despawn(node) end
+---Deterministic RNG for a rollback session: drawn from (match seed, tick, draw
+---index), so every peer rolls the same numbers AND a re-simulated tick rolls
+---them again. Use this instead of `rng()` in anything a rollback node reads —
+---an unseeded roll comes from the clock, and two peers drawing differently is
+---a match that quietly forks in two.
+---@param a number|nil Omitted → [0,1). One arg → an integer 1..a. Two → a..b.
+---@param b number|nil
+---@return number
+function net.random(a, b) end
+---True while the engine is RE-SIMULATING ticks it already ran after a rollback
+---correction. For cosmetics the engine can't gate for you (a material poke, a
+---UI label). NEVER branch simulation on it: a replayed tick that computes
+---something different from the live tick is the definition of a desync.
+---@return boolean
+function net.replaying() end
+---Ticks re-simulated by the most recent rollback correction.
+---@return number
+function net.rollbackDepth() end
+---The deepest rollback this session has had to perform.
+---@return number
+function net.rollbackMax() end
+---Mean ticks re-simulated per correction — the texture of the connection,
+---where rollbackMax is only its worst moment.
+---@return number
+function net.rollbackAverage() end
+---0..1 — the fraction of simulated ticks that had to guess a peer's input.
+---@return number
+function net.mispredictRate() end
+---The session's FIXED input delay, in ticks. Never changes mid-match.
+---@return number
+function net.inputDelay() end
+---True while the sim is waiting for input rather than guessing past the depth
+---cap — the game runs slightly slow instead of teleporting the opponent. Show
+---your own "connection trouble" banner off this.
+---@return boolean
+function net.stalled() end
+
 ---Is this node under MY control on this machine? Offline / non-networked →
 ---true. Server → true unless a remote peer owns it. Client → true only for
 ---your own predicted node(s). THE way for shared scripts (cameras, HUDs) to
@@ -401,6 +670,16 @@ function input.key(name) end
 ---@param name string
 ---@return boolean
 function input.pressed(name) end
+---The CHARACTERS entered this frame, as a string, resolved by the OS keyboard
+---layout — with a paste (Ctrl/Cmd-V) folded in.
+---
+---A different question from `input.pressed`, which is PHYSICAL: `"q"` is the key
+---where Q sits on a QWERTY board and types `a` on AZERTY. Building a string by
+---polling keys gets the alphabet wrong for anyone whose keyboard isn't yours.
+---Never contains control characters — Enter and Backspace stay actions. Empty
+---while a UI text field has focus, because the field consumed them.
+---@return string
+function input.typed() end
 ---The ACTIVE camera's world yaw (radians), captured with the input snapshot.
 ---THE way to do camera-relative movement in multiplayer: the aim rides the
 ---input command, so the server and prediction replay use exactly the angle
@@ -884,6 +1163,36 @@ function terrain.height(x, z) end
 
 ---Seeded value noise, one octave, ≈ -1..1. Deterministic on every machine —
 ---the SAME numbers the engine's Rust generators produce. Scale the inputs to
+---@class mathlib
+---@field clamp fun(x: number, lo: number, hi: number): number Hold x inside lo..hi (reversed bounds tolerated).
+---@field saturate fun(x: number): number Clamp to 0..1.
+---@field sign fun(x: number): number -1, 0 or 1 (exactly 0 for 0).
+---@field round fun(x: number, step?: number): number Nearest whole number, or nearest multiple of `step` (`round(x, 0.25)` snaps to quarters).
+---@field lerp fun(a: number, b: number, t: number): number Linear blend, UNCLAMPED (extrapolates).
+---@field mix fun(a: number, b: number, t: number): number lerp with t clamped to 0..1.
+---@field inverseLerp fun(a: number, b: number, x: number): number Where x sits in a..b, 0..1 (0 when a == b, never NaN).
+---@field remap fun(x: number, a: number, b: number, c: number, d: number): number Range a..b onto c..d.
+---@field smoothstep fun(a: number, b: number, x: number): number 0..1 with eased ends.
+---@field approach fun(current: number, target: number, maxDelta: number): number Move toward target without overshooting — pass `rate * dt`.
+---@field wrapAngle fun(a: number): number An angle folded into (−pi, pi].
+---@field deltaAngle fun(a: number, b: number): number The SHORTEST signed turn from a to b, correct across the ±pi seam.
+---@field approachAngle fun(current: number, target: number, maxDelta: number): number approach() for headings — turns the short way, never overshoots.
+---@field pingPong fun(t: number, len: number): number 0 → len → 0, forever.
+math = math
+
+---@class tablelib
+---@field map fun(list: table, fn: fun(v: any, i: number): any): table A new list of fn(value, i).
+---@field filter fun(list: table, fn: fun(v: any, i: number): boolean): table A new list of the items fn accepts.
+---@field find fun(list: table, fn: fun(v: any, i: number): boolean): any, number|nil The first item satisfying the predicate, and its index.
+---@field indexOf fun(list: table, value: any): number|nil The index of a value by equality.
+---@field count fun(t: table, fn?: fun(v: any, i: number): boolean): number Entries (keyed tables too), or how many match.
+---@field sum fun(list: table, fn?: fun(v: any, i: number): number): number Add the numbers, or add fn over them.
+---@field keys fun(t: table): table The keys as a SORTED list (pairs order isn't reproducible).
+---@field copy fun(t: table): table A shallow copy.
+---@field extend fun(dst: table, src: table): table Append src's items onto dst in place; returns dst.
+---@field reverse fun(list: table): table A new list, back to front.
+table = table
+
 ---pick a frequency (lattice cell = 1 unit).
 ---@param x number
 ---@param y number
@@ -1008,6 +1317,12 @@ function physics.pause(on) end
 ---Whether the physics step is currently paused.
 ---@return boolean
 function physics.isPaused() end
+---Frame-step: freeze the whole gameplay tick and release exactly `n` ticks (default 1),
+---each advancing scripts, physics and animation one frame. The scriptable half of the
+---editor's ⏭ Step button, for a training mode's own frame stepper. Call it from
+---`update` — the frame pass still runs while the tick is frozen, `fixedUpdate` does not.
+---@param n integer|nil
+function physics.step(n) end
 
 ---ride exact Kepler rails; one dominant body pulls µ/r² (patched conics).
 ---@class Space

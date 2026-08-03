@@ -59,5 +59,22 @@ function update(node, dt)
     head = string.format("PERIPHERALS   ·   %d port%s latched",
       d.latched, d.latched == 1 and "" or "s")
   end
+  -- The company line: what you're flying is worth money, and the contract you
+  -- signed is the reason you're up here. Both belong where the pilot is looking.
+  local co = findScript("company")
+  local mi = findScript("missions")
+  local tail = {}
+  -- What we're carrying, when we're carrying anything: a hold is a peripheral
+  -- like any other, and its number is the reason for the trip.
+  if v.holdLine then
+    local hl = v.holdLine()
+    if hl then tail[#tail + 1] = hl end
+  end
+  if co and co.money then tail[#tail + 1] = co.money(co.balance()) end
+  if mi and mi.activeLine then
+    local l = mi.activeLine()
+    if l then tail[#tail + 1] = l end
+  end
+  if #tail > 0 then head = head .. "\n" .. table.concat(tail, "   ·   ") end
   if title.text ~= head then title.text = head end
 end

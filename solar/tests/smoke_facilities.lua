@@ -24,12 +24,16 @@ local function add(n) nodes[n.name] = n; return n end
 local astro = add({ name = "Astronaut", visible = true,
   x = planet.x + 0, y = planet.y + planet.radius, z = planet.z + 0 })
 
--- FacTracking parented to the planet → its coords ARE body-relative. Put it 4 m
--- north of the astronaut's body-relative position (0, R, 0).
-add({ name = "FacTracking", x = 0, y = planet.radius, z = 4 })
-add({ name = "FacCommand",  x = 40, y = planet.radius, z = 0 })
-add({ name = "FacHangar",   x = 0,  y = planet.radius, z = 40 })
-add({ name = "FacPower",    x = -40, y = planet.radius, z = 0 })
+-- The facilities hang off the PLANET node, exactly as base_facilities spawns
+-- them: their own coords are body-relative and only compose into world space
+-- through the parent. A menu that compares them against a world-space astronaut
+-- without walking that chain is off by the planet's orbital position — which is
+-- the bug this models.
+local planet_node = add({ name = planet.name, x = planet.x, y = planet.y, z = planet.z })
+add({ name = "FacTracking", parent = planet_node, x = 0, y = planet.radius, z = 4 })
+add({ name = "FacCommand",  parent = planet_node, x = 40, y = planet.radius, z = 0 })
+add({ name = "FacHangar",   parent = planet_node, x = 0,  y = planet.radius, z = 40 })
+add({ name = "FacPower",    parent = planet_node, x = -40, y = planet.radius, z = 0 })
 
 -- UI nodes the script drives.
 for _, nm in ipairs({ "Facility Prompt", "Facility Panel", "Facility Title", "Facility Body", "Facility Action", "Facility Exit" }) do
@@ -126,4 +130,16 @@ astro.z = planet.z + 500 -- far from every facility
 menu.update({}, 1 / 60)
 assert(nodes["Facility Prompt"].__el.visible == false, "prompt hidden when far from all facilities")
 
-print("smoke_facilities OK — proximity, open/close, tracking readout, hangar→builder, board/leave")
+-- A facility that never found its planet node is TOP-LEVEL, so its coordinates
+-- are already world. The prompt must read that correctly too — measuring it in
+-- the planet's frame puts it an orbit away and the prompt never fires.
+local orphan = nodes["FacPower"]
+orphan.parent = nil
+orphan.x, orphan.y, orphan.z = astro.x + 3, astro.y, astro.z
+menu.update({}, 1 / 60)
+assert(nodes["Facility Prompt"].__el.visible == true,
+  "prompt should show next to an UNPARENTED facility (world coords)")
+assert(nodes["Facility Prompt"].text:find("Power Plant"),
+  "prompt should name the unparented facility, got: " .. nodes["Facility Prompt"].text)
+
+print("smoke_facilities OK — proximity (parented + world), open/close, tracking readout, hangar→builder, board/leave")

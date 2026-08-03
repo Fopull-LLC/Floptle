@@ -27,12 +27,18 @@ function update(node, dt)
   -- MOVING is the honest third state: a leg halfway down is neither up nor
   -- down, and pretending otherwise is how you land on a retracting gear.
   local moving = (d.on and d.anim < 0.99) or (not d.on and d.anim > 0.01)
-  local state = moving and (d.on and "EXTENDING" or "RETRACTING")
-    or (d.on and "DEPLOYED" or "STOWED")
+  -- A thruster bus is ON/OFF and switches instantly; a folding leg has a real
+  -- in-between. Only the ones that actually take time report EXTENDING.
+  local state
+  if moving and not d.instant then
+    state = d.on and "EXTENDING" or "RETRACTING"
+  else
+    state = d.on and (d.verbOn or "DEPLOYED") or (d.verbOff or "STOWED")
+  end
   local text = string.format("  %s  ×%d      %s   [%s]",
     d.label, d.count, state, string.upper(d.key or "?"))
   if node.text ~= text then node.text = text end
-  if moving then
+  if moving and not d.instant then
     el.fillR, el.fillG, el.fillB, el.fillA = 0.30, 0.26, 0.10, 0.92
     el.textR, el.textG, el.textB = 1.0, 0.86, 0.5
   elseif d.on then

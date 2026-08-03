@@ -184,6 +184,26 @@ InputMap(
                 ),
             ],
         ),
+        Axis1(
+            name: "Turn",
+            socd: Neutral,
+            bindings: [
+                Keys(
+                    minus: Key(KeyQ),
+                    plus: Key(KeyE),
+                ),
+                Keys(
+                    minus: Pad(
+                        id: Any,
+                        ctrl: Button(LeftBumper),
+                    ),
+                    plus: Pad(
+                        id: Any,
+                        ctrl: Button(RightBumper),
+                    ),
+                ),
+            ],
+        ),
     ],
     axes2: [
         Axis2(

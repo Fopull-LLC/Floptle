@@ -97,6 +97,20 @@ API.save = {
 }
 API.scene = { load = function() end }
 
+-- Cross-script handles. The builder asks for the COMPANY ledger (it prices the
+-- build against the balance and charges at rollout); a scene without one must
+-- degrade to "no money system", which is exactly what a nil handle means.
+-- `API.COMPANY` is set by the money tests below to wire a real one in.
+API.COMPANY = nil
+function API.findScript(kind)
+  if kind == "company" then return API.COMPANY end
+  return nil
+end
+function API.findScripts(kind)
+  local h = API.findScript(kind)
+  return h and { h } or {}
+end
+
 -- Audio: the builder plays UI clicks + a hangar bed; hand back a handle with
 -- the SoundHandle surface (stop() is used on the bed) so it all no-ops here.
 API.SOUNDS = {}

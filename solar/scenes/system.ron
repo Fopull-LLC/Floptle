@@ -450,14 +450,18 @@
                     ],
                 ),
                 (
-                    kind: "dig_tool",
+                    kind: "tool_belt",
                     enabled: true,
                     params: [
-                        ("radius", 3.0),
-                        ("range", 45.0),
-                        ("rate", 0.12),
-                        ("spacing", 0.45),
-                        ("strength", 0.6),
+                        ("laser_radius", 0.95),
+                        ("laser_rate", 0.3),
+                        ("laser_range", 26.0),
+                        ("laser_strength", 0.55),
+                        ("spade_radius", 1.4),
+                        ("spade_rate", 0.14),
+                        ("spade_strength", 0.6),
+                        ("cut_reach", 4.6),
+                        ("cut_cone", 0.55),
                     ],
                 ),
             ],
@@ -2311,6 +2315,96 @@
             )),
         ),
         (
+            name: "Dock Lock Row",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "dock_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 1.0),
+                    ],
+                    strs: [
+                        ("kind", "lock"),
+                    ],
+                ),
+            ],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(26.0)),
+                shape: Some((
+                    fill: (0.10, 0.22, 0.34, 0.92),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.7, 0.86, 0.7),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.7, 0.84, 0.95, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Dock Auto Row",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "dock_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 1.0),
+                    ],
+                    strs: [
+                        ("kind", "auto"),
+                    ],
+                ),
+            ],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(26.0)),
+                shape: Some((
+                    fill: (0.10, 0.20, 0.16, 0.92),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.8, 0.6, 0.7),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.7, 0.84, 0.95, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
             name: "Dock Assist Row",
             transform: (
                 translation: (0.0, 0.0, 0.0),
@@ -2341,6 +2435,51 @@
                     radius: 5.0,
                     border: 1.0,
                     border_color: (0.4, 0.7, 0.86, 0.7),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.7, 0.84, 0.95, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Dock Recover Row",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "dock_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 1.0),
+                    ],
+                    strs: [
+                        ("kind", "recover"),
+                    ],
+                ),
+            ],
+            parent: Some(61),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(352.0), Fixed(26.0)),
+                shape: Some((
+                    fill: (0.10, 0.24, 0.16, 0.92),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.4, 0.78, 0.6, 0.7),
                 )),
                 text: Some((
                     text: "",
@@ -2419,6 +2558,1021 @@
                     text: "  P closes  ·  a latched port undocks on click",
                     size: 11.0,
                     color: (0.45, 0.6, 0.72, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Company",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "company",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+        ),
+        (
+            name: "Missions",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "missions",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+        ),
+        // ── OPS BOARD ─────────────────────────────────────────────────────────
+        // The contracts panel at the Command Centre: balance, standing, the
+        // contract on the books with its goals ticked, and every job you could
+        // sign next. Rows are generic (`ops_row` reads the catalogue), so a new
+        // contract is a table entry in missions.lua and nothing here changes.
+        (
+            name: "Ops Board",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "ops_board",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+            parent: Some(18),
+            ui: Some((
+                place: Pin(
+                    anchor: Center,
+                    offset: (0.0, 0.0),
+                ),
+                size: (Fixed(520.0), Fit),
+                stack: Some((
+                    dir: Column,
+                    gap: 6.0,
+                    pad: 20.0,
+                    align: Start,
+                    justify: Start,
+                )),
+                shape: Some((
+                    fill: (0.04, 0.06, 0.10, 0.80),
+                    radius: 12.0,
+                    border: 1.5,
+                    border_color: (0.42, 0.66, 0.88, 0.85),
+                    shadow: Some((
+                        color: (0.0, 0.0, 0.0, 0.6),
+                        offset: (0.0, 12.0),
+                        blur: 30.0,
+                        spread: 3.0,
+                    )),
+                )),
+                visible: false,
+                opacity: 0.98,
+            )),
+        ),
+        (
+            name: "Ops Title",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(80),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(480.0), Fixed(118.0)),
+                text: Some((
+                    text: "OPS BOARD",
+                    size: 15.0,
+                    color: (0.72, 0.9, 1.0, 1.0),
+                    align: Start,
+                    valign: Start,
+                    fit: false,
+                )),
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Ops Row 1",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "ops_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 1.0),
+                    ],
+                ),
+            ],
+            parent: Some(80),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(480.0), Fixed(28.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.55, 0.7, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 14.0,
+                    color: (0.72, 0.86, 0.96, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Ops Row 2",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "ops_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 2.0),
+                    ],
+                ),
+            ],
+            parent: Some(80),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(480.0), Fixed(28.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.55, 0.7, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 14.0,
+                    color: (0.72, 0.86, 0.96, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Ops Row 3",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "ops_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 3.0),
+                    ],
+                ),
+            ],
+            parent: Some(80),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(480.0), Fixed(28.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.55, 0.7, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 14.0,
+                    color: (0.72, 0.86, 0.96, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Ops Row 4",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "ops_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 4.0),
+                    ],
+                ),
+            ],
+            parent: Some(80),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(480.0), Fixed(28.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.55, 0.7, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 14.0,
+                    color: (0.72, 0.86, 0.96, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Ops Row 5",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "ops_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 5.0),
+                    ],
+                ),
+            ],
+            parent: Some(80),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(480.0), Fixed(28.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.55, 0.7, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 14.0,
+                    color: (0.72, 0.86, 0.96, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Ops Row 6",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "ops_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 6.0),
+                    ],
+                ),
+            ],
+            parent: Some(80),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(480.0), Fixed(28.0)),
+                shape: Some((
+                    fill: (0.1, 0.14, 0.18, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.35, 0.55, 0.7, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 14.0,
+                    color: (0.72, 0.86, 0.96, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Ops Hint",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(80),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(480.0), Fixed(22.0)),
+                text: Some((
+                    text: "",
+                    size: 12.0,
+                    color: (0.5, 0.65, 0.78, 1.0),
+                    align: Start,
+                    valign: Start,
+                    fit: false,
+                )),
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
+        // ── MATERIAL ECONOMY ──────────────────────────────────────────────────
+        // The registry, the containers, the climate model, the flora generator
+        // and R&D are all plain managers: no transform, no UI, just state other
+        // scripts reach through findScript(). Every one of them keeps its data
+        // in save.* so it survives the builder ⇄ system scene hop.
+        (
+            name: "Materials",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "materials",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+        ),
+        (
+            name: "Inventory",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "inventory",
+                    enabled: true,
+                    params: [
+                        ("suit_kg", 45.0),
+                        ("base_kg", 1000000.0),
+                    ],
+                ),
+            ],
+        ),
+        (
+            name: "Climate",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "climate",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+        ),
+        (
+            name: "Flora Gen",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "flora_gen",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+        ),
+        // The scatter field. `budget` is the hard cap on live plant nodes —
+        // raise it on a strong machine, drop it if a forest ever costs frames.
+        (
+            name: "Flora Field",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "flora_field",
+                    enabled: true,
+                    params: [
+                        ("near", 55.0),
+                        ("far", 115.0),
+                        ("cell", 20.0),
+                        ("spacing", 9.0),
+                        ("budget", 90.0),
+                        ("cells_per_tick", 1.0),
+                        ("interval", 0.25),
+                        ("regrow", 900.0),
+                        ("alt_max", 260.0),
+                        ("enabled", 1.0),
+                    ],
+                ),
+            ],
+        ),
+        (
+            name: "Research",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "research",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+        ),
+        // The tool belt's one HUD line: what's equipped, what it's pointed at,
+        // and how full the pack is. Written by tool_belt itself.
+        (
+            name: "Tool HUD",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(18),
+            ui: Some((
+                place: Pin(
+                    anchor: Bottom,
+                    offset: (0.0, -18.0),
+                ),
+                size: (Fixed(620.0), Fixed(22.0)),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.78, 0.88, 0.98, 1.0),
+                    align: Center,
+                    valign: Center,
+                    fit: false,
+                )),
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        // ── INVENTORY PANEL ───────────────────────────────────────────────────
+        // I opens the suit pack. Rows are generic (inv_row reads the container),
+        // so a new material is a registry entry and nothing here changes.
+        (
+            name: "Inventory Panel",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "inventory_panel",
+                    enabled: true,
+                    params: [
+                        ("reach", 11.0),
+                    ],
+                ),
+            ],
+            parent: Some(18),
+            ui: Some((
+                place: Pin(
+                    anchor: Left,
+                    offset: (14.0, 30.0),
+                ),
+                size: (Fixed(430.0), Fit),
+                stack: Some((
+                    dir: Column,
+                    gap: 5.0,
+                    pad: 14.0,
+                    align: Start,
+                    justify: Start,
+                )),
+                shape: Some((
+                    fill: (0.03, 0.06, 0.05, 0.78),
+                    radius: 9.0,
+                    border: 1.2,
+                    border_color: (0.42, 0.82, 0.6, 0.75),
+                    shadow: Some((
+                        color: (0.0, 0.0, 0.0, 0.6),
+                        offset: (0.0, 10.0),
+                        blur: 26.0,
+                        spread: 2.0,
+                    )),
+                )),
+                visible: false,
+                opacity: 0.97,
+            )),
+        ),
+        (
+            name: "Inventory Title",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(96),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(402.0), Fixed(52.0)),
+                text: Some((
+                    text: "INVENTORY",
+                    size: 13.0,
+                    color: (0.72, 1.0, 0.86, 1.0),
+                    align: Start,
+                    valign: Start,
+                    fit: false,
+                )),
+                visible: true,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Inv Row 1",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "inv_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 1.0),
+                    ],
+                ),
+            ],
+            parent: Some(96),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(402.0), Fixed(24.0)),
+                shape: Some((
+                    fill: (0.08, 0.14, 0.11, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.3, 0.6, 0.45, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.78, 0.86, 0.94, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Inv Row 2",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "inv_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 2.0),
+                    ],
+                ),
+            ],
+            parent: Some(96),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(402.0), Fixed(24.0)),
+                shape: Some((
+                    fill: (0.08, 0.14, 0.11, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.3, 0.6, 0.45, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.78, 0.86, 0.94, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Inv Row 3",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "inv_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 3.0),
+                    ],
+                ),
+            ],
+            parent: Some(96),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(402.0), Fixed(24.0)),
+                shape: Some((
+                    fill: (0.08, 0.14, 0.11, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.3, 0.6, 0.45, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.78, 0.86, 0.94, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Inv Row 4",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "inv_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 4.0),
+                    ],
+                ),
+            ],
+            parent: Some(96),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(402.0), Fixed(24.0)),
+                shape: Some((
+                    fill: (0.08, 0.14, 0.11, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.3, 0.6, 0.45, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.78, 0.86, 0.94, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Inv Row 5",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "inv_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 5.0),
+                    ],
+                ),
+            ],
+            parent: Some(96),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(402.0), Fixed(24.0)),
+                shape: Some((
+                    fill: (0.08, 0.14, 0.11, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.3, 0.6, 0.45, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.78, 0.86, 0.94, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Inv Row 6",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "inv_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 6.0),
+                    ],
+                ),
+            ],
+            parent: Some(96),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(402.0), Fixed(24.0)),
+                shape: Some((
+                    fill: (0.08, 0.14, 0.11, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.3, 0.6, 0.45, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.78, 0.86, 0.94, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Inv Row 7",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "inv_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 7.0),
+                    ],
+                ),
+            ],
+            parent: Some(96),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(402.0), Fixed(24.0)),
+                shape: Some((
+                    fill: (0.08, 0.14, 0.11, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.3, 0.6, 0.45, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.78, 0.86, 0.94, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Inv Row 8",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "inv_row",
+                    enabled: true,
+                    params: [
+                        ("slot", 8.0),
+                    ],
+                ),
+            ],
+            parent: Some(96),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(402.0), Fixed(24.0)),
+                shape: Some((
+                    fill: (0.08, 0.14, 0.11, 0.9),
+                    radius: 5.0,
+                    border: 1.0,
+                    border_color: (0.3, 0.6, 0.45, 0.55),
+                )),
+                text: Some((
+                    text: "",
+                    size: 13.0,
+                    color: (0.78, 0.86, 0.94, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Inventory Action",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [
+                (
+                    kind: "inv_action",
+                    enabled: true,
+                    params: [],
+                ),
+            ],
+            parent: Some(96),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(402.0), Fixed(28.0)),
+                shape: Some((
+                    fill: (0.10, 0.26, 0.18, 0.94),
+                    radius: 6.0,
+                    border: 1.2,
+                    border_color: (0.45, 0.9, 0.65, 0.8),
+                )),
+                text: Some((
+                    text: "  Transfer all  ▸",
+                    size: 13.0,
+                    color: (0.7, 1.0, 0.84, 1.0),
+                    align: Start,
+                    valign: Center,
+                    fit: false,
+                )),
+                button: true,
+                visible: false,
+                opacity: 1.0,
+            )),
+        ),
+        (
+            name: "Inventory Hint",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            matter: Empty,
+            scripts: [],
+            parent: Some(96),
+            ui: Some((
+                place: Free(
+                    pos: (0.0, 0.0),
+                ),
+                size: (Fixed(402.0), Fixed(20.0)),
+                text: Some((
+                    text: "",
+                    size: 11.0,
+                    color: (0.5, 0.72, 0.62, 1.0),
                     align: Start,
                     valign: Center,
                     fit: false,

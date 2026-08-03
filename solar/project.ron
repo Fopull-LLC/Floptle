@@ -3,8 +3,8 @@
     retro_height: 410,
     matter: true,
     title: Some("Floptle Solar"),
-    entry_scene: Some("scenes/planetoid.ron"),
-    engine_version: Some("0.7.0"),
+    entry_scene: Some("scenes/menu.ron"),
+    engine_version: Some("0.19.1"),
     layers: [
         "entity",
         "level",

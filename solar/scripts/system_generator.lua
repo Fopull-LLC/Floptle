@@ -170,6 +170,54 @@ local function archetype(r, kind, radius, caveScale)
   return o, atmoHue
 end
 
+-- The WORLD RECORD every game system downstream reads: what archetype this body
+-- is (mining yields), how much sun it gets and whether it has air (climate),
+-- and where its sea sits (water, shorelines, what grows). Rolled once here —
+-- the generator is the only thing that knows these facts — and published to
+-- `save.world.<name>`, which survives the scene hop and rides the save slot.
+local function publishWorld(b, kind, insol, sea)
+  save.set("world." .. b.name, {
+    name = b.name,
+    kind = kind,
+    seed = b.opts.seed or 1,
+    radius = b.opts.radius or 100,
+    relief = b.opts.relief or 6,
+    sea = sea or 0,
+    atmo = (b.cel.atmoDensity or 0),
+    insol = insol or 1.0,
+  })
+end
+
+-- The sea: a sphere of water at a fixed radius, with the terrain poking through
+-- it wherever the ground is higher. That IS an ocean — basins fill, ridges
+-- become coastline, and the shoreline moves as the relief does, for free.
+--
+-- It is deliberately not a collider (nothing to swim into, no raycast to catch
+-- the flora scatter); `climate.isUnderwater` is the one rule everything asks,
+-- and the swimmer, the splashdown check and the scatter all read it. Real
+-- water — waves, refraction, buoyancy volumes — is an engine feature
+-- (floptle/0038); this reads honestly at the retro fidelity the game is drawn
+-- at, and the day the engine grows a water volume this node becomes it.
+local function makeSea(parent, name, sea, kind, temp)
+  local frozen = (kind == "ice" or kind == "frost" or (temp or 0.5) < 0.2)
+  local col = frozen and { 0.72, 0.86, 0.94 } or { 0.10, 0.34, 0.62 }
+  createNode(name .. " Sea", parent, function(w)
+    w:setPrimitive("Sphere", col)
+    w:setMaterial {
+      color = col,
+      alpha = frozen and 1.0 or 0.86,
+      specular = { 0.9, 0.96, 1.0 },
+      specularStrength = frozen and 0.25 or 0.85,
+      shininess = 64,
+      ambient = 0.55,
+    }
+    w.x, w.y, w.z = 0, 0, 0
+    -- The Sphere primitive is radius 0.85 at scale 1.
+    w.scale = sea / 0.85
+    w.tags = { "genbody", "sea" }
+  end)
+end
+
 -- One body under the system group: node + celestial + core kernel. The body
 -- carries its GENSPEC (setTerrainGen) instead of a pre-generated field: the
 -- engine generates its terrain in the background the first time you approach
@@ -193,6 +241,7 @@ local function makeBody(sys, b)
       core.scale = math.max(b.opts.coreR * 0.8, 4)
       core.tags = { "genbody" }
     end)
+    if (b.sea or 0) > 0 then makeSea(n, b.name, b.sea, b.kind, b.temp) end
   end)
 end
 
@@ -290,7 +339,29 @@ local function roll(p)
       cel.atmoDensity = r:range(0.5, 0.85)
       cel.clouds = math.max(0, r:range(-0.25, 0.65))
     end
-    specs[#specs + 1] = { name = name, id = id, pos = pos, cel = cel, opts = opts }
+    -- Sunlight at this orbit, normalised so the innermost planet sits near 1
+    -- (the star's luminosity was picked for that) and falling off as 1/r². The
+    -- climate model reads it as the world's basic warmth.
+    local insol = (starLum * 1e6) / (a * a)
+    -- SEAS. A world needs air to hold liquid water, and the archetype decides
+    -- how likely it is to have any; sea level sits inside the relief band, so
+    -- basins flood and ridges stay dry — how much of the world is ocean is part
+    -- of the roll, not a constant. An ice world's sea is a frozen one.
+    local sea = 0
+    local seaChance = ({ canyon = 0.75, crystal = 0.5, ice = 0.45, dune = 0.25, lava = 0 })[kind] or 0
+    if cel.atmoDensity and r:next() < seaChance then
+      sea = radius + opts.relief * r:range(-0.55, 0.10)
+    end
+    local baseT = ({ canyon = 0.55, dune = 0.78, ice = 0.16, frost = 0.12,
+                     lava = 0.95, crystal = 0.45 })[kind] or 0.4
+    local temp = baseT * (0.55 + 0.45 * insol)
+    local spec = { name = name, id = id, pos = pos, cel = cel, opts = opts,
+                   kind = kind, sea = sea, temp = temp }
+    specs[#specs + 1] = spec
+    publishWorld(spec, kind, insol, sea)
+    if sea > 0 then
+      print(string.format("    sea at r %.0f (%s)", sea, temp < 0.2 and "frozen" or "liquid"))
+    end
     -- Only the SPAWN planet generates up front, and it generates ALONE: while
     -- its fill runs, the engine starts no other generation (the batch owns the
     -- queue), so the player's world is always the FIRST one finished. Every
@@ -316,11 +387,15 @@ local function roll(p)
         local mpos = { pos[1] + ma * math.cos(mm0), 0, pos[3] + ma * math.sin(mm0) }
         local mopts = archetype(r, mkind, mr, p.caveScale)
         mopts.seed = r:int(1, 1e9)
-        specs[#specs + 1] = { name = mname, id = id, pos = mpos, cel = {
+        local mspec = { name = mname, id = id, pos = mpos, cel = {
           mu = mmu, bodyRadius = mr + math.max(mr * 0.035, 4), soi = 0,
           occluderRadius = math.max((mr - mopts.relief - mopts.caveDepth) * 0.95, 0),
           parent = name, a = ma, e = r:range(0, 0.04), i = r:range(0, 0.25), m0 = mm0,
-        }, opts = mopts } -- moons stream from their genspec too
+        }, opts = mopts, kind = mkind, sea = 0 } -- moons stream from their genspec too
+        specs[#specs + 1] = mspec
+        -- Moons are airless in this generator: no sea, nothing grows — but the
+        -- record still publishes, because MINING reads the archetype from it.
+        publishWorld(mspec, mkind, (starLum * 1e6) / (a * a), 0)
         print(string.format("    moon %s — %s, r %.0f, orbit %.0f", mname, mkind, mr, ma))
         id = id + 1
         ma = ma * r:range(1.8, 2.4)

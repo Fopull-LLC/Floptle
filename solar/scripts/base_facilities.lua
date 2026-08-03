@@ -11,16 +11,39 @@
 -- keeps its baked Static collider glued to the moving ground. Coordinates are
 -- recomputed from the LIVE body each attempt so no orbit drift creeps in.
 
--- angle = bearing around the base (deg); radius = ground distance from the crew
--- spawn; seat = how far the prefab's ORIGIN sits above the ground (= |mesh y-min| ×
+-- THE BASE IS A PLACE. It is sited ONCE — at the crew's landing site, and only
+-- after the loading screen has handed the world over — and then remembered
+-- body-relative in the save (`base.body` + `base.x/y/z`). Every later session
+-- rebuilds it on the same ground.
+--
+-- Before this the ring was cut around wherever the astronaut happened to be
+-- when the terrain first answered, and on a loaded save that is the LOADING
+-- HOVER: game_manager parks the crew 60 m over the spawn planet's north pole
+-- while the field streams, THEN teleports them to their saved position. The
+-- colony went up at the pole and the player woke up hundreds of metres away —
+-- with no prompt to enter anything, because they were never actually near a
+-- building.
+--
+-- angle = bearing around the base (deg); radius = ground distance from the base
+-- site; seat = how far the prefab's ORIGIN sits above the ground (= |mesh y-min| ×
 -- prefab scale, so the building's base rests on the surface); yaw = spin about the
--- local up for facing variety. Bearings dodge 0° (where the launchpad drops during
+-- local up for facing variety.
+--
+-- The three SHEDS (command centre, assembly hangar, depot) are walk-in
+-- buildings: their prefabs carry a SHELL collider built from the model's own
+-- geometry rather than one box around the whole thing, so the doorways the mesh
+-- has are doorways you can use. The power plant and the tracking dish are
+-- machines and stay solid. Bearings dodge 0° (where the launchpad drops during
 -- a launch) and keep the buildings clear of each other.
 local FACILITIES = {
-  { prefab = "FacCommand",  angle = 40,  radius = 26, seat = 1.5,   yaw = 215 },
-  { prefab = "FacHangar",   angle = 145, radius = 30, seat = 1.875, yaw = 330 },
+  { prefab = "FacCommand",  angle = 40,  radius = 30, seat = 2.1,   yaw = 215 },
+  { prefab = "FacHangar",   angle = 145, radius = 30, seat = 3.5,   yaw = 330 },
   { prefab = "FacPower",    angle = 250, radius = 24, seat = 1.02,  yaw = 70 },
   { prefab = "FacTracking", angle = 320, radius = 33, seat = 1.64,  yaw = 130 },
+  -- The Commerce Depot: cargo comes off a landed craft here and materials are
+  -- sold from here. Sited between the command centre and the hangar, on the
+  -- side you walk back to from the pad.
+  { prefab = "FacDepot",    angle = 90,  radius = 28, seat = 1.25,  yaw = 250 },
 }
 
 local want_spawn = false
@@ -56,23 +79,69 @@ function start(node)
   log("base: siting facilities — waiting for the base terrain…")
 end
 
+-- Which world the base belongs to. Once sited it is THAT planet's colony: if
+-- the crew is off visiting another world nothing is built (and nothing tries to
+-- stream a planet's terrain from across the system to do it) — the base is
+-- waiting for them at home.
+local function site_body(crew)
+  local home = save.get("base.body")
+  local here = dominant_at(crew.x, crew.y, crew.z)
+  if home then
+    if not here or here.name ~= home then return nil end
+    return space.body(home) or here
+  end
+  return here
+end
+
+-- The base's centre, in WORLD coordinates, recomputed from the body's live
+-- position every attempt (the planet is orbiting while we work). Returns the
+-- site, its up vector, and whether it came from the save.
+local function site_point(body, crew)
+  local hx, hy, hz = save.get("base.x"), save.get("base.y"), save.get("base.z")
+  if save.get("base.body") == body.name and hx and hy and hz then
+    local px, py, pz = body.x + hx, body.y + hy, body.z + hz
+    local d = math.sqrt(hx * hx + hy * hy + hz * hz)
+    if d > 1e-3 then return px, py, pz, hx / d, hy / d, hz / d, true end
+  end
+  local dx, dy, dz = crew.x - body.x, crew.y - body.y, crew.z - body.z
+  local d = math.sqrt(dx * dx + dy * dy + dz * dz)
+  if d < 1e-3 then return crew.x, crew.y, crew.z, 0, 1, 0, false end
+  return crew.x, crew.y, crew.z, dx / d, dy / d, dz / d, false
+end
+
 local function try_place()
+  -- Nothing is sited while the loading screen is up: the crew is parked over
+  -- the north pole then, not standing where they live.
+  local gm = findScript("game_manager")
+  if gm and gm.loading then return false end
+
   -- Base site = the crew spawn (the Astronaut). Fall back to the debug Ship.
   local crew = find("Astronaut") or find("Ship")
   if not crew then return false end
-  local px, py, pz = crew.x, crew.y, crew.z
 
-  -- Local up = radial from the dominant body (fallback world +Y); keep its
-  -- terrain warm so the ground streams in under the base.
-  local ux, uy, uz = 0, 1, 0
-  local body = dominant_at(px, py, pz)
-  if body then
-    if body.name and body.name ~= "" then terrain.warm(body.name) end
-    local dx, dy, dz = px - body.x, py - body.y, pz - body.z
-    local d = math.sqrt(dx * dx + dy * dy + dz * dz)
-    if d > 1e-3 then ux, uy, uz = dx / d, dy / d, dz / d end
-  end
+  local body = site_body(crew)
   if not body then return false end
+  if body.name and body.name ~= "" then terrain.warm(body.name) end
+  local px, py, pz, ux, uy, uz, from_save = site_point(body, crew)
+
+  -- Pin the site to the GROUND under it before anything is built: the probe
+  -- doubles as the "is the terrain actually here yet?" gate, and a crew still
+  -- falling out of a restore doesn't drag the colony down with them.
+  local centre = raycast(px + ux * 240, py + uy * 240, pz + uz * 240,
+                         -ux, -uy, -uz, 600.0)
+  if not (centre and centre.distance) then return false end
+  px = px + ux * 240 - ux * centre.distance
+  py = py + uy * 240 - uy * centre.distance
+  pz = pz + uz * 240 - uz * centre.distance
+  if not from_save then
+    -- Remember it body-relative — absolute coordinates go stale the moment the
+    -- planet moves on its orbit.
+    save.set("base.body", body.name)
+    save.set("base.x", px - body.x)
+    save.set("base.y", py - body.y)
+    save.set("base.z", pz - body.z)
+    log(string.format("base: colony sited on %s (this is home now)", body.name))
+  end
 
   -- Two tangents spanning the ground plane at the base: s = world-X projected out
   -- of up, t = up × s. Facilities ring the base along these.
@@ -84,7 +153,13 @@ local function try_place()
   local ty = uz * sx - ux * sz
   local tz = ux * sy - uy * sx
 
+  -- No planet node, no base. A facility that fails to parent keeps WORLD
+  -- coordinates: it never rides the orbit (the ground slides out from under it)
+  -- and it reads in a different frame from everything that measures against it.
+  -- The rails snapshot and the scene mirror can disagree for a frame right after
+  -- the generator rolls a system, so this waits rather than building wrong.
   local planet_node = find(body.name)
+  if not planet_node then return false end
   local pitch, roll = up_angles(ux, uy, uz)
 
   for _, f in ipairs(FACILITIES) do
@@ -132,7 +207,18 @@ function update(node, dt)
   wait_t = wait_t + dt
   if try_place() then
     want_spawn = false
-    log("base: all facilities standing")
+    -- How far you are from your own front door, said out loud: a base that is
+    -- half a planet away is a fact worth knowing before you go looking for it.
+    local crew = find("Astronaut")
+    local b = space.body(save.get("base.body") or "")
+    local hx, hy, hz = save.get("base.x"), save.get("base.y"), save.get("base.z")
+    if crew and b and hx then
+      local dx, dy, dz = crew.x - (b.x + hx), crew.y - (b.y + hy), crew.z - (b.z + hz)
+      log(string.format("base: all facilities standing — %.0f m from the crew",
+        math.sqrt(dx * dx + dy * dy + dz * dz)))
+    else
+      log("base: all facilities standing")
+    end
   elseif wait_t - last_note > 5.0 then
     last_note = wait_t
     log(string.format("base: waiting for terrain… (%.0fs, %d/%d placed)", wait_t, placed, #FACILITIES))

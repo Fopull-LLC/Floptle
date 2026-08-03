@@ -109,7 +109,23 @@ local REG = {
   -- (the assemblies weld into one vessel); press its UNDOCK control and it
   -- splits the stack right back apart at that seam, sending the far half away
   -- as a live craft you can fly. That's the whole orbit → land → return loop.
-  dockPort  = { prefab = "PartDockPort",  label = "Docking Port", h = 0.28, rx = 0.53, rz = 0.53, mass = 0.18, cost = 180, top = true,  bottom = true,  kind = "structural", dock = true, side = true },
+  -- radial_orient makes a FLANK-mounted port face outward (+X) instead of
+  -- keeping its authored "up" — that's what makes side berths work. Stacked
+  -- axially it behaves exactly as before, so one part covers both.
+  dockPort  = { prefab = "PartDockPort",  label = "Docking Port", h = 0.28, rx = 0.53, rz = 0.53, mass = 0.18, cost = 180, top = true,  bottom = true,  kind = "structural", dock = true, side = true, radial_orient = true },
+  -- RCS BLOCK: the small four-way thruster cluster docking is actually flown
+  -- with. Mounts on a flank like a fin, rings with symmetry, and pools its
+  -- thrust into the craft's translation authority (IJKL + HN). Balance them
+  -- around the hull — the pooled push goes through the centre of mass, so a
+  -- lopsided set costs you nothing but looks wrong, and a bare craft with no
+  -- blocks simply has no translation at all.
+  rcs       = { prefab = "PartRCS",       label = "RCS Block",    h = 0.34, rx = 0.20, rz = 0.20, mass = 0.08, cost = 110, top = false, bottom = false, kind = "structural", rcs = true, rcs_thrust = 3.0, radial_orient = true },
+  -- CARGO BAY: the hold. `cargo` is its capacity in kilograms; a vessel's total
+  -- is the sum of its bays, and that number is the only thing standing between
+  -- a planet full of ore and the warehouse. The bay's own mass is the EMPTY
+  -- mass — what's inside is added in flight from the manifest, so a full hold
+  -- genuinely flies worse than an empty one.
+  cargo     = { prefab = "PartCargo",     label = "Cargo Bay",    h = 1.20, rx = 0.50, rz = 0.50, mass = 0.9,  cost = 300, top = true,  bottom = true,  kind = "structural", cargo = 250, side = true },
 }
 
 -- ── State ───────────────────────────────────────────────────────────────────
@@ -317,6 +333,14 @@ end
 -- stage's engines burn (everything above the next decoupler waits its turn).
 -- Stage k = the stack above the k-th decoupler, thrusting on the engines
 -- between decouplers k and k+1. Honest TWR (thrust / mass·g) + pooled fuel.
+-- Propellant mass for a fuel quantity. The part registry prices tanks by
+-- their DRY mass, so the propellant has to be counted separately or a full
+-- tank and an empty one weigh the same — and Δv comes out infinite.
+local FUEL_T_PER_UNIT = 0.005   -- 60-unit FT-S tank ⇒ 0.30 t of propellant
+local function fuel_mass(units)
+  return (units or 0) * FUEL_T_PER_UNIT
+end
+
 local function stage_lines()
   -- Radial-decoupler branches are SIDE BOOSTERS: they separate laterally as
   -- one group (fired before the axial cuts), so they get their own row and
@@ -362,8 +386,26 @@ local function stage_lines()
       end
     end
     if k == 0 or th > 0 or fu > 0 then
-      out = out .. string.format("\nSTAGE %d:  TWR %.2f   fuel %d   %.2f t",
-        k + 1, (m > 0 and th > 0) and th / (m * 9.81) or 0, fu, m)
+      -- Δv by Tsiolkovsky, honestly: this stage's WET mass is everything still
+      -- attached above the cut, its DRY mass is that minus the fuel this stage
+      -- actually burns, and Isp comes from the stage's own thrust/burn ratio
+      -- (the engines' exhaust velocity, not a constant pulled out of the air).
+      -- A stage with no engine gets no Δv, which is the correct answer and the
+      -- one that catches "I forgot to put an engine on the upper stage".
+      local burn = 0.0
+      for uid, p in pairs(parts) do
+        if not booster_uids[uid] and p.y > lo + 0.01 and p.y < hi - 0.01 then
+          burn = burn + (p.def.burn or 0)
+        end
+      end
+      local dv = 0.0
+      local dry = m - fuel_mass(fu)
+      if th > 0 and burn > 0 and dry > 0.01 and m > dry then
+        dv = (th / burn) * math.log(m / dry)
+      end
+      out = out .. string.format("\nSTAGE %d:  TWR %.2f   Δv %s   fuel %d   %.2f t",
+        k + 1, (m > 0 and th > 0) and th / (m * 9.81) or 0,
+        dv > 0 and string.format("%.0f m/s", dv) or "—", fu, m)
     end
   end
   return out
@@ -531,6 +573,23 @@ local function draw_stage_badges()
   end
 end
 
+-- The company ledger, if this scene has one mounted (it does; the builder is
+-- where money is spent). Fetched fresh — scripts don't survive a scene load.
+local co_ref = nil
+local function company_ref()
+  if not co_ref or not co_ref.node or not co_ref.node.valid then
+    co_ref = findScript("company")
+  end
+  return co_ref
+end
+
+-- What this build costs to put on the pad.
+local function build_cost()
+  local c = 0
+  for _, p in pairs(parts) do c = c + p.def.cost end
+  return c
+end
+
 local function refresh_stats()
   paint_stages()
   if not stats_node then return end
@@ -547,8 +606,18 @@ local function refresh_stats()
   end
   local twr = (mass > 0) and (thrust / (mass * 9.81)) or 0
   local twr_s = (thrust > 0) and string.format("   TWR %.2f", twr) or ""
-  stats_node.text = string.format("%d parts   %.2f t   $%d%s%s   ⛭ %s%s",
-    n, mass, cost, twr_s,
+  -- The build cost against the company's actual balance: you should be able to
+  -- see you can't afford it WHILE you're adding the part, not after you press
+  -- LAUNCH. Over budget turns the figure red-flagged rather than hiding it.
+  local co = company_ref()
+  local bal = co and co.balance and co.balance() or nil
+  local money = string.format("$%d", cost)
+  if bal then
+    money = string.format("$%d / %s%s", cost, co.money(bal),
+      (cost > bal) and "  ⚠ OVER BUDGET" or "")
+  end
+  stats_node.text = string.format("%d parts   %.2f t   %s%s%s   ⛭ %s%s",
+    n, mass, money, twr_s,
     sym_n > 1 and ("   SYM ×" .. sym_n) or "",
     TOOL_LABEL[tool] or "?", stage_lines())
 end
@@ -994,9 +1063,36 @@ local function gizmo_footprint_px(p, tool, len, rad)
   return cx, cy, maxr
 end
 
+-- The catalogue's buttons ask for these: what a part is called and costs, and
+-- whether R&D has opened it yet.
+function partInfo(id)
+  return REG[id]
+end
+
+-- Let a catalogue button push a line into the builder's hint bar (it has no
+-- text node of its own, and the hint bar is where every other explanation in
+-- this scene appears).
+function hintNow(msg, secs)
+  hint(msg, secs or 3.0)
+end
+
 -- ── The catalogue calls this (findScript("builder").pick) ───────────────────
 function pick(id)
   if ghost or not REG[id] then return end
+  -- A LOCKED part's click IS its research purchase — or the sentence saying
+  -- what it wants first. The catalogue never holds a card you can't act on,
+  -- and you never have to go somewhere else to open one.
+  local rs = findScript("research")
+  if rs and not rs.isUnlocked(id) then
+    local ok, why = rs.unlock(id)
+    if not ok then
+      hint("LOCKED  ·  " .. rs.labelOf(id) .. "  —  " .. why, 4.0)
+      ui("tool", 0.7)
+      return
+    end
+    hint("RESEARCH COMPLETE  ·  " .. why .. "  —  placing it now", 4.0)
+    ui("save", 0.9)
+  end
   local def = REG[id]
   ghost = { id = id, def = def, yaw = 0, pitch = 0, roll = 0, node = nil }
   click_cool = 0.15
@@ -1175,6 +1271,9 @@ local function save_blueprint()
       parent = p.parent or 0, att = p.att or "", sym = p.sym or 0,
       stage = stage_of[uid] or 0,
       h = d.h, mass = d.mass, cost = d.cost, kind = d.kind,
+      -- Half-widths ride along too: the flight side needs a part's real
+      -- footprint for hull contact, not just its stack height.
+      rx = d.rx or 0, rz = d.rz or 0,
       thrust = d.thrust or 0, burn = d.burn or 0, fuel = d.fuel or 0,
       decouple = d.decouple and 1 or 0, legs = d.legs and 1 or 0,
       radial = d.radial and 1 or 0, chute = d.chute and 1 or 0,
@@ -1184,9 +1283,13 @@ local function save_blueprint()
       -- and their ratings (EC capacity / charge rate) through to the vessel.
       power = d.power and 1 or 0, solar = d.solar and 1 or 0,
       ec = d.ec or 0, gen = d.gen or 0,
-      -- Docking ports are peripherals, not staging events: the flight side
-      -- reads this to find every mating face on the craft.
+      -- Docking ports and RCS blocks are peripherals, not staging events: the
+      -- flight side reads these to find every mating face and thruster aboard.
       dock = d.dock and 1 or 0,
+      rcs = d.rcs and 1 or 0, rcs_thrust = d.rcs_thrust or 0,
+      -- Hold capacity in kg (0 = not a cargo bay). The vessel sums these into
+      -- one pooled hold when it spawns.
+      cargo = d.cargo or 0,
     }
   end
   save.set("shipyard.blueprint", bp)
@@ -1579,6 +1682,20 @@ function update(node, dt)
         elseif on_ring and placed then
           mirror_onto_ring(host_uid, placed)
         end
+        -- DOCKING SEAM: ports work in PAIRS — one on each craft, stacked face
+        -- to face. A single port welded into a stack is just a spacer and the
+        -- flight panel will (correctly) refuse to separate it, so say which one
+        -- you've just built the moment it's placed rather than in orbit.
+        if placed and parts[placed] and parts[placed].def.dock then
+          local host = host_uid and parts[host_uid]
+          if host and host.def.dock then
+            hint("docking seam — these two separate in flight (peripherals ▸ UNDOCK) " ..
+                 "and can re-dock later", 4.0)
+          else
+            hint("docking port placed — it needs a SECOND port stacked on its free " ..
+                 "face to make a seam that separates", 4.0)
+          end
+        end
       elseif why then
         hint(why, 2.0)
       else
@@ -1795,6 +1912,18 @@ end
 function doSave() save_blueprint() end
 function doLaunch()
   if partCount == 0 then hint("nothing to launch — build something first", 2.5) return end
+  -- The hull is BOUGHT at rollout. Crash it and that money is gone; bring it
+  -- home and recover it and most of it comes back. That's the whole loop, and
+  -- it only means anything if the pad refuses a build you can't pay for.
+  local co = company_ref()
+  local cost = build_cost()
+  if co and co.afford and not co.afford(cost) then
+    hint(string.format("can't afford this build — %s of %s. Fly a contract first.",
+      co.money(cost), co.money(co.balance())), 4.0)
+    return
+  end
+  if co and co.spend then co.spend(cost, "hull rollout (" .. partCount .. " parts)") end
+  save.set("shipyard.spent", cost)
   save_blueprint()
   ui("launch", 1.0)
   save.set("shipyard.launch", 1)

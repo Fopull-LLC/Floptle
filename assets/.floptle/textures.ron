@@ -1,14 +1,20 @@
 {
-    "assets/textures/UI/Hand/FP Hand-Sheet.png": (
-        filter: Pixelated,
-        wrap: Repeat,
-        sheet_cols: 21,
-        sheet_rows: 1,
-    ),
     "/mnt/disks/3tb/GithubRepositories/Floptle/assets/textures/UI/Hand/FP Hand Keypad-Sheet.png": (
         filter: Pixelated,
         wrap: Repeat,
         sheet_cols: 9,
         sheet_rows: 1,
+    ),
+    "textures/UI/Hand/FP Hand-Sheet.png": (
+        filter: Pixelated,
+        wrap: Repeat,
+        sheet_cols: 21,
+        sheet_rows: 1,
+    ),
+    "textures/Test.png": (
+        filter: Pixelated,
+        wrap: Repeat,
+        sheet_cols: 0,
+        sheet_rows: 0,
     ),
 }

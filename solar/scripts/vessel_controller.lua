@@ -136,7 +136,22 @@ local DEVICES = {
       child.pitch = (pose.pitch or 0) - (1 - f) * 0.5       -- tip toward the sky
     end,
   },
+  -- RCS: not a folding device — the "state" is simply whether the thruster bus
+  -- is live. It rides the registry anyway so the keybind, the HUD tag and the
+  -- peripherals row all come along for free, which is the whole point of the
+  -- registry. `launch = false` because thrusters idle on the pad; the fold
+  -- animation is a no-op and `rcsTick` drives the plumes off the live command.
+  rcs = {
+    key = "r", label = "RCS", order = 0, launch = false,
+    verb_on = "ON", verb_off = "OFF",
+    detect = function(d) return (d.rcs or 0) == 1 end,
+    parts = {}, on = false, anim = 0.0, speed = 8.0, pose = {},
+    apply = function() end,
+  },
 }
+
+-- Translation state, published for the HUD and the peripherals console.
+rcs = { thrust = 0.0, firing = false, cmd = 0.0 }
 
 local bp = nil
 local launch_mode = false -- arrived via the builder's LAUNCH (clamp lifecycle)
@@ -335,6 +350,17 @@ local function part_axis(d)
   return -cy * sz + sy * sx * cz, cx * cz, sy * sz + cy * sx * cz
 end
 
+-- The part's local +X in the VESSEL frame — the OUTWARD direction of anything
+-- the builder mounted on a flank. `radial_orient` parts are yawed by
+-- `atan2(-dz, dx)` precisely so their +X points away from the hull, so this is
+-- where a side-mounted docking port mates and where an RCS block's nozzles aim.
+local function part_axis_x(d)
+  local cy, sy = math.cos(d.yaw or 0), math.sin(d.yaw or 0)
+  local cx, sx = math.cos(d.pitch or 0), math.sin(d.pitch or 0)
+  local cz, sz = math.cos(d.roll or 0), math.sin(d.roll or 0)
+  return cy * cz + sy * sx * sz, cx * sz, -sy * cz + cy * sx * sz
+end
+
 -- `override` is the blueprint an UNDOCKED module is handed at the seam (see
 -- `undock`); without one we're the shipyard's launch and read the saved build.
 local function load_bp(override)
@@ -377,7 +403,9 @@ local function load_bp(override)
   end
   for _, dev in pairs(DEVICES) do
     dev.parts, dev.nodes, dev.pose = {}, {}, {}
-    dev.on, dev.anim, dev.anim_applied = true, 1.0, nil
+    -- Roll out in each device's LAUNCH state (gear down, thrusters cold).
+    dev.on = dev.launch ~= false
+    dev.anim, dev.anim_applied = dev.on and 1.0 or 0.0, nil
   end
   for _, d in pairs(bp.parts) do
     part_total = part_total + 1
@@ -402,7 +430,29 @@ local function load_bp(override)
     if (d.power or 0) == 1 then elec.cap = elec.cap + (d.ec or 0) end
     if (d.solar or 0) == 1 then elec.gen = elec.gen + (d.gen or 0) end
     if (d.comms or 0) == 1 then elec.comms = true end
-    if d.kind == "crewed" then pod = { x = d.x, y = d.y, z = d.z }; pod_uid = d.uid end
+  end
+  -- THE COMMAND POD. A stack can carry MORE THAN ONE crewed part — a lander
+  -- riding its mothership through a docking seam is exactly that — and `pairs`
+  -- order is arbitrary, so "whichever crewed part came last" made `pod_uid`
+  -- nondeterministic. That matters: `axial_departing` inverts its cut to keep
+  -- the pod side, so a coin-flip there undocked the MOTHERSHIP instead of the
+  -- lander. Pick the crewed part nearest the tree root (the primary craft's
+  -- pod), tie-broken by uid so the same blueprint always flies the same way.
+  local best_pod, best_rank
+  for _, d in pairs(bp.parts) do
+    if d.kind == "crewed" then
+      local depth, u, guard = 0, d.uid, 0
+      while by_uid[u] and (by_uid[u].parent or 0) ~= 0 and guard < 64 do
+        u = by_uid[u].parent
+        depth, guard = depth + 1, guard + 1
+      end
+      local rank = depth * 1e6 + d.uid
+      if not best_rank or rank < best_rank then best_rank, best_pod = rank, d end
+    end
+  end
+  if best_pod then
+    pod = { x = best_pod.x, y = best_pod.y, z = best_pod.z }
+    pod_uid = best_pod.uid
   end
   table.sort(decouplers, function(a, b) return a.y < b.y end)
   -- Build the ordered EVENT list: booster branches group into ring events by
@@ -477,6 +527,7 @@ local function load_bp(override)
   -- and again after every dock/undock rewrites the tree.
   dock.ports, dock.latched, dock.pending, dock.target = {}, 0, nil, nil
   dockRescan()
+  holdRegister(dock.node)
 end
 
 
@@ -677,12 +728,12 @@ end
 local SAS_KEYS = {
   ["1"] = "stability", ["2"] = "prograde", ["3"] = "retrograde",
   ["4"] = "normal", ["5"] = "antinormal", ["6"] = "radialin",
-  ["7"] = "radialout",
+  ["7"] = "radialout", ["8"] = "dock",
 }
 local SAS_LABEL = {
   off = "OFF", stability = "STAB", prograde = "PRO", retrograde = "RETRO",
   normal = "NML", antinormal = "ANTI-NML", radialin = "RAD-IN",
-  radialout = "RAD-OUT",
+  radialout = "RAD-OUT", dock = "DOCK",
 }
 
 function setSAS(m)
@@ -1130,19 +1181,26 @@ end
 -- Everything here is deliberately GLOBAL: the peripherals panel reads this
 -- state cross-script, and `fixedUpdate` sits at Lua's 60-upvalue ceiling — a
 -- global reference costs it nothing where another local would break it.
-local DOCK_CAPTURE_R = 0.55   -- port faces this close latch (metres)
-local DOCK_ALIGN = 0.80       -- ...if they're at least this square to each other
-local DOCK_CLOSE_V = 1.5      -- ...and closing/drifting no faster than this (m/s)
 local DOCK_ASSIST_R = 6.0     -- soft-capture magnetism reaches this far
 local DOCK_LOCKOUT = 2.5      -- s of no-recapture after an undock (or you'd re-latch)
 
 dock = {
+  -- The capture envelope lives ON the published table, not in locals: the HUD
+  -- and the panel tick the pilot's checklist against these every frame, and
+  -- `fixedUpdate` is at Lua's 60-upvalue ceiling — three more captured locals
+  -- is exactly the kind of thing that breaks it. A global costs nothing.
+  captureR = 0.55,   -- port faces this close latch (metres)
+  alignMin = 0.80,   -- ...if they're at least this square to each other
+  driftMax = 1.5,    -- ...and closing/drifting no faster than this (m/s)
   ports = {},      -- every mating face on the craft, vessel-local
   assist = true,   -- soft-capture magnetism (the panel toggles it)
   target = nil,    -- live approach readout: range / align / closing / lateral
   latched = 0,     -- how many of our ports are currently mated
   arm = 0.0,       -- `time` before which capture is locked out (post-undock)
   pending = nil,   -- a capture in flight, folded in on the tick the merge lands
+  auto = false,    -- docking autopilot: RCS flies the approach for you
+  lock = nil,      -- { id = <their node id>, uid = <their port uid> } target lock
+  map = false,     -- the map view owns the screen (published by fixedUpdate)
   msg = "",        -- one-line status the panel and HUD show
   node = nil,      -- our own root (stashed so the cross-script hooks can reach it)
   next_uid = 1,    -- uid allocator for absorbed parts
@@ -1171,14 +1229,26 @@ local function dock_retree()
   axial_set_cache = {}
 end
 
--- Which way does this port FACE? A port welded into a stack has an axial
--- neighbour on one side and open space on the other, and only the open face can
--- mate. Read straight off the attachment tree (its own axial mount + its axial
--- children) — geometry guessing gets this wrong the moment a part is nudged.
--- Returns +1 / −1 along the part's own +Y, or nil when BOTH faces are occupied
--- (a port buried mid-stack, or one that's already docked).
-local function dock_free_face(d)
-  local ax, ay, az = part_axis(d)
+-- Which way does this port FACE, and is that face usable?
+--
+-- A STACKED port has an axial neighbour on one side and open space on the
+-- other, and only the open face can mate — so its axis is its own ±Y, signed
+-- by which side is free. A port bolted to a FLANK is a different animal: the
+-- hull is behind it by construction and its mating face is the outward one,
+-- which for a `radial_orient` part is its local **+X** (see the builder's
+-- `yaw = atan2(-dz, dx)` — that yaw is chosen precisely to aim +X outward).
+-- Getting this wrong is why a side berth used to point at the sky.
+--
+-- Read off the attachment TREE, not geometry: a part nudged half a centimetre
+-- must not change which way its port faces. Returns (ax, ay, az, buried).
+local function dock_face(d)
+  local radial = (d.att or "") == "radial"
+  local ax, ay, az
+  if radial then
+    ax, ay, az = part_axis_x(d)
+  else
+    ax, ay, az = part_axis(d)
+  end
   local plus, minus = false, false
   local function mark(q)
     if not q then return end
@@ -1189,14 +1259,19 @@ local function dock_free_face(d)
       minus = true
     end
   end
-  if (d.att or "") ~= "radial" then mark(bp_by_uid[d.parent or 0]) end
+  -- A radial port's own mount sits behind it; only an AXIAL mount blocks a face.
+  if not radial then mark(bp_by_uid[d.parent or 0]) end
   for _, u in ipairs(bp_kids[d.uid] or {}) do
     local q = bp_by_uid[u]
-    if q and (q.att or "") ~= "radial" then mark(q) end
+    if q then mark(q) end
   end
-  if plus and minus then return nil end
-  if plus then return -1 end
-  return 1
+  if radial then
+    -- One usable face. Anything parked out along it buries the port.
+    return ax, ay, az, plus
+  end
+  if plus and minus then return ax, ay, az, true end
+  local sign = plus and -1 or 1
+  return ax * sign, ay * sign, az * sign, false
 end
 
 -- (Re)build the port list from the current blueprint — after load, after every
@@ -1211,15 +1286,37 @@ function dockRescan()
     if (d.dock or 0) == 1 and (part_hp[u] or 0) > 0 then
       local p = keep[u] or { uid = u }
       p.x, p.y, p.z = d.x, d.y, d.z
-      local sign = dock_free_face(d)
-      local ax, ay, az = part_axis(d)
-      p.buried = (sign == nil)
-      sign = sign or 1
-      p.ax, p.ay, p.az = ax * sign, ay * sign, az * sign
+      p.ax, p.ay, p.az, p.buried = dock_face(d)
+      p.radial = (d.att or "") == "radial"
       if p.mate and not bp_by_uid[p.mate] then p.mate = nil end
-      if p.mate then dock.latched = dock.latched + 1 end
       dock.ports[#dock.ports + 1] = p
     end
+  end
+  -- MATED IN THE VAB: two docking ports stacked face to face in the builder are
+  -- ALREADY a seam — that's how you carry a lander up bolted to its mothership,
+  -- and it's the whole point of the part. Nothing captured them, so nothing set
+  -- their latch; read it off the attachment tree instead. Without this the pair
+  -- comes up "blocked" (both faces occupied, neither mated) and there is no way
+  -- to ever separate them — which is exactly what a stacked pair looks like.
+  --
+  -- A LONE port is not a seam. One port with a part welded to each face is just
+  -- a structural spacer: there'd be nothing on the far half to re-dock to, so
+  -- refusing it is honest rather than handing you a one-way separation that
+  -- silently ends the mission. Ports come in pairs.
+  for _, p in ipairs(dock.ports) do
+    if not p.mate then
+      local d = bp_by_uid[p.uid]
+      local pu = (d and (d.att or "") ~= "radial") and (d.parent or 0) or 0
+      local host = pu ~= 0 and bp_by_uid[pu]
+      if host and (host.dock or 0) == 1 then
+        local q = dock_port(pu)
+        if q and not q.mate then p.mate, q.mate = q.uid, p.uid end
+      end
+    end
+  end
+  dock.latched = 0
+  for _, p in ipairs(dock.ports) do
+    if p.mate then dock.latched = dock.latched + 1 end
   end
 end
 
@@ -1441,13 +1538,11 @@ local function dock_absorb(node)
   for _, dev in pairs(DEVICES) do dev.anim_applied = nil end -- re-pose the newcomers
   fuel = math.min(fuel_cap, fuel + (man.fuel or 0))
   elec.charge = math.min(elec.cap, elec.charge + (man.charge or 0))
+  -- The rescan pairs the seam for us: we just hung the module's port off ours
+  -- in the tree, which is the same shape as a pair stacked in the VAB, so one
+  -- rule covers both and there's no second place for latch state to go stale.
   dock_retree()
   dockRescan()
-  local pm, qm = dock_port(pend.port.uid), mate and dock_port(mate)
-  if pm and qm then
-    pm.mate, qm.mate = qm.uid, pm.uid
-    dock.latched = dock.latched + 2
-  end
   dock.pending = nil
   dock.arm = time + DOCK_LOCKOUT
   dock.msg = string.format("DOCKED — %s (%d parts)", man.name or "module", #absorbed)
@@ -1666,9 +1761,15 @@ function dockTick(node, info, dt)
           local dx, dy, dz = q.x - m.x, q.y - m.y, q.z - m.z
           local d = math.sqrt(dx * dx + dy * dy + dz * dz)
           local align = -(m.ax * q.ax + m.ay * q.ay + m.az * q.az)
-          if d < DOCK_ASSIST_R and align > 0.15 and (not best or d < best.d) then
+          -- A LOCKED target always wins, however far or however crooked: once
+          -- you've picked a berth the readout must keep describing THAT berth,
+          -- or the numbers you're flying on jump to a nearer port mid-approach.
+          local locked = dock.lock and dock.lock.id == v.node.id
+            and dock.lock.uid == q.uid
+          if (locked or (d < DOCK_ASSIST_R and align > 0.15))
+            and (not best or best.locked ~= true) and (locked or not best or d < best.d) then
             local inv = 1.0 / math.max(d, 1e-6)
-            best = { d = d, align = align, m = m, q = q, v = v,
+            best = { d = d, align = align, m = m, q = q, v = v, locked = locked,
                      ux = dx * inv, uy = dy * inv, uz = dz * inv }
           end
         end
@@ -1695,7 +1796,16 @@ function dockTick(node, info, dt)
     name = best.v.node.name or "craft", range = best.d, align = best.align,
     closing = closing, drift = drift,
     lateral = math.sqrt(math.max(0.0, best.d * best.d - proj * proj)),
-    port = best.m.p.uid,
+    port = best.m.p.uid, uid = best.q.uid, id = best.v.node.id,
+    locked = best.locked or false,
+    -- Geometry the autopilot and the guide lines fly on: both port faces in
+    -- world space, the APPROACH CORRIDOR (down the target's own normal — you
+    -- come in along their centreline, not straight at them from wherever you
+    -- happen to be), and their velocity so we match it instead of the world's.
+    mx = best.m.x, my = best.m.y, mz = best.m.z,
+    qx = best.q.x, qy = best.q.y, qz = best.q.z,
+    max = -best.q.ax, may = -best.q.ay, maz = -best.q.az,
+    vx = oi and oi.vel.x or 0, vy = oi and oi.vel.y or 0, vz = oi and oi.vel.z or 0,
   }
   -- SOFT CAPTURE: a spring toward their port plus a damper on the relative
   -- motion. The SPRING is applied at our port, so it swings the craft square as
@@ -1715,7 +1825,7 @@ function dockTick(node, info, dt)
   end
   -- LATCH. Close enough, square enough, slow enough — and past the lockout that
   -- stops a fresh undock snapping straight back on.
-  if best.d < DOCK_CAPTURE_R and best.align > DOCK_ALIGN and drift < DOCK_CLOSE_V
+  if best.d < dock.captureR and best.align > dock.alignMin and drift < dock.driftMax
     and time > dock.arm and dock_is_master(node, best.v) then
     local man = best.v.dockManifest and best.v.dockManifest(best.q.uid)
     if man and #man.parts > 0 then
@@ -1731,6 +1841,472 @@ function dockTick(node, info, dt)
   end
 end
 
+-- ── RCS ─────────────────────────────────────────────────────────────────────
+-- Pooled translation authority. Every fitted block adds thrust and the push
+-- goes through the CENTRE OF MASS — a deliberate simplification, and the one
+-- that makes docking flyable. A real block set fires asymmetric nozzles and you
+-- spend the whole approach fighting the spin they induce; here a lopsided set
+-- costs you nothing but looks wrong. That is the right trade for a control
+-- whose entire job is 5 cm corrections.
+--
+--   H / N   translate FORE / AFT — along the nose, the axis a stack docks on
+--   J / L   translate left / right
+--   I / K   translate up / down
+--   R       RCS on / off (also a row in the peripherals console)
+local RCS_BURN = 0.06   -- fuel per second per block at full deflection
+local rcs_plumes = nil  -- uid → the block's plume node, resolved once
+
+-- Every fitted block's world position + its share of the push, plus the pooled
+-- thrust. Also where the plume nodes get cached.
+local function rcs_total()
+  local t = 0.0
+  for _, u in ipairs(DEVICES.rcs.parts) do
+    local d = bp_by_uid[u]
+    if d then t = t + (d.rcs_thrust or 0) end
+  end
+  return t
+end
+
+-- Light or stop every block's plume together. The blocks fire as a set, so one
+-- tell for the set is honest — and it means a ringed craft doesn't flicker.
+local function rcs_plume(node, on, mag)
+  if not rcs_plumes then rcs_plumes = {} end
+  for _, u in ipairs(DEVICES.rcs.parts) do
+    local pn = rcs_plumes[u]
+    if not (pn and pn.valid) then
+      pn = nil
+      local c = child_of_uid(node, u)
+      if c then
+        for _, g in ipairs(c:children()) do
+          if g.name == "RCS Plume" then pn = g end
+        end
+      end
+      rcs_plumes[u] = pn
+    end
+    if pn then
+      local ps = pn:particles()
+      if ps then
+        if on and not ps:isPlaying() then ps:play() end
+        if not on and ps:isPlaying() then ps:stop() end
+        if on then ps:setIntensity(0.25 + mag * 0.7) end
+      end
+      local l = pn:getcomponent("PointLight")
+      if l then l.intensity = on and (0.4 + mag * 1.6) or 0.0 end
+    end
+  end
+end
+
+-- The DOCKING AUTOPILOT's translation command, in the VESSEL frame
+-- (right, nose, forward). It flies the approach the way you would if you were
+-- patient: kill the lateral offset first, and only close along the axis once
+-- you're near the centreline — then close slowly, slower the nearer you get.
+-- Returns nil when there's nothing to fly toward.
+local function rcs_auto_cmd(node, info)
+  local t = dock.target
+  if not (dock.auto and t and t.mx) then return nil end
+  local rx, up, rz = basis(node)
+  local fwd = { x = -rz.x, y = -rz.y, z = -rz.z }
+  local right = {}
+  right.x, right.y, right.z = cross(fwd.x, fwd.y, fwd.z, up.x, up.y, up.z)
+  -- Offset from OUR port to THEIRS, split into "along their axis" (the
+  -- approach corridor) and "across it" (the miss).
+  local dx, dy, dz = t.qx - t.mx, t.qy - t.my, t.qz - t.mz
+  local along = dx * t.max + dy * t.may + dz * t.maz
+  local ox, oy, oz = dx - t.max * along, dy - t.may * along, dz - t.maz * along
+  local lat = math.sqrt(ox * ox + oy * oy + oz * oz)
+  -- Desired velocity: cancel the miss at ~0.4 m/s, close at a rate that falls
+  -- off with range and waits for the centreline.
+  local wx, wy, wz = 0.0, 0.0, 0.0
+  if lat > 0.02 then
+    local s = math.min(0.4, lat * 0.8) / lat
+    wx, wy, wz = ox * s, oy * s, oz * s
+  end
+  local close = (lat < 0.25) and math.min(0.35, math.max(0.06, t.range * 0.4)) or 0.0
+  wx = wx + t.max * close
+  wy = wy + t.may * close
+  wz = wz + t.maz * close
+  -- ...and steer toward it: command = (want − have), clamped to the stick.
+  local ex = wx - (info.vel.x - (t.vx or 0))
+  local ey = wy - (info.vel.y - (t.vy or 0))
+  local ez = wz - (info.vel.z - (t.vz or 0))
+  local el = math.sqrt(ex * ex + ey * ey + ez * ez)
+  if el < 0.01 then return 0, 0, 0 end
+  local g = math.min(1.0, el * 3.0) / el
+  ex, ey, ez = ex * g, ey * g, ez * g
+  -- Same ordering the stick uses: (right, fore along the nose, seat-up).
+  return ex * right.x + ey * right.y + ez * right.z,
+         ex * up.x + ey * up.y + ez * up.z,
+         ex * fwd.x + ey * fwd.y + ez * fwd.z
+end
+
+-- Read the stick (or the autopilot), push, burn, and light the plumes. Global
+-- so `fixedUpdate` can call it without spending one of its last upvalues.
+function rcsTick(node, info, dt)
+  local dev = DEVICES.rcs
+  if destroyed or #dev.parts == 0 then
+    rcs.firing, rcs.cmd = false, 0.0
+    return
+  end
+  rcs.thrust = rcs_total()
+  -- Vessel-frame command: (right, FORE along the nose, up out of the seat).
+  local tx, ty, tz = 0, 0, 0
+  if piloting and not dock.map then
+    tx = (input.key("l") and 1 or 0) - (input.key("j") and 1 or 0)
+    ty = (input.key("h") and 1 or 0) - (input.key("n") and 1 or 0)
+    tz = (input.key("i") and 1 or 0) - (input.key("k") and 1 or 0)
+  end
+  local manual = (tx ~= 0 or ty ~= 0 or tz ~= 0)
+  if not manual then
+    -- The autopilot only ever has the stick when you don't.
+    local ax, ay, az = rcs_auto_cmd(node, info)
+    if ax then tx, ty, tz = ax, ay, az end
+  end
+  local mag = math.sqrt(tx * tx + ty * ty + tz * tz)
+  local live = dev.on and mag > 0.01 and fuel > 0 and not info.anchored
+    and rcs.thrust > 0
+  rcs.firing, rcs.cmd = live, live and math.min(1.0, mag) or 0.0
+  if not live then
+    rcs_plume(node, false, 0)
+    return
+  end
+  mag = math.min(1.0, mag)
+  local inv = 1.0 / math.sqrt(tx * tx + ty * ty + tz * tz)
+  tx, ty, tz = tx * inv, ty * inv, tz * inv
+  -- Vessel frame → world. `ty` rides the NOSE (`up` is the stack axis here),
+  -- which is what you want on a stack: H closes the gap, N backs off. `tz`
+  -- rides the seat's up, which is the hull's −Z column.
+  local rx, up, rz = basis(node)
+  local fx, fy, fz = -rz.x, -rz.y, -rz.z
+  local rgx, rgy, rgz = cross(fx, fy, fz, up.x, up.y, up.z)
+  local wx = rgx * tx + up.x * ty + fx * tz
+  local wy = rgy * tx + up.y * ty + fy * tz
+  local wz = rgz * tx + up.z * ty + fz * tz
+  local f = rcs.thrust * mag
+  assembly.force(node, vec3(wx * f, wy * f, wz * f))
+  fuel = math.max(0.0, fuel - #dev.parts * RCS_BURN * mag * dt)
+  rcs_plume(node, true, mag)
+end
+
+-- ── hull contact (INTERIM) ──────────────────────────────────────────────────
+-- The engine's solver has no body-vs-body pass: two separated vessels pass
+-- straight through each other, which makes a station something you fly through
+-- rather than dock with. Until the engine grows real compound-vs-compound
+-- contacts (task floptle/0032), this is a game-side stand-in.
+--
+-- Every part is one sphere at its SMALLEST half-dimension. Deliberately
+-- conservative: an approximation that under-reports is a bumper you can still
+-- dock through, while one that over-reports is a force field that shoves the
+-- port away before it can ever latch. Overlaps push apart with a spring-damper
+-- applied AT the contact, so a glancing hit spins you the way it should.
+-- DOCKING PORTS ARE EXEMPT — they have to touch to latch.
+local BUMP_K, BUMP_C = 55.0, 10.0
+local bump_cache = { t = -1.0, list = nil, radius = 0.0 }
+
+local function part_radius(d)
+  local wide = math.max(d.rx or 0, d.rz or 0)
+  if wide <= 0 then wide = (d.h or 1.0) * 0.5 end
+  return math.max(0.12, math.min(wide, (d.h or 1.0) * 0.5))
+end
+
+-- Our live hull, as world spheres — cached per tick because every other vessel
+-- in range asks for it, and both sides of a pair ask every tick.
+function hullSpheres()
+  if bump_cache.t == time and bump_cache.list then return bump_cache.list, bump_cache.radius end
+  local node = dock.node
+  local out = {}
+  bump_cache.t, bump_cache.list, bump_cache.radius = time, out, 0.0
+  if destroyed or not node or not node.valid then return out, 0.0 end
+  local info = assembly.info(node)
+  if not info then return out, 0.0 end
+  local rx, up, rz = basis(node)
+  local bx, by, bz = base_of(node, info)
+  local reach = 0.0
+  for u, d in pairs(bp_by_uid) do
+    if (d.dock or 0) ~= 1 and (part_hp[u] or 0) > 0 then
+      local r = part_radius(d)
+      out[#out + 1] = {
+        x = bx + rx.x * d.x + up.x * d.y + rz.x * d.z,
+        y = by + rx.y * d.x + up.y * d.y + rz.y * d.z,
+        z = bz + rx.z * d.x + up.z * d.y + rz.z * d.z,
+        r = r,
+      }
+      local off = math.sqrt(d.x * d.x + d.y * d.y + d.z * d.z) + r
+      if off > reach then reach = off end
+    end
+  end
+  bump_cache.radius = reach
+  return out, reach
+end
+
+function hullBump(node, info, dt)
+  if destroyed or info.anchored then return end
+  local mine, my_reach = hullSpheres()
+  if #mine == 0 then return end
+  local m = math.max(0.1, info.mass or 1.0)
+  local bx, by, bz = base_of(node, info)
+  for _, v in ipairs(findScripts("vessel_controller")) do
+    if v.hullSpheres and v.node and v.node.valid and v.node.id ~= node.id then
+      local dx0, dy0, dz0 = v.node.x - bx, v.node.y - by, v.node.z - bz
+      local d0 = math.sqrt(dx0 * dx0 + dy0 * dy0 + dz0 * dz0)
+      local theirs, their_reach = v.hullSpheres()
+      if d0 < my_reach + their_reach + 2.0 and #theirs > 0 then
+        local oi = assembly.info(v.node)
+        local ovx = oi and oi.vel.x or 0
+        local ovy = oi and oi.vel.y or 0
+        local ovz = oi and oi.vel.z or 0
+        for _, a in ipairs(mine) do
+          for _, b in ipairs(theirs) do
+            local dx, dy, dz = a.x - b.x, a.y - b.y, a.z - b.z
+            local dd = dx * dx + dy * dy + dz * dz
+            local sum = a.r + b.r
+            if dd < sum * sum and dd > 1e-9 then
+              local dist = math.sqrt(dd)
+              local ux, uy, uz = dx / dist, dy / dist, dz / dist
+              -- Spring out of the overlap...
+              local push = math.min(sum - dist, 0.6) * BUMP_K * m
+              -- ...and damp the CLOSING component only, so resting contact
+              -- settles instead of pumping energy into a stack of parts.
+              local rvx = info.vel.x - ovx
+              local rvy = info.vel.y - ovy
+              local rvz = info.vel.z - ovz
+              local vn = rvx * ux + rvy * uy + rvz * uz
+              if vn < 0 then push = push - vn * BUMP_C * m end
+              assembly.forceAt(node, vec3(ux * push, uy * push, uz * push),
+                vec3((a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5))
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+-- ── docking guides ──────────────────────────────────────────────────────────
+-- Drawn in the CAMERA pass (post-writeback), because a guide computed in
+-- fixedUpdate floats a rails-carry beside the hull on any orbiting world — the
+-- exact error that would make an alignment aid lie to you.
+--
+-- Three things, and no more: a ring on each port face so you can SEE which
+-- hardware is talking; the approach CORRIDOR down the target's own centreline,
+-- which is the line you actually have to fly; and the miss — a bar from where
+-- you are to where the corridor is, which turns "am I lined up?" into a length
+-- you can watch shrink. The corridor goes green the moment every capture
+-- condition is met, so the last second of a dock needs no HUD at all.
+function dockGuides()
+  local t = dock.target
+  if not t or not t.mx or dock.map then return end
+  local ok = t.range < dock.captureR and t.align > dock.alignMin
+    and t.drift < dock.driftMax
+  local r, g, b = 1.0, 0.72, 0.2
+  if ok then
+    r, g, b = 0.3, 1.0, 0.45
+  elseif t.locked then
+    r, g, b = 0.5, 0.8, 1.0
+  end
+  -- The two faces.
+  draw.ring(t.mx, t.my, t.mz, t.max, t.may, t.maz, 0.42, r, g, b, 0.95)
+  draw.ring(t.qx, t.qy, t.qz, t.max, t.may, t.maz, 0.42, r, g, b, 0.7)
+  -- The corridor: back down the target's normal, far enough to fly in on.
+  local L = math.max(2.0, math.min(12.0, t.range * 2.0))
+  draw.line(t.qx, t.qy, t.qz,
+            t.qx - t.max * L, t.qy - t.may * L, t.qz - t.maz * L, r, g, b, 0.5)
+  -- The MISS: our port, out to its own point on the corridor. Watch it shrink.
+  local dx, dy, dz = t.mx - t.qx, t.my - t.qy, t.mz - t.qz
+  local along = dx * t.max + dy * t.may + dz * t.maz
+  local cx = t.qx + t.max * along
+  local cy = t.qy + t.may * along
+  local cz = t.qz + t.maz * along
+  if t.lateral > 0.03 then
+    draw.line(t.mx, t.my, t.mz, cx, cy, cz, 1.0, 0.35, 0.35, 0.9)
+  end
+  -- Where we'd arrive if we just kept drifting: the closing-rate lead marker.
+  if t.closing > 0.02 then
+    draw.sphere(cx, cy, cz, 0.10, r, g, b, 0.8)
+  end
+end
+
+-- ── recovery ────────────────────────────────────────────────────────────────
+-- Bring a craft home and you get most of its hardware value back. That is the
+-- other half of the money loop: a hull is BOUGHT at rollout, so the difference
+-- between a landing and a crater is the difference between an expensive flight
+-- and a ruinous one — and between a company that grows and one that doesn't.
+--
+-- Recoverable means: landed, stopped, and near enough to the base that a truck
+-- could plausibly go and get it. Damaged parts refund less; destroyed ones
+-- refund nothing, because they aren't there.
+local RECOVER_RANGE = 260.0   -- metres from the base site
+local RECOVER_RATE = 0.80     -- fraction of a pristine part's value returned
+
+-- Distance to the home base (the crew spawn), in the body-relative frame that
+-- survives the planet's orbit. nil when there's no base on this world.
+local function base_distance(node)
+  local a = find("Astronaut")
+  local home = find("FacCommand") or find("FacHangar")
+  local d = space.dominant(node.x, node.y, node.z)
+  local b = d and space.body(d)
+  if not (home and b) then return nil end
+  -- Facilities are planet-PARENTED, so their coords are already body-relative.
+  local rx2, ry2, rz2 = node.x - b.x, node.y - b.y, node.z - b.z
+  local dx, dy, dz = rx2 - home.x, ry2 - home.y, rz2 - home.z
+  return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+-- What this craft is worth back, right now.
+function recoverValue()
+  local v = 0.0
+  for u, d in pairs(bp_by_uid) do
+    local hp = part_hp[u] or 0
+    if hp > 0 then v = v + (d.cost or 0) * RECOVER_RATE * hp end
+  end
+  return math.floor(v)
+end
+
+-- Can we recover here? Returns (ok, why-not).
+function recoverReady()
+  local node = dock.node
+  if destroyed or not node or not node.valid then return false, "no craft" end
+  local info = assembly.info(node)
+  if not info then return false, "no craft" end
+  if not info.grounded then return false, "not landed" end
+  local sp = math.sqrt(info.vel.x ^ 2 + info.vel.y ^ 2 + info.vel.z ^ 2)
+  if sp > 1.5 then return false, "still moving" end
+  local d = base_distance(node)
+  if not d then return false, "no base on this world" end
+  if d > RECOVER_RANGE then
+    return false, string.format("%.0f m from base", d)
+  end
+  return true, nil
+end
+
+-- Recover: bank the value, put the pilot back on the ground at the base, and
+-- take the craft off the map. Everything docked to it comes home too — that's
+-- the point of hauling a full stack back rather than shedding it in orbit.
+function recoverCraft()
+  local ok = recoverReady()
+  if not ok then return false end
+  local node = dock.node
+  local value = recoverValue()
+  local co = findScript("company")
+  if co and co.earn then
+    co.earn(value, "recovered " .. (node.name or "craft") .. " (" .. part_total .. " parts)")
+  end
+  -- Whatever it was carrying comes home with it: a recovery is the crane
+  -- unloading the hold, not the hold being thrown away with the hull.
+  local inv = findScript("inventory")
+  if inv and holdId and not inv.isEmpty(holdId) then
+    local n = inv.transferAll(holdId, "base")
+    if n > 0 then log(string.format("  cargo: %d unit(s) into the warehouse", n)) end
+  end
+  save.set("mission.recovered", true)
+  if piloting then
+    piloting = false
+    throttle = 0.0
+    set_flames(node, 0)
+    silence_loops()
+    set_hud(nil)
+    set_stage_list(nil)
+    set_navball(false)
+    if not astronaut or not astronaut.valid then astronaut = find("Astronaut") end
+    if astronaut then
+      local i2 = assembly.info(node)
+      local bx2, by2, bz2 = base_of(node, i2)
+      astronaut.x, astronaut.y, astronaut.z = bx2, by2 + 2.0, bz2
+      astronaut.vx, astronaut.vy, astronaut.vz = 0, 0, 0
+      astronaut.visible = true
+    end
+  end
+  log(string.format("RECOVERED — %s   +$%d", node.name or "craft", value))
+  destroy(node)
+  destroyed = true
+  return true
+end
+
+-- ── the cargo hold ─────────────────────────────────────────────────────────
+-- Every Cargo Bay aboard pools into ONE inventory container, keyed by the
+-- craft's name ("hold:Kestrel I"). The astronaut fills it on the surface (the
+-- inventory panel's transfer), the Commerce Depot empties it at home, and a
+-- recovered craft brings its load in with it.
+--
+-- What's inside is REAL MASS: `holdApplyMass` writes the manifest back onto the
+-- bays' rigidbodies and rebuilds the compound, so the loaded return trip climbs
+-- worse than the empty outbound one did. It only runs when the manifest
+-- actually changed — loading and unloading are both things you do parked, and a
+-- per-tick rebuild would be a per-tick rebuild.
+--
+-- Two craft with the SAME NAME share a hold. That's a consequence of keying on
+-- something the player chose and can recognise, and it's the honest trade: a
+-- name you can find beats a uid you can't.
+holdId = nil          -- published: the inventory container, nil = no bays
+holdCap = 0.0         -- published: kilograms
+craftName = "Vessel"  -- published
+local hold_parts = {}
+local hold_applied = -1.0
+local CARGO_T_PER_KG = 0.001   -- game mass units per kilogram of cargo
+
+function holdRegister(node)
+  hold_parts, holdCap = {}, 0.0
+  for _, d in pairs((bp and bp.parts) or {}) do
+    if (d.cargo or 0) > 0 then
+      hold_parts[#hold_parts + 1] = { uid = d.uid, dry = d.mass or 0.9 }
+      holdCap = holdCap + d.cargo
+    end
+  end
+  if node and node.valid and node.name then craftName = node.name end
+  holdId = (holdCap > 0) and ("hold:" .. craftName) or nil
+  hold_applied = -1.0
+  local inv = findScript("inventory")
+  if inv and holdId then inv.setCap(holdId, holdCap) end
+end
+
+function holdMass()
+  local inv = findScript("inventory")
+  if not (inv and holdId) then return 0.0 end
+  return inv.mass(holdId)
+end
+
+-- The bay part's live node: matched by its blueprint offset, the same way the
+-- peripheral animator finds legs and panels.
+local function part_node(node, d)
+  if not (node and node.valid and d) then return nil end
+  for _, c in ipairs(node:children()) do
+    if math.abs((c.x or 0) - d.x) < 0.05 and math.abs((c.z or 0) - d.z) < 0.05
+      and math.abs((c.y or 0) - d.y) < 0.45 then
+      return c
+    end
+  end
+  return nil
+end
+
+-- Push the manifest's mass into the physics. Call after any transfer.
+function holdApplyMass(node)
+  node = node or dock.node
+  local m = holdMass()
+  if math.abs(m - hold_applied) < 0.5 then return false end
+  hold_applied = m
+  if #hold_parts == 0 then return false end
+  local share = m / #hold_parts * CARGO_T_PER_KG
+  local changed = false
+  for _, hp in ipairs(hold_parts) do
+    local ch = part_node(node, bp_by_uid[hp.uid])
+    local rb = ch and ch:getcomponent("RigidBody")
+    if rb then
+      rb.mass = hp.dry + share
+      changed = true
+    end
+  end
+  if changed then assembly.rebuild(node) end
+  return changed
+end
+
+-- What the HUD / panels say about the hold. nil when the craft has no bays —
+-- the row hides itself rather than reading "0 / 0 kg".
+function holdLine()
+  if not holdId then return nil end
+  local inv = findScript("inventory")
+  if not inv then return nil end
+  return string.format("HOLD  %s", inv.line(holdId))
+end
+
 -- ── the peripherals interface ──────────────────────────────────────────────
 -- What the peripherals panel talks to. It's a GENERIC device browser: it asks
 -- for the fitted device list and toggles entries by id, so a new peripheral
@@ -1741,7 +2317,12 @@ function peripherals()
   for id, dev in pairs(DEVICES) do
     if #dev.parts > 0 then
       out[#out + 1] = { id = id, label = dev.label, key = dev.key, on = dev.on,
-                        anim = dev.anim, count = #dev.parts, order = dev.order or 50 }
+                        anim = dev.anim, count = #dev.parts, order = dev.order or 50,
+                        -- A thruster bus is ON/OFF; a folding leg is
+                        -- DEPLOYED/STOWED. The row says whichever fits.
+                        verbOn = dev.verb_on or "DEPLOYED",
+                        verbOff = dev.verb_off or "STOWED",
+                        instant = dev.launch == false and dev.speed >= 8.0 }
     end
   end
   table.sort(out, function(a, b)
@@ -1772,6 +2353,25 @@ end
 
 -- The docking rows: one entry per port, in a stable order, with everything the
 -- panel needs to draw and act on it.
+-- Lock (or clear) the berth we're flying to. The panel cycles through every
+-- port in reach; a lock keeps the readout, the guides and DOCK ALIGN all
+-- describing the SAME berth instead of snapping to whatever drifts nearest.
+function dockLock()
+  local t = dock.target
+  if dock.lock then
+    dock.lock = nil
+    dock.msg = "target released"
+    return false
+  end
+  if not t then
+    dock.msg = "nothing in range to lock"
+    return false
+  end
+  dock.lock = { id = t.id, uid = t.uid }
+  dock.msg = "target locked: " .. (t.name or "craft")
+  return true
+end
+
 function dockPorts()
   local out = {}
   for _, p in ipairs(dock.ports) do
@@ -2322,6 +2922,7 @@ function fixedUpdate(node, dt)
   -- the map repaints on the shared node.
   local sc_map = findScript("ship_controller")
   local map_open = (sc_map and sc_map.map_view) or false
+  dock.map = map_open
   -- Flying from the map pulls the camera far back; keep this vessel exempt from
   -- distant-craft LOD while it's open so throttle/steering stay live and our
   -- orbital velocity keeps feeding the trajectory. Released when the map closes.
@@ -2608,6 +3209,10 @@ function fixedUpdate(node, dt)
   end
   gear_deployed = DEVICES.gear.on
   update_peripherals(node, dt)
+  -- Translation + hull contact. Both are globals so `fixedUpdate` spends no
+  -- upvalue on them (it sits at Lua's 60-upvalue ceiling; see `power_tick`).
+  rcsTick(node, info, dt)
+  hullBump(node, info, dt)
   update_chutes(node, dt)
   local p = (input.key("w") and 1 or 0) - (input.key("s") and 1 or 0)
   local y = (input.key("a") and 1 or 0) - (input.key("d") and 1 or 0)
@@ -2637,14 +3242,38 @@ function fixedUpdate(node, dt)
   else
     -- Pointing autopilot: rotate the nose toward the target with the KSP
     -- braking law (fastest rate that can still stop on arrival).
-    local ddom = space.dominant(node.x, node.y, node.z)
-    local db = ddom and space.body(ddom)
-    local tx, ty, tz = sas_target_dir(node, db, sas_mode)
+    --
+    -- DOCK ALIGN (mode "dock", key 8) is the SAME law about a different vector:
+    -- it swings whichever PORT you're flying onto the approach corridor. That
+    -- distinction is the whole feature — aiming the nose at the target is
+    -- wrong for a side berth and wrong for a belly port, and it's why lining
+    -- up by hand was so miserable. Align the port, not the ship.
+    local cur_x, cur_y, cur_z = nx, ny, nz
+    local tx, ty, tz
+    if sas_mode == "dock" then
+      local t = dock.target
+      if t and t.mx then
+        local p
+        for _, q in ipairs(dock.ports) do
+          if q.uid == t.port then p = q end
+        end
+        if p then
+          cur_x = rx.x * p.ax + up.x * p.ay + rz.x * p.az
+          cur_y = rx.y * p.ax + up.y * p.ay + rz.y * p.az
+          cur_z = rx.z * p.ax + up.z * p.ay + rz.z * p.az
+          tx, ty, tz = t.max, t.may, t.maz
+        end
+      end
+    else
+      local ddom = space.dominant(node.x, node.y, node.z)
+      local db = ddom and space.body(ddom)
+      tx, ty, tz = sas_target_dir(node, db, sas_mode)
+    end
     if tx then
       sasm_x, sasm_y, sasm_z = tx, ty, tz
-      local axx, axy, axz = cross(nx, ny, nz, tx, ty, tz)
+      local axx, axy, axz = cross(cur_x, cur_y, cur_z, tx, ty, tz)
       local s = math.sqrt(axx * axx + axy * axy + axz * axz)
-      local c = nx * tx + ny * ty + nz * tz
+      local c = cur_x * tx + cur_y * ty + cur_z * tz
       if s > 1e-5 then
         local theta = math.atan2(s, c)
         local rate = math.min(params.max_rate, math.sqrt(2 * params.rate_accel * theta))
@@ -2904,16 +3533,29 @@ function fixedUpdate(node, dt)
     -- in the panel; here it's one line you can fly off.
     if dock.target then
       local t = dock.target
+      -- ✓ marks each capture condition that's already satisfied, so the last
+      -- few metres are a checklist rather than four numbers to interpret.
       lines[#lines + 1] = string.format(
-        "[DOCK]  %s  %.2f m   align %3d%%   lat %.2f   %+.2f m/s%s",
-        t.name, t.range, t.align * 100, t.lateral, t.closing,
-        dock.assist and "   MAG" or "")
+        "[DOCK]%s %s   %.2f m%s   align %3d%%%s   lat %.2f   %+.2f m/s%s",
+        t.locked and " ◎" or "", t.name,
+        t.range, t.range < dock.captureR and "✓" or "",
+        t.align * 100, t.align > dock.alignMin and "✓" or "",
+        t.lateral, t.closing, t.drift < dock.driftMax and "✓" or "")
+      lines[#lines + 1] = string.format("        %s%s%s",
+        dock.assist and "MAG " or "", dock.auto and "AUTO " or "",
+        (sas_mode == "dock") and "DOCK-ALIGN" or "[8] dock-align · [P] console")
     elseif dock.latched > 0 then
       lines[#lines + 1] = string.format("[DOCK]  %d port%s latched   [P] peripherals",
         dock.latched, dock.latched == 1 and "" or "s")
     end
+    if #DEVICES.rcs.parts > 0 then
+      lines[#lines + 1] = string.format(
+        "[RCS ]  %s  ×%d  %.0f kN%s   HN fore/aft · JL strafe · IK up/down",
+        DEVICES.rcs.on and "ON " or "OFF", #DEVICES.rcs.parts, rcs.thrust or 0,
+        rcs.firing and "  ▲" or "")
+    end
     lines[#lines + 1] =
-      "[SPACE] stage · [T] SAS · [G] gear · [P] peripherals · [.,] warp · [M] map · [F] exit"
+      "[SPACE] stage · [T] SAS · [G] gear · [R] RCS · [P] peripherals · [.,] warp · [M] map · [F] exit"
     set_hud(table.concat(lines, "\n"))
 
     -- The stage list (right edge): SEPARATION EVENTS in the builder's
@@ -2963,6 +3605,7 @@ function lateUpdate(node, dt)
     local einfo = assembly.info(node)
     if einfo then power_tick(node, einfo, dt) end
   end
+  if piloting then dockGuides() end
   if piloting or not astronaut or not astronaut.visible then return end
   local info = assembly.info(node)
   if board_dist(node, astronaut, info) > params.board_range + 1.4 then return end
