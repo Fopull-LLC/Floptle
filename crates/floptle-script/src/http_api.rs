@@ -199,7 +199,7 @@ fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> mlua::Result<Value> {
 /// …and back. A Lua table with a `1` key is an ARRAY; anything else is an
 /// object. That is the only rule Lua's one table type can support, and stating
 /// it is better than guessing per call.
-fn lua_to_json(v: &Value) -> mlua::Result<serde_json::Value> {
+pub(crate) fn lua_to_json(v: &Value) -> mlua::Result<serde_json::Value> {
     Ok(match v {
         Value::Nil => serde_json::Value::Null,
         Value::Boolean(b) => serde_json::Value::Bool(*b),
@@ -243,22 +243,31 @@ fn log(logs: &Rc<RefCell<Vec<ScriptLog>>>, level: LogLevel, msg: String) {
     logs.borrow_mut().push(ScriptLog { level, msg, source: None });
 }
 
-/// Build the `res` table a callback receives.
-fn reply_table(lua: &Lua, r: &HttpReply, want_json: bool) -> mlua::Result<Table> {
+/// Build the `res` table a callback receives. Shared with `account.*`, which
+/// calls a different server through a different transport and must still hand a
+/// script the one `res` shape — two spellings of "did it work" would be a
+/// gratuitous thing to make anybody remember.
+pub(crate) fn make_reply_table(
+    lua: &Lua,
+    status: u16,
+    body: &str,
+    error: Option<&str>,
+    parse_json: bool,
+) -> mlua::Result<Table> {
     let t = lua.create_table()?;
-    let ok = r.error.is_none() && (200..300).contains(&r.status);
+    let ok = error.is_none() && (200..300).contains(&status);
     t.set("ok", ok)?;
-    t.set("status", r.status)?;
-    t.set("body", r.body.as_str())?;
-    if let Some(e) = &r.error {
-        t.set("error", e.as_str())?;
+    t.set("status", status)?;
+    t.set("body", body)?;
+    if let Some(e) = error {
+        t.set("error", e)?;
     }
-    if want_json || r.said_json {
-        match serde_json::from_str::<serde_json::Value>(&r.body) {
+    if parse_json {
+        match serde_json::from_str::<serde_json::Value>(body) {
             Ok(v) => t.set("json", json_to_lua(lua, &v)?)?,
             // Malformed JSON SETS res.error rather than raising: a server
             // having a bad day must not take a script down with it.
-            Err(e) if r.error.is_none() => {
+            Err(e) if error.is_none() => {
                 t.set("ok", false)?;
                 t.set("error", format!("the reply is not valid JSON: {e}"))?;
             }
@@ -266,6 +275,10 @@ fn reply_table(lua: &Lua, r: &HttpReply, want_json: bool) -> mlua::Result<Table>
         }
     }
     Ok(t)
+}
+
+fn reply_table(lua: &Lua, r: &HttpReply, want_json: bool) -> mlua::Result<Table> {
+    make_reply_table(lua, r.status, &r.body, r.error.as_deref(), want_json || r.said_json)
 }
 
 /// Deliver every reply that has arrived. Called from the host's FRAME pass —

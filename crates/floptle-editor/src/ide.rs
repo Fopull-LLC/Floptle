@@ -2917,6 +2917,7 @@ const API_CATEGORIES: &[&str] = &[
     "input — keyboard & mouse",
     "drawing — draw.*",
     "the web — http.*, json.*",
+    "the player's account — account.*",
     // These two were routed to by `api_category` but never listed here, so the
     // whole UI surface — `ui.make`, `ui.on`, the pointer hooks, `color` — was
     // absent from the reference for as long as it has existed. Forty-three
@@ -2969,6 +2970,8 @@ fn api_category(label: &str) -> &'static str {
         "references — wire nodes in the Inspector"
     } else if label.starts_with("draw.") {
         "drawing — draw.*"
+    } else if label.starts_with("account.") {
+        "the player's account — account.*"
     } else if label.starts_with("http.") || label.starts_with("json.") || label == "openUrl" {
         "the web — http.*, json.*"
     } else if label.starts_with("vec3") || label.starts_with("vec2") || matches!(
@@ -3592,6 +3595,18 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "http.cancelAll", insert: "http.cancelAll()", doc: "http.cancelAll() — forget every pending callback. Stop and scene.load do this for you: a callback closes over nodes from the scene that asked, and delivering it into a fresh session is how one run inherits the previous one's network." },
     ApiEntry { label: "json.encode", insert: "json.encode(", doc: "json.encode(value) — a Lua value as a JSON string. A table with a [1] is an ARRAY, anything else is an object (that is the only rule Lua's single table type can support). http.post takes a table body directly, so you rarely need this by hand." },
     ApiEntry { label: "json.decode", insert: "json.decode(", doc: "json.decode(s) -> value, err — parse JSON. Bad input returns nil AND a message rather than raising: a reply from someone else\'s server is data, not a bug in your script. JSON null becomes nil, so a null field reads exactly like a missing one." },
+    ApiEntry { label: "account.signIn", insert: "account.signIn()", doc: "account.signIn() — begin signing the player in to their Foverse account (fopull.com). Returns IMMEDIATELY; watch account.state() and draw account.code(). The engine drives the OAuth device flow in Rust — the player approves in their browser, so the game never sees a password and never holds a token. Play only." },
+    ApiEntry { label: "account.state", insert: "account.state()", doc: "account.state() — \"signedOut\" | \"starting\" | \"waiting\" | \"signedIn\" | \"failed\". Polled rather than called back, because signing in takes as long as a person takes to pick up their phone and a sign-in screen is redrawing anyway." },
+    ApiEntry { label: "account.code", insert: "account.code()", doc: "account.code() — while state() is \"waiting\": { code = \"WXYZ-9999\", url = \"...\", expiresIn = 900 }. Show the code and send them to the url (openUrl does it) — that pairing is what the player approves. nil at any other time." },
+    ApiEntry { label: "account.player", insert: "account.player()", doc: "account.player() — { id, name, email, tier } once signed in, else nil. There is deliberately no way to read the access token: a shipped game's Lua is readable, so anything a script can hold a player can read out of the file." },
+    ApiEntry { label: "account.error", insert: "account.error()", doc: "account.error() — why the last sign-in failed, as a sentence you can put on screen. nil unless state() is \"failed\"." },
+    ApiEntry { label: "account.cancel", insert: "account.cancel()", doc: "account.cancel() — abandon a sign-in in progress (the player pressed Escape). Harmless at any other time." },
+    ApiEntry { label: "account.signOut", insert: "account.signOut()", doc: "account.signOut() — forget the session NOW, then clear the keyring and revoke the refresh token in the background. In that order on purpose: a player who presses Sign Out is signed out whether or not the network agrees." },
+    ApiEntry { label: "account.get", insert: "account.get(", doc: "account.get(\"/wallet\", function(res) end) — a Floptle Cloud call with the player's bearer token attached for you. Takes a PATH, not a URL: there is exactly one host it can reach, which is what makes attaching a token to it safe. Bare paths get the /api/floptle/v1 prefix; /userinfo and /oauth/* stay at the root. res is the same table http.* gives you." },
+    ApiEntry { label: "account.post", insert: "account.post(", doc: "account.post(\"/games/mygame/events\", { event = \"boss_killed\", event_id = id }, function(res) end) — report what HAPPENED and let the server decide what it is worth. A table body is sent as JSON. There is no endpoint that credits currency directly, by design: anything a client can announce, a modified client can announce." },
+    ApiEntry { label: "account.put", insert: "account.put(", doc: "account.put(\"/games/mygame/saves/slot1\", { data = t, expected_version = v }, function(res) end) — a cloud save. expected_version is optimistic concurrency: send the version you last read and a stale write gets 409 instead of silently clobbering the player's other machine." },
+    ApiEntry { label: "account.delete", insert: "account.delete(", doc: "account.delete(\"/games/mygame/saves/slot1\", function(res) end) — remove something from Floptle Cloud." },
+    ApiEntry { label: "account.inFlight", insert: "account.inFlight()", doc: "account.inFlight() — how many account calls are still waiting on a reply (cap 6). A spinner, or a guard against firing the same request every frame." },
     ApiEntry { label: "openUrl", insert: "openUrl(", doc: "openUrl(url) — open an http:// or https:// address in the player\'s own browser. The device-code sign-in flow needs it: the player approves the pairing on your real site, so the game never sees a password and needs no secret baked into it. Play only; if the platform refuses, the URL is logged instead so the player can still get there." },
     ApiEntry { label: "draw.text", insert: "draw.text(", doc: "draw.text(x, y, s, size, r,g,b [, a] [, align]) — a string on the SCREEN, in the pixels input.mouse() reports, without building a UI tree: a damage number, a frame-time readout, the count under a selection box. The engine measures and lays out the glyphs with the same font stack ui.make uses. align is \"left\" (default) | \"center\" | \"right\", and x is that edge. Immediate mode: re-draw it every frame you want it." },
     ApiEntry { label: "draw.circle", insert: "draw.circle(", doc: "draw.circle(x, y, radius, r,g,b [, a]) — a filled circle in screen pixels, x/y its CENTRE. draw.circleOutline(..., [px]) is the hollow twin. Same immediate-mode rules as draw.rect: over the scene, over the HUD, one frame each." },

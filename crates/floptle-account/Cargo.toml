@@ -1,0 +1,30 @@
+# The Foverse account: signing in to fopull.com and talking to Floptle Cloud.
+#
+# Extracted from floptle-hub so the ENGINE can use the same flow. The Hub is not
+# the only thing that needs an account any more — a shipped game does, and it
+# cannot depend on the Hub being installed.
+#
+# Deliberately tiny: no rendering, no scene, no Lua. Both the Hub (a GUI app) and
+# floptle-script (a runtime) link it, so it must stay cheap for both.
+[package]
+name = "floptle-account"
+description = "Foverse account: OAuth device flow against fopull.com, keyring session, Floptle Cloud client."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+log = { workspace = true }
+# PKCE: 32 random bytes, S256, base64url. The whole reason a Lua script cannot
+# drive this flow itself and the engine has to.
+base64 = "0.22"
+getrandom = "0.2"
+sha2 = "0.10"
+# The session lives in the OS keyring, never on disk in plaintext.
+keyring = "3"

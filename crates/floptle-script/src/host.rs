@@ -1549,6 +1549,16 @@ impl ScriptHost {
             logs.clone(),
             http_in_fixed.clone(),
         );
+        // `account.*` (task 0055 / 0054): the same worker-thread + frame-pass
+        // shape, against fopull.com only, with the token kept in Rust.
+        let account: Rc<RefCell<crate::account_api::AccountState>> =
+            Rc::new(RefCell::new(crate::account_api::AccountState::new()));
+        crate::account_api::install_account_api(
+            &lua,
+            account.clone(),
+            logs.clone(),
+            http_in_fixed.clone(),
+        );
 
         // The rollback `replaying` flag (§4) — shared so `net.replaying()` can
         // answer it, which is the escape hatch for any cosmetic the engine's
@@ -1752,6 +1762,7 @@ impl ScriptHost {
             replaying,
             replay_marks: None,
             http,
+            account,
             http_in_fixed,
         }
     }
@@ -2127,11 +2138,16 @@ impl ScriptHost {
     /// Play is how one run inherits the previous one's network.
     pub fn set_playing(&self, playing: bool) {
         self.http.borrow_mut().set_playing(playing);
+        // The account's SESSION survives Stop — it is the player's, stored in
+        // the OS keyring, and signing in again every time you press Play would
+        // be absurd. Only the callbacks and an unfinished sign-in are dropped.
+        self.account.borrow_mut().set_playing(playing);
     }
 
     /// A scene load mid-session: same rule as Stop for anything on the wire.
     pub fn cancel_web_requests(&self) {
         self.http.borrow_mut().cancel_all();
+        self.account.borrow_mut().cancel_all();
     }
 
     /// How many web requests are still waiting on a reply (`http.inFlight()`).
@@ -3176,6 +3192,7 @@ impl ScriptHost {
         // Before `update`, so a callback's writes are visible to the same frame.
         crate::http_api::set_now(&self.http, time as f64);
         crate::http_api::drain(&self.lua, &self.http, &self.logs);
+        crate::account_api::drain(&self.lua, &self.account, &self.logs);
         // Pass 2: run each script's start/update.
         self.run_pass(world, &work, dt, time, Pass::Frame, floptle_input::Domain::Frame);
         // Bindings run AFTER every `update`, so a label always shows this

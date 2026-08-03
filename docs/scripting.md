@@ -2821,7 +2821,7 @@ velocity in the new frame automatically, keeping world velocity continuous.
 
 ---
 
-## 24. The web: `http.*` & `json.*`
+## 26. The web: `http.*` & `json.*`
 
 Non-blocking requests to your own server, so a game can have an account, a card
 list, a leaderboard or a shop. The callback runs on a later frame **on the main
@@ -2846,3 +2846,39 @@ and the one rule that makes an account-backed game possible at all:
 
 > **The server decides what the player owns.** The client asks; it never
 > announces. Anything a client can announce, a modified client can announce.
+
+---
+
+## 27. The player's account: `account.*`
+
+`http.*` is your game talking to *your* server. `account.*` is your game talking
+to **Floptle's** — Foverse accounts, Fobucks, cloud saves, leaderboards and
+missions, on `fopull.com`.
+
+```lua
+account.signIn()          -- returns immediately; the player approves in a browser
+account.state()           -- "signedOut" | "starting" | "waiting" | "signedIn" | "failed"
+account.code()            -- while waiting: { code = "WXYZ-9999", url = "…", expiresIn }
+account.player()          -- when signed in: { id, name, email, tier }
+account.error()  account.cancel()  account.signOut()
+
+account.get("/wallet", function(res) end)
+account.post("/games/mygame/events", { event = "boss_killed", event_id = id }, cb)
+account.put("/games/mygame/saves/slot1", { data = t }, cb)
+```
+
+The engine drives the OAuth device flow in Rust, because the provider mandates
+PKCE S256 and Lua has no SHA-256 — so a script asks for a **player**, never a
+token. There is no `account.token()` on purpose: a shipped game's Lua is
+readable, and anything a script can hold, somebody can read out of the file.
+
+The calls take a **path**, not a URL. One host, which is what makes attaching
+the player's token to it safe.
+
+The session lives in the OS keyring and is **shared with the Floptle Hub** —
+sign in once, in whichever you opened.
+
+**[docs/web-api.md](web-api.md) § Floptle Cloud** is the full page: the mission
+and wallet shapes, why the wallet is read-only, and the three answers that
+surprise a first test (`event_id` is mandatory, an empty `awarded` is not always
+a failure, and a mission pays nothing until it is approved).

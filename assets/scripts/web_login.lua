@@ -25,13 +25,18 @@
 -- press Play. It expects the three endpoints listed in docs/web-api.md — point
 -- it at your own server, or change the paths to match one you already have.
 --
--- NOTE ON FLOPTLE CLOUD (fopull.com). Signing in to a *Foverse* account is this
--- same flow, but the real provider requires PKCE (S256), and Lua has no SHA-256
--- — so a script cannot drive it directly today. The Floptle Hub already does
--- that sign-in and holds the token; handing it to the running game is the piece
--- that is not built yet (floptle-platform tasks/floptle/0054). Until it is, this
--- script is the pattern for YOUR OWN server, which is what most games want
--- anyway.
+-- NOT THE WAY TO REACH FLOPTLE CLOUD. Signing in to a *Foverse* account is this
+-- same flow, but the real provider requires PKCE (S256) and Lua has no SHA-256,
+-- so the engine drives that one itself in Rust and hands you `account.*`:
+--
+--     account.signIn()  account.state()  account.code()  account.player()
+--     account.get("/wallet", function(res) end)
+--
+-- Four lines instead of this file, no token in your script, and the session is
+-- shared with the Floptle Hub. See docs/web-api.md § Floptle Cloud.
+--
+-- This script remains the pattern for YOUR OWN server, which is what most games
+-- want anyway — and it is the readable version of what `account.*` is doing.
 
 defaults = {
   --@header Your API

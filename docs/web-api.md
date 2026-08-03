@@ -179,26 +179,133 @@ anything reused elsewhere. Issue short-lived tokens and refresh them.
 
 ---
 
-## Floptle Cloud (fopull.com)
+## Floptle Cloud (fopull.com) — `account.*`
 
-The engine's own cloud — Foverse accounts, cloud saves and leaderboards — is
-live at `https://fopull.com`, with the game-data API at
-`https://fopull.com/api/floptle/v1`. Two things to know before you aim at it:
+Everything above is `http.*`: **your** game talking to **your** server. If the
+server you want is Floptle's own — Foverse accounts, Fobucks, cloud saves,
+leaderboards, missions — you do not use `http.*` at all. You use `account.*`,
+and it is a smaller surface on purpose.
 
-* **A script cannot do that sign-in yet.** The provider is a standard OAuth 2.0
-  device grant with **PKCE (S256) mandatory**, and Lua has no SHA-256. The
-  **Hub** already signs in and holds the token; handing that token to the
-  running game is the missing piece
-  (floptle-platform `tasks/floptle/0054`). Once it lands, everything on this
-  page is how you'd use it.
-* **The `cloud` scope matters.** The game-data endpoints answer
-  `403 insufficient_scope` for a token without it.
+### Signing in
+
+```lua
+account.signIn()          -- returns immediately
+account.state()           -- "signedOut" | "starting" | "waiting" | "signedIn" | "failed"
+account.code()            -- while waiting: { code = "WXYZ-9999", url = "…", expiresIn = 900 }
+account.player()          -- when signed in: { id, name, email, tier }
+account.error()           -- why the last attempt failed
+account.cancel()          -- they pressed Escape
+account.signOut()
+```
+
+The engine drives the device flow **in Rust**, because the provider mandates
+PKCE S256 and Lua has no SHA-256. That is not a limitation you work around —
+it is the reason a script never has to think about any of this. Ask for a
+sign-in, draw the code, and get a player.
+
+**Polled, not called back.** Signing in takes as long as a person takes to pick
+up their phone; a sign-in screen redraws every frame anyway. A whole account
+screen is about twenty lines:
+
+```lua
+function update(dt)
+  local state = account.state()
+  if state == "signedOut" and input.pressed("enter") then account.signIn() end
+  if state == "waiting" then
+    local c = account.code()
+    if c and c.code ~= shown then shown = c.code; openUrl(c.url) end
+  end
+end
+
+function lateUpdate()
+  local s, who = account.state(), account.player()
+  if s == "signedIn" then
+    draw.text(20, 20, "Hi, " .. who.name, 22, 1, 1, 1)
+  elseif s == "waiting" then
+    draw.text(20, 20, account.code().code, 40, 1, 1, 1)
+  end
+end
+```
+
+**One session, everywhere.** It lives in the OS keyring, shared with the Floptle
+Hub — sign in from the Hub and your game already knows the player; sign in from
+a game and the Hub does. Stop and `scene.load` drop pending callbacks and
+abandon an unfinished sign-in, but never the session itself: nobody should have
+to sign in again because they pressed Play twice.
+
+### Calling the Cloud
+
+```lua
+account.get("/wallet", function(res) end)
+account.post("/games/mygame/events", { … }, function(res) end)
+account.put("/games/mygame/saves/slot1", { data = t }, function(res) end)
+account.delete("/games/mygame/saves/slot1", function(res) end)
+```
+
+`res` is the same table `http.*` gives you, and the JSON is always parsed
+because every Cloud endpoint answers JSON, including its errors.
+
+**A path, not a URL** — and that is the whole security model. There is exactly
+one host these can reach, which is what makes attaching the player's token to
+them safe. A bare path gets the `/api/floptle/v1` prefix; `/userinfo` and
+`/oauth/*` stay at the domain root where the contract pins them. A URL where a
+path belongs raises at the call site, with the reason.
+
+**There is no `account.token()`, and there will not be.** A shipped game's Lua
+is readable — anything a script can hold, somebody can read out of the file and
+post somewhere else. The token stays in Rust and is attached to requests there.
+
+### The rule, again, because currency is where it bites
+
+Floptle Cloud has **missions** and a **Fobucks wallet**, and Fobucks are real:
+they buy real goods on fopull.com. So the wallet is **read-only** and there is
+no route that credits it. A game reports what happened:
+
+```lua
+account.post("/games/mygame/events", {
+  event    = "boss_killed",
+  count    = 1,
+  event_id = playerId .. ":boss:" .. n,   -- REQUIRED; makes the report idempotent
+  meta     = { difficulty = "hard" },     -- stored, never load-bearing for an award
+}, function(res)
+  -- res.json.awarded is what the SERVER decided. It may be empty, and that is
+  -- not always an error — see below.
+end)
+```
+
+The server owns the rule that turns an event into money. A modified build can
+lie about the event; it cannot invent the amount, claim a `once` mission twice,
+or write the balance.
+
+Three things that will surprise a first test:
+
+* **`event_id` is mandatory** (`422 invalid_event_id`). Re-sending one returns
+  `duplicate: true` and awards nothing — which is the point: a lost reply is
+  safe to retry, and a captured request is not worth replaying.
+* **`awarded: []` is not always a failure.** There is a shared daily Fobucks
+  budget per account across every Floptle game. Once it is spent, an approved
+  mission legitimately awards nothing. Check `duplicate` to tell the two apart.
+* **A mission pays nothing until it is approved**, whoever defined it — defining
+  is self-service, being paid is not. Read `reward_active` off the mission and
+  never promise money that will not arrive. Read `reward.amount` too, rather
+  than hard-coding it: it is a live economic number.
+
+The `cloud` scope is what unlocks all of it; a token without it gets
+`403 insufficient_scope`. The engine requests it.
 
 The one wire detail worth stating, because it is the thing most likely to trip
 a JSON layer: **request bodies must be JSON objects.** In Floptle they are —
 `json.encode{}` is `{}`, not `[]`, and there is a live test asserting the server
 accepts it — but if you build a body by appending to a list you will get
 `400 invalid_body`. Use explicit string keys.
+
+### The account limits
+
+| | |
+|---|---|
+| **6** account calls in flight | past this, the call raises |
+| **20 s** timeout | not configurable; one server, whose timeouts we know |
+| **1 MB** reply | four times the largest legitimate answer (a 256 KB save) |
 
 ---
 

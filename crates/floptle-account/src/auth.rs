@@ -1,10 +1,14 @@
-//! Signing the Hub into fopull.com via the OAuth 2.0 **Device Authorization Grant**
+//! Signing in to fopull.com via the OAuth 2.0 **Device Authorization Grant**
 //! (RFC 8628) with mandatory PKCE, per `floptle-platform/contracts/identity-auth.md`.
 //!
 //! The HTTP transport and the token store are behind traits so the flow is fully
 //! unit-testable offline (a mock provider + in-memory store) and the real impls
 //! ([`HttpProvider`] over `ureq`, [`KeyringStore`] over the OS keyring) drop in unchanged.
-//! No password ever touches the Hub — the user approves in their browser.
+//! No password ever touches Floptle — the user approves in their browser.
+//!
+//! This shipped as `floptle-hub::auth` and moved here unchanged when the engine
+//! needed the same flow. It is still the Hub's; [`crate::Account`] wraps it for
+//! callers that cannot block, which is the only thing the move added.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -280,7 +284,7 @@ const MAX_POLL_INTERVAL: u64 = 30;
 /// §3.5). Bounded three ways so it can never wedge: a terminal outcome, the `cancel` flag, or
 /// the `expires_in` client-side deadline. `sleep` is injected so the loop is testable without
 /// real time; the Hub passes a real sleep that also observes `cancel`.
-pub fn poll_until<P: Provider>(
+pub fn poll_until<P: Provider + ?Sized>(
     provider: &P,
     device_code: &str,
     verifier: &str,
@@ -350,6 +354,11 @@ fn host_of(url: &str) -> Option<String> {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Session {
     pub sub: String,
+    /// The account's display name from `/userinfo`. `#[serde(default)]` so a session
+    /// stored by an older build (which didn't keep it) still loads — a field added to
+    /// a persisted struct must never sign anybody out.
+    #[serde(default)]
+    pub name: Option<String>,
     pub email: Option<String>,
     pub tier: String,
     pub access_token: String,
@@ -360,6 +369,7 @@ impl Session {
     pub fn from_parts(tokens: Tokens, who: UserInfo, ent: Entitlements) -> Self {
         Self {
             sub: who.sub,
+            name: who.name,
             email: who.email,
             tier: if ent.tier.is_empty() { "free".into() } else { ent.tier },
             access_token: tokens.access_token,
@@ -368,11 +378,24 @@ impl Session {
     }
 
     /// A human label for the account (email, else the subject id, else a generic fallback).
+    /// This is what the **Hub** shows: it manages an account, and the email is the thing
+    /// you'd check you signed in as.
     pub fn display_name(&self) -> &str {
         match self.email.as_deref() {
             Some(e) if !e.is_empty() => e,
             _ if !self.sub.is_empty() => self.sub.as_str(),
             _ => "your account",
+        }
+    }
+
+    /// What a **game** shows: the player's name, falling back to the email and then the
+    /// subject id. Different from [`display_name`](Self::display_name) on purpose — a
+    /// fighting game's win screen should say "Ty", not an email address, and putting
+    /// somebody's email on a screen they might be streaming is its own small harm.
+    pub fn player_name(&self) -> &str {
+        match self.name.as_deref() {
+            Some(n) if !n.trim().is_empty() => n,
+            _ => self.display_name(),
         }
     }
 
@@ -397,6 +420,11 @@ pub trait TokenStore {
 /// Persists the session in the OS keyring (Keychain / Credential Manager / Secret Service)
 /// as one JSON blob — the tokens never hit disk in plaintext. Cheap to construct (two owned
 /// strings), so worker threads build their own rather than doing keyring I/O on the UI thread.
+///
+/// **The Hub and every game share this entry**, and the `floptle-hub` name in it is now
+/// historical rather than descriptive. That sharing is the feature: sign in once, in
+/// whichever of them you happened to open, and the rest already know you. Renaming it would
+/// sign everybody out for nothing.
 pub struct KeyringStore {
     service: String,
     user: String,
@@ -432,6 +460,28 @@ impl TokenStore for KeyringStore {
             Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(format!("keyring clear: {e}")),
         }
+    }
+}
+
+/// A [`TokenStore`] that forgets everything when the process ends.
+///
+/// For tests, and for anywhere a keyring is the wrong answer — a dedicated
+/// server or a CI machine has no secret service, and asking one for a password
+/// prompt is worse than not persisting at all.
+#[derive(Default)]
+pub struct MemoryStore(std::sync::Mutex<Option<Session>>);
+
+impl TokenStore for MemoryStore {
+    fn save(&self, session: &Session) -> Result<(), String> {
+        *self.0.lock().map_err(|_| "the store lock is poisoned")? = Some(session.clone());
+        Ok(())
+    }
+    fn load(&self) -> Option<Session> {
+        self.0.lock().ok()?.clone()
+    }
+    fn clear(&self) -> Result<(), String> {
+        *self.0.lock().map_err(|_| "the store lock is poisoned")? = None;
+        Ok(())
     }
 }
 
@@ -578,6 +628,7 @@ mod tests {
         let payload = URL_SAFE_NO_PAD.encode(br#"{"exp":1000}"#);
         let s = Session {
             sub: "u1".into(),
+            name: None,
             email: None,
             tier: "free".into(),
             access_token: format!("h.{payload}.s"),

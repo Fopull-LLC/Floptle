@@ -28,6 +28,7 @@ members = [
     "crates/floptle-script",   # Lua (LuaJIT/mlua) scripting host + hot reload
     "crates/floptle-net",      # networking (deferred; clean boundary stub for now)
     "crates/floptle-scene",    # data-driven scene/project model (RON) over the ECS
+    "crates/floptle-account",  # Foverse account: device-flow sign-in + Floptle Cloud client
     "crates/floptle-relay",    # open rendezvous relay: lobby codes, no port-forwarding (bin)
     "crates/floptle-dist",     # release manifest + bundle download/verify/unpack (Hub + export templates)
     "crates/floptle-editor",   # egui + egui_dock authoring application (bin)

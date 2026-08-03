@@ -167,6 +167,7 @@ type UiListeners = Rc<RefCell<Vec<UiListener>>>;
 /// answer rather than last frame's.
 type UiFrameEvents = Rc<RefCell<Vec<(u32, String)>>>;
 
+mod account_api;
 mod api;
 mod audio_api;
 mod env;
@@ -500,6 +501,10 @@ pub struct ScriptHost {
     /// The `http.*` bridge: callbacks waiting on a reply, the caps, and the
     /// session generation that keeps a stale reply out of a fresh Play.
     http: Rc<RefCell<http_api::HttpState>>,
+    /// The `account.*` bridge: the player's Foverse account and the Cloud calls
+    /// waiting on a reply. Built lazily inside — a project that never signs
+    /// anybody in never touches the OS keyring.
+    account: Rc<RefCell<account_api::AccountState>>,
     /// True while the tick pass is running — `http.*` warns once when called
     /// from there, because nothing about a reply's timing can be replayed.
     http_in_fixed: Rc<std::cell::Cell<bool>>,

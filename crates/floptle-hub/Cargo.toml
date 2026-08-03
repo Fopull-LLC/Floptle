@@ -24,13 +24,11 @@ serde_json = { workspace = true }
 directories = "6"
 ureq = { workspace = true }
 sha2 = "0.10"
-# OAuth device-flow login (task 0002): PKCE (getrandom+sha2+base64url), token storage in
-# the OS keyring.
-base64 = "0.22"
-getrandom = "0.2"
-keyring = "3"
 log = { workspace = true }
 env_logger = { workspace = true }
+# OAuth device-flow login (task 0002). Lived here until the engine needed the same
+# flow; the Hub still drives it exactly as before.
+floptle-account = { path = "../floptle-account" }
 floptle-scene = { path = "../floptle-scene" }
 floptle-dist = { path = "../floptle-dist" }
 

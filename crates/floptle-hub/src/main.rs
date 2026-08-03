@@ -7,7 +7,6 @@
 //! per-user data dir; the editor is launched as a child process for a chosen project.
 
 mod app;
-mod auth;
 mod config;
 mod install;
 mod launch;
@@ -16,6 +15,11 @@ mod releases;
 
 use app::HubApp;
 use config::Paths;
+
+/// The device flow moved to `floptle-account` when the engine needed it too — a game
+/// exported from Floptle runs on machines that never installed the Hub. Re-exported under
+/// its old path so every `crate::auth::…` here still reads the same.
+pub use floptle_account::auth;
 
 fn main() -> eframe::Result<()> {
     env_logger::init();
