@@ -62,12 +62,39 @@ the far side of a wall.
   the **selection's own normal**, its node, or the world (`V` cycles). Normal is
   the default: a diagonal wall pushes straight out of itself in one drag.
 
+### Reading the wireframe: what's near, what's behind
+
+The overlay is drawn flat over the scene, so from v0.20.0 it carries two depth
+cues — otherwise a box's far rim looks exactly like its near one and there is no
+way to tell what a click is about to grab:
+
+- **Distance** — edges and vertex dots fade and thin with how far away they are,
+  normalised over the mesh's own extent (so a doorframe and a hangar read the
+  same way).
+- **Behind the surface** — anything the mesh's own front faces hide draws faint,
+  and a vertex round the back draws as a small **ring** instead of a filled dot.
+
+Occluded geometry is still drawn and still **selectable** — being able to reach
+through a blockout is the point of the see-through selection modes. The cue only
+tells you which side of the shape you are looking at. Selected elements keep
+their full brightness wherever they are, so a selection never disappears into
+the fade.
+
 ### ✂ Knife
 
 `/` arms the knife. Click one **edge or corner** of a face, then another on the
 same face, and the face splits along that line. The point under the cursor is
 shown live — a filled dot for a new corner mid-edge, a ring for an existing one,
 so you can see which you're about to get.
+
+**The first click chooses the face; after that the aim is locked to it.** The
+second point is solved against that face's own plane, so the cursor can drift
+past an edge, or over a face that is nearer the camera, and the cut still tracks
+where you mean. (Before v0.20.0 every click re-picked the face from whatever the
+ray hit first, so aiming near a corner landed the second point on the
+neighbouring face and the tool quietly threw the cut away and started over.
+Which face won depended on the camera angle — which is why turning around and
+trying from the other side sometimes appeared to fix it.)
 
 The cut carries into the faces that share those edges: they gain the same corner,
 so the seam stays welded and no hairline crack opens along it. Both halves keep
@@ -78,7 +105,9 @@ can be walked across a face (or from one half into the next) in one gesture. Esc
 ends the cut; Esc again puts the knife away.
 
 A cut that can't divide a face — two points on one edge, two corners already
-joined — is refused with the reason, and nothing is changed.
+joined — **greys out while you are still aiming** and says why next to the
+cursor, so you never click and wonder what happened. The preview asks the cut
+itself, so what it shows and what the click does can never disagree.
 
 ## 4. Materials, per face
 

@@ -30,7 +30,7 @@ mod raycast;
 mod select;
 mod triangulate;
 
-pub use knife::{knife, nearest_cut_point, CutPoint, KnifeCut};
+pub use knife::{face_plane_hit, knife, knife_refusal, nearest_cut_point, CutPoint, KnifeCut};
 pub use ops::{
     bridge_faces, delete_faces, detach_faces, extrude_faces, flip_faces, inset_faces, merge_into,
     recenter, recenter_on, resize, set_face_slot, snap_verts, subdivide_faces, transform_verts,
@@ -39,7 +39,7 @@ pub use ops::{
 pub use primitives::{arch, box_mesh, cylinder, plane, sphere, stairs, wedge, ShapeKind, ShapeSpec};
 pub use raycast::{raycast, FaceHit};
 pub use select::{
-    connected_faces, coplanar_faces, edge_loop, faces_with_slot, grow_faces,
+    connected_faces, coplanar_faces, edge_loop, faces_with_slot, front_facing, grow_faces,
 };
 pub use triangulate::{face_normal, triangulate, SlotMesh};
 

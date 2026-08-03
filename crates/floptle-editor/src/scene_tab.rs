@@ -550,13 +550,22 @@ impl EditorTabViewer<'_> {
             let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
             let wire = egui::Color32::from_rgba_unmultiplied(160, 170, 185, 140);
             let sel_col = egui::Color32::from_rgb(255, 200, 80);
-            for &(a, b, on) in &viz.edges {
-                let stroke = if on {
-                    egui::Stroke::new(2.5, sel_col)
+            // Depth cues: near geometry draws bright and solid, far geometry
+            // fades and thins, and anything the mesh's own front surface hides
+            // draws faint. Without them every edge of a box is identical
+            // whichever side of it you are looking at, and you cannot tell what
+            // a click is about to grab. Selection ignores the fade — a selected
+            // edge has to stay findable wherever it is.
+            for e in &viz.edges {
+                let stroke = if e.selected {
+                    egui::Stroke::new(if e.behind { 1.8 } else { 2.5 }, sel_col)
                 } else {
-                    egui::Stroke::new(1.0, wire)
+                    // 1.5px in front and near, 0.7px behind and far.
+                    let width = (1.5 - e.depth * 0.5) * if e.behind { 0.6 } else { 1.0 };
+                    let alpha = (200.0 - e.depth * 90.0) * if e.behind { 0.32 } else { 1.0 };
+                    egui::Stroke::new(width, wire.gamma_multiply(alpha / 255.0))
                 };
-                painter.line_segment([pt(a), pt(b)], stroke);
+                painter.line_segment([pt(e.a), pt(e.b)], stroke);
             }
             for ring in &viz.sel_faces {
                 let mut pts: Vec<egui::Pos2> = ring.iter().map(|v| pt(*v)).collect();
@@ -569,9 +578,21 @@ impl EditorTabViewer<'_> {
                 painter.line_segment([pt(a), pt(b)], egui::Stroke::new(2.0, egui::Color32::WHITE));
             }
             if viz.show_verts {
-                for &(p, on) in &viz.verts {
-                    let (r, c) = if on { (4.0, sel_col) } else { (2.5, wire) };
-                    painter.circle_filled(pt(p), r, c);
+                for v in &viz.verts {
+                    // A vertex round the back draws as a RING, not a dot — the
+                    // fastest read there is for "that one is behind the
+                    // surface", and it survives being the same colour.
+                    let (r, c) = if v.selected {
+                        (4.0 - v.depth * 0.8, sel_col)
+                    } else {
+                        let alpha = (210.0 - v.depth * 100.0) * if v.behind { 0.45 } else { 1.0 };
+                        (2.8 - v.depth * 0.9, wire.gamma_multiply(alpha / 255.0))
+                    };
+                    if v.behind {
+                        painter.circle_stroke(pt(v.p), r, egui::Stroke::new(1.0, c));
+                    } else {
+                        painter.circle_filled(pt(v.p), r, c);
+                    }
                 }
             }
             // Draw-tool preview: the candidate shape's wireframe, its footprint
@@ -630,7 +651,15 @@ impl EditorTabViewer<'_> {
             // drawn as a RING on an existing corner and a dot mid-edge, so you
             // can see before you click whether the cut reuses a corner or makes
             // a new one.
-            let cut_col = egui::Color32::from_rgb(255, 120, 120);
+            // A cut that WOULD be refused draws grey and says why, right at the
+            // cursor — the answer arrives while you are still aiming instead of
+            // after a click that appeared to do nothing.
+            let refused = viz.knife_why.is_some();
+            let cut_col = if refused {
+                egui::Color32::from_rgb(150, 150, 160)
+            } else {
+                egui::Color32::from_rgb(255, 120, 120)
+            };
             if let Some((p, on_corner)) = viz.knife_to {
                 if let Some(from) = viz.knife_from {
                     painter.line_segment([pt(from), pt(p)], egui::Stroke::new(2.0, cut_col));
@@ -639,6 +668,17 @@ impl EditorTabViewer<'_> {
                     painter.circle_stroke(pt(p), 6.0, egui::Stroke::new(2.0, cut_col));
                 } else {
                     painter.circle_filled(pt(p), 4.0, cut_col);
+                }
+                if let Some(why) = viz.knife_why.as_ref() {
+                    let at = pt(p) + egui::vec2(12.0, 12.0);
+                    let font = egui::FontId::proportional(11.0);
+                    let galley = painter.layout_no_wrap(why.clone(), font, cut_col);
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(at, galley.size()).expand(3.0),
+                        3.0,
+                        egui::Color32::from_black_alpha(200),
+                    );
+                    painter.galley(at, galley, cut_col);
                 }
             }
             if let Some(from) = viz.knife_from {

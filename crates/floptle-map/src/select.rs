@@ -5,11 +5,115 @@
 //! feeds them straight into a `BTreeSet`, and undo compares whole meshes).
 
 use crate::{face_normal, MapMesh};
-use std::collections::{BTreeSet, HashMap};
+use glam::Vec3;
+use std::collections::{BTreeSet, HashMap, HashSet};
+
+/// Which corners and edges of `mesh` have at least one face turned toward
+/// `eye` — everything else is round the back, hidden by the mesh's own front
+/// surface.
+///
+/// `eye` is in the mesh's OWN object space; put the camera through the parent
+/// chain's inverse rather than transforming every normal, so a rotated or
+/// non-uniformly scaled node needs no inverse-transpose fix-up.
+///
+/// This is the cheap half of a hidden-line pass — O(faces), exact for a closed
+/// convex shape and right for the overwhelming majority of blockout geometry.
+/// It exists because a flat wireframe overlay draws a box's far rim exactly like
+/// its near one, which makes the shape hard to read and makes it hard to tell
+/// what a click is about to grab. The editor draws what this reports faintly,
+/// but still draws it: seeing through a blockout is the point of the
+/// see-through selection modes, so hiding it would take that away.
+pub fn front_facing(mesh: &MapMesh, eye: Vec3) -> (Vec<bool>, HashSet<(u32, u32)>) {
+    let mut verts = vec![false; mesh.verts.len()];
+    let mut edges = HashSet::new();
+    for f in &mesh.faces {
+        if f.verts.len() < 3 || f.verts.iter().any(|&v| v as usize >= mesh.verts.len()) {
+            continue;
+        }
+        let centre: Vec3 =
+            f.verts.iter().map(|&v| mesh.verts[v as usize]).sum::<Vec3>() / f.verts.len() as f32;
+        if face_normal(mesh, f).dot(eye - centre) <= 0.0 {
+            continue; // turned away: it hides things, it doesn't reveal them
+        }
+        let n = f.verts.len();
+        for i in 0..n {
+            let (a, b) = (f.verts[i], f.verts[(i + 1) % n]);
+            verts[a as usize] = true;
+            edges.insert(key(a, b));
+        }
+    }
+    (verts, edges)
+}
 
 /// Canonical undirected edge key.
 fn key(a: u32, b: u32) -> (u32, u32) {
     (a.min(b), a.max(b))
+}
+
+#[cfg(test)]
+mod depth_cue_tests {
+    use super::front_facing;
+    use crate::box_mesh;
+    use glam::Vec3;
+
+    /// Looking at a box from +Z: the near face's four corners and edges are
+    /// front-facing, the far ones are not. That distinction is the whole
+    /// difference between a wireframe you can read and a flat tangle of
+    /// identical lines.
+    #[test]
+    fn a_box_hides_its_far_side_from_wherever_you_stand() {
+        let m = box_mesh(Vec3::ONE);
+        for (eye, axis, sign) in [
+            (Vec3::new(0.0, 0.0, 9.0), 2, 1.0),
+            (Vec3::new(0.0, 0.0, -9.0), 2, -1.0),
+            (Vec3::new(9.0, 0.0, 0.0), 0, 1.0),
+            (Vec3::new(0.0, -9.0, 0.0), 1, -1.0),
+        ] {
+            let (verts, edges) = front_facing(&m, eye);
+            // Every corner on the near side is visible; every corner on the far
+            // side is not (a cube's corners are all at ±1).
+            for (i, p) in m.verts.iter().enumerate() {
+                let near = p[axis] * sign > 0.0;
+                assert_eq!(
+                    verts[i], near,
+                    "corner {i} at {p} from {eye}: expected front={near}"
+                );
+            }
+            // Straight on, exactly one face meets the eye — so the visible
+            // edges are precisely that face's four, and every side edge
+            // (one corner near, one far) is hidden along with the far rim.
+            assert_eq!(edges.len(), 4, "from {eye}: one face meets the eye");
+            for &(a, b) in &m.edges() {
+                let both_near = m.verts[a as usize][axis] * sign > 0.0
+                    && m.verts[b as usize][axis] * sign > 0.0;
+                assert_eq!(edges.contains(&(a, b)), both_near, "edge {a}-{b} from {eye}");
+            }
+        }
+    }
+
+    /// A corner-on view sees three faces, so nothing but the single opposite
+    /// corner is hidden — the cue degrades gracefully rather than flickering.
+    #[test]
+    fn a_corner_on_view_hides_only_the_opposite_corner() {
+        let m = box_mesh(Vec3::ONE);
+        let (verts, _) = front_facing(&m, Vec3::splat(9.0));
+        let hidden: Vec<usize> = (0..m.verts.len()).filter(|&i| !verts[i]).collect();
+        assert_eq!(hidden.len(), 1, "only (-1,-1,-1) is out of sight: {hidden:?}");
+        assert_eq!(m.verts[hidden[0]], Vec3::splat(-1.0));
+    }
+
+    /// Inside the box every face is turned away, so nothing reads as "in
+    /// front" — and nothing panics or divides by zero on the way there.
+    #[test]
+    fn from_inside_nothing_is_front_facing() {
+        let m = box_mesh(Vec3::ONE);
+        let (verts, edges) = front_facing(&m, Vec3::ZERO);
+        assert!(verts.iter().all(|v| !v));
+        assert!(edges.is_empty());
+        // An empty mesh answers empty rather than panicking.
+        let empty = crate::MapMesh { verts: Vec::new(), faces: Vec::new(), ..m.clone() };
+        assert!(front_facing(&empty, Vec3::ZERO).0.is_empty());
+    }
 }
 
 /// Which faces use each undirected edge.

@@ -989,10 +989,11 @@ pub(crate) struct MapDrag {
 /// Screen-space overlay for the Scene tab (physical px; scene_tab divides by ppp).
 #[derive(Default)]
 pub(crate) struct MapViz {
-    /// (a, b, selected) projected edges of the target mesh.
-    pub(crate) edges: Vec<(floptle_core::math::Vec2, floptle_core::math::Vec2, bool)>,
-    /// (pos, selected) projected verts — only drawn in Vertex mode.
-    pub(crate) verts: Vec<(floptle_core::math::Vec2, bool)>,
+    /// The target mesh's projected edges, with the two cues that make a
+    /// blockout readable in a flat overlay — see [`VizEdge`].
+    pub(crate) edges: Vec<VizEdge>,
+    /// Projected verts — only drawn in Vertex mode.
+    pub(crate) verts: Vec<VizVert>,
     /// Projected outlines of SELECTED faces.
     pub(crate) sel_faces: Vec<Vec<floptle_core::math::Vec2>>,
     /// Outline of the hovered element (vert ring / edge / face).
@@ -1020,6 +1021,44 @@ pub(crate) struct MapViz {
     /// about to get is the whole difference between a clean cut and a sliver).
     pub(crate) knife_from: Option<floptle_core::math::Vec2>,
     pub(crate) knife_to: Option<(floptle_core::math::Vec2, bool)>,
+    /// Why the cut under the cursor would be REFUSED, or `None` if it would
+    /// work. Straight from `knife_refusal`, so the telegraph and the operation
+    /// cannot disagree.
+    pub(crate) knife_why: Option<String>,
+}
+
+/// One projected wireframe edge.
+///
+/// A map overlay is drawn flat over the scene, so without help every edge of a
+/// box looks identical whether it is the near rim or the far one — which makes
+/// a blockout genuinely hard to read, and makes it hard to tell what a click
+/// would select. Two cues fix that, and both are cheap:
+///
+/// * **`behind`** — every face using this edge points away from the camera, so
+///   the mesh's own front surface is in the way. Drawn faint and hollow, the
+///   way a CAD hidden line reads. Still selectable: seeing through the blockout
+///   is the point of the see-through modes, and hiding these would take that
+///   away.
+/// * **`depth`** — 0 at the nearest part of this mesh, 1 at the farthest.
+///   Fades and thins with distance, so even two front-facing edges separate.
+#[derive(Clone, Copy)]
+pub(crate) struct VizEdge {
+    pub(crate) a: floptle_core::math::Vec2,
+    pub(crate) b: floptle_core::math::Vec2,
+    pub(crate) selected: bool,
+    pub(crate) depth: f32,
+    pub(crate) behind: bool,
+}
+
+/// One projected vertex dot, with the same two cues as [`VizEdge`]. A vertex
+/// behind the surface draws as a small ring rather than a filled dot — the
+/// quickest read there is for "that one is round the back".
+#[derive(Clone, Copy)]
+pub(crate) struct VizVert {
+    pub(crate) p: floptle_core::math::Vec2,
+    pub(crate) selected: bool,
+    pub(crate) depth: f32,
+    pub(crate) behind: bool,
 }
 
 /// One Map-tab operation, routed through `EditorCmd` (the tab holds disjoint
@@ -1374,21 +1413,40 @@ impl Editor {
     /// Where a knife click would land: the face under the cursor and the point
     /// on its border the cut would run from/to.
     ///
+    /// `lock` is the face a cut is already under way on. **Once the first point
+    /// is placed, the face is decided** — the second point is solved against
+    /// THAT face's plane, whatever the ray happens to hit first. Re-picking the
+    /// face every click is what made the knife feel unreliable: aim near a box's
+    /// corner and the second click lands on the neighbouring face, so instead of
+    /// cutting, the tool silently threw the anchor away and started again. Which
+    /// face wins there depends on the camera angle, which is exactly why turning
+    /// around and trying from the other side sometimes "fixed" it.
+    ///
     /// The CORNER snap is done in screen space (within a gizmo handle of a
     /// projected corner), like every other grab in this editor, so aiming at a
     /// corner feels the same here as it does in vertex mode. The edge point is
-    /// then solved exactly in object space from the ray hit — projecting the
-    /// edge and interpolating in 2D would drift at grazing angles, which is
-    /// precisely where you cut a wall.
+    /// then solved exactly in object space — projecting the edge and
+    /// interpolating in 2D would drift at grazing angles, which is precisely
+    /// where you cut a wall.
     pub(crate) fn map_knife_pick(
         &self,
         cursor: floptle_core::math::Vec2,
+        lock: Option<u32>,
     ) -> Option<(u32, floptle_map::CutPoint)> {
         let (e, id) = self.map_target()?;
         let mesh = self.maps.meshes.get(&id)?;
         let (ro, rd) = self.map_local_ray(e, cursor)?;
-        let hit = floptle_map::raycast(mesh, ro, rd, f32::MAX)?;
-        let face = mesh.faces.get(hit.face as usize)?;
+        // Locked: the chosen face's plane, unbounded, so the cursor may drift
+        // past an edge or behind another face and the aim still tracks. Free:
+        // whatever the ray hits, which is how the FIRST point picks its face.
+        let (fi, at) = match lock.filter(|&f| (f as usize) < mesh.faces.len()) {
+            Some(f) => (f, floptle_map::face_plane_hit(mesh, f, ro, rd)?),
+            None => {
+                let hit = floptle_map::raycast(mesh, ro, rd, f32::MAX)?;
+                (hit.face, hit.pos)
+            }
+        };
+        let face = mesh.faces.get(fi as usize)?;
         let gpu = self.gpu.as_ref()?;
         let (w, h) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
         let cam = self.camera.render_camera();
@@ -1406,11 +1464,11 @@ impl Editor {
             }
         }
         if let Some((_, v)) = best {
-            return Some((hit.face, floptle_map::CutPoint::Vert(v)));
+            return Some((fi, floptle_map::CutPoint::Vert(v)));
         }
         // `0.0` corner-snap radius: corners were handled above, in the units
         // that actually match how the tool feels.
-        floptle_map::nearest_cut_point(mesh, hit.face, hit.pos, 0.0).map(|c| (hit.face, c))
+        floptle_map::nearest_cut_point(mesh, fi, at, 0.0).map(|c| (fi, c))
     }
 
     /// One knife click. The first sets the cut's anchor; the second cuts, and
@@ -1420,7 +1478,7 @@ impl Editor {
         if self.playing {
             return;
         }
-        let Some((face, at)) = self.map_knife_pick(cursor) else {
+        let Some((face, at)) = self.map_knife_pick(cursor, self.map_knife.map(|k| k.face)) else {
             self.map_note(
                 floptle_script::LogLevel::Debug,
                 "the knife cuts a face — aim at one (a cut runs from one edge or corner to another)",
@@ -1433,27 +1491,12 @@ impl Editor {
         };
         let Some((_, id)) = self.map_target() else { return };
         let Some(pre) = self.maps.meshes.get(&id).cloned() else { return };
-        // The two ends must belong to ONE face. After a cut the anchor sits on a
-        // corner shared by both halves, so accept the face the second click
-        // landed on whenever it owns the anchor — that is what makes chaining
-        // work without asking which half you are on.
-        let anchor_here = |mesh: &MapMesh, f: u32| -> bool {
-            let Some(ring) = mesh.faces.get(f as usize) else { return false };
-            match pending.at {
-                floptle_map::CutPoint::Vert(v) => ring.verts.contains(&v),
-                floptle_map::CutPoint::Edge { a, b, .. } => {
-                    ring.verts.contains(&a) && ring.verts.contains(&b)
-                }
-            }
-        };
-        if face != pending.face && !anchor_here(&pre, face) {
-            // Not one face: rather than refuse and strand the user holding a
-            // stale anchor, restart the cut from where they just clicked.
+        // The pick above was LOCKED to the pending face, so both ends are on it
+        // by construction. The only way `face` differs now is a stale anchor
+        // that an undo has outlived — start over there rather than cut something
+        // the preview never showed.
+        if face != pending.face {
             self.map_knife = Some(MapKnife { face, at });
-            self.map_note(
-                floptle_script::LogLevel::Debug,
-                "both ends of a cut have to be on the same face — started a new cut here",
-            );
             return;
         }
         let on = face;
@@ -1537,16 +1580,55 @@ impl Editor {
         };
         let sel = self.map_sel.as_ref();
         let mut viz = MapViz { show_verts: self.map_mode == MapSubMode::Vertex, ..Default::default() };
+
+        // ---- depth cues ------------------------------------------------------
+        // Which corners and edges are round the BACK, decided in the mesh's own
+        // object space so a rotated or non-uniformly scaled node needs no normal
+        // fix-up: put the camera through the parent chain's exact inverse
+        // (`inv_mul`, the componentwise TRS one) and compare against the raw
+        // face normals. A face is front-facing when the camera is on its outside.
+        let cam_local = t
+            .inv_mul(&floptle_core::Transform::from_translation(cam.world_position))
+            .translation
+            .as_vec3();
+        let (vert_front, edge_front) = floptle_map::front_facing(mesh, cam_local);
+        // Depth normalised over THIS mesh's own extent, so the fade reads the
+        // same on a doorframe and on a hangar (an absolute scale would make one
+        // of them uniformly bright and the other uniformly dim).
+        let dist = |p: floptle_core::math::Vec3| -> f32 {
+            let wp = t.translation + (t.rotation * (t.scale * p)).as_dvec3();
+            (wp - cam.world_position).length() as f32
+        };
+        let (mut near, mut far) = (f32::MAX, f32::MIN);
+        for &p in &mesh.verts {
+            let d = dist(p);
+            near = near.min(d);
+            far = far.max(d);
+        }
+        let span = (far - near).max(1e-3);
+        let depth_of = |p: floptle_core::math::Vec3| ((dist(p) - near) / span).clamp(0.0, 1.0);
+
         for (a, b) in mesh.edges() {
             if let (Some(sa), Some(sb)) = (project(mesh.verts[a as usize]), project(mesh.verts[b as usize])) {
-                let on = sel.is_some_and(|s| s.edges.contains(&(a, b)));
-                viz.edges.push((sa, sb, on));
+                viz.edges.push(VizEdge {
+                    a: sa,
+                    b: sb,
+                    selected: sel.is_some_and(|s| s.edges.contains(&(a, b))),
+                    depth: (depth_of(mesh.verts[a as usize])
+                        + depth_of(mesh.verts[b as usize]))
+                        * 0.5,
+                    behind: !edge_front.contains(&(a.min(b), a.max(b))),
+                });
             }
         }
         for (i, &p) in mesh.verts.iter().enumerate() {
             if let Some(s) = project(p) {
-                let on = sel.is_some_and(|s2| s2.verts.contains(&(i as u32)));
-                viz.verts.push((s, on));
+                viz.verts.push(VizVert {
+                    p: s,
+                    selected: sel.is_some_and(|s2| s2.verts.contains(&(i as u32))),
+                    depth: depth_of(p),
+                    behind: !vert_front.get(i).copied().unwrap_or(false),
+                });
             }
         }
         if let Some(s) = sel {
@@ -1623,12 +1705,18 @@ impl Editor {
         // Knife: the anchor, and the point the next click would cut to. Drawn
         // live so the cut is aimed BEFORE it is made, not discovered after.
         if self.map_knife_on {
-            viz.knife_from =
-                self.map_knife.and_then(|k| k.at.position(mesh)).and_then(&project);
+            let pending = self.map_knife;
+            viz.knife_from = pending.and_then(|k| k.at.position(mesh)).and_then(&project);
             if let Some(cursor) = self.cursor.filter(|_| self.cursor_over_scene())
-                && let Some((_, at)) = self.map_knife_pick(cursor)
+                && let Some((face, at)) = self.map_knife_pick(cursor, pending.map(|k| k.face))
                 && let Some(p) = at.position(mesh).and_then(&project)
             {
+                // Ask the CUT ITSELF whether it would happen, every frame, so
+                // the line greys out and says why while you are still aiming
+                // instead of after you have clicked and nothing moved.
+                viz.knife_why = pending
+                    .filter(|k| k.face == face)
+                    .and_then(|k| floptle_map::knife_refusal(mesh, face, k.at, at));
                 viz.knife_to = Some((p, matches!(at, floptle_map::CutPoint::Vert(_))));
             }
         }
