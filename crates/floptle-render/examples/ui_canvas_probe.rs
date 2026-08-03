@@ -39,6 +39,7 @@ fn shape(fill: [f32; 4]) -> ShapeSpec {
         shadow: None,
         glow: None,
         grain: None,
+        frame: None,
         blend: Default::default(),
     }
 }

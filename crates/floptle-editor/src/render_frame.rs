@@ -5217,7 +5217,7 @@ impl Editor {
                 if let Some(e) = ent(&self.world, *idx)
                     && let Some(mut spec) = self.world.get::<floptle_ui::ElementSpec>(e).cloned()
                 {
-                    spec.shape = src.shape;
+                    spec.shape = src.shape.clone();
                     spec.opacity = src.opacity;
                     spec.tint = src.tint;
                     spec.rotation = src.rotation;

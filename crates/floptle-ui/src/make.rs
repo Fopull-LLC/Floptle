@@ -464,6 +464,12 @@ pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> bool {
             shape!().border.0[quad_i(name, ["L", "T", "R", "B"])] = v.num();
         }
         "borderColor" => shape!().border_color = v.color(),
+        // A 9-sliced sprite AS the border — the pixel-art alternative to `border`.
+        // `frameSlice` is the inset quad; without it the sprite stretches like a
+        // photograph, so naming a frame and no slice is almost always a mistake.
+        "frame" => shape!().frame.get_or_insert_with(Default::default).texture = v.text(),
+        "frameUV" => shape!().frame.get_or_insert_with(Default::default).uv = v.quad(),
+        "frameSlice" => shape!().frame.get_or_insert_with(Default::default).slice = v.quad(),
 
         // ---- text ----------------------------------------------------------
         "text" => text!().text = v.text(),
@@ -678,7 +684,8 @@ fn edits(a: &str, b: &str) -> usize {
 pub const ALL_PROPS: &[&str] = &[
     "align", "border", "borderB", "borderColor", "borderL", "borderR", "borderT", "button",
     "case", "cell", "cols", "count", "dir", "disabled", "draggable", "dropTarget", "field",
-    "fill", "fillA", "fillB", "fillG", "fillR", "flip", "focusable", "font", "gap", "group",
+    "fill", "fillA", "fillB", "fillG", "fillR", "flip", "focusable", "font", "frame", "frameSlice",
+    "frameUV", "gap", "group",
     "groupA", "groupB", "groupG", "groupR", "groupTint", "h", "height", "image", "imageFit",
     "inset", "interact", "justify", "lineHeight", "margin", "mask", "max", "maxH", "maxLen",
     "maxLines", "maxW", "min", "minH", "minW", "numeric", "opacity", "order", "overflow", "pad",

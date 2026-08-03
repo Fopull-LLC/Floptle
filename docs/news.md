@@ -1,31 +1,19 @@
 ## Just shipped
 
-**v0.22.3 "Which One"** is a Hub release about version numbers. The Hub, the
-engine, and the engine a project is pinned to all wear the same number, and the
-Hub now tells them apart: it shows its own version on every tab, and a release
-that changed only the Hub says so instead of appearing as a new engine to install
-and to move every project onto.
+**v0.23.0 "Cut Corners"** — your UI can wear a sprite. A panel's edge, a
+button's outline, the box around whatever the player has selected: any of them
+can be a piece of pixel art you drew, 9-sliced so one small sprite stretches to
+any size without smearing its corners. Every frame in a game can live in one
+texture, and a frame takes its tint from the style it sits in — so one white
+sprite is a bright focused edge and a dim idle one, with the hover transition
+already attached.
 
-The engine underneath it is still **v0.22.0 "Hold Together"** — modelling that
+**v0.22.3 "Which One"** before it, a Hub release about version numbers: the Hub
+shows its own version on every tab, and a release that changed only the Hub says
+so instead of appearing as a new engine to install.
+
+The engine underneath both is **v0.22.0 "Hold Together"** — modelling that
 behaves and levels that survive a scene change.
-
-Loading one scene from another used to bring the level in stripped: untextured
-surfaces, wrong materials, missing paint and collision that didn't match what you
-could see. Opening the same scene directly looked perfect, which made it look
-like your scene file was broken. It's fixed — a level loads the same way
-whichever direction you arrive from.
-
-The map tool stopped folding. Faces with more than three corners were being split
-into triangles the simplest possible way, which is only correct while a face stays
-flat and convex — and moving any vertex ends both. Dragging a corner could crease
-a face, stretch it, or spill it outside its own outline. Faces are split properly
-now, so what you select and what you walk into match what you see.
-
-Also in it: **right-click in the viewport** for everything you can do to a
-selection, **Select ⏵ Warped faces** to find the one that's wrong, **disable a
-node** and everything under it, shortcuts that stop getting stuck after you
-alt-tab, a scene tree that opens folded, and a crash handler that offers to file
-a report for you with the details already filled in.
 
 ## Being worked on
 

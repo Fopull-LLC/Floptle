@@ -3509,7 +3509,7 @@ end
             "`if el.visible` must be false when it is false — 0 is truthy in Lua"
         );
         let spec = world.get::<floptle_ui::ElementSpec>(e).unwrap();
-        let fill = spec.shape.unwrap().fill;
+        let fill = spec.shape.as_ref().unwrap().fill;
         assert!((fill[0] - 1.0).abs() < 1e-6 && (fill[1] - 0.5).abs() < 1e-6);
         assert_eq!(fill[3], 1.0, "a three-argument color is opaque, not invisible");
         let tc = spec.text.as_ref().unwrap().color;

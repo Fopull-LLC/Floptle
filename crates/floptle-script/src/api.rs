@@ -144,7 +144,7 @@ pub fn mirror_component_colors(
     let mut out: HashMap<String, HashMap<String, [f32; 4]>> = HashMap::new();
     if let Some(spec) = world.get::<floptle_ui::ElementSpec>(e) {
         let mut f: HashMap<String, [f32; 4]> = HashMap::new();
-        if let Some(s) = spec.shape {
+        if let Some(s) = &spec.shape {
             f.insert("fill".into(), s.fill);
             f.insert("borderColor".into(), s.border_color);
         }
@@ -350,7 +350,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 floptle_ui::Size::Fit => {}
             }
         }
-        if let Some(s) = spec.shape {
+        if let Some(s) = &spec.shape {
             // `radius`/`border` read back the FIRST entry: with a uniform value
             // (the overwhelmingly common case) that is exactly the number the
             // designer typed, and per-corner shapes have the indexed fields

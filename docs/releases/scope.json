@@ -2,5 +2,6 @@
   "//": "What each release actually changed: \"engine\", \"hub\", or both. One tag builds both binaries, so every release ships an engine bundle and a Hub bundle whether or not either changed — which means the version number alone can't tell the Hub whether there is a new engine in it. A version NOT listed here changed both, which is the normal case and the safe default: only the exceptions need a line. Read by scripts/embed-release-notes.sh over the whole manifest on every publish, so adding a line here fixes an already-published release the next time anything ships.",
 
   "0.22.1": ["hub"],
-  "0.22.3": ["hub"]
+  "0.22.3": ["hub"],
+  "0.23.0": ["engine"]
 }

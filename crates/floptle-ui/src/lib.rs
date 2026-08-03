@@ -194,7 +194,10 @@ impl Default for StackCfg {
 /// side (rules and accent bars stop costing an extra node), `grain` (the
 /// cheapest cure for plastic-looking UI), and `glow`/inset `shadow` (light and
 /// recession).
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+// NOT `Copy` since `frame` arrived: a 9-slice carries a texture path, and a path is a
+// String. Everything here was scalar until then, and the copies were incidental rather
+// than load-bearing — the emit path borrows the shape and clones only the path itself.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShapeSpec {
     /// The flat fill — and, when `gradient` is set, its near colour.
     pub fill: [f32; 4],
@@ -217,9 +220,49 @@ pub struct ShapeSpec {
     /// Optional per-pixel noise over the fill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grain: Option<GrainSpec>,
+    /// A 9-sliced sprite drawn as this shape's EDGE, in place of a drawn border.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<FrameSpec>,
     /// How this shape composites against what is already drawn.
     #[serde(default, skip_serializing_if = "is_normal_blend")]
     pub blend: Blend,
+}
+
+/// A 9-sliced sprite drawn as an element's edge.
+///
+/// **A frame is a border, not a background.** It draws over the fill, takes the shape's
+/// [`border_color`](ShapeSpec::border_color) as its tint, and leaves its middle patch
+/// transparent so the fill shows through — which is what lets one white sprite become a
+/// silver panel edge on one screen and a dim one on the next without a second asset.
+///
+/// Tying it to `border_color` rather than giving it a colour of its own is deliberate:
+/// that channel already animates, so a frame picks up a style's hover/focus transition
+/// with no new machinery. A style that sets `frame` should set `border_color` too — the
+/// default is opaque black, which is a frame you can see but did not choose.
+///
+/// The renderer expands the nine patches, because it is the only place that knows the
+/// texture's pixel size and therefore how big an unstretched corner should be.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FrameSpec {
+    /// Texture asset path — normally a sheet holding many frames.
+    pub texture: String,
+    /// UV sub-rect `[min_u, min_v, max_u, max_v]` of the sheet: WHICH frame.
+    #[serde(default = "full_uv")]
+    pub uv: [f32; 4],
+    /// 9-slice insets `[L, T, R, B]` as a fraction of `uv`. All zero would stretch
+    /// the sprite like a photograph, so a frame with no insets is a frame with no
+    /// corners — set these to the sprite's actual border thickness.
+    pub slice: [f32; 4],
+}
+
+fn full_uv() -> [f32; 4] {
+    [0.0, 0.0, 1.0, 1.0]
+}
+
+impl Default for FrameSpec {
+    fn default() -> Self {
+        FrameSpec { texture: String::new(), uv: full_uv(), slice: [0.0; 4] }
+    }
 }
 
 fn is_normal_blend(b: &Blend) -> bool {
@@ -237,6 +280,7 @@ impl Default for ShapeSpec {
             shadow: None,
             glow: None,
             grain: None,
+            frame: None,
             blend: Blend::Normal,
         }
     }
@@ -1646,7 +1690,7 @@ pub fn scroll_clips(
         if n.spec.scroll.is_none() {
             continue;
         }
-        let radius = n.spec.shape.map(|s| s.radius.max()).unwrap_or(0.0);
+        let radius = n.spec.shape.as_ref().map(|s| s.radius.max()).unwrap_or(0.0);
         let clip = Clip { rect: p.rect, radius };
         let mut stack: Vec<u32> = n.children.iter().map(|c| c.id).collect();
         while let Some(id) = stack.pop() {
@@ -1807,7 +1851,7 @@ pub fn draw_list_with(
         // under-rounding would show.
         let radius = nodes
             .get(mask_id)
-            .and_then(|n| n.spec.shape)
+            .and_then(|n| n.spec.shape.as_ref())
             .map(|s| s.radius.max())
             .unwrap_or(0.0);
         let clip = Clip { rect, radius };
@@ -1841,10 +1885,10 @@ pub fn draw_list_with(
             scale: spec.scale,
             pivot: spec.pivot,
         };
-        let radius = spec.shape.map(|s| s.radius.0).unwrap_or([0.0; 4]);
-        let blend = spec.shape.map(|s| s.blend).unwrap_or(Blend::Normal);
+        let radius = spec.shape.as_ref().map(|s| s.radius.0).unwrap_or([0.0; 4]);
+        let blend = spec.shape.as_ref().map(|s| s.blend).unwrap_or(Blend::Normal);
 
-        if let Some(s) = spec.shape {
+        if let Some(s) = &spec.shape {
             // Glow sits furthest back — it is light spilling from under the
             // element, so a drop shadow drawn after it still reads as contact.
             if let Some(g) = s.glow
@@ -1917,6 +1961,25 @@ pub fn draw_list_with(
                     shadow_offset: sh.offset,
                     // `spread` pushes the inner edge further in.
                     border: [sh.spread; 4],
+                    blend,
+                    xform,
+                    ..Default::default()
+                });
+            }
+            // The 9-sliced edge sprite, over the fill and the inset shadow because it
+            // is the element's EDGE — the thing everything else sits inside. Tinted by
+            // `border_color`, which is the same channel a drawn border uses and the
+            // reason a frame inherits a style's hover transition for nothing.
+            if let Some(f) = &s.frame
+                && !f.texture.is_empty()
+            {
+                dl.quads.push(Quad {
+                    rect: p.rect,
+                    color: paint(s.border_color),
+                    texture: f.texture.clone(),
+                    uv: f.uv,
+                    slice: f.slice,
+                    clip,
                     blend,
                     xform,
                     ..Default::default()
@@ -2006,7 +2069,7 @@ pub fn draw_list_with(
             let clip = if field.is_some() {
                 Some(clip.unwrap_or(Clip {
                     rect: p.rect,
-                    radius: spec.shape.map(|s| s.radius.max()).unwrap_or(0.0),
+                    radius: spec.shape.as_ref().map(|s| s.radius.max()).unwrap_or(0.0),
                 }))
             } else {
                 clip

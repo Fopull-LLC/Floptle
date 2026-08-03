@@ -38,7 +38,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Blend, Case, Corners, GlowSpec, Gradient, GrainSpec, ShadowSpec, Sides, TextShadow, TextStroke,
+    Blend, Case, Corners, FrameSpec, GlowSpec, Gradient, GrainSpec, ShadowSpec, Sides, TextShadow,
+    TextStroke,
 };
 
 // ---------------------------------------------------------------------------
@@ -368,6 +369,10 @@ pub struct StyleBlock {
     pub glow: Option<StyleGlow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grain: Option<GrainSpec>,
+    /// A 9-sliced sprite as this element's edge — the pixel-art equivalent of
+    /// `border`. Tinted by `border_color`, which is what makes it animate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<FrameSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blend: Option<Blend>,
     // --- element ---
@@ -653,7 +658,7 @@ impl Anim {
 /// Read the animatable properties an element currently has authored on it —
 /// the values a style with no override for a property should leave alone.
 fn authored(spec: &crate::ElementSpec) -> Animated {
-    let shape = spec.shape;
+    let shape = spec.shape.as_ref();
     Animated {
         fill: shape.map(|s| s.fill).unwrap_or([1.0; 4]),
         border_color: shape.map(|s| s.border_color).unwrap_or([0.0; 4]),
@@ -738,6 +743,9 @@ fn apply_discrete(spec: &mut crate::ElementSpec, block: &StyleBlock, tk: &Tokens
     }
     if let Some(gr) = block.grain {
         spec.shape.get_or_insert_with(Default::default).grain = Some(gr);
+    }
+    if let Some(f) = &block.frame {
+        spec.shape.get_or_insert_with(Default::default).frame = Some(f.clone());
     }
     if let Some(b) = block.blend {
         spec.shape.get_or_insert_with(Default::default).blend = b;
@@ -973,7 +981,7 @@ mod tests {
         )];
         let mut rt = StyleRuntime::default();
         apply_styles(&mut roots, &button_sheet(), &tokens(), &StateInput::default(), &mut rt, 1.0);
-        assert_eq!(roots[0].spec.shape.unwrap().fill, [0.05, 0.06, 0.09, 1.0]);
+        assert_eq!(roots[0].spec.shape.as_ref().unwrap().fill, [0.05, 0.06, 0.09, 1.0]);
         assert_eq!(roots[0].spec.text.as_ref().unwrap().color, [1.0, 0.85, 0.35, 1.0]);
     }
 
@@ -1159,7 +1167,7 @@ mod tests {
         )];
         let mut rt = StyleRuntime::default();
         apply_styles(&mut roots, &button_sheet(), &tokens(), &StateInput::default(), &mut rt, 1.0);
-        assert_eq!(roots[0].spec.shape.unwrap().radius.0, [7.0; 4], "radius was not in the style");
+        assert_eq!(roots[0].spec.shape.as_ref().unwrap().radius.0, [7.0; 4], "radius was not in the style");
     }
 
     /// An element naming a style that doesn't exist keeps its authored look
@@ -1176,7 +1184,7 @@ mod tests {
         )];
         let mut rt = StyleRuntime::default();
         apply_styles(&mut roots, &button_sheet(), &tokens(), &StateInput::default(), &mut rt, 1.0);
-        assert_eq!(roots[0].spec.shape.unwrap().fill, [0.2, 0.3, 0.4, 1.0]);
+        assert_eq!(roots[0].spec.shape.as_ref().unwrap().fill, [0.2, 0.3, 0.4, 1.0]);
     }
 
     #[test]
@@ -1302,6 +1310,75 @@ mod tests {
         // works because the style resolved before the solver ran.
         let child_rect = placed.iter().find(|p| p.id == 2).unwrap().rect;
         assert_eq!([child_rect[0], child_rect[1]], [12.0, 12.0]);
+    }
+
+    /// A 9-sliced sprite AS the border, which is how a pixel-art project gets a drawn
+    /// panel edge that a `border: 2.0` rectangle cannot express.
+    ///
+    /// The colour is the assertion that matters: the frame quad takes `border_color`,
+    /// so a white 1-bit sprite becomes silver here and dim on a disabled row without a
+    /// second asset — and it animates, because that channel already did.
+    #[test]
+    fn a_frame_draws_over_the_fill_and_takes_the_border_colour() {
+        use crate::{draw_list, solve, FrameSpec, Size};
+        let mut styles = BTreeMap::new();
+        styles.insert(
+            "panel".to_string(),
+            Style {
+                base: StyleBlock {
+                    fill: Some(ColorRef::Lit([0.0, 0.0, 0.0, 0.5])),
+                    border_color: Some(ColorRef::Token("accent".into())),
+                    frame: Some(FrameSpec {
+                        texture: "textures/ui/frames.png".into(),
+                        uv: [0.0, 0.0, 0.25, 0.5],
+                        slice: [0.3, 0.3, 0.3, 0.3],
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let sheet = StyleSheet { styles };
+        let mut roots = vec![Node {
+            id: 1,
+            spec: ElementSpec {
+                style: "panel".into(),
+                size: [Size::Fixed(200.0), Size::Fixed(100.0)],
+                shape: Some(ShapeSpec::default()),
+                ..Default::default()
+            },
+            children: vec![],
+        }];
+
+        let mut rt = StyleRuntime::default();
+        apply_styles(&mut roots, &sheet, &tokens(), &StateInput::default(), &mut rt, 1.0);
+        let placed = solve(&roots, [400.0, 300.0], &|_| [0.0, 0.0]);
+        let dl = draw_list(&roots, &placed, &[]);
+
+        // Fill first, frame over it — a frame is an edge, not a backdrop.
+        assert_eq!(dl.quads[0].color, [0.0, 0.0, 0.0, 0.5]);
+        assert!(dl.quads[0].texture.is_empty());
+        let f = &dl.quads[1];
+        assert_eq!(f.texture, "textures/ui/frames.png");
+        assert_eq!(f.uv, [0.0, 0.0, 0.25, 0.5]);
+        assert_eq!(f.slice, [0.3, 0.3, 0.3, 0.3]);
+        assert_eq!(f.color, [1.0, 0.85, 0.35, 1.0], "the frame wears border_color");
+        assert_eq!(f.rect, dl.quads[0].rect, "and covers the whole element");
+
+        // A frame with no texture emits nothing — so `frame: None` costs no quad.
+        let mut bare = vec![Node {
+            id: 1,
+            spec: ElementSpec {
+                size: [Size::Fixed(10.0), Size::Fixed(10.0)],
+                shape: Some(ShapeSpec::default()),
+                ..Default::default()
+            },
+            children: vec![],
+        }];
+        let placed = solve(&bare, [400.0, 300.0], &|_| [0.0, 0.0]);
+        assert_eq!(draw_list(&bare, &placed, &[]).quads.len(), 1);
+        bare[0].spec.shape.as_mut().unwrap().frame = Some(FrameSpec::default());
+        assert_eq!(draw_list(&bare, &placed, &[]).quads.len(), 1);
     }
 
     #[test]
