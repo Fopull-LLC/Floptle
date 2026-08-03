@@ -1106,8 +1106,11 @@ impl eframe::App for HubApp {
                     })
                     .or_else(|| {
                         engine_new.as_ref().map(|r| {
+                            // "Engine", not "Floptle". This chip sits a few pixels from the
+                            // words "Floptle Hub 0.22.2", and "Floptle 0.22.1" beside that
+                            // is the whole confusion in one line.
                             (
-                                format!("{} Floptle {}", ico::UPGRADE, r.version),
+                                format!("{} Engine {}", ico::UPGRADE, r.version),
                                 "a newer engine is available — click to see what's in it",
                                 Tab::Installs,
                             )
@@ -1204,7 +1207,7 @@ impl eframe::App for HubApp {
                 ui.horizontal(|ui| {
                     ui.colored_label(
                         egui::Color32::LIGHT_GREEN,
-                        format!("{} Floptle {} is available", ico::UPGRADE, r.version),
+                        format!("{} Floptle engine {} is available", ico::UPGRADE, r.version),
                     );
                     if !r.date.is_empty() {
                         ui.small(&r.date);
