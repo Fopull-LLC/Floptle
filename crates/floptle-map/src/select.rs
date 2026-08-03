@@ -42,6 +42,21 @@ pub fn front_facing(mesh: &MapMesh, eye: Vec3) -> (Vec<bool>, HashSet<(u32, u32)
             edges.insert(key(a, b));
         }
     }
+    // Nothing facing you means nothing is IN THE WAY, so the cue has no
+    // meaning and everything draws normally. Two cases that matter, and both
+    // are ordinary map editing rather than curiosities:
+    //
+    // * **Inside a room.** Build a box, stand in it — the commonest position
+    //   there is — and every face is turned away. Dimming the whole wireframe
+    //   there would make the tool worse exactly where it is used most.
+    // * **A single-sided plane seen from behind.** One face, turned away,
+    //   occluding nothing.
+    //
+    // Without this guard the "behind the surface" cue answers "all of it",
+    // which is never information.
+    if edges.is_empty() {
+        return (vec![true; mesh.verts.len()], mesh.edges().into_iter().collect());
+    }
     (verts, edges)
 }
 
@@ -102,17 +117,42 @@ mod depth_cue_tests {
         assert_eq!(m.verts[hidden[0]], Vec3::splat(-1.0));
     }
 
-    /// Inside the box every face is turned away, so nothing reads as "in
-    /// front" — and nothing panics or divides by zero on the way there.
+    /// Inside a room, EVERYTHING reads as visible.
+    ///
+    /// Standing inside a box is the commonest position in map editing, and
+    /// every face is turned away from you there. The literal answer — "all of
+    /// it is behind the surface" — is true and useless: nothing is in the way,
+    /// because the only faces that could hide anything are the ones behind the
+    /// camera. Dimming the whole wireframe there would make the tool worse
+    /// exactly where it is used most, so the guard says so.
     #[test]
-    fn from_inside_nothing_is_front_facing() {
+    fn from_inside_a_room_everything_still_reads_as_visible() {
         let m = box_mesh(Vec3::ONE);
         let (verts, edges) = front_facing(&m, Vec3::ZERO);
-        assert!(verts.iter().all(|v| !v));
-        assert!(edges.is_empty());
-        // An empty mesh answers empty rather than panicking.
+        assert!(verts.iter().all(|v| *v), "inside a box, nothing occludes anything");
+        assert_eq!(edges.len(), m.edges().len(), "every edge stays fully drawn");
+    }
+
+    /// The same guard covers a single-sided plane seen from behind: one face,
+    /// turned away, occluding nothing.
+    #[test]
+    fn a_one_sided_plane_seen_from_behind_is_not_dimmed() {
+        let m = crate::plane(glam::Vec2::new(4.0, 4.0));
+        let front = front_facing(&m, Vec3::new(0.0, 5.0, 0.0));
+        let back = front_facing(&m, Vec3::new(0.0, -5.0, 0.0));
+        assert!(front.0.iter().all(|v| *v), "from the front, obviously");
+        assert!(back.0.iter().all(|v| *v), "…and from behind, since nothing hides it");
+        assert_eq!(back.1.len(), m.edges().len());
+    }
+
+    /// An empty mesh answers empty rather than panicking.
+    #[test]
+    fn an_empty_mesh_answers_empty() {
+        let m = box_mesh(Vec3::ONE);
         let empty = crate::MapMesh { verts: Vec::new(), faces: Vec::new(), ..m.clone() };
-        assert!(front_facing(&empty, Vec3::ZERO).0.is_empty());
+        let (verts, edges) = front_facing(&empty, Vec3::ZERO);
+        assert!(verts.is_empty());
+        assert!(edges.is_empty());
     }
 }
 

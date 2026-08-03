@@ -80,6 +80,10 @@ tells you which side of the shape you are looking at. Selected elements keep
 their full brightness wherever they are, so a selection never disappears into
 the fade.
 
+When **nothing** faces you — standing inside a room, or looking at the back of a
+one-sided plane — nothing is in the way, so the whole wireframe draws at full
+strength. "All of it is behind the surface" is true there and useless.
+
 ### ✂ Knife
 
 `/` arms the knife. Click one **edge or corner** of a face, then another on the
