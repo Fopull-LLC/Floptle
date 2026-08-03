@@ -22,7 +22,16 @@
 -- the server checking. Read docs/web-api.md before you design an economy.
 --
 -- SETUP: attach to any node, set `api` to your API's base URL in the Inspector,
--- press Play. Requires the endpoints in docs/web-api.md; point it at your own.
+-- press Play. It expects the three endpoints listed in docs/web-api.md — point
+-- it at your own server, or change the paths to match one you already have.
+--
+-- NOTE ON FLOPTLE CLOUD (fopull.com). Signing in to a *Foverse* account is this
+-- same flow, but the real provider requires PKCE (S256), and Lua has no SHA-256
+-- — so a script cannot drive it directly today. The Floptle Hub already does
+-- that sign-in and holds the token; handing it to the running game is the piece
+-- that is not built yet (floptle-platform tasks/floptle/0054). Until it is, this
+-- script is the pattern for YOUR OWN server, which is what most games want
+-- anyway.
 
 defaults = {
   --@header Your API

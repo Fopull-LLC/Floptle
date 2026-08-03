@@ -633,9 +633,9 @@ mod tests {
 
     /// A Lua state with `http`/`json` installed, plus the two handles a test
     /// pokes at: the request bookkeeping and the Console.
-    type Harness = (Lua, Rc<RefCell<HttpState>>, Rc<RefCell<Vec<ScriptLog>>>);
+    pub(super) type Harness = (Lua, Rc<RefCell<HttpState>>, Rc<RefCell<Vec<ScriptLog>>>);
 
-    fn lua_with_http() -> Harness {
+    pub(super) fn lua_with_http() -> Harness {
         let lua = Lua::new();
         let state = Rc::new(RefCell::new(HttpState::new()));
         let logs: Rc<RefCell<Vec<ScriptLog>>> = Rc::new(RefCell::new(Vec::new()));
@@ -842,5 +842,107 @@ mod tests {
         assert!(t.get::<bool>("ok").unwrap());
         assert!(matches!(t.get::<Value>("json").unwrap(), Value::Nil));
         assert_eq!(t.get::<String>("body").unwrap(), "plain text");
+    }
+}
+
+/// Live checks against the real Floptle Cloud API on `fopull.com`
+/// (floptle-platform `tasks/floptle/0054`). `#[ignore]`d: they need the
+/// network, so CI never runs them — `cargo test -p floptle-script -- --ignored
+/// --nocapture live_` when you want to prove the chain by hand.
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// The one wire shape W expected to fight this layer: request bodies must
+    /// be JSON **objects**, and an empty Lua table has to encode as `{}` and
+    /// not `[]` or the server answers `400 invalid_body`.
+    ///
+    /// Proved against the live endpoint rather than only against our own
+    /// encoder: `POST /api/floptle/v1/games` with no token answers `401`
+    /// (the auth gate) when the body parsed, and `400 invalid_body` when it
+    /// did not — so the status code itself distinguishes the two.
+    #[test]
+    #[ignore = "hits the network"]
+    fn live_an_empty_table_body_is_a_json_object_the_server_accepts() {
+        let (lua, state, logs) = super::tests::lua_with_http();
+        state.borrow_mut().set_playing(true);
+        let got: Rc<RefCell<Option<(u16, String)>>> = Rc::new(RefCell::new(None));
+        {
+            let g = got.clone();
+            let cb = lua
+                .create_function(move |_, res: Table| {
+                    *g.borrow_mut() = Some((
+                        res.get::<u16>("status").unwrap_or(0),
+                        res.get::<String>("body").unwrap_or_default(),
+                    ));
+                    Ok(())
+                })
+                .unwrap();
+            lua.globals().set("__cb", cb).unwrap();
+        }
+        lua.load(
+            "http.post('https://fopull.com/api/floptle/v1/games', {}, { json = true }, __cb)",
+        )
+        .exec()
+        .expect("the request should start");
+        // Poll the drain until the worker answers.
+        for _ in 0..200 {
+            drain(&lua, &state, &logs);
+            if got.borrow().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let (status, body) = got.borrow().clone().expect("no reply within 20s");
+        println!("POST /games with {{}} -> {status}: {body}");
+        assert_eq!(
+            status, 401,
+            "an empty table must reach the server as a JSON OBJECT: a 400 here means it \
+             encoded as [] and the body parser rejected it. Body: {body}"
+        );
+        assert!(
+            !body.contains("invalid_body"),
+            "the server read the body as the wrong JSON type: {body}"
+        );
+    }
+
+    /// A real GET through the whole chain: worker thread, reply channel, the
+    /// frame-pass drain, the `res` table, and the JSON parse. The discovery
+    /// document is unauthenticated and stable, so this asserts on its content.
+    #[test]
+    #[ignore = "hits the network"]
+    fn live_a_get_round_trips_through_the_whole_chain() {
+        let (lua, state, logs) = super::tests::lua_with_http();
+        state.borrow_mut().set_playing(true);
+        let got: Rc<RefCell<Option<(bool, String)>>> = Rc::new(RefCell::new(None));
+        {
+            let g = got.clone();
+            let cb = lua
+                .create_function(move |_, res: Table| {
+                    let issuer = res
+                        .get::<Table>("json")
+                        .and_then(|j| j.get::<String>("issuer"))
+                        .unwrap_or_default();
+                    *g.borrow_mut() = Some((res.get::<bool>("ok").unwrap_or(false), issuer));
+                    Ok(())
+                })
+                .unwrap();
+            lua.globals().set("__cb", cb).unwrap();
+        }
+        lua.load("http.get('https://fopull.com/.well-known/openid-configuration', __cb)")
+            .exec()
+            .unwrap();
+        for _ in 0..200 {
+            drain(&lua, &state, &logs);
+            if got.borrow().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let (ok, issuer) = got.borrow().clone().expect("no reply within 20s");
+        println!("issuer = {issuer}");
+        assert!(ok, "the discovery document should fetch cleanly");
+        // Parsed from the content-type alone, with no `json = true` asked for.
+        assert_eq!(issuer, "https://fopull.com");
     }
 }

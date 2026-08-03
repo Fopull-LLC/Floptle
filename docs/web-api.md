@@ -179,6 +179,29 @@ anything reused elsewhere. Issue short-lived tokens and refresh them.
 
 ---
 
+## Floptle Cloud (fopull.com)
+
+The engine's own cloud — Foverse accounts, cloud saves and leaderboards — is
+live at `https://fopull.com`, with the game-data API at
+`https://fopull.com/api/floptle/v1`. Two things to know before you aim at it:
+
+* **A script cannot do that sign-in yet.** The provider is a standard OAuth 2.0
+  device grant with **PKCE (S256) mandatory**, and Lua has no SHA-256. The
+  **Hub** already signs in and holds the token; handing that token to the
+  running game is the missing piece
+  (floptle-platform `tasks/floptle/0054`). Once it lands, everything on this
+  page is how you'd use it.
+* **The `cloud` scope matters.** The game-data endpoints answer
+  `403 insufficient_scope` for a token without it.
+
+The one wire detail worth stating, because it is the thing most likely to trip
+a JSON layer: **request bodies must be JSON objects.** In Floptle they are —
+`json.encode{}` is `{}`, not `[]`, and there is a live test asserting the server
+accepts it — but if you build a body by appending to a list you will get
+`400 invalid_body`. Use explicit string keys.
+
+---
+
 ## Secrets
 
 There is no safe place for an API key in a shipped game. If a script can read
