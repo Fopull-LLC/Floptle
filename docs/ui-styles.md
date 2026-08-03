@@ -216,7 +216,7 @@ is the loop the system exists for; use it.
 
 | Group | Properties |
 |---|---|
-| Shape | `fill`, `gradient`, `radius`, `border`, `border_color`, `shadow`, `glow`, `grain`, `blend` |
+| Shape | `fill`, `gradient`, `radius`, `border`, `border_color`, `frame`, `shadow`, `glow`, `grain`, `blend` |
 | Element | `opacity`, `tint`, `rotation`, `scale` |
 | Text | `text_color`, `text_size`, `tracking`, `line_height`, `case`, `font`, `text_stroke`, `text_shadow` |
 | Layout | `pad`, `gap` (on a stack) |
@@ -228,6 +228,55 @@ numbers `(TL, TR, BR, BL)`.
 
 Layout *placement* is deliberately absent: a style says what things look like,
 not where they go. Where they go is the designer's, in the viewport.
+
+---
+
+## Frames — a sprite instead of a border
+
+`border` strokes a rectangle. `frame` puts a **9-sliced sprite** there instead,
+which is how a pixel-art project gets an edge it drew rather than one the
+renderer computed.
+
+```ron
+"panel": (
+    base: (
+        fill: "ink",
+        border_color: "silver",
+        frame: (
+            texture: "textures/ui/frames.png",
+            uv: (0.25, 0.0, 0.5, 0.5),
+            slice: (0.25, 0.25, 0.25, 0.25),
+        ),
+    ),
+),
+```
+
+- **`uv`** is a `(min_u, min_v, max_u, max_v)` window into the texture, so every
+  frame in a game can live in one atlas — one texture, one draw call, and a new
+  panel style costs a line rather than an asset.
+- **`slice`** is the corner inset as a fraction of that window. The corners keep
+  their drawn pixel size and only the middles stretch.
+
+**A frame is tinted by `border_color`.** That is the same channel a drawn border
+uses, so one white sprite becomes a bright focused edge and a dim idle one with
+no second asset, and the frame picks up the style's hover/focus transition for
+free. A style that sets `frame` should set `border_color` in the same block —
+the default is opaque black, which is an edge you can see but did not choose.
+
+From Lua the three properties are `frame`, `frameUV` and `frameSlice`.
+
+### ⚠ The size floor
+
+A corner patch **never stretches**. An element smaller than two of them has no
+middle left, and the renderer's answer is to abandon the nine patches and draw
+the whole sprite as one stretched quad. That does not look like a small frame —
+it looks like a smear.
+
+So the floor is **twice your corner size in both axes**. Work it out once from
+the atlas: a 48px cell at `slice: 0.25` is a 12px corner, so nothing under ~24
+units should carry that frame. Menu rows, meter tracks and pips are usually
+under it and want a plain `border` instead. Switching to a different frame cell
+does not help — the fallback is about size, not art.
 
 ---
 

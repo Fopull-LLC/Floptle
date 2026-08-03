@@ -3,6 +3,10 @@
 Start here. Floptle is a lightweight, hyperoptimized Rust game engine for surreal,
 otherworldly visuals (Fopull LLC).
 
+> **Picking this up cold?** [HANDOFF.md](HANDOFF.md) is the current state — what shipped,
+> how a release reaches a player, the two gates, and the gotchas that have already cost
+> somebody a day. Everything below is the reference; that is the orientation.
+
 ## Using the engine (start here to build something)
 
 - [getting-started.md](getting-started.md) — from empty project to a **walkable
