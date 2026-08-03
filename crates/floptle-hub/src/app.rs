@@ -1107,8 +1107,9 @@ impl eframe::App for HubApp {
                     .or_else(|| {
                         engine_new.as_ref().map(|r| {
                             // "Engine", not "Floptle". This chip sits a few pixels from the
-                            // words "Floptle Hub 0.22.2", and "Floptle 0.22.1" beside that
-                            // is the whole confusion in one line.
+                            // heading — which now reads "Floptle Hub <its own version>" —
+                            // and "Floptle 0.22.1" beside that is the whole confusion in a
+                            // single line.
                             (
                                 format!("{} Engine {}", ico::UPGRADE, r.version),
                                 "a newer engine is available — click to see what's in it",

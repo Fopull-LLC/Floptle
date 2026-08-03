@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.22.2 "Which One"** is a Hub release about version numbers. The Hub, the
+**v0.22.3 "Which One"** is a Hub release about version numbers. The Hub, the
 engine, and the engine a project is pinned to all wear the same number, and the
 Hub now tells them apart: it shows its own version on every tab, and a release
 that changed only the Hub says so instead of appearing as a new engine to install
