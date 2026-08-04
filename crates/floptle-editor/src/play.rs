@@ -556,6 +556,7 @@ impl Editor {
             }
             render.pending.clear();
             render.empty.clear();
+            render.born.clear();
             render.impostor = true;
             render.impostor_color = Some(color);
             self.terrain_cold

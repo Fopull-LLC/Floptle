@@ -397,7 +397,9 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let emissive = in.emissive.rgb * in.emissive.a;
     // Opacity: the material's alpha (in.color.a) times the texture's own alpha,
     // times painted alpha. Terrain is forced opaque (its vcolor.a is a slot).
-    let alpha = select(in.color.a * texel.a * in.vcolor.a, in.color.a, terrain);
+    // Terrain is opaque: its dissolve is the discard below, not a blend, so its
+    // alpha out is a flat 1.0 rather than the instance's dissolve progress.
+    let alpha = select(in.color.a * texel.a * in.vcolor.a, 1.0, terrain);
 
     // ALPHA CUTOUT for OPAQUE materials: a transparent-background texture (a PNG with an
     // alpha channel) shows through as actual holes, not black. Without this the opaque
@@ -415,6 +417,25 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // Screen pixel index — drives the optional fog/shadow dither. Needed by the
     // unlit early-return's fog too, so it's computed before that branch.
     let pix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
+
+    // A newly meshed terrain chunk DISSOLVES in rather than popping
+    // (`floptle/0067`): the streamer ramps `color.a` 0 → 1 over its first
+    // moments and the fraction of pixels that survive follows it.
+    //
+    // A dissolve and not a blend, because terrain is opaque and must stay in
+    // the opaque pass: an alpha-blended chunk would need sorting against every
+    // other chunk, and a half-transparent hillside shows the sky through the
+    // hill behind it. Discarding is order-independent and free. The threshold
+    // is `ign` rather than 4×4 Bayer for the same reason the fog uses it — a
+    // regular grid across a whole hillside reads as a screen door, where the
+    // gradient noise reads as the thing appearing.
+    //
+    // `fs_depth` runs the IDENTICAL test, so a fading chunk primes depth for
+    // exactly the pixels it will shade. Both derive the threshold from
+    // `in.clip` (invariant between the passes) and the same instance alpha.
+    if (terrain && in.color.a < 0.999 && ign(pix) > in.color.a) {
+        discard;
+    }
 
     // Unlit (fullbright/flat) — pure albedo + emissive, the classic retro look.
     if (in.params.z > 0.5) {
@@ -473,7 +494,13 @@ fn fs_mask(in: VsOut) -> @location(0) vec4<f32> {
 fn fs_depth(in: VsOut) {
     // Terrain is always opaque and its vcolor.a is a SLOT, not opacity — prime depth for it
     // unconditionally (else a hill wouldn't cap the raymarch and blobs would show through it).
+    // The one exception is a chunk still dissolving in (`floptle/0067`): priming depth for a
+    // pixel the color pass then discards would punch a hole in whatever is behind it, so the
+    // SAME test runs here. Identical inputs, identical result — see `fs`.
     if (in.tsplat > 0.5) {
+        if (in.color.a < 0.999 && ign(vec2<u32>(u32(in.clip.x), u32(in.clip.y))) > in.color.a) {
+            discard;
+        }
         return;
     }
     // Same tiled sampling as the color pass, so the conservative alpha test

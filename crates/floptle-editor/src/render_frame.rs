@@ -365,6 +365,9 @@ impl Editor {
         // — and read from the one predicate the input path uses, so where the
         // pixels go and where clicks are measured cannot disagree.
         let game_offscreen = self.game_offscreen();
+        // Same reason: the terrain chunks' dissolve-in clock is read before the
+        // destructure below takes `&mut self` (`floptle/0067`).
+        let chunk_now = self.now();
 
         let (
             Some(gpu),
@@ -1190,6 +1193,7 @@ impl Editor {
             cam.world_position,
             view_proj,
             self.mesh_ids[floptle_core::Shape::Sphere as usize],
+            chunk_now,
             &mut instances,
         );
 
@@ -6671,6 +6675,7 @@ impl Editor {
                 cam.world_position,
                 view_proj,
                 self.mesh_ids[floptle_core::Shape::Sphere as usize],
+                self.now(),
                 &mut instances,
             );
         }

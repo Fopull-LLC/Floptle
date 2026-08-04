@@ -106,8 +106,15 @@ pub struct InstanceRaw {
     /// that does not exist:
     ///   - `normal_mat[0].w` = the instance's TERRAIN color base.
     ///   - `normal_mat[1].w` = the paint-modulate flag (0/1; see `MaterialParams`).
+    ///   - `normal_mat[2].w` = the terrain-splat flag (0/1) — read on the CPU too,
+    ///     by [`is_terrain`], because terrain reads its `color.a` differently.
     pub normal_mat: [[f32; 4]; 3],
     /// Base color tint (rgb) + alpha.
+    ///
+    /// Alpha is opacity, and below 1 routes the instance to the blended pass —
+    /// EXCEPT on terrain ([`is_terrain`]), where the surface is opaque by
+    /// definition and the lane carries a newly meshed chunk's dissolve-in
+    /// progress instead (`floptle/0067`).
     pub color: [f32; 4],
     /// Emissive color (rgb) + strength (a).
     pub emissive: [f32; 4],
@@ -2014,12 +2021,20 @@ impl Raster {
         // frame on a big planet (the 60→10 fps collapse on approach).
         const OPAQUE_CUTOFF: f32 = 0.999;
         let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
+        // Terrain's alpha lane is a DISSOLVE threshold, not opacity
+        // (`floptle/0067`): the fragment shader discards a matching fraction of
+        // a newly meshed chunk's pixels and what survives is fully opaque. So a
+        // fading chunk belongs in the OPAQUE pass — blending it instead would
+        // dim it toward the sky rather than reveal it, drop it out of the depth
+        // prepass, and make it order-dependent against the chunks behind it,
+        // which on a planet is every other chunk.
+        let is_opaque = |raw: &InstanceRaw| is_terrain(raw) || raw.color[3] >= OPAQUE_CUTOFF;
         let bucketize =
             |want_opaque: bool, raws: &mut Vec<InstanceRaw>| -> Vec<(usize, Option<u32>, u32, u32)> {
                 let groups = group_by_key(
                     instances
                         .iter()
-                        .filter(|(_, _, raw)| (raw.color[3] >= OPAQUE_CUTOFF) == want_opaque)
+                        .filter(|(_, _, raw)| is_opaque(raw) == want_opaque)
                         .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), *raw)),
                 );
                 let mut buckets = Vec::with_capacity(groups.len());
@@ -2210,7 +2225,7 @@ impl Raster {
         let groups = group_by_key(
             instances
                 .iter()
-                .filter(|(_, _, raw)| raw.color[3] >= OPAQUE_CUTOFF)
+                .filter(|(_, _, raw)| is_terrain(raw) || raw.color[3] >= OPAQUE_CUTOFF)
                 .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), *raw))
                 .chain(
                     flsl.iter()
@@ -2358,6 +2373,18 @@ pub fn instance_of(model: Mat4, color: [f32; 3]) -> InstanceRaw {
 
 /// Pack a model matrix + a full [`MaterialParams`] into an `InstanceRaw`, computing
 /// the inverse-transpose normal matrix from its upper-3×3.
+/// Is this instance a meshed-terrain chunk (the `terrain_splat` flag)?
+///
+/// The one thing the CPU-side pass routing needs to know about terrain, and it
+/// needs to know it because terrain does not read `color.a` as opacity: the
+/// shader forces the surface opaque (its VERTEX alpha is a palette slot) and
+/// the instance alpha is instead the dissolve-in of a chunk that just streamed
+/// in. Reading the flag back off the packed instance rather than threading a
+/// parallel bool through every draw list keeps the two in step by construction.
+pub fn is_terrain(raw: &InstanceRaw) -> bool {
+    raw.normal_mat[2][3] > 0.5
+}
+
 pub fn instance_of_mat(model: Mat4, m: &MaterialParams) -> InstanceRaw {
     // The inverse-transpose is correct under rotation + non-uniform scale; guard a
     // degenerate (zero/singular) scale, whose non-invertible 3×3 would otherwise

@@ -72,6 +72,15 @@ pub(crate) struct TerrainRender {
     /// keyed by chunk coord so a sculpt can re-mesh just the chunks it touched and
     /// free the ones that emptied.
     pub slots: HashMap<[i32; 3], (MeshId, u8)>,
+    /// When each chunk FIRST became resident, in seconds on the editor's clock —
+    /// what [`chunk_fade`] measures the dissolve-in against (`floptle/0067`).
+    ///
+    /// A separate map rather than a third tuple field so that re-meshing an
+    /// existing chunk does not touch it: a dig re-uploads the chunk it bit, and
+    /// dissolving the ground back in every time you mine it would be worse than
+    /// the pop this exists to remove. Only a coord arriving from nothing is
+    /// stamped. Entries are dropped with their slot.
+    pub born: HashMap<[i32; 3], f32>,
     /// Chunks a worker job is in flight for: coord → (target lod, job epoch). A
     /// result is applied only if its (lod, epoch) still matches — anything else is
     /// stale (the chunk was re-dirtied, re-ringed, or the scene changed) and drops.
@@ -411,6 +420,14 @@ impl TerrainWorker {
 }
 
 impl Editor {
+    /// Seconds since the editor started — a monotonic clock for anything that
+    /// animates on wall time rather than on the play session's `play_t`, which
+    /// restarts with every Play. Zero before there is a window, which is the
+    /// headless case: a test's chunks are all born at 0 and fully faded in.
+    pub(crate) fn now(&self) -> f32 {
+        self.started.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0)
+    }
+
     /// Keep every terrain's render meshes in sync with its field + the camera (P4).
     ///
     /// Per frame: (1) drain finished worker meshes (stale epochs drop); (2) on a
@@ -422,6 +439,9 @@ impl Editor {
     /// keeps the shadow atlas fed.
     pub(crate) fn sync_terrain_meshes(&mut self, full_rebuild: bool, cam_world: DVec3) {
         self.terrain_scan_frame = self.terrain_scan_frame.wrapping_add(1);
+        // Stamped onto every chunk that arrives this frame, so a wave of them
+        // dissolves in together rather than each on its own schedule.
+        let now = self.now();
         if self.terrain_worker.is_none() && !self.terrains.is_empty() {
             self.terrain_worker = Some(TerrainWorker::spawn());
         }
@@ -443,6 +463,7 @@ impl Editor {
             for (_, (mid, _)) in r.slots.drain() {
                 raster.free_dynamic(mid);
             }
+            r.born.clear();
             false
         });
         self.terrain_chunks_dirty.retain(|e, _| live.contains(e));
@@ -464,10 +485,11 @@ impl Editor {
                     if let Some((mid, _)) = render.slots.remove(&done.coord) {
                         raster.free_dynamic(mid);
                     }
+                    render.born.remove(&done.coord);
                     render.empty.insert(done.coord);
                 } else {
                     render.empty.remove(&done.coord);
-                    upload_chunk(gpu, raster, render, done.coord, &done.mesh, done.lod);
+                    upload_chunk(gpu, raster, render, done.coord, &done.mesh, done.lod, now);
                 }
             }
         }
@@ -509,6 +531,7 @@ impl Editor {
                     for (_, (mid, _)) in render.slots.drain() {
                         raster.free_dynamic(mid);
                     }
+                    render.born.clear();
                     continue;
                 }
             } else {
@@ -551,6 +574,9 @@ impl Editor {
                         false
                     }
                 });
+                // A chunk the field no longer fills gives its stamp back with
+                // its slot, so coming back later is an arrival and fades again.
+                render.born.retain(|c, _| has.contains(c));
             }
 
             // Brush / script edits: near chunks synchronously (sculpting must feel
@@ -571,9 +597,10 @@ impl Editor {
                             if let Some((mid, _)) = render.slots.remove(&coord) {
                                 raster.free_dynamic(mid);
                             }
+                            render.born.remove(&coord);
                             render.empty.insert(coord);
                         } else {
-                            upload_chunk(gpu, raster, render, coord, &cm, 0);
+                            upload_chunk(gpu, raster, render, coord, &cm, 0, now);
                         }
                     } else {
                         queue.push((dist - DIRTY_PRIORITY_BOOST, e, coord, lod));
@@ -614,7 +641,7 @@ impl Editor {
                             if cm.is_empty() {
                                 render.empty.insert(coord);
                             } else {
-                                upload_chunk(gpu, raster, render, coord, &cm, 0);
+                                upload_chunk(gpu, raster, render, coord, &cm, 0, now);
                             }
                         } else {
                             queue.push((d, e, coord, raw_lod(d, rings)));
@@ -679,6 +706,7 @@ pub(crate) fn push_terrain_instances(
     cam_world: DVec3,
     view_proj: Mat4,
     sphere_mesh: MeshId,
+    now: f32,
     instances: &mut Vec<(MeshId, Option<floptle_render::TexId>, floptle_render::InstanceRaw)>,
 ) {
     // Frustum planes (Gribb–Hartmann) in CAMERA-RELATIVE space — the same
@@ -785,13 +813,45 @@ pub(crate) fn push_terrain_instances(
             // Splat: interpret the chunk color's alpha as a palette slot + triplanar-sample
             // the terrain palette (bound to the raster in `set_terrain_palette`).
             mp.terrain_splat = true;
+            // Dissolve-in for a chunk that just arrived (`floptle/0067`). The
+            // alpha lane is free on terrain — the shader forces terrain opaque
+            // because its VERTEX alpha is a palette slot — so this rides an
+            // existing lane, which matters when the raster budget is full at
+            // 16/16. An unstamped chunk is fully opaque, so nothing that was
+            // already on screen flickers when this ships.
+            if let Some(&born) = render.born.get(coord) {
+                mp.alpha = chunk_fade(now, born);
+            }
             instances.push((mid, None, floptle_render::instance_of_mat(model, &mp)));
         }
     }
 }
 
+/// How long a newly resident chunk takes to dissolve fully in, in seconds.
+///
+/// Short enough that it reads as the thing arriving rather than as fog, long
+/// enough to cover the arrival of the chunks behind it — a terrain streams in
+/// waves, and a fade shorter than the gap between waves just moves the pop.
+const CHUNK_FADE_SECS: f32 = 0.35;
+
+/// How opaque a chunk that first became resident at `born` is at `now` — the
+/// `color.a` the shader dissolves against (`floptle/0067`).
+///
+/// Clamped at both ends. A `born` in the FUTURE reads as fully opaque rather
+/// than as the start of a fade: only a clock that went backwards can produce
+/// one, and a chunk stuck invisible is a worse failure than one that never
+/// faded. `born == now` is the ordinary first frame, and starts at zero.
+pub(crate) fn chunk_fade(now: f32, born: f32) -> f32 {
+    let age = now - born;
+    if age < 0.0 {
+        return 1.0;
+    }
+    (age / CHUNK_FADE_SECS).clamp(0.0, 1.0)
+}
+
 /// Register (or overwrite) one chunk's dynamic slot in a terrain's render set,
-/// recording the LOD the mesh was extracted at.
+/// recording the LOD the mesh was extracted at — and, for a chunk arriving from
+/// nothing, the moment it arrived (see [`TerrainRender::born`]).
 fn upload_chunk(
     gpu: &floptle_render::Gpu,
     raster: &mut floptle_render::Raster,
@@ -799,8 +859,15 @@ fn upload_chunk(
     coord: [i32; 3],
     cm: &floptle_field::ChunkMesh,
     lod: u8,
+    now: f32,
 ) {
     let data = floptle_render::chunk_mesh_data(cm);
+    // Before the match, because two of its three arms are also "already
+    // resident" — an LOD swap and an outgrown slot are both re-meshes of
+    // something the player can already see, and neither should dissolve.
+    if !render.slots.contains_key(&coord) {
+        render.born.insert(coord, now);
+    }
     match render.slots.get(&coord).copied() {
         Some((mid, _)) if raster.replace_dynamic(gpu, mid, &data) => {
             render.slots.insert(coord, (mid, lod));
@@ -2443,8 +2510,34 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::terrain_voxel_size;
-    use super::{lod_for, raw_lod, rings_for_body, LOD_RINGS};
+    use super::{CHUNK_FADE_SECS, chunk_fade, lod_for, raw_lod, rings_for_body, LOD_RINGS};
     use floptle_field::BakedSdf;
+
+    /// A chunk that just arrived dissolves in over its first moments, monotonically
+    /// (`floptle/0067`) — and a chunk with no arrival stamp is simply opaque, which
+    /// is what keeps every already-resident chunk from flickering on the frame this
+    /// shipped.
+    #[test]
+    fn a_new_chunk_dissolves_in_and_an_old_one_is_just_there() {
+        assert_eq!(chunk_fade(10.0, 10.0), 0.0, "born this instant: nothing of it yet");
+        assert!(chunk_fade(10.0 + CHUNK_FADE_SECS * 0.5, 10.0) > 0.4);
+        assert!(chunk_fade(10.0 + CHUNK_FADE_SECS * 0.5, 10.0) < 0.6);
+        assert_eq!(chunk_fade(10.0 + CHUNK_FADE_SECS, 10.0), 1.0, "done fading");
+        assert_eq!(chunk_fade(1000.0, 10.0), 1.0, "and it stays done");
+
+        // Never backwards: a threshold that is not ordered in alpha turns the
+        // dissolve into a flicker, which is worse than the pop it replaces.
+        let mut prev = 0.0;
+        for i in 0..=20 {
+            let f = chunk_fade(10.0 + CHUNK_FADE_SECS * i as f32 / 20.0, 10.0);
+            assert!(f >= prev, "fade went backwards at step {i}: {f} after {prev}");
+            prev = f;
+        }
+
+        // A clock that restarted under a loaded scene must not leave chunks
+        // invisible forever — the one failure worse than never fading.
+        assert_eq!(chunk_fade(0.5, 900.0), 1.0, "a stamp in the future reads as opaque");
+    }
 
     /// The LOD rings hold their chunk at the boundary (±1 hysteresis) so a camera
     /// drifting across a ring edge can't flip a chunk's stride every frame.
