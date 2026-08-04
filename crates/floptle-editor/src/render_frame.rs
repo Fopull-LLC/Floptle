@@ -996,6 +996,18 @@ impl Editor {
         // actually culls (the editor Scene view renders with MAX = no table).
         let game_layer_table =
             (game_cull_mask != u32::MAX).then(|| self.project.build_layers());
+        // FRUSTUM CULL (`floptle/0075`). Until this existed, terrain chunks were
+        // the only thing in the engine that asked whether it was on screen —
+        // every mesh, map mesh, tilemap, batch and primitive became an instance
+        // every frame, and roughly half of any scene is behind the camera.
+        //
+        // Built from the same camera-relative `view_proj` the instance matrices
+        // are, so a position that is right for a draw is right for the test.
+        // The rejection sits at the TOP of the loop, before the match, so every
+        // arm benefits from one test rather than eight.
+        let frustum = floptle_render::Frustum::from_view_proj(view_proj);
+        // How much was skipped, reported in the window title beside the fps.
+        let mut culled_nodes = 0usize;
         for (e, matter) in &ents {
             // Hidden nodes (Visible(false)) don't draw their geometry (a script or the
             // Inspector can toggle this); they still keep transforms, physics, children.
@@ -1016,6 +1028,17 @@ impl Editor {
             }
             // World transform (composes any parent chain) — a parent carries children.
             let t = floptle_core::world_transform(&self.world, *e);
+            // Off screen? Skip the whole node — the material lookups, the matrix,
+            // every arm below (`floptle/0075`). Answers false for anything whose
+            // extent the scene does not know, and for the Blob, which is an SDF
+            // primitive that shadows things it is not itself beside.
+            if crate::node_bounds::node_is_off_screen(
+                &self.world, &self.mesh_registry, &self.anim.poses,
+                *e, matter, &t, cam.world_position, &frustum,
+            ) {
+                culled_nodes += 1;
+                continue;
+            }
             // A node's Material (if any) overrides the look; else fall back to the
             // primitive's color (meshes default to white = untinted texture). A
             // material texture (resolved to a registered handle) re-textures the shape.
@@ -1243,6 +1266,10 @@ impl Editor {
                 let protos = &self.scatter_protos;
                 let mut mesh_of =
                     |asset: &str| protos.get(asset).filter(|p| !p.is_empty()).cloned();
+                // Measured at bake time from the same import bounds the mesh path
+                // uses, so a field culls by DIRECTION as well as distance.
+                let proto_radius = &self.scatter_proto_radius;
+                let mut radius_of = |asset: &str| proto_radius.get(asset).copied();
                 // A hard cap, logged nowhere and needing none: a source with a
                 // silly density costs a frame-rate dip, never a frame that
                 // never ends.
@@ -1253,8 +1280,10 @@ impl Editor {
                     &sources,
                     eye,
                     &mut mesh_of,
+                    &mut radius_of,
                     &mut ground,
                     &base,
+                    &frustum,
                     SCATTER_BUDGET,
                     &mut instances,
                 );
@@ -1262,6 +1291,15 @@ impl Editor {
                 self.scatter_cache.clear();
             }
         }
+
+        // The gather is finished: record what it cost. `instances` is taken here
+        // rather than in the loop because terrain and scatter push after it, and
+        // the number a game wants is the whole submission (`floptle/0075`).
+        self.render_counts = crate::node_bounds::Counts {
+            nodes: ents.len(),
+            culled: culled_nodes,
+            instances: instances.len(),
+        };
 
         // Undo any transient scene-binding animation preview now that the draw list
         // is built — the ECS goes back to authored transforms before UI/undo/save.
@@ -4405,10 +4443,13 @@ impl Editor {
                 self.fps_timer = 0.0;
                 if let Some(window) = self.window.as_ref() {
                     window.set_title(&format!(
-                        "Floptle Editor — {}{} — {:.0} fps",
+                        "Floptle Editor — {}{} — {:.0} fps — {} nodes ({} off screen), {} instances",
                         self.scene_name,
                         if self.scene_dirty { " •" } else { "" },
-                        self.fps
+                        self.fps,
+                        self.render_counts.nodes,
+                        self.render_counts.culled,
+                        self.render_counts.instances
                     ));
                 }
             }
@@ -6569,7 +6610,9 @@ impl Editor {
             ],
         };
 
-        // Camera-relative instances + blobs, exactly like the main gather.
+        // Camera-relative instances + blobs, exactly like the main gather —
+        // including the frustum cull, built from THIS camera's matrix.
+        let off_frustum = floptle_render::Frustum::from_view_proj(view_proj);
         let ents: Vec<(Entity, Matter)> =
             self.world.query::<Matter>().map(|(e, m)| (e, m.clone())).collect();
         // Per-node paint, resolved BEFORE the draw loop (which borrows `raster`
@@ -6605,6 +6648,15 @@ impl Editor {
                 continue;
             }
             let t = floptle_core::world_transform(&self.world, *ent);
+            // …and the same cull the screen uses (`floptle/0075`), against THIS
+            // camera's frustum. An offscreen target that culled differently from
+            // the window would be a mirror showing a different room.
+            if crate::node_bounds::node_is_off_screen(
+                &self.world, &self.mesh_registry, &self.anim.poses,
+                *ent, matter, &t, cam.world_position, &off_frustum,
+            ) {
+                continue;
+            }
             let mat = self.world.get::<Material>(*ent).cloned();
             // Texture-painted node → ALSO push its paint overlay; the base draws normally
             // below (see the main path).

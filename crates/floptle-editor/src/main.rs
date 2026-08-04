@@ -71,6 +71,7 @@ mod map_paint;
 mod map_ui;
 mod matter_catalog;
 mod net;
+mod node_bounds;
 mod paint_io;
 mod paint_mesh;
 mod paint_tex;
@@ -1253,6 +1254,13 @@ struct Editor {
     /// FAILURE, so a prototype that cannot be drawn is reported once rather
     /// than every frame it is looked at.
     scatter_protos: HashMap<String, Vec<crate::scatter_draw::Part>>,
+    /// A scatter prototype's bounding radius at scale 1, by the same asset
+    /// string — measured while baking, from the same import bounds the mesh path
+    /// uses. Needed so a field can be frustum-culled per prop and not just by
+    /// distance (`floptle/0075`): a full disc used to submit everything behind
+    /// you. A prototype with no measurable size is absent here, which reads as
+    /// "never cull it".
+    scatter_proto_radius: HashMap<String, f32>,
     /// Per-entity vertex buffers for CPU-skinned parts (two characters sharing
     /// a model must not bake their poses into one buffer).
     skin_variants: anim::SkinVariants,
@@ -2168,6 +2176,13 @@ struct Editor {
     /// every frame.
     fps: f32,
     fps_timer: f32,
+    /// What the last gather actually submitted (`floptle/0075`).
+    ///
+    /// A frame rate on its own says a scene is slow and nothing about why, which
+    /// is how four separate "the engine is slow" tickets turned out to be four
+    /// different counts nobody could read. These are the two numbers the cull
+    /// moves, in the title beside the fps.
+    render_counts: crate::node_bounds::Counts,
     /// Active camera focus glide (F), or `None`.
     focus_anim: Option<FocusAnim>,
     /// Asset pending rename: (current path, edited new-name buffer). Drives a modal.

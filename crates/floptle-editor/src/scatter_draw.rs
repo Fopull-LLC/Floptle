@@ -145,8 +145,10 @@ pub(crate) fn build_instances(
     sources: &[ScatterSource],
     eye: DVec3,
     mesh_of: &mut impl FnMut(&str) -> Option<Vec<Part>>,
+    radius_of: &mut impl FnMut(&str) -> Option<f32>,
     ground: &mut impl FnMut(DVec3, Vec3, f32) -> Option<(f32, Vec3)>,
     material: &MaterialParams,
+    frustum: &floptle_render::Frustum,
     budget: usize,
     out: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
 ) {
@@ -163,6 +165,20 @@ pub(crate) fn build_instances(
         if range <= 0.0 || src.bands.is_empty() {
             continue;
         }
+        // The largest prop this source can draw, at scale 1 — the whole source's
+        // radius, taken once rather than per band per prop. Conservative on
+        // purpose: an LOD band whose stand-in is smaller than the near mesh must
+        // not be culled by the near mesh's own tighter sphere.
+        //
+        // `None` — a prototype whose bounds nothing measured — means this source
+        // is never direction-culled. Its props still cull by distance, as they
+        // always did.
+        let prop_radius = src
+            .bands
+            .iter()
+            .map(|b| radius_of(&b.asset))
+            .try_fold(0.0f32, |acc, r| r.map(|r| acc.max(r)))
+            .filter(|r| r.is_finite() && *r > 0.0);
         // The key set changes when the eye crosses a chunk boundary, not when
         // the frame advances (`floptle/0071`). Standing still, or walking
         // within one chunk, this is a hash lookup — it used to be a square
@@ -213,11 +229,19 @@ pub(crate) fn build_instances(
                 // …and only HERE does the world get involved: the instance's
                 // place in its region, carried out to wherever that region is.
                 let rot = src.frame.rot * inst.rotation(src.align);
-                let model = Mat4::from_scale_rotation_translation(
-                    Vec3::splat(inst.scale),
-                    rot,
-                    (src.frame.to_world(inst.pos) - eye).as_vec3(),
-                );
+                let centre = (src.frame.to_world(inst.pos) - eye).as_vec3();
+                // …and only then, is it on screen? Distance was the only test a
+                // field ever applied, so a full disc submitted everything behind
+                // you (`floptle/0075`). AFTER the band test, which is the cheaper
+                // one and also the one that rejects most.
+                if let Some(pr) = prop_radius
+                    && !frustum
+                        .contains_sphere(centre, floptle_render::cull::scale_radius(pr, Vec3::splat(inst.scale)))
+                {
+                    continue;
+                }
+                let model =
+                    Mat4::from_scale_rotation_translation(Vec3::splat(inst.scale), rot, centre);
                 // Mid-fade draws BOTH bands, cross-dissolved. Drawing one and
                 // switching is what a pop is; two half-opaque props for a few
                 // metres of walking is what nobody notices.
@@ -314,6 +338,10 @@ impl crate::Editor {
             && let Ok(docs) = crate::prefab::load_prefab_docs(&path)
         {
             let mut out = Vec::new();
+            // The prop's bounding radius, accumulated as its pieces are found:
+            // a frond three metres up the trunk reaches its own radius further
+            // than the trunk does (`floptle/0075`).
+            let mut radius = 0.0f32;
             for (i, d) in docs.iter().enumerate() {
                 let floptle_scene::MatterDoc::Mesh { asset_path } = &d.matter else { continue };
                 if !self.import_model(asset_path) {
@@ -322,17 +350,28 @@ impl crate::Editor {
                 let Some(a) = self.mesh_registry.get(asset_path) else { continue };
                 let parts: Vec<MeshId> = a.parts.clone();
                 let local = prefab_local(&docs, i);
+                let (scale, _, offset) = local.to_scale_rotation_translation();
+                radius = radius.max(
+                    offset.length()
+                        + floptle_render::cull::radius_from_longest_edge(a.size, scale),
+                );
                 out.extend(parts.into_iter().map(|m| (m, None, local)));
+            }
+            if radius.is_finite() && radius > 0.0 {
+                self.scatter_proto_radius.insert(asset.to_string(), radius);
             }
             return out;
         }
         if !self.import_model(asset) {
             return Vec::new();
         }
-        self.mesh_registry
-            .get(asset)
-            .map(|a| a.parts.iter().map(|&m| (m, None, Mat4::IDENTITY)).collect())
-            .unwrap_or_default()
+        let Some(a) = self.mesh_registry.get(asset) else { return Vec::new() };
+        let radius = floptle_render::cull::radius_from_longest_edge(a.size, Vec3::ONE);
+        let parts: Vec<Part> = a.parts.iter().map(|&m| (m, None, Mat4::IDENTITY)).collect();
+        if radius.is_finite() && radius > 0.0 {
+            self.scatter_proto_radius.insert(asset.to_string(), radius);
+        }
+        parts
     }
 }
 
@@ -383,6 +422,63 @@ mod tests {
     /// A prototype of several parts draws one instance PER PART, each at its
     /// place within the prop and all sharing the prop's transform
     /// (`floptle/0065`). That is what lets a generated plant — a trunk and
+    /// A field is culled by DIRECTION, not only by distance (`floptle/0075`).
+    ///
+    /// `band_at` has always rejected props past the last LOD band, so a field was
+    /// bounded — but never oriented. A full disc submitted its whole area
+    /// including everything behind the camera, which is roughly half of it. This
+    /// aims a real frustum at the field and then turns it round.
+    #[test]
+    fn a_scatter_field_submits_only_the_half_it_can_see() {
+        let s = src();
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
+        // A measured prototype radius is what makes the cull possible at all;
+        // without one the source is submitted whole, as it was before.
+        let mut radius = |_: &str| Some(1.0f32);
+        let mat = MaterialParams::flat([1.0; 3]);
+        let mut count = |frustum: &floptle_render::Frustum,
+                         radius: &mut dyn FnMut(&str) -> Option<f32>| {
+            let mut out = Vec::new();
+            build_instances(
+                &mut ScatterCache::default(),
+                std::slice::from_ref(&s),
+                DVec3::ZERO,
+                &mut mesh,
+                &mut { radius },
+                &mut ground,
+                &mat,
+                frustum,
+                100_000,
+                &mut out,
+            );
+            out.len()
+        };
+        let proj = Mat4::perspective_rh(60f32.to_radians(), 16.0 / 9.0, 0.1, 1000.0);
+        let everything = count(&floptle_render::Frustum::everything(), &mut radius);
+        assert!(everything > 20, "the field should have plenty of props: {everything}");
+        // Looking down −Z: only the props on that side survive.
+        let forward = count(&floptle_render::Frustum::from_view_proj(proj), &mut radius);
+        assert!(
+            forward < everything,
+            "aiming the camera at half the field submitted all of it ({forward} of {everything})"
+        );
+        assert!(forward > 0, "…but the half in front of the camera has to still be there");
+        // Turned round: the same field, none of it visible.
+        let behind = count(
+            &floptle_render::Frustum::from_view_proj(proj * Mat4::from_rotation_y(std::f32::consts::PI)),
+            &mut radius,
+        );
+        assert!(behind < forward, "turning round should submit less, not the same");
+        // A prototype nothing measured is never direction-culled — an
+        // unmeasurable asset must cost a frame, not disappear.
+        let unmeasured = count(&floptle_render::Frustum::from_view_proj(proj), &mut |_: &str| None);
+        assert_eq!(
+            unmeasured, everything,
+            "a source with no measured prop radius must submit whole rather than vanish"
+        );
+    }
+
     /// three fronds — be scattered without a scene node per frond.
     #[test]
     fn a_multi_part_prototype_draws_each_part_at_its_own_place() {
@@ -401,8 +497,10 @@ mod tests {
             std::slice::from_ref(&s),
             DVec3::ZERO,
             &mut |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]),
+            &mut |_: &str| None,
             &mut ground,
             &MaterialParams::flat([1.0; 3]),
+            &floptle_render::Frustum::everything(),
             10_000,
             &mut one,
         );
@@ -412,8 +510,10 @@ mod tests {
             &[s],
             DVec3::ZERO,
             &mut mesh,
+            &mut |_: &str| None,
             &mut ground,
             &MaterialParams::flat([1.0; 3]),
+            &floptle_render::Frustum::everything(),
             10_000,
             &mut two,
         );
@@ -464,7 +564,8 @@ mod tests {
         let mat = MaterialParams::flat([1.0, 1.0, 1.0]);
         let mut out = Vec::new();
         build_instances(
-            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut ground, &mat,
+            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &floptle_render::Frustum::everything(),
             10_000, &mut out,
         );
         let before = out.len();
@@ -475,7 +576,8 @@ mod tests {
         s.removed.insert(victim);
         out.clear();
         build_instances(
-            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut ground, &mat,
+            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &floptle_render::Frustum::everything(),
             10_000, &mut out,
         );
         assert_eq!(out.len(), before - 1, "the cut prop was still drawn");
@@ -494,7 +596,8 @@ mod tests {
         let mat = MaterialParams::flat([1.0, 1.0, 1.0]);
         let mut out = Vec::new();
         build_instances(
-            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut ground, &mat,
+            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &floptle_render::Frustum::everything(),
             64, &mut out,
         );
         assert_eq!(out.len(), 64);
@@ -539,7 +642,8 @@ mod tests {
             };
             let mut out = Vec::new();
             build_instances(
-                &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut ground, &mat,
+                &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &floptle_render::Frustum::everything(),
                 20_000, &mut out,
             );
             worst = worst.max(casts);
@@ -560,7 +664,8 @@ mod tests {
         };
         let mut out = Vec::new();
         build_instances(
-            &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut ground, &mat, 20_000,
+            &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &floptle_render::Frustum::everything(), 20_000,
             &mut out,
         );
         assert_eq!(casts, 0, "a stationary camera re-settled ground it had already settled");
@@ -584,13 +689,15 @@ mod tests {
         for _ in 0..40 {
             let mut out = Vec::new();
             build_instances(
-                &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut ground, &mat,
+                &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &floptle_render::Frustum::everything(),
                 20_000, &mut out,
             );
         }
         let mut out = Vec::new();
         build_instances(
-            &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut ground, &mat, 300,
+            &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &floptle_render::Frustum::everything(), 300,
             &mut out,
         );
         assert_eq!(out.len(), 300, "the budget is a hard stop");
@@ -637,8 +744,9 @@ mod tests {
         for _ in 0..40 {
             before.clear();
             build_instances(
-                &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut ground,
-                &mat, 20_000, &mut before,
+                &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh,
+                &mut |_: &str| None, &mut ground, &mat,
+                &floptle_render::Frustum::everything(), 20_000, &mut before,
             );
         }
         assert!(!before.is_empty(), "nothing was drawn to begin with");
@@ -654,7 +762,8 @@ mod tests {
         casts.set(0);
         let mut after = Vec::new();
         build_instances(
-            &mut cache, std::slice::from_ref(&s), moved, &mut mesh, &mut ground, &mat, 20_000,
+            &mut cache, std::slice::from_ref(&s), moved, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &floptle_render::Frustum::everything(), 20_000,
             &mut after,
         );
 
@@ -706,7 +815,8 @@ mod tests {
         let mat = MaterialParams::flat([1.0; 3]);
         let mut out = Vec::new();
         build_instances(
-            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut ground, &mat,
+            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut |_: &str| None, &mut ground, &mat,
+            &floptle_render::Frustum::everything(),
             20_000, &mut out,
         );
         assert!(!out.is_empty(), "an unanchored field stopped drawing");
@@ -735,7 +845,8 @@ mod tests {
             // Stand ~35 m away: inside the first band's 10 m fade window.
             build_instances(
                 &mut cache, std::slice::from_ref(&s), DVec3::new(0.0, 0.0, 0.0), &mut mesh,
-                &mut ground, &mat, 10_000, &mut out,
+                &mut |_: &str| None,
+                &mut ground, &mat, &floptle_render::Frustum::everything(), 10_000, &mut out,
             );
         }
         let both = asked.iter().any(|a| a == "near") && asked.iter().any(|a| a == "far");
