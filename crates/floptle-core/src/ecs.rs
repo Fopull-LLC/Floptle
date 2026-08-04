@@ -39,18 +39,54 @@ trait AnyColumn: Any {
     fn remove_entity(&mut self, e: Entity);
 }
 
-/// Dense, unordered rows of `(owner, component)`. O(n) point lookup today; the
-/// archetype rewrite makes it O(1) without touching the `World` API.
+/// Dense, unordered rows of `(owner, component)`, plus an index from entity to
+/// row so a point lookup is a hash probe rather than a scan.
+///
+/// **Why the index earns its keep.** `get` looked its row up by walking the
+/// column, which is fine for a handful of nodes and quietly quadratic for a
+/// crowd: every per-node pass in the engine — the script scene mirror alone
+/// asks ~15 components of every node, once a frame — turned into rows × nodes
+/// comparisons. A 5,500-node scene spent 60 ms a frame doing nothing but
+/// finding rows. Rows stay dense and unordered; only the way in changed.
 struct Column<T> {
     rows: Vec<(Entity, T)>,
+    /// Entity index → row. Keyed by `index` alone, NOT the generation, because
+    /// that is what row lookup has always matched on: a stale handle to a
+    /// reused slot finds the new occupant, and every caller above this already
+    /// checks liveness where it matters.
+    at: HashMap<u32, usize>,
 }
 
 impl<T> Column<T> {
     fn new() -> Self {
-        Self { rows: Vec::new() }
+        Self { rows: Vec::new(), at: HashMap::new() }
     }
     fn position(&self, e: Entity) -> Option<usize> {
-        self.rows.iter().position(|(re, _)| re.index == e.index)
+        self.at.get(&e.index).copied()
+    }
+    /// Add or replace this entity's row.
+    fn set(&mut self, e: Entity, value: T) {
+        match self.at.get(&e.index) {
+            Some(&i) => self.rows[i] = (e, value),
+            None => {
+                self.at.insert(e.index, self.rows.len());
+                self.rows.push((e, value));
+            }
+        }
+    }
+    /// Drop this entity's row, returning the component.
+    ///
+    /// `swap_remove` moves the last row into the hole, so the moved row's own
+    /// index has to follow it — the one bookkeeping step that makes the map a
+    /// liability if it is ever forgotten, which is why removal lives here and
+    /// nowhere else.
+    fn take(&mut self, e: Entity) -> Option<T> {
+        let i = self.at.remove(&e.index)?;
+        let row = self.rows.swap_remove(i);
+        if let Some((moved, _)) = self.rows.get(i) {
+            self.at.insert(moved.index, i);
+        }
+        Some(row.1)
     }
 }
 
@@ -62,9 +98,7 @@ impl<T: 'static> AnyColumn for Column<T> {
         self
     }
     fn remove_entity(&mut self, e: Entity) {
-        if let Some(i) = self.position(e) {
-            self.rows.swap_remove(i);
-        }
+        self.take(e);
     }
 }
 
@@ -140,18 +174,12 @@ impl World {
         if !self.is_alive(e) {
             return;
         }
-        let col = self.column_mut::<T>();
-        if let Some(i) = col.position(e) {
-            col.rows[i] = (e, value);
-        } else {
-            col.rows.push((e, value));
-        }
+        self.column_mut::<T>().set(e, value);
     }
 
     /// Remove a component, returning it if present.
     pub fn remove<T: 'static>(&mut self, e: Entity) -> Option<T> {
-        let col = self.column_mut::<T>();
-        col.position(e).map(|i| col.rows.swap_remove(i).1)
+        self.column_mut::<T>().take(e)
     }
 
     pub fn get<T: 'static>(&self, e: Entity) -> Option<&T> {
@@ -208,6 +236,43 @@ mod tests {
         assert_ne!(e2.generation(), e.generation());
         assert!(!w.is_alive(e));
         assert!(w.is_alive(e2));
+    }
+
+    /// Removing a row `swap_remove`s the LAST one into the hole. Whichever
+    /// entity that was has moved, and its way back in has to move with it —
+    /// forget that and every lookup after the first despawn reads a stranger's
+    /// component. The scan this replaced could not get this wrong.
+    #[test]
+    fn removing_a_row_carries_the_moved_rows_index_with_it() {
+        let mut w = World::new();
+        let es: Vec<Entity> = (0..5)
+            .map(|i| {
+                let e = w.spawn();
+                w.insert(e, Hp(i));
+                e
+            })
+            .collect();
+        // Take one out of the MIDDLE, so the last row really does move.
+        assert_eq!(w.remove::<Hp>(es[1]), Some(Hp(1)));
+        assert_eq!(w.get::<Hp>(es[1]), None);
+        for (i, e) in es.iter().enumerate() {
+            if i == 1 {
+                continue;
+            }
+            assert_eq!(w.get::<Hp>(*e), Some(&Hp(i as i32)), "entity {i} still owns its own row");
+        }
+        // Despawn takes the same path through every column at once.
+        w.despawn(es[4]);
+        assert_eq!(w.get::<Hp>(es[4]), None);
+        assert_eq!(w.get::<Hp>(es[0]), Some(&Hp(0)));
+        assert_eq!(w.get::<Hp>(es[3]), Some(&Hp(3)));
+        // …and a recycled slot lands on the right row, not the ghost of the old one.
+        let reused = w.spawn();
+        assert_eq!(reused.index(), es[4].index());
+        assert_eq!(w.get::<Hp>(reused), None);
+        w.insert(reused, Hp(99));
+        assert_eq!(w.get::<Hp>(reused), Some(&Hp(99)));
+        assert_eq!(w.query::<Hp>().count(), 4);
     }
 
     #[test]
