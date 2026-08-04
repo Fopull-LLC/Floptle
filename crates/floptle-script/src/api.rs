@@ -1143,6 +1143,23 @@ fn describe_cell_range() -> String {
     )
 }
 
+/// The keys a `findScript` handle answers ITSELF, and what each one is for.
+///
+/// A handle is a proxy onto another script's environment, and these three names
+/// belong to the proxy rather than to the script behind it — so a script that
+/// exports one of them can reach its own copy and nobody else can
+/// (`floptle/0085`). They are reported at load, because the collision is
+/// decidable then and undecidable by anyone reading a call site.
+///
+/// `name` is deliberately NOT here: it asks the script first, and falls back to
+/// the script's kind only when the script has no `name` of its own. `kind` is
+/// the same string, so nothing lost the ability to ask.
+pub const HANDLE_KEYS: &[(&str, &str)] = &[
+    ("node", "the handle's own node"),
+    ("kind", "which script this is (the file name)"),
+    ("valid", "whether the script is still loaded"),
+];
+
 /// Every key `node:setCamera{...}` reads. Anything else is refused, naming the
 /// nearest real one (`floptle/0078`, `floptle/0082`).
 pub(crate) const CAMERA_KEYS: &[&str] =
@@ -3388,17 +3405,39 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
             let e: u32 = this.raw_get("__id")?;
             let name: String = this.raw_get("__script")?;
+            // Resolved from the registry rather than held as a live table —
+            // see `Shared::envs` (`floptle/0069`).
+            let env =
+                envs.borrow().get(&(e, name.clone())).and_then(|k| lua.registry_value::<Table>(k).ok());
             match key.as_str() {
                 "node" => return Ok(Value::Table(new_node_handle(lua, e)?)),
-                "kind" | "name" => return Ok(Value::String(lua.create_string(&name)?)),
+                "kind" => return Ok(Value::String(lua.create_string(&name)?)),
+                // `name` asks the SCRIPT first (`floptle/0085`). The handle used
+                // to answer it itself, so a script exporting `function name(id)`
+                // — the obvious name for "turn an id into a display name" —
+                // could call it from inside itself and from nowhere else: every
+                // cross-script caller got the script's own kind back, as a
+                // string, and died at the call site with `attempt to call field
+                // 'name' (a string value)`. Nothing raised until something
+                // called it, which for a display-name function is the first
+                // moment there is anything to display.
+                //
+                // `kind` is the same string and is not shadowable, so nothing
+                // loses the ability to ask which script a handle is.
+                "name" => {
+                    if let Some(env) = &env
+                        && let Ok(v) = env.get::<Value>("name")
+                        && !matches!(v, Value::Nil)
+                    {
+                        return Ok(v);
+                    }
+                    return Ok(Value::String(lua.create_string(&name)?));
+                }
                 "valid" => {
                     return Ok(Value::Boolean(envs.borrow().contains_key(&(e, name.clone()))));
                 }
                 _ => {}
             }
-            // Resolved from the registry rather than held as a live table —
-            // see `Shared::envs` (`floptle/0069`).
-            let env = envs.borrow().get(&(e, name)).and_then(|k| lua.registry_value::<Table>(k).ok());
             match env {
                 Some(env) => env.get::<Value>(key),
                 None => Ok(Value::Nil),

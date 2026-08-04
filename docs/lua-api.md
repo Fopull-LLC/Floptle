@@ -744,7 +744,7 @@ findAll("Coin") — an array of every node with that name.
 
 ### `findScript`
 
-findScript("GameManager") — a script handle for the first node anywhere running that script (the manager pattern), or nil. Call its methods / read its state.
+findScript("GameManager") — a script handle for the first node anywhere running that script (the manager pattern), or nil. Call its methods / read its state. RESERVED KEYS: a handle answers `node` (its own node), `kind` (which script it is) and `valid` (still loaded?) ITSELF, so a script exporting one of those three can reach it and nobody else can — the editor lints the export and the Console says so at load. `name` is NOT reserved: a script's own `name` wins, and `kind` is the same string (floptle/0085).
 
 ### `findScriptInScene`
 

@@ -1968,6 +1968,7 @@ impl ScriptHost {
             synced_stores,
             synced_warned: std::collections::HashSet::new(),
             param_warned: std::collections::HashSet::new(),
+            handle_key_warned: std::collections::HashSet::new(),
             script_skip: std::collections::HashSet::new(),
             frame_skip: std::collections::HashSet::new(),
             driver_skip: std::collections::HashSet::new(),
@@ -3140,6 +3141,7 @@ impl ScriptHost {
         *self.net.rewind.borrow_mut() = None;
         self.synced_warned.clear();
         self.param_warned.clear();
+        self.handle_key_warned.clear();
     }
 
     /// Build the `synced` proxy for an instance whose script declares
@@ -4495,6 +4497,50 @@ impl ScriptHost {
     /// Run one already-ensured `(entity, script)` instance's lifecycle for
     /// `pass` — per-frame (`start`/`update`), per-gameplay-tick
     /// (`fixedUpdate`), or post-physics (`lateUpdate`).
+    /// Report a script exporting a name a `findScript` handle answers itself —
+    /// once per `(script, key)` per session (`floptle/0085`).
+    ///
+    /// **Why at load.** The handle is a proxy, so the export is reachable from
+    /// inside the script and from nowhere else: every cross-script caller gets
+    /// the handle's own value instead. What arrives is the wrong TYPE, not a nil
+    /// — so nothing raises when the handle resolves, nothing raises when the
+    /// field is read, and the eventual `attempt to call field 'x' (a string
+    /// value)` points at the caller rather than at the script that took the
+    /// name. One real case broke four screens in a shipped game, each only at
+    /// the moment it had something to show.
+    ///
+    /// The collision is decidable here, where both the script and the reserved
+    /// list are in hand, and undecidable by anyone reading a call site.
+    fn warn_shadowed_handle_keys(&mut self, kind: &str, env: &Table) {
+        for (key, purpose) in crate::api::HANDLE_KEYS {
+            // `node` is set INTO every env by the host itself (a persistent
+            // handle for the script's own entity), so an env having it proves
+            // nothing about what the script wrote.
+            if *key == "node" {
+                continue;
+            }
+            if matches!(env.get::<Value>(*key), Ok(Value::Nil) | Err(_)) {
+                continue;
+            }
+            if !self.handle_key_warned.insert((kind.to_string(), (*key).to_string())) {
+                continue;
+            }
+            self.logs.borrow_mut().push(crate::ScriptLog {
+                level: crate::LogLevel::Warn,
+                msg: format!(
+                    "{kind}.lua exports `{key}`, which a findScript handle answers itself \
+                     ({purpose}) — so `{kind}` can use it and no other script can: a \
+                     cross-script `h.{key}` reads the handle's value, not yours. Rename the \
+                     export (`{key}Of`, `label`, …). Note `name` is NOT reserved: a script's \
+                     own `name` wins, and `kind` still reports which script a handle is."
+                ),
+                // Line 0: the collision is with the handle, not with a line —
+                // the editor's `reservedKey` lint is what points at the export.
+                source: Some((kind.to_string(), 0)),
+            });
+        }
+    }
+
     /// Report a scene param the script no longer declares — once per
     /// `(script, param)` per session (`floptle/0068`).
     ///
@@ -4598,6 +4644,7 @@ impl ScriptHost {
         let eid = e.index();
         if first {
             self.warn_unread_params(eid, name, params, strs, &env);
+            self.warn_shadowed_handle_keys(name, &env);
         }
         let body = self.bodies.borrow().get(&eid).copied();
         // Resolve reference params by NAME through the O(1) index — per tick, so

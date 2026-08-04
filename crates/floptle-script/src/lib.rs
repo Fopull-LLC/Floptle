@@ -251,7 +251,7 @@ pub(crate) use api::install_handle_api;
 /// it to auto-key changed properties.
 pub use api::{
     apply_component_color, apply_component_field, apply_component_field_str,
-    mirror_component_colors, mirror_components,
+    mirror_component_colors, mirror_components, HANDLE_KEYS,
 };
 pub use input_api::{SharedDomain, SharedInput};
 pub use net_api::{
@@ -650,6 +650,10 @@ pub struct ScriptHost {
     /// session, so a param carried on eighteen instances of the same script is
     /// ONE Console line rather than eighteen (`floptle/0068`).
     param_warned: std::collections::HashSet<(String, String)>,
+    /// `(script kind, key)` combos already reported as shadowing a `findScript`
+    /// handle's own key (`floptle/0085`) — one line per script per session, not
+    /// one per instance.
+    handle_key_warned: std::collections::HashSet<(String, String)>,
     /// Entities whose scripts are SKIPPED this session (a networked CLIENT
     /// doesn't run server-authoritative nodes' scripts — their state arrives
     /// in snapshots; docs/netcode-design.md §6). Set by the driver.
@@ -2247,6 +2251,107 @@ end
             strs: Vec::new(),
         }]));
         (world, e)
+    }
+
+    /// A cross-script `h.name(...)` calls the script's own function
+    /// (`floptle/0085`).
+    ///
+    /// This is the exact shape a player reported as "the commerce center is
+    /// still just erroring": `materials.lua` exported `function name(id)`
+    /// returning a display name — the obvious spelling — and the handle answered
+    /// `name` itself, with the script's own kind, as a string. Every caller died
+    /// at the call site with `attempt to call field 'name' (a string value)`,
+    /// and only at the moment it had something to display, so the mining
+    /// readout, the pickup line, the depot stock list and the research panel
+    /// each broke separately.
+    #[test]
+    fn a_script_that_exports_name_can_be_called_by_other_scripts() {
+        let dir = std::env::temp_dir().join(format!("floptle_shadow_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "materials",
+            "\
+function name(id)
+  return id == 'iron' and 'Iron Ore' or '?'
+end
+",
+        );
+        write_script(
+            &dir,
+            "readout",
+            "\
+function update(node, dt)
+  local m = findScript('materials')
+  label = m.name('iron')
+  which = m.kind
+  live = m.valid
+end
+",
+        );
+        let (mut world, e) = world_with_script("readout");
+        let mats = world.spawn();
+        world.insert(mats, Transform::IDENTITY);
+        world.insert(mats, floptle_core::Name("Materials".into()));
+        world.insert(
+            mats,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst::new("materials")]),
+        );
+        let mut host = ScriptHost::new();
+        // Two frames: the readout may reach the materials handle only once both
+        // instances have been ensured.
+        for i in 0..2 {
+            host.run(&mut world, &dir, 1.0 / 60.0, i as f32 / 60.0);
+        }
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let env = host.instance_env(e.index(), "readout").expect("the readout ran");
+        assert_eq!(
+            env.get::<String>("label").ok().as_deref(),
+            Some("Iron Ore"),
+            "the handle answered `name` itself instead of calling the script's function"
+        );
+        // …and the two keys that ARE the handle's still work, so nothing lost the
+        // ability to ask which script a handle is or whether it is still loaded.
+        assert_eq!(env.get::<String>("which").ok().as_deref(), Some("materials"));
+        assert_eq!(env.get::<bool>("live").ok(), Some(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A script exporting a name the handle DOES keep is reported at load, once,
+    /// naming the script and the key (`floptle/0085`).
+    #[test]
+    fn exporting_a_reserved_handle_key_is_reported_at_load() {
+        let dir = std::env::temp_dir().join(format!("floptle_shadow2_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "stock",
+            "\
+function kind(id)
+  return 'ore'
+end
+
+function update(node, dt)
+  ran = true
+end
+",
+        );
+        let (mut world, _e) = world_with_script("stock");
+        let mut host = ScriptHost::new();
+        for i in 0..3 {
+            host.run(&mut world, &dir, 1.0 / 60.0, i as f32 / 60.0);
+        }
+        let logs = host.drain_logs();
+        let warns: Vec<&crate::ScriptLog> = logs
+            .iter()
+            .filter(|l| l.level == crate::LogLevel::Warn && l.msg.contains("findScript handle"))
+            .collect();
+        assert_eq!(warns.len(), 1, "one line per script per session: {warns:?}");
+        let msg = &warns[0].msg;
+        for want in ["stock", "`kind`", "which script this is"] {
+            assert!(msg.contains(want), "missing {want:?}: {msg}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A script points a camera at a render target and reads back what it got

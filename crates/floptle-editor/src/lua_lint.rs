@@ -527,6 +527,41 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
                 });
             }
         }
+        // Pass 7: a top-level export a `findScript` handle answers itself
+        // (`floptle/0085`). The host reports this at load too, but only once the
+        // scene runs — and the failure it prevents is silent AND delayed: the
+        // handle resolves, the field is present, the type is wrong, and nothing
+        // raises until something calls it.
+        //
+        // Column 0 as the test for "top level" is a heuristic, and the right one:
+        // a `local function kind()` inside a block is indented in every style
+        // this repo has, and an indented `kind = …` is a field on something.
+        if !raw.starts_with(char::is_whitespace) {
+            for (key, purpose) in floptle_script::HANDLE_KEYS {
+                let exported = code
+                    .strip_prefix("function ")
+                    .is_some_and(|r| r.trim_start().starts_with(&format!("{key}(")))
+                    || code
+                        .strip_prefix(*key)
+                        .map(str::trim_start)
+                        .is_some_and(|r| r.starts_with('=') && !r.starts_with("=="));
+                if !exported {
+                    continue;
+                }
+                out.push(Lint {
+                    line: n + 1,
+                    message: format!(
+                        "`{key}` is a name a findScript handle answers itself ({purpose}), so \
+                         this export is reachable from THIS script and no other: a \
+                         cross-script `h.{key}` reads the handle's value instead, and if yours \
+                         is a function the caller dies at the call with \"attempt to call \
+                         field '{key}'\". Rename it. (`name` is safe — a script's own `name` \
+                         wins there.)"
+                    ),
+                    kind: LintKind::ReservedKey,
+                });
+            }
+        }
     }
 
     out.sort_by_key(|l| (l.line, l.message.clone()));
@@ -704,6 +739,48 @@ print(used)
         );
         assert!(
             !lint("if input.pressed(\"i\") then bag() end\n", &api)
+                .iter()
+                .any(|l| l.kind == LintKind::ReservedKey)
+        );
+    }
+
+    /// Exporting a name a `findScript` handle keeps is flagged on the line that
+    /// exports it (`floptle/0085`).
+    ///
+    /// The runtime message for this points at the CALLER — "attempt to call
+    /// field 'kind' (a string value)" — in a different file from the mistake,
+    /// and only once something calls it. The export is the decidable half, and
+    /// this is where it is decidable.
+    #[test]
+    fn exporting_a_name_the_handle_keeps_is_flagged_at_the_export() {
+        let api: Vec<&str> = Vec::new();
+        let ls = lint("function kind(id)\n  return 'ore'\nend\n", &api);
+        let hit = ls.iter().find(|l| l.kind == LintKind::ReservedKey).expect("flagged");
+        assert_eq!(hit.line, 1);
+        assert!(hit.message.contains("findScript handle"), "says why: {}", hit.message);
+        // A plain assignment counts too — a handle shadows a value as readily as
+        // a function, and `valid` as a boolean would be wrong only sometimes,
+        // which is worse.
+        assert!(
+            lint("valid = true\n", &api).iter().any(|l| l.kind == LintKind::ReservedKey)
+        );
+        // `name` is deliberately allowed: the script's own wins now, and that is
+        // the whole point of the fix.
+        assert!(
+            !lint("function name(id)\n  return 'Iron Ore'\nend\n", &api)
+                .iter()
+                .any(|l| l.kind == LintKind::ReservedKey),
+            "a script's own `name` wins — flagging it would forbid the fix"
+        );
+        // Indented is a local or a field on something, not an export.
+        assert!(
+            !lint("function f()\n  local kind = 1\n  return kind\nend\n", &api)
+                .iter()
+                .any(|l| l.kind == LintKind::ReservedKey)
+        );
+        // A comparison is not an assignment.
+        assert!(
+            !lint("if kind == 'ore' then end\n", &api)
                 .iter()
                 .any(|l| l.kind == LintKind::ReservedKey)
         );

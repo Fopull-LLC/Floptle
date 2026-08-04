@@ -1683,6 +1683,21 @@ to another script:
 | `mgr.addScore(5)` | **call a function** the script defines |
 | `mgr.params` | the script's `params` table (its tunables) |
 | `mgr.node` | the node the script is attached to (a node handle) |
+| `mgr.kind` | which script this is (its file name) |
+| `mgr.valid` | is the script still loaded? |
+
+> **Three names belong to the handle, not to your script.** `node`, `kind` and
+> `valid` are answered by the handle itself, so a script that exports one of
+> them can use its own copy and **no other script can** — a cross-script
+> `h.kind` reads the handle's value instead of yours. The trap is that it is
+> silent: the handle resolves, the field is there, the type is wrong, and
+> nothing raises until something *calls* it. So the editor lints the export and
+> the Console says so when the script loads.
+>
+> `name` is **not** reserved. A script's own `name` wins — `materials.name(id)`
+> returning a display name is the obvious thing to write, and it used to be the
+> one thing you could not (`floptle/0085`). Ask `kind` when you want to know
+> which script a handle is.
 
 ```lua
 -- scripts/manager.lua — shared state + an API for other scripts to call.
