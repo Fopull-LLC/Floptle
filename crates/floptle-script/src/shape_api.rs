@@ -36,6 +36,10 @@ pub(crate) struct QueryShared {
     pub layers: Rc<RefCell<floptle_core::Layers>>,
 }
 
+/// Every key a query options table reads (`raycast`, `overlapSphere`,
+/// `spherecast`, …). Anything else is refused (`floptle/0082`).
+pub(crate) const QUERY_KEYS: &[&str] = &["ignore", "layers"];
+
 /// Parse the shared options table into (bodies to skip, layer mask).
 ///
 /// Identical in meaning to `raycast`'s, deliberately: an unknown layer name is
@@ -58,6 +62,10 @@ fn query_opts(
             if let Ok(eid) = t.raw_get::<u32>("__id") {
                 exclude.push(eid);
             } else {
+                // An options table, not a node handle. A misspelled `ignor`
+                // would have meant "ignore nothing", so the ray hits the caller
+                // and every query returns itself (`floptle/0082`).
+                crate::opts::check_keys(t, QUERY_KEYS, who)?;
                 if let Ok(ig) = t.get::<Table>("ignore")
                     && let Ok(eid) = ig.raw_get::<u32>("__id")
                 {

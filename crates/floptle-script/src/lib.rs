@@ -969,7 +969,10 @@ pub enum RichSet {
     Celestial(Vec<(String, CompVal)>),
     Material(Vec<(String, CompVal)>),
     MatterTerrain(u32),
-    MatterPrimitive(String, [f64; 3]),
+    /// `node:setPrimitive(shape [, color])`. The shape is already PARSED — the
+    /// name was checked at the call, where a misspelling can still name a line
+    /// (`floptle/0082`).
+    MatterPrimitive(floptle_core::Shape, [f64; 3]),
     /// `node:setTilemap{...}` — build (or re-shape) a 2D grid on this node.
     MatterTilemap { cols: u32, rows: u32, tile: f32, data: Vec<u32> },
     /// `node:setSpriteBatch{ size = }` — the other half of the 2D pair. A

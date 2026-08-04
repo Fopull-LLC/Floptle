@@ -39,7 +39,7 @@ fn dvec3(t: &Table, key: &str) -> Option<glam::DVec3> {
 /// through, and the only reason that could happen is that an unknown key was
 /// silently dropped (`floptle/0066`). A typo'd `perchunk` had exactly the same
 /// failure: the default, forever, with nothing to see.
-const CREATE_KEYS: &[&str] = &[
+pub(crate) const CREATE_KEYS: &[&str] = &[
     "asset", "lod", "range", "seed", "center", "radius", "halfX", "halfZ", "align", "perChunk",
     "chunk", "scaleMin", "scaleMax", "fade", "density", "densityRows", "parent",
 ];

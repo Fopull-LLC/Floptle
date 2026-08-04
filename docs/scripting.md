@@ -3496,3 +3496,54 @@ budget check keeps working.
 because vsync, the OS and the GPU finishing are outside every bucket; a number
 claiming to be the frame time without being it would be worse than not offering
 one.
+
+## 29. Options that refuse — and why an error is the kind answer
+
+Every options table in this engine is **closed**. A key it does not read is an
+error, not a shrug:
+
+```lua
+scatter.create{ asset = "trees/pine.glb", perchunk = 6 }
+-- scatter.create: no option called `perchunk` (did you mean `perChunk`?)
+
+node:setCamera{ target = "minimap", width = 0 }
+-- node:setCamera: `width = 0` is outside 8 – 4096
+
+audio.play("engine.ogg", { mode = "spacial" })
+-- audio.play: `mode = "spacial"` is not a name I know — it takes spatial, 3d,
+-- distance, flat, 2d
+```
+
+Every message names three things: **the property**, **the value it got**, and
+**what it accepts**. Any one of the three missing sends you back to re-reading
+your own file, which is the part that costs an afternoon.
+
+### Why this is worth a breaking change
+
+43% of every bug ever filed against this engine — 32 of 74 — was one shape: the
+engine answered something it did not understand instead of refusing it.
+
+* `scatter.create{ collide = true }` was parsed, stored, and read by nothing.
+  For two releases. A game asked for solid props and got props you walk through.
+* `pin = "topCenter"` meant top-**left**. Silently. Four HUD elements in one
+  corner and a report that read like a layout bug.
+* A typo'd `perchunk` took the default, forever, with nothing to see.
+* `scene.load(name, { addative = true })` **destroyed** the running scene instead
+  of layering onto it — `additive = false` is what a misspelling reads as.
+
+Every one of those was found by somebody playing, and each was fixed on its own.
+The counter-argument — that refusing is a breaking change — was settled the first
+time: a game that asked for solid props and got props it walked through was worse
+off than a game that got an error. **Silence is not compatibility.**
+
+### What keeps it true
+
+One list per call, in the code, read by both the check and the write — so a key
+that is accepted is a key that does something. One shared parser per enum, so the
+list an error offers is the list the engine acts on. And two tests: one calls
+every registered options table with a bogus key and fails if it is accepted, the
+other scans the source and fails when a **new** options table appears that
+neither checks its keys nor is excused in writing.
+
+So this does not decay back. That is the actual deliverable — not the 32 fixes,
+which were already made one at a time.

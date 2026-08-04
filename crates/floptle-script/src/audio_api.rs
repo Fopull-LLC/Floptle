@@ -22,12 +22,27 @@ pub(crate) struct AudioBridges {
     pub next_handle: Rc<RefCell<u32>>,
 }
 
-/// Read a play-options table into `PlayParams`. Unknown keys are ignored;
-/// enum strings are case-insensitive (`mode = "spatial"`, `falloff =
-/// "linear"`, `endBehavior = "destroy"`, `loop = true`).
-fn parse_params(opts: Option<&Table>) -> PlayParams {
+/// Every key an `audio.play` options table reads. Anything else is refused
+/// (`floptle/0082`).
+pub(crate) const PLAY_KEYS: &[&str] = &[
+    "volume", "pitch", "pan", "minDistance", "maxDistance", "mode", "falloff", "track",
+    "endBehavior", "loop",
+];
+
+/// Read a play-options table into `PlayParams`, refusing anything it does not
+/// understand.
+///
+/// Enum strings are case-insensitive (`mode = "spatial"`, `falloff = "linear"`,
+/// `endBehavior = "destroy"`, `loop = true`). A near-miss — `mode = "spacial"` —
+/// used to leave the default in place, so a sound a game asked to be positional
+/// played flat, at full volume, everywhere, forever. There is nothing to see in
+/// that: it is a mix that sounds wrong.
+fn parse_params(opts: Option<&Table>) -> mlua::Result<PlayParams> {
+    use crate::opts::{check_keys, parse_enum};
+    const CALL: &str = "audio.play";
     let mut p = PlayParams::default();
-    let Some(t) = opts else { return p };
+    let Some(t) = opts else { return Ok(p) };
+    check_keys(t, PLAY_KEYS, CALL)?;
     let num = |key: &str| t.raw_get::<f64>(key).ok();
     if let Some(v) = num("volume") {
         p.volume = v as f32;
@@ -44,29 +59,27 @@ fn parse_params(opts: Option<&Table>) -> PlayParams {
     if let Some(v) = num("maxDistance") {
         p.max_distance = v as f32;
     }
-    if let Ok(s) = t.raw_get::<String>("mode")
-        && let Some(m) = SpatialMode::parse(&s)
-    {
-        p.mode = m;
+    // Each of these calls the SAME parser the engine acts on, and offers that
+    // parser's own ACCEPTS list — so the message cannot describe a behaviour the
+    // code does not have (`floptle/0072`'s shape).
+    if let Ok(s) = t.raw_get::<String>("mode") {
+        p.mode = parse_enum(CALL, "mode", &s, SpatialMode::ACCEPTS, SpatialMode::parse)?;
     }
-    if let Ok(s) = t.raw_get::<String>("falloff")
-        && let Some(f) = Falloff::parse(&s)
-    {
-        p.falloff = f;
+    if let Ok(s) = t.raw_get::<String>("falloff") {
+        p.falloff = parse_enum(CALL, "falloff", &s, Falloff::ACCEPTS, Falloff::parse)?;
     }
     if let Ok(s) = t.raw_get::<String>("track") {
         p.track = s;
     }
-    if let Ok(s) = t.raw_get::<String>("endBehavior")
-        && let Some(e) = EndBehavior::parse(&s)
-    {
-        p.end = e;
+    if let Ok(s) = t.raw_get::<String>("endBehavior") {
+        p.end =
+            parse_enum(CALL, "endBehavior", &s, EndBehavior::ACCEPTS, EndBehavior::parse)?;
     }
     // `loop = true` is the friendlier spelling of endBehavior = "Loop".
     if let Ok(true) = t.raw_get::<bool>("loop") {
         p.end = EndBehavior::Loop;
     }
-    p
+    Ok(p)
 }
 
 fn as_f64(v: &Value) -> Option<f64> {
@@ -268,7 +281,7 @@ pub(crate) fn install_audio_api(lua: &Lua, b: &AudioBridges) -> mlua::Result<()>
                         }
                         _ => (AudioAt::Flat, None),
                     };
-                    let params = parse_params(opts.as_ref());
+                    let params = parse_params(opts.as_ref())?;
                     let handle = {
                         let mut n = next.borrow_mut();
                         *n += 1;

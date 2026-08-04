@@ -154,6 +154,25 @@ pub enum Shape {
     Plane,
 }
 
+impl Shape {
+    /// Every spelling [`Shape::parse`] accepts (`floptle/0082`), for an error
+    /// message that names what it takes.
+    pub const ACCEPTS: &'static [&'static str] = &["Cube", "Sphere", "Capsule", "Plane"];
+
+    /// Parse a shape name, case-insensitively. `None` for anything else —
+    /// `node:setPrimitive("Sphre")` used to make a CUBE and say nothing, which
+    /// is a whole different object silently standing where you put it.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "cube" | "box" => Some(Self::Cube),
+            "sphere" | "ball" => Some(Self::Sphere),
+            "capsule" => Some(Self::Capsule),
+            "plane" | "quad" => Some(Self::Plane),
+            _ => None,
+        }
+    }
+}
+
 /// How fast an entity spins about Y (radians/sec) — a tiny demo behavior.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Spin {

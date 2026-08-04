@@ -344,7 +344,7 @@ pub(crate) fn install_terrain_api(
         let q = generates.clone();
         let logs2 = logs.clone();
         if let Ok(f) = lua.create_function(move |_, (id, opts): (u32, Option<Table>)| {
-            let fill = planet_fill_from_table(opts.as_ref());
+            let fill = planet_fill_from_table(opts.as_ref())?;
             let mut q = q.borrow_mut();
             if q.len() >= 16 {
                 logs2.borrow_mut().push(crate::ScriptLog {
@@ -500,13 +500,47 @@ pub(crate) fn install_terrain_api(
 /// [`floptle_field::procgen::PlanetFill`] — one parser for BOTH the immediate
 /// generation queue and the on-node genspec (G2), so their vocabularies can
 /// never drift apart. Every field optional; camelCase keys.
+/// Every key a planet-generation options table reads (`floptle/0082`). The seven
+/// paint layers all take `{ slot =, color = }`; `pockets`, `seam` and `iceCaps`
+/// have their own inner keys, checked separately below.
+pub(crate) const PLANET_KEYS: &[&str] = &[
+    "seed", "radius", "voxel", "relief", "bumpFreq", "caveDepth", "coreR", "craters",
+    "craterMin", "craterMax", "patchBias", "patchThr", "subsoilDepth", "strataDepth",
+    "corePaint", "craterDust", "surfaceA", "surfaceB", "subsoil", "strata", "deep", "pockets",
+    "seam", "iceCaps",
+];
+
+/// The inner keys of a paint layer, and of the three special sub-tables.
+const PAINT_KEYS: &[&str] = &["slot", "color"];
+const POCKET_KEYS: &[&str] = &["slot", "color", "threshold", "minDepth"];
+const SEAM_KEYS: &[&str] = &["slot", "color", "minDepth", "center", "width"];
+const ICECAP_KEYS: &[&str] = &["lat", "slot", "color"];
+
 pub(crate) fn planet_fill_from_table(
     opts: Option<&Table>,
-) -> floptle_field::procgen::PlanetFill {
+) -> mlua::Result<floptle_field::procgen::PlanetFill> {
+    use crate::opts::check_keys;
     use floptle_field::procgen::{GlowPockets, LayerPaint, PlanetFill, SeamSpec};
+    // A planet is generated ONCE, on a background thread, and cached to disk.
+    // A misspelled `relif` therefore produces a world that is wrong and STAYS
+    // wrong across restarts, with nothing anywhere saying which key did it.
+    const CALL: &str = "terrain.generatePlanet";
     let mut fill = PlanetFill::default();
     {
         if let Some(t) = opts {
+                check_keys(t, PLANET_KEYS, CALL)?;
+                for k in ["corePaint", "craterDust", "surfaceA", "surfaceB", "subsoil", "strata", "deep"] {
+                    if let Some(v) = t.raw_get::<Option<Table>>(k).ok().flatten() {
+                        check_keys(&v, PAINT_KEYS, &format!("{CALL} {k}"))?;
+                    }
+                }
+                for (k, keys) in
+                    [("pockets", POCKET_KEYS), ("seam", SEAM_KEYS), ("iceCaps", ICECAP_KEYS)]
+                {
+                    if let Some(v) = t.raw_get::<Option<Table>>(k).ok().flatten() {
+                        check_keys(&v, keys, &format!("{CALL} {k}"))?;
+                    }
+                }
                 let gf = |k: &str| t.raw_get::<Option<f64>>(k).ok().flatten();
                 let gc = |v: &Table| -> Option<[f32; 3]> {
                     let c: Table = v.raw_get::<Option<Table>>("color").ok().flatten()?;
@@ -600,6 +634,6 @@ pub(crate) fn planet_fill_from_table(
                 }
         }
     }
-    fill
+    Ok(fill)
 }
 

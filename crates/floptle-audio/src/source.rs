@@ -44,6 +44,13 @@ pub enum EndBehavior {
 }
 
 impl SpatialMode {
+    /// Every spelling [`Self::parse`] accepts, for an error message that names
+    /// what it takes (`floptle/0082`). `spatial_mode_accepts_every_name_it_offers`
+    /// pushes all of these through the real parser, so the list cannot drift
+    /// from the behaviour.
+    pub const ACCEPTS: &'static [&'static str] =
+        &["spatial", "3d", "distance", "flat", "2d"];
+
     /// Parse the user-facing (Lua/inspector) spelling; case-insensitive.
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
@@ -64,6 +71,10 @@ impl SpatialMode {
 }
 
 impl Falloff {
+    /// Every spelling [`Self::parse`] accepts (`floptle/0082`).
+    pub const ACCEPTS: &'static [&'static str] =
+        &["inverse", "linear", "exponential", "exp"];
+
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "inverse" => Some(Self::Inverse),
@@ -83,6 +94,9 @@ impl Falloff {
 }
 
 impl EndBehavior {
+    /// Every spelling [`Self::parse`] accepts (`floptle/0082`).
+    pub const ACCEPTS: &'static [&'static str] = &["stop", "destroy", "loop"];
+
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "stop" => Some(Self::Stop),
@@ -154,5 +168,33 @@ pub struct AudioSource {
 impl Default for AudioSource {
     fn default() -> Self {
         Self { clip: String::new(), params: PlayParams::default(), play_on_start: true }
+    }
+}
+
+#[cfg(test)]
+mod accepts_tests {
+    use super::*;
+
+    /// Every name an error message offers has to parse (`floptle/0082`).
+    ///
+    /// The failure this prevents is the worst kind of documentation bug: an
+    /// error that tells you to write something the code then refuses, so the
+    /// reader concludes the engine is broken — and they are right, just not
+    /// about what.
+    #[test]
+    fn every_offered_audio_enum_name_parses() {
+        for s in SpatialMode::ACCEPTS {
+            assert!(SpatialMode::parse(s).is_some(), "offered but refused: mode = {s:?}");
+        }
+        for s in Falloff::ACCEPTS {
+            assert!(Falloff::parse(s).is_some(), "offered but refused: falloff = {s:?}");
+        }
+        for s in EndBehavior::ACCEPTS {
+            assert!(EndBehavior::parse(s).is_some(), "offered but refused: endBehavior = {s:?}");
+        }
+        // …and the case the whole task is about: a near-miss is refused, not
+        // quietly defaulted.
+        assert!(SpatialMode::parse("spacial").is_none());
+        assert!(Falloff::parse("exponentail").is_none());
     }
 }

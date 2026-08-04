@@ -71,6 +71,9 @@ use crate::{
     VfxCmd, VfxInfo,
 };
 
+/// Every key a `scene.load` options table reads (`floptle/0082`).
+pub(crate) const SCENE_LOAD_KEYS: &[&str] = &["additive", "environment"];
+
 /// Render any Lua value as readable Console text: primitives plainly, engine
 /// handles by IDENTITY (`node "Player" (#4)`, `component "RigidBody" of …`),
 /// userdata via `__tostring` (vec3/vec2 print their components), and tables
@@ -550,7 +553,16 @@ impl ScriptHost {
                         if let Ok(eid) = t.raw_get::<u32>("__id") {
                             exclude.push(eid);
                         } else {
-                            // No __id → an options table.
+                            // No __id → an options table. Checked against the
+                            // SAME list `shape_api`'s queries use, because this
+                            // is a second copy of that parsing and the two lists
+                            // drifting is how `layers` ends up honoured by one
+                            // and ignored by the other (`floptle/0082`).
+                            crate::opts::check_keys(
+                                t,
+                                crate::shape_api::QUERY_KEYS,
+                                "raycast",
+                            )?;
                             if let Ok(ig) = t.get::<Table>("ignore")
                                 && let Ok(eid) = ig.raw_get::<u32>("__id")
                             {
@@ -805,23 +817,34 @@ impl ScriptHost {
                 "load",
                 lua.create_function(move |_, (name, opts): (String, Option<Table>)| {
                     // `{ additive = true }` layers the scene on top of the
-                    // running one instead of replacing it. Anything else in the
-                    // table is ignored rather than rejected, so the option set
-                    // can grow without breaking a script that passed a table.
+                    // running one instead of replacing it.
+                    //
+                    // This used to ignore anything else in the table, on the
+                    // reasoning that the option set could then grow without
+                    // breaking a script that passed one. That reasoning was
+                    // wrong in the one direction that matters: a typo'd
+                    // `addative = true` reads as `additive = false`, which
+                    // DESTROYS the running scene instead of layering onto it.
+                    // Every node it held is gone, the request queue is cleared,
+                    // and nothing anywhere mentions a key (`floptle/0082`).
                     //
                     // `{ environment = true }` additionally hands the world's
                     // environment to the layer: its sun, fog, skybox and post
                     // chain replace the base scene's for as long as it is
                     // loaded. Meaningless without `additive` (a full swap
                     // already brings its own), so it is read alongside it.
-                    let (additive, environment) = opts
-                        .map(|o| {
+                    let (additive, environment) = match &opts {
+                        Some(o) => {
+                            crate::opts::check_keys(o, SCENE_LOAD_KEYS, "scene.load")?;
                             (
-                                o.get::<Option<bool>>("additive").ok().flatten().unwrap_or(false),
-                                o.get::<Option<bool>>("environment").ok().flatten().unwrap_or(false),
+                                crate::opts::opt_bool(o, "scene.load", "additive")?
+                                    .unwrap_or(false),
+                                crate::opts::opt_bool(o, "scene.load", "environment")?
+                                    .unwrap_or(false),
                             )
-                        })
-                        .unwrap_or((false, false));
+                        }
+                        None => (false, false),
+                    };
                     let req = if additive {
                         crate::SceneRequest::Additive { name, environment }
                     } else {
@@ -2004,6 +2027,24 @@ impl ScriptHost {
         out.sort();
         out.dedup();
         out
+    }
+
+    /// Run one line of Lua against a real host, with `node` bound to a node
+    /// handle — the harness `opts::TABLES`' guard test uses to call every option
+    /// table for real (`floptle/0082`).
+    ///
+    /// A real host, not a bare `Lua`: the whole point of that test is that the
+    /// check runs in the code a game reaches, and a hand-built table proves
+    /// nothing about the call that ships.
+    #[cfg(test)]
+    pub(crate) fn eval_for_test(src: &str) -> Result<(), String> {
+        let host = Self::new();
+        // Play mode, so the calls that are edit-mode-gated (http, account) reach
+        // their option parsing instead of refusing for a different reason.
+        host.set_playing(true);
+        let handle = new_node_handle(&host.lua, 1).map_err(|e| e.to_string())?;
+        host.lua.globals().set("node", handle).map_err(|e| e.to_string())?;
+        host.lua.load(src).exec().map_err(|e| e.to_string())
     }
 
     /// Feed the running scene's name (before `run`) — what `scene.current()` reads.

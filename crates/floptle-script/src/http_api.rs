@@ -139,12 +139,26 @@ impl HttpState {
     }
 }
 
-/// Read `opts` into (headers, timeout, explicit-json).
-fn read_opts(opts: Option<&Table>) -> (Vec<(String, String)>, f64, Option<bool>) {
+/// Every key an `http.get`/`http.post` options table reads (`floptle/0082`).
+pub(crate) const OPT_KEYS: &[&str] = &["headers", "timeout", "json"];
+
+/// What `read_opts` pulls out of an options table: headers, timeout seconds, and
+/// an explicit `json = true/false` (`None` = let the content-type decide).
+type ReadOpts = (Vec<(String, String)>, f64, Option<bool>);
+
+/// Read `opts` into (headers, timeout, explicit-json), refusing anything else.
+///
+/// A misspelled `header = {...}` used to send the request WITHOUT the header —
+/// so the server answered 401 and the game reported "the API is down".
+fn read_opts(
+    call: &str,
+    opts: Option<&Table>,
+) -> mlua::Result<ReadOpts> {
     let mut headers = Vec::new();
     let mut timeout = DEFAULT_TIMEOUT;
     let mut want_json = None;
-    let Some(t) = opts else { return (headers, timeout, want_json) };
+    let Some(t) = opts else { return Ok((headers, timeout, want_json)) };
+    crate::opts::check_keys(t, OPT_KEYS, call)?;
     if let Ok(h) = t.get::<Table>("headers") {
         for pair in h.pairs::<String, Value>().flatten() {
             let v = match pair.1 {
@@ -166,7 +180,7 @@ fn read_opts(opts: Option<&Table>) -> (Vec<(String, String)>, f64, Option<bool>)
     if let Ok(Value::Boolean(b)) = t.get::<Value>("json") {
         want_json = Some(b);
     }
-    (headers, timeout, want_json)
+    Ok((headers, timeout, want_json))
 }
 
 /// Turn a `serde_json::Value` into a Lua value. Objects become tables, arrays
@@ -566,7 +580,8 @@ pub(crate) fn install_http_api(
         let fx = in_fixed.clone();
         if let Ok(f) = lua.create_function(move |_, args: mlua::MultiValue| {
             let (url, body, opts, cb) = parse_args(args.into_iter().collect(), has_body)?;
-            let (headers, timeout, explicit_json) = read_opts(opts.as_ref());
+            let (headers, timeout, explicit_json) =
+                read_opts(&format!("http.{name}"), opts.as_ref())?;
             // `json = true` in opts forces a parse; otherwise the content-type
             // decides, which is what people expect and never surprises anyone.
             let want_json = explicit_json.unwrap_or(false);

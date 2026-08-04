@@ -16,6 +16,9 @@ use mlua::{Lua, Table, Value};
 
 use floptle_input::{BindFilter, ConsumeMode, Context, Domain, InputSystem};
 
+/// Every key an `input.pushContext` options table reads (`floptle/0082`).
+pub(crate) const CONTEXT_KEYS: &[&str] = &["priority", "consume", "enabled"];
+
 /// Shared handle to the host's input system. The driver resolves into it each
 /// frame and tick; scripts read (and, for `consume`, write) through it.
 pub type SharedInput = Rc<std::cell::RefCell<InputSystem>>;
@@ -308,6 +311,7 @@ pub fn install(lua: &Lua, t: &Table, sys: &SharedInput, domain: &SharedDomain) {
         lua.create_function(move |_, (name, opts): (String, Option<Table>)| {
             let (mut priority, mut consume, mut enabled) = (0, false, Vec::new());
             if let Some(o) = opts {
+                crate::opts::check_keys(&o, CONTEXT_KEYS, "input.pushContext")?;
                 priority = o.get::<i32>("priority").unwrap_or(0);
                 consume = o.get::<bool>("consume").unwrap_or(false);
                 if let Ok(list) = o.get::<Table>("enabled") {

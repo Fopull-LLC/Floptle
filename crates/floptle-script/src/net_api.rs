@@ -13,6 +13,18 @@ use mlua::{Lua, RegistryKey, Table, Value};
 
 use crate::{LogLevel, ScriptLog};
 
+
+/// Every key each `net.*` options table reads (`floptle/0082`).
+///
+/// A misspelled networking option is the worst possible silent default: it takes
+/// effect on the SERVER, so the symptom is a session that behaves differently
+/// from every local test — `interestBudget` typo'd is a lobby that stutters for
+/// nobody who can reproduce it.
+pub(crate) const HOST_KEYS: &[&str] =
+    &["maxPlayers", "port", "relay", "interest", "interestBudget", "inputDelay"];
+pub(crate) const RPC_KEYS: &[&str] = &["to", "withInput"];
+pub(crate) const SPAWN_KEYS: &[&str] = &["x", "y", "z", "owner"];
+
 /// A queued session command from Lua, drained by the editor each tick.
 #[derive(Clone, Debug)]
 pub enum NetCmd {
@@ -476,6 +488,7 @@ pub(crate) fn install_net_api(
                 let (mut interest, mut interest_budget) = (None, None);
                 let mut input_delay = None;
                 if let Some(o) = opts {
+                    crate::opts::check_keys(&o, HOST_KEYS, "net.host")?;
                     max_players =
                         o.get::<Option<u32>>("maxPlayers").ok().flatten().unwrap_or(16);
                     port = o.get::<Option<u16>>("port").ok().flatten();
@@ -643,6 +656,7 @@ pub(crate) fn install_net_api(
                 };
                 let (mut to, mut with_input) = (None, false);
                 if let Some(o) = opts {
+                    crate::opts::check_keys(&o, RPC_KEYS, "net.rpc")?;
                     to = o.get::<Option<u64>>("to").ok().flatten();
                     with_input =
                         o.get::<Option<bool>>("withInput").ok().flatten().unwrap_or(false);
@@ -756,6 +770,13 @@ pub(crate) fn install_net_api(
         t.set(
             "spawn",
             lua.create_function(move |_, (path, opts): (String, Option<Table>)| {
+                // Keys first, ROLE second: a client calling this is a no-op by
+                // design, and finding out a year later that the options table
+                // was also misspelled the whole time is the failure this task is
+                // about (`floptle/0082`).
+                if let Some(o) = &opts {
+                    crate::opts::check_keys(o, SPAWN_KEYS, "net.spawn")?;
+                }
                 if n.state.borrow().role != NetRoleState::Server {
                     n.warn(format!("net.spawn(\"{path}\"): only the server spawns — ignored"));
                     return Ok(());

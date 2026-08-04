@@ -29,6 +29,32 @@ pub struct OptTable {
     pub keys: &'static [&'static str],
 }
 
+/// Every Lua-facing option table in the engine, and the keys it reads.
+///
+/// This is the list `every_registered_option_table_refuses_an_unknown_key` walks:
+/// it pushes a bogus key through each call **for real, through Lua**, and fails
+/// if the call accepts it. So an entry here is a promise the code has to keep,
+/// and the companion source-scan test
+/// (`no_option_table_escapes_the_registry`) fails when a NEW option table
+/// appears that is neither registered nor deliberately excused.
+pub const TABLES: &[OptTable] = &[
+    OptTable { call: "scatter.create", keys: crate::scatter_api::CREATE_KEYS },
+    OptTable { call: "node:setCamera", keys: crate::api::CAMERA_KEYS },
+    OptTable { call: "node:setMaterial", keys: crate::api::MATERIAL_KEYS },
+    OptTable { call: "node:setCelestial", keys: crate::api::CELESTIAL_KEYS },
+    OptTable { call: "node:setTilemap", keys: crate::api::TILEMAP_KEYS },
+    OptTable { call: "node:setSpriteBatch", keys: crate::api::SPRITE_BATCH_KEYS },
+    OptTable { call: "terrain.generatePlanet", keys: crate::terrain_api::PLANET_KEYS },
+    OptTable { call: "audio.play", keys: crate::audio_api::PLAY_KEYS },
+    OptTable { call: "net.host", keys: crate::net_api::HOST_KEYS },
+    OptTable { call: "net.rpc", keys: crate::net_api::RPC_KEYS },
+    OptTable { call: "net.spawn", keys: crate::net_api::SPAWN_KEYS },
+    OptTable { call: "input.pushContext", keys: crate::input_api::CONTEXT_KEYS },
+    OptTable { call: "scene.load", keys: crate::host::SCENE_LOAD_KEYS },
+    OptTable { call: "http.get", keys: crate::http_api::OPT_KEYS },
+    OptTable { call: "raycast", keys: crate::shape_api::QUERY_KEYS },
+];
+
 /// Refuse an options table containing anything the engine does not read.
 ///
 /// Names the key, and suggests the nearest real one — a rejected typo that
@@ -246,6 +272,133 @@ mod tests {
         assert!(
             require_range("c", "w", f64::NAN, 8.0, 4096.0).is_err(),
             "a NaN passes every comparison and must still be refused"
+        );
+    }
+
+    /// One line of Lua that calls each registered option table, with a key the
+    /// engine does not read. A registry entry with no snippet fails the test
+    /// below — which is what makes adding an option table cost writing this
+    /// down.
+    ///
+    /// `nonesuch` is the bogus key everywhere, so the assertion is uniform.
+    fn bogus_call(call: &str) -> &'static str {
+        match call {
+            "scatter.create" => "scatter.create{ asset = 'a.glb', nonesuch = 1 }",
+            "node:setCamera" => "node:setCamera{ nonesuch = 1 }",
+            "node:setMaterial" => "node:setMaterial{ nonesuch = 1 }",
+            "node:setCelestial" => "node:setCelestial{ nonesuch = 1 }",
+            "node:setTilemap" => "node:setTilemap{ cols = 2, rows = 2, nonesuch = 1 }",
+            "node:setSpriteBatch" => "node:setSpriteBatch{ nonesuch = 1 }",
+            "terrain.generatePlanet" => "terrain.generatePlanet(1, { nonesuch = 1 })",
+            "audio.play" => "audio.play('a.ogg', { nonesuch = 1 })",
+            "net.host" => "net.host{ nonesuch = 1 }",
+            "net.rpc" => "net.rpc('ping', nil, { nonesuch = 1 })",
+            "net.spawn" => "net.spawn('p.prefab.ron', { nonesuch = 1 })",
+            "input.pushContext" => "input.pushContext('menu', { nonesuch = 1 })",
+            "scene.load" => "scene.load('next', { nonesuch = 1 })",
+            "http.get" => "http.get('/x', { nonesuch = 1 }, function() end)",
+            "raycast" => "raycast(0,0,0, 0,-1,0, 10, { nonesuch = 1 })",
+            other => panic!(
+                "opts::TABLES lists `{other}` but no test calls it — add a line to \
+                 `bogus_call` so the registry entry is a promise the code has to keep"
+            ),
+        }
+    }
+
+    /// Every registered option table refuses a key the engine does not read —
+    /// checked by CALLING IT, from Lua, through the real host (`floptle/0082`).
+    ///
+    /// 32 of the 74 bugs filed against this engine were one shape: the engine
+    /// answered something it did not understand. Every one was fixed on its own,
+    /// after a player hit it. A registry with no test behind it would be the
+    /// same thing again — a list that says the checks exist.
+    #[test]
+    fn every_registered_option_table_refuses_an_unknown_key() {
+        for t in TABLES {
+            let src = bogus_call(t.call);
+            let err = crate::ScriptHost::eval_for_test(src).expect_err(&format!(
+                "`{}` accepted `nonesuch` silently — the whole class of bug this \
+                 registry exists to end: {src}",
+                t.call
+            ));
+            assert!(
+                err.contains("nonesuch"),
+                "`{}` refused, but not because of the key it was given — the message \
+                 has to name the value received: {err}",
+                t.call
+            );
+            assert!(
+                !t.keys.is_empty(),
+                "`{}` is registered with no keys at all",
+                t.call
+            );
+        }
+    }
+
+    /// No option table escapes the registry (`floptle/0082`).
+    ///
+    /// This is the half that stops the audit decaying. It scans this crate's own
+    /// source for the shape of an options table — a Lua closure taking a
+    /// `Table`/`Option<Table>` that is not a handle — and fails when one appears
+    /// that neither calls [`check_keys`] nor is excused below with a reason.
+    ///
+    /// A source scan is a blunt instrument, and the right one here: the
+    /// alternative is trusting that whoever adds the next `terrain.sculpt{...}`
+    /// remembers a convention, and 32 bugs say that does not happen.
+    #[test]
+    fn no_option_table_escapes_the_registry() {
+        // Closures that take a table which is NOT a bag of options, with why.
+        const NOT_OPTIONS: &[(&str, &str)] = &[
+            ("math_api.rs", "list helpers (map/filter/sort) take DATA, not options"),
+            ("http_api.rs", "the reply table is built by the engine and read by the game"),
+            ("ui_make.rs", "ui.make validates every property AND value itself (floptle/0072)"),
+            ("api.rs", "handle metatables and the construction calls, all checked at the call"),
+            ("audio_api.rs", "sound/track handles; the one options table is audio.play"),
+            ("net_api.rs", "node handles and the synced store's __index/__newindex"),
+            ("assembly_api.rs", "vector arguments accepted as {x,y,z} tables"),
+            ("shape_api.rs", "query options go through query_opts, which checks them"),
+            ("terrain_api.rs", "the one options table is the planet fill"),
+            ("input_api.rs", "the one options table is input.pushContext"),
+            ("scatter_api.rs", "the one options table is scatter.create"),
+            ("host.rs", "scene.load; the rest are handle/registry tables"),
+            ("env.rs", "the script environment itself"),
+            ("save_api.rs", "save data is the GAME's table, arbitrary by design"),
+            ("rollback_api.rs", "snapshot/restore tables are the game's own state"),
+            ("account_api.rs", "the account/mission reply tables are engine-built"),
+            ("perf_api.rs", "no option tables"),
+            ("space_api.rs", "no option tables"),
+            ("view_api.rs", "no option tables"),
+            ("water_api.rs", "no option tables"),
+            ("sched_api.rs", "no option tables"),
+            ("math_api.rs", "vector and list helpers"),
+            ("preprocess.rs", "no Lua closures"),
+            ("opts.rs", "this module"),
+            ("lib.rs", "tests and type declarations"),
+        ];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut unexcused: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("read src/").flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let file = path.file_name().unwrap().to_string_lossy().to_string();
+            let src = std::fs::read_to_string(&path).expect("read source");
+            let takes_table = src.contains("Option<Table>") || src.contains("(Table, Table)");
+            if !takes_table {
+                continue;
+            }
+            if src.contains("check_keys") || NOT_OPTIONS.iter().any(|(f, _)| *f == file) {
+                continue;
+            }
+            unexcused.push(file);
+        }
+        assert!(
+            unexcused.is_empty(),
+            "these files take a Lua options table but neither check its keys nor appear in \
+             NOT_OPTIONS with a reason — an unrecognised key there defaults silently, which \
+             is 43% of every bug ever filed against this engine:\n  {}",
+            unexcused.join("\n  ")
         );
     }
 }

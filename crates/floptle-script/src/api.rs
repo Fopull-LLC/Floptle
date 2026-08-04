@@ -1041,12 +1041,6 @@ pub(crate) fn apply_rich_sets(
                 }
             }
             RichSet::MatterPrimitive(shape, color) => {
-                let shape = match shape.as_str() {
-                    "Sphere" | "sphere" => floptle_core::Shape::Sphere,
-                    "Capsule" | "capsule" => floptle_core::Shape::Capsule,
-                    "Plane" | "plane" => floptle_core::Shape::Plane,
-                    _ => floptle_core::Shape::Cube,
-                };
                 world.insert(
                     e,
                     Matter::Primitive {
@@ -1164,6 +1158,28 @@ pub const HANDLE_KEYS: &[(&str, &str)] = &[
 /// nearest real one (`floptle/0078`, `floptle/0082`).
 pub(crate) const CAMERA_KEYS: &[&str] =
     &["fovY", "active", "target", "width", "height", "hz", "cullMask"];
+
+/// Every key `node:setMaterial{...}` reads (`floptle/0082`).
+///
+/// These lists are the ONE place each construction call's surface is written
+/// down: the check reads them and `apply_rich_sets` acts on exactly these names,
+/// so a key that is accepted is a key that does something.
+pub(crate) const MATERIAL_KEYS: &[&str] = &[
+    "color", "emissive", "emissiveStrength", "specular", "shininess", "specularStrength", "rim",
+    "rimStrength", "unlit", "ambient", "alpha", "texture", "cell", "sheetCols", "sheetRows",
+];
+
+/// Every key `node:setCelestial{...}` reads (`floptle/0082`).
+pub(crate) const CELESTIAL_KEYS: &[&str] = &[
+    "mu", "bodyRadius", "soi", "parent", "a", "e", "i", "lan", "argPe", "m0", "atmoColor",
+    "atmoHeight", "atmoDensity", "clouds", "luminosity", "starColor", "occluderRadius",
+];
+
+/// Every key `node:setTilemap{...}` reads (`floptle/0082`).
+pub(crate) const TILEMAP_KEYS: &[&str] = &["cols", "rows", "tile", "data"];
+
+/// Every key `node:setSpriteBatch{...}` reads (`floptle/0082`).
+pub(crate) const SPRITE_BATCH_KEYS: &[&str] = &["size"];
 
 /// The handle `node:tilemap()` returns: read and write single squares.
 ///
@@ -2399,6 +2415,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 "setCelestial",
                 lua.create_function(move |_, (this, t): (Table, Table)| {
                     let e: u32 = this.raw_get("__id")?;
+                    crate::opts::check_keys(&t, CELESTIAL_KEYS, "node:setCelestial")?;
                     q.borrow_mut().push((e, crate::RichSet::Celestial(fo(&t)?)));
                     Ok(())
                 })?,
@@ -2411,6 +2428,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 "setMaterial",
                 lua.create_function(move |_, (this, t): (Table, Table)| {
                     let e: u32 = this.raw_get("__id")?;
+                    crate::opts::check_keys(&t, MATERIAL_KEYS, "node:setMaterial")?;
                     q.borrow_mut().push((e, crate::RichSet::Material(fo(&t)?)));
                     Ok(())
                 })?,
@@ -2441,7 +2459,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     let e: u32 = this.raw_get("__id")?;
                     let spec = match &opts {
                         Some(t) => {
-                            let fill = crate::terrain_api::planet_fill_from_table(Some(t));
+                            let fill = crate::terrain_api::planet_fill_from_table(Some(t))?;
                             Some(ron::to_string(&fill).map_err(|err| {
                                 mlua::Error::runtime(format!("setTerrainGen: {err}"))
                             })?)
@@ -2462,6 +2480,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 "setTilemap",
                 lua.create_function(move |_, (this, t): (Table, Table)| {
                     let e: u32 = this.raw_get("__id")?;
+                    crate::opts::check_keys(&t, TILEMAP_KEYS, "node:setTilemap")?;
                     let cols: u32 = t.get::<Option<u32>>("cols")?.unwrap_or(0);
                     let rows: u32 = t.get::<Option<u32>>("rows")?.unwrap_or(0);
                     let tile: f32 = t.get::<Option<f32>>("tile")?.unwrap_or(1.0);
@@ -2500,7 +2519,14 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     // optional argument, so `nd:setSpriteBatch()` is the whole
                     // call for the common case.
                     let size: f32 = match &t {
-                        Some(t) => t.get::<Option<f32>>("size")?.unwrap_or(1.0),
+                        Some(t) => {
+                            crate::opts::check_keys(
+                                t,
+                                SPRITE_BATCH_KEYS,
+                                "node:setSpriteBatch",
+                            )?;
+                            t.get::<Option<f32>>("size")?.unwrap_or(1.0)
+                        }
                         None => 1.0,
                     };
                     // NaN spelled out rather than `!(size > 0.0)`: same guard,
@@ -2629,9 +2655,23 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     let c = match &color {
                         Value::Nil => [0.8, 0.8, 0.8],
                         other => triple_of(other).ok_or_else(|| {
-                            mlua::Error::runtime("setPrimitive(shape [, color]): bad color")
+                            mlua::Error::runtime(
+                                "setPrimitive(shape [, color]): a colour takes {r,g,b}, \
+                                 {x,y,z}, {1,0.5,0.2} or vec3",
+                            )
                         })?,
                     };
+                    // Checked HERE, through the parser the write itself uses: a
+                    // misspelled shape used to become a CUBE, silently — a
+                    // different object standing exactly where you put it
+                    // (`floptle/0082`).
+                    let shape = crate::opts::parse_enum(
+                        "node:setPrimitive",
+                        "shape",
+                        &shape,
+                        floptle_core::Shape::ACCEPTS,
+                        floptle_core::Shape::parse,
+                    )?;
                     q.borrow_mut().push((e, crate::RichSet::MatterPrimitive(shape, c)));
                     Ok(())
                 })?,
