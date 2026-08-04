@@ -29,7 +29,7 @@ Click into the **⌖ Scene** panel and hold the **right mouse button**. Now:
 
 - **W A S D** — fly forward, left, back, right
 - **mouse** — look
-- **Q / E** or **Ctrl / Space** — down and up
+- **Space** — rise, **C** — drop
 
 That's the editor's camera, not a game camera. It exists so you can get a look
 at what you're building, and it has nothing to do with what a player will see.
@@ -136,7 +136,7 @@ way to.
 Add a `defaults` table and the Inspector builds a row for every value in it.
 Open `scripts/spinner.lua` and replace what's there with the version below.
 
-Now select `Spinner`, press Play, and **drag the Speed slider while the game is
+Now select `Spinner`, press Play, and **drag the `speed` slider while the game is
 running**. The cube responds immediately.
 
 ### What just happened
@@ -229,7 +229,7 @@ a behaviour, exposed a number, and read the player's input.
 ### Try breaking it, on purpose
 
 - Take the `* dt` out and watch the speed become a property of your monitor.
-- Set Speed to 0 and drive around. Set it to 720.
+- Set `speed` to 0 and drive around. Set it to 720.
 - Change `node.yaw` to `node.y` and see what "turning" becomes.
 - Attach `spinner` to the ball as well. One script, two nodes, separate
   Inspector values on each.

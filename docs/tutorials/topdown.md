@@ -28,7 +28,7 @@ platformer tutorial covers all three, but you don't need to have finished it.
 
 ## 1. A room to walk around
 
-Add a **Cube**, name it `Ground`, scale it to about `30, 1, 30`, and give it a
+Add a **Cube**, name it `Ground`, set its **scale** to about `30, 1, 30`, and give it a
 **Rigidbody** with **mode** **Static**.
 
 Then wall it in: four more cubes, stood on end around the edge, each with a
@@ -49,7 +49,7 @@ Add a **Capsule**, name it `Player`, and give it a **Rigidbody** left on
 **Dynamic**, with **shape** Capsule and **freeze rot** on for x, y and z. The
 same setup as any character.
 
-Add the tag `player` while you're here — the pickups and the door will look for
+Add the tag `player` on the **tags** row while you're here — the pickups and the door will look for
 it.
 
 Then create and attach the script below.
@@ -108,7 +108,7 @@ end
 ## 3. Look down at it
 
 Select the `Camera`, remove its `freelook` script (the **…** beside it →
-**🗑 Remove**), attach the script below, and drag `Player` onto its **Target**
+**🗑 Remove**), attach the script below, and drag `Player` onto its `target`
 row.
 
 Press Play and walk into a wall to check your room actually contains you.
@@ -304,7 +304,7 @@ Add a **Cube**, name it `Key`, shrink it, and put it near the villager. Give it
 a **Rigidbody** with **mode** **Kinematic** and **trigger** ticked, then attach
 the script below.
 
-Set its **Item** row in the Inspector to `Rusty Key` — the door is going to ask
+Set its `item` row in the Inspector to `Rusty Key` — the door is going to ask
 for that exact string, so watch the spelling.
 
 Press Play and walk over it. The Console prints what you picked up, and the
@@ -360,7 +360,7 @@ Back in the first scene, add a **Cube**, name it `Door`, stand it in a wall,
 give it a **Rigidbody** with **mode** **Kinematic** and **trigger** ticked, and
 attach the script below.
 
-Check its Inspector rows: **Destination** should be `cave`, and **Needs** should
+Check its Inspector rows: `destination` should be `cave`, and `needs` should
 be `Rusty Key` — spelled exactly as the pickup spells it.
 
 Now play it properly: walk into the door *first* and get refused, then go and

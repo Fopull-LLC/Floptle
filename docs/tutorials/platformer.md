@@ -33,7 +33,7 @@ script, and what `update` and `params` are.
 Start from a new empty project, or clear the starter scene — either is fine.
 
 Add a cube (Hierarchy → **✚ New** → **■ Cube**), rename it `Ground`, and in
-the Inspector set its **Scale** to about `40, 1, 40`. That's a wide, thin slab.
+the Inspector set its **scale** to about `40, 1, 40`. That's a wide, thin slab.
 
 Now give it a body: in the Inspector, **➕ Add Component → Rigidbody**, and set
 its **mode** to **Static**. Static means "solid, and it never moves" — the
@@ -49,7 +49,7 @@ scale them flat, Rigidbody, mode Static.
 ## 2. Make the player
 
 Add a **Capsule**, rename it `Player`, and lift it a few metres up so it starts
-in the air (Position Y around 3).
+in the air (**position** y around 3).
 
 Give it a **Rigidbody** and leave its **mode** on **Dynamic** — it should fall,
 get pushed, and push back. Then set:
@@ -156,7 +156,7 @@ the next step.
 
 ### Tune it while it runs
 
-With `Player` selected and the game playing, drag **Speed** and **Jump** in the
+With `Player` selected and the game playing, drag `speed` and `jump` in the
 Inspector. Find values you like before you write another line. Being able to do
 this is most of why `defaults` exists, and it is much faster than reasoning
 about what 8.5 metres per second ought to feel like.
@@ -168,8 +168,8 @@ about what 8.5 metres per second ought to feel like.
 Select the `Camera` node. Remove the `freelook` script it came with (the **…**
 beside it → **🗑 Remove**), then create and attach the one below.
 
-Now wire it up: with `Camera` selected, the Inspector shows a **Target** row with
-a node picker. Drag `Player` from the Hierarchy onto it.
+Now wire it up: with `Camera` selected, the Inspector shows a `target` row with a
+node picker. Drag `Player` from the Hierarchy onto it.
 
 ### Why a noderef instead of find("Player")
 
@@ -382,7 +382,7 @@ end
 
 ## 8. Tag the player
 
-Select `Player`. In the Inspector, find the **Tags** row and add the tag
+Select `Player`. In the Inspector, find the **tags** row and add the tag
 `player`.
 
 ### What tags are for
@@ -399,7 +399,7 @@ A tag is a label you can put on any number of nodes and test cheaply:
 
 ## 9. Coins
 
-Add a **Sphere**, name it `Coin`, shrink it (Scale around `0.4`), and float it
+Add a **Sphere**, name it `Coin`, shrink it (**scale** around `0.4`), and float it
 somewhere the player has to jump for.
 
 Give it a **Rigidbody**, set its **mode** to **Kinematic**, and tick

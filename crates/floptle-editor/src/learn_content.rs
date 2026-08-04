@@ -693,7 +693,7 @@ Click into the **⌖ Scene** panel and hold the **right mouse button**. Now:
 
 - **W A S D** — fly forward, left, back, right
 - **mouse** — look
-- **Q / E** or **Ctrl / Space** — down and up
+- **Space** — rise, **C** — drop
 
 That's the editor's camera, not a game camera. It exists so you can get a look
 at what you're building, and it has nothing to do with what a player will see.
@@ -797,7 +797,7 @@ way to.
 Add a `defaults` table and the Inspector builds a row for every value in it.
 Open `scripts/spinner.lua` and replace what's there with the version below.
 
-Now select `Spinner`, press Play, and **drag the Speed slider while the game is
+Now select `Spinner`, press Play, and **drag the `speed` slider while the game is
 running**. The cube responds immediately.
 
 ## What just happened
@@ -860,7 +860,7 @@ a behaviour, exposed a number, and read the player's input.
 ## Try breaking it, on purpose
 
 - Take the `* dt` out and watch the speed become a property of your monitor.
-- Set Speed to 0 and drive around. Set it to 720.
+- Set `speed` to 0 and drive around. Set it to 720.
 - Change `node.yaw` to `node.y` and see what \"turning\" becomes.
 - Attach `spinner` to the ball as well. One script, two nodes, separate
   Inspector values on each.
@@ -919,7 +919,7 @@ script, and what `update` and `params` are.
 Start from a new empty project, or clear the starter scene — either is fine.
 
 Add a cube (Hierarchy → **✚ New** → **■ Cube**), rename it `Ground`, and in
-the Inspector set its **Scale** to about `40, 1, 40`. That's a wide, thin slab.
+the Inspector set its **scale** to about `40, 1, 40`. That's a wide, thin slab.
 
 Now give it a body: in the Inspector, **➕ Add Component → Rigidbody**, and set
 its **mode** to **Static**. Static means \"solid, and it never moves\" — the
@@ -936,7 +936,7 @@ scale them flat, Rigidbody, mode Static.",
             title: "Make the player",
             body: "\
 Add a **Capsule**, rename it `Player`, and lift it a few metres up so it starts
-in the air (Position Y around 3).
+in the air (**position** y around 3).
 
 Give it a **Rigidbody** and leave its **mode** on **Dynamic** — it should fall,
 get pushed, and push back. Then set:
@@ -1001,7 +1001,7 @@ the next step.
 
 ## Tune it while it runs
 
-With `Player` selected and the game playing, drag **Speed** and **Jump** in the
+With `Player` selected and the game playing, drag `speed` and `jump` in the
 Inspector. Find values you like before you write another line. Being able to do
 this is most of why `defaults` exists, and it is much faster than reasoning
 about what 8.5 metres per second ought to feel like.",
@@ -1014,8 +1014,8 @@ about what 8.5 metres per second ought to feel like.",
 Select the `Camera` node. Remove the `freelook` script it came with (the **…**
 beside it → **🗑 Remove**), then create and attach the one below.
 
-Now wire it up: with `Camera` selected, the Inspector shows a **Target** row with
-a node picker. Drag `Player` from the Hierarchy onto it.
+Now wire it up: with `Camera` selected, the Inspector shows a `target` row with a
+node picker. Drag `Player` from the Hierarchy onto it.
 
 ## Why a noderef instead of find(\"Player\")
 
@@ -1108,7 +1108,7 @@ right. (When you want buttons and layout, that's what the **◫ UI** tab is for.
         Step {
             title: "Tag the player",
             body: "\
-Select `Player`. In the Inspector, find the **Tags** row and add the tag
+Select `Player`. In the Inspector, find the **tags** row and add the tag
 `player`.
 
 ## What tags are for
@@ -1126,7 +1126,7 @@ A tag is a label you can put on any number of nodes and test cheaply:
         Step {
             title: "Coins",
             body: "\
-Add a **Sphere**, name it `Coin`, shrink it (Scale around `0.4`), and float it
+Add a **Sphere**, name it `Coin`, shrink it (**scale** around `0.4`), and float it
 somewhere the player has to jump for.
 
 Give it a **Rigidbody**, set its **mode** to **Kinematic**, and tick
@@ -1228,7 +1228,7 @@ platformer tutorial covers all three, but you don't need to have finished it.
         Step {
             title: "A room to walk around",
             body: "\
-Add a **Cube**, name it `Ground`, scale it to about `30, 1, 30`, and give it a
+Add a **Cube**, name it `Ground`, set its **scale** to about `30, 1, 30`, and give it a
 **Rigidbody** with **mode** **Static**.
 
 Then wall it in: four more cubes, stood on end around the edge, each with a
@@ -1250,7 +1250,7 @@ Add a **Capsule**, name it `Player`, and give it a **Rigidbody** left on
 **Dynamic**, with **shape** Capsule and **freeze rot** on for x, y and z. The
 same setup as any character.
 
-Add the tag `player` while you're here — the pickups and the door will look for
+Add the tag `player` on the **tags** row while you're here — the pickups and the door will look for
 it.
 
 Then create and attach the script below.
@@ -1278,7 +1278,7 @@ a gently-pushed analogue stick alone.",
             title: "Look down at it",
             body: "\
 Select the `Camera`, remove its `freelook` script (the **…** beside it →
-**🗑 Remove**), attach the script below, and drag `Player` onto its **Target**
+**🗑 Remove**), attach the script below, and drag `Player` onto its `target`
 row.
 
 Press Play and walk into a wall to check your room actually contains you.
@@ -1360,7 +1360,7 @@ Add a **Cube**, name it `Key`, shrink it, and put it near the villager. Give it
 a **Rigidbody** with **mode** **Kinematic** and **trigger** ticked, then attach
 the script below.
 
-Set its **Item** row in the Inspector to `Rusty Key` — the door is going to ask
+Set its `item` row in the Inspector to `Rusty Key` — the door is going to ask
 for that exact string, so watch the spelling.
 
 Press Play and walk over it. The Console prints what you picked up, and the
@@ -1398,7 +1398,7 @@ Back in the first scene, add a **Cube**, name it `Door`, stand it in a wall,
 give it a **Rigidbody** with **mode** **Kinematic** and **trigger** ticked, and
 attach the script below.
 
-Check its Inspector rows: **Destination** should be `cave`, and **Needs** should
+Check its Inspector rows: `destination` should be `cave`, and `needs` should
 be `Rusty Key` — spelled exactly as the pickup spells it.
 
 Now play it properly: walk into the door *first* and get refused, then go and
@@ -1485,7 +1485,7 @@ want an empty stage.
 Select the `Camera` and remove its `freelook` script (the **…** beside it →
 **🗑 Remove**) — otherwise you will fly the camera off by accident mid-game.
 
-Set the camera's **Position** to about `0, 4, 18` and its **Rotation** to all
+Set the camera's **position** to about `0, 4, 18` and its **rotation** to all
 zeroes. It now looks along -Z at a flat plane, which is the whole stage.
 
 Everything you place from here goes at **z = 0**.",
@@ -1634,8 +1634,8 @@ quitting, and the exported build.",
 This is the real work, and it is entirely done from the Inspector with the game
 running. Nothing below needs a code change.
 
-- **Flap** on the bird, and **Interval** and **Gap** on the game, are the three
-  numbers that decide whether this is playable. Move one at a time.
+- `flap` on the bird, and `interval`, `gapLow` and `gapHigh` on the game, are
+  the numbers that decide whether this is playable. Move one at a time.
 - If it's too hard, widen the gap before you slow the pipes down — a slow game
   is boring in a way a hard one isn't.
 - Make the gap narrow as the score climbs. Two lines in `score()`.

@@ -31,7 +31,7 @@ want an empty stage.
 Select the `Camera` and remove its `freelook` script (the **…** beside it →
 **🗑 Remove**) — otherwise you will fly the camera off by accident mid-game.
 
-Set the camera's **Position** to about `0, 4, 18` and its **Rotation** to all
+Set the camera's **position** to about `0, 4, 18` and its **rotation** to all
 zeroes. It now looks along -Z at a flat plane, which is the whole stage.
 
 Everything you place from here goes at **z = 0**.
@@ -329,8 +329,8 @@ end
 This is the real work, and it is entirely done from the Inspector with the game
 running. Nothing below needs a code change.
 
-- **Flap** on the bird, and **Interval** and **Gap** on the game, are the three
-  numbers that decide whether this is playable. Move one at a time.
+- `flap` on the bird, and `interval`, `gapLow` and `gapHigh` on the game, are
+  the numbers that decide whether this is playable. Move one at a time.
 - If it's too hard, widen the gap before you slow the pipes down — a slow game
   is boring in a way a hard one isn't.
 - Make the gap narrow as the score climbs. Two lines in `score()`.
