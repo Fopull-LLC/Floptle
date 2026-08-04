@@ -1,6 +1,15 @@
 ## Just shipped
 
-**v0.25.0 "Follow Along"** — Floptle can teach you how to use it. A new
+**v0.26.0 "Give It Back"** — a busy scene got much faster. Finding what a node
+has on it was a search through every node, so a scene's cost grew with the
+square of its size; it is now a direct lookup, and a 5,500-node scene went from
+60 ms a frame of pure lookups to 4. Nothing in your project changes. Alongside
+it: a game can get the mouse cursor back for its own menus — a shop that opens
+mid-play used to be unclickable for the rest of the session — and sprites in a
+batch can squash and stretch, which is what a 2D game telegraphs an attack with.
+The 2D guide now says plainly, with numbers, when a batch stops being optional.
+
+**v0.25.0 "Follow Along"** before it — Floptle can teach you how to use it. A new
 **🎓 Learn** tab holds five follow-along tutorials that build a real game from an
 empty project, and because the editor can see what you've made, each step ticks
 itself off when you've actually done it — so you never get three steps past a
@@ -14,7 +23,7 @@ mesh — so the hairline gaps that open between tiles as the camera moves cannot
 happen — and sprite batches where every sprite carries its own colour, which is
 the difference between flashing an enemy red and blinking it off.
 
-**v0.24.1 "Plain Sight"** before it: two dozen buttons that had been drawing as
+**v0.24.1 "Plain Sight"** under those: two dozen buttons that had been drawing as
 empty boxes got their icons back, and the 188 scripting calls that had no
 description anywhere got one — plus a complete reference page and a search that
 finds what you typed.
