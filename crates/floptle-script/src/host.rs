@@ -2260,9 +2260,19 @@ impl ScriptHost {
                 }
             }
         }
-        // Queued spawn/destroy requests must not leak across a scene switch
-        // (their entities/prefabs belong to the old scene's session).
+        // Queued spawn/create/destroy requests must not leak across a scene
+        // switch (their entities/prefabs belong to the old scene's session).
+        // All three are drained in the same place — `apply_script_spawns` — so
+        // all three have to be dropped here: a request queued on a frame that
+        // ended in Stop would otherwise be applied on the NEXT session, where
+        // `parent` is an index the new scene has given to a different node and
+        // `cb` closes over an environment that has already been dropped.
         for req in self.spawn_requests.borrow_mut().drain(..) {
+            if let Some(cb) = req.cb {
+                let _ = self.lua.remove_registry_value(cb);
+            }
+        }
+        for req in self.create_requests.borrow_mut().drain(..) {
             if let Some(cb) = req.cb {
                 let _ = self.lua.remove_registry_value(cb);
             }

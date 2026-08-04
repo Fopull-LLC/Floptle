@@ -747,3 +747,214 @@ impl Editor {
         self.selection.retain(|&e| self.world.is_alive(e));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use floptle_core::{Matter, Name, ScriptInst, Scripts, Transform};
+    use floptle_ui::UiLayer;
+
+    use crate::Editor;
+
+    /// A HUD described with `ui.make`, over two Play sessions with a Stop in
+    /// between — the shape of the report in `floptle/0061`: "after playing the
+    /// game in the editor once, when I try to play again the UI does not show".
+    ///
+    /// Two sessions is the whole test. One session passes trivially and always
+    /// has; everything interesting lives in what the second one inherits.
+    #[test]
+    fn a_made_hud_comes_back_on_the_second_play() {
+        let dir = std::env::temp_dir().join(format!("floptle_0061_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("hud.lua"),
+            "\
+function start(node)
+  ui.make(node, { 'col', key = 'hud', w = '100%',
+                  { 'text', key = 'score', text = 'SCORE 0' } })
+end
+",
+        )
+        .expect("write hud.lua");
+
+        let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
+        let layer = ed.world.spawn();
+        ed.world.insert(layer, Transform::IDENTITY);
+        ed.world.insert(layer, Name("HUD".into()));
+        ed.world.insert(layer, Matter::Empty);
+        ed.world.insert(layer, UiLayer::default());
+        ed.world.insert(layer, Scripts(vec![ScriptInst {
+            kind: "hud".into(),
+            enabled: true,
+            params: Vec::new(),
+            refs: Vec::new(),
+            strs: Vec::new(),
+        }]));
+
+        let elements = |ed: &Editor| ed.world.query::<floptle_core::Made>().count();
+        let session = |ed: &mut Editor, t: f32| {
+            let snap = ed.snapshot();
+            ed.script_host.reset_instances();
+            ed.playing = true;
+            ed.script_host.run(&mut ed.world, &dir, 1.0 / 60.0, t);
+            assert!(ed.script_host.errors().is_empty(), "{:?}", ed.script_host.errors());
+            ed.apply_script_spawns();
+            let n = elements(ed);
+            ed.playing = false;
+            ed.restore(snap);
+            n
+        };
+
+        assert_eq!(session(&mut ed, 0.0), 2, "first session: the column and its text");
+        assert_eq!(session(&mut ed, 1.0), 2, "second session: the same HUD, not an empty screen");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same two sessions, with everything a real HUD does that the plain
+    /// case above leaves out: described from `update` rather than `start`, rows
+    /// that come and go, a `ui.on` listener, a visibility write, and a
+    /// `destroy` still in flight when Stop lands.
+    ///
+    /// Each of those is a place where an entity index from the finished session
+    /// could be read against the fresh one, and an index is exactly the kind of
+    /// thing that survives a restore.
+    #[test]
+    fn a_busy_hud_comes_back_too() {
+        let dir = std::env::temp_dir().join(format!("floptle_0061_busy_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("hud.lua"),
+            "\
+local ticks = 0
+
+function start(node)
+  ticks = 0
+  -- A node created at runtime, which the restored scene will not contain.
+  createNode('Debris', node, function(n) n.y = 1 end)
+end
+
+function update(node, dt)
+  ticks = ticks + 1
+  local rows = { 'col', key = 'hud', w = '100%',
+                 { 'text', key = 'score', text = 'SCORE ' .. ticks } }
+  -- A row that appears on the second frame and leaves again on the fourth,
+  -- so reconcile is doing real work rather than the same tree twice.
+  if ticks >= 2 and ticks < 4 then
+    rows[#rows + 1] = { 'button', key = 'go', text = 'GO' }
+  end
+  ui.make(node, rows)
+  node.visible = true
+  -- Queued and never drained on the frame Stop lands.
+  createNode('Late', node)
+end
+",
+        )
+        .expect("write hud.lua");
+
+        let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
+        let layer = ed.world.spawn();
+        ed.world.insert(layer, Transform::IDENTITY);
+        ed.world.insert(layer, Name("HUD".into()));
+        ed.world.insert(layer, Matter::Empty);
+        ed.world.insert(layer, UiLayer::default());
+        ed.world.insert(layer, Scripts(vec![ScriptInst {
+            kind: "hud".into(),
+            enabled: true,
+            params: Vec::new(),
+            refs: Vec::new(),
+            strs: Vec::new(),
+        }]));
+        let snap = ed.snapshot();
+        ed.restore(snap.clone());
+
+        // Three sessions of five frames each — the third catches anything that
+        // needs two restores to go wrong.
+        for session in 0..3 {
+            ed.script_host.reset_instances();
+            ed.playing = true;
+            for frame in 0..5 {
+                ed.script_host.run(&mut ed.world, &dir, 1.0 / 60.0, frame as f32 / 60.0);
+                assert!(
+                    ed.script_host.errors().is_empty(),
+                    "session {session} frame {frame}: {:?}",
+                    ed.script_host.errors()
+                );
+                ed.apply_script_spawns();
+            }
+            let made = ed.world.query::<floptle_core::Made>().count();
+            assert_eq!(made, 2, "session {session}: the column and its text are on screen");
+            // …and they are under the layer, not orphaned onto whatever node
+            // inherited the old session's index.
+            let under_layer = ed
+                .world
+                .query::<floptle_core::Made>()
+                .filter(|(e, _)| {
+                    ed.world.get::<floptle_core::Parent>(*e).is_some_and(|p| p.0 == layer)
+                })
+                .count();
+            assert_eq!(under_layer, 1, "session {session}: the column hangs off the HUD layer");
+            ed.playing = false;
+            ed.restore(snap.clone());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stop lands where it lands: after `update` has run and queued work, and
+    /// before the driver drains the queue. Everything in flight belongs to the
+    /// session that just ended — a `createNode` applied on the NEXT Play names
+    /// a parent index the new scene has given to somebody else, and runs a
+    /// callback closed over an environment that has been dropped.
+    #[test]
+    fn work_queued_on_the_last_frame_of_a_session_does_not_land_in_the_next_one() {
+        let dir = std::env::temp_dir().join(format!("floptle_0061_q_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // `parent` is the HUD layer's index in THIS session. Next session that
+        // index belongs to whatever the fresh world hands it to.
+        std::fs::write(
+            dir.join("spawner.lua"),
+            "function update(node, dt)\n  createNode('Tile', node, function(n) n.y = 3 end)\nend\n",
+        )
+        .expect("write spawner.lua");
+
+        let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
+        let e = ed.world.spawn();
+        ed.world.insert(e, Transform::IDENTITY);
+        ed.world.insert(e, Name("Spawner".into()));
+        ed.world.insert(e, Matter::Empty);
+        ed.world.insert(e, Scripts(vec![ScriptInst {
+            kind: "spawner".into(),
+            enabled: true,
+            params: Vec::new(),
+            refs: Vec::new(),
+            strs: Vec::new(),
+        }]));
+        let snap = ed.snapshot();
+        // The baseline is measured through a restore, because that is what the
+        // comparison is against — a round trip through the doc is not the
+        // identity (it is where the scene's implicit camera and light arrive).
+        ed.restore(snap.clone());
+        let authored = ed.world.query::<Transform>().count();
+
+        // A session that ends between `update` and the drain.
+        ed.script_host.reset_instances();
+        ed.playing = true;
+        ed.script_host.run(&mut ed.world, &dir, 1.0 / 60.0, 0.0);
+        ed.playing = false;
+        ed.restore(snap.clone());
+
+        // Play again. Nothing from last time may be waiting.
+        ed.script_host.reset_instances();
+        assert_eq!(
+            ed.world.query::<Transform>().count(),
+            authored,
+            "the restored scene is the authored one"
+        );
+        ed.playing = true;
+        ed.apply_script_spawns();
+        assert_eq!(
+            ed.world.query::<Transform>().count(),
+            authored,
+            "a node queued in the previous session must not appear in this one"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
