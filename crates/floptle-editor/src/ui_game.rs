@@ -1713,6 +1713,18 @@ impl Editor {
                     .on_hover_text("reference HEIGHT in design units — the height you author against. Element positions/sizes are in these units.")
                     .changed();
             });
+            ui.horizontal(|ui| {
+                ui.label("pixel scale");
+                changed |= ui
+                    .checkbox(&mut layer.pixel_scale, "whole pixels")
+                    .on_hover_text(
+                        "snap the canvas scale to a WHOLE number of pixels per design unit. \
+                         For pixel art: a fractional scale resamples the font off its own \
+                         grid, so the same HUD reads crisp at one window size and mushy at \
+                         another. The leftover becomes margin, so nothing moves off its edge.",
+                    )
+                    .changed();
+            });
             if layer.scale_mode == UiScaleMode::Blend {
                 ui.horizontal(|ui| {
                     ui.label("match");

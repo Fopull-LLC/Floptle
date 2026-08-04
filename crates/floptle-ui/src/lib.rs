@@ -1057,6 +1057,14 @@ pub struct UiLayer {
     /// Master switch: an off layer draws nothing (in-game and in-editor).
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Snap the canvas scale to a WHOLE number of pixels per design unit.
+    ///
+    /// What a pixel-art HUD wants and nothing else does, which is why it is off
+    /// by default: a fractional scale resamples a pixel font off its own grid,
+    /// and it changes with every window size. Ignored below 1x, where there are
+    /// no whole pixels left to snap to.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pixel_scale: bool,
     /// Screen overlay vs a quad in the 3D world. Screen-space by default so
     /// existing layers are unchanged.
     #[serde(default)]
@@ -1144,11 +1152,21 @@ impl UiLayer {
             UiScaleMode::Shrink => by_w.max(by_h),
             UiScaleMode::ConstantPixels => 1.0,
         };
-        if s.is_finite() && s > 0.0 {
-            s
-        } else {
-            0.01
-        }
+        let s = if s.is_finite() && s > 0.0 { s } else { 0.01 };
+        // Whole pixels per design unit, if the layer asks for them. A layer
+        // designed at 240 units in a 486px panel scales by 2.025, which puts
+        // some rows of an 8px font on two screen pixels and some on three —
+        // the glyph is resampled off its own grid and the whole HUD reads as
+        // mush at one window size and crisp at another.
+        //
+        // Rounding DOWN rather than to the nearest keeps every element inside
+        // the viewport, and the leftover becomes margin: the design canvas is
+        // solved slightly LARGER (243 units, not 240), so anchored elements
+        // stay against their edges and centred ones stay centred. That is the
+        // same thing `MatchHeight` already does horizontally, and it is why
+        // this needs no offset — and therefore cannot put a click somewhere
+        // other than where the pixel is.
+        if self.pixel_scale && s >= 1.0 { s.floor() } else { s }
     }
 }
 
@@ -1159,6 +1177,7 @@ impl Default for UiLayer {
             reference_width: default_reference_width(),
             scale_mode: UiScaleMode::default(),
             match_wh: default_match_wh(),
+            pixel_scale: false,
             z: 0,
             enabled: true,
             space: UiSpace::Screen,
@@ -3311,6 +3330,40 @@ mod tests {
         assert!((b - 2.0f32.sqrt()).abs() < 1e-4, "blend geo-mean, got {b}");
         // Degenerate viewport never yields a non-positive scale.
         assert!(layer(UiScaleMode::MatchHeight).scale_for([0.0, 0.0]) > 0.0);
+    }
+
+    /// A pixel-art HUD wants whole pixels per design unit, or its font is
+    /// resampled off its own grid and reads as mush at one window size and
+    /// crisp at another.
+    #[test]
+    fn a_pixel_scaled_layer_snaps_to_whole_pixels() {
+        let pixel = |on: bool| UiLayer {
+            design_height: 240.0,
+            scale_mode: UiScaleMode::MatchHeight,
+            pixel_scale: on,
+            ..Default::default()
+        };
+        // The panel from the report: 486 rows over a 240-unit design.
+        assert_eq!(pixel(false).scale_for([864.0, 486.0]), 2.025, "the old, fractional answer");
+        assert_eq!(pixel(true).scale_for([864.0, 486.0]), 2.0, "…snapped down to whole pixels");
+        // Rounding DOWN, so nothing is pushed out of the viewport: the design
+        // canvas comes out slightly LARGER (243 units, not 240) and the extra
+        // is margin — which is what keeps anchored elements against their edge
+        // and means no offset, and therefore no pointer skew, is involved.
+        assert!(486.0 / pixel(true).scale_for([864.0, 486.0]) >= 240.0);
+        // An exact fit is untouched either way.
+        assert_eq!(pixel(true).scale_for([1280.0, 720.0]), 3.0);
+        // Below 1x there are no whole pixels left to snap to, so leave it be.
+        assert_eq!(pixel(true).scale_for([200.0, 120.0]), 0.5);
+    }
+
+    /// Off by default, and absent from a default layer's RON — an existing
+    /// project's HUD must be laid out exactly as it was.
+    #[test]
+    fn pixel_scale_is_opt_in_and_does_not_appear_in_a_default_layer() {
+        assert!(!UiLayer::default().pixel_scale);
+        let text = ron::ser::to_string(&UiLayer::default()).unwrap();
+        assert!(!text.contains("pixel_scale"), "default omitted: {text}");
     }
 
     #[test]
