@@ -311,6 +311,82 @@ pub fn plane(half: f32) -> MeshData {
     MeshData { vertices, indices: vec![0, 1, 2, 0, 2, 3], colors: None }
 }
 
+/// A grid of spritesheet cells as ONE mesh, centred on the origin in the XY
+/// plane, facing +Z (`floptle/0058`).
+///
+/// `data` is row-major from the TOP-LEFT, `cols * rows` long; a cell of
+/// [`floptle_core::EMPTY_TILE`] (or any index past the end of the sheet's
+/// `cols * rows`) emits no geometry, so a map can have holes.
+///
+/// ## Why this is one mesh and not one quad per tile
+///
+/// The seam this fixes is not a texture-bleed problem, it is a *geometry*
+/// problem. Give every tile its own transform and tile `i`'s right edge is
+/// computed as `origin + (i + 0.5) * tile + half`, while tile `i + 1`'s left
+/// edge is `origin + (i + 1.5) * tile - half`. Those are different float
+/// expressions for the same number, they disagree in the last bit, and as the
+/// camera moves the two edges land either side of a pixel boundary
+/// independently — a hairline of background that flickers in and out.
+///
+/// Here both edges are the single value `(i + 1) * tile - w`, written once into
+/// one vertex buffer. Two triangles that share an edge coordinate exactly are
+/// watertight under the rasterizer's fill rule: there is no gap to show
+/// through, at any zoom, from any camera position. Tiles still get their own
+/// four vertices — they must, because they have different UVs — but the
+/// coordinates along a shared edge are bit-identical, which is the part that
+/// matters.
+///
+/// UVs come from the sheet grid with a half-texel inset (see
+/// [`floptle_core::Material::cell_uv_inset`]), so a cell can never sample its
+/// neighbour under linear filtering.
+pub fn tilemap(
+    cols: u32,
+    rows: u32,
+    tile: f32,
+    sheet_cols: u32,
+    sheet_rows: u32,
+    texel: [f32; 2],
+    data: &[u32],
+) -> MeshData {
+    let (sc, sr) = (sheet_cols.max(1), sheet_rows.max(1));
+    let cells = sc * sr;
+    // Centre the grid on the node's origin, so the transform places its middle.
+    let (w, h) = (cols as f32 * tile * 0.5, rows as f32 * tile * 0.5);
+    let (du, dv) = (1.0 / sc as f32, 1.0 / sr as f32);
+    // Half a texel, in the sheet's UV space. Zero when the caller doesn't know
+    // the texture size — an inset guessed from nothing would shrink the art.
+    let (iu, iv) = (texel[0] * 0.5, texel[1] * 0.5);
+
+    let mut vertices = Vec::with_capacity(data.len() * 4);
+    let mut indices = Vec::with_capacity(data.len() * 6);
+    for row in 0..rows {
+        for col in 0..cols {
+            let Some(&cell) = data.get((row * cols + col) as usize) else { continue };
+            if cell >= cells {
+                continue; // EMPTY_TILE, or past the end of the sheet
+            }
+            // The two expressions below are the ONLY place a tile edge is
+            // computed, which is what makes neighbouring edges identical.
+            let (x0, x1) = (col as f32 * tile - w, (col + 1) as f32 * tile - w);
+            // Row 0 is the TOP of the map, so y descends as row grows.
+            let (y1, y0) = (h - row as f32 * tile, h - (row + 1) as f32 * tile);
+
+            let (cx, cy) = (cell % sc, cell / sc);
+            let (u0, u1) = (cx as f32 * du + iu, (cx + 1) as f32 * du - iu);
+            let (v0, v1) = (cy as f32 * dv + iv, (cy + 1) as f32 * dv - iv);
+
+            let base = vertices.len() as u32;
+            for (px, py, u, v) in
+                [(x0, y0, u0, v1), (x1, y0, u1, v1), (x1, y1, u1, v0), (x0, y1, u0, v0)]
+            {
+                vertices.push(Vertex { pos: [px, py, 0.0], normal: [0.0, 0.0, 1.0], uv: [u, v] });
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+    MeshData { vertices, indices, colors: None }
+}
+
 // Small f32 vec helpers for the flat-shaded primitives below.
 fn vsub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
@@ -526,5 +602,99 @@ mod tests {
                 assert!(horiz >= -1e-4, "side normal points inward: pos {:?} n {:?}", v.pos, v.normal);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tilemap_tests {
+    use super::*;
+
+    /// **The whole point of the primitive.** Two neighbouring tiles must give
+    /// the same coordinate for the edge they share — not "close", the same
+    /// bits. A difference in the last bit is exactly what opens the hairline
+    /// this replaces.
+    #[test]
+    fn neighbouring_tiles_share_an_exact_edge() {
+        // A tile size that is NOT a round binary number, which is the case the
+        // real project hit (32 px at 240p works out to 1.4364 world units).
+        let tile = 1.436_4_f32;
+        let m = tilemap(4, 3, tile, 2, 2, [0.0, 0.0], &[0; 12]);
+        assert_eq!(m.indices.len(), 12 * 6);
+
+        // Tile (col, row) occupies vertices [i*4, i*4+4): bottom-left,
+        // bottom-right, top-right, top-left.
+        let xs = |col: u32, row: u32| {
+            let base = ((row * 4 + col) * 4) as usize;
+            (m.vertices[base].pos[0], m.vertices[base + 1].pos[0])
+        };
+        for row in 0..3 {
+            for col in 0..3 {
+                let (_, right) = xs(col, row);
+                let (left, _) = xs(col + 1, row);
+                assert_eq!(
+                    right.to_bits(),
+                    left.to_bits(),
+                    "tile ({col},{row})'s right edge and ({},{row})'s left edge differ",
+                    col + 1
+                );
+            }
+        }
+
+        // …and the same vertically, where the rows meet.
+        let ys = |col: u32, row: u32| {
+            let base = ((row * 4 + col) * 4) as usize;
+            (m.vertices[base].pos[1], m.vertices[base + 3].pos[1])
+        };
+        for row in 0..2 {
+            for col in 0..4 {
+                let (bottom, _) = ys(col, row);
+                let (_, top) = ys(col, row + 1);
+                assert_eq!(bottom.to_bits(), top.to_bits(), "rows {row}/{} disagree", row + 1);
+            }
+        }
+    }
+
+    /// An empty square emits nothing, so a map can have holes without giving up
+    /// cell 0 of its sheet.
+    #[test]
+    fn an_empty_cell_draws_no_triangles() {
+        let data = [0, floptle_core::EMPTY_TILE, 3, 0];
+        let m = tilemap(2, 2, 1.0, 2, 2, [0.0, 0.0], &data);
+        assert_eq!(m.vertices.len(), 3 * 4, "one square is a hole");
+        assert_eq!(m.indices.len(), 3 * 6);
+
+        // A cell index past the end of the sheet is a hole too, rather than
+        // wrapping round to a tile the author never chose.
+        let m = tilemap(1, 1, 1.0, 2, 2, [0.0, 0.0], &[99]);
+        assert!(m.vertices.is_empty());
+    }
+
+    /// The grid is centred on the node's origin, and row 0 is the TOP.
+    #[test]
+    fn the_grid_is_centred_and_row_zero_is_the_top() {
+        let m = tilemap(2, 2, 2.0, 1, 1, [0.0, 0.0], &[0; 4]);
+        let xs: Vec<f32> = m.vertices.iter().map(|v| v.pos[0]).collect();
+        let ys: Vec<f32> = m.vertices.iter().map(|v| v.pos[1]).collect();
+        assert_eq!(xs.iter().cloned().fold(f32::MAX, f32::min), -2.0);
+        assert_eq!(xs.iter().cloned().fold(f32::MIN, f32::max), 2.0);
+        assert_eq!(ys.iter().cloned().fold(f32::MAX, f32::min), -2.0);
+        assert_eq!(ys.iter().cloned().fold(f32::MIN, f32::max), 2.0);
+        // The first tile written is row 0, and it sits in the upper half.
+        assert!(m.vertices[0].pos[1] >= 0.0, "row 0 must be the top of the map");
+    }
+
+    /// The UV window comes from the sheet, and the inset pulls it in.
+    #[test]
+    fn cells_index_the_sheet_and_the_inset_pulls_them_in() {
+        // Cell 3 of a 2x2 sheet is the bottom-right quarter.
+        let m = tilemap(1, 1, 1.0, 2, 2, [0.0, 0.0], &[3]);
+        let us: Vec<f32> = m.vertices.iter().map(|v| v.uv[0]).collect();
+        assert_eq!(us.iter().cloned().fold(f32::MAX, f32::min), 0.5);
+
+        // With a known texel size the window starts inside the cell instead.
+        let m = tilemap(1, 1, 1.0, 2, 2, [1.0 / 32.0, 1.0 / 32.0], &[3]);
+        let u_min = m.vertices.iter().map(|v| v.uv[0]).fold(f32::MAX, f32::min);
+        assert!(u_min > 0.5, "the inset must pull the window off the cell boundary");
+        assert!(u_min < 0.52, "…but only by half a texel");
     }
 }

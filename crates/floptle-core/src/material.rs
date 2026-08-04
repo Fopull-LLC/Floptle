@@ -148,6 +148,32 @@ impl Material {
         [cx as f32 * du, cy as f32 * dv, (cx + 1) as f32 * du, (cy + 1) as f32 * dv]
     }
 
+    /// [`cell_uv`](Self::cell_uv), pulled in by half a texel on every side.
+    ///
+    /// A cell's UV window shares an exact edge with its neighbour, and a linear
+    /// sampler asked for a texel *on* that edge blends across it — so a sprite
+    /// picks up a rim of the frame beside it, at some scales and camera
+    /// positions and not others. Half a texel in is the standard fix: it is
+    /// inside the cell's outermost texel, so nearest sampling is unchanged and
+    /// linear sampling can no longer reach over the line.
+    ///
+    /// `texel` is `[1/width, 1/height]` of the whole sheet texture. All-zero
+    /// (the caller doesn't know the size yet) means no inset rather than a
+    /// guess — an inset invented from nothing would quietly crop the art.
+    pub fn cell_uv_inset(&self, texel: [f32; 2]) -> [f32; 4] {
+        let [u0, v0, u1, v1] = self.cell_uv();
+        // A plain texture has no neighbouring cell to bleed from, and pulling
+        // its window in would crop every textured surface in the engine by a
+        // texel. The inset is a sheet's problem only.
+        if !self.is_sheet() {
+            return [u0, v0, u1, v1];
+        }
+        let (iu, iv) = (texel[0] * 0.5, texel[1] * 0.5);
+        // Never let the inset cross itself on a sheet cell smaller than a texel.
+        let (iu, iv) = (iu.min((u1 - u0) * 0.25), iv.min((v1 - v0) * 0.25));
+        [u0 + iu, v0 + iv, u1 - iu, v1 - iv]
+    }
+
     /// The tiling the RENDERER should pack for this material: a sheet becomes a
     /// UV window onto its own cell, so sprite indexing costs no new instance
     /// lanes, no shader variant, and reaches a custom `.flsl`'s `baseTexture()`
@@ -157,10 +183,16 @@ impl Material {
     /// single cell would drag in its neighbours, which is never what the artist
     /// meant (the same rule UI images follow in `ImageSpec::tiled_uv`).
     pub fn effective_tiling(&self) -> Option<Tiling> {
+        self.effective_tiling_inset([0.0, 0.0])
+    }
+
+    /// [`effective_tiling`](Self::effective_tiling) with the half-texel inset
+    /// applied, for callers that know the sheet texture's size.
+    pub fn effective_tiling_inset(&self, texel: [f32; 2]) -> Option<Tiling> {
         if !self.is_sheet() {
             return self.tiling;
         }
-        let [u0, v0, u1, v1] = self.cell_uv();
+        let [u0, v0, u1, v1] = self.cell_uv_inset(texel);
         // `base_texel` in raster.wgsl scales UVs about the 0.5 CENTER before
         // adding the offset, so the window's offset is its own centre minus that
         // one — not its corner.
@@ -195,6 +227,26 @@ mod tests {
     /// The packed tiling must reproduce the cell rect through the renderer's
     /// centre-scaled transform: `uv' = (uv - 0.5) * count + 0.5 + offset` has to
     /// carry the quad's corners onto the cell's corners.
+    /// The inset must stay INSIDE the cell and must not survive on a
+    /// single-cell texture, where there is no neighbour to bleed from.
+    #[test]
+    fn a_cell_pulls_in_by_half_a_texel_but_a_whole_texture_does_not() {
+        // A 4x2 sheet on a 64x32 texture: one texel is 1/64 by 1/32.
+        let texel = [1.0 / 64.0, 1.0 / 32.0];
+        let [u0, v0, u1, v1] = sheet(4, 2, 0).cell_uv_inset(texel);
+        assert!(u0 > 0.0 && v0 > 0.0, "the window must start inside the cell");
+        assert!(u1 < 0.25 && v1 < 0.5, "and end inside it");
+        assert!((u0 - 0.5 / 64.0).abs() < 1e-6, "half a texel, not a whole one");
+        assert!((u1 - (0.25 - 0.5 / 64.0)).abs() < 1e-6);
+
+        // Not a sheet: the whole texture, untouched. Insetting here would crop
+        // every plain textured surface in the engine.
+        assert_eq!(Material::default().cell_uv_inset(texel), [0.0, 0.0, 1.0, 1.0]);
+
+        // An unknown texture size insets by nothing rather than guessing.
+        assert_eq!(sheet(4, 2, 0).cell_uv_inset([0.0, 0.0]), sheet(4, 2, 0).cell_uv());
+    }
+
     #[test]
     fn effective_tiling_maps_the_quad_onto_its_cell() {
         for (cols, rows, cell) in [(4, 4, 0), (4, 4, 6), (21, 1, 20), (3, 5, 14), (2, 2, 3)] {

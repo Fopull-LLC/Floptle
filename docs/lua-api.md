@@ -30,8 +30,9 @@ each group, and meant to be searched.
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 14
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 7
+- [2D — tilemaps & sprite batches](#2d--tilemaps--sprite-batches) — 8
 - [vessels — assembly.*](#vessels--assembly) — 14
-- [the camera & the screen](#the-camera--the-screen) — 6
+- [the camera & the screen](#the-camera--the-screen) — 7
 - [physics controls — pause & step](#physics-controls--pause--step) — 4
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
@@ -1764,6 +1765,40 @@ scatter.removed(sourceId) — the sorted ids this source has lost. A game that w
 
 scatter.restore(sourceId [, instanceId]) — put one prop back, or all of them when the instance is omitted (returns how many). This is what "the forest regrows after fifteen minutes" is, without your game having to remember what it cut.
 
+## 2D — tilemaps & sprite batches
+
+### `batch:draw`
+
+b:draw(x, y [, z] [, scale] [, rot] [, cell] [, r, g, b, a]) — draw one sprite THIS FRAME, positioned in the batch node's local space. Immediate mode, exactly like draw.* : what you draw this frame is what shows, and next frame starts empty — there is no pool to grow and no clear() to forget. The tint is the thing a shared Material could never give one sprite: flash one enemy red without blinking it off.
+
+### `node:setTilemap`
+
+node:setTilemap{cols=13, rows=7, tile=1.5 [, data={…}]} — make this node a TILEMAP: a grid of spritesheet cells drawn as one mesh, one draw call. The sheet is the node's own Material (texture + sheetCols/sheetRows). Neighbouring tiles share an exact edge, so the hairline gaps a grid of separate quads opens up as the camera moves cannot happen. `data` is row-major from the top-left; leave it out for an empty grid you fill with tm:set.
+
+### `node:sprites`
+
+node:sprites() — a handle to this node's SpriteBatch: b:draw(...) queues one sprite for this frame. N sprites from one node, each with its own position, rotation, scale, cell AND tint — no scene node per sprite and no pool to grow.
+
+### `node:tilemap`
+
+node:tilemap() — a handle to this node's tilemap grid: tm:set / tm:get / tm:fill / tm:size. Re-dress a room per floor without rebuilding the node.
+
+### `tm:fill`
+
+tm:fill(cell) — set every square, including the empty ones. The fast way to reset a room before re-dressing it.
+
+### `tm:get`
+
+tm:get(x, y) → cell, or nil outside the grid and on an empty square.
+
+### `tm:set`
+
+tm:set(x, y, cell) — set one square, 0-based from the TOP-LEFT. Outside the grid is a no-op rather than a wrap. Pass EMPTY_TILE (or use tm:fill) to clear.
+
+### `tm:size`
+
+tm:size() → cols, rows.
+
 ## vessels — assembly.*
 
 ### `assembly`
@@ -1831,6 +1866,10 @@ The game camera's projection: viewport size and rect, world↔screen conversion,
 ### `camera.exists`
 
 camera.exists() — true once a live game camera is being fed. Guard the other camera.* calls with it during the first frames, or while a scene without a camera is up.
+
+### `camera.pixelsPerUnit`
+
+camera.pixelsPerUnit([distance]) → px — how many screen pixels one world unit covers at that distance (default: the camera's distance from the origin). The number every 2D game used to derive by hand from the FOV and the camera's Z, and then snap the camera to a multiple of for crisp pixels.
 
 ### `camera.screenRect`
 

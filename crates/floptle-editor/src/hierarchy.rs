@@ -142,6 +142,31 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             pick = Some(new_plane());
             ui.close();
         }
+        if ui
+            .button("▦ Tilemap")
+            .on_hover_text(
+                "a grid of spritesheet cells as ONE mesh — the 2D level primitive. \
+                 Give it a Material with a sheet, then fill the grid from a script \
+                 (node:setTilemap{…} / tm:set). Neighbouring tiles share an exact \
+                 edge, so no seams open up as the camera moves",
+            )
+            .clicked()
+        {
+            pick = Some(MatterDoc::Tilemap { cols: 16, rows: 16, tile: 1.0, data: Vec::new() });
+            ui.close();
+        }
+        if ui
+            .button("▪ Sprite Batch")
+            .on_hover_text(
+                "N sprites from one node, each with its own cell AND tint, drawn \
+                 per frame from a script (node:sprites() / b:draw(…)) — no scene \
+                 node per bullet and no pool to grow",
+            )
+            .clicked()
+        {
+            pick = Some(MatterDoc::SpriteBatch { size: 1.0 });
+            ui.close();
+        }
         if ui.button("◑ Blob").on_hover_text("an SDF metaball — nearby blobs melt together (organic/surreal shapes)").clicked() {
             pick = Some(MatterDoc::Blob { scale: 1.0 });
             ui.close();

@@ -11,7 +11,7 @@ use floptle_core::math::Vec2;
 use floptle_core::math::Vec3;
 use floptle_core::math::Vec4;
 use floptle_core::transform::Transform;
-use crate::gizmo::{SCALE_SENS, TRACKBALL_SENS, Tool, local_axis, ray_aabb, ray_sphere};
+use crate::gizmo::{SCALE_SENS, TRACKBALL_SENS, Tool, local_axis, ray_aabb, ray_box, ray_sphere};
 use crate::viz::{cursor_ground, project};
 use crate::{Editor, FocusAnim, scene_hit, snap_dvec3};
 
@@ -246,6 +246,29 @@ impl Editor {
                         let rd_l = (m_inv * rd.extend(0.0)).truncate();
                         floptle_map::raycast(mesh, ro_l, rd_l, f32::MAX).map(|h| h.t)
                     })
+                }
+                // A flat grid in the node's XY plane: pick it as a thin box, so
+                // clicking the floor of a 2D room selects the map rather than
+                // requiring the Hierarchy.
+                Matter::Tilemap { cols, rows, tile, .. } => {
+                    let m_inv = t.render_matrix(cam.world_position).inverse();
+                    if !m_inv.is_finite() {
+                        continue;
+                    }
+                    let ro_l = (m_inv * ro.extend(1.0)).truncate();
+                    let rd_l = (m_inv * rd.extend(0.0)).truncate();
+                    let half = Vec3::new(
+                        (*cols as f32 * tile * 0.5).max(0.01),
+                        (*rows as f32 * tile * 0.5).max(0.01),
+                        tile * 0.1,
+                    );
+                    ray_box(ro_l, rd_l, half)
+                }
+                // Its sprites are this frame's, and picking one would select the
+                // batch anyway — so pick the batch's own origin.
+                Matter::SpriteBatch { size } => {
+                    let center = (t.translation - cam.world_position).as_vec3();
+                    ray_sphere(ro, rd, center, (size * t.scale.max_element()).max(0.1))
                 }
                 // no mesh — select via the hierarchy.
                 Matter::Empty

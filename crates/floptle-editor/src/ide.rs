@@ -2965,6 +2965,7 @@ const API_CATEGORIES: &[&str] = &[
     "terrain — runtime sculpt & queries",
     "water — depth, buoyancy & ice",
     "scatter — instanced props",
+    "2D — tilemaps & sprite batches",
     "vessels — assembly.*",
     "the camera & the screen",
     "physics controls — pause & step",
@@ -3036,6 +3037,13 @@ fn api_category(label: &str) -> &'static str {
         "particles — effects from script"
     } else if starts(label, "sound") || starts(label, "source") || starts(label, "track") {
         "audio — sounds & the mixer"
+    } else if starts(label, "tm")
+        || starts(label, "batch")
+        || label == "node:setTilemap"
+        || label == "node:tilemap"
+        || label == "node:sprites"
+    {
+        "2D — tilemaps & sprite batches"
     } else if starts(label, "hit") {
         "scene lookups & raycast"
     } else if starts(label, "body") {
@@ -3653,6 +3661,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "camera.worldToScreen", insert: "camera.worldToScreen(", doc: "camera.worldToScreen(x,y,z) → sx, sy, depth, onscreen — project a world point into the game view (pixels in input.mouse()'s space). onscreen=false behind the camera / off-frustum. Sample a drawn line into points, project each, keep the nearest to the cursor = click-on-line picking (the map's maneuver nodes)." },
     ApiEntry { label: "camera.screenToRay", insert: "camera.screenToRay(", doc: "camera.screenToRay(sx,sy) → ox,oy,oz, dx,dy,dz — a world ray from a screen pixel (inverse of worldToScreen)." },
     ApiEntry { label: "camera.screenSize", insert: "camera.screenSize()", doc: "camera.screenSize() → w, h — the game viewport size in pixels. camera.exists() is true once a live game camera is being fed." },
+    ApiEntry { label: "camera.pixelsPerUnit", insert: "camera.pixelsPerUnit()", doc: "camera.pixelsPerUnit([distance]) → px — how many screen pixels one world unit covers at that distance (default: the camera's distance from the origin). The number every 2D game used to derive by hand from the FOV and the camera's Z, and then snap the camera to a multiple of for crisp pixels." },
     ApiEntry { label: "input.scroll", insert: "input.scroll(", doc: "input.scroll() — mouse wheel delta this frame." },
     ApiEntry { label: "input.lockMouse", insert: "input.lockMouse(", doc: "input.lockMouse() — pin the cursor to the window center and hide it (FPS / free-look mouselook without holding a button). Read motion with input.mouse_delta(). Released on Stop." },
     ApiEntry { label: "input.unlockMouse", insert: "input.unlockMouse(", doc: "input.unlockMouse() — release the cursor back to the desktop and show it again." },
@@ -3839,6 +3848,14 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node:setTerrain", insert: ":setTerrain(", doc: "node:setTerrain(id) — make the node a Terrain volume with that id; fill it with terrain.generatePlanet(id, opts)." },
     ApiEntry { label: "node:setTerrainGen", insert: ":setTerrainGen(", doc: "node:setTerrainGen(opts) — attach an ON-DEMAND generation spec (the same opts table terrain.generatePlanet takes): the body's field generates in the background when something first approaches, so no field file is needed at all — a rolled galaxy is playable instantly and unvisited worlds cost one scene node. Player edits saved under terrain.saveDir take priority over regeneration. nil clears." },
     ApiEntry { label: "node:setPrimitive", insert: ":setPrimitive(", doc: "node:setPrimitive(\"Sphere\" [, {r,g,b}]) — make the node a primitive (Cube/Sphere/Capsule/Plane)." },
+    ApiEntry { label: "node:setTilemap", insert: ":setTilemap{", doc: "node:setTilemap{cols=13, rows=7, tile=1.5 [, data={…}]} — make this node a TILEMAP: a grid of spritesheet cells drawn as one mesh, one draw call. The sheet is the node's own Material (texture + sheetCols/sheetRows). Neighbouring tiles share an exact edge, so the hairline gaps a grid of separate quads opens up as the camera moves cannot happen. `data` is row-major from the top-left; leave it out for an empty grid you fill with tm:set." },
+    ApiEntry { label: "node:tilemap", insert: ":tilemap()", doc: "node:tilemap() — a handle to this node's tilemap grid: tm:set / tm:get / tm:fill / tm:size. Re-dress a room per floor without rebuilding the node." },
+    ApiEntry { label: "node:sprites", insert: ":sprites()", doc: "node:sprites() — a handle to this node's SpriteBatch: b:draw(...) queues one sprite for this frame. N sprites from one node, each with its own position, rotation, scale, cell AND tint — no scene node per sprite and no pool to grow." },
+    ApiEntry { label: "tm:set", insert: ":set(", doc: "tm:set(x, y, cell) — set one square, 0-based from the TOP-LEFT. Outside the grid is a no-op rather than a wrap. Pass EMPTY_TILE (or use tm:fill) to clear." },
+    ApiEntry { label: "tm:get", insert: ":get(", doc: "tm:get(x, y) → cell, or nil outside the grid and on an empty square." },
+    ApiEntry { label: "tm:fill", insert: ":fill(", doc: "tm:fill(cell) — set every square, including the empty ones. The fast way to reset a room before re-dressing it." },
+    ApiEntry { label: "tm:size", insert: ":size()", doc: "tm:size() → cols, rows." },
+    ApiEntry { label: "batch:draw", insert: ":draw(", doc: "b:draw(x, y [, z] [, scale] [, rot] [, cell] [, r, g, b, a]) — draw one sprite THIS FRAME, positioned in the batch node's local space. Immediate mode, exactly like draw.* : what you draw this frame is what shows, and next frame starts empty — there is no pool to grow and no clear() to forget. The tint is the thing a shared Material could never give one sprite: flash one enemy red without blinking it off." },
     ApiEntry { label: "destroy", insert: "destroy(", doc: "destroy(node) — remove a node AND its whole subtree (physics body included). Queued: applied after the pass, so the handle stays readable through the current call. Method form: node:destroy(). On a client, replicated nodes refuse (server authority — net.despawn)." },
     ApiEntry { label: "node:destroy", insert: ":destroy()", doc: "node:destroy() — remove this node and its children (same as destroy(node)). The classic pickup: onTriggerEnter → award score → node:destroy()." },
     ApiEntry { label: "node:particles", insert: "node:particles()", doc: "node:particles() — the particle handle for this node's Particle System component. Setters: :play/:stop/:restart/:setIntensity/:setBeamEnd. Getters: :isPlaying/:alive/:asset. e.g. on a hit, node:particles():restart() to re-fire a burst." },

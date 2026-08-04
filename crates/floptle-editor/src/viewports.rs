@@ -421,6 +421,7 @@ impl Editor {
                 vp_y: tab_org[1],
                 vp_w: tab_px[0],
                 vp_h: tab_px[1],
+                fov_y: cam.projection.fov_y(),
                 valid: true,
             });
         }

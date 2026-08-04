@@ -205,7 +205,17 @@ impl MaterialParams {
     /// is a property of the GEOMETRY, so the caller fills them in once it knows
     /// which mesh is being drawn.
     pub fn from_material(m: &floptle_core::Material) -> Self {
-        let (tile_mode, tile, tile_rotation) = match m.effective_tiling() {
+        Self::from_material_inset(m, [0.0, 0.0])
+    }
+
+    /// [`from_material`](Self::from_material) with the sheet cell's UV window
+    /// pulled in by half a texel, for callers that know the texture's size.
+    ///
+    /// `texel` is `[1/width, 1/height]`. Without it a sheet cell shares an exact
+    /// edge with its neighbour and a linear sampler blends across it — a rim of
+    /// the next frame around a sprite, at some scales and not others.
+    pub fn from_material_inset(m: &floptle_core::Material, texel: [f32; 2]) -> Self {
+        let (tile_mode, tile, tile_rotation) = match m.effective_tiling_inset(texel) {
             None => (0, [0.0; 4], 0.0),
             Some(floptle_core::Tiling::Uv { count, offset, rotation }) => {
                 (1, [count[0], count[1], offset[0], offset[1]], rotation)

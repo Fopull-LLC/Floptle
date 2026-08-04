@@ -32,6 +32,19 @@ impl Projection {
             }
         }
     }
+
+    /// The vertical field of view, radians.
+    ///
+    /// An orthographic camera has none — its view is the same height at every
+    /// distance — so it reports the angle that covers its height one unit away.
+    /// That keeps `camera.pixelsPerUnit` answering something true at the plane
+    /// a flat game is actually built on, rather than zero.
+    pub fn fov_y(&self) -> f32 {
+        match *self {
+            Projection::Perspective { fov_y, .. } => fov_y,
+            Projection::Orthographic { height, .. } => 2.0 * (height * 0.5).atan(),
+        }
+    }
 }
 
 /// The active camera. `world_position` is full-precision; the render path keeps it

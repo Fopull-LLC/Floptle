@@ -1520,6 +1520,48 @@ impl EditorTabViewer<'_> {
                                     .add(egui::DragValue::new(scale).speed(0.02).prefix("blob size ").range(0.05..=50.0))
                                     .changed();
                             }
+                            // 2D (`floptle/0058`). The grid is edited from
+                            // Lua — a room is re-dressed per floor — so the
+                            // Inspector states the shape and the one thing that
+                            // is easy to get wrong: the sheet is the MATERIAL's.
+                            Matter::Tilemap { cols, rows, tile, data } => {
+                                ui.horizontal(|ui| {
+                                    ui.label("grid");
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::DragValue::new(cols).speed(1.0).prefix("cols ").range(0..=1024))
+                                        .changed();
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::DragValue::new(rows).speed(1.0).prefix("rows ").range(0..=1024))
+                                        .changed();
+                                });
+                                cmd.inspector_changed |= ui
+                                    .add(egui::DragValue::new(tile).speed(0.01).prefix("tile ").range(0.001..=64.0))
+                                    .on_hover_text("world size of one tile's edge")
+                                    .changed();
+                                let want = (*cols as usize) * (*rows as usize);
+                                ui.small(format!("{} of {want} cells filled", data.len().min(want)));
+                                if data.len() != want && ui.button("resize to fit").clicked() {
+                                    data.resize(want, floptle_core::EMPTY_TILE);
+                                    cmd.inspector_changed = true;
+                                }
+                                ui.small(
+                                    "the sheet comes from this node's Material (texture + \
+                                     sheet cols/rows). Fill the grid from a script: \
+                                     node:setTilemap{...} then tm:set(x, y, cell).",
+                                );
+                            }
+                            Matter::SpriteBatch { size } => {
+                                cmd.inspector_changed |= ui
+                                    .add(egui::DragValue::new(size).speed(0.01).prefix("sprite size ").range(0.001..=64.0))
+                                    .on_hover_text("world edge of one sprite, before its own scale")
+                                    .changed();
+                                ui.small(
+                                    "sprites are written per frame from a script — \
+                                     node:sprites() then b:clear() and b:draw(...). Each one \
+                                     carries its own cell AND tint, which a shared Material \
+                                     cannot give it.",
+                                );
+                            }
                             Matter::FieldShape { radius } => {
                                 cmd.inspector_changed |= ui
                                     .add(egui::DragValue::new(radius).speed(0.02).prefix("bounds radius ").range(0.05..=200.0))

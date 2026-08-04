@@ -950,8 +950,160 @@ pub(crate) fn apply_rich_sets(
                     },
                 );
             }
+            // 2D (`floptle/0058`). The sheet is the node's Material, so a
+            // tilemap only ever carries its grid.
+            RichSet::MatterTilemap { cols, rows, tile, mut data } => {
+                let want = (cols as usize) * (rows as usize);
+                // A short `data` fills the rest with holes rather than
+                // repeating or refusing: a caller who sized the grid and then
+                // filled part of it meant the rest to be empty.
+                data.resize(want, floptle_core::EMPTY_TILE);
+                data.truncate(want);
+                world.insert(e, Matter::Tilemap { cols, rows, tile, data });
+            }
+            RichSet::TileCells(writes) => {
+                let Some(Matter::Tilemap { cols, rows, data, .. }) =
+                    world.get_mut::<Matter>(e)
+                else {
+                    continue;
+                };
+                let (cols, rows) = (*cols, *rows);
+                for (x, y, cell) in writes {
+                    // Out of bounds is a no-op, not a panic and not a wrap: a
+                    // loop that runs one past the edge is a bug in the caller's
+                    // bounds, and wrapping would silently paint the far side.
+                    if x < cols && y < rows {
+                        let i = (y * cols + x) as usize;
+                        if let Some(slot) = data.get_mut(i) {
+                            *slot = cell;
+                        }
+                    }
+                }
+            }
         }
     }
+}
+
+/// The handle `node:tilemap()` returns: read and write single squares.
+///
+/// Deliberately tiny. A game re-dresses a room per floor, so `set` and `fill`
+/// are what it needs; anything richer belongs in Lua on top of these.
+fn new_tilemap_handle(
+    lua: &Lua,
+    e: u32,
+    q: crate::RichSetQueue,
+    scene: std::rc::Rc<std::cell::RefCell<crate::SceneMirror>>,
+) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.raw_set("__id", e)?;
+
+    // tm:set(x, y, cell) — 0-based from the TOP-LEFT, matching the data order.
+    let qs = q.clone();
+    t.raw_set(
+        "set",
+        lua.create_function(move |_, (this, x, y, cell): (Table, u32, u32, u32)| {
+            let e: u32 = this.raw_get("__id")?;
+            qs.borrow_mut().push((e, crate::RichSet::TileCells(vec![(x, y, cell)])));
+            Ok(())
+        })?,
+    )?;
+
+    // tm:fill(cell) — every square, including the empty ones.
+    let qf = q.clone();
+    let sf = scene.clone();
+    t.raw_set(
+        "fill",
+        lua.create_function(move |_, (this, cell): (Table, u32)| {
+            let e: u32 = this.raw_get("__id")?;
+            let (cols, rows) = sf.borrow().tilemaps.get(&e).map(|(c, r, _)| (*c, *r)).unwrap_or((0, 0));
+            let mut writes = Vec::with_capacity((cols * rows) as usize);
+            for y in 0..rows {
+                for x in 0..cols {
+                    writes.push((x, y, cell));
+                }
+            }
+            qf.borrow_mut().push((e, crate::RichSet::TileCells(writes)));
+            Ok(())
+        })?,
+    )?;
+
+    // tm:size() -> cols, rows
+    let ss = scene.clone();
+    t.raw_set(
+        "size",
+        lua.create_function(move |_, this: Table| {
+            let e: u32 = this.raw_get("__id")?;
+            let (c, r) = ss.borrow().tilemaps.get(&e).map(|(c, r, _)| (*c, *r)).unwrap_or((0, 0));
+            Ok((c, r))
+        })?,
+    )?;
+
+    // tm:get(x, y) -> cell, or nil outside the grid / on an empty square.
+    t.raw_set(
+        "get",
+        lua.create_function(move |_, (this, x, y): (Table, u32, u32)| {
+            let e: u32 = this.raw_get("__id")?;
+            let s = scene.borrow();
+            // Outside the grid reads as absent rather than wrapping round to
+            // the far side: a loop that runs one past the edge is a bug in the
+            // caller's bounds, and wrapping would hide it.
+            let cell = s.tilemaps.get(&e).and_then(|(cols, rows, data)| {
+                (x < *cols && y < *rows).then(|| data.get((y * cols + x) as usize).copied())?
+            });
+            match cell {
+                Some(c) if c != floptle_core::EMPTY_TILE => Ok(Value::Integer(c as i64)),
+                _ => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+    Ok(t)
+}
+
+/// The handle `node:sprites()` returns.
+///
+/// One method, on purpose. `b:draw(...)` is IMMEDIATE MODE — the same contract
+/// as `draw.*` and `gizmo.*`: what you draw this frame is what shows, and next
+/// frame starts empty. There is nothing to allocate, nothing to pool, and no
+/// `clear()` to forget on the frame a wave dies.
+fn new_sprite_batch_handle(
+    lua: &Lua,
+    e: u32,
+    draws: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<u32, Vec<floptle_core::Sprite>>>>,
+) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.raw_set("__id", e)?;
+    #[allow(clippy::type_complexity)]
+    let f = lua.create_function(
+        move |_,
+              (this, x, y, z, scale, rot, cell, r, g, b, a): (
+            Table,
+            f32,
+            f32,
+            Option<f32>,
+            Option<f32>,
+            Option<f32>,
+            Option<u32>,
+            Option<f32>,
+            Option<f32>,
+            Option<f32>,
+            Option<f32>,
+        )| {
+            let e: u32 = this.raw_get("__id")?;
+            let sprite = floptle_core::Sprite {
+                pos: [x, y, z.unwrap_or(0.0)],
+                rot: rot.unwrap_or(0.0),
+                scale: scale.unwrap_or(1.0),
+                cell: cell.unwrap_or(0),
+                // The tint defaults to white, so the common call is short and
+                // a game only pays for colour where it wants colour.
+                tint: [r.unwrap_or(1.0), g.unwrap_or(1.0), b.unwrap_or(1.0), a.unwrap_or(1.0)],
+            };
+            draws.borrow_mut().entry(e).or_default().push(sprite);
+            Ok(())
+        },
+    )?;
+    t.raw_set("draw", f)?;
+    Ok(t)
 }
 
 /// Apply a STRING-valued component field — the string counterpart of
@@ -2098,6 +2250,61 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         }
         {
             let q = q.clone();
+        // ---- 2D: node:setTilemap{...} and node:tilemap() (`floptle/0058`) ----
+        {
+            let q = q.clone();
+            methods.set(
+                "setTilemap",
+                lua.create_function(move |_, (this, t): (Table, Table)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let cols: u32 = t.get::<Option<u32>>("cols")?.unwrap_or(0);
+                    let rows: u32 = t.get::<Option<u32>>("rows")?.unwrap_or(0);
+                    let tile: f32 = t.get::<Option<f32>>("tile")?.unwrap_or(1.0);
+                    if cols == 0 || rows == 0 {
+                        return Err(mlua::Error::runtime(
+                            "setTilemap{ cols =, rows =, tile = }: cols and rows must be > 0",
+                        ));
+                    }
+                    // `data` is optional: a grid with no cells yet is a blank
+                    // room you then paint with tm:set, which is how a game that
+                    // re-dresses a floor actually works.
+                    let data: Vec<u32> = match t.get::<Option<Table>>("data")? {
+                        Some(list) => {
+                            let mut v = Vec::with_capacity(list.raw_len());
+                            for i in 1..=list.raw_len() {
+                                // Lua is 1-based; a nil hole is an empty tile.
+                                v.push(list.raw_get::<Option<u32>>(i)?.unwrap_or(floptle_core::EMPTY_TILE));
+                            }
+                            v
+                        }
+                        None => Vec::new(),
+                    };
+                    q.borrow_mut().push((e, crate::RichSet::MatterTilemap { cols, rows, tile, data }));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let q = q.clone();
+            let scene = shared.scene.clone();
+            methods.set(
+                "tilemap",
+                lua.create_function(move |lua, this: Table| {
+                    let e: u32 = this.raw_get("__id")?;
+                    new_tilemap_handle(lua, e, q.clone(), scene.clone())
+                })?,
+            )?;
+        }
+        {
+            let draws = shared.sprite_draws.clone();
+            methods.set(
+                "sprites",
+                lua.create_function(move |lua, this: Table| {
+                    let e: u32 = this.raw_get("__id")?;
+                    new_sprite_batch_handle(lua, e, draws.clone())
+                })?,
+            )?;
+        }
             methods.set(
                 "setPrimitive",
                 lua.create_function(move |_, (this, shape, color): (Table, String, Value)| {

@@ -694,6 +694,25 @@ pub enum MatterDoc {
         #[serde(default = "one_f32")]
         radius: f32,
     },
+    /// A grid of spritesheet cells drawn as one mesh (`floptle/0058`). The sheet
+    /// is the node's Material; this is only the grid.
+    Tilemap {
+        #[serde(default)]
+        cols: u32,
+        #[serde(default)]
+        rows: u32,
+        #[serde(default = "one_f32")]
+        tile: f32,
+        /// Row-major cell indices from the top-left, `cols * rows` long.
+        #[serde(default)]
+        data: Vec<u32>,
+    },
+    /// N sprites from one node, each with its own transform, cell and tint. The
+    /// sprites themselves are runtime-only and deliberately not saved.
+    SpriteBatch {
+        #[serde(default = "one_f32")]
+        size: f32,
+    },
     /// The scene's environment background (solid color or equirect texture + tint).
     Skybox {
         #[serde(default = "sky_grey")]
@@ -880,6 +899,13 @@ impl From<&Matter> for MatterDoc {
                 visibility: *visibility,
             },
             Matter::FieldShape { radius } => MatterDoc::FieldShape { radius: *radius },
+            Matter::Tilemap { cols, rows, tile, data } => MatterDoc::Tilemap {
+                cols: *cols,
+                rows: *rows,
+                tile: *tile,
+                data: data.clone(),
+            },
+            Matter::SpriteBatch { size } => MatterDoc::SpriteBatch { size: *size },
             Matter::Skybox { color, size, texture, tint, shader, shader_params } => {
                 MatterDoc::Skybox {
                     color: *color,
@@ -972,6 +998,13 @@ impl MatterDoc {
                 visibility: *visibility,
             },
             MatterDoc::FieldShape { radius } => Matter::FieldShape { radius: *radius },
+            MatterDoc::Tilemap { cols, rows, tile, data } => Matter::Tilemap {
+                cols: *cols,
+                rows: *rows,
+                tile: *tile,
+                data: data.clone(),
+            },
+            MatterDoc::SpriteBatch { size } => Matter::SpriteBatch { size: *size },
             MatterDoc::Skybox { color, size, texture, tint, shader, shader_params } => {
                 Matter::Skybox {
                     color: *color,

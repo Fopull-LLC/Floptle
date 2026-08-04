@@ -212,6 +212,18 @@ pub(crate) fn ray_aabb(ro: Vec3, rd: Vec3, half: f32) -> Option<f32> {
     }
 }
 
+/// [`ray_aabb`] for a box whose half-extents differ per axis — a tilemap is
+/// wide and tall and almost flat, and a cube-shaped pick volume around one
+/// would swallow everything standing on it.
+pub(crate) fn ray_box(ro: Vec3, rd: Vec3, half: Vec3) -> Option<f32> {
+    let inv = Vec3::ONE / rd;
+    let t1 = (-half - ro) * inv;
+    let t2 = (half - ro) * inv;
+    let near = t1.min(t2).max_element();
+    let far = t1.max(t2).min_element();
+    (near <= far && far > 1e-3).then(|| near.max(1e-3))
+}
+
 /// Build the gizmo geometry for the selected entity and hit-test the cursor.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_gizmo(

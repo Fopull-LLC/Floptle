@@ -46,6 +46,8 @@ pub(crate) fn matter_doc_name(m: &MatterDoc) -> &'static str {
         MatterDoc::GravityVolume { .. } => "Gravity Volume",
         MatterDoc::WaterVolume { .. } => "Water Volume",
         MatterDoc::FieldShape { .. } => "Field Shape",
+        MatterDoc::Tilemap { .. } => "Tilemap",
+        MatterDoc::SpriteBatch { .. } => "Sprite Batch",
         MatterDoc::Skybox { .. } => "Skybox",
         MatterDoc::PostProcess { .. } => "Post Processing",
     }
@@ -74,6 +76,8 @@ pub(crate) fn matter_kind_label(m: &Matter) -> &'static str {
         Matter::GravityVolume { .. } => "Gravity Volume",
         Matter::WaterVolume { .. } => "Water Volume",
         Matter::FieldShape { .. } => "Field Shape",
+        Matter::Tilemap { .. } => "Tilemap",
+        Matter::SpriteBatch { .. } => "Sprite Batch",
         Matter::Skybox { .. } => "Skybox",
         Matter::PostProcess { .. } => "Post Processing",
     }
@@ -96,6 +100,8 @@ pub(crate) fn matter_icon(m: &Matter) -> &'static str {
         Matter::GravityVolume { .. } => "⬇",
         Matter::WaterVolume { .. } => "≈",
         Matter::FieldShape { .. } => "◈",
+        Matter::Tilemap { .. } => "▦",
+        Matter::SpriteBatch { .. } => "▪",
         Matter::Skybox { .. } => "◎",
         Matter::PostProcess { .. } => "✨",
     }

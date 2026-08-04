@@ -45,9 +45,9 @@ pub use matter::{
     is_disabled, is_persistent, world_transform, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, CastShadow,
     CelestialBody, Collidable, Disabled, GravityMode, Layer, Light, Made, Matter, MeshCollider, Name,
     Parent,
-    ParticleSystem, Persistent, RepeatIndex, RigidBody, SceneTag, Shape, Spin, Tags, TerrainGen,
-    TexturePaint, Trigger, VertexPaint, WaterKind,
-    Visible,
+    ParticleSystem, Persistent, RepeatIndex, RigidBody, SceneTag, Shape, Spin, Sprite, Sprites, Tags,
+    TerrainGen, TexturePaint, Trigger, VertexPaint, WaterKind,
+    Visible, EMPTY_TILE,
 };
 pub use net::{NetId, Replicated, ReplicationMode};
 pub use script::{ScriptInst, Scripts};

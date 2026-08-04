@@ -25,6 +25,10 @@ pub struct ViewInfo {
     pub vp_y: f32,
     pub vp_w: f32,
     pub vp_h: f32,
+    /// The camera's vertical field of view, radians — what turns "how many
+    /// pixels tall is the view" into "how many pixels is a metre"
+    /// (`floptle/0058`).
+    pub fov_y: f32,
     /// False until the editor has fed a real camera (screen queries no-op).
     pub valid: bool,
 }
@@ -38,6 +42,7 @@ impl Default for ViewInfo {
             vp_y: 0.0,
             vp_w: 0.0,
             vp_h: 0.0,
+            fov_y: 60f32.to_radians(),
             valid: false,
         }
     }
@@ -62,6 +67,35 @@ pub(crate) fn install_camera_api(lua: &Lua, view: Rc<RefCell<ViewInfo>>) {
             Ok((v.vp_w, v.vp_h))
         }) {
             let _ = t.set("screenSize", f);
+        }
+    }
+
+    // camera.pixelsPerUnit([distance]) -> px (`floptle/0058`).
+    //
+    // Every 2D project was deriving this itself out of the FOV and the camera's
+    // Z — one project's copy reads `240 / (2 * 9.33 * tan 30°)` — and then
+    // snapping the camera to a multiple of it. That constant is the engine's to
+    // know: it is the projection, which the renderer already has.
+    {
+        let v = view.clone();
+        if let Ok(f) = lua.create_function(move |_, distance: Option<f32>| {
+            let v = v.borrow();
+            if !v.valid {
+                return Ok(0.0f32);
+            }
+            // Default to the camera's distance from the world origin — a flat
+            // game is built around the origin plane, and asking for the number
+            // at "where my game is" should not require restating where that is.
+            let d = distance.unwrap_or_else(|| {
+                let c = DVec3::from(v.cam_world);
+                c.length() as f32
+            });
+            let half = (v.fov_y * 0.5).tan().max(1e-6);
+            // The world height the view covers at `d`, against its pixel height.
+            let world_h = 2.0 * d.abs().max(1e-6) * half;
+            Ok(v.vp_h / world_h)
+        }) {
+            let _ = t.set("pixelsPerUnit", f);
         }
     }
 
@@ -152,8 +186,43 @@ mod tests {
             vp_y: 0.0,
             vp_w: w,
             vp_h: h,
+            // The same 1.0 rad the projection above was built with, so
+            // `pixelsPerUnit` and `worldToScreen` describe one camera.
+            fov_y: 1.0,
             valid: true,
         }
+    }
+
+    /// `pixelsPerUnit` has to agree with the projection it came from: a metre
+    /// at the camera's distance must measure the same as `worldToScreen` says
+    /// it does. Otherwise a game snapping to it snaps to the wrong grid, which
+    /// is exactly the hand-rolled constant this replaces.
+    #[test]
+    fn pixels_per_unit_matches_what_world_to_screen_measures() {
+        // Camera 10 units back down +Z, looking at the origin.
+        let lua = lua_with(view_info([0.0, 0.0, 10.0], Quat::IDENTITY, 800.0, 600.0));
+        let px: f32 = lua.load("return camera.pixelsPerUnit()").eval().unwrap();
+
+        // Measure the same metre by projecting two points a metre apart on the
+        // plane the default distance refers to (the origin).
+        let (ax, _, _, _): (f32, f32, f32, bool) =
+            lua.load("return camera.worldToScreen(0, 0, 0)").eval().unwrap();
+        let (bx, _, _, _): (f32, f32, f32, bool) =
+            lua.load("return camera.worldToScreen(1, 0, 0)").eval().unwrap();
+        let measured = (bx - ax).abs();
+        assert!(
+            (px - measured).abs() < 0.5,
+            "pixelsPerUnit says {px} px/unit but projecting a unit measures {measured}"
+        );
+
+        // Twice as far away is half the size — the thing a flat game relies on.
+        let far = lua_with(view_info([0.0, 0.0, 20.0], Quat::IDENTITY, 800.0, 600.0));
+        let px_far: f32 = far.load("return camera.pixelsPerUnit()").eval().unwrap();
+        assert!((px_far * 2.0 - px).abs() < 0.5, "{px_far} should be half of {px}");
+
+        // An explicit distance overrides the default.
+        let same: f32 = lua.load("return camera.pixelsPerUnit(20)").eval().unwrap();
+        assert!((same - px_far).abs() < 0.5);
     }
 
     fn lua_with(view: ViewInfo) -> Lua {

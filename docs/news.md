@@ -9,6 +9,11 @@ start from the finished version of any of them in one click from the New project
 screen. There's a fifteen-minute first tutorial for people who have never
 programmed, and a twenty-minute orientation for people who have.
 
+The same release adds a **2D layer**: a tilemap that draws a whole level as one
+mesh — so the hairline gaps that open between tiles as the camera moves cannot
+happen — and sprite batches where every sprite carries its own colour, which is
+the difference between flashing an enemy red and blinking it off.
+
 **v0.24.1 "Plain Sight"** before it: two dozen buttons that had been drawing as
 empty boxes got their icons back, and the 188 scripting calls that had no
 description anywhere got one — plus a complete reference page and a search that

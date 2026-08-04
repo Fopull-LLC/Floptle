@@ -32,6 +32,47 @@ impl Tags {
     }
 }
 
+/// The cell value that leaves a tilemap square EMPTY.
+///
+/// Not `0`: zero is a perfectly good first cell of a sheet, and a grid that
+/// cannot express "nothing here" without giving up its first tile is a grid
+/// that makes every artist renumber their sheet.
+pub const EMPTY_TILE: u32 = u32::MAX;
+
+/// One sprite in a [`Matter::SpriteBatch`].
+///
+/// Positions are LOCAL to the batch node, so the node's transform still places
+/// and orients the whole thing — a batch is a node like any other, it just draws
+/// more than one quad.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sprite {
+    /// Local position.
+    pub pos: [f32; 3],
+    /// Roll about the view axis, radians. Sprites face +Z like the quad does.
+    pub rot: f32,
+    /// Multiplies the batch's `size`.
+    pub scale: f32,
+    /// Cell of the Material's sheet.
+    pub cell: u32,
+    /// Multiplied into the texture, RGBA. This is the thing a shared Material
+    /// could never give one sprite on its own.
+    pub tint: [f32; 4],
+}
+
+impl Default for Sprite {
+    fn default() -> Self {
+        Self { pos: [0.0; 3], rot: 0.0, scale: 1.0, cell: 0, tint: [1.0; 4] }
+    }
+}
+
+/// This frame's sprites for a [`Matter::SpriteBatch`] node.
+///
+/// Runtime-only and never serialised, for the same reason as [`Made`]: these are
+/// rebuilt every frame from whatever the game is doing, and a saved scene
+/// containing them would describe last session's bullets.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Sprites(pub Vec<Sprite>);
+
 /// Which row of a UI **repeater** this node is: 0-based, in flow order.
 ///
 /// Runtime-only and never serialised — a repeater's rows are spawned by the
@@ -639,6 +680,51 @@ pub enum Matter {
     /// shadows and spans all key off it, so keep it snug. Visual only for now
     /// (no collision until the CPU field evaluator lands — proposal §7.3).
     FieldShape { radius: f32 },
+    /// A grid of spritesheet cells drawn as **one mesh, one draw call**
+    /// (`floptle/0058`).
+    ///
+    /// The sheet comes from the node's [`crate::Material`] — its `texture`,
+    /// `sheet_cols`/`sheet_rows` and `filter`. This component is only the grid,
+    /// so a tilemap is dressed exactly like every other surface and a project
+    /// does not learn a second way to say "this texture, chopped this way".
+    /// (The Material's own `cell` is unused: each tile carries its own UVs.)
+    ///
+    /// **Why this exists at all.** A tilemap built from one quad per tile has a
+    /// hairline of background between tiles that opens and closes as the camera
+    /// moves — each quad's edge is computed through its own transform, so two
+    /// touching edges land either side of a pixel boundary independently. Here
+    /// every tile is a quad in one vertex buffer whose corners are computed by
+    /// the same expression, so a shared edge is *bit-identical* on both sides
+    /// and the rasterizer has no gap to fill. That is a structural fix; the
+    /// alternative games reach for — overlapping tiles by a few percent — only
+    /// hides it, and only for tiles that happen to be opaque at the edge.
+    ///
+    /// `data` is row-major, `rows * cols` long, from the top-left.
+    /// [`EMPTY_TILE`] leaves a hole rather than drawing cell 0.
+    Tilemap {
+        cols: u32,
+        rows: u32,
+        /// World size of one tile's edge.
+        tile: f32,
+        /// Row-major cell indices into the Material's sheet.
+        data: Vec<u32>,
+    },
+    /// N sprites drawn from one node, each with its own position, rotation,
+    /// scale, sheet cell **and tint** (`floptle/0058`).
+    ///
+    /// Like [`Tilemap`](Self::Tilemap) the sheet is the node's Material. The
+    /// sprites themselves are a runtime-only [`Sprites`] component, written per
+    /// frame from Lua — they are this frame's bullets, not scene content, and a
+    /// saved scene full of them would describe a moment that has passed.
+    ///
+    /// The tint is the point. Colour otherwise lives on the Material, which a
+    /// pool of quads shares, so a game cannot flash one enemy red — it blinks
+    /// the sprite off instead, which is the wrong effect chosen because the
+    /// right one was unreachable.
+    SpriteBatch {
+        /// World size of one sprite's edge, before its own scale.
+        size: f32,
+    },
     /// The scene's environment background — a face-inverted sphere of radius `size`
     /// drawn behind everything. `color` is the solid sky color (grey by default); when
     /// `texture` is set it's sampled equirectangularly (seamless loop) and multiplied by

@@ -76,6 +76,8 @@ impl Editor {
         // before anything draws with a stale block.
         self.sync_map_paint();
         self.map_edit_frame_update();
+        // 2D: rebuild any tilemap whose grid or sheet changed (`floptle/0058`).
+        self.sync_tilemaps();
         // The 🎓 Learn tab answers its checks from a snapshot of the scene and
         // the project's files. Taken up here with the other whole-`self` passes,
         // before the GPU destructure below splits `self` apart — and only while
@@ -455,6 +457,7 @@ impl Editor {
                 vp_y: 0.0,
                 vp_w: gpu.config.width as f32,
                 vp_h: gpu.config.height as f32,
+                fov_y: cam.projection.fov_y(),
                 valid: true,
             });
         }
@@ -1097,6 +1100,39 @@ impl Editor {
                         instances.push((mesh, tex, instance_of_mat(model, &mp)));
                     }
                 }
+                // The 2D layer (`floptle/0058`). A tilemap is one uploaded
+                // mesh; a sprite batch is N instances off the unit quad, each
+                // with its own cell and tint.
+                Matter::Tilemap { .. } => {
+                    let model = t.render_matrix(cam.world_position);
+                    if let Some(draw) =
+                        crate::sprite2d::tilemap_draw(&self.tilemaps, *e, model, mat.as_ref(), tex)
+                    {
+                        match flsl {
+                            Some(b) => flsl_draws.push((draw.0, draw.1, b, draw.2)),
+                            None => instances.push(draw),
+                        }
+                    }
+                }
+                Matter::SpriteBatch { size } => {
+                    if let Some(&mesh) = self.mesh_ids.get(floptle_core::Shape::Plane as usize) {
+                        let model = t.render_matrix(cam.world_position);
+                        let texel = tex
+                            .and_then(|id| raster.texture_size(id))
+                            .map(|[w, h]| [1.0 / w.max(1.0), 1.0 / h.max(1.0)])
+                            .unwrap_or([0.0, 0.0]);
+                        let mut raws = Vec::new();
+                        crate::sprite2d::sprite_draws(
+                            &self.world, *e, *size, model, mat.as_ref(), texel, &mut raws,
+                        );
+                        for raw in raws {
+                            match flsl {
+                                Some(b) => flsl_draws.push((mesh, tex, b, raw)),
+                                None => instances.push((mesh, tex, raw)),
+                            }
+                        }
+                    }
+                }
                 Matter::Blob { scale } => {
                     // Blobs render in the raymarch pass — a custom fragment
                     // shader doesn't apply (the Sdf stage is their world).
@@ -1362,6 +1398,16 @@ impl Editor {
                             mask_mesh.push((mesh, instance_of(model, [1.0, 1.0, 1.0])));
                         }
                     }
+                    Matter::Tilemap { .. } => {
+                        if let Some(tm) = self.tilemaps.get(&e) {
+                            let model = t.render_matrix(cam.world_position);
+                            mask_mesh.push((tm.mesh, instance_of(model, [1.0, 1.0, 1.0])));
+                        }
+                    }
+                    // A batch's sprites are this frame's, so outlining them
+                    // would trace whatever happened to be alive when you
+                    // clicked. The Hierarchy row is the selection you want.
+                    Matter::SpriteBatch { .. } => {}
                     Matter::Mesh { asset_path } => {
                         if let Some(asset) = self.mesh_registry.get(asset_path) {
                             let model = t.render_matrix(cam.world_position);
@@ -5246,6 +5292,8 @@ impl Editor {
                 MatterDoc::GravityVolume { .. } => "Gravity Volume",
                 MatterDoc::WaterVolume { .. } => "Water Volume",
                 MatterDoc::FieldShape { .. } => "Field Shape",
+                MatterDoc::Tilemap { .. } => "Tilemap",
+                MatterDoc::SpriteBatch { .. } => "Sprite Batch",
                 MatterDoc::Skybox { .. } => "Skybox",
                 MatterDoc::PostProcess { .. } => "Post Processing",
             };

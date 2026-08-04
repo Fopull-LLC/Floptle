@@ -1620,6 +1620,7 @@ impl ScriptHost {
             body_changes: Rc::new(RefCell::new(HashMap::new())),
             body_height_changes: Rc::new(RefCell::new(HashMap::new())),
             body_pos_changes: Rc::new(RefCell::new(HashMap::new())),
+            sprite_draws: Rc::new(RefCell::new(HashMap::new())),
             shader_param_sets: Rc::new(RefCell::new(Vec::new())),
             envs: Rc::new(RefCell::new(HashMap::new())),
             model_changes: Rc::new(RefCell::new(HashMap::new())),
@@ -1820,6 +1821,7 @@ impl ScriptHost {
             body_changes: shared.body_changes.clone(),
             body_height_changes: shared.body_height_changes.clone(),
             body_pos_changes: shared.body_pos_changes.clone(),
+            sprite_draws: shared.sprite_draws.clone(),
             shader_param_sets: shared.shader_param_sets.clone(),
             colliders,
             hulls,
@@ -3783,6 +3785,26 @@ impl ScriptHost {
                 crate::api::apply_rich_sets(world, &ents, sets);
             }
         }
+        // 2D sprite batches (`floptle/0058`). IMMEDIATE MODE: whatever the
+        // scripts drew this pass becomes the node's whole set of sprites, and a
+        // batch nobody drew to this pass draws nothing. That is what makes
+        // `b:draw` behave like `draw.*` — no retained list, so no pool to grow
+        // and no `clear()` anyone can forget on the frame a wave dies.
+        {
+            let drawn = std::mem::take(&mut *self.sprite_draws.borrow_mut());
+            let batches: Vec<(Entity, u32)> = world
+                .query::<Matter>()
+                .filter(|(_, m)| matches!(m, Matter::SpriteBatch { .. }))
+                .map(|(e, _)| (e, e.index()))
+                .collect();
+            for (ent, id) in batches {
+                let list = drawn.get(&id).cloned().unwrap_or_default();
+                match world.get_mut::<floptle_core::Sprites>(ent) {
+                    Some(slot) => slot.0 = list,
+                    None => world.insert(ent, floptle_core::Sprites(list)),
+                }
+            }
+        }
         // Persist `params.X = ...` writes into the node's stored ScriptInst —
         // the next pass seeds from them (the write STICKS) and the Inspector
         // shows them live. Stop reverts them with the rest of the play state.
@@ -4050,13 +4072,20 @@ impl ScriptHost {
         s.ui_texts.clear();
         s.ui_styles.clear();
         s.ui_textures.clear();
+        s.tilemaps.clear();
         for (e, tr) in world.query::<Transform>() {
             let id = e.index();
             s.order.push(id);
             s.ents.insert(id, e);
             s.transforms.insert(id, *tr);
-            if let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(e) {
-                s.models.insert(id, asset_path.clone());
+            match world.get::<Matter>(e) {
+                Some(Matter::Mesh { asset_path }) => {
+                    s.models.insert(id, asset_path.clone());
+                }
+                Some(Matter::Tilemap { cols, rows, data, .. }) => {
+                    s.tilemaps.insert(id, (*cols, *rows, data.clone()));
+                }
+                _ => {}
             }
             if let Some(spec) = world.get::<floptle_ui::ElementSpec>(e) {
                 if let Some(t) = spec.text.as_ref() {

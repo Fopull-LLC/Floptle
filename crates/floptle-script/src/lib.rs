@@ -147,7 +147,14 @@ pub enum SceneRequest {
     /// `scene.load(name)` — replace the world.
     Load { name: String },
     /// `scene.load(name, { additive = true })` — layer on top of it.
-    Additive { name: String },
+    ///
+    /// `environment` is `{ environment = true }`: the layer OWNS the world's
+    /// environment while it is loaded — its `lighting` block (sun + fog) plus
+    /// its Skybox and PostProcess nodes replace the base scene's, which are
+    /// disabled rather than destroyed and come back on `unload`. Without it an
+    /// additive layer brings nodes only, and a second Skybox would leave the
+    /// look decided by query order.
+    Additive { name: String, environment: bool },
     /// `scene.unload(name)` — take an additive layer away again.
     Unload { name: String },
 }
@@ -366,6 +373,8 @@ pub struct ScriptHost {
     /// Cross-node position writes on body entities → the driver teleports the
     /// body (see `Shared::body_pos_changes`).
     body_pos_changes: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
+    /// This frame's sprite-batch draws (see `Shared::sprite_draws`).
+    sprite_draws: Rc<RefCell<HashMap<u32, Vec<floptle_core::Sprite>>>>,
     /// `node:setShaderParam(name, x, y, z, w)` writes — (entity index, uniform
     /// name, vec4 lanes), drained by the editor into the node's Material or UI
     /// ElementSpec `shader_params` (the per-frame shader drivers then upload).
@@ -786,6 +795,10 @@ pub struct AudioInfo {
 /// the ECS at the start of each `run` and flushed back at the end. It decouples the Lua
 /// handles (which can persist across frames, e.g. a cached manager reference) from the
 /// `&mut World` borrow, and lets one script reach any other node by hierarchy or name.
+/// The queue the construction API pushes into, drained each pass by
+/// `flush_writes`.
+pub(crate) type RichSetQueue = Rc<RefCell<Vec<(u32, RichSet)>>>;
+
 #[derive(Default)]
 pub(crate) struct SceneMirror {
     /// Stable iteration order (entity index), for deterministic name lookups.
@@ -802,6 +815,10 @@ pub(crate) struct SceneMirror {
     transforms: HashMap<u32, Transform>,
     /// Mesh nodes' current model path (so a script can read `node.model`).
     models: HashMap<u32, String>,
+    /// Tilemap nodes' grid: `(cols, rows, row-major cells)`, so a handle can
+    /// answer `tm:get` / `tm:size` without reaching into the world
+    /// (`floptle/0058`).
+    tilemaps: HashMap<u32, (u32, u32, Vec<u32>)>,
     /// UI elements' current text (so a script can read `node.text`).
     ui_texts: HashMap<u32, String>,
     /// UI elements' current style name (so a script can read `node.style`).
@@ -884,6 +901,11 @@ pub enum RichSet {
     Material(Vec<(String, CompVal)>),
     MatterTerrain(u32),
     MatterPrimitive(String, [f64; 3]),
+    /// `node:setTilemap{...}` — build (or re-shape) a 2D grid on this node.
+    MatterTilemap { cols: u32, rows: u32, tile: f32, data: Vec<u32> },
+    /// `tm:set(x, y, cell)` writes, batched per call site. Applied in order, so
+    /// two writes to one square land the way the script wrote them.
+    TileCells(Vec<(u32, u32, u32)>),
     /// On-demand generation spec (RON `PlanetFill`) for a Terrain node —
     /// `None` clears it. See `floptle_core::TerrainGen` (G2 galaxy streaming).
     TerrainGen(Option<String>),
@@ -902,6 +924,13 @@ struct Shared {
     /// the driver TELEPORTS the body there (otherwise the physics writeback
     /// stomps the transform next frame and the write silently vanishes).
     body_pos_changes: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
+    /// This frame's `b:draw(...)` calls per sprite-batch entity.
+    ///
+    /// IMMEDIATE MODE, like `draw.*` and `gizmo.*`: the list is taken every
+    /// pass and becomes that node's whole set of sprites, so what you drew this
+    /// frame is exactly what shows and there is no `clear()` anyone can forget.
+    /// A retained list would leak for as long as the game ran.
+    sprite_draws: Rc<RefCell<HashMap<u32, Vec<floptle_core::Sprite>>>>,
     /// `node:setShaderParam(...)` writes, drained by the editor per frame.
     shader_param_sets: ShaderParamSets,
     /// (entity index, script kind) → that instance's live Lua environment table, so a
@@ -2123,6 +2152,80 @@ end
             strs: Vec::new(),
         }]));
         (world, e)
+    }
+
+    /// The 2D layer, end to end from Lua (`floptle/0058`): build a grid, paint
+    /// squares, read them back, and draw sprites into a batch.
+    #[test]
+    fn a_script_builds_a_tilemap_and_fills_a_sprite_batch() {
+        let dir = std::env::temp_dir().join(format!("floptle_2d_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "flat",
+            "\
+function start(node)
+  node:setTilemap{ cols = 4, rows = 3, tile = 2.0 }
+end
+
+function update(node, dt)
+  local tm = node:tilemap()
+  tm:fill(1)
+  tm:set(0, 0, 7)
+  tm:set(3, 2, 9)
+  tm:set(99, 99, 5)      -- outside the grid: a no-op, not a wrap
+  readBack = tm:get(0, 0)
+  cols, rows = tm:size()
+
+  local b = node:sprites()
+  b:draw(1, 2)                                   -- the short form
+  b:draw(3, 4, 0, 2.0, 1.5, 6, 1, 0.2, 0.2, 0.5) -- …and the whole thing
+end
+",
+        );
+        let (mut world, e) = world_with_script("flat");
+        world.insert(e, floptle_core::Matter::Empty);
+        let mut host = ScriptHost::new();
+        // Two passes: `start` builds the grid, and the writes queued in the
+        // first `update` land before the second reads them back.
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+
+        let Some(floptle_core::Matter::Tilemap { cols, rows, tile, data }) =
+            world.get::<floptle_core::Matter>(e)
+        else {
+            panic!("setTilemap did not make a tilemap: {:?}", world.get::<floptle_core::Matter>(e))
+        };
+        assert_eq!((*cols, *rows, *tile), (4, 3, 2.0));
+        assert_eq!(data.len(), 12, "the grid is sized even with no data given");
+        assert_eq!(data[0], 7, "tm:set(0, 0, ..) writes the top-left");
+        assert_eq!(data[11], 9, "…and (3, 2) the bottom-right");
+        assert_eq!(data[1], 1, "tm:fill covered the rest");
+        assert!(data.iter().all(|c| *c != 5), "an out-of-bounds set must not wrap");
+
+        // The batch node has no SpriteBatch matter here, so nothing was stored —
+        // the draws are only kept for nodes that are actually batches.
+        assert!(world.get::<floptle_core::Sprites>(e).is_none());
+
+        // Make it a batch and the same draws land.
+        world.insert(e, floptle_core::Matter::SpriteBatch { size: 1.0 });
+        host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
+        let sprites = world.get::<floptle_core::Sprites>(e).expect("sprites");
+        assert_eq!(sprites.0.len(), 2, "two draws, two sprites");
+        assert_eq!(sprites.0[0].pos, [1.0, 2.0, 0.0]);
+        assert_eq!(sprites.0[0].tint, [1.0, 1.0, 1.0, 1.0], "the short form is untinted");
+        assert_eq!(sprites.0[1].cell, 6);
+        assert_eq!(sprites.0[1].tint, [1.0, 0.2, 0.2, 0.5], "the per-sprite tint survives");
+
+        // IMMEDIATE MODE: a pass that draws nothing leaves nothing behind.
+        write_script(&dir, "flat", "function update(node, dt)\nend\n");
+        host.run(&mut world, &dir, 1.0 / 60.0, 3.0 / 60.0);
+        assert!(
+            world.get::<floptle_core::Sprites>(e).is_some_and(|s| s.0.is_empty()),
+            "sprites must not survive a frame nobody drew them"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

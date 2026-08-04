@@ -61,6 +61,7 @@ mod learn;
 mod learn_content;
 mod settings_ui;
 mod shadow;
+mod sprite2d;
 mod lua_format;
 mod lua_lint;
 mod lua_support;
@@ -1660,6 +1661,9 @@ struct Editor {
     ide: IdeState,
     /// 🎓 Learn tab state (see `learn.rs`).
     learn: learn::LearnState,
+    /// Uploaded tilemap geometry, keyed by node (`floptle/0058`). Rebuilt only
+    /// when a grid or its sheet actually changes — see `sprite2d.rs`.
+    tilemaps: HashMap<Entity, sprite2d::TileGpu>,
     /// The asset selected in the browser (shown in the Inspector); `None` = a node.
     selected_asset: Option<String>,
     /// The full multi-selection in the browser (Ctrl/Shift-click); the primary is
