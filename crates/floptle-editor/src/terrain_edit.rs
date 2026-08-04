@@ -93,7 +93,47 @@ pub(crate) struct TerrainRender {
 /// P4 LOD ring radii, in CHUNKS of Chebyshev distance from the camera's chunk:
 /// within `RINGS[l]` → stride `2^l`; beyond the last ring → stride 8. One chunk
 /// ≈ 48 units at the default 1.5-unit voxel.
+///
+/// These are the radii for a world big enough that "24 chunks away" is over the
+/// horizon. On a SMALL body they are not — see [`rings_for_body`].
 const LOD_RINGS: [i32; 3] = [4, 10, 24];
+
+/// What fraction of a body's RADIUS each ring should reach, on a body small
+/// enough for the absolute rings to swallow it whole.
+///
+/// A walkable planet is 100–250 units across the radius and one chunk is ~48,
+/// so `LOD_RINGS[0]` alone — 192 units — contains the entire body. Standing on
+/// a 180-unit world meant every one of its ~177 surface chunks was queued for
+/// surface-net meshing at full detail, through a 16-deep worker queue: that is
+/// the arrival hitch, and the pop-in is the queue draining.
+///
+/// The rings were always trying to say "detail near you, coarse over the
+/// horizon". On a small body that sentence has to be written in units of the
+/// body, because its horizon is a few dozen metres away rather than a few
+/// hundred.
+const BODY_RING_FRACTION: [f64; 3] = [0.15, 0.40, 1.0];
+
+/// The LOD rings to use for a terrain, given the body radius it belongs to
+/// (`None` for ordinary, non-celestial terrain).
+///
+/// Never LARGER than the absolute rings, so a big world is untouched: this can
+/// only tighten. Never smaller than one chunk per ring either — a body you can
+/// stand on always gets a ring of full detail under your feet and two coarser
+/// ones around it, however small it is.
+fn rings_for_body(body_radius: Option<f64>, chunk_units: f64) -> [i32; 3] {
+    let Some(r) = body_radius.filter(|r| *r > 0.0) else { return LOD_RINGS };
+    let chunk = chunk_units.max(1e-3);
+    let mut out = LOD_RINGS;
+    for (i, frac) in BODY_RING_FRACTION.iter().enumerate() {
+        let by_body = ((r * frac) / chunk).ceil() as i32;
+        out[i] = out[i].min(by_body).max(i as i32 + 1);
+    }
+    // Rings must stay strictly ordered or `lod_for`'s hysteresis compares
+    // against a boundary that is behind it.
+    out[1] = out[1].max(out[0] + 1);
+    out[2] = out[2].max(out[1] + 1);
+    out
+}
 
 /// A celestial terrain switches to its sphere impostor beyond this many body
 /// radii of camera distance (~2° of angular diameter — chunk meshes would be
@@ -252,12 +292,12 @@ pub(crate) fn impostor_surface_color(field: &floptle_field::ChunkField, radius: 
 }
 
 /// The ring a distance lands in, no hysteresis — for chunks with no current lod.
-fn raw_lod(dist: i32) -> u8 {
-    if dist <= LOD_RINGS[0] {
+fn raw_lod(dist: i32, rings: [i32; 3]) -> u8 {
+    if dist <= rings[0] {
         0
-    } else if dist <= LOD_RINGS[1] {
+    } else if dist <= rings[1] {
         1
-    } else if dist <= LOD_RINGS[2] {
+    } else if dist <= rings[2] {
         2
     } else {
         3
@@ -266,20 +306,20 @@ fn raw_lod(dist: i32) -> u8 {
 
 /// The ring a distance lands in, with ±1 chunk of hysteresis against the chunk's
 /// current lod so camera drift across a boundary can't thrash remeshing.
-fn lod_for(dist: i32, cur: u8) -> u8 {
-    let raw = raw_lod(dist);
+fn lod_for(dist: i32, cur: u8, rings: [i32; 3]) -> u8 {
+    let raw = raw_lod(dist, rings);
     if raw == cur {
         cur
     } else if raw > cur {
         // Coarsen only once clearly past the boundary above the current ring.
-        if dist > LOD_RINGS[(cur as usize).min(2)] + 1 {
+        if dist > rings[(cur as usize).min(2)] + 1 {
             raw
         } else {
             cur
         }
     } else {
         // Refine only once clearly inside the finer ring.
-        if dist < LOD_RINGS[raw as usize] {
+        if dist < rings[raw as usize] {
             raw
         } else {
             cur
@@ -475,6 +515,14 @@ impl Editor {
                 render.impostor = false;
             }
             let chunk_units = floptle_field::CHUNK as f32 * terrain.field.voxel();
+            // Rings sized to the BODY when there is one (`floptle/0067`): on a
+            // world you can walk around, "24 chunks away" is the far side of it.
+            let rings = rings_for_body(
+                self.world
+                    .get::<floptle_core::CelestialBody>(e)
+                    .map(|cb| cb.body_radius * ts as f64),
+                (chunk_units * ts) as f64,
+            );
             // Camera into the FIELD's local frame (rotation + uniform scale), so
             // LOD rings follow the terrain wherever its node puts it.
             let cl = (rot.inverse() * (cam_world - anchor).as_vec3()) / (chunk_units * ts);
@@ -515,7 +563,7 @@ impl Editor {
                     render.empty.remove(&coord);
                     let dist = dist_of(coord);
                     let cur = render.slots.get(&coord).map(|&(_, l)| l);
-                    let lod = cur.unwrap_or_else(|| raw_lod(dist));
+                    let lod = cur.unwrap_or_else(|| raw_lod(dist, rings));
                     if lod == 0 {
                         render.pending.remove(&coord); // a sync mesh supersedes any job
                         let cm = floptle_field::mesh_chunk(&terrain.field, coord, 1, false);
@@ -558,7 +606,7 @@ impl Editor {
                             continue;
                         }
                         let d = dist_of(coord);
-                        if raw_lod(d) == 0 {
+                        if raw_lod(d, rings) == 0 {
                             // The ground around the player never streams: a fresh
                             // load (or a dig that created a chunk) meshes it NOW.
                             let cm =
@@ -569,11 +617,11 @@ impl Editor {
                                 upload_chunk(gpu, raster, render, coord, &cm, 0);
                             }
                         } else {
-                            queue.push((d, e, coord, raw_lod(d)));
+                            queue.push((d, e, coord, raw_lod(d, rings)));
                         }
                     }
                     Some(&(_, cur)) => {
-                        let want = lod_for(dist_of(coord), cur);
+                        let want = lod_for(dist_of(coord), cur, rings);
                         if want != cur && !render.pending.contains_key(&coord) {
                             queue.push((dist_of(coord), e, coord, want));
                         }
@@ -2395,30 +2443,107 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::terrain_voxel_size;
-    use super::{lod_for, raw_lod, LOD_RINGS};
+    use super::{lod_for, raw_lod, rings_for_body, LOD_RINGS};
     use floptle_field::BakedSdf;
 
     /// The LOD rings hold their chunk at the boundary (±1 hysteresis) so a camera
     /// drifting across a ring edge can't flip a chunk's stride every frame.
     #[test]
     fn lod_rings_have_hysteresis() {
-        let b = LOD_RINGS[0]; // the lod0/lod1 boundary
+        let r = LOD_RINGS;
+        let b = r[0]; // the lod0/lod1 boundary
         // Fresh chunks take the raw ring.
-        assert_eq!(raw_lod(b), 0);
-        assert_eq!(raw_lod(b + 1), 1);
+        assert_eq!(raw_lod(b, r), 0);
+        assert_eq!(raw_lod(b + 1, r), 1);
         // A lod0 chunk exactly at the boundary +1 stays lod0…
-        assert_eq!(lod_for(b + 1, 0), 0);
+        assert_eq!(lod_for(b + 1, 0, r), 0);
         // …and coarsens once clearly past it.
-        assert_eq!(lod_for(b + 2, 0), 1);
+        assert_eq!(lod_for(b + 2, 0, r), 1);
         // A lod1 chunk at the boundary stays lod1…
-        assert_eq!(lod_for(b, 1), 1);
+        assert_eq!(lod_for(b, 1, r), 1);
         // …and refines once clearly inside.
-        assert_eq!(lod_for(b - 1, 1), 0);
+        assert_eq!(lod_for(b - 1, 1, r), 0);
         // No-change fast path.
-        assert_eq!(lod_for(2, 0), 0);
-        assert_eq!(lod_for(100, 3), 3);
+        assert_eq!(lod_for(2, 0, r), 0);
+        assert_eq!(lod_for(100, 3, r), 3);
         // Far chunks are lod3 regardless of history.
-        assert_eq!(lod_for(LOD_RINGS[2] + 2, 0), 3);
+        assert_eq!(lod_for(LOD_RINGS[2] + 2, 0, r), 3);
+    }
+
+    /// Surface chunks of a sphere of `radius`, and how many of them the rings
+    /// would queue at FULL detail from a camera standing on it.
+    ///
+    /// The count is what `floptle/0067` asks for: on a walkable planet the whole
+    /// body used to sit inside ring 0, so arriving meant surface-net meshing all
+    /// of it through a 16-deep queue — the hitch, and then the pop-in as the
+    /// queue drained.
+    fn lod0_chunks(radius: f64, chunk: f64, rings: [i32; 3]) -> (usize, usize) {
+        let n = (radius / chunk).ceil() as i32 + 1;
+        // Stand on the north pole; the camera's chunk is the top of the sphere.
+        let cam = [0, (radius / chunk).round() as i32, 0];
+        let (mut surface, mut full) = (0, 0);
+        for x in -n..=n {
+            for y in -n..=n {
+                for z in -n..=n {
+                    // A chunk the surface passes through: its corner span
+                    // straddles the radius.
+                    let lo = ((x * x + y * y + z * z) as f64).sqrt() * chunk;
+                    let hi = (((x.abs() + 1).pow(2) + (y.abs() + 1).pow(2) + (z.abs() + 1).pow(2))
+                        as f64)
+                        .sqrt()
+                        * chunk;
+                    if !(lo <= radius && hi >= radius) {
+                        continue;
+                    }
+                    surface += 1;
+                    let d = (x - cam[0]).abs().max((y - cam[1]).abs()).max((z - cam[2]).abs());
+                    if raw_lod(d, rings) == 0 {
+                        full += 1;
+                    }
+                }
+            }
+        }
+        (surface, full)
+    }
+
+    /// The measurement, as a chunk count rather than a frame time — a count is
+    /// what a test can hold, and the frame time follows it.
+    #[test]
+    fn a_walkable_planet_no_longer_meshes_its_whole_surface_at_full_detail() {
+        // Solar's planets are 100–230 units; one chunk is 32 voxels × 1.5.
+        let (radius, chunk) = (180.0, 48.0);
+        let tight = rings_for_body(Some(radius), chunk);
+        let (surface, before) = lod0_chunks(radius, chunk, LOD_RINGS);
+        let (_, after) = lod0_chunks(radius, chunk, tight);
+
+        assert!(
+            before * 2 > surface,
+            "more than HALF the body's {surface} surface chunks used to be queued at full \
+             detail from one standing position ({before})"
+        );
+        assert!(
+            after * 8 < before,
+            "standing on a {radius}-unit world: {before} full-detail chunks became {after}"
+        );
+        println!(
+            "radius {radius}: {surface} surface chunks, full detail {before} -> {after} \
+             (rings {:?} -> {tight:?})",
+            LOD_RINGS
+        );
+        // …and the ring still covers the ground you are standing on.
+        assert!(tight[0] >= 1 && tight[1] > tight[0] && tight[2] > tight[1], "{tight:?}");
+    }
+
+    /// A world big enough for the absolute rings to mean what they say is
+    /// untouched — this can only ever tighten.
+    #[test]
+    fn a_big_world_keeps_the_rings_it_had() {
+        assert_eq!(rings_for_body(Some(100_000.0), 48.0), LOD_RINGS);
+        assert_eq!(rings_for_body(None, 48.0), LOD_RINGS, "ordinary terrain has no body");
+        // A tiny moon still gets a full-detail ring under your feet and two
+        // coarser ones around it, rather than collapsing to nothing.
+        let tiny = rings_for_body(Some(20.0), 48.0);
+        assert_eq!(tiny, [1, 2, 3], "ordered, and never empty: {tiny:?}");
     }
 
     /// A dense field with the given world size and voxel dims — only the fields
