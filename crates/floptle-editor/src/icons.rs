@@ -5,13 +5,26 @@
 //! glyph it lacks renders as a **tofu square**, and nothing warns you — the
 //! label just looks broken to whoever opens the editor.
 //!
-//! So every icon lives here as a named constant, and [`ALL`] feeds a test that
-//! asserts the real font stack can draw each one. Picking a new icon means
-//! adding it here and running `cargo test -p floptle-editor icons`; if it's
-//! tofu, the test says so before a user ever sees it.
+//! So every icon lives here as a named constant, and [`ALL`] names the ones
+//! shared across tabs. But the test that guards them ([`tests`]) does NOT read
+//! that list: it scans **every string literal in every source file**, because
+//! the icon that ships broken is always the one nobody remembered to register.
 //!
-//! Casualties of that check, for the record: 🎮 ⚠ ⚪ ✓ 🔍 ＋ ⬢ ✏ ✨ 🎧 🖌 —
-//! all missing, several of which had been shipping as squares in tab titles.
+//! ## Ask the charmaps, not egui
+//!
+//! `epaint::Fonts::has_glyph` is not usable for this. It answers by resolving
+//! the character to a font face and comparing that face against the one holding
+//! the replacement glyph — so a character whose real home happens to *be* that
+//! face reports missing (upstream marks the case with a TODO). An earlier pass
+//! trusted it and swapped away icons that were fine: 🎮 ⚠ 🔍 ✏ ✨ 🎧 ✔ were all
+//! recorded here as dead, and all of them draw correctly.
+//!
+//! The test below instead reads each bundled font's **character map** with
+//! `skrifa` — the same crate epaint uses to resolve a glyph — which is the fact
+//! the renderer actually acts on. To settle a case by eye rather than by
+//! assertion, `cargo run -p floptle-editor --example glyph_probe` draws every
+//! glyph in the editor to `target/glyph_probe.png` above a control row of known
+//! -missing codepoints, so "broken" has a reference to be compared against.
 
 // Some of these appear only inside `dock.rs`'s title literals (`concat!` can't
 // take a const) — they still belong here, because [`ALL`] is what the coverage
@@ -129,58 +142,94 @@ pub(crate) fn test_input() -> egui::RawInput {
 mod tests {
     use super::*;
 
-    /// Every icon must actually render in the editor's font stack.
+    /// Which characters the editor's font stack can actually draw, read from
+    /// the fonts' own character maps.
     ///
-    /// This is the test that would have caught 🎮 and ⚠ rendering as squares
-    /// in the Input settings — and ⬢ ✏ ✨ 🎧 🖌, which had been tofu in the
-    /// tab bar for some time.
-    #[test]
-    fn every_icon_has_a_glyph() {
-        let ctx = test_context();
-        let id = egui::FontId::proportional(14.0);
-        let mut tofu = Vec::new();
-        ctx.fonts_mut(|f| {
-            for (name, glyph) in ALL {
-                for c in glyph.chars() {
-                    if !f.has_glyph(&id, c) {
-                        tofu.push(format!("{name} = {glyph:?} (U+{:04X})", c as u32));
-                    }
+    /// This is the ground truth the renderer acts on. See the module docs for
+    /// why `Fonts::has_glyph` can't be used instead.
+    fn drawable() -> std::collections::HashSet<char> {
+        let defs = egui::FontDefinitions::default();
+        // The Proportional family plus the "Hack" the editor appends to it —
+        // mirror of the setup in `main.rs`.
+        let mut names: Vec<String> = defs
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        names.push("Hack".to_owned());
+
+        let mut out = std::collections::HashSet::new();
+        for name in &names {
+            let data = defs
+                .font_data
+                .get(name)
+                .unwrap_or_else(|| panic!("the font stack names {name:?} but egui has no such font"));
+            let font = skrifa::FontRef::from_index(&data.font, data.index)
+                .unwrap_or_else(|e| panic!("{name} is not a readable font: {e}"));
+            let charmap = skrifa::MetadataProvider::charmap(&font);
+            for (cp, _) in charmap.mappings() {
+                if let Some(c) = char::from_u32(cp) {
+                    out.insert(c);
                 }
             }
-        });
-        assert!(tofu.is_empty(), "icons render as tofu squares:\n  {}", tofu.join("\n  "));
+        }
+        out
     }
 
-    /// Every non-ASCII character in a **string literal** anywhere in the 🖼 tab
-    /// must have a glyph.
+    /// **Every** non-ASCII character in a string literal anywhere in the editor
+    /// must be drawable.
     ///
-    /// [`ALL`] only covers icons someone remembered to register. The image
-    /// editor's chrome is full of one-off glyphs typed straight into button
-    /// labels — ⏶ ⏷ ⎘ 👁 ⛶ ↶ ↷ ⇩ ⊗ — and any one of them silently shipping as a
-    /// tofu box is exactly the failure this module exists to prevent. So scan
-    /// the source instead of trusting a list.
+    /// [`ALL`] only covers icons someone remembered to register, and the icons
+    /// that ship broken are the ones typed straight into a button label and
+    /// never registered anywhere. So scan the sources instead of trusting a
+    /// list — all of them, not a chosen few. That partial coverage is exactly
+    /// how ⛰ ⬢ 🥊 ⬡ 🖌 ＋ and eighteen others reached users as empty boxes,
+    /// across 88 call sites, while this module's test was passing.
     #[test]
-    fn every_glyph_in_the_image_tab_renders() {
-        let sources = [
-            ("image_ui.rs", include_str!("image_ui.rs")),
-            ("image_edit.rs", include_str!("image_edit.rs")),
-            ("image_io.rs", include_str!("image_io.rs")),
-        ];
-        let ctx = test_context();
-        let id = egui::FontId::proportional(14.0);
-        let mut tofu = Vec::new();
-        ctx.fonts_mut(|f| {
-            for (name, src) in sources {
-                for c in string_literal_chars(src) {
-                    if !c.is_ascii() && !f.has_glyph(&id, c) {
-                        tofu.push(format!("{name}: {c:?} (U+{:04X})", c as u32));
-                    }
+    fn every_glyph_in_the_editor_renders() {
+        let ok = drawable();
+        let mut tofu: Vec<String> = Vec::new();
+        for (path, src) in sources() {
+            for c in string_literal_chars(&src) {
+                if !c.is_ascii() && !ok.contains(&c) {
+                    tofu.push(format!("{c:?} (U+{:04X}) in {path}", c as u32));
                 }
             }
-        });
+        }
         tofu.sort();
         tofu.dedup();
-        assert!(tofu.is_empty(), "the Image tab draws tofu squares:\n  {}", tofu.join("\n  "));
+        assert!(
+            tofu.is_empty(),
+            "these draw as empty boxes — no bundled font maps them:\n  {}\n\
+             Pick a replacement that IS mapped; `cargo run -p floptle-editor \
+             --example glyph_probe` draws the whole set to a PNG.",
+            tofu.join("\n  ")
+        );
+    }
+
+    /// Every `.rs` file under `src/`, read at test time.
+    ///
+    /// Read from disk rather than `include_str!` so that adding a module can
+    /// never quietly fall outside the check.
+    fn sources() -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let mut stack = vec![std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src"
+        ))];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    out.push((name, std::fs::read_to_string(&p).unwrap_or_default()));
+                }
+            }
+        }
+        assert!(out.len() > 40, "found only {} sources — the walk is wrong", out.len());
+        out
     }
 
     /// Characters inside double-quoted string literals — skipping comments,
@@ -237,21 +286,30 @@ mod tests {
         out
     }
 
-    /// Every dock tab title must render too — titles embed icons directly.
+    /// Every registered icon must be drawable.
+    #[test]
+    fn every_icon_has_a_glyph() {
+        let ok = drawable();
+        let tofu: Vec<String> = ALL
+            .iter()
+            .flat_map(|(name, glyph)| glyph.chars().map(move |c| (*name, *glyph, c)))
+            .filter(|(_, _, c)| !ok.contains(c))
+            .map(|(name, glyph, c)| format!("{name} = {glyph:?} (U+{:04X})", c as u32))
+            .collect();
+        assert!(tofu.is_empty(), "icons draw as empty boxes:\n  {}", tofu.join("\n  "));
+    }
+
+    /// Every dock tab title must render too — titles embed icons directly, and
+    /// a broken one is the most-seen pixel in the editor.
     #[test]
     fn every_tab_title_renders() {
-        let ctx = test_context();
-        let id = egui::FontId::proportional(14.0);
-        let mut tofu = Vec::new();
-        ctx.fonts_mut(|f| {
-            for tab in crate::dock::EditorTab::ALL {
-                for c in tab.title().chars() {
-                    if !f.has_glyph(&id, c) {
-                        tofu.push(format!("{:?} title {:?} (U+{:04X})", tab, tab.title(), c as u32));
-                    }
-                }
-            }
-        });
-        assert!(tofu.is_empty(), "tab titles render as tofu:\n  {}", tofu.join("\n  "));
+        let ok = drawable();
+        let tofu: Vec<String> = crate::dock::EditorTab::ALL
+            .iter()
+            .flat_map(|tab| tab.title().chars().map(move |c| (tab, c)))
+            .filter(|(_, c)| !ok.contains(c))
+            .map(|(tab, c)| format!("{:?} title {:?} (U+{:04X})", tab, tab.title(), c as u32))
+            .collect();
+        assert!(tofu.is_empty(), "tab titles draw as empty boxes:\n  {}", tofu.join("\n  "));
     }
 }

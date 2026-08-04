@@ -55,7 +55,7 @@ impl Editor {
                 self.console.push(
                     floptle_script::LogLevel::Debug,
                     format!(
-                        "⬡ saved prefab {} ({} node{})",
+                        "◇ saved prefab {} ({} node{})",
                         path.display(),
                         docs.len(),
                         if docs.len() == 1 { "" } else { "s" }

@@ -335,10 +335,10 @@ scene root. Also fixed: `spawn_node` dropped the `cast_shadow` opt-out.
 as a file — a saved clipboard IS a valid prefab (the loader tolerates the
 `//floptle-nodes-v1` tag line). Create: drag Hierarchy node(s) into the
 Assets panel (folder rows, grid background, tree empty space → prefabs/) or
-right-click → "⬡ Save as Prefab". Instantiate: drag the asset into the
+right-click → "◇ Save as Prefab". Instantiate: drag the asset into the
 viewport (cursor placement), onto a Hierarchy row (spawns as child, authored
-local offset), the empty Hierarchy area, or context menu "⬡ Add to scene"
-(camera-front). Blue ⬡ icon; instantiate is blocked during Play (Console
+local offset), the empty Hierarchy area, or context menu "◇ Add to scene"
+(camera-front). Blue ◇ icon; instantiate is blocked during Play (Console
 points at `spawn()`).
 
 **Lua runtime**: `spawn(prefab [, pos [, fn]])` queues a `SpawnRequest`

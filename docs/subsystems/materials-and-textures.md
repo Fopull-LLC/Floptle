@@ -111,7 +111,7 @@ Material(
 >
 > **Animate it** by stepping `cell`: from Lua (`node:getcomponent("Material").cell
 > = f`, or `node:setMaterial{ cell = f }`), or with a **stepped property track**
-> in the Animation tab (＋ Property ▸ Material ▸ cell). Under the hood a sheet is
+> in the Animation tab (✚ Property ▸ Material ▸ cell). Under the hood a sheet is
 > the *cell's UV window* packed into the existing tiling lanes
 > (`Material::effective_tiling`), so it costs no instance attribute (location 15
 > is the last one), no shader variant, and a custom `.flsl`'s `baseTexture()` gets

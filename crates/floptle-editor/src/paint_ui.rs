@@ -1,4 +1,4 @@
-//! The 🖌 Paint dock tab: vertex-brush settings.
+//! The ◨ Paint dock tab: vertex-brush settings.
 //!
 //! A tab rather than an Inspector section on purpose — the Inspector is per-entity and
 //! rebuilds on every selection change, but brush state has to outlive selection (you
@@ -166,11 +166,11 @@ impl EditorTabViewer<'_> {
         ui.separator();
 
         ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut brush.mode, PaintMode::Paint, "🖌 Paint");
+            ui.selectable_value(&mut brush.mode, PaintMode::Paint, "✏ Paint");
             if brush.target == PaintTarget::Vertex {
                 ui.selectable_value(&mut brush.mode, PaintMode::Smooth, "≈ Smooth");
             }
-            ui.selectable_value(&mut brush.mode, PaintMode::Erase, "⌫ Erase")
+            ui.selectable_value(&mut brush.mode, PaintMode::Erase, "⊘ Erase")
                 .on_hover_text(match brush.target {
                     PaintTarget::Texture => "brush paint back to the original texture",
                     PaintTarget::Vertex => "brush vertex paint back to neutral",
@@ -229,13 +229,13 @@ impl EditorTabViewer<'_> {
                 .button("Fill selected")
                 .on_hover_text(match (brush.target, brush.mode == PaintMode::Erase) {
                     (PaintTarget::Texture, true) => {
-                        "⌫ Erase is active: fade ALL paint by the brush strength (full strength removes it)"
+                        "⊘ Erase is active: fade ALL paint by the brush strength (full strength removes it)"
                     }
                     (PaintTarget::Texture, false) => {
                         "flood the node at the brush STRENGTH — 1.0 is solid, lower lays a translucent wash"
                     }
                     (PaintTarget::Vertex, true) => {
-                        "⌫ Erase is active: flood the selected node back to neutral (unpainted)"
+                        "⊘ Erase is active: flood the selected node back to neutral (unpainted)"
                     }
                     (PaintTarget::Vertex, false) => "flood the whole selected node with the brush color",
                 })

@@ -126,7 +126,7 @@ pub(crate) fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
     } else if is_vfx(path) {
         ("✨", egui::Color32::from_rgb(250, 150, 190)) // particle effect
     } else if is_prefab(path) {
-        ("⬡", egui::Color32::from_rgb(110, 190, 255)) // prefab (node subtree)
+        ("◇", egui::Color32::from_rgb(110, 190, 255)) // prefab (node subtree)
     } else if is_shader(path) {
         ("◈", egui::Color32::from_rgb(190, 140, 255)) // .flsl shader (ADR-0007)
     } else if is_audio(path) {

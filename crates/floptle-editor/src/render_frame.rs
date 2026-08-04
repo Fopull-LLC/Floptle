@@ -1899,7 +1899,7 @@ impl Editor {
                             cmd.focus_terrain = true;
                             ui.close();
                         }
-                        if ui.button("⬢ Map tools").clicked() {
+                        if ui.button("▦ Map tools").clicked() {
                             cmd.focus_map = true;
                             ui.close();
                         }
@@ -2095,7 +2095,7 @@ impl Editor {
                             if rb.stalled {
                                 ui.colored_label(
                                     egui::Color32::from_rgb(255, 170, 60),
-                                    "🥊 ROLLBACK · waiting for input",
+                                    "⚔ ROLLBACK · waiting for input",
                                 )
                                 .on_hover_text(
                                     "past the depth cap the sim waits instead of guessing \
@@ -2110,7 +2110,7 @@ impl Editor {
                                 // "delay 2 — 99% guessed" is the whole diagnosis
                                 // (floptle/0049).
                                 let line = format!(
-                                    "🥊 ROLLBACK · {} fighter(s) · delay {} · {:.0}% guessed",
+                                    "⚔ ROLLBACK · {} fighter(s) · delay {} · {:.0}% guessed",
                                     rb.fighters,
                                     rb.input_delay,
                                     rb.mispredict_rate * 100.0,
@@ -3024,7 +3024,7 @@ impl Editor {
                     .show(ui.ctx(), |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             ui.set_max_width(190.0);
-                            // ---- ⬢ Map tool: the operations for what's selected ----
+                            // ---- ▦ Map tool: the operations for what's selected ----
                             //
                             // Right-click is where people look for "what can I do to
                             // this?" — every one of these was previously a key you had

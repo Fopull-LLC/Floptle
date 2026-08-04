@@ -351,7 +351,7 @@ impl Editor {
 
     /// A capture completed while the Input settings were open: commit it and
     /// persist. Auto-committing is the behaviour people expect from
-    /// press-to-bind — click ＋, press the key, done.
+    /// press-to-bind — click ✚, press the key, done.
     pub(crate) fn settle_pending_rebind(&mut self, cancel: bool) {
         let sys = self.script_host.input_system().clone();
         let captured = sys.borrow().pending_rebind().and_then(|p| p.captured.clone());

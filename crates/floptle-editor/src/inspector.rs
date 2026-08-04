@@ -955,7 +955,7 @@ impl EditorTabViewer<'_> {
             ui.strong("⌖ Pivot");
             let mut editing = *self.pivot_edit;
             if ui
-                .selectable_label(editing, "✥ drag in view")
+                .selectable_label(editing, "⌖ drag in view")
                 .on_hover_text(
                     "move the rotation joint by dragging the gizmo in the Scene view \
                      instead of posing — turn off to pose around the new pivot",
@@ -1430,7 +1430,7 @@ impl EditorTabViewer<'_> {
                     if let Some(tags) = world.get::<floptle_core::Tags>(e) {
                         for t in &tags.0 {
                             if ui
-                                .small_button(format!("{t} ✕"))
+                                .small_button(format!("{t} ✖"))
                                 .on_hover_text("remove this tag")
                                 .clicked()
                             {
@@ -1536,7 +1536,7 @@ impl EditorTabViewer<'_> {
                             Matter::MapMesh { id } => {
                                 ui.label(format!("map mesh #{id}"));
                                 ui.small(
-                                    "editable blockout geometry — use the ⬢ Map tool (key 8) \
+                                    "editable blockout geometry — use the ▦ Map tool (key 8) \
                                      to edit faces/edges/verts, extrude, and assign per-face \
                                      materials; the Map tab has the shape ops",
                                 );
@@ -2582,7 +2582,7 @@ impl EditorTabViewer<'_> {
                 // ===== Celestial Body (on-rails orbit; only when the node has one) =====
                 if world.get::<floptle_core::CelestialBody>(e).is_some() {
                     ui.separator();
-                    let (_, _, remove) = component_header(ui, "🪐 Celestial Body", false, true);
+                    let (_, _, remove) = component_header(ui, "☉ Celestial Body", false, true);
                     if remove {
                         cmd.remove_celestial = Some(e);
                     }
@@ -3100,7 +3100,7 @@ impl EditorTabViewer<'_> {
                         .map(|i| nodes[i].name.clone());
                     ui.add_enabled_ui(sel_obj_name.is_some(), |ui| {
                         if ui
-                            .button("🦴 Rig selected object to flow")
+                            .button("🔗 Rig selected object to flow")
                             .on_hover_text(
                                 "Generate a soft bone-chain down the selected object and \
                                  auto-weight it (hair, cloth, antennae). Writes a new rigged \
@@ -3285,7 +3285,7 @@ impl EditorTabViewer<'_> {
                         items.push(("Physics", "♦  Rigidbody".into(), Add::Rb));
                     }
                     if world.get::<floptle_core::CelestialBody>(e).is_none() {
-                        items.push(("Physics", "🪐  Celestial Body (orbit rails)".into(), Add::Celestial));
+                        items.push(("Physics", "☉  Celestial Body (orbit rails)".into(), Add::Celestial));
                     }
                     if !has_net {
                         items.push(("Networking", "🌐  Networked".into(), Add::Net));

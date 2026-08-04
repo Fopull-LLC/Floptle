@@ -186,7 +186,7 @@ impl EditorTabViewer<'_> {
             ui.separator();
 
             // ---- snapping ----
-            ui.toggle_value(&mut self.ui_design.snap, "🧲")
+            ui.toggle_value(&mut self.ui_design.snap, "⊞")
                 .on_hover_text("snapping (guides, sibling edges, then the grid)");
             ui.add_enabled_ui(self.ui_design.snap, |ui| {
                 let step = self.ui_design.grid_step(self.ui_tokens);
@@ -197,7 +197,9 @@ impl EditorTabViewer<'_> {
                         .range(0.0..=256.0)
                         .prefix("grid ")
                         .custom_formatter(move |v, _| {
-                            if v <= 0.0 { format!("{step:.0} ⌁") } else { format!("{v:.0}") }
+                            // 0 means "follow the theme" — say so, rather than
+                            // showing a bare number that looks like a setting.
+                            if v <= 0.0 { format!("auto {step:.0}") } else { format!("{v:.0}") }
                         }),
                 );
                 if r.changed() {

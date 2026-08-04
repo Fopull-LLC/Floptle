@@ -203,7 +203,7 @@ impl Editor {
         let Some(stored) = decode(&bytes) else {
             self.console.push(
                 floptle_script::LogLevel::Error,
-                "🖌 texture paint file is unreadable (wrong magic/version) — ignoring".into(),
+                "◨ texture paint file is unreadable (wrong magic/version) — ignoring".into(),
                 None,
             );
             return;
@@ -261,7 +261,7 @@ impl Editor {
                 self.console.push(
                     floptle_script::LogLevel::Warn,
                     format!(
-                        "🖌 '{key}' changed since it was texture-painted — that node's paint \
+                        "◨ '{key}' changed since it was texture-painted — that node's paint \
                          was NOT applied (re-paint it, or restore the old model)"
                     ),
                     None,

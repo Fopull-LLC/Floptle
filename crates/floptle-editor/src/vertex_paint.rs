@@ -27,7 +27,7 @@ pub(crate) struct PaintViz {
 
 /// The paint value that leaves the surface unchanged. Brush paint modulates 2×, so
 /// mid-grey (0.5) is neutral, not white — a fresh block filled with this looks untouched
-/// until a dab lands, and "clear"/⌫ Erase return to it. Alpha stays fully opaque.
+/// until a dab lands, and "clear"/⊘ Erase return to it. Alpha stays fully opaque.
 /// `pub(crate)`: the texture-paint mirror blocks fill with it too.
 pub(crate) const NEUTRAL_PAINT: [u8; 4] = [128, 128, 128, 255];
 
@@ -63,7 +63,7 @@ pub(crate) struct PaintBlocks {
 }
 
 impl Editor {
-    /// Bring the 🖌 Paint tab to the front (re-adding it if closed), so choosing the
+    /// Bring the ◨ Paint tab to the front (re-adding it if closed), so choosing the
     /// tool never leaves the brush controls hidden behind another tab.
     pub(crate) fn focus_paint(&mut self) {
         if let Some(dock) = self.dock_state.as_mut() {
@@ -71,7 +71,7 @@ impl Editor {
         }
     }
 
-    /// Bring the ⬢ Map tab to the front (re-adding it if closed) — the Map
+    /// Bring the ▦ Map tab to the front (re-adding it if closed) — the Map
     /// tool's shape/op controls live there.
     pub(crate) fn focus_map(&mut self) {
         if let Some(dock) = self.dock_state.as_mut() {
@@ -523,7 +523,7 @@ impl Editor {
         }
     }
 
-    /// Flood every part of the selected node with the brush color. With ⌫ Erase active it
+    /// Flood every part of the selected node with the brush color. With ⊘ Erase active it
     /// floods NEUTRAL instead — the whole node back to unpainted.
     pub(crate) fn paint_fill_selected(&mut self) {
         if self.playing {

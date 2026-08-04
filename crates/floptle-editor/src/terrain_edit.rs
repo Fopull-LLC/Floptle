@@ -1460,7 +1460,7 @@ impl Editor {
                 if queued > 0 {
                     self.console.push(
                         floptle_script::LogLevel::Debug,
-                        format!("⛰ checkpoint: {queued} field(s) queued — saving in the background"),
+                        format!("Δ checkpoint: {queued} field(s) queued — saving in the background"),
                         None,
                     );
                 }
@@ -1481,7 +1481,7 @@ impl Editor {
                     Ok(Ok(bytes)) => self.console.push(
                         floptle_script::LogLevel::Debug,
                         format!(
-                            "⛰ checkpointed {} → save slot ({:.1} MB)",
+                            "Δ checkpointed {} → save slot ({:.1} MB)",
                             job.name,
                             bytes as f64 / 1e6
                         ),
@@ -1491,7 +1491,7 @@ impl Editor {
                         self.terrain_disk_dirty.insert(job.e); // NOT safely on disk
                         self.console.push(
                             floptle_script::LogLevel::Error,
-                            format!("⛰ checkpoint of {} FAILED: {err}", job.name),
+                            format!("Δ checkpoint of {} FAILED: {err}", job.name),
                             None,
                         );
                     }
@@ -1503,7 +1503,7 @@ impl Editor {
                         self.terrain_disk_dirty.insert(job.e);
                         self.console.push(
                             floptle_script::LogLevel::Error,
-                            format!("⛰ checkpoint writer for {} died — field kept dirty", job.name),
+                            format!("Δ checkpoint writer for {} died — field kept dirty", job.name),
                             None,
                         );
                     }
@@ -1601,7 +1601,7 @@ impl Editor {
                     self.terrain_disk_dirty.insert(job.e);
                     self.console.push(
                         floptle_script::LogLevel::Error,
-                        format!("⛰ checkpoint of {} FAILED: {err}", job.name),
+                        format!("Δ checkpoint of {} FAILED: {err}", job.name),
                         None,
                     );
                 }
@@ -1609,7 +1609,7 @@ impl Editor {
                     self.terrain_disk_dirty.insert(job.e);
                     self.console.push(
                         floptle_script::LogLevel::Error,
-                        format!("⛰ checkpoint writer for {} died — field kept dirty", job.name),
+                        format!("Δ checkpoint writer for {} died — field kept dirty", job.name),
                         None,
                     );
                 }
@@ -1652,7 +1652,7 @@ impl Editor {
         if wrote > 0 {
             self.console.push(
                 floptle_script::LogLevel::Debug,
-                format!("⛰ flushed {wrote} terrain field(s) to the save slot"),
+                format!("Δ flushed {wrote} terrain field(s) to the save slot"),
                 None,
             );
         }
@@ -1774,7 +1774,7 @@ impl Editor {
                 self.finish_terrain_load(e, t);
                 self.console.push(
                     floptle_script::LogLevel::Debug,
-                    format!("⛰ {name} terrain ready ({secs:.1}s)"),
+                    format!("Δ {name} terrain ready ({secs:.1}s)"),
                     None,
                 );
             }
@@ -1784,7 +1784,7 @@ impl Editor {
             self.console.push(
                 floptle_script::LogLevel::Error,
                 format!(
-                    "⛰ {name} terrain FAILED to stream (bad genspec, unreadable field, \
+                    "Δ {name} terrain FAILED to stream (bad genspec, unreadable field, \
                      or the generation crashed) — the body stays an impostor"
                 ),
                 None,
@@ -1944,7 +1944,7 @@ impl Editor {
             self.terrain_cold.remove(&e);
             self.console.push(
                 floptle_script::LogLevel::Warn,
-                format!("⛰ terrain id {id}: no field file and no genspec — impostor only"),
+                format!("Δ terrain id {id}: no field file and no genspec — impostor only"),
                 None,
             );
             return;
@@ -1957,9 +1957,9 @@ impl Editor {
         self.console.push(
             floptle_script::LogLevel::Debug,
             match &sources[0] {
-                TerrainSource::File(_) => format!("⛰ streaming {name} in (field file)…"),
+                TerrainSource::File(_) => format!("Δ streaming {name} in (field file)…"),
                 TerrainSource::Generate(_) => {
-                    format!("⛰ streaming {name} in (generating from its genspec)…")
+                    format!("Δ streaming {name} in (generating from its genspec)…")
                 }
             },
             None,
@@ -1988,7 +1988,7 @@ impl Editor {
                 self.console.push(
                     floptle_script::LogLevel::Warn,
                     format!(
-                        "⛰ terrain id {id}: no field file and no genspec — impostor only"
+                        "Δ terrain id {id}: no field file and no genspec — impostor only"
                     ),
                     None,
                 );
@@ -2035,7 +2035,7 @@ impl Editor {
             self.rebuild_sim();
             self.console.push(
                 floptle_script::LogLevel::Debug,
-                "⛰ terrain streamed in — collision live".into(),
+                "Δ terrain streamed in — collision live".into(),
                 None,
             );
         }

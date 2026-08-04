@@ -1324,62 +1324,51 @@ impl EditorTabViewer<'_> {
                  name or an example to copy it.",
             );
             ui.add_space(6.0);
-            // Groups open by default here: this is a BROWSER, and a wall of
-            // closed headers is a table of contents, not a reference.
-            for cat in API_CATEGORIES {
-                let entries: Vec<&ApiEntry> = LUA_API
-                    .iter()
-                    .filter(|e| api_category(e.label) == *cat)
-                    .filter(|e| {
-                        !searching
-                            || e.label.to_ascii_lowercase().contains(&q)
-                            || e.doc.to_ascii_lowercase().contains(&q)
-                    })
-                    .collect();
-                if entries.is_empty() {
-                    continue;
+            // SEARCHING is a different job from browsing. Grouped results make
+            // you scan every category for the one row you wanted, and with 500+
+            // entries a doc-text match in the first group buries an exact name
+            // match in the last. So while there's a query, rank everything into
+            // one flat list, best first, and label each row with the group it
+            // came from — you still learn where it lives, you just don't have
+            // to go looking.
+            if searching {
+                let mut ranked: Vec<(u8, &ApiEntry)> =
+                    LUA_API.iter().filter_map(|e| api_rank(e, &q).map(|r| (r, e))).collect();
+                ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.label.cmp(b.1.label)));
+                hits += ranked.len();
+                if !ranked.is_empty() {
+                    ui.small(format!(
+                        "{} match{} — best first",
+                        ranked.len(),
+                        if ranked.len() == 1 { "" } else { "es" }
+                    ));
+                    ui.add_space(4.0);
                 }
-                hits += entries.len();
-                let hdr = egui::CollapsingHeader::new(
-                    egui::RichText::new(format!("{cat}  ({})", entries.len())).strong(),
-                )
-                .id_salt(("api_cat", cat));
-                let hdr = if searching { hdr.open(Some(true)) } else { hdr.default_open(true) };
-                hdr.show(ui, |ui| {
-                    for e in entries {
-                        // The name copies on click — the shortest path from
-                        // "what was that called?" to having it in your script.
-                        let name = ui
-                            .add(
-                                egui::Label::new(
-                                    egui::RichText::new(e.label)
-                                        .monospace()
-                                        .color(egui::Color32::from_rgb(78, 201, 176)),
-                                )
-                                .sense(egui::Sense::click()),
-                            )
-                            .on_hover_text("click to copy");
-                        if name.clicked() {
-                            ui.ctx().copy_text(e.label.to_string());
-                        }
-                        ui.indent(("api_doc", e.label), |ui| {
-                            inline_doc_label(ui, e.doc, &egui::FontId::monospace(12.0));
-                            // A worked example beats a signature — the signature is
-                            // already in the line above.
-                            if let Some(ex) = api_example(e.label) {
-                                self.doc_body_ui(ui, &indent_block(ex));
-                                if ui
-                                    .small_button("⧉ copy example")
-                                    .on_hover_text("copy this snippet to the clipboard")
-                                    .clicked()
-                                {
-                                    ui.ctx().copy_text(ex.to_string());
-                                }
-                            }
-                        });
-                        ui.add_space(4.0);
+                for (_, e) in ranked {
+                    self.api_entry_ui(ui, e, true);
+                }
+            }
+            // …and with no query, the grouped browse. Groups open by default:
+            // this is a BROWSER, and a wall of closed headers is a table of
+            // contents, not a reference.
+            if !searching {
+                for cat in API_CATEGORIES {
+                    let entries: Vec<&ApiEntry> =
+                        LUA_API.iter().filter(|e| api_category(e.label) == *cat).collect();
+                    if entries.is_empty() {
+                        continue;
                     }
-                });
+                    egui::CollapsingHeader::new(
+                        egui::RichText::new(format!("{cat}  ({})", entries.len())).strong(),
+                    )
+                    .id_salt(("api_cat", cat))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for e in entries {
+                            self.api_entry_ui(ui, e, false);
+                        }
+                    });
+                }
             }
           }
           if page == DocsPage::Shaders {
@@ -1457,6 +1446,50 @@ impl EditorTabViewer<'_> {
         });
     }
 
+    /// One API entry: the name (click to copy), its description, and its worked
+    /// example if it has one.
+    ///
+    /// `with_group` adds the category it belongs to, which a flat search result
+    /// needs and a row already sitting under that category's header does not.
+    fn api_entry_ui(&mut self, ui: &mut egui::Ui, e: &ApiEntry, with_group: bool) {
+        ui.horizontal(|ui| {
+            // The name copies on click — the shortest path from "what was that
+            // called?" to having it in your script.
+            let name = ui
+                .add(
+                    egui::Label::new(
+                        egui::RichText::new(e.label)
+                            .monospace()
+                            .color(egui::Color32::from_rgb(78, 201, 176)),
+                    )
+                    .sense(egui::Sense::click()),
+                )
+                .on_hover_text("click to copy");
+            if name.clicked() {
+                ui.ctx().copy_text(e.label.to_string());
+            }
+            if with_group {
+                ui.weak(egui::RichText::new(api_category(e.label)).small());
+            }
+        });
+        ui.indent(("api_doc", e.label), |ui| {
+            inline_doc_label(ui, e.doc, &egui::FontId::monospace(12.0));
+            // A worked example beats a signature — the signature is already in
+            // the line above.
+            if let Some(ex) = api_example(e.label) {
+                self.doc_body_ui(ui, &indent_block(ex));
+                if ui
+                    .small_button("⎘ copy example")
+                    .on_hover_text("copy this snippet to the clipboard")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(ex.to_string());
+                }
+            }
+        });
+        ui.add_space(4.0);
+    }
+
     /// The code editor for open file `i`: toolbar, find/replace, shortcuts, the
     /// highlighted text area, diagnostics, autocomplete and the references panel.
     fn file_editor_ui(&mut self, ui: &mut egui::Ui, i: usize) {
@@ -1496,7 +1529,7 @@ impl EditorTabViewer<'_> {
             let is_lua_tab = self.ide.open[i].path.ends_with(".lua");
             if is_lua_tab {
                 if ui
-                    .button("⚏ Format")
+                    .button("▤ Format")
                     .on_hover_text(
                         "Alt+Shift+F — re-indent this file by block depth.\n\
                          Never changes anything but whitespace; `--@noformat` opts a file out.",
@@ -2282,7 +2315,7 @@ impl EditorTabViewer<'_> {
     /// byte offset — re-indenting shifts every offset after the first change, so a
     /// byte-restored caret lands somewhere else on every format.
     ///
-    /// One entry point for Alt+Shift+F, the ⚏ Format button and format-on-save, so
+    /// One entry point for Alt+Shift+F, the ▤ Format button and format-on-save, so
     /// all three behave identically.
     fn format_with_caret(&mut self, ui: &egui::Ui, i: usize, editor_id: egui::Id) {
         let caret = ide_selection(ui.ctx(), editor_id).map(|(_, _, c)| c);
@@ -2405,7 +2438,7 @@ impl EditorTabViewer<'_> {
         // one — which is the "nothing moves on its own" rule this editor is held to.
         if n == 0 {
             ui.label(
-                egui::RichText::new("✓ no warnings")
+                egui::RichText::new("✔ no warnings")
                     .small()
                     .color(ui.visuals().weak_text_color()),
             );
@@ -2435,7 +2468,7 @@ impl EditorTabViewer<'_> {
         egui::ScrollArea::vertical().max_height(110.0).id_salt(("lints", i)).show(ui, |ui| {
             for l in &self.ide.lints {
                 let icon = match l.kind {
-                    crate::lua_lint::LintKind::AccidentalGlobal => "✎",
+                    crate::lua_lint::LintKind::AccidentalGlobal => "✏",
                     crate::lua_lint::LintKind::UnusedLocal => "○",
                     crate::lua_lint::LintKind::UpvaluePressure => "▲",
                     // A suggestion, not a defect — its own mark so the strip
@@ -2571,7 +2604,7 @@ impl EditorTabViewer<'_> {
                         );
                     }
                     ui.small(
-                        egui::RichText::new("⏎ accept · ↑↓ choose · esc hide · ⇥ indents")
+                        egui::RichText::new("↵ accept · ↑↓ choose · esc hide · ⇥ indents")
                             .color(ui.visuals().weak_text_color()),
                     );
                 });
@@ -2928,22 +2961,89 @@ const API_CATEGORIES: &[&str] = &[
     // discoverability complaint this release is about, in miniature.
     "game UI — text, buttons & hooks",
     "networking — net.*, synced",
+    "scenes — load, unload & persist",
     "terrain — runtime sculpt & queries",
+    "water — depth, buoyancy & ice",
+    "scatter — instanced props",
+    "vessels — assembly.*",
+    "the camera & the screen",
+    "physics controls — pause & step",
     "persistence — save.*",
     "timers — after, every, tween",
     "space — orbits & time-warp",
     "components — getcomponent",
     "animation — node:animator",
+    "particles — effects from script",
     "audio — sounds & the mixer",
     "assets",
     "debug gizmos",
     "lua stdlib",
 ];
 
+/// How well an API entry answers `q` — lower is better, `None` is no match.
+///
+/// The ordering is the order someone actually wants: the thing you typed the
+/// name of, then things whose name begins that way, then the rest of the name
+/// matches, and only then a mention in the prose. Without it, typing "play"
+/// puts `anim:play` below every entry whose description happens to say "while
+/// playing", which is the difference between a search box and a filter.
+fn api_rank(e: &ApiEntry, q: &str) -> Option<u8> {
+    let label = e.label.to_ascii_lowercase();
+    // The name after the last `.` or `:` — what people type when they don't
+    // remember (or don't care) which table it hangs off.
+    let leaf = label.rsplit(['.', ':']).next().unwrap_or(&label);
+    if label == q {
+        Some(0)
+    } else if leaf == q {
+        Some(1)
+    } else if label.starts_with(q) || leaf.starts_with(q) {
+        Some(2)
+    } else if label.contains(q) {
+        Some(3)
+    } else if e.doc.to_ascii_lowercase().contains(q) {
+        Some(4)
+    } else {
+        None
+    }
+}
+
+/// Does `label` name a member of the handle conventionally called `holder`?
+///
+/// Matches `holder.field` and `holder:method` but not `holder` alone, and not
+/// a longer name that merely starts the same way — `mat.cell` is a Material
+/// handle, `math.clamp` is not.
+fn starts(label: &str, holder: &str) -> bool {
+    label
+        .strip_prefix(holder)
+        .is_some_and(|rest| rest.starts_with('.') || rest.starts_with(':'))
+}
+
 /// Which Docs-page group an API entry belongs to (by its label shape).
 fn api_category(label: &str) -> &'static str {
-    if label == "node:getcomponent" {
+    // Handle members first: these are prefixed by the local name a script
+    // conventionally binds the handle to (`local rb = node:getcomponent(...)`),
+    // so they must be matched before the broader `node.` / `math.` arms below.
+    if label == "node:getcomponent"
+        || starts(label, "rb")
+        || starts(label, "light")
+        || starts(label, "cam")
+        || starts(label, "mat")
+    {
         "components — getcomponent"
+    } else if starts(label, "el") || starts(label, "slider") || starts(label, "layer") {
+        "game UI — text, buttons & hooks"
+    } else if starts(label, "particles") || label == "node:particles" || label == "spawnEffect" {
+        "particles — effects from script"
+    } else if starts(label, "sound") || starts(label, "source") || starts(label, "track") {
+        "audio — sounds & the mixer"
+    } else if starts(label, "hit") {
+        "scene lookups & raycast"
+    } else if starts(label, "body") {
+        "space — orbits & time-warp"
+    } else if starts(label, "timer") {
+        "timers — after, every, tween"
+    } else if label == "rng" || starts(label, "rng") {
+        "lua stdlib"
     } else if matches!(
         label,
         "node.text"
@@ -2971,9 +3071,21 @@ fn api_category(label: &str) -> &'static str {
         "game UI — text, buttons & hooks"
     } else if matches!(label, "noderef" | "scriptref" | "componentref") {
         "references — wire nodes in the Inspector"
-    } else if label.starts_with("draw.") {
+    } else if label == "draw" || label.starts_with("draw.") {
         "drawing — draw.*"
-    } else if label.starts_with("account.") {
+    } else if label == "water" || label.starts_with("water.") {
+        "water — depth, buoyancy & ice"
+    } else if label == "scatter" || label.starts_with("scatter.") {
+        "scatter — instanced props"
+    } else if label == "assembly" || label.starts_with("assembly.") {
+        "vessels — assembly.*"
+    } else if label == "camera" || label.starts_with("camera.") {
+        "the camera & the screen"
+    } else if label == "physics" || label.starts_with("physics.") {
+        "physics controls — pause & step"
+    } else if label == "scene" || label.starts_with("scene.") {
+        "scenes — load, unload & persist"
+    } else if label == "account" || label.starts_with("account.") {
         "the player's account — account.*"
     } else if label.starts_with("http.") || label.starts_with("json.") || label == "openUrl" {
         "the web — http.*, json.*"
@@ -3012,11 +3124,11 @@ fn api_category(label: &str) -> &'static str {
         || matches!(label, "synced" | "replicated" | "onRpc" | "snapshot" | "restore")
     {
         "networking — net.*, synced"
-    } else if label.starts_with("save.") {
+    } else if label == "save" || label.starts_with("save.") {
         "persistence — save.*"
     } else if matches!(label, "after" | "every" | "tween") {
         "timers — after, every, tween"
-    } else if label.starts_with("space.") {
+    } else if label == "space" || label.starts_with("space.") {
         "space — orbits & time-warp"
     } else if label.starts_with("terrain") {
         "terrain — runtime sculpt & queries"
@@ -3028,13 +3140,94 @@ fn api_category(label: &str) -> &'static str {
         "assets"
     } else if label.starts_with("anim") {
         "animation — node:animator"
-    } else if label.starts_with("math") || label.starts_with("string") {
+    } else if label.starts_with("math") || label.starts_with("string") || label.starts_with("table")
+    {
         "lua stdlib"
-    } else if matches!(label, "find" | "findAll" | "findScript" | "findScriptInScene" | "findScripts" | "findTagged" | "raycast") {
+    } else if matches!(
+        label,
+        "find"
+            | "findAll"
+            | "findScript"
+            | "findScriptInScene"
+            | "findScripts"
+            | "findTagged"
+            | "raycast"
+            | "overlapSphere"
+            | "spherecast"
+            | "capsulecast"
+    ) {
         "scene lookups & raycast"
     } else {
         "script basics — lifecycle, params, log"
     }
+}
+
+/// Render the whole API reference as Markdown, for `docs/lua-api.md`.
+///
+/// Same table, same grouping and same examples as the editor's Docs tab, so
+/// the page you read on a website and the page you read in the tool cannot
+/// disagree. A test regenerates and diffs it (see `lua_api_reference_file_is_current`),
+/// which is also the only caller — the editor renders the table directly.
+#[cfg(test)]
+fn render_api_reference() -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    s.push_str(
+        "# Lua API reference\n\n\
+         Every name a script can reach, grouped the way the editor's **Docs** tab groups\n\
+         them. The same table drives this page, that tab, the hover docs and autocomplete —\n\
+         so there is one description of each call, in one place, and it is the one you get\n\
+         everywhere.\n\n\
+         *Generated — do not edit by hand.* Change the entry in `crates/floptle-editor/src/ide.rs`\n\
+         and run `UPDATE_DOCS=1 cargo test -p floptle-editor lua_api_reference_file`.\n\n\
+         New here? [`scripting.md`](scripting.md) is the guided tour — it teaches in order,\n\
+         with worked examples. This page is the reference: complete, alphabetical within\n\
+         each group, and meant to be searched.\n\n",
+    );
+
+    // Contents first: a reference you have to scroll is a reference you don't
+    // use. Counts included so the size of each area is obvious at a glance.
+    s.push_str("## Contents\n\n");
+    for cat in API_CATEGORIES {
+        let n = LUA_API.iter().filter(|e| api_category(e.label) == *cat).count();
+        if n == 0 {
+            continue;
+        }
+        let _ = writeln!(s, "- [{cat}](#{}) — {n}", anchor(cat));
+    }
+    s.push('\n');
+
+    for cat in API_CATEGORIES {
+        let mut entries: Vec<&ApiEntry> =
+            LUA_API.iter().filter(|e| api_category(e.label) == *cat).collect();
+        if entries.is_empty() {
+            continue;
+        }
+        entries.sort_by_key(|e| e.label);
+        let _ = writeln!(s, "## {cat}\n");
+        for e in entries {
+            let _ = writeln!(s, "### `{}`\n", e.label);
+            let _ = writeln!(s, "{}\n", e.doc);
+            if let Some((_, ex)) = API_EXAMPLES.iter().find(|(l, _)| *l == e.label) {
+                let _ = writeln!(s, "```lua\n{ex}\n```\n");
+            }
+        }
+    }
+    s
+}
+
+/// A GitHub-style heading anchor, so the contents links actually land.
+#[cfg(test)]
+fn anchor(title: &str) -> String {
+    title
+        .to_ascii_lowercase()
+        .chars()
+        .filter_map(|c| match c {
+            ' ' => Some('-'),
+            c if c.is_ascii_alphanumeric() || c == '-' || c == '_' => Some(c),
+            _ => None,
+        })
+        .collect()
 }
 
 /// One completion / docs entry for the in-engine IDE.
@@ -3718,6 +3911,208 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "color.hex", insert: "color.hex(\"#\")", doc: "color.hex(\"#ff8800\") / color.hex(\"ff8800aa\") — 6 or 8 hex digits. A 3-digit shorthand is refused rather than guessed at." },
     ApiEntry { label: "color.lerp", insert: "color.lerp(", doc: "color.lerp(a, b, t) — blend two colours per channel, t clamped to 0..1." },
     ApiEntry { label: "node.index", insert: "node.index", doc: "Which row of a UI repeater this node is, 0-based — nil on anything a repeater didn't spawn, so `if node.index then` is a fine \"am I a row\". Read the count with getcomponent(\"UiElement\").count on the container." },
+
+    // ---- Added by the API-coverage audit -------------------------------
+    // Every one of these is reachable from a script and had NO reference row:
+    // the whole of water.*, scatter.*, assembly.*, physics.*, the shape
+    // queries, half of draw.*, the gamepad calls, and sixteen table
+    // overviews. `lua_api_reference_covers_the_whole_surface` now fails if
+    // that gap ever reopens.
+    ApiEntry { label: "account", insert: "account", doc: "The signed-in player: account.signIn(), account.player(), and http verbs that carry the session. A script asks for a PLAYER, never for a token, and the server decides what that player owns." },
+    ApiEntry { label: "assembly", insert: "assembly", doc: "Multi-part vessels: hold forces and torques, split parts off, latch parts on, and read the compound's mass and centre of mass. A vessel is one physics body built from many nodes." },
+    ApiEntry { label: "assembly.force", insert: "assembly.force(", doc: "assembly.force(node, force) — a HELD force through the centre of mass, re-applied every tick until you change it (engines, thrusters). Through the CoM means no torque: the vessel accelerates without turning." },
+    ApiEntry { label: "assembly.forceAt", insert: "assembly.forceAt(", doc: "assembly.forceAt(node, force, at) — a held world-space force at a world point. Off the centre of mass it produces torque as well as acceleration, which is how an off-axis thruster makes a craft tumble — and how RCS steers it." },
+    ApiEntry { label: "assembly.impacts", insert: "assembly.impacts(", doc: "assembly.impacts(node) — the LAST tick's per-part contact loads: { part, impulse, speed, speedAbs, x, y, z }. What a damage model reads: how hard each part was hit and where." },
+    ApiEntry { label: "assembly.impulseAt", insert: "assembly.impulseAt(", doc: "assembly.impulseAt(node, impulse, at) — a one-shot kick at a world point, applied once rather than held. Explosions, collisions you resolve yourself, a docking clamp letting go." },
+    ApiEntry { label: "assembly.info", insert: "assembly.info(", doc: "assembly.info(node) — { mass, com, origin, vel, angVel, grounded, anchored, parts }. com is the world-space centre of mass as a vec3 — the number a flight controller, a CoM gizmo and a landing check all need." },
+    ApiEntry { label: "assembly.keepLive", insert: "assembly.keepLive(", doc: "assembly.keepLive(node, true) — exempt this compound from distant-craft LOD, so it keeps simulating in full even when nothing is near it. For the craft the player will come back to and expects to find where physics would have put it." },
+    ApiEntry { label: "assembly.merge", insert: "assembly.merge(", doc: "assembly.merge(node, other) — latch another assembly onto this one: docking, grabbing, a part snapping into place. The two become one physics body with one mass and one centre of mass." },
+    ApiEntry { label: "assembly.rebuild", insert: "assembly.rebuild(", doc: "assembly.rebuild(node) — re-gather the compound from the root's CURRENT children. Call it after you have added or removed part nodes yourself, so the physics body matches the scene again." },
+    ApiEntry { label: "assembly.setAnchored", insert: "assembly.setAnchored(", doc: "assembly.setAnchored(node, true) — pin the vessel exactly where it stands (a launch clamp, a craft on a pad, anything that must not drift while you build it). Release it and normal physics resumes." },
+    ApiEntry { label: "assembly.split", insert: "assembly.split(", doc: "assembly.split(node, parts [, fn] [, prefab]) — detach part nodes into their own assembly (stage separation, a wing coming off). The new assembly keeps the velocity it had, so debris carries on rather than appearing at rest." },
+    ApiEntry { label: "assembly.syncColliders", insert: "assembly.syncColliders(", doc: "assembly.syncColliders(node) — re-pose the compound's collision shapes to its parts' current transforms. Needed after you move parts around without a rebuild, or the vessel collides with where it used to be." },
+    ApiEntry { label: "assembly.teleport", insert: "assembly.teleport(", doc: "assembly.teleport(node, pos) — move the assembly origin to a world position, carrying every part with it. A teleport rather than a force: no acceleration, no tumble." },
+    ApiEntry { label: "assembly.torque", insert: "assembly.torque(", doc: "assembly.torque(node, t) — a held PURE torque, no linear push: reaction wheels, SAS, anything that turns a vessel without moving it." },
+    ApiEntry { label: "audio", insert: "audio", doc: "Sounds and the mixer: audio.play for one-shots, audio.track for a mixer bus, node:sound() for a node's Audio Source." },
+    ApiEntry { label: "camera", insert: "camera", doc: "The game camera's projection: viewport size and rect, world↔screen conversion, and picking rays. camera.screenRect shares its space with input.mouse(), which is why hit-testing works." },
+    ApiEntry { label: "camera.exists", insert: "camera.exists()", doc: "camera.exists() — true once a live game camera is being fed. Guard the other camera.* calls with it during the first frames, or while a scene without a camera is up." },
+    ApiEntry { label: "camera.screenRect", insert: "camera.screenRect()", doc: "camera.screenRect() -> x, y, w, h — the game viewport in the SAME space as input.mouse() and camera.worldToScreen, offset included. That shared space is the only reason hit-testing the mouse against a projected point works; screenSize alone would be wrong wherever the viewport isn't at the window origin." },
+    ApiEntry { label: "capsulecast", insert: "capsulecast(", doc: "capsulecast(origin, dir, radius, halfHeight, max [, opts]) — the player-shaped sweep: \"can I actually move there\", asked with the shape that will be moving. Upright along the capsule's own axis, matching how the solver keeps a capsule body aligned, so the cast and the move agree." },
+    ApiEntry { label: "draw", insert: "draw", doc: "The GAME's telegraph layer — 3D lines/shapes and screen-space rects, circles and text that SHIP with your game. gizmo.* is the debug-only twin that never appears for a player." },
+    ApiEntry { label: "draw.box", insert: "draw.box(", doc: "draw.box(cx,cy,cz, hx,hy,hz, yaw, r,g,b [,a]) — a yaw-rotated wireframe box from half-extents. Trigger volumes, build footprints, an attach point." },
+    ApiEntry { label: "draw.cone", insert: "draw.cone(", doc: "draw.cone(bx,by,bz, dx,dy,dz, radius, height, r,g,b [,a]) — a SOLID cone: base disc at b, apex `height` along the unit direction d. Gizmo arrowheads, thruster plumes, direction markers." },
+    ApiEntry { label: "draw.disc", insert: "draw.disc(", doc: "draw.disc(cx,cy,cz, nx,ny,nz, r0, r1, r,g,b [,a]) — a filled annulus around normal n (r0 = inner, r1 = outer; r0 = 0 gives a full disc). Rotation gizmo bands, ground markers." },
+    ApiEntry { label: "draw.rect", insert: "draw.rect(", doc: "draw.rect(x, y, w, h, r,g,b [,a] [,radius]) — a filled rectangle in SCREEN PIXELS, in input.mouse()'s space. An RTS marquee is just the two corners you dragged between — the 3D version has to be projected onto a ground plane, which fights the camera angle and misses whatever the plane doesn't cross." },
+    ApiEntry { label: "draw.rectOutline", insert: "draw.rectOutline(", doc: "draw.rectOutline(x, y, w, h, r,g,b [,a] [,thickness]) — the hollow twin of draw.rect. The last number is the border thickness rather than a corner radius." },
+    ApiEntry { label: "draw.ring", insert: "draw.ring(", doc: "draw.ring(cx,cy,cz, nx,ny,nz, radius, r,g,b [,a]) — a circle around normal n at c. Range rings, selection circles, an area-of-effect telegraph." },
+    ApiEntry { label: "draw.sphere", insert: "draw.sphere(", doc: "draw.sphere(cx,cy,cz, radius, r,g,b [,a]) — three rings, i.e. a wireframe ball. Cheap enough to draw per-frame for every marker on screen." },
+    ApiEntry { label: "draw.tri", insert: "draw.tri(", doc: "draw.tri(x1,y1,z1, x2,y2,z2, x3,y3,z3, r,g,b [,a]) — one filled triangle. The raw primitive under the solid shapes, for when you want your own." },
+    ApiEntry { label: "http", insert: "http", doc: "Talk to a web server: http.get / post / put / delete, plus json.*. Every call is asynchronous — the reply arrives in a callback, never as a return value." },
+    ApiEntry { label: "input.cancelRebind", insert: "input.cancelRebind()", doc: "input.cancelRebind() — abandon a rebind in progress, leaving the old binding alone." },
+    ApiEntry { label: "input.commitRebind", insert: "input.commitRebind()", doc: "input.commitRebind() — accept the captured binding. Returns false if nothing was captured yet." },
+    ApiEntry { label: "input.facing", insert: "input.facing()", doc: "input.facing() — which way this player's character is facing, as -1 or 1. The fighter layer mirrors directional input by it, so \"forward\" means toward the opponent on both sides of the screen." },
+    ApiEntry { label: "input.padAxis", insert: "input.padAxis(", doc: "input.padAxis(1, \"leftx\") — read a pad axis raw, -1..1, past the action map. Same diagnostic purpose as input.padButton; bind through actions for real gameplay." },
+    ApiEntry { label: "input.padButton", insert: "input.padButton(", doc: "input.padButton(1, \"a\") — read a pad button RAW, straight past the action map. Deliberately unmediated: this is what distinguishes \"your pad works, your bindings are wrong\" from \"your pad is not here\"." },
+    ApiEntry { label: "input.padCount", insert: "input.padCount()", doc: "input.padCount() — how many gamepads are connected. The quick check behind a \"press a button to join\" prompt." },
+    ApiEntry { label: "input.pads", insert: "input.pads()", doc: "input.pads() — every gamepad the engine has enumerated: { index, name, connected }. Show it in your options screen; \"the pad isn't listed\" and \"the pad is listed but nothing is bound\" are different problems and only this can tell them apart." },
+    ApiEntry { label: "input.pendingRebind", insert: "input.pendingRebind()", doc: "input.pendingRebind() — the captured chip text once something has been pressed, an EMPTY string while still waiting, or nil when no rebind is running. Enough for a menu to show \"press any button…\" and then the result." },
+    ApiEntry { label: "json", insert: "json", doc: "json.encode(t) and json.decode(s) — the wire format for http.*. decode returns nil, message on bad input rather than raising, because a reply from someone else's server is data, not a bug in your script." },
+    ApiEntry { label: "net", insert: "net", doc: "Multiplayer: host and join, synced state, RPCs, ownership (net.isMine), and the rollback readouts. Open netcode — you can self-host the relay." },
+    ApiEntry { label: "overlapSphere", insert: "overlapSphere(", doc: "overlapSphere(center, radius [, opts]) — everything inside a sphere, DEEPEST overlap first, as hit tables ({x,y,z, nx,ny,nz, distance, node}). Reports static geometry AND body hulls. opts takes { exclude = node, layers = {\"Enemies\"} }. The blast-radius / \"what is in this area\" query." },
+    ApiEntry { label: "physics", insert: "physics", doc: "Sim controls: physics.pause(true) freezes the whole gameplay tick while scripts keep running (pause menus, cutscenes, loading screens), and physics.step() advances it one tick at a time." },
+    ApiEntry { label: "physics.isPaused", insert: "physics.isPaused()", doc: "physics.isPaused() — whether the sim is currently frozen, including when the editor froze it rather than your script." },
+    ApiEntry { label: "physics.pause", insert: "physics.pause(", doc: "physics.pause(true) — freeze the whole gameplay tick while scripts keep running. Pause menus, cutscenes and loading screens are this call: the world stops, your UI doesn't." },
+    ApiEntry { label: "physics.step", insert: "physics.step([n])", doc: "physics.step([n]) — advance the frozen tick n times (default 1, max 600) — the same thing the editor's frame-step button does, so a game can build its own training mode. Call it from update: a fixedUpdate caller would never get a second turn, because the tick it is waiting for is the one it just stopped." },
+    ApiEntry { label: "save", insert: "save", doc: "The persistent store: save.set / save.get, named slots, and flushing to disk. Values are capped at about a kilobyte each — store the small fact, not the whole world." },
+    ApiEntry { label: "scatter", insert: "scatter", doc: "Thousands of props from a seed — GPU-instanced, with no scene node anywhere in it. Your generator still decides WHAT grows where; the engine decides where each instance stands and draws them. scatter.create declares a source, scatter.remove harvests one." },
+    ApiEntry { label: "scatter.create", insert: "scatter.create{", doc: "scatter.create{ asset = \"tree.glb\", seed = 7, perChunk = 24, chunk = 16 } — declare a source, get its id. Region: center + radius for a sphere (a planet), or center + halfX/halfZ for ground. Also scaleMin/scaleMax, align = \"surface\" (default) or \"world\", fade, and lod = { {asset=, distance=}, ... } nearest-first. Placement is a pure function of the seed, so every machine and every session grows the SAME forest without storing one." },
+    ApiEntry { label: "scatter.destroy", insert: "scatter.destroy(", doc: "scatter.destroy(id) — remove a whole source and everything it was drawing. Returns true if there was one." },
+    ApiEntry { label: "scatter.near", insert: "scatter.near(", doc: "scatter.near(sourceId, point, radius) — the instances around a point, nearest first: { id, pos, distance, scale, param }. What a harvest verb aims with, and what a \"is there room to build here\" check reads." },
+    ApiEntry { label: "scatter.remove", insert: "scatter.remove(", doc: "scatter.remove(sourceId, instanceId) — take one prop out, permanently. By id rather than by position, which is what makes it survive streaming out and back in: an id comes from (seed, chunk, index), a position is a float off the end of a chain of arithmetic." },
+    ApiEntry { label: "scatter.removed", insert: "scatter.removed(", doc: "scatter.removed(sourceId) — the sorted ids this source has lost. A game that wants permanence saves THIS — a handful of numbers — not every plant it ever saw, which is what made permanence unstorable before (save values are capped at about a kilobyte)." },
+    ApiEntry { label: "scatter.restore", insert: "scatter.restore(", doc: "scatter.restore(sourceId [, instanceId]) — put one prop back, or all of them when the instance is omitted (returns how many). This is what \"the forest regrows after fifteen minutes\" is, without your game having to remember what it cut." },
+    ApiEntry { label: "scene", insert: "scene", doc: "Which world is loaded: scene.load / scene.unload, additive layers, and scene.onLoaded. Pair with node.persistent to carry a node across a swap." },
+    ApiEntry { label: "scene.onLoaded", insert: "scene.onLoaded(", doc: "scene.onLoaded(function(name, additive) ... end) — run something once a scene has finished loading. Fires AFTER the world is whole, because a loading screen's whole job is to go away once the thing it was covering exists." },
+    ApiEntry { label: "scene.unload", insert: "scene.unload(", doc: "scene.unload(\"Shop\") — remove a scene that was loaded additively, and everything under it. The other half of scene.load{ additive = true }." },
+    ApiEntry { label: "space", insert: "space", doc: "On-rails celestial mechanics: where the bodies are, which one's gravity owns a point, the orbit a craft is on, and time-warp." },
+    ApiEntry { label: "space.body", insert: "space.body(", doc: "space.body(\"Pebble\") — one celestial body by node name: { name, x,y,z, vx,vy,vz, mu, radius, soi } in world coordinates, or nil. space.bodies() returns them all." },
+    ApiEntry { label: "spherecast", insert: "spherecast(", doc: "spherecast(origin, dir, radius, max [, opts]) — the first thing a moving BALL of that radius would hit, or nil. A raycast that can't slip through a gap narrower than the thing you are actually moving." },
+    ApiEntry { label: "terrain", insert: "terrain", doc: "Runtime sculpting and queries against the SDF terrain: dig, sculpt, paint, ask what is under a point, and persist edits per save slot." },
+    ApiEntry { label: "terrain.slotAt", insert: "terrain.slotAt(", doc: "terrain.slotAt(x, y, z) — the texture-palette slot at a world point, or nil where the field is untextured. The material half of the question terrain.query answers the distance half of: survey before you cut, and let a footstep know what it is standing on." },
+    ApiEntry { label: "terrain.yields", insert: "terrain.yields()", doc: "terrain.yields() — drains what recent digs actually removed: { id, removed, added, untextured, slots }, with slots mapping palette slot to volume. This is how mining pays out by MATERIAL — you get ore because you cut rock that was painted as ore." },
+    ApiEntry { label: "ui", insert: "ui", doc: "Screen UI from scripts: ui.on / ui.events for input, ui.bind for data, ui.make for whole trees. See the game-UI section for the full set." },
+    ApiEntry { label: "water", insert: "water", doc: "Water volumes: how deep a point is (water.depthAt), what is in the water (water.at), freezing and thawing (water.setFrozen). The engine already does buoyancy and drag — these are the questions a GAME still has to answer: swimming, drowning, flooding, a gauge going red." },
+    ApiEntry { label: "water.at", insert: "water.at(", doc: "water.at(point) — nil in air, else { depth, density, frozen, node, up }. `up` is the way OUT of the water (radial on a sea, the pool's own +Y) — what a swim controller pushes along, and NOT the same as -gravity in a tilted tank. Innermost volume wins, so a tank inside an ocean answers as the tank." },
+    ApiEntry { label: "water.depthAt", insert: "water.depthAt(", doc: "water.depthAt(x, y, z) — or a vec3, or a node. Metres BELOW the surface at that point; 0 in air. The one number everything else is derived from, and it is the same rule the solver uses, so a swim state can never disagree with the physics that floats you. A frozen volume reads 0 everywhere." },
+    ApiEntry { label: "water.isUnderwater", insert: "water.isUnderwater(", doc: "water.isUnderwater(point) — the yes/no, for when you don't need the depth. Takes x,y,z or a vec3 or a node: if water.isUnderwater(node) then stamina = stamina - dt end" },
+    ApiEntry { label: "water.setFrozen", insert: "water.setFrozen(", doc: "water.setFrozen(node, true) — freeze a water volume. Freezing is a STATE, not a second system: the same node with a flag flipped, and both the physics (no buoyancy, no drag) and the look follow from it. A world that thaws is one call back." },
+    ApiEntry { label: "water.volumes", insert: "water.volumes()", doc: "water.volumes() — every body of water in the scene, as node handles. What a climate or weather system iterates when it wants to know where the seas are." },
+
+    // ---- Handle members ------------------------------------------------
+    // Everything reachable THROUGH a handle rather than by name: the component
+    // handles `node:getcomponent` returns, the sound/track/particle handles,
+    // vec3/vec2's own methods, a raycast hit's fields. `api_surface()` cannot
+    // see these — they live on metatables and userdata — so they are checked
+    // against the editor's own EmmyLua annotations instead, which is where
+    // their descriptions come from.
+    ApiEntry { label: "body.mu", insert: "body.mu", doc: "Gravitational parameter µ = GM." },
+    ApiEntry { label: "body.name", insert: "body.name", doc: "The celestial body's node name — what space.body() takes and space.dominant() returns." },
+    ApiEntry { label: "body.radius", insert: "body.radius", doc: "Physical surface radius." },
+    ApiEntry { label: "body.soi", insert: "body.soi", doc: "Sphere-of-influence radius (-1 = infinite, the root)." },
+    ApiEntry { label: "body.vx", insert: "body.vx", doc: "World velocity X — the body's own motion along its rails, which a rendezvous has to match." },
+    ApiEntry { label: "body.vy", insert: "body.vy", doc: "World velocity Y." },
+    ApiEntry { label: "body.vz", insert: "body.vz", doc: "World velocity Z." },
+    ApiEntry { label: "body.x", insert: "body.x", doc: "World X of the body's centre this tick." },
+    ApiEntry { label: "body.y", insert: "body.y", doc: "World Y of the body's centre." },
+    ApiEntry { label: "body.z", insert: "body.z", doc: "World Z of the body's centre." },
+    ApiEntry { label: "cam.active", insert: "cam.active", doc: "The play-mode view camera (1/0) — assign true to switch to it." },
+    ApiEntry { label: "cam.fovY", insert: "cam.fovY", doc: "Vertical field of view, radians." },
+    ApiEntry { label: "el.border", insert: "el.border", doc: "Shape border thickness (design units)." },
+    ApiEntry { label: "el.cell", insert: "el.cell", doc: "Spritesheet cell index the image shows (set per frame for sprite animation)." },
+    ApiEntry { label: "el.fillA", insert: "el.fillA", doc: "Shape fill alpha 0..1." },
+    ApiEntry { label: "el.fillB", insert: "el.fillB", doc: "Shape fill blue 0..1." },
+    ApiEntry { label: "el.fillG", insert: "el.fillG", doc: "Shape fill green 0..1." },
+    ApiEntry { label: "el.fillR", insert: "el.fillR", doc: "Shape fill red 0..1." },
+    ApiEntry { label: "el.height", insert: "el.height", doc: "Height (same rules as width)." },
+    ApiEntry { label: "el.opacity", insert: "el.opacity", doc: "Multiplies every color the element draws, 0..1." },
+    ApiEntry { label: "el.posX", insert: "el.posX", doc: "Free position X / Pin offset X (design units)." },
+    ApiEntry { label: "el.posY", insert: "el.posY", doc: "Free position Y / Pin offset Y (design units)." },
+    ApiEntry { label: "el.radius", insert: "el.radius", doc: "Shape corner radius (design units)." },
+    ApiEntry { label: "el.scrollY", insert: "el.scrollY", doc: "Scroll-view position, design units (0 = top; the wheel drives it too, clamped to the content). Present only on elements with the scroll-view option." },
+    ApiEntry { label: "el.textA", insert: "el.textA", doc: "Text color alpha 0..1." },
+    ApiEntry { label: "el.textB", insert: "el.textB", doc: "Text color blue 0..1." },
+    ApiEntry { label: "el.textG", insert: "el.textG", doc: "Text color green 0..1." },
+    ApiEntry { label: "el.textR", insert: "el.textR", doc: "Text color red 0..1." },
+    ApiEntry { label: "el.textSize", insert: "el.textSize", doc: "Text glyph size (design units; ignored while fit is on)." },
+    ApiEntry { label: "el.tintA", insert: "el.tintA", doc: "Image tint alpha 0..1." },
+    ApiEntry { label: "el.tintB", insert: "el.tintB", doc: "Image tint blue 0..1." },
+    ApiEntry { label: "el.tintG", insert: "el.tintG", doc: "Image tint green 0..1." },
+    ApiEntry { label: "el.tintR", insert: "el.tintR", doc: "Image tint red 0..1." },
+    ApiEntry { label: "el.visible", insert: "el.visible", doc: "Shown (1/0; assign true/false)." },
+    ApiEntry { label: "el.width", insert: "el.width", doc: "Width in the axis's sizing mode (px value, % fraction, or grow weight). Absent (nil) on a fit axis; writing one makes it fixed px." },
+    ApiEntry { label: "hit.nx", insert: "hit.nx", doc: "Contact normal X (unit, out of the hit surface)." },
+    ApiEntry { label: "hit.ny", insert: "hit.ny", doc: "Contact normal Y." },
+    ApiEntry { label: "hit.nz", insert: "hit.nz", doc: "Contact normal Z." },
+    ApiEntry { label: "hit.x", insert: "hit.x", doc: "Contact point X (world)." },
+    ApiEntry { label: "hit.y", insert: "hit.y", doc: "Contact point Y (world)." },
+    ApiEntry { label: "hit.z", insert: "hit.z", doc: "Contact point Z (world)." },
+    ApiEntry { label: "layer.designHeight", insert: "layer.designHeight", doc: "Design units that span the window height." },
+    ApiEntry { label: "layer.enabled", insert: "layer.enabled", doc: "Master switch (1/0; assign true/false) — an off layer draws nothing." },
+    ApiEntry { label: "layer.worldSpace", insert: "layer.worldSpace", doc: "1 = a panel inside the 3D world at this node's transform; 0 = a screen overlay." },
+    ApiEntry { label: "layer.z", insert: "layer.z", doc: "Draw order: lowest z first." },
+    ApiEntry { label: "light.b", insert: "light.b", doc: "Color blue 0..1." },
+    ApiEntry { label: "light.g", insert: "light.g", doc: "Color green 0..1." },
+    ApiEntry { label: "light.intensity", insert: "light.intensity", doc: "Brightness multiplier." },
+    ApiEntry { label: "light.r", insert: "light.r", doc: "Color red 0..1." },
+    ApiEntry { label: "light.range", insert: "light.range", doc: "Reach in world units." },
+    ApiEntry { label: "mat.cell", insert: "mat.cell", doc: "Which cell of the sheet draws (row-major from the top-left; clamped into the grid)." },
+    ApiEntry { label: "mat.sheetCols", insert: "mat.sheetCols", doc: "Sheet columns (0 = not a sheet — the whole texture)." },
+    ApiEntry { label: "mat.sheetRows", insert: "mat.sheetRows", doc: "Sheet rows." },
+    ApiEntry { label: "rb.friction", insert: "rb.friction", doc: "Surface friction 0..1 (0 = frictionless)." },
+    ApiEntry { label: "rb.gravity", insert: "rb.gravity", doc: "Gravity pull on this body (1/0; assign true/false)." },
+    ApiEntry { label: "rb.half_x", insert: "rb.half_x", doc: "Box half-extent X." },
+    ApiEntry { label: "rb.half_y", insert: "rb.half_y", doc: "Box half-extent Y." },
+    ApiEntry { label: "rb.half_z", insert: "rb.half_z", doc: "Box half-extent Z." },
+    ApiEntry { label: "rb.height", insert: "rb.height", doc: "Capsule total height." },
+    ApiEntry { label: "rb.kinematic", insert: "rb.kinematic", doc: "Transform-driven mode (1/0; assign true/false, live): never falls or gets pushed, but PUSHES dynamic bodies — platforms, elevators, grabbed objects. (Static mode is the Inspector dropdown — a baked collider, nothing to toggle here.)" },
+    ApiEntry { label: "rb.lock_rot_x", insert: "rb.lock_rot_x", doc: "Freeze rotation about X (1/0)." },
+    ApiEntry { label: "rb.lock_rot_y", insert: "rb.lock_rot_y", doc: "Freeze rotation about Y (1/0)." },
+    ApiEntry { label: "rb.lock_rot_z", insert: "rb.lock_rot_z", doc: "Freeze rotation about Z (1/0)." },
+    ApiEntry { label: "rb.lock_x", insert: "rb.lock_x", doc: "Freeze world X translation (1/0)." },
+    ApiEntry { label: "rb.lock_y", insert: "rb.lock_y", doc: "Freeze world Y translation (1/0)." },
+    ApiEntry { label: "rb.lock_z", insert: "rb.lock_z", doc: "Freeze world Z translation (1/0)." },
+    ApiEntry { label: "rb.radius", insert: "rb.radius", doc: "Sphere/capsule radius." },
+    ApiEntry { label: "rb.restitution", insert: "rb.restitution", doc: "Bounciness 0..1 (0 = no bounce)." },
+    ApiEntry { label: "rb.shape", insert: "rb.shape", doc: "Body shape: 0 = sphere, 1 = capsule, 2 = box." },
+    ApiEntry { label: "rng:int", insert: "rng:int(", doc: "Uniform integer in [a, b] inclusive." },
+    ApiEntry { label: "rng:next", insert: "rng:next(", doc: "Uniform in [0, 1)." },
+    ApiEntry { label: "rng:pick", insert: "rng:pick(", doc: "A uniform element of `list` (nil if empty)." },
+    ApiEntry { label: "rng:range", insert: "rng:range(", doc: "Uniform in [a, b)." },
+    ApiEntry { label: "slider.max", insert: "slider.max", doc: "Range end." },
+    ApiEntry { label: "slider.min", insert: "slider.min", doc: "Range start." },
+    ApiEntry { label: "slider.value", insert: "slider.value", doc: "Current value (clamped to min..max at draw time)." },
+    ApiEntry { label: "sound:isPlaying", insert: "sound:isPlaying(", doc: "Still audible (false once finished)?" },
+    ApiEntry { label: "sound:pause", insert: "sound:pause(", doc: "Freeze playback." },
+    ApiEntry { label: "sound:position", insert: "sound:position(", doc: "Playhead in seconds." },
+    ApiEntry { label: "sound:resume", insert: "sound:resume(", doc: "Continue a paused sound." },
+    ApiEntry { label: "sound:seek", insert: "sound:seek(", doc: "Jump the playhead to a time in seconds." },
+    ApiEntry { label: "sound:setPan", insert: "sound:setPan(", doc: "Stereo pan −1..1 (non-spatial sounds)." },
+    ApiEntry { label: "sound:setPitch", insert: "sound:setPitch(", doc: "Playback-rate pitch (0.5 = octave down, 2 = octave up)." },
+    ApiEntry { label: "sound:setPosition", insert: "sound:setPosition(", doc: "Move the emitter (stops following a node)." },
+    ApiEntry { label: "sound:setTrack", insert: "sound:setTrack(", doc: "Re-route through a mixer track (\\\"Master\\\" or a track name)." },
+    ApiEntry { label: "sound:setVolume", insert: "sound:setVolume(", doc: "Linear volume (1 = as authored)." },
+    ApiEntry { label: "sound:stop", insert: "sound:stop(", doc: "Fade the sound out and end it." },
+    ApiEntry { label: "source:isPlaying", insert: "source:isPlaying(", doc: "Is the source audible right now?" },
+    ApiEntry { label: "source:pause", insert: "source:pause(", doc: "Freeze playback (resume continues from here)." },
+    ApiEntry { label: "source:play", insert: "source:play(", doc: "Play the source's clip from the start (restarts if already playing)." },
+    ApiEntry { label: "source:position", insert: "source:position(", doc: "Playhead in seconds." },
+    ApiEntry { label: "source:resume", insert: "source:resume(", doc: "Continue a paused sound." },
+    ApiEntry { label: "source:seek", insert: "source:seek(", doc: "Jump the playhead to a time in seconds." },
+    ApiEntry { label: "source:setClip", insert: "source:setClip(", doc: "Swap the clip (project-relative path like \\\"audio/steps.ogg\\\"); restarts playback if playing." },
+    ApiEntry { label: "source:stop", insert: "source:stop(", doc: "Fade the sound out (a few ms — no click)." },
+    ApiEntry { label: "timer:cancel", insert: "timer:cancel(", doc: "timer:cancel() — stop a pending after / every / tween. The handle those three return exists for exactly this: local h = every(1, tick) ... h:cancel()." },
+    ApiEntry { label: "track:setMuted", insert: "track:setMuted(", doc: "Mute / unmute the track." },
+    ApiEntry { label: "track:setPan", insert: "track:setPan(", doc: "Stereo pan −1..1." },
+    ApiEntry { label: "track:setSoloed", insert: "track:setSoloed(", doc: "Solo the track (mutes everything else)." },
+    ApiEntry { label: "track:setVolume", insert: "track:setVolume(", doc: "Fader gain in dB (0 = unity, −60 = silent)." },
+    ApiEntry { label: "vec2.x", insert: "vec2.x", doc: "The vector's X." },
+    ApiEntry { label: "vec2.y", insert: "vec2.y", doc: "The vector's Y." },
+    ApiEntry { label: "vec2:distance", insert: "vec2:distance(", doc: "vec2:distance(other) — the distance between two 2-D points." },
+    ApiEntry { label: "vec2:dot", insert: "vec2:dot(", doc: "vec2:dot(other) — the dot product; the cosine of the angle when both are unit length." },
+    ApiEntry { label: "vec2:length", insert: "vec2:length(", doc: "vec2:length() — how long the 2-D vector is." },
+    ApiEntry { label: "vec2:lengthSquared", insert: "vec2:lengthSquared(", doc: "vec2:lengthSquared() — length without the square root, for comparisons." },
+    ApiEntry { label: "vec2:lerp", insert: "vec2:lerp(", doc: "vec2:lerp(other, t) — a straight-line blend from this (t = 0) to other (t = 1)." },
+    ApiEntry { label: "vec2:normalized", insert: "vec2:normalized(", doc: "vec2:normalized() — a unit-length copy, pointing the same way. Zero stays zero rather than becoming a NaN." },
+    ApiEntry { label: "vec3.x", insert: "vec3.x", doc: "The vector's X. Vectors are values, not handles — writing v.x = 5 changes that vector, not whatever it came from." },
+    ApiEntry { label: "vec3.y", insert: "vec3.y", doc: "The vector's Y." },
+    ApiEntry { label: "vec3.z", insert: "vec3.z", doc: "The vector's Z." },
+    ApiEntry { label: "vec3:cross", insert: "vec3:cross(", doc: "vec3:cross(other) — a vector perpendicular to both, right-handed. The way to build a basis, or to ask which side of a plane something is on." },
+    ApiEntry { label: "vec3:distance", insert: "vec3:distance(", doc: "vec3:distance(other) — the distance between two points. Reads better than (a - b):length() and does the same thing." },
+    ApiEntry { label: "vec3:dot", insert: "vec3:dot(", doc: "vec3:dot(other) — the dot product. With unit vectors it is the cosine of the angle between them: node.forward:dot(toEnemy) > 0.7 is a 45° cone in front." },
+    ApiEntry { label: "vec3:length", insert: "vec3:length(", doc: "vec3:length() — how long the vector is. The distance form of a difference: (b - a):length()." },
+    ApiEntry { label: "vec3:lengthSquared", insert: "vec3:lengthSquared(", doc: "vec3:lengthSquared() — length without the square root. Compare distances with it (d2 < r*r) and skip the expensive part." },
+    ApiEntry { label: "vec3:lerp", insert: "vec3:lerp(", doc: "vec3:lerp(other, t) — a straight-line blend, t from 0 (this) to 1 (other). The one-liner behind smooth camera and marker movement." },
+    ApiEntry { label: "vec3:normalized", insert: "vec3:normalized(", doc: "Unit-length copy (zero stays zero)." },
 ];
 
 /// The built-in Scripting docs, shown on the IDE's Docs page as searchable
@@ -3794,7 +4189,7 @@ in Lua, so a leaked 0 would have been permanently `true`.)",
         "\
 ## Formatting
 
-**Alt+Shift+F** formats the open file, or tick **on save** next to the ⚏ Format
+**Alt+Shift+F** formats the open file, or tick **on save** next to the ▤ Format
 button. It re-indents by real block depth and fixes whitespace, and it changes
 NOTHING else — no re-flowed expressions, no realigned comments, no moved code. Your
 line stays your line.
@@ -4126,7 +4521,7 @@ never during prediction replays, so they can't double-fire on corrections.",
         "\
 A PREFAB is a reusable node (with its whole child subtree) saved as an asset:
 drag a node from the Hierarchy into the Assets panel (or right-click it →
-⬡ Save as Prefab). Place instances by dragging the prefab into the viewport,
+◇ Save as Prefab). Place instances by dragging the prefab into the viewport,
 onto a Hierarchy row (spawns as a child), or right-click → Add to scene.
 
 Scripts spawn and remove them at runtime:
@@ -4445,6 +4840,175 @@ that take move orders, click/box select), rotate.lua, pulsate.lua, float.lua
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Everything a script can reach by name must have a reference entry.
+    ///
+    /// The list of names comes from [`floptle_script::ScriptHost::api_surface`],
+    /// which diffs a live Lua state against a bare one — so this is checked
+    /// against what the engine ACTUALLY installs, never against a second list
+    /// that could rot in the same direction as the first.
+    ///
+    /// It found 69 undocumented names the first time it ran: the whole of
+    /// `water.*`, `scatter.*`, `assembly.*` and `physics.*`, the shape queries,
+    /// most of the solid `draw.*` shapes, the gamepad calls, and sixteen tables
+    /// with no overview at all. An API nobody can find is one nobody has.
+    #[test]
+    fn lua_api_reference_covers_the_whole_surface() {
+        let documented: std::collections::HashSet<&str> =
+            LUA_API.iter().map(|e| e.label).collect();
+        let missing: Vec<String> = floptle_script::ScriptHost::api_surface()
+            .into_iter()
+            .filter(|name| !documented.contains(name.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} name(s) are reachable from Lua with no entry in LUA_API — \
+             add one so they appear in the Docs tab and in docs/lua-api.md:\n  {}",
+            missing.len(),
+            missing.join("\n  ")
+        );
+    }
+
+    /// Everything reachable through a HANDLE must have a reference entry too.
+    ///
+    /// `api_surface()` walks the globals, so it cannot see a method that lives
+    /// on a metatable: every component handle, the sound and particle handles,
+    /// `vec3`'s own methods, a raycast hit's fields. Those are declared in the
+    /// editor's EmmyLua annotations (which external IDEs already read), so the
+    /// annotations are the checklist here.
+    ///
+    /// Between the two tests, "documented" means the whole API and not the part
+    /// that happened to be easy to enumerate. This one found 118 members with
+    /// no entry — most of `getcomponent`'s fields, all of the audio handles,
+    /// and `vec3:dot` / `vec3:cross` / `vec3:length`.
+    #[test]
+    fn lua_api_reference_covers_every_handle_member() {
+        let documented: std::collections::HashSet<&str> =
+            LUA_API.iter().map(|e| e.label).collect();
+        let missing: Vec<String> = annotated_members()
+            .into_iter()
+            .filter(|(label, _)| !documented.contains(label.as_str()))
+            .map(|(label, class)| format!("{label}  (from ---@class {class})"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} handle member(s) are annotated for IDEs but have no LUA_API entry, \
+             so they are missing from the Docs tab and docs/lua-api.md:\n  {}",
+            missing.len(),
+            missing.join("\n  ")
+        );
+    }
+
+    /// `(label, class)` for every `---@field` in the editor's EmmyLua stubs
+    /// whose class is a handle the reference documents by member.
+    fn annotated_members() -> Vec<(String, String)> {
+        // class -> the local name a script conventionally binds it to, which is
+        // the prefix the reference uses. `Node` is excluded: its members are
+        // already covered as `node.` / `node:` entries by the surface test's
+        // sibling rows, and the annotation carries no other spelling.
+        const HOLDERS: &[(&str, &str)] = &[
+            ("RigidBodyHandle", "rb"),
+            ("PointLightHandle", "light"),
+            ("CameraHandle", "cam"),
+            ("UiElementHandle", "el"),
+            ("UiSliderHandle", "slider"),
+            ("UiLayerHandle", "layer"),
+            ("MaterialHandle", "mat"),
+            ("ParticleSystemHandle", "particles"),
+            ("AudioSourceHandle", "source"),
+            ("SoundHandle", "sound"),
+            ("AudioTrackHandle", "track"),
+            ("Vec3", "vec3"),
+            ("Vec2", "vec2"),
+            ("Rng", "rng"),
+            ("Hit", "hit"),
+            ("SpaceBody", "body"),
+            ("TimerHandle", "timer"),
+        ];
+        let mut out = Vec::new();
+        // The class the following `---@field` lines belong to, once it is one
+        // of the handles above; None while inside any other class.
+        let mut current: Option<(&str, &str)> = None;
+        for line in crate::lua_support::LUA_ANNOTATIONS.lines() {
+            if let Some(rest) = line.strip_prefix("---@class ") {
+                let name = rest.split_whitespace().next().unwrap_or_default();
+                current = HOLDERS.iter().find(|(c, _)| *c == name).copied();
+                continue;
+            }
+            let (Some(rest), Some((class, holder))) =
+                (line.strip_prefix("---@field "), current)
+            else {
+                continue;
+            };
+            let mut it = rest.split_whitespace();
+            let Some(name) = it.next() else { continue };
+            // A method is annotated as `fun(...)`; anything else is a field,
+            // and the reference spells the two differently.
+            let sep = if it.next().is_some_and(|t| t.starts_with("fun(")) { ':' } else { '.' };
+            out.push((format!("{holder}{sep}{name}"), class.to_owned()));
+        }
+        assert!(out.len() > 100, "only {} annotated members parsed", out.len());
+        out
+    }
+
+    /// Searching the reference puts the name you typed first.
+    ///
+    /// With 500+ entries this is the difference between a search box and a
+    /// filter: an unranked `contains` match puts every entry whose *prose*
+    /// mentions "play" above `anim:play` itself, purely because its category is
+    /// drawn earlier.
+    #[test]
+    fn api_search_ranks_the_obvious_answer_first() {
+        let best = |q: &str| -> String {
+            let mut ranked: Vec<(u8, &ApiEntry)> =
+                LUA_API.iter().filter_map(|e| api_rank(e, q).map(|r| (r, e))).collect();
+            ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.label.cmp(b.1.label)));
+            ranked.first().map(|(_, e)| e.label.to_owned()).unwrap_or_default()
+        };
+        // Exact label.
+        assert_eq!(best("water.depthat"), "water.depthAt");
+        // The leaf alone — what you type when you don't recall the table.
+        assert_eq!(best("depthat"), "water.depthAt");
+        assert_eq!(best("crossfade"), "anim:crossfade");
+        // A prefix.
+        assert_eq!(best("spherec"), "spherecast");
+        // A word that appears in a lot of PROSE must still lose to the entry
+        // actually named that.
+        assert_eq!(best("tween"), "tween");
+
+        // And a doc-only match is still found, just last.
+        let doc_only = LUA_API
+            .iter()
+            .filter_map(|e| api_rank(e, "buoyancy").map(|r| (r, e.label)))
+            .collect::<Vec<_>>();
+        assert!(!doc_only.is_empty(), "a word that only appears in prose must still match");
+    }
+
+    /// `docs/lua-api.md` is generated from [`LUA_API`] — this keeps it current.
+    ///
+    /// The reference exists twice on purpose: in the editor, where you are when
+    /// you need it, and in the repo, where search engines, a text editor and
+    /// anyone reading on a second monitor can reach it. Writing it twice by
+    /// hand would mean maintaining it once and letting the other rot, so the
+    /// file is generated and this test fails if it drifts.
+    ///
+    /// Regenerate with:
+    /// `UPDATE_DOCS=1 cargo test -p floptle-editor lua_api_reference_file`
+    #[test]
+    fn lua_api_reference_file_is_current() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/lua-api.md");
+        let generated = render_api_reference();
+        if std::env::var("UPDATE_DOCS").is_ok() {
+            std::fs::write(path, &generated).expect("write docs/lua-api.md");
+            return;
+        }
+        let on_disk = std::fs::read_to_string(path).unwrap_or_default();
+        assert_eq!(
+            on_disk, generated,
+            "docs/lua-api.md is out of date — regenerate it with \
+             `UPDATE_DOCS=1 cargo test -p floptle-editor lua_api_reference_file`"
+        );
+    }
 
     /// Collect every string egui painted this frame.
     fn painted_text(output: &egui::FullOutput) -> String {

@@ -408,9 +408,9 @@ impl Align {
             Align::Left => "⇤",
             Align::CenterX => "⇹",
             Align::Right => "⇥",
-            Align::Top => "⤒",
+            Align::Top => "⇧",
             Align::CenterY => "⇳",
-            Align::Bottom => "⤓",
+            Align::Bottom => "⇩",
         }
     }
     pub(crate) fn tip(self) -> &'static str {

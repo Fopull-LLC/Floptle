@@ -199,10 +199,10 @@ impl EditorTabViewer<'_> {
                 });
         }
 
-        // ⬢ Map tool HUD. The Map PANEL is the control surface; this is a
+        // ▦ Map tool HUD. The Map PANEL is the control surface; this is a
         // status strip — what the next click and the next drag will do, on one
         // line, so it states the tool's mode without duplicating the panel or
-        // covering the scene. `⌄` opens the same chips for anyone who would
+        // covering the scene. `⏷` opens the same chips for anyone who would
         // rather switch from here.
         if !game && self.tool == Tool::MapEdit && !self.map_playing {
             let accent = egui::Color32::from_rgb(120, 220, 255);
@@ -307,7 +307,7 @@ impl EditorTabViewer<'_> {
                         });
                         // Second line: gizmo · handles · what's armed.
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("⬢").small().weak());
+                            ui.label(egui::RichText::new("▦").small().weak());
                             let cycle = |ui: &mut egui::Ui, text: &str, hover: String| {
                                 ui.add(egui::Button::new(egui::RichText::new(text).small()).frame(false))
                                     .on_hover_text(hover)
@@ -351,7 +351,7 @@ impl EditorTabViewer<'_> {
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        egui::RichText::new(if *self.map_hud_open { "⌃" } else { "⌄" })
+                                        egui::RichText::new(if *self.map_hud_open { "⏶" } else { "⏷" })
                                             .small(),
                                     )
                                     .frame(false),

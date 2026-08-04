@@ -41,7 +41,7 @@
 //! The node's vertex colors keep multiplying the overlay, so paint sits in the same light
 //! as the surface it covers: imported COLOR_0 rides the atlas mesh's own paint block, and
 //! brush vertex paint is mirrored into an atlas-ordered block
-//! ([`Editor::sync_tex_paint_mirrors`]). The ⌫ Erase brush pulls the paint's alpha back to
+//! ([`Editor::sync_tex_paint_mirrors`]). The ⊘ Erase brush pulls the paint's alpha back to
 //! zero — revealing the live base, not a copy of it.
 //!
 //! # Identity + undo + save
@@ -255,7 +255,7 @@ impl Editor {
     /// its far side — the same rule the vertex brush applies per vertex.
     ///
     /// Paint deposits color AND alpha (coverage) — the overlay blends over the base by that
-    /// alpha, so a soft brush edge fades the paint out over the untouched surface. ⌫ Erase
+    /// alpha, so a soft brush edge fades the paint out over the untouched surface. ⊘ Erase
     /// pulls the alpha back toward zero, revealing the live base.
     pub(crate) fn texture_paint_dab(
         &mut self,
@@ -384,7 +384,7 @@ impl Editor {
     /// One uniform DAB over every texel: the brush STRENGTH is the deposit weight, so
     /// strength 1.0 floods solid color while 0.3 lays a 30% translucent wash over the base
     /// — and repeated fills deepen it, exactly like repeated strokes. Blend mode + channel
-    /// mask apply as in a dab. With ⌫ Erase active it FADES all paint by the strength
+    /// mask apply as in a dab. With ⊘ Erase active it FADES all paint by the strength
     /// instead (full strength removes it — the base shows through). One undo step per node
     /// — `None` pre-state when the node wasn't painted, so undo removes the paint entirely.
     pub(crate) fn tex_fill_selected(&mut self) {

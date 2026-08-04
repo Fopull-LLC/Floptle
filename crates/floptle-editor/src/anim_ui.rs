@@ -1442,7 +1442,7 @@ impl EditorTabViewer<'_> {
                     "Ctrl+Z / Ctrl+Y = undo / redo",
                     "double-click a lane = key pose there",
                     "right-click a lane = insert key here",
-                    "⏺ Key all bones · ⌾ Key all tracks (toolbar)",
+                    "⏺ Key all bones · ◎ Key all tracks (toolbar)",
                     "— Navigation —",
                     "Space = play/pause · Home/End = clip ends",
                     "←/→ = step · , / . (or [ / ]) = prev/next key",
@@ -1700,7 +1700,7 @@ const RECORD_RED: Color32 = Color32::from_rgb(235, 80, 80);
 /// The selection stretch-span bar + grip (an amber, distinct from the accent).
 const STRETCH_COL: Color32 = Color32::from_rgb(235, 170, 90);
 
-/// One ＋ Property menu entry: (channel name, display name, [(component, field)]).
+/// One ✚ Property menu entry: (channel name, display name, [(component, field)]).
 type NodeFieldMenu = (String, String, Vec<(String, String)>);
 
 /// Draw a dopesheet key diamond centred at `c`.
@@ -1833,7 +1833,7 @@ fn prop_kind(component: &str, field: &str) -> PropKind {
 impl EditorTabViewer<'_> {
     /// The selected property key's inline editor, shown under the dopesheet.
     /// Everything else about property tracks lives ON the timeline: lanes under
-    /// their node, ＋ Property in the header, and the lane-label context menus —
+    /// their node, ✚ Property in the header, and the lane-label context menus —
     /// this strip is only "here's the key you clicked, set its value".
     fn property_tracks_ui(&mut self, ui: &mut egui::Ui, _target: Entity) {
         // Immutable data first, before borrowing the clip doc mutably.
@@ -1932,7 +1932,7 @@ impl EditorTabViewer<'_> {
         // borrow: current local TRS (double-click / "key pose here"), current numeric
         // field values (keying a property writes what's on the node right now, like
         // record does), and which animatable fields each node actually has (the
-        // ＋ Property menus list only real components, Unity-style).
+        // ✚ Property menus list only real components, Unity-style).
         let mut live_trs: HashMap<String, TransformTRS> = HashMap::new();
         let mut live_vals: HashMap<(String, String, String), f64> = HashMap::new();
         let mut node_fields: Vec<NodeFieldMenu> = Vec::new();
@@ -2080,7 +2080,7 @@ impl EditorTabViewer<'_> {
                 st.clip_dirty = true;
             }
             if !doc.channels.is_empty()
-                && ui.button("⌾ Key all tracks")
+                && ui.button("◎ Key all tracks")
                     .on_hover_text("key every existing track (transform + property lanes) at its current value")
                     .clicked()
             {
@@ -2107,9 +2107,9 @@ impl EditorTabViewer<'_> {
                 st.clip_dirty = true;
             }
             ui.separator();
-            // ＋ Property: node ▸ field cascade listing only components actually on
+            // ✚ Property: node ▸ field cascade listing only components actually on
             // each node (Unity's "Add Property"). Adds an empty lane to key into.
-            ui.menu_button("＋ Property", |ui| {
+            ui.menu_button("✚ Property", |ui| {
                 if node_fields.is_empty() {
                     ui.weak("no animatable components in this subtree");
                 }
@@ -2385,7 +2385,7 @@ impl EditorTabViewer<'_> {
                         if let Some((_, _, fields)) =
                             node_fields.iter().find(|(c, _, _)| *c == chan_name)
                         {
-                            ui.menu_button("＋ Add property", |ui| {
+                            ui.menu_button("✚ Add property", |ui| {
                                 for (comp, field) in fields {
                                     let has = existing
                                         .iter()
@@ -2564,7 +2564,7 @@ impl EditorTabViewer<'_> {
                                 delete_sel = true;
                                 ui.close();
                             }
-                            if ui.button("⧉ Copy keys").clicked() {
+                            if ui.button("⎘ Copy keys").clicked() {
                                 copy_keys = true;
                                 ui.close();
                             }
@@ -2596,7 +2596,7 @@ impl EditorTabViewer<'_> {
                     );
                     plresp.context_menu(|ui| {
                         if ui
-                            .button("＋ Key current value at playhead")
+                            .button("✚ Key current value at playhead")
                             .on_hover_text("writes the value the node has right now")
                             .clicked()
                         {
@@ -2712,7 +2712,7 @@ impl EditorTabViewer<'_> {
                 painter.text(
                     Pos2::new(tl_left + 12.0, rows_top + lane_h * 0.7),
                     Align2::LEFT_CENTER,
-                    "no keys yet — ● Record then pose nodes / change properties, or ＋ Property to add a lane",
+                    "no keys yet — ● Record then pose nodes / change properties, or ✚ Property to add a lane",
                     FontId::proportional(11.5),
                     ui.visuals().weak_text_color(),
                 );

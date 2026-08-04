@@ -128,7 +128,7 @@ impl Editor {
                     self.console.push(
                         floptle_script::LogLevel::Debug,
                         format!(
-                            "🥊 input delay set to {n} tick(s) ({:.0} ms) — takes effect at the \
+                            "⚔ input delay set to {n} tick(s) ({:.0} ms) — takes effect at the \
                              next match, not this one",
                             f32::from(n) * 1000.0 / 60.0
                         ),

@@ -154,10 +154,10 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             pick = Some(MatterDoc::Empty);
             ui.close();
         }
-        ui.menu_button("⬢ Map shape", |ui| {
+        ui.menu_button("▦ Map shape", |ui| {
             for shape in crate::map_edit::MapShape::ALL {
                 let label = shape.label().trim_start_matches("Map ");
-                if ui.button(format!("⬢ {label}")).clicked() {
+                if ui.button(format!("▦ {label}")).clicked() {
                     cmd.add_map_shape = Some(shape);
                     ui.close();
                 }
@@ -165,7 +165,7 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
         })
         .response
         .on_hover_text(
-            "editable blockout geometry — the ⬢ Map tool (key 8) edits its \
+            "editable blockout geometry — the ▦ Map tool (key 8) edits its \
              faces/edges/verts, extrudes, and assigns per-face materials",
         );
         ui.separator();
@@ -378,7 +378,7 @@ impl EditorTabViewer<'_> {
                 ui.close();
             }
             if ui
-                .button("⬡ Save as Prefab")
+                .button("◇ Save as Prefab")
                 .on_hover_text("save this node (and its children) as a reusable asset in prefabs/ — or drag it into the Assets panel")
                 .clicked()
             {

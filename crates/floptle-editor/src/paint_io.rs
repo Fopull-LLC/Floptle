@@ -215,7 +215,7 @@ impl Editor {
         let Some(stored) = decode(&bytes) else {
             self.console.push(
                 floptle_script::LogLevel::Error,
-                "🖌 vertex paint file is unreadable (wrong magic/version) — ignoring".into(),
+                "◨ vertex paint file is unreadable (wrong magic/version) — ignoring".into(),
                 None,
             );
             return;
@@ -261,7 +261,7 @@ impl Editor {
                     self.console.push(
                         floptle_script::LogLevel::Warn,
                         format!(
-                            "🖌 '{key}' part {i} changed since it was painted \
+                            "◨ '{key}' part {i} changed since it was painted \
                              ({} verts stored, {live} now) — that node's paint was NOT applied \
                              (re-paint it, or restore the old model)",
                             colors.len()

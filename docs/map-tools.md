@@ -1,10 +1,10 @@
-# Building levels in the editor — the ⬢ Map tool
+# Building levels in the editor — the ▦ Map tool
 
 Blockout geometry you draw, cut, texture and **paint** without leaving Floptle.
 Map meshes are for LEVELS — walls, floors, stairs, arches, ramps; characters and
 props still come from Blender ([asset pipeline](subsystems/asset-pipeline.md)).
 
-Press **8** (or Window ▸ ⬢ Map) to turn the tool on. The **⬢ Map** panel is the
+Press **8** (or Window ▸ ▦ Map) to turn the tool on. The **▦ Map** panel is the
 full control surface; the strip over the viewport carries the controls you touch
 constantly, so they're never behind another dock tab.
 
@@ -143,7 +143,7 @@ resized wall keeps its texture scale instead of stretching it.
 
 ## 5. Painting a blockout
 
-Map meshes take the 🖌 **Paint** tool (key 7), both kinds:
+Map meshes take the ✏ **Paint** tool (key 7), both kinds:
 
 - **Vertex paint** — colour per corner, the cheap retro look: shade a corridor
   darker toward its end, warm a floor near a light, tint one wall.
@@ -179,7 +179,7 @@ Two things worth knowing:
 
 Every control has one, and every one is rebindable in the Map panel's **KEYS**
 section. Two rules keep them out of each other's way: map chords are only
-consulted while the ⬢ Map tool is active and you aren't typing, and the keys the
+consulted while the ▦ Map tool is active and you aren't typing, and the keys the
 editor keeps for itself (the fly camera, the tool digits, focus/grid/gizmo
 toggles) are **refused** at bind time with the reason — so a broken binding can't
 be created in the first place.

@@ -1,29 +1,74 @@
 # Floptle documentation
 
-Start here. Floptle is a lightweight, hyperoptimized Rust game engine for surreal,
-otherworldly visuals (Fopull LLC).
+Floptle is a lightweight, hyperoptimized Rust game engine for surreal, otherworldly
+visuals (Fopull LLC). **Everything that exists is listed on this page.** If it isn't
+linked here, it isn't finished — a test enforces that.
 
 > **Picking this up cold?** [HANDOFF.md](HANDOFF.md) is the current state — what shipped,
 > how a release reaches a player, the two gates, and the gotchas that have already cost
 > somebody a day. Everything below is the reference; that is the orientation.
 
-## Using the engine (start here to build something)
+## Find it fast
+
+| I want to… | Go to |
+| --- | --- |
+| Get something on screen and walk around in it | [getting-started.md](getting-started.md) |
+| Look up what a Lua call does | [lua-api.md](lua-api.md) — every name, or the editor's **§ Docs** page |
+| Learn scripting properly, in order | [scripting.md](scripting.md) |
+| Make things fall, collide, be stood on | [physics.md](physics.md) |
+| Build a level without leaving the engine | [map-tools.md](map-tools.md) |
+| Sculpt terrain / build a planet | [subsystems/deformable-matter.md](subsystems/deformable-matter.md) |
+| Draw a texture | [image-editor.md](image-editor.md) |
+| Build a menu or a HUD | [ui-tab.md](ui-tab.md) → [ui-styles.md](ui-styles.md) → [ui-make.md](ui-make.md) |
+| Animate a character | [animation.md](animation.md) |
+| Add sound | [subsystems/audio.md](subsystems/audio.md) |
+| Make particles / VFX | [subsystems/particles-vfx.md](subsystems/particles-vfx.md) |
+| Write a shader | [subsystems/shaders.md](subsystems/shaders.md) |
+| Go multiplayer | [multiplayer.md](multiplayer.md) |
+| Ship a build | [export-builds.md](export-builds.md) |
+| Talk to a website / sell something | [web-api.md](web-api.md) |
+| Understand *why* it's built this way | [decisions/](decisions/README.md) |
+
+## Using the engine
+
+The build-something guides. Each one is a path from nothing to a working result.
 
 - [getting-started.md](getting-started.md) — from empty project to a **walkable
   first-person scene**: sculpt terrain, add a player, gravity, mesh colliders, scripts.
-- [scripting.md](scripting.md) — the complete **Lua API**: the `node` transform + physics
-  body, `input`, `raycast`, globals, and the character recipe. (Mirrored in-engine on the
-  Scripting ▸ § Docs page.)
+- [scripting.md](scripting.md) — the **Lua guide**, taught in order: the `node` transform
+  and physics body, `input`, `raycast`, lifecycle, UI, netcode, scenes, water, scatter.
+  Mirrored in-engine on the **Scripting ▸ § Docs** page.
+- [lua-api.md](lua-api.md) — the **complete Lua reference**: every name a script can
+  reach, grouped and searchable. Generated from the same table that drives the editor's
+  Docs tab, its hover docs and its autocomplete, so all four always agree.
 - [physics.md](physics.md) — **rigidbodies, gravity, colliders, raycasting** and how the
   play loop runs.
-- [multiplayer.md](multiplayer.md) — from a single-player scene to **two machines playing
-  together**: which replication mode to pick, prediction, rollback for fighting games,
-  testing on one desk, and shipping (relay, dedicated server, interest management).
-- [map-tools.md](map-tools.md) — the **⬢ Map** tool: draw, cut, texture and
+- [animation.md](animation.md) — **clips, controllers, layers and blending**: baked
+  `.anim.ron` files, glTF import, and driving it all from Lua.
+- [map-tools.md](map-tools.md) — the **▦ Map** tool: draw, cut, texture and
   **paint** blockout levels in the editor, without a round trip to Blender.
 - [image-editor.md](image-editor.md) — the **🖼 Image** tab: draw a texture in the
   engine and watch it change on the mesh (pixels, paint and vectors, one document).
+- [multiplayer.md](multiplayer.md) — from a single-player scene to **two machines playing
+  together**: which replication mode to pick, prediction, rollback for fighting games,
+  testing on one desk, and shipping (relay, dedicated server, interest management).
+- [web-api.md](web-api.md) — talking to a **website or your own server**: the account
+  flow, missions, and Fobucks.
 - [export-builds.md](export-builds.md) — **shipping a build** players can run.
+- [updating-the-hub.md](updating-the-hub.md) — the one **manual Hub update**; from
+  v0.21.2 onward the Hub updates itself.
+
+### Building UI
+
+- [ui-tab.md](ui-tab.md) — the **◫ UI** tab: the authoring canvas where screens get built.
+- [ui-styles.md](ui-styles.md) — **styles and tokens**: how to stop typing colours onto
+  elements one at a time.
+- [ui-navigation.md](ui-navigation.md) — **keyboard and gamepad focus**, for a menu that
+  isn't mouse-only.
+- [ui-make.md](ui-make.md) — **screens from data** (`ui.make`): a roster of four fighters
+  or nine, an inventory of whatever the player is carrying.
+- [ui-demo.md](ui-demo.md) — the demo scene that uses all of it at once. Open it and press
+  Play.
 
 ## Design docs (how it's built and why)
 
@@ -32,6 +77,55 @@ otherworldly visuals (Fopull LLC).
 3. [ROADMAP.md](ROADMAP.md) — the phased build plan; each phase ends in a runnable demo.
 4. [decisions/](decisions/) — ADRs: every significant choice and *why* (start at [the index](decisions/README.md)).
 5. [subsystems/](subsystems/) — deep-dive design per system (start at [the index](subsystems/README.md)).
+
+## Plans and proposals
+
+Where a system was argued out before it was built. Useful when you want the reasoning
+behind a design, or when you are picking up work that was scoped but not finished. A
+proposal is **not** documentation of what shipped — for that, use the guides above.
+
+- [engine-roadmap.md](engine-roadmap.md) — the four workstreams from "great editor" to
+  "ship a whole game".
+- [game-roadmap.md](game-roadmap.md) — **Floptle Solar**, the space-company game built in
+  the engine to prove the engine.
+- [solar-demo-plan.md](solar-demo-plan.md) — the KSP-class demo build order (superseded as
+  the forward plan by the game roadmap).
+- [galaxy-streaming-proposal.md](galaxy-streaming-proposal.md) — terrain residency,
+  on-demand generation, multi-system worlds.
+- [terrain-mesh-proposal.md](terrain-mesh-proposal.md) — Terrain 2.0: meshed SDF terrain,
+  surface nets and LOD rings.
+- [shader-system-proposal.md](shader-system-proposal.md) — `.flsl`, the shader IR and the
+  ◈ graph editor.
+- [particle-system-proposal.md](particle-system-proposal.md) — the ❋ timeline and the
+  automation lanes.
+- [animation-system-proposal.md](animation-system-proposal.md) — skeletal animation,
+  controllers, layers, Lua control.
+- [vertex-paint-proposal.md](vertex-paint-proposal.md) — painting colour straight onto
+  meshes.
+- [map-tools-proposal.md](map-tools-proposal.md) — the in-engine blockout and polygon
+  modelling suite.
+- [image-editor-proposal.md](image-editor-proposal.md) — one canvas for pixels, paint and
+  vectors.
+- [ui-system-proposal.md](ui-system-proposal.md) — the designer-first UI system.
+- [ui-system-2-proposal.md](ui-system-2-proposal.md) — making good-looking UI the cheap
+  path.
+- [scripting-experience-proposal.md](scripting-experience-proposal.md) — why
+  discoverability *was* the gap, and the plan that closed it.
+- [scripting-experience-handoff.md](scripting-experience-handoff.md) — the working notes
+  for executing that plan.
+- [networking-proposal.md](networking-proposal.md) — networking and Floptle Cloud.
+- [netcode-design.md](netcode-design.md) — the `floptle-net` transport and replication design.
+- [rollback-netcode-design.md](rollback-netcode-design.md) — one netcode, three replication
+  modes; the finalized rollback plan.
+- [rollback-p7-fofighter-checklist.md](rollback-p7-fofighter-checklist.md) — the acceptance
+  run over the relay.
+- [hub-proposal.md](hub-proposal.md) — the launcher and version manager.
+
+## Releases
+
+- [releases/](releases/) — the notes for every version. These are what a player reads;
+  [releases/STYLE.md](releases/STYLE.md) is the rule they are written to.
+- [news.md](news.md) — what's on the Hub's 📰 News tab right now.
 
 ## The three signature ideas (what makes Floptle unlike other engines)
 

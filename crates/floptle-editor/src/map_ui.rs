@@ -1,4 +1,4 @@
-//! The ⬢ Map tab: draw/spawn blockout shapes, the vertex/edge/face sub-mode,
+//! The ▦ Map tab: draw/spawn blockout shapes, the vertex/edge/face sub-mode,
 //! modeling ops on the current sub-object selection, and the material-slot
 //! list (assign faces to slots; override each slot's material per node).
 //!
@@ -83,14 +83,14 @@ impl EditorTabViewer<'_> {
             );
             return;
         }
-        // The whole tab runs on the ⬢ Map TOOL's sub-object selection. Say so
+        // The whole tab runs on the ▦ Map TOOL's sub-object selection. Say so
         // once, at the top, with the button that fixes it — greying everything
         // out with no explanation is what made this feel broken.
         if !self.map_tool_on {
             egui::Frame::group(ui.style()).fill(ui.visuals().faint_bg_color).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if ui
-                        .button("⬢  Turn on the Map tool")
+                        .button("▦  Turn on the Map tool")
                         .on_hover_text(
                             "key 8 — needed to draw shapes and select faces in the viewport",
                         )
@@ -504,7 +504,7 @@ impl EditorTabViewer<'_> {
             if action(
                 ui,
                 true,
-                "⌗ Snap to grid",
+                "⊞ Snap to grid",
                 "round the selection (or the whole mesh) onto the grid",
             ) {
                 self.cmd.map_op = Some(MapOp::SnapToGrid);
@@ -741,7 +741,7 @@ impl EditorTabViewer<'_> {
                 "makes a slot from the selection and gives it its own material — this is how \
                  one face gets a different look from the rest"
             } else {
-                "select some faces first (⬢ Map tool, face mode)"
+                "select some faces first (▦ Map tool, face mode)"
             };
             if r.on_hover_text(hover).on_disabled_hover_text(hover).clicked() {
                 let name = {
@@ -836,7 +836,7 @@ impl EditorTabViewer<'_> {
                                     );
                                     self.cmd.inspector_changed |= res.changed;
                                 }
-                                if ui.small_button("✕ clear override").clicked()
+                                if ui.small_button("✖ clear override").clicked()
                                     && let Some(om) =
                                         self.world.get_mut::<floptle_core::ObjectMaterials>(entity)
                                 {
@@ -845,7 +845,7 @@ impl EditorTabViewer<'_> {
                                 }
                             });
                     } else if ui
-                        .small_button("＋ give this slot its own material")
+                        .small_button("✚ give this slot its own material")
                         .on_hover_text("colour / texture / shader for every face on this slot")
                         .clicked()
                     {
@@ -864,7 +864,7 @@ impl EditorTabViewer<'_> {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             if ui
-                .small_button("＋ empty slot")
+                .small_button("✚ empty slot")
                 .on_hover_text("add a slot without assigning anything to it")
                 .clicked()
             {
@@ -880,7 +880,7 @@ impl EditorTabViewer<'_> {
                 self.cmd.map_op = Some(MapOp::AddSlot(name));
             }
             if ui
-                .small_button("🧹 Clean unused geometry")
+                .small_button("♻ Clean unused geometry")
                 .on_hover_text(
                     "drop stored geometry no node uses any more (duplicates and deleted nodes \
                      leave copies behind so undo can bring them back — anything undo could \
@@ -904,7 +904,7 @@ impl EditorTabViewer<'_> {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(
-                    "map keys only fire while the ⬢ Map tool is active and you're not typing",
+                    "map keys only fire while the ▦ Map tool is active and you're not typing",
                 )
                 .weak()
                 .small(),

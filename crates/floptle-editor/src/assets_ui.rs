@@ -31,7 +31,7 @@ impl<'a> EditorTabViewer<'a> {
             let import_dir =
                 if *self.assets_grid { self.assets_grid_dir.clone() } else { root.clone() };
             if ui
-                .button("⤓ Import…")
+                .button("⬇ Import…")
                 .on_hover_text(
                     "pick files to copy into the project (models, textures, audio, …).\n\
                      You can also drag files in from your file manager on X11/Windows/macOS.",
@@ -95,7 +95,7 @@ impl<'a> EditorTabViewer<'a> {
                     .order(egui::Order::Tooltip)
                     .show(ui.ctx(), |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.small("⬡ save as prefab");
+                            ui.small("◇ save as prefab");
                         });
                     });
             }
@@ -266,7 +266,7 @@ impl<'a> EditorTabViewer<'a> {
     /// Accept files dragged in from the OS file explorer, importing (copying) them
     /// into `dir`. egui-winit populates `raw.hovered_files`/`raw.dropped_files`, but
     /// winit carries NO drop position and doesn't move the cursor during an OS drag
-    /// (and on Wayland delivers no drops at all — use the ⤓ Import button there).
+    /// (and on Wayland delivers no drops at all — use the ⬇ Import button there).
     ///
     /// `strong` = a folder target: precise, pointer-gated (bright outline + tip), so
     /// it only claims a drop the cursor is actually over. `!strong` = the panel-wide
@@ -299,7 +299,7 @@ impl<'a> EditorTabViewer<'a> {
                     .order(egui::Order::Tooltip)
                     .show(ui.ctx(), |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.small("＋ import here");
+                            ui.small("✚ import here");
                         });
                     });
             }
@@ -323,7 +323,7 @@ impl<'a> EditorTabViewer<'a> {
     /// Rename / Reveal / Delete — the same verbs files get.
     fn folder_menu(&mut self, ui: &mut egui::Ui, dir: &Path) {
         self.new_asset_menu(ui, dir);
-        if ui.button("⤓ Import here…").on_hover_text("copy files from your computer into this folder").clicked() {
+        if ui.button("⬇ Import here…").on_hover_text("copy files from your computer into this folder").clicked() {
             self.cmd.pick_import_dir = Some(dir.to_path_buf());
             ui.close();
         }
@@ -397,7 +397,7 @@ impl<'a> EditorTabViewer<'a> {
     fn asset_file_menu(&mut self, ui: &mut egui::Ui, path: &str, dir: Option<&Path>) {
         if is_prefab(path) {
             if ui
-                .button("⬡ Add to scene")
+                .button("◇ Add to scene")
                 .on_hover_text("place an instance in front of the camera — or just drag the prefab into the viewport")
                 .clicked()
             {

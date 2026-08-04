@@ -13,10 +13,13 @@ on the [`../decisions/`](../decisions/) ADRs and the top-level
 - [renderer.md](renderer.md) — the otherworldly render graph; SDF raymarching you fly *into*; reality-bending post.
 - [shaders.md](shaders.md) — the shader IR: one source of truth, edited as graph **and** `.flsl` text → WGSL.
 - [light.md](light.md) — programmable light transport: light as the fourth field; bend rays (bend can *be* gravity).
+- [shadows.md](shadows.md) — field-marched sun shadows: terrain casts from the field itself, meshes cast and receive against it.
+- [post-processing.md](post-processing.md) — the per-scene **✨ Post Processing** node, so each scene can own its look.
 - [deformable-matter.md](deformable-matter.md) — the unifying idea: everything is malleable matter (morph · blend/soup · soft-body · stick · fracture).
 
 ### World & simulation
 - [physics.md](physics.md) — SDF-first collision; character & raycast-vehicle controllers on morphing worlds.
+- [physics-slices.md](physics-slices.md) — that design cut into independently-shippable increments, and what each one covers.
 - [gravity-and-density.md](gravity-and-density.md) — gravity as a field emitted by matter; density → mass, crushability, and "walk up a fractal wall."
 - [large-world-space.md](large-world-space.md) — default-on floating-origin / camera-relative space: simulate a galaxy with no jitter.
 - [time.md](time.md) — time as a rate field `r(p)`: per-entity local clocks; slow/freeze/dilation regions.

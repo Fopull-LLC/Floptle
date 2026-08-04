@@ -18,6 +18,48 @@ use crate::env::{
 };
 use crate::preprocess::preprocess;
 
+/// Collect the dotted names reachable from a Lua table, for
+/// [`ScriptHost::api_surface`].
+///
+/// `seen` breaks the reference cycles Lua tables freely contain (`_G._G`, a
+/// module that stores itself). The depth cap keeps the walk to the shape an API
+/// actually has — a table, its members, and one level of nesting under those.
+fn flatten(
+    t: &Table,
+    prefix: &str,
+    seen: &mut std::collections::HashSet<usize>,
+    depth: usize,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if depth > 2 || !seen.insert(t.to_pointer() as usize) {
+        return out;
+    }
+    for pair in t.pairs::<Value, Value>().flatten() {
+        let (k, v) = pair;
+        let Value::String(name) = k else { continue };
+        let Ok(name) = name.to_str() else { continue };
+        let name = name.to_string();
+        // `_G`, `__index` and friends are plumbing, not API. `package` and
+        // `debug` are stdlib bulk that the diff would drop anyway — skipping
+        // them keeps the walk cheap.
+        if name.starts_with('_') || name == "package" || name == "debug" {
+            continue;
+        }
+        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
+        match v {
+            Value::Table(inner) => {
+                out.push(path.clone());
+                out.extend(flatten(&inner, &path, seen, depth + 1));
+            }
+            Value::Function(_) => out.push(path),
+            // A plain value the engine seeded (`dt`, `time`, `synced`).
+            _ if depth == 0 => out.push(path),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Lua argument tuples for the `gizmo.*` draw calls: positions, then the
 /// optional size/length and 0–1 RGB tail.
 type GizmoLineArgs = (f64, f64, f64, f64, f64, f64, Option<f64>, Option<f64>, Option<f64>);
@@ -1863,6 +1905,32 @@ impl ScriptHost {
             account,
             http_in_fixed,
         }
+    }
+
+    /// Every name the engine adds to a script's environment, as dotted paths
+    /// (`water.depthAt`, `math.lerp`, `vec3`, …), sorted.
+    ///
+    /// Derived by **diffing a live host's globals against a bare `Lua`**, so it
+    /// cannot drift from what scripts can actually call. Anything a hand-kept
+    /// list would miss — a function added without a doc line, a table installed
+    /// by a subsystem nobody remembered — shows up here the moment it exists.
+    ///
+    /// That is the point: `docs/lua-api.md` is checked against this, so a new
+    /// API is undocumented for exactly as long as it takes `cargo test` to run.
+    /// It reports only what is reachable by *name*; methods that live on a
+    /// handle's metatable (`node:animator()`, the component handles) are
+    /// userdata and are covered by the annotation list in the editor instead.
+    pub fn api_surface() -> Vec<String> {
+        let bare = Lua::new();
+        let base = flatten(&bare.globals(), "", &mut std::collections::HashSet::new(), 0);
+        let host = Self::new();
+        let all = flatten(&host.lua.globals(), "", &mut std::collections::HashSet::new(), 0);
+
+        let base: std::collections::HashSet<String> = base.into_iter().collect();
+        let mut out: Vec<String> = all.into_iter().filter(|k| !base.contains(k)).collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Feed the running scene's name (before `run`) — what `scene.current()` reads.

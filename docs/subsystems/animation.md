@@ -151,7 +151,7 @@ not a separate section. Drag a diamond to retime, right-click to delete, click
 to select; the selected key's **value + time are edited inline under the sheet**
 (a texture picker for image lanes, a number otherwise).
 
-**Unity-style timeline interactions.** **＋ Property** in the header opens a
+**Unity-style timeline interactions.** **✚ Property** in the header opens a
 node ▸ field cascade listing only the animatable fields each node actually has
 (numeric fields come from the live component mirror). **Right-click a lane
 label** for its menu — node lanes: key pose at playhead / add property / delete

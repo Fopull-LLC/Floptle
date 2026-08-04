@@ -233,7 +233,7 @@ The 🌐 panel is your instrument:
   The misconfigured one just does several times the work. The line turns orange
   past 50% guessed, because that is a delay too low for the link, not a bad
   connection — see **Input delay** below.
-- **🥊 ROLLBACK · waiting for input** (orange) — a stall. Past the depth cap the
+- **⚔ ROLLBACK · waiting for input** (orange) — a stall. Past the depth cap the
   sim waits rather than guessing further, so the game runs slightly slow instead
   of teleporting the opponent. It recovers on its own. Show your own "connection
   trouble" banner off `net.stalled()`, because otherwise a stall is

@@ -2,8 +2,8 @@
 //!
 //! The tool strip is the most-looked-at surface in the tab and it's keyed by
 //! letters, not labels — so an icon that reads wrong is a tool nobody can find.
-//! Font glyphs couldn't carry it: the bundled stack has no pencil, brush,
-//! eraser, eyedropper or pen (✎ 🖌 ⌫ ⌾ ✒ are all tofu — see `icons.rs`), and the
+//! Font glyphs couldn't carry it: the bundled stack has no brush, eyedropper or
+//! pen (🖌 🖉 ✒ are absent from every charmap — see `icons.rs`), and the
 //! geometric shapes that *do* exist are a poor mime of a paint program.
 //!
 //! So each icon is a few primitives in a unit box. They cost nothing, they can

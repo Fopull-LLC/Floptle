@@ -331,7 +331,7 @@ struct EditorCmd {
     new_scene: Option<String>,
     /// Switch the active tool (from the Scene-tab tool strip).
     set_tool: Option<Tool>,
-    /// Spawn a new map-mesh blockout shape (⬢ Map tab / Add menu).
+    /// Spawn a new map-mesh blockout shape (▦ Map tab / Add menu).
     add_map_shape: Option<map_edit::MapShape>,
     /// A Map-tab modeling op on the current sub-object selection.
     map_op: Option<map_edit::MapOp>,
@@ -347,7 +347,7 @@ struct EditorCmd {
     map_turn: Option<i32>,
     /// Drop stored map geometry no node references any more.
     map_prune: bool,
-    /// Focus the ⬢ Map dock tab (Window menu).
+    /// Focus the ▦ Map dock tab (Window menu).
     focus_map: bool,
     /// Put every dock panel back to the shipped layout (Window menu).
     reset_layout: bool,
@@ -547,7 +547,7 @@ enum ProjectAction {
 struct EditorTabViewer<'a> {
     world: &'a mut World,
     selection: &'a mut Vec<Entity>,
-    /// Map-building suite state for the ⬢ Map tab (read-only; ops go via cmd).
+    /// Map-building suite state for the ▦ Map tab (read-only; ops go via cmd).
     maps: &'a map_edit::MapStore,
     map_sel: &'a Option<map_edit::MapSel>,
     map_mode: map_edit::MapSubMode,
@@ -560,7 +560,7 @@ struct EditorTabViewer<'a> {
     map_orient: &'a mut map_edit::MapOrient,
     map_xform: &'a mut map_edit::MapXform,
     map_select_hidden: &'a mut bool,
-    /// True while the ⬢ Map TOOL is active — every sub-object op needs it, so
+    /// True while the ▦ Map TOOL is active — every sub-object op needs it, so
     /// the tab offers to turn it on rather than silently greying out.
     map_tool_on: bool,
     map_playing: bool,
@@ -1194,7 +1194,7 @@ struct Editor {
     /// Editable map-mesh geometry (the map-building suite) — the authority
     /// behind every `Matter::MapMesh { id }` node and its `@map/<id>` parts.
     maps: map_edit::MapStore,
-    /// Active sub-object selection of the ⬢ Map tool (verts/edges/faces on
+    /// Active sub-object selection of the ▦ Map tool (verts/edges/faces on
     /// the primary map-mesh node). Cleared on undo restore — see history.rs.
     map_sel: Option<map_edit::MapSel>,
     /// The Map tool's vertex/edge/face sub-mode (Tab cycles it).
@@ -1248,7 +1248,7 @@ struct Editor {
     /// Which frame the sub-object gizmo's handles use.
     map_orient: map_edit::MapOrient,
     /// Move / rotate / scale for the sub-object gizmo (the global tool stays
-    /// on ⬢ Map — switching tools would drop the sub-object selection).
+    /// on ▦ Map — switching tools would drop the sub-object selection).
     map_xform: map_edit::MapXform,
     /// Let clicks and box-select reach sub-objects hidden behind the surface.
     map_select_hidden: bool,
@@ -2608,7 +2608,7 @@ impl ApplicationHandler for Editor {
                         self.capture_map_rebind(code);
                         return;
                     }
-                    // ⬢ Map tool keybinds. They run BEFORE the editor's own
+                    // ▦ Map tool keybinds. They run BEFORE the editor's own
                     // shortcuts but only inside the map context (tool active,
                     // not typing, no Ctrl), and map_keys.rs refuses to bind
                     // anything the editor answers in that same context — so
@@ -2800,7 +2800,7 @@ impl ApplicationHandler for Editor {
                                         // selected for animation (there's no scene selection
                                         // to delete anyway — this just prevents accidents).
                                         KeyCode::Delete | KeyCode::Backspace if posing_bone => {}
-                                        // (the ⬢ Map tool's delete-faces bind runs
+                                        // (the ▦ Map tool's delete-faces bind runs
                                         // before this and only claims the key while
                                         // faces are selected — see the dispatch above)
                                         KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),

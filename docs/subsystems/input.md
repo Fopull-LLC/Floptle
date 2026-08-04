@@ -346,9 +346,9 @@ A single panel in the editor (egui, dark/retro theme — ADR-0004), deliberately
 ```
  ┌─ Project Settings ▸ Input ────────────────────────── input.ron ── [⟲] ┐
  │ ACTIONS                                                                │
- │  Jump      [⌨ Space] [🎮 South]                            [＋] [🗑]  │
- │  Punch     [⌨ J    ] [🎮 West ]                            [＋] [🗑]  │
- │  Taunt   ⚪ ⚠ unbound                                      [＋] [🗑]  │
+ │  Jump      [⌨ Space] [🎮 South]                            [✚] [🗑]  │
+ │  Punch     [⌨ J    ] [🎮 West ]                            [✚] [🗑]  │
+ │  Taunt   ⚪ ⚠ unbound                                      [✚] [🗑]  │
  │ USED IN SCRIPTS, NOT IN THE MAP                                        │
  │  ⚠ Block                            fighter.lua:42  action     [add]   │
  │ AXES 2D                                                                │
@@ -366,7 +366,7 @@ A single panel in the editor (egui, dark/retro theme — ADR-0004), deliberately
   one click adds it — that's a control which silently does nothing, and it's the
   failure worth surfacing above all others. `⚪` marks the reverse: bound, but
   nothing references it.
-- **Add a binding** two ways. `＋` arms **press-to-bind** — the fast path when
+- **Add a binding** two ways. `✚` arms **press-to-bind** — the fast path when
   the device is in your hand, through the same code path a shipped game's
   settings menu uses; Escape always cancels. `▾` opens a **picker** listing
   every key, mouse button, pad button and pad axis, which needs **no hardware

@@ -89,7 +89,7 @@ pub(crate) fn matter_icon(m: &Matter) -> &'static str {
         Matter::Blob { .. } => "◑",
         Matter::Mesh { .. } => "✳",
         Matter::Empty => "🗀",
-        Matter::MapMesh { .. } => "⬢",
+        Matter::MapMesh { .. } => "▦",
         Matter::Terrain { .. } => "Δ",
         Matter::Camera { .. } => "⌖",
         Matter::PointLight { .. } => "●",

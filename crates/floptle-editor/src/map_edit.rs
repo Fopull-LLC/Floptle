@@ -475,7 +475,7 @@ impl Editor {
             self.console.push(
                 floptle_script::LogLevel::Warn,
                 format!(
-                    "⬢ map geometry NOT saved — {} could not be read this session (fix or remove it, then reload the scene)",
+                    "▦ map geometry NOT saved — {} could not be read this session (fix or remove it, then reload the scene)",
                     self.maps_file_path().display()
                 ),
                 None,
@@ -538,7 +538,7 @@ impl Editor {
                 self.maps.load_failed = true;
                 self.console.push(
                     floptle_script::LogLevel::Error,
-                    format!("⬢ map sidecar {} could not be read: {e} — map nodes will stay empty and saving map geometry is disabled until this is fixed", path.display()),
+                    format!("▦ map sidecar {} could not be read: {e} — map nodes will stay empty and saving map geometry is disabled until this is fixed", path.display()),
                     None,
                 );
                 return;
@@ -555,7 +555,7 @@ impl Editor {
                 self.maps.load_failed = true;
                 self.console.push(
                     floptle_script::LogLevel::Error,
-                    format!("⬢ map sidecar {} failed to parse: {e} — map nodes will stay empty and saving map geometry is disabled until this is fixed", path.display()),
+                    format!("▦ map sidecar {} failed to parse: {e} — map nodes will stay empty and saving map geometry is disabled until this is fixed", path.display()),
                     None,
                 );
             }
@@ -745,7 +745,7 @@ impl MapOrient {
     }
 }
 
-/// What the sub-object gizmo does. The global tool stays on ⬢ Map (switching
+/// What the sub-object gizmo does. The global tool stays on ▦ Map (switching
 /// to the Rotate/Scale TOOLS would drop the sub-object selection), so the map
 /// tool carries its own transform mode — G/R/S, as in every modeling package.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2172,7 +2172,7 @@ impl Editor {
     /// something says WHY — a modeling tool that silently no-ops reads as
     /// broken.
     pub(crate) fn map_note(&mut self, level: floptle_script::LogLevel, msg: impl Into<String>) {
-        self.console.push(level, format!("⬢ {}", msg.into()), None);
+        self.console.push(level, format!("▦ {}", msg.into()), None);
     }
 
     /// A discrete Map-tab / keyboard operation on the current selection.

@@ -8,6 +8,11 @@ it up immediately.
 > The same reference is built into the editor: open the **Scripting** tab → **§ Docs**,
 > and the API shows up as autocomplete + hover hints as you type.
 
+**This page teaches; [`lua-api.md`](lua-api.md) lists.** Read this one in order to learn
+how the pieces fit, and go to the reference when you already know the name and want the
+signature — it has every call the engine exposes, grouped and searchable, and it is
+generated from the same table the editor's Docs tab reads, so the two never disagree.
+
 ## Contents
 1. [A first script](#1-a-first-script)
 2. [Lifecycle: `start`, `update`, `fixedUpdate`](#2-lifecycle-start-update-fixedupdate)
@@ -2786,7 +2791,7 @@ or `synced` instead).
 A **prefab** is a reusable node (with its whole child subtree) saved as an
 asset. Make one by **dragging a node from the Hierarchy into the Assets
 panel** (drop on a folder to aim; it lands in `prefabs/` otherwise), or
-right-click the node → **⬡ Save as Prefab**. Place instances by dragging the
+right-click the node → **◇ Save as Prefab**. Place instances by dragging the
 prefab into the viewport, dropping it on a Hierarchy row (spawns as that
 node's child), or right-click → **Add to scene**.
 
@@ -3131,7 +3136,7 @@ can't double-fire them.
 
 ## 25. Space: orbits, gravity & time-warp
 
-Scenes with **Celestial Body** components (Add Component → 🪐) put planets and
+Scenes with **Celestial Body** components (Add Component → ☉) put planets and
 moons on exact Kepler rails: every tick the engine writes their positions from
 orbital elements (stable at any warp — no integration, no drift), and each body
 pulls real **µ/r² gravity** with patched-conic dominance: the deepest sphere of

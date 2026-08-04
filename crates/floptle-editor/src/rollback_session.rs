@@ -150,7 +150,7 @@ impl Editor {
             self.console.push(
                 floptle_script::LogLevel::Warn,
                 format!(
-                    "🥊 a rollback match was announced (peers {peers:?}) but scene \
+                    "⚔ a rollback match was announced (peers {peers:?}) but scene \
                      \"{}\" has no Rollback nodes here — this machine will simulate \
                      nothing while the others fight. Check the scene loaded, and that its \
                      fighters carry Replicated with mode Rollback.",
@@ -202,7 +202,7 @@ impl Editor {
         self.console.push(
             floptle_script::LogLevel::Debug,
             format!(
-                "🥊 rollback match started — {n} fighter(s), {delay}-tick input delay, \
+                "⚔ rollback match started — {n} fighter(s), {delay}-tick input delay, \
                  peers {peers:?} in slot order"
             ),
             None,
@@ -352,7 +352,7 @@ impl Editor {
             self.console.push(
                 floptle_script::LogLevel::Warn,
                 format!(
-                    "🥊 \"{name}\" is simulated by the rollback driver here, but {n} snapshot \
+                    "⚔ \"{name}\" is simulated by the rollback driver here, but {n} snapshot \
                      sample(s) of it got past the ingest guard and would have been written over \
                      its transform. They were dropped. The session's rollback flag and the \
                      driver disagreed — the fight is still correct, but this node's rotation \
@@ -849,7 +849,7 @@ impl Editor {
             self.console.push(
                 floptle_script::LogLevel::Error,
                 format!(
-                    "🥊 {} Rollback node(s) are in the snapshot filter as well as the \
+                    "⚔ {} Rollback node(s) are in the snapshot filter as well as the \
                      driver's: {}. The driver replays fixedUpdate and update but nothing \
                      replays lateUpdate, so their late pass runs NOWHERE — cosmetic work \
                      written there (model yaw, rim lights, camera offsets) silently stops \
@@ -867,7 +867,7 @@ impl Editor {
         self.console.push(
             floptle_script::LogLevel::Error,
             format!(
-                "🥊 {} Rollback node(s) are being run by NOTHING this match — not the \
+                "⚔ {} Rollback node(s) are being run by NOTHING this match — not the \
                  rollback driver and not the global script passes: {}. Their scripts will \
                  never tick, so anything asking them a question gets nil for the whole \
                  match. This is an engine fault, not a project one; please report it with \
@@ -971,7 +971,7 @@ impl Editor {
         self.console.push(
             floptle_script::LogLevel::Warn,
             format!(
-                "🥊 rollback STALLED — this machine ({role}) has simulated to tick {current} \
+                "⚔ rollback STALLED — this machine ({role}) has simulated to tick {current} \
                  but only tick {confirmed} is confirmed, so it is waiting rather than \
                  guessing further. Frontiers: {who}. The peer whose frontier has stopped \
                  moving is the one not receiving."
@@ -1020,7 +1020,7 @@ impl Editor {
             self.console.push(
                 floptle_script::LogLevel::Error,
                 format!(
-                    "🥊 DESYNC at tick {tick} — the peers' simulations no longer agree. From \
+                    "⚔ DESYNC at tick {tick} — the peers' simulations no longer agree. From \
                      here the two machines are playing different matches. Usual causes: a \
                      gameplay value outside snapshot()/restore(), an unseeded rng(), a \
                      read of node.x inside fixedUpdate (that is the interpolated render pose \

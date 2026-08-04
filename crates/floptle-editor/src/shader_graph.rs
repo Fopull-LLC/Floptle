@@ -1164,7 +1164,7 @@ impl EditorTabViewer<'_> {
             let targets: Vec<NodeKey> =
                 if multi { sel.iter().cloned().collect() } else { vec![n.key.clone()] };
             let word = if multi { format!(" {} nodes", targets.len()) } else { String::new() };
-            if ui.button(format!("⧉ Duplicate{word}")).on_hover_text("Ctrl+D").clicked() {
+            if ui.button(format!("⎘ Duplicate{word}")).on_hover_text("Ctrl+D").clicked() {
                 acts.push(Act::Duplicate(targets.clone()));
                 ui.close();
             }

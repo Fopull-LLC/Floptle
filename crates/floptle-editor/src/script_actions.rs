@@ -89,7 +89,7 @@ impl Editor {
         }
         self.console.push(
             floptle_script::LogLevel::Debug,
-            format!("⛰ generating {} terrain field(s) in the background…", gens.len()),
+            format!("Δ generating {} terrain field(s) in the background…", gens.len()),
             None,
         );
         self.planet_gen_pending.extend(gens.iter().map(|(id, _)| *id));
@@ -134,7 +134,7 @@ impl Editor {
             let Some(e) = target else {
                 self.console.push(
                     floptle_script::LogLevel::Warn,
-                    format!("⛰ generated field for terrain id {id}, but no node carries it"),
+                    format!("Δ generated field for terrain id {id}, but no node carries it"),
                     None,
                 );
                 continue;
@@ -157,13 +157,13 @@ impl Editor {
                 self.rebuild_sim();
                 self.console.push(
                     floptle_script::LogLevel::Debug,
-                    format!("⛰ terrain id {id} generated during Play — collision live"),
+                    format!("Δ terrain id {id} generated during Play — collision live"),
                     None,
                 );
             }
             self.console.push(
                 floptle_script::LogLevel::Debug,
-                format!("⛰ terrain id {id} ready — {chunks} chunks in {:.1}s", ms as f64 / 1000.0),
+                format!("Δ terrain id {id} ready — {chunks} chunks in {:.1}s", ms as f64 / 1000.0),
                 None,
             );
         }
