@@ -35,7 +35,12 @@ fn solar_scenes_parse() {
         assert!(doc.is_ok(), "{} failed to parse: {:?}", path.display(), doc.err());
         checked += 1;
     }
-    assert!(checked >= 4, "expected the solar scenes, found {checked}");
+    // At least ONE, not at least four: the guard is here so a missing or empty
+    // directory can't make this pass vacuously — it is not a claim about how
+    // many scenes the game has. Pinning the count made an ENGINE test fail
+    // because a game deleted a scene, which is a false alarm in the one place
+    // false alarms are most expensive.
+    assert!(checked >= 1, "solar/scenes had no .ron files at all");
 }
 
 #[test]
