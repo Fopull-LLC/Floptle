@@ -961,6 +961,12 @@ pub(crate) fn apply_rich_sets(
                 data.truncate(want);
                 world.insert(e, Matter::Tilemap { cols, rows, tile, data });
             }
+            // The counterpart setter (`floptle/0062`). Like a tilemap, a batch
+            // takes its sheet from the node's ordinary Material — so this
+            // carries only the quad's edge length.
+            RichSet::MatterSpriteBatch { size } => {
+                world.insert(e, Matter::SpriteBatch { size: size.max(1e-4) });
+            }
             RichSet::TileCells(writes) => {
                 let Some(Matter::Tilemap { cols, rows, data, .. }) =
                     world.get_mut::<Matter>(e)
@@ -2304,6 +2310,31 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         }
         {
             let q = q.clone();
+            methods.set(
+                "setSpriteBatch",
+                lua.create_function(move |_, (this, t): (Table, Option<Table>)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    // `size` is the quad's edge; every sprite scales it. One
+                    // optional argument, so `nd:setSpriteBatch()` is the whole
+                    // call for the common case.
+                    let size: f32 = match &t {
+                        Some(t) => t.get::<Option<f32>>("size")?.unwrap_or(1.0),
+                        None => 1.0,
+                    };
+                    // NaN spelled out rather than `!(size > 0.0)`: same guard,
+                    // and it says which two things it is refusing.
+                    if size.is_nan() || size <= 0.0 {
+                        return Err(mlua::Error::runtime(
+                            "setSpriteBatch{ size = }: size must be greater than 0",
+                        ));
+                    }
+                    q.borrow_mut().push((e, crate::RichSet::MatterSpriteBatch { size }));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let q = q.clone();
             let scene = shared.scene.clone();
             methods.set(
                 "tilemap",
@@ -2315,10 +2346,34 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         }
         {
             let draws = shared.sprite_draws.clone();
+            let scene = shared.scene.clone();
+            let q = q.clone();
             methods.set(
                 "sprites",
                 lua.create_function(move |lua, this: Table| {
                     let e: u32 = this.raw_get("__id")?;
+                    // Refuse a node that is not a batch, rather than handing
+                    // back a handle whose every `draw` is collected and then
+                    // dropped by the renderer's own filter. That silence cost a
+                    // real project an afternoon (`floptle/0062`): the calls all
+                    // returned, nothing was ever drawn, and there was no line
+                    // anywhere to say why.
+                    let is_batch = scene.borrow().sprite_batches.contains(&e)
+                        // …or it is about to be one: `setSpriteBatch` is queued
+                        // and applied after the pass, so the obvious two lines
+                        // — make it a batch, then take its handle — have to
+                        // work in the order anybody would write them.
+                        || q.borrow().iter().any(|(qe, set)| {
+                            *qe == e && matches!(set, crate::RichSet::MatterSpriteBatch { .. })
+                        });
+                    if !is_batch {
+                        return Err(mlua::Error::runtime(
+                            "node:sprites(): this node is not a sprite batch. Call \
+                             node:setSpriteBatch{ size = 1.0 } first (or set Matter to \
+                             Sprite Batch in the Inspector) — without it every draw is \
+                             thrown away.",
+                        ));
+                    }
                     new_sprite_batch_handle(lua, e, draws.clone())
                 })?,
             )?;

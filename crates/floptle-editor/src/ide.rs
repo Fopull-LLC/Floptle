@@ -3040,6 +3040,7 @@ fn api_category(label: &str) -> &'static str {
     } else if starts(label, "tm")
         || starts(label, "batch")
         || label == "node:setTilemap"
+        || label == "node:setSpriteBatch"
         || label == "node:tilemap"
         || label == "node:sprites"
     {
@@ -3848,9 +3849,10 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node:setTerrain", insert: ":setTerrain(", doc: "node:setTerrain(id) — make the node a Terrain volume with that id; fill it with terrain.generatePlanet(id, opts)." },
     ApiEntry { label: "node:setTerrainGen", insert: ":setTerrainGen(", doc: "node:setTerrainGen(opts) — attach an ON-DEMAND generation spec (the same opts table terrain.generatePlanet takes): the body's field generates in the background when something first approaches, so no field file is needed at all — a rolled galaxy is playable instantly and unvisited worlds cost one scene node. Player edits saved under terrain.saveDir take priority over regeneration. nil clears." },
     ApiEntry { label: "node:setPrimitive", insert: ":setPrimitive(", doc: "node:setPrimitive(\"Sphere\" [, {r,g,b}]) — make the node a primitive (Cube/Sphere/Capsule/Plane)." },
+    ApiEntry { label: "node:setSpriteBatch", insert: ":setSpriteBatch{", doc: "node:setSpriteBatch{size=1.0} — make this node a SPRITE BATCH, so node:sprites() can draw into it. The counterpart of node:setTilemap: a game's sprite styles are data (one batch per material), so the nodes that draw them are made from the same script that declares them rather than authored one at a time into the scene. `size` is the quad's edge length; every sprite scales it. The sheet is the node's own Material." },
     ApiEntry { label: "node:setTilemap", insert: ":setTilemap{", doc: "node:setTilemap{cols=13, rows=7, tile=1.5 [, data={…}]} — make this node a TILEMAP: a grid of spritesheet cells drawn as one mesh, one draw call. The sheet is the node's own Material (texture + sheetCols/sheetRows). Neighbouring tiles share an exact edge, so the hairline gaps a grid of separate quads opens up as the camera moves cannot happen. `data` is row-major from the top-left; leave it out for an empty grid you fill with tm:set." },
     ApiEntry { label: "node:tilemap", insert: ":tilemap()", doc: "node:tilemap() — a handle to this node's tilemap grid: tm:set / tm:get / tm:fill / tm:size. Re-dress a room per floor without rebuilding the node." },
-    ApiEntry { label: "node:sprites", insert: ":sprites()", doc: "node:sprites() — a handle to this node's SpriteBatch: b:draw(...) queues one sprite for this frame. N sprites from one node, each with its own position, rotation, scale, cell AND tint — no scene node per sprite and no pool to grow." },
+    ApiEntry { label: "node:sprites", insert: ":sprites()", doc: "node:sprites() — a handle to this node's SpriteBatch (make it one with node:setSpriteBatch{} first; on any other node this is an error rather than a handle that silently draws nothing): b:draw(...) queues one sprite for this frame. N sprites from one node, each with its own position, rotation, scale, cell AND tint — no scene node per sprite and no pool to grow." },
     ApiEntry { label: "tm:set", insert: ":set(", doc: "tm:set(x, y, cell) — set one square, 0-based from the TOP-LEFT. Outside the grid is a no-op rather than a wrap. Pass EMPTY_TILE (or use tm:fill) to clear." },
     ApiEntry { label: "tm:get", insert: ":get(", doc: "tm:get(x, y) → cell, or nil outside the grid and on an empty square." },
     ApiEntry { label: "tm:fill", insert: ":fill(", doc: "tm:fill(cell) — set every square, including the empty ones. The fast way to reset a room before re-dressing it." },

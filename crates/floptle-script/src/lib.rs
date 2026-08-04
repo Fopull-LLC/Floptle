@@ -819,6 +819,10 @@ pub(crate) struct SceneMirror {
     /// answer `tm:get` / `tm:size` without reaching into the world
     /// (`floptle/0058`).
     tilemaps: HashMap<u32, (u32, u32, Vec<u32>)>,
+    /// Entities that ARE sprite batches, so `node:sprites()` can refuse a node
+    /// that is not one instead of handing back a handle whose every draw is
+    /// silently dropped.
+    sprite_batches: std::collections::HashSet<u32>,
     /// UI elements' current text (so a script can read `node.text`).
     ui_texts: HashMap<u32, String>,
     /// UI elements' current style name (so a script can read `node.style`).
@@ -903,6 +907,12 @@ pub enum RichSet {
     MatterPrimitive(String, [f64; 3]),
     /// `node:setTilemap{...}` — build (or re-shape) a 2D grid on this node.
     MatterTilemap { cols: u32, rows: u32, tile: f32, data: Vec<u32> },
+    /// `node:setSpriteBatch{ size = }` — the other half of the 2D pair. A
+    /// game's sprite styles are DATA (one batch per material, one material per
+    /// style), so the nodes that draw them have to be makeable from the same
+    /// Lua that declares them, not authored one-by-one into a scene and kept in
+    /// sync by nothing.
+    MatterSpriteBatch { size: f32 },
     /// `tm:set(x, y, cell)` writes, batched per call site. Applied in order, so
     /// two writes to one square land the way the script wrote them.
     TileCells(Vec<(u32, u32, u32)>),
@@ -2177,7 +2187,12 @@ function update(node, dt)
   readBack = tm:get(0, 0)
   cols, rows = tm:size()
 
-  local b = node:sprites()
+  -- A node is not a sprite batch until it is told to be one, and taking the
+  -- handle in the very next line has to work (`floptle/0062`). A separate node
+  -- because Matter is exclusive: a tilemap is not also a batch.
+  local nd = find('Batch')
+  nd:setSpriteBatch{ size = 1.0 }
+  local b = nd:sprites()
   b:draw(1, 2)                                   -- the short form
   b:draw(3, 4, 0, 2.0, 1.5, 6, 1, 0.2, 0.2, 0.5) -- …and the whole thing
   b:draw(5, 6, 0, vec2(1.4, 0.6))                -- squash and stretch
@@ -2186,6 +2201,10 @@ end
         );
         let (mut world, e) = world_with_script("flat");
         world.insert(e, floptle_core::Matter::Empty);
+        let batch = world.spawn();
+        world.insert(batch, Transform::IDENTITY);
+        world.insert(batch, floptle_core::Name("Batch".into()));
+        world.insert(batch, floptle_core::Matter::Empty);
         let mut host = ScriptHost::new();
         // Two passes: `start` builds the grid, and the writes queued in the
         // first `update` land before the second reads them back.
@@ -2205,14 +2224,17 @@ end
         assert_eq!(data[1], 1, "tm:fill covered the rest");
         assert!(data.iter().all(|c| *c != 5), "an out-of-bounds set must not wrap");
 
-        // The batch node has no SpriteBatch matter here, so nothing was stored —
-        // the draws are only kept for nodes that are actually batches.
-        assert!(world.get::<floptle_core::Sprites>(e).is_none());
-
-        // Make it a batch and the same draws land.
-        world.insert(e, floptle_core::Matter::SpriteBatch { size: 1.0 });
+        // `setSpriteBatch` made the OTHER node a batch, from Lua alone.
+        assert!(
+            matches!(
+                world.get::<floptle_core::Matter>(batch),
+                Some(floptle_core::Matter::SpriteBatch { .. })
+            ),
+            "setSpriteBatch made it a batch: {:?}",
+            world.get::<floptle_core::Matter>(batch)
+        );
         host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
-        let sprites = world.get::<floptle_core::Sprites>(e).expect("sprites");
+        let sprites = world.get::<floptle_core::Sprites>(batch).expect("sprites");
         assert_eq!(sprites.0.len(), 3, "three draws, three sprites");
         assert_eq!(sprites.0[0].pos, [1.0, 2.0, 0.0]);
         assert_eq!(sprites.0[0].tint, [1.0, 1.0, 1.0, 1.0], "the short form is untinted");
@@ -2226,9 +2248,147 @@ end
         write_script(&dir, "flat", "function update(node, dt)\nend\n");
         host.run(&mut world, &dir, 1.0 / 60.0, 3.0 / 60.0);
         assert!(
-            world.get::<floptle_core::Sprites>(e).is_some_and(|s| s.0.is_empty()),
+            world.get::<floptle_core::Sprites>(batch).is_some_and(|s| s.0.is_empty()),
             "sprites must not survive a frame nobody drew them"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `node:sprites()` on a node that is not a batch used to return a handle
+    /// whose every draw was collected and then dropped by the renderer's own
+    /// filter — no error, no warning, nothing drawn, ever (`floptle/0062`).
+    #[test]
+    fn asking_a_plain_node_for_a_sprite_batch_says_so() {
+        let dir = std::env::temp_dir().join(format!("floptle_0062_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "flat",
+            "function update(node, dt)\n  local b = node:sprites()\n  b:draw(1, 2)\nend\n",
+        );
+        let (mut world, e) = world_with_script("flat");
+        world.insert(e, floptle_core::Matter::Empty);
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        let errs = host.errors().to_vec();
+        assert_eq!(errs.len(), 1, "it must complain: {errs:?}");
+        assert!(
+            errs[0].contains("setSpriteBatch"),
+            "…and name the call that fixes it: {}",
+            errs[0]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A screen with a section switched off, written the way anybody writes it:
+    /// `local dead = nil` and then the section in the list. That leaves a HOLE
+    /// in the array, and a hole used to take the WHOLE SCREEN down — one absent
+    /// section and nothing at all was built, with an error naming an index
+    /// rather than a section. Found in a real project (`floptle/0061`).
+    #[test]
+    fn a_section_switched_off_does_not_take_the_screen_with_it() {
+        let dir = std::env::temp_dir().join(format!("floptle_uimake_nil_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "hud",
+            "\
+function update(node, dt)
+  local vitals = { 'text', text = 'HP' }
+  local dead   = nil                      -- the section that is not on screen
+  local hint   = { 'text', text = 'HINT' }
+  ui.make(node, { vitals, dead, hint })
+end
+",
+        );
+        let (mut world, e) = world_with_script("hud");
+        world.insert(e, floptle_core::Matter::Empty);
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        host.apply_ui_makes(&mut world);
+        assert_eq!(
+            world.query::<floptle_core::Made>().count(),
+            2,
+            "the two sections that ARE on screen"
+        );
+
+        // …and the trailing half of the same problem: a hole truncates Lua's
+        // length operator, so `hint` used to be dropped without a word.
+        let texts: Vec<String> = world
+            .query::<floptle_ui::ElementSpec>()
+            .filter_map(|(_, s)| s.text.as_ref().map(|t| t.text.clone()))
+            .collect();
+        assert!(texts.contains(&"HINT".to_string()), "the section AFTER the hole: {texts:?}");
+
+        // An empty table is how a screen is taken down. It used to describe one
+        // anonymous box, so hiding a menu left an element behind every time.
+        write_script(&dir, "hud", "function update(node, dt)\n  ui.make(node, {})\nend\n");
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        let destroy = host.apply_ui_makes(&mut world);
+        assert_eq!(destroy.len(), 2, "both sections handed back for destruction");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reconcile REUSES entities, so an element that was a buy button and is
+    /// now a sold-out label is the same entity with no `clicked` in its new
+    /// description. Its old closure used to stay armed — clicking one thing did
+    /// another thing's job, intermittently, depending on what the screen last
+    /// showed.
+    #[test]
+    fn an_element_that_stops_being_a_button_stops_answering_the_old_one() {
+        let dir = std::env::temp_dir().join(format!("floptle_uimake_hook_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "shop",
+            "\
+function update(node, dt)
+  ui.make(node, { { 'text', key = 'row', text = 'BUY',
+                    button = true, onClicked = function() log('FIRED') end } })
+end
+",
+        );
+        let (mut world, e) = world_with_script("shop");
+        world.insert(e, floptle_core::Matter::Empty);
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        host.apply_ui_makes(&mut world);
+        let row = world
+            .query::<floptle_core::Made>()
+            .find(|(_, m)| m.key == "row")
+            .map(|(e, _)| e.index())
+            .expect("the row");
+
+        // It is a button, and it answers.
+        let fired = |h: &mut ScriptHost| {
+            h.drain_logs().iter().filter(|l| l.msg.contains("FIRED")).count()
+        };
+        let _ = fired(&mut host); // clear anything from the describe pass
+        host.run_ui_hooks(&mut world, &[(row, "clicked")]);
+        assert_eq!(fired(&mut host), 1, "the button works");
+
+        // The same row, re-described as a plain label.
+        write_script(
+            &dir,
+            "shop",
+            "\
+function update(node, dt)
+  ui.make(node, { { 'text', key = 'row', text = 'SOLD OUT' } })
+end
+",
+        );
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        host.apply_ui_makes(&mut world);
+        let same = world
+            .query::<floptle_core::Made>()
+            .find(|(_, m)| m.key == "row")
+            .map(|(e, _)| e.index());
+        assert_eq!(same, Some(row), "reconcile kept the entity — that is the whole hazard");
+        let _ = fired(&mut host);
+        host.run_ui_hooks(&mut world, &[(row, "clicked")]);
+        assert_eq!(fired(&mut host), 0, "…and it must NOT answer the old closure");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
