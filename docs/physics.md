@@ -111,3 +111,30 @@ field's native resolution — is anchored on its node's `f64` translation. Conte
 placed millions of units out simulates as precisely as content at the origin.
 
 Stop (F1) drops the sim and restores the scene to its pre-Play state.
+
+### What it costs as a scene grows
+
+Depenetration used to test **every body against every collider**, twice per tick.
+That is fine for a room and quadratic for a level: 400 bodies over 1,681 colliders
+cost 4.5 s for 120 steps.
+
+There is now a spatial index over the colliders, rebuilt once per tick, and each
+body asks it which colliders can possibly reach it (`floptle/0076`):
+
+| colliders × bodies | before | after |
+|---|---:|---:|
+| 169 × 50 | 61.6 ms | 50.5 ms |
+| 625 × 200 | 859 ms | 248 ms |
+| 1,681 × 400 | 4.50 s | 556 ms |
+
+The ratio **growing** with scene size is the point — that is a quadratic being
+removed rather than a constant being shaved.
+
+It cannot change what your game does. The index answers with *candidates* and the
+same exact test runs on each, in the same order, so a scene simulates identically
+— there is a test that runs the same fall against an indexed world and an
+unindexed one and requires the resting position to match exactly. A collider whose
+shape has no cheap bound (an infinite plane, a terrain field, a triangle mesh) is
+offered to every query, exactly as before.
+
+Nothing to configure, and nothing to opt into.

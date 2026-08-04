@@ -37,6 +37,7 @@ pub mod noise;
 pub mod origin;
 pub mod profile;
 pub mod script;
+pub mod spatial;
 pub mod time;
 pub mod transform;
 

@@ -27,6 +27,18 @@ pub trait CollisionShape {
     /// Downcast to the sculptable terrain field, if this collider is one — the runtime
     /// terrain API (Lua `terrain.sculpt/dig`) edits the sim's own copy through this so
     /// collision keeps agreeing with the authority field it was cloned from.
+    /// A bounding sphere in the shape's own frame, if one is worth having.
+    ///
+    /// `None` means "no useful bound" — an infinite plane, a terrain field, a
+    /// mesh whose extent is not cheap to know. The broadphase treats those as
+    /// always-candidates (`floptle/0076`), so a shape that does not answer this
+    /// behaves exactly as it did before: the narrow phase still tests it.
+    ///
+    /// Returning a bound that is too SMALL would silently drop contacts, so the
+    /// implementations below are the ones where the bound is exact.
+    fn bounds(&self) -> Option<(Vec3, f32)> {
+        None
+    }
     fn chunk_terrain(&self) -> Option<&ChunkTerrain> {
         None
     }
@@ -71,6 +83,9 @@ pub struct SphereShape {
 }
 
 impl CollisionShape for SphereShape {
+    fn bounds(&self) -> Option<(Vec3, f32)> {
+        Some((self.center, self.radius))
+    }
     fn distance(&self, p: Vec3) -> f32 {
         (p - self.center).length() - self.radius
     }
@@ -97,6 +112,11 @@ impl BoxShape {
 }
 
 impl CollisionShape for BoxShape {
+    fn bounds(&self) -> Option<(Vec3, f32)> {
+        // The box's own diagonal, so ANY rotation is covered without asking
+        // which one this is.
+        Some((self.center, self.half.length()))
+    }
     fn distance(&self, p: Vec3) -> f32 {
         let l = self.inv_rot * (p - self.center);
         let q = l.abs() - self.half;
@@ -132,6 +152,9 @@ impl CapsuleShape {
 }
 
 impl CollisionShape for CapsuleShape {
+    fn bounds(&self) -> Option<(Vec3, f32)> {
+        Some(((self.a + self.b) * 0.5, (self.b - self.a).length() * 0.5 + self.radius))
+    }
     fn distance(&self, p: Vec3) -> f32 {
         (p - self.closest(p)).length() - self.radius
     }

@@ -41,6 +41,13 @@ impl AnchoredCollider {
         Self { shape, anchor: DVec3::ZERO, layer: 0, eid: None, sensor: false, offset: Vec3::ZERO }
     }
 
+    /// The collider's bounding sphere in the SIM frame, if its shape has one
+    /// (`floptle/0076`). `None` = no useful bound, so the broadphase always
+    /// offers it and the narrow phase decides, exactly as before.
+    pub fn bounds(&self) -> Option<(Vec3, f32)> {
+        self.shape.bounds().map(|(c, r)| (c + self.offset, r))
+    }
+
     /// Signed distance from sim-frame point `p` to the surface.
     pub fn distance(&self, p: Vec3) -> f32 {
         self.shape.distance(p - self.offset)
@@ -98,6 +105,25 @@ pub struct PhysicsWorld {
     /// `(body index, kinematic entity, point, normal)` — cleared each step,
     /// consumed by the sim's touch-event diff.
     pub kin_contacts: Vec<(usize, u32, Vec3, Vec3)>,
+    /// Broadphase over the colliders, rebuilt at the top of every `step`
+    /// (`floptle/0076`).
+    ///
+    /// Rebuilt rather than cached-and-invalidated on purpose: `colliders` is a
+    /// public Vec that the sim rewrites wholesale, terrain edits mutate in place,
+    /// and `rebase` moves every offset at once. A per-step rebuild is O(colliders)
+    /// against a pass that is bodies x colliders x 2, so it pays for itself at two
+    /// bodies — and it cannot go stale, which no invalidation scheme can promise.
+    collider_index: floptle_core::spatial::Grid,
+    /// Scratch candidate list, reused so the broadphase allocates nothing per body.
+    cand: Vec<u32>,
+    /// True while `step` has already rebuilt the index for this tick.
+    ///
+    /// `step_body` is also reachable directly (the rollback driver steps bodies
+    /// one at a time), and an index left over from another collider set would
+    /// drop contacts — a body falling through the floor. So `step_body` rebuilds
+    /// unless `step` just did, which costs the driven path what it cost before
+    /// and never risks a stale answer.
+    index_fresh: bool,
     /// Compound rigid bodies (multi-shape 6-DOF assemblies — see `compound.rs`),
     /// stepped alongside `bodies` with the same collider set and layer matrix.
     pub compounds: Vec<Compound>,
@@ -120,6 +146,9 @@ impl Default for PhysicsWorld {
             kin_contacts: Vec::new(),
             compounds: Vec::new(),
             compound_contacts: Vec::new(),
+            collider_index: Default::default(),
+            cand: Vec::new(),
+            index_fresh: false,
         }
     }
 }
@@ -551,8 +580,24 @@ impl PhysicsWorld {
     /// Advance the simulation by `dt` seconds. Call on a FIXED timestep (e.g. 1/120 s
     /// via an accumulator) for stability, not the variable render delta. Field-indexed
     /// throughout so the per-body collider/gravity/contact accesses stay borrow-clean.
+    /// Rebuild the collider broadphase from the current collider set
+    /// (`floptle/0076`).
+    pub(crate) fn reindex_colliders(&mut self) {
+        // A collider with no bound (a plane, a terrain field, a mesh) is handed
+        // in with an infinite radius, which the grid files as oversized and
+        // therefore offers to every query. That is what makes this a pure
+        // narrowing: nothing the scan tested can stop being tested.
+        let items = self.colliders.iter().map(|c| match c.bounds() {
+            Some((centre, r)) => (centre, r),
+            None => (Vec3::ZERO, f32::INFINITY),
+        });
+        self.collider_index.rebuild(items);
+        self.index_fresh = true;
+    }
+
     pub fn step(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, 0.1); // guard against a huge stalled frame
+        self.reindex_colliders();
         self.contacts.clear();
         self.kin_contacts.clear();
         self.compound_contacts.clear();
@@ -566,6 +611,7 @@ impl PhysicsWorld {
         for ci in 0..self.compounds.len() {
             self.step_compound(ci, dt);
         }
+        self.index_fresh = false;
     }
 
     pub fn add_compound(&mut self, c: Compound) -> usize {
@@ -885,6 +931,12 @@ impl PhysicsWorld {
     /// approximate). Does NOT clear `contacts`; the frame driver owns that.
     pub fn step_body(&mut self, bi: usize, dt: f32) {
         let dt = dt.clamp(0.0, 0.1);
+        if !self.index_fresh {
+            // Reached directly (the rollback driver), so nothing has built the
+            // broadphase for this tick yet.
+            self.reindex_colliders();
+            self.index_fresh = false; // one body only; the next one rebuilds too
+        }
         if !self.bodies[bi].active {
             return; // snapshot-driven (networked authority on a client)
         }
@@ -966,7 +1018,29 @@ impl PhysicsWorld {
             let row = self.matrix[self.bodies[bi].layer as usize];
             let passes = if self.bodies[bi].sensor { 0 } else { 2 };
             for _ in 0..passes {
-                for ci in 0..self.colliders.len() {
+                // Broadphase (`floptle/0076`): ask the index which colliders can
+                // possibly reach this body, instead of walking all of them. The
+                // query sphere covers every sample centre plus the body radius,
+                // and a collider outside it cannot produce `radius - d > 0` — so
+                // this narrows what is TESTED and cannot change what is FOUND.
+                //
+                // Re-queried each pass because depenetration moves the body, and
+                // in ASCENDING index order — the same order the full scan visited
+                // them, which is what keeps a rollback re-simulation bit-exact.
+                let cand = {
+                    let (centres, n_c, radius) = self.bodies[bi].sample_centers();
+                    let pos = self.bodies[bi].pos;
+                    let reach = centres[..n_c]
+                        .iter()
+                        .map(|c| c.distance(pos))
+                        .fold(0.0f32, f32::max);
+                    let mut cand = std::mem::take(&mut self.cand);
+                    cand.clear();
+                    self.collider_index.sphere(pos, reach + radius + 0.01, &mut cand);
+                    cand
+                };
+                for &ci in &cand {
+                    let ci = ci as usize;
                     if (row >> self.colliders[ci].layer) & 1 == 0 {
                         continue;
                     }
@@ -1004,6 +1078,9 @@ impl PhysicsWorld {
                         });
                     }
                 }
+                // Hand the buffer back so the next pass (and the next body)
+                // reuses its allocation.
+                self.cand = cand;
                 // …and against the KINEMATIC bodies' hulls — moving platforms
                 // and elevators push dynamic bodies exactly like static
                 // geometry would (only kinematic bodies live in `kin_hulls`,
@@ -1258,5 +1335,104 @@ mod shape_query_tests {
         let hit = capsulecast(&[], &hulls, o, d, 0.4, 1.8, Vec3::Y, 10.0, &[], !0)
             .expect("the capsule's top cap reaches it");
         assert_eq!(hit.eid, Some(1));
+    }
+
+    /// The broadphase must not change the answer (`floptle/0076`).
+    ///
+    /// This is the only property that makes an index safe to drop under a solver:
+    /// a candidate list that misses a collider is a body falling through the
+    /// floor, and the failure appears at whatever scene size first spreads the
+    /// geometry out. So the same fall is simulated against two worlds — one whose
+    /// colliders all report bounds, one where they are all unbounded (and are
+    /// therefore always candidates, i.e. the old full scan) — and the resting
+    /// position has to match exactly.
+    #[test]
+    fn the_broadphase_finds_exactly_what_the_full_scan_found() {
+        /// A box that refuses to say how big it is, so the index has to offer it
+        /// to every query — the old behaviour, reproduced on purpose.
+        use crate::shapes::BoxShape;
+        struct Unbounded(BoxShape);
+        impl crate::shapes::CollisionShape for Unbounded {
+            fn distance(&self, p: Vec3) -> f32 {
+                self.0.distance(p)
+            }
+            fn normal(&self, p: Vec3) -> Vec3 {
+                self.0.normal(p)
+            }
+            // bounds() left at the default None.
+        }
+
+        // A floor built from many tiles, so a body only ever touches a few — the
+        // case where an index either narrows correctly or breaks.
+        let tiles: Vec<(Vec3, Vec3)> = (-6..=6)
+            .flat_map(|x| {
+                (-6..=6).map(move |z| {
+                    (Vec3::new(x as f32 * 4.0, 0.0, z as f32 * 4.0), Vec3::new(2.0, 0.5, 2.0))
+                })
+            })
+            .collect();
+
+        let run = |bounded: bool| -> (Vec3, usize) {
+            let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+            for (c, half) in &tiles {
+                let b = BoxShape::new(*c, *half, Quat::IDENTITY);
+                if bounded {
+                    w.add_collider(Box::new(b));
+                } else {
+                    w.add_collider(Box::new(Unbounded(b)));
+                }
+            }
+            let bi = w.add_body(Body::sphere(Vec3::new(3.0, 6.0, -5.0), 0.5));
+            for _ in 0..240 {
+                w.step(1.0 / 60.0);
+            }
+            (w.bodies[bi].pos, w.contacts.len())
+        };
+
+        let (with_index, n_index) = run(true);
+        let (full_scan, n_scan) = run(false);
+        assert_eq!(
+            with_index, full_scan,
+            "the indexed run rested at {with_index:?} and the full scan at {full_scan:?} —              a broadphase that changes the simulation is not a broadphase"
+        );
+        assert_eq!(n_index, n_scan, "…and it found the same number of contacts");
+        assert!(with_index.y > 0.0, "the body should be resting ON the floor, not through it");
+    }
+
+    /// A body stepped one at a time (the rollback driver's path) must land in the
+    /// same place as one stepped by the whole world.
+    ///
+    /// `step_body` bypasses `step`, so it also bypasses the index rebuild that
+    /// lives there. If it used a stale or empty index the body would fall through
+    /// — and the rollback acceptance test is that live and replayed ticks agree
+    /// bit for bit.
+    #[test]
+    fn a_body_stepped_on_its_own_gets_the_same_broadphase() {
+        use crate::shapes::BoxShape;
+        let build = || {
+            let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+            for x in -4..=4 {
+                w.add_collider(Box::new(BoxShape::new(
+                    Vec3::new(x as f32 * 3.0, 0.0, 0.0),
+                    Vec3::new(1.5, 0.5, 8.0),
+                    Quat::IDENTITY,
+                )));
+            }
+            let bi = w.add_body(Body::sphere(Vec3::new(0.0, 5.0, 0.0), 0.5));
+            (w, bi)
+        };
+        let (mut whole, bi) = build();
+        for _ in 0..180 {
+            whole.step(1.0 / 60.0);
+        }
+        let (mut one, bj) = build();
+        for _ in 0..180 {
+            one.step_body(bj, 1.0 / 60.0);
+        }
+        assert_eq!(
+            whole.bodies[bi].pos, one.bodies[bj].pos,
+            "stepping a body directly must not lose the broadphase"
+        );
+        assert!(whole.bodies[bi].pos.y > 0.0, "and it must still land on the floor");
     }
 }

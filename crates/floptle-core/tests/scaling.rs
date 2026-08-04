@@ -233,3 +233,81 @@ fn sweeping_the_resident_chunks_is_linear_in_how_many_there_are() {
     });
     assert_linearish("chunks_near", ratio);
 }
+
+/// The spatial index (`floptle/0076`): N sphere queries over N items must stay
+/// roughly LINEAR in N, where the honest scan they replace is quadratic.
+///
+/// This is the guard the card asked for, and it is the measurement that decided
+/// the shape. "What is near here?" asked once per body per frame — which is what
+/// a game with damage volumes, triggers or AI perception does — is the exact
+/// N-queries-over-N-items case, and the scan makes it grow 16x when the scene
+/// grows 4x. Every accidental quadratic that reached a player in this engine had
+/// that same signature.
+///
+/// The rebuild is INSIDE the measurement on purpose. An index whose query is
+/// sub-linear but whose build is worse than the scan it replaced is not a win,
+/// and measuring only the query would hide that.
+#[test]
+fn n_sphere_queries_over_n_bodies_stay_linear() {
+    use floptle_core::math::Vec3;
+    use floptle_core::spatial::Grid;
+
+    let ratio = growth(2_000, |n| {
+        // A lattice a few radii apart, so a query's own neighbourhood is small
+        // and the index has something to narrow.
+        let side = (n as f32).cbrt().ceil() as usize;
+        let items: Vec<(Vec3, f32)> = (0..n)
+            .map(|i| {
+                let (x, y, z) = (i % side, (i / side) % side, i / (side * side));
+                (Vec3::new(x as f32 * 3.0, y as f32 * 3.0, z as f32 * 3.0), 0.5)
+            })
+            .collect();
+        let mut grid = Grid::default();
+        grid.rebuild(items.iter().copied());
+        // One query per item, each a couple of cells wide — the per-frame shape.
+        let mut cand = Vec::new();
+        let mut total = 0usize;
+        for (c, _) in &items {
+            cand.clear();
+            grid.sphere(*c, 2.0, &mut cand);
+            total += cand.len();
+        }
+        std::hint::black_box(total);
+    });
+    assert_linearish("spatial::Grid, n queries over n items", ratio);
+}
+
+/// …and the same work done the way it was done before is quadratic, so the guard
+/// above is measuring a real change and not a tautology.
+///
+/// Without this, "the index is linear" is unfalsifiable: any cheap-enough loop
+/// looks linear at these sizes. This is the before-number, in the same harness.
+#[test]
+fn the_scan_the_index_replaces_really_is_quadratic() {
+    use floptle_core::math::Vec3;
+
+    let ratio = growth(2_000, |n| {
+        let side = (n as f32).cbrt().ceil() as usize;
+        let items: Vec<(Vec3, f32)> = (0..n)
+            .map(|i| {
+                let (x, y, z) = (i % side, (i / side) % side, i / (side * side));
+                (Vec3::new(x as f32 * 3.0, y as f32 * 3.0, z as f32 * 3.0), 0.5)
+            })
+            .collect();
+        let mut total = 0usize;
+        for (c, _) in &items {
+            for (o, r) in &items {
+                if o.distance_squared(*c) <= (r + 2.0) * (r + 2.0) {
+                    total += 1;
+                }
+            }
+        }
+        std::hint::black_box(total);
+    });
+    assert!(
+        ratio > 8.0,
+        "the full scan measured {ratio:.1}x for 4x the bodies. It is supposed to be \
+         ~16x — if it is not, this harness is not measuring what the guard above \
+         claims to improve."
+    );
+}
