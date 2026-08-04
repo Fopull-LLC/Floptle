@@ -1,6 +1,16 @@
 ## Just shipped
 
-**v0.28.0 "One Missing Section"** — a screen built with `ui.make` no longer
+**v0.29.0 "Ask The Index"** — one script finding another stopped costing the
+size of your scene: a 5,000-node game spent 25 ms a frame searching for things
+and now spends 0.2. Worlds can have biomes, because scattered props take a
+density rule; a prop your own script assembled can be scattered, because a
+prefab works where only a mesh file used to; and landing on a small planet stops
+hitching, because detail rings now scale with the world instead of covering it
+whole. Plus three silences broken — a scatter option that did nothing, a scene
+value your script no longer reads, and a scene value quietly pinning the number
+you just edited.
+
+**v0.28.0 "One Missing Section"** before it — a screen built with `ui.make` no longer
 disappears because one part of it isn't showing. A section written as `nil` —
 which is how anybody writes a HUD where parts come and go — used to take the
 whole screen down, or silently drop everything after it. Clicking also stopped
@@ -9,7 +19,7 @@ no longer asks for, so a row that used to be a Buy button and is now a label
 stops answering the old one. And a script can make a sprite batch
 (`node:setSpriteBatch`) instead of authoring one node per style into the scene.
 
-**v0.27.0 "Same Everywhere"** before it — a pixel-art game can look the same in every
+**v0.27.0 "Same Everywhere"** under those — a pixel-art game can look the same in every
 window size. Two settings, both off by default: upscale the picture by a whole
 number and letterbox the rest, so every pixel is the same size instead of some
 being two screen pixels and some three; and pin the internal width, so a wide
@@ -18,7 +28,7 @@ same rule, which is what stops a pixel font being resampled off its own grid.
 Plus a fix for work a script queued on a session's last frame arriving in the
 next one.
 
-**v0.26.0 "Give It Back"** under those — a busy scene got much faster. Finding what a node
+**v0.26.0 "Give It Back"** — a busy scene got much faster. Finding what a node
 has on it was a search through every node, so a scene's cost grew with the
 square of its size; it is now a direct lookup, and a 5,500-node scene went from
 60 ms a frame of pure lookups to 4. Nothing in your project changes. Alongside
