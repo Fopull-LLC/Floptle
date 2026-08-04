@@ -1,0 +1,61 @@
+# The gate. Every push and every pull request runs the whole suite and the whole
+# lint pass, so a broken commit is caught where it was made rather than at a tag.
+#
+# Until this existed, both were enforced only by whoever was at the keyboard
+# remembering to run them — 1,500 tests and a zero-warning clippy policy resting
+# on human memory. That is a bad bet on its own, and a worse one because a green
+# local run is not always evidence: a full disk makes `cargo test` exit with NO
+# output at all, which through a summarising pipe reads exactly like a pass.
+#
+# Linux only, on purpose. It is the cheapest runner and nothing here is
+# platform-specific; the release workflow builds and links all four platforms, so
+# a portability break still cannot reach a published bundle. See release.yml,
+# which runs this same gate as a hard precondition of publishing.
+name: ci
+
+on:
+  push:
+    branches: ["**"] # branches only — a tag push runs the gate inside release.yml
+  pull_request:
+  workflow_call: # release.yml calls this, so there is exactly one definition of "green"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: test + clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same set the release bundle needs: windowing/GPU headers for wgpu + winit,
+      # ALSA for the audio backend, and udev for the gamepad backend — gilrs's
+      # libudev-sys build script does an unconditional find_library().unwrap()
+      # and PANICS without the .pc file.
+      - name: Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev \
+            libwayland-dev libgl1-mesa-dev libasound2-dev libudev-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # Lint first: it compiles the same crates the tests need, and a warning is
+      # cheaper to read than a test failure caused by the same mistake.
+      - name: clippy (zero warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace --all-targets
+
+      # `--all-targets` skips doc-tests entirely, which is easy to forget and
+      # means a broken example in a doc comment ships.
+      - name: doc tests
+        run: cargo test --workspace --doc

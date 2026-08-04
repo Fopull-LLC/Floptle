@@ -17,7 +17,16 @@ permissions:
   contents: write
 
 jobs:
+  # Nothing publishes until the suite and the lint pass are green ON THE TAGGED
+  # COMMIT. A local run before tagging is not evidence — it can be stale, it can
+  # be a dirty tree, and on a full disk `cargo test` prints nothing at all and
+  # reads as a pass. This is the only check that is actually about the artifact
+  # being shipped. Same definition of green as every other push (ci.yml).
+  gate:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: gate
     name: bundle ${{ matrix.target }}
     strategy:
       fail-fast: false
