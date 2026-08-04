@@ -2508,6 +2508,10 @@ impl ScriptHost {
             let out = crate::ui_make::reconcile(world, req.container, &req.roots);
             destroy.extend(out.destroy);
             let mut handlers = self.ui_handlers.borrow_mut();
+            // What this description asked for, so anything it did NOT ask for
+            // can be taken off afterwards.
+            let mut asked: std::collections::HashSet<(u32, &'static str)> =
+                std::collections::HashSet::new();
             for (path, hook, f) in req.hooks {
                 let Some((_, e)) = out.bound.iter().find(|(p, _)| *p == path) else {
                     // The described element it belonged to didn't survive
@@ -2516,11 +2520,35 @@ impl ScriptHost {
                     let _ = self.lua.remove_registry_value(f);
                     continue;
                 };
+                asked.insert((*e, hook));
                 // Re-describing a screen replaces its handlers: the closure is
                 // freshly made every call and captures this call's values, so
                 // keeping the old one would run against stale state.
                 if let Some(old) = handlers.insert((*e, hook.to_string()), f) {
                     let _ = self.lua.remove_registry_value(old);
+                }
+            }
+            // …and REMOVES the ones it stopped asking for. Reconcile reuses
+            // entities, so an element that was a buy button and is now a
+            // sold-out label is the same entity with no `clicked` in its new
+            // description — and it kept answering the old closure. Clicking one
+            // thing did another thing's job, which reads from the outside as
+            // the menu selecting the wrong row, intermittently, depending on
+            // what the screen happened to show last.
+            //
+            // Scoped to the elements THIS call described (`out.bound`), so a
+            // second `ui.make` on another container never disarms this one's.
+            let stale: Vec<(u32, String)> = handlers
+                .keys()
+                .filter(|(e, hook)| {
+                    out.bound.iter().any(|(_, b)| b == e)
+                        && !asked.iter().any(|(ae, ah)| ae == e && ah == hook)
+                })
+                .cloned()
+                .collect();
+            for k in stale {
+                if let Some(f) = handlers.remove(&k) {
+                    let _ = self.lua.remove_registry_value(f);
                 }
             }
         }
@@ -4094,6 +4122,7 @@ impl ScriptHost {
         s.ui_styles.clear();
         s.ui_textures.clear();
         s.tilemaps.clear();
+        s.sprite_batches.clear();
         for (e, tr) in world.query::<Transform>() {
             let id = e.index();
             s.order.push(id);
@@ -4105,6 +4134,9 @@ impl ScriptHost {
                 }
                 Some(Matter::Tilemap { cols, rows, data, .. }) => {
                     s.tilemaps.insert(id, (*cols, *rows, data.clone()));
+                }
+                Some(Matter::SpriteBatch { .. }) => {
+                    s.sprite_batches.insert(id);
                 }
                 _ => {}
             }

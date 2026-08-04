@@ -122,6 +122,19 @@ pub struct MakeResult {
 // Lua table -> description
 // ---------------------------------------------------------------------------
 
+/// A Lua table key as a 1-based array index, if it is one.
+///
+/// Integers arrive as `Integer` from a literal and as `Number` once arithmetic
+/// has been near them, so both count — a list built with `t[#t + 1] = …` must
+/// not be read differently from one written out longhand.
+fn key_index(k: &Value) -> Option<usize> {
+    match k {
+        Value::Integer(i) if *i >= 1 => Some(*i as usize),
+        Value::Number(n) if *n >= 1.0 && n.fract() == 0.0 => Some(*n as usize),
+        _ => None,
+    }
+}
+
 /// Read the tree argument: one element table, or an array of them.
 pub fn parse_tree(lua: &Lua, v: &Value) -> mlua::Result<(Vec<MadeNode>, Vec<Hook>)> {
     let Value::Table(t) = v else {
@@ -129,15 +142,53 @@ pub fn parse_tree(lua: &Lua, v: &Value) -> mlua::Result<(Vec<MadeNode>, Vec<Hook
     };
     let mut hooks = Vec::new();
     let mut roots = Vec::new();
+    // An EMPTY table describes nothing, which is how a screen is taken down:
+    // `ui.make(node, {})`. It used to fall through to "a table with no kind and
+    // no properties", i.e. one anonymous box — so hiding a menu left an element
+    // behind on every hide, and the call that most obviously means "clear" was
+    // the one call that could not.
+    if t.clone().pairs::<Value, Value>().next().is_none() {
+        return Ok((roots, hooks));
+    }
     // A list of elements, or one element? Only a list starts with a table:
     // an element starts with its kind, or with nothing and some properties.
     if matches!(t.raw_get::<Value>(1)?, Value::Table(_)) {
-        for i in 1..=t.raw_len() {
+        // NOT `1..=raw_len()`. A screen with a section switched off is written
+        // `local dead = nil` and then `{ vitals, score, dead }`, which is the
+        // obvious way to say it and leaves a HOLE in the array. Lua's length
+        // operator is only defined up to a border, so a holed table reports
+        // whatever its internal array happens to end at: sometimes the full
+        // count, in which case the nil entry used to abort the whole screen —
+        // one absent section and the ENTIRE HUD is missing, with an error that
+        // names an index rather than the section — and sometimes the index
+        // before the hole, in which case every later section was silently
+        // dropped and nothing was reported at all.
+        //
+        // So walk the integer keys the table actually has, and treat nil as
+        // what a person writing it means: no element here. A deferred child
+        // returning nil was ALREADY allowed for exactly this reason (see the
+        // function-child arm below); this is the same intent spelled the
+        // shorter way, and it has to mean the same thing.
+        let mut last = 0usize;
+        for pair in t.clone().pairs::<Value, Value>() {
+            let (k, _) = pair?;
+            if let Some(i) = key_index(&k) {
+                last = last.max(i);
+            }
+        }
+        for i in 1..=last {
             let child: Value = t.raw_get(i)?;
-            let Value::Table(ct) = child else {
-                return Err(mlua::Error::runtime(format!(
-                    "ui.make: entry {i} of the tree is not an element table"
-                )));
+            let ct = match child {
+                Value::Table(ct) => ct,
+                Value::Nil => continue,
+                _ => {
+                    return Err(mlua::Error::runtime(format!(
+                        "ui.make: entry {i} of the tree is not an element table (it is a \
+                         {}). An element is a table; leave it out or set it to nil to \
+                         show nothing.",
+                        child.type_name()
+                    )));
+                }
             };
             let path = vec![(roots.len()) as u16];
             roots.push(parse_node(lua, &ct, &path, &mut hooks, "")?);
@@ -231,7 +282,18 @@ fn parse_node(
     // same spec: Lua's `pairs` makes no promises about hash order at all.
     node.props.sort_by(|a, b| a.0.cmp(&b.0));
     // ---- children ----
-    let n = t.raw_len();
+    // The largest integer key, not `raw_len()`: a child list with a hole in it
+    // (`{ header, body, footer }` where `body` is conditionally nil) reports
+    // its length only as far as the hole, so everything after an absent child
+    // used to vanish silently. A nil child is skipped below and always was —
+    // it just had to be REACHED first.
+    let mut n = 0usize;
+    for pair in t.clone().pairs::<Value, Value>() {
+        let (k, _) = pair?;
+        if let Some(i) = key_index(&k) {
+            n = n.max(i);
+        }
+    }
     for i in first_child..=n {
         let child: Value = t.raw_get(i)?;
         let mut push = |node_t: &Table, made: &mut MadeNode| -> mlua::Result<()> {
