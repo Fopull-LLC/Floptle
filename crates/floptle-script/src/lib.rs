@@ -46,6 +46,10 @@ type ShaderParamSets = Rc<RefCell<Vec<(u32, String, [f32; 4])>>>;
 /// `(script key name, why the host keeps it)` — see [`ScriptHost::set_reserved_keys`].
 type ReservedKeys = Rc<RefCell<Vec<(String, String)>>>;
 
+/// The frame profile, shared between the driver, the Lua `perf` table and the
+/// editor readout (`floptle/0077`).
+pub type SharedProfile = Rc<RefCell<floptle_core::profile::FrameProfile>>;
+
 /// One world-space line segment a script queued via `draw.line(...)` this tick
 /// (immediate mode — re-queued every tick while wanted). Drawn depth-tested by
 /// the runtime line layer; the S6 v2 map draws its orbit conics with these.
@@ -226,6 +230,7 @@ pub use http_api::open_in_browser;
 mod input_api;
 mod math_api;
 mod net_api;
+mod perf_api;
 pub mod rollback_api;
 mod preprocess;
 mod save_api;
@@ -524,6 +529,15 @@ pub struct ScriptHost {
     /// exactly like not being pressed, which is why a game shipped an inventory
     /// bound to Tab and heard about it from a player rather than from a test.
     reserved_keys: ReservedKeys,
+    /// Where this frame's time went, per subsystem and per script
+    /// (`floptle/0077`). Written by the driver and by [`ScriptHost::run_pass`],
+    /// read by the editor readout and by the Lua `perf` table — one structure, so
+    /// a game's own budget assertion and the number on screen cannot disagree.
+    ///
+    /// Off by default and free while off. It exists because "the engine is slow"
+    /// was the only report a game could make, and four such reports turned out to
+    /// be four different numbers the game could have read itself.
+    profile: SharedProfile,
     /// `params.X = value` writes queued this pass — (entity, script kind, key,
     /// value). Flushed to the node's stored `ScriptInst` params so tunables are
     /// TWO-WAY: the write persists across frames and shows live in the
@@ -2304,6 +2318,67 @@ end
             world.get::<floptle_core::Sprites>(batch).is_some_and(|s| s.0.is_empty()),
             "sprites must not survive a frame nobody drew them"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A script sees its OWN cost, attributed by file name (`floptle/0077`).
+    ///
+    /// End to end through the real host, because the value of this API is
+    /// entirely in a game being able to assert its own budget — and the thing
+    /// that makes that possible is per-script attribution, which nothing outside
+    /// `run_pass` can produce.
+    #[test]
+    fn a_script_reads_its_own_frame_cost_by_name() {
+        let dir = std::env::temp_dir().join(format!("floptle_perf_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // Two scripts, one deliberately doing more work than the other, so the
+        // ordering `perf.scripts()` promises has something to order.
+        write_script(
+            &dir,
+            "busy",
+            "\
+function start(node)
+  perf.enable(true)
+end
+
+function update(node, dt)
+  local acc = 0
+  for i = 1, 200000 do acc = acc + i % 7 end
+  spun = acc
+end
+",
+        );
+        write_script(&dir, "idle", "function update(node, dt)\n  ticked = true\nend\n");
+        let (mut world, _e) = world_with_script("busy");
+        let idle = world.spawn();
+        world.insert(idle, Transform::IDENTITY);
+        world.insert(idle, floptle_core::Name("Idle".into()));
+        world.insert(
+            idle,
+            floptle_core::Scripts(vec![floptle_core::ScriptInst::new("idle")]),
+        );
+        let mut host = ScriptHost::new();
+        // `start` turns collection on; the frames after it are the measured ones.
+        for i in 0..4 {
+            host.run(&mut world, &dir, 1.0 / 60.0, i as f32 / 60.0);
+            host.profile().borrow_mut().end_frame();
+        }
+        let prof = host.profile().borrow();
+        assert!(prof.enabled(), "the script's own perf.enable(true) did not take");
+        let rows = prof.scripts();
+        assert!(rows.len() >= 2, "both scripts should be listed: {rows:?}");
+        assert_eq!(rows[0].0, "busy", "most expensive first: {rows:?}");
+        assert!(rows[0].1.ms > 0.0, "the busy script measured as free: {rows:?}");
+        // The bucket is the rows added up, so the readout cannot disagree with
+        // itself — that discrepancy is what makes a reader stop trusting one.
+        let bucket = prof.bucket(floptle_core::profile::Bucket::Scripts).expect("on");
+        let sum: f32 = rows.iter().map(|(_, c)| c.ms).sum();
+        assert!(
+            (bucket.ms - sum).abs() < sum.max(0.001) * 0.05,
+            "bucket {} vs rows {sum}",
+            bucket.ms
+        );
+        drop(prof);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

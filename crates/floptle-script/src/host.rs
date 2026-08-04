@@ -1710,6 +1710,12 @@ impl ScriptHost {
         if let Err(e) = crate::math_api::install(&lua) {
             eprintln!("[lua] failed to install the vector math API: {e}");
         }
+        // `perf.*` — a game reading its own frame cost (`floptle/0077`). Off by
+        // default and free while off, so this costs nothing but the table.
+        let profile: crate::SharedProfile = Rc::new(RefCell::new(Default::default()));
+        if let Err(e) = crate::perf_api::install(&lua, &profile) {
+            eprintln!("[lua] failed to install the perf API: {e}");
+        }
         // The `audio` API (one-shots, sound handles, mixer tracks) + `node:sound()`.
         // Must come after the handle API: it extends the node methods table.
         let audio_bridges = crate::audio_api::AudioBridges {
@@ -1922,6 +1928,7 @@ impl ScriptHost {
             physics_paused,
             mouse_lock,
             reserved_keys,
+            profile,
             param_writes: RefCell::new(Vec::new()),
             scene_request,
             scene_loaded,
@@ -3246,6 +3253,17 @@ impl ScriptHost {
     /// [`floptle_input::InputSystem::resolve_frame`] /
     /// [`resolve_tick`](floptle_input::InputSystem::resolve_tick)) and the Lua
     /// `input.action(...)` family reads out of it.
+    /// This frame's cost breakdown, shared with the Lua `perf` table
+    /// (`floptle/0077`).
+    ///
+    /// The driver records subsystem times into it and folds each frame with
+    /// `end_frame`; the host itself records per-script times inside `run_pass`.
+    /// One structure on purpose — the number a game asserts on and the number the
+    /// editor shows must be the same number, or one of them is a lie.
+    pub fn profile(&self) -> &crate::SharedProfile {
+        &self.profile
+    }
+
     pub fn input_system(&self) -> &crate::input_api::SharedInput {
         &self.input_sys
     }
@@ -3901,10 +3919,21 @@ impl ScriptHost {
             let mut ran = false;
             for inst in &scripts.0 {
                 if inst.enabled {
+                    // Per-SCRIPT attribution (`floptle/0077`). One `Instant` pair
+                    // per instance per pass would be thousands of syscalls in a
+                    // crowded scene, so it is skipped entirely unless somebody is
+                    // collecting — the profiler must not be a frame cost itself.
+                    // Named by KIND, because "which of my scripts is doing this"
+                    // is the whole question and a game author says `planet_walker`,
+                    // not entity 4173.
+                    let span = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
                     self.tick_instance(
                         *e, &inst.kind, &inst.params, &inst.refs, &inst.strs, &mut tr, dt, time,
                         pass,
                     );
+                    if let Some(span) = span {
+                        self.profile.borrow_mut().record_script(&inst.kind, span.ms());
+                    }
                     ran = true;
                 }
             }

@@ -137,7 +137,14 @@ impl Editor {
         // Background checkpoints (terrain.flush): a few chunks of encoding per
         // frame + threaded writes — autosaves must never stutter the game.
         self.step_terrain_checkpoint();
-        self.sync_terrain_meshes(terrain_full_rebuild, lod_cam);
+        {
+            // TERRAIN (`floptle/0077`): residency, field generation and meshing.
+            // `0074` came in as "I can see through unloaded terrain" and was a
+            // priority bug; a number here would have shown the meshing queue.
+            let _t = floptle_core::profile::Span::new();
+            self.sync_terrain_meshes(terrain_full_rebuild, lod_cam);
+            self.profile_record(floptle_core::profile::Bucket::Terrain, _t.ms());
+        }
         self.sync_sky_texture();
         self.sync_sky_shader();
         // Texture-painted nodes keep their vertex paint via atlas-ordered mirror blocks;
@@ -368,6 +375,11 @@ impl Editor {
         // Same reason: the terrain chunks' dissolve-in clock is read before the
         // destructure below takes `&mut self` (`floptle/0067`).
         let chunk_now = self.now();
+        // The frame profile, cloned out before the destructure below takes
+        // `&mut self` (`floptle/0077`). It is an `Rc<RefCell<…>>` shared with the
+        // Lua `perf` table, so this is a refcount bump and the numbers a game
+        // reads are the same ones written here.
+        let profile = self.script_host.profile().clone();
 
         let (
             Some(gpu),
@@ -968,6 +980,11 @@ impl Editor {
                 Some((e, b.parts.iter().map(|&(base, _)| base).collect()))
             })
             .collect();
+        // RENDER, first half (`floptle/0077`): turning the scene into instances.
+        // The submission itself is timed separately below and lands in the same
+        // bucket — a game asking "what does rendering cost" wants one number, and
+        // the two halves are not separable from Lua anyway.
+        let gather_t = floptle_core::profile::Span::new();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
         // Custom-shader draws (a Material with a compiled `.flsl`): same
         // instance data, drawn through the shader's own pipeline + group(3).
@@ -1008,6 +1025,8 @@ impl Editor {
         let frustum = floptle_render::Frustum::from_view_proj(view_proj);
         // How much was skipped, reported in the window title beside the fps.
         let mut culled_nodes = 0usize;
+        // Scatter props submitted this frame — the count `floptle/0071` needed.
+        let mut scatter_props = 0usize;
         for (e, matter) in &ents {
             // Hidden nodes (Visible(false)) don't draw their geometry (a script or the
             // Inspector can toggle this); they still keep transforms, physics, children.
@@ -1247,6 +1266,7 @@ impl Editor {
                 });
                 self.script_host.set_scatter_frame(id, frame);
             }
+            let before_scatter = instances.len();
             let sources: Vec<floptle_core::scatter::ScatterSource> =
                 self.script_host.scatter_sources().clone();
             if !sources.is_empty() {
@@ -1275,6 +1295,7 @@ impl Editor {
                 // never ends.
                 const SCATTER_BUDGET: usize = 20_000;
                 let base = MaterialParams::flat([1.0, 1.0, 1.0]);
+                let _scatter_t = floptle_core::profile::Span::new();
                 crate::scatter_draw::build_instances(
                     &mut self.scatter_cache,
                     &sources,
@@ -1287,6 +1308,13 @@ impl Editor {
                     SCATTER_BUDGET,
                     &mut instances,
                 );
+                // SCATTER. `0071` was filed as "currently unplayable" and was a
+                // field asking for 117,000 props; `props` in the counts below is
+                // that number, and this is what it cost.
+                scatter_props = instances.len().saturating_sub(before_scatter);
+                profile
+                    .borrow_mut()
+                    .record(floptle_core::profile::Bucket::Scatter, _scatter_t.ms());
             } else if self.scatter_cache.len() > 0 {
                 self.scatter_cache.clear();
             }
@@ -1300,6 +1328,24 @@ impl Editor {
             culled: culled_nodes,
             instances: instances.len(),
         };
+        // …and the same numbers into the profile a game can read (`floptle/0077`).
+        // Terrain chunk and particle counts come from the systems that own them.
+        {
+            let chunks: usize =
+                self.terrain_render.values().map(|r| r.slots.len()).sum();
+            let particles = self.vfx.live_particles();
+            let mut prof = profile.borrow_mut();
+            prof.set_counts(floptle_core::profile::Counts {
+                nodes: ents.len(),
+                culled: culled_nodes,
+                instances: instances.len(),
+                draws: 0,
+                chunks,
+                props: scatter_props,
+                particles,
+            });
+            prof.record(floptle_core::profile::Bucket::Render, gather_t.ms());
+        }
 
         // Undo any transient scene-binding animation preview now that the draw list
         // is built — the ECS goes back to authored transforms before UI/undo/save.
@@ -1879,7 +1925,14 @@ impl Editor {
         let net_relay_addr = &mut self.net_relay_addr;
         let net_join_code = &mut self.net_join_code;
         let net_lobby_code = self.net_lobby_code.clone();
+        // A snapshot of the profile, taken before the UI closure so the readout
+        // never holds the `RefCell` across a frame that also writes it.
+        let perf_snapshot = PerfSnapshot::take(&profile.borrow());
         let show_net_panel = &mut self.show_net_panel;
+        let show_perf_panel = &mut self.show_perf_panel;
+        // Applied after the UI closure, because turning collection on or off
+        // needs the profile and the closure has the fields split.
+        let mut perf_toggle: Option<bool> = None;
         // Player mode (an exported build / --play): no editor chrome at all —
         // the Game view IS the window. F1 (handled at the winit layer) toggles
         // the multiplayer window, which still works for LAN/relay sessions.
@@ -2168,10 +2221,41 @@ impl Editor {
                     {
                         *show_net_panel = !*show_net_panel;
                     }
+                    // ⏱ Frame cost (`floptle/0077`). Opening it turns collection
+                    // on; closing it turns collection off, so the profiler costs
+                    // nothing when nobody is looking at it — which is the only
+                    // way one stays switched on.
+                    if ui
+                        .button(if *show_perf_panel { "⏱ profiling" } else { "⏱" })
+                        .on_hover_text(
+                            "Frame cost — where the time goes, per subsystem and per \
+                             script. Readable from Lua too (perf.*), so a game can \
+                             assert its own budget in a smoke test.",
+                        )
+                        .clicked()
+                    {
+                        *show_perf_panel = !*show_perf_panel;
+                        perf_toggle = Some(*show_perf_panel);
+                    }
                     // The view is now chosen by the Scene / Game dock tabs (the editor
                     // free-fly view vs the active-camera gameplay view), not a toggle here.
                 });
             });
+            }
+
+            // ---- ⏱ frame cost (`floptle/0077`) ----
+            if *show_perf_panel {
+                let mut open = true;
+                egui::Window::new("⏱ Frame cost")
+                    .open(&mut open)
+                    .default_width(320.0)
+                    .show(ui, |ui| {
+                        perf_readout(ui, &perf_snapshot);
+                    });
+                if !open {
+                    *show_perf_panel = false;
+                    perf_toggle = Some(false);
+                }
             }
 
             // ---- 🌐 multiplayer harness (Host & Join locally) ----
@@ -3741,6 +3825,8 @@ impl Editor {
                 // `rm_draw` already accounts for the matter toggle + terrain presence;
                 // with nothing to raymarch the globals still upload so the raster
                 // pass's field group (shadows/AO/proxies) sees this frame's data.
+                // …and RENDER, second half: the passes themselves.
+                let draw_t = floptle_core::profile::Span::new();
                 let raster_clear = if rm_draw {
                     // Opaque depth prepass: primes the depth buffer (early-z kills
                     // hidden raster fragments before their shadow-marching shader
@@ -3973,6 +4059,10 @@ impl Editor {
                     }
                 }
 
+                profile
+                    .borrow_mut()
+                    .record(floptle_core::profile::Bucket::Render, draw_t.ms());
+
                 // ---- game UI: over the finished frame (native res), before
                 // the editor's own chrome. One instanced pass per frame.
                 if !ui_layers.is_empty()
@@ -4117,6 +4207,34 @@ impl Editor {
         }
 
         self.apply_frame_commands(cmd, frame_pointer_down);
+        // Collection on while the panel is shut can only be a script's doing, so
+        // that is how ownership is known — no extra channel from Lua.
+        self.perf_enabled_by_script =
+            self.script_host.profile().borrow().enabled() && !self.show_perf_panel;
+        // Opening ⏱ starts collecting; closing it stops. But a game that called
+        // `perf.enable(true)` itself keeps it on — closing the panel must not
+        // silently break the budget check a smoke test depends on.
+        if let Some(on) = perf_toggle
+            && (on || !self.perf_enabled_by_script)
+        {
+            self.script_host.profile().borrow_mut().enable(on);
+        }
+
+        // The frame is over: fold every bucket into its history (`floptle/0077`).
+        // Once, at the very end, so a subsystem that reported in several pieces —
+        // physics per tick, scripts per pass — contributes one figure per frame.
+        // A no-op while collection is off.
+        self.script_host.profile().borrow_mut().end_frame();
+    }
+
+    /// Add a subsystem's cost to this frame (`floptle/0077`).
+    ///
+    /// A one-line helper because the alternative is `self.script_host.profile()
+    /// .borrow_mut().record(...)` at every measured site, and a borrow that long
+    /// spelled out eight times is eight chances to hold it across something that
+    /// also wants it.
+    pub(crate) fn profile_record(&self, bucket: floptle_core::profile::Bucket, ms: f32) {
+        self.script_host.profile().borrow_mut().record(bucket, ms);
     }
 
     /// Live syntax check for the active IDE file (drives the red squiggle):
@@ -4552,12 +4670,15 @@ impl Editor {
             // Repeaters first: a list whose count changed last frame gets its
             // rows NOW, so this frame's layout, hit-testing and hooks all see
             // the same set of rows the player is looking at.
+            let ui_t = floptle_core::profile::Span::new();
             self.ui_repeaters();
             // Game-UI interaction (buttons + draggable sliders): detect hover/press/
             // click against this frame's layout BEFORE scripts run, so a dragged
             // slider's value is already in the ECS when `update` reads it. The hook
             // events dispatch to Lua right after the run.
             self.ui_interact();
+            // GAME UI: repeater expansion, the layout solve and hit-testing.
+            self.profile_record(floptle_core::profile::Bucket::Ui, ui_t.ms());
             // Feed the player input to scripts (the Lua `input` API) — but ONLY while the
             // Game view is focused. In the Scene view you're editing, not playing, so the
             // game gets neutral input (the character stops moving) even though physics
@@ -4716,6 +4837,7 @@ impl Editor {
             } else {
                 sdt
             };
+            let anim_t = floptle_core::profile::Span::new();
             let fired = anim::advance_animators(
                 &mut self.anim,
                 &mut self.world,
@@ -4723,6 +4845,9 @@ impl Editor {
                 anim_dt,
                 anim_cmds,
             );
+            // ANIMATION: clip sampling, blending, pose composition and CPU
+            // skinning. The number `floptle/0080` needs before and after.
+            self.profile_record(floptle_core::profile::Bucket::Animation, anim_t.ms());
             for (eid, func) in fired {
                 self.script_host.call_function(&mut self.world, eid, &func);
             }
@@ -4961,7 +5086,18 @@ impl Editor {
                         if self.physics_paused {
                             sim.clear_held_forces();
                         } else {
+                            // PHYSICS (`floptle/0077`). Timed per TICK and
+                            // accumulated, because a frame can run several — a
+                            // per-frame timer would report the last tick and hide
+                            // a catch-up frame, which is exactly the spike a game
+                            // notices.
+                            let t = floptle_core::profile::Span::new();
                             sim.step_tick(self.game_tick.step, focus);
+                            let ms = t.ms();
+                            self.script_host
+                                .profile()
+                                .borrow_mut()
+                                .record(floptle_core::profile::Bucket::Physics, ms);
                         }
                     }
                     // Collision / trigger events from THIS tick, dispatched to
@@ -7079,4 +7215,121 @@ fn resolve_mesh_particles(
             }
         }
     }
+}
+
+/// What the ⏱ readout draws, copied out of the profile before the UI closure
+/// (`floptle/0077`).
+///
+/// A snapshot rather than a borrow because the UI closure runs inside the frame's
+/// split borrows and the profile is also being written this frame — and because a
+/// readout that could change halfway through drawing itself would show a bucket
+/// total that disagreed with the rows under it.
+struct PerfSnapshot {
+    on: bool,
+    frames: u64,
+    buckets: Vec<(&'static str, floptle_core::profile::Cost)>,
+    scripts: Vec<(String, floptle_core::profile::Cost)>,
+    accounted_ms: f32,
+    counts: floptle_core::profile::Counts,
+}
+
+impl PerfSnapshot {
+    fn take(p: &floptle_core::profile::FrameProfile) -> Self {
+        Self {
+            on: p.enabled(),
+            frames: p.frames(),
+            buckets: floptle_core::profile::Bucket::ALL
+                .into_iter()
+                .map(|b| (b.name(), p.bucket(b).unwrap_or_default()))
+                .collect(),
+            scripts: p.scripts(),
+            accounted_ms: p.accounted_ms().unwrap_or(0.0),
+            counts: p.counts(),
+        }
+    }
+}
+
+/// Draw the frame-cost readout.
+///
+/// Two columns per row on purpose: the rolling mean AND the worst frame of the
+/// last second. The spike is what anybody is ever chasing, and a mean hides it —
+/// a 40 ms hitch once a second adds under a millisecond to a 60-frame average.
+fn perf_readout(ui: &mut egui::Ui, s: &PerfSnapshot) {
+    if !s.on {
+        ui.label("Not collecting.");
+        ui.small(
+            "Collection is off by default because a profiler that costs a frame is a \
+             profiler people turn off. Close and reopen this panel to start.",
+        );
+        return;
+    }
+    if s.frames == 0 {
+        ui.label("Measuring — numbers appear next frame.");
+        return;
+    }
+    ui.small(
+        "worst = the worst single frame in the last second. That is the column to \
+         read; a hitch is invisible in an average.",
+    );
+    ui.add_space(4.0);
+    egui::Grid::new("perf-buckets").num_columns(3).striped(true).show(ui, |ui| {
+        ui.label(egui::RichText::new("").strong());
+        ui.label(egui::RichText::new("avg ms").strong());
+        ui.label(egui::RichText::new("worst ms").strong());
+        ui.end_row();
+        for (name, c) in &s.buckets {
+            ui.label(*name);
+            ui.label(egui::RichText::new(format!("{:6.2}", c.ms)).monospace());
+            // The worst column carries the colour, since it is the one being read.
+            let hot = c.worst_ms > 8.0;
+            let text = egui::RichText::new(format!("{:6.2}", c.worst_ms)).monospace();
+            ui.label(if hot { text.color(egui::Color32::from_rgb(230, 150, 90)) } else { text });
+            ui.end_row();
+        }
+        ui.label(egui::RichText::new("accounted").weak());
+        ui.label(egui::RichText::new(format!("{:6.2}", s.accounted_ms)).monospace().weak());
+        ui.label("");
+        ui.end_row();
+    });
+    // "accounted", not "total": vsync, the OS and the GPU finishing are outside
+    // every bucket, and a readout claiming to add up to the frame time without
+    // doing so is worse than one that never claimed it.
+    ui.small("accounted = these buckets added up. Not the frame time — vsync, the OS and the GPU finishing are outside all of them.");
+
+    ui.add_space(6.0);
+    ui.separator();
+    // BY SCRIPT NAME. The whole point: "scripts: 6 ms" does not answer "which of
+    // my scripts is doing this".
+    ui.label(egui::RichText::new("per script").strong());
+    if s.scripts.is_empty() {
+        ui.small("No scripts have run since collection started.");
+    } else {
+        egui::Grid::new("perf-scripts").num_columns(3).striped(true).show(ui, |ui| {
+            for (name, c) in s.scripts.iter().take(12) {
+                ui.label(name);
+                ui.label(egui::RichText::new(format!("{:6.2}", c.ms)).monospace());
+                ui.label(egui::RichText::new(format!("{:6.2}", c.worst_ms)).monospace());
+                ui.end_row();
+            }
+        });
+        if s.scripts.len() > 12 {
+            ui.small(format!("…and {} more, cheaper", s.scripts.len() - 12));
+        }
+    }
+
+    ui.add_space(6.0);
+    ui.separator();
+    // Counts, because three of the four "the engine is slow" tickets were
+    // answerable from one of these alone.
+    ui.label(egui::RichText::new("counts").strong());
+    let c = &s.counts;
+    ui.label(
+        egui::RichText::new(format!(
+            "{} nodes ({} off screen)\n{} instances, {} draws\n{} terrain chunks\n{} scatter props\n{} particles",
+            c.nodes, c.culled, c.instances, c.draws, c.chunks, c.props, c.particles
+        ))
+        .monospace(),
+    );
+    ui.add_space(4.0);
+    ui.small("All of this is readable from Lua as perf.* — assert a budget in a smoke test rather than waiting for a player to notice.");
 }

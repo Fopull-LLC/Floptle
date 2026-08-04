@@ -34,6 +34,7 @@ pub mod matter;
 pub mod net;
 pub mod noise;
 pub mod origin;
+pub mod profile;
 pub mod script;
 pub mod time;
 pub mod transform;

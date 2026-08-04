@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 22
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 23
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 17
 - [vectors, directions & easing](#vectors-directions--easing) — 47
@@ -34,6 +34,7 @@ each group, and meant to be searched.
 - [vessels — assembly.*](#vessels--assembly) — 14
 - [the camera & the screen](#the-camera--the-screen) — 7
 - [physics controls — pause & step](#physics-controls--pause--step) — 4
+- [frame cost — perf.*](#frame-cost--perf) — 11
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
@@ -153,6 +154,10 @@ function update(node, dt)
   node.x = node.x + params.walk * dt   -- Inspector-tuned
 end
 ```
+
+### `perf`
+
+Where YOUR frame time goes — per subsystem and per script, readable from Lua so a game can assert its own budget in a smoke test rather than filing an engine ticket. Off by default and free while off: call perf.enable(true) first. Every getter RAISES while collection is off rather than answering 0, because a budget assertion that passes on no data is worse than no assertion.
 
 ### `spawn`
 
@@ -1920,6 +1925,52 @@ physics.pause(true) — freeze the whole gameplay tick while scripts keep runnin
 ### `physics.step`
 
 physics.step([n]) — advance the frozen tick n times (default 1, max 600) — the same thing the editor's frame-step button does, so a game can build its own training mode. Call it from update: a fixedUpdate caller would never get a second turn, because the tick it is waiting for is the one it just stopped.
+
+## frame cost — perf.*
+
+### `perf.accountedMs`
+
+perf.accountedMs() — the buckets added up. Called 'accounted' and not 'total' on purpose: vsync, the OS and the GPU finishing are outside every bucket, so this is what the engine can see, not the frame time.
+
+### `perf.buckets`
+
+perf.buckets() → the bucket names, in frame order: scripts, physics, terrain, scatter, particles, animation, ui, render. Iterate this rather than keeping your own list, which could go stale.
+
+### `perf.counts`
+
+perf.counts() → { nodes=, culled=, instances=, draws=, chunks=, props=, particles= }. Readable even while collection is off, because counts are free to keep — and three of the four 'the engine is slow' reports this API exists for were answerable from one count alone (a scatter field asking for 117,000 props was one of them).
+
+### `perf.enable`
+
+perf.enable(true) — start collecting; perf.enable(false) stops and CLEARS the history (a stale average from before a fix looks exactly like a fix that did not work). Off by default, because a profiler that costs a frame is one people turn off.
+
+### `perf.enabled`
+
+perf.enabled() — is anything being measured? Safe to call while off, so a script can ask before reading.
+
+### `perf.ms`
+
+perf.ms("scripts") — that bucket's rolling average, in milliseconds. An unknown bucket names every accepted value rather than answering 0.
+
+### `perf.scriptMs`
+
+perf.scriptMs("planet_walker") — one script's own average cost, by file name. 0 for a script that has not run, which is different from an error.
+
+### `perf.scriptWorstMs`
+
+perf.scriptWorstMs("planet_walker") — that script's worst frame in the last second.
+
+### `perf.scripts`
+
+perf.scripts() → { {name=, ms=, worstMs=}, ... }, MOST EXPENSIVE FIRST — which is the order the question is asked in. A total for 'scripts' never answered 'which of my scripts is doing this'.
+
+### `perf.slowestScript`
+
+perf.slowestScript() → the name of the costliest script, or nil if none have run. The one-liner you actually put in an assertion message.
+
+### `perf.worstMs`
+
+perf.worstMs("scripts") — the WORST single frame in the last second. This is the one to watch: a 40 ms hitch once a second adds under a millisecond to a 60-frame average, so the mean hides exactly the thing you are chasing.
 
 ## persistence — save.*
 

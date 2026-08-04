@@ -3394,3 +3394,90 @@ sign in once, in whichever you opened.
 and wallet shapes, why the wallet is read-only, and the three answers that
 surprise a first test (`event_id` is mandatory, an empty `awarded` is not always
 a failure, and a mission pays nothing until it is approved).
+
+## 28. Where the frame went: `perf.*`
+
+Until **0.33.0** the engine kept a smoothed FPS number and nothing else. No
+attribution — not per script, not per subsystem, not per draw. So when a game got
+slow, the author's only available move was to file an engine ticket. That is not a
+hypothetical; it happened four times:
+
+| filed as | actually was |
+|---|---|
+| "a crowded scene is unplayable" | component lookup was a linear scan |
+| "cross-script wiring is slow" | `findScript` was a linear scan |
+| "currently unplayable" | a scatter field asked for 117,000 props |
+| "I can see through unloaded terrain" | mesh priority ignored world distance |
+
+Every one cost a round trip through the engine to discover a number the game
+could have read itself. **Three of the four were answerable from a count alone.**
+
+```lua
+function start(node)
+  perf.enable(true)
+end
+
+function update(node, dt)
+  -- The WORST recent frame, not the average. A 40 ms hitch once a second adds
+  -- under a millisecond to a 60-frame mean, so the mean hides the thing you are
+  -- chasing.
+  if perf.worstMs("scripts") > 6 then
+    log("slow pass — the worst is " .. perf.slowestScript())
+  end
+end
+```
+
+The buckets, in frame order: `scripts` `physics` `terrain` `scatter` `particles`
+`animation` `ui` `render`. `perf.buckets()` returns exactly that list, so a loop
+over it can never name one that does not exist.
+
+### Per script, by name
+
+`perf.ms("scripts")` tells you the pass is expensive. It does not tell you which
+of your scripts is doing it, which is the actual question — so
+`perf.scripts()` returns a row per script **most expensive first**, and
+`perf.slowestScript()` is the one-liner you put in an assertion message.
+
+```lua
+for _, s in ipairs(perf.scripts()) do
+  print(string.format("%-24s %5.2f ms  (worst %5.2f)", s.name, s.ms, s.worstMs))
+end
+```
+
+Names are script file names, because that is what you call them.
+
+### Counts
+
+```lua
+local c = perf.counts()
+-- nodes, culled, instances, draws, chunks, props, particles
+assert(c.props < 20000, "the forest is asking for too much")
+```
+
+Counts are free to keep, so `perf.counts()` works even while collection is off.
+
+### It is off by default, and reading it while off is an ERROR
+
+A profiler that is itself a frame cost gets turned off, and then it does not
+exist. So nothing is collected until `perf.enable(true)` — either from a script,
+or by opening the editor's **⏱** panel.
+
+But that makes "off" and "free" the same shape, and
+`assert(perf.ms("scripts") < 4)` would then pass in a smoke test that measured
+nothing. So every timing getter **raises** while collection is off and tells you
+to call `perf.enable(true)`. Same reasoning as the `pin = "topCenter"` fix: a
+wrong answer that looks like a right one is worse than an error.
+
+An unknown bucket name raises too, and names every accepted value.
+
+### In the editor
+
+The **⏱** button in the play toolbar opens the same numbers, per bucket and per
+script, with the worst column coloured. Opening it starts collection; closing it
+stops — unless a script asked for it, in which case it stays on so a game's own
+budget check keeps working.
+
+`accountedMs()` is the buckets added up. It is called *accounted* and not *total*
+because vsync, the OS and the GPU finishing are outside every bucket; a number
+claiming to be the frame time without being it would be worse than not offering
+one.

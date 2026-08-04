@@ -2972,6 +2972,7 @@ const API_CATEGORIES: &[&str] = &[
     "vessels — assembly.*",
     "the camera & the screen",
     "physics controls — pause & step",
+    "frame cost — perf.*",
     "persistence — save.*",
     "timers — after, every, tween",
     "space — orbits & time-warp",
@@ -3049,6 +3050,8 @@ fn api_category(label: &str) -> &'static str {
         || label == "EMPTY_TILE"
     {
         "2D — tilemaps & sprite batches"
+    } else if starts(label, "perf") {
+        "frame cost — perf.*"
     } else if starts(label, "hit") {
         "scene lookups & raycast"
     } else if starts(label, "body") {
@@ -3988,6 +3991,18 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "physics.isPaused", insert: "physics.isPaused()", doc: "physics.isPaused() — whether the sim is currently frozen, including when the editor froze it rather than your script." },
     ApiEntry { label: "physics.pause", insert: "physics.pause(", doc: "physics.pause(true) — freeze the whole gameplay tick while scripts keep running. Pause menus, cutscenes and loading screens are this call: the world stops, your UI doesn't." },
     ApiEntry { label: "physics.step", insert: "physics.step([n])", doc: "physics.step([n]) — advance the frozen tick n times (default 1, max 600) — the same thing the editor's frame-step button does, so a game can build its own training mode. Call it from update: a fixedUpdate caller would never get a second turn, because the tick it is waiting for is the one it just stopped." },
+    ApiEntry { label: "perf", insert: "perf", doc: "Where YOUR frame time goes — per subsystem and per script, readable from Lua so a game can assert its own budget in a smoke test rather than filing an engine ticket. Off by default and free while off: call perf.enable(true) first. Every getter RAISES while collection is off rather than answering 0, because a budget assertion that passes on no data is worse than no assertion." },
+    ApiEntry { label: "perf.enable", insert: "perf.enable(", doc: "perf.enable(true) — start collecting; perf.enable(false) stops and CLEARS the history (a stale average from before a fix looks exactly like a fix that did not work). Off by default, because a profiler that costs a frame is one people turn off." },
+    ApiEntry { label: "perf.enabled", insert: "perf.enabled()", doc: "perf.enabled() — is anything being measured? Safe to call while off, so a script can ask before reading." },
+    ApiEntry { label: "perf.buckets", insert: "perf.buckets()", doc: "perf.buckets() → the bucket names, in frame order: scripts, physics, terrain, scatter, particles, animation, ui, render. Iterate this rather than keeping your own list, which could go stale." },
+    ApiEntry { label: "perf.ms", insert: "perf.ms(", doc: "perf.ms(\"scripts\") — that bucket's rolling average, in milliseconds. An unknown bucket names every accepted value rather than answering 0." },
+    ApiEntry { label: "perf.worstMs", insert: "perf.worstMs(", doc: "perf.worstMs(\"scripts\") — the WORST single frame in the last second. This is the one to watch: a 40 ms hitch once a second adds under a millisecond to a 60-frame average, so the mean hides exactly the thing you are chasing." },
+    ApiEntry { label: "perf.scriptMs", insert: "perf.scriptMs(", doc: "perf.scriptMs(\"planet_walker\") — one script's own average cost, by file name. 0 for a script that has not run, which is different from an error." },
+    ApiEntry { label: "perf.scriptWorstMs", insert: "perf.scriptWorstMs(", doc: "perf.scriptWorstMs(\"planet_walker\") — that script's worst frame in the last second." },
+    ApiEntry { label: "perf.scripts", insert: "perf.scripts()", doc: "perf.scripts() → { {name=, ms=, worstMs=}, ... }, MOST EXPENSIVE FIRST — which is the order the question is asked in. A total for 'scripts' never answered 'which of my scripts is doing this'." },
+    ApiEntry { label: "perf.slowestScript", insert: "perf.slowestScript()", doc: "perf.slowestScript() → the name of the costliest script, or nil if none have run. The one-liner you actually put in an assertion message." },
+    ApiEntry { label: "perf.counts", insert: "perf.counts()", doc: "perf.counts() → { nodes=, culled=, instances=, draws=, chunks=, props=, particles= }. Readable even while collection is off, because counts are free to keep — and three of the four 'the engine is slow' reports this API exists for were answerable from one count alone (a scatter field asking for 117,000 props was one of them)." },
+    ApiEntry { label: "perf.accountedMs", insert: "perf.accountedMs()", doc: "perf.accountedMs() — the buckets added up. Called 'accounted' and not 'total' on purpose: vsync, the OS and the GPU finishing are outside every bucket, so this is what the engine can see, not the frame time." },
     ApiEntry { label: "save", insert: "save", doc: "The persistent store: save.set / save.get, named slots, and flushing to disk. Values are capped at about a kilobyte each — store the small fact, not the whole world." },
     ApiEntry { label: "scatter", insert: "scatter", doc: "Thousands of props from a seed — GPU-instanced, with no scene node anywhere in it. Your generator still decides WHAT grows where; the engine decides where each instance stands and draws them. scatter.create declares a source, scatter.remove harvests one." },
     ApiEntry { label: "scatter.create", insert: "scatter.create{", doc: "scatter.create{ asset = \"tree.glb\", seed = 7, perChunk = 24, chunk = 16 } — declare a source, get its id. Region: center + radius for a sphere (a planet), or center + halfX/halfZ for ground. `parent = \"Umunquo\"` anchors the region to a NODE, so a planet that orbits carries its props instead of sliding out from under them — every prop keeps its id, its place on the surface and the ground height it settled at, because none of those were ever expressed in world space. Without a parent the region is pinned to the world, which is right for a landscape that never moves and wrong for every celestial body. Also scaleMin/scaleMax, align = \"surface\" (default) or \"world\", fade, and lod = { {asset=, distance=}, ... } nearest-first. Placement is a pure function of the seed, so every machine and every session grows the SAME forest without storing one. `density` is how a world gets biomes: pass a function(x, y, z) -> 0..1 and it is sampled ONCE, at declare time, into a densityRows grid (rows x 2*rows for a sphere\'s longitude) — 0 means no instance is generated at all, not a hidden one. An option this doesn\'t list is an error, not a shrug. `asset` may be a mesh file OR a .prefab.ron — a prefab is baked once into one instanced draw per Mesh node it holds, each at its authored place in the prop, which is how a prop your own script assembled gets scattered." },

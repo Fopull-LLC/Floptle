@@ -2176,6 +2176,13 @@ struct Editor {
     /// every frame.
     fps: f32,
     fps_timer: f32,
+    /// Is the ⏱ frame-cost panel open? Opening it starts collecting and closing
+    /// it stops, so the profiler costs nothing when nobody is looking
+    /// (`floptle/0077`).
+    show_perf_panel: bool,
+    /// True once a SCRIPT called `perf.enable(true)`, so closing the panel does
+    /// not switch collection off underneath a game's own budget check.
+    perf_enabled_by_script: bool,
     /// What the last gather actually submitted (`floptle/0075`).
     ///
     /// A frame rate on its own says a scene is slow and nothing about why, which

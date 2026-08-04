@@ -289,6 +289,17 @@ impl VfxSystem {
     /// The per-node particle state scripts read via `node:particles()`: one entry per
     /// ParticleSystem node — `playing`/`alive` from its live instance (if any) plus the
     /// effect asset key. Fed to the script host before each Play-mode script frame.
+    /// Live particles across every effect, attached and detached
+    /// (`floptle/0077`).
+    ///
+    /// One number for the frame readout. Per-effect counts are already reachable
+    /// as `node:particles():alive()`; this is the one a game checks against a
+    /// budget without knowing which effect went wrong.
+    pub fn live_particles(&self) -> usize {
+        self.instances.values().map(|(_, i)| i.alive()).sum::<usize>()
+            + self.detached.iter().map(|d| d.inst.alive()).sum::<usize>()
+    }
+
     pub fn script_info(&self, world: &World) -> HashMap<u32, floptle_script::VfxInfo> {
         let mut out = HashMap::new();
         for (e, ps) in world.query::<ParticleSystem>() {
