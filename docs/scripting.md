@@ -3103,6 +3103,46 @@ LOD bands **cross-dissolve** rather than switching — the pop at a band boundar
 is the thing everyone notices about scatter and nothing else about it. Past the
 last band's distance an instance is culled.
 
+### The outermost `lod` distance is your budget
+
+`lod` reads as a look — how far you can see rock. It is really the cost knob,
+and it is the only one that squares.
+
+That last distance sets how many chunks stay **resident**, as a square sweep
+whose side grows with it, and that sweep is walked every frame with a distance
+computed for every prop in it. So:
+
+> cost ≈ (far ÷ chunk)² × perChunk, per source, per frame
+
+Halving `far`, or doubling `chunk`, quarters it. `perChunk` is linear and is the
+knob to reach for when you want the field thicker or thinner — it is the cheap
+one.
+
+Ask, rather than guess:
+
+```lua
+local field = scatter.create{ center = planet.pos, radius = 107,
+                              chunk = 34, perChunk = 14,
+                              lod = { { asset = "rock.glb", distance = 190 } } }
+
+local c = scatter.cost(field)
+log(("%d chunks, %d props"):format(c.chunks, c.props))   -- 121 chunks, 1694 props
+```
+
+Roughly what to expect: a walkable body wants **tens to a couple of hundred
+chunks**, a few thousand props. A field big enough to matter also says so in the
+Console the moment you declare it, naming the two numbers that decided it —
+you should not have to go looking.
+
+Two things the engine does so a big field degrades instead of stopping:
+
+* Chunks arrive **nearest first**, and only a few hundred props are dropped onto
+  the ground per frame. A field coming into view fills in over a few frames from
+  where you stand outwards, rather than freezing the one frame it arrives on.
+* On a body **smaller than your view distance**, residency saturates at the body.
+  Asking to see 700 m of a 214 m planet costs exactly what asking to see 190 m
+  costs.
+
 ### Harvesting
 
 ```lua
@@ -3121,6 +3161,7 @@ end
 | `scatter.remove(id, instanceId)` | remove one, permanently |
 | `scatter.restore(id [, instanceId])` | put one back, or all of them (regrowth) |
 | `scatter.removed(id)` | the ids this source has lost — **this** is what you save |
+| `scatter.cost(id)` | what it asks for per frame: `{chunks, props, far, chunkSize, perChunk}` |
 | `scatter.destroy(id)` | drop the whole source |
 
 `param` is a stable per-instance 0..1 you can map to a variant or a yield. It

@@ -606,6 +606,7 @@ impl ScriptHost {
             &lua,
             scatter_sources.clone(),
             scatter_next_id.clone(),
+            logs.clone(),
         );
 
         // `gizmo.*` — immediate-mode debug drawing: world-space lines, rays, spheres

@@ -73,7 +73,21 @@ fn check_keys(opts: &Table, known: &[&str], call: &str) -> mlua::Result<()> {
     Ok(())
 }
 
-pub(crate) fn install_scatter_api(lua: &Lua, sources: Sources, next_id: Rc<std::cell::Cell<u32>>) {
+/// Chunks resident at once, above which a source is reported rather than left
+/// to be discovered as "the engine is slow" (`floptle/0071`).
+///
+/// Not a limit — a game may genuinely want a big field, and refusing one would
+/// be the engine deciding a game's look. This is the number at which the reason
+/// stops being obvious. A walkable body wants tens of chunks; the field that
+/// prompted this had 4,489, and the two numbers that did it read as a look.
+const LOUD_CHUNKS: u64 = 400;
+
+pub(crate) fn install_scatter_api(
+    lua: &Lua,
+    sources: Sources,
+    next_id: Rc<std::cell::Cell<u32>>,
+    logs: Rc<RefCell<Vec<crate::ScriptLog>>>,
+) {
     use floptle_core::scatter::{Align, Band, Region, ScatterSource};
     let Ok(t) = lua.create_table() else { return };
 
@@ -82,6 +96,7 @@ pub(crate) fn install_scatter_api(lua: &Lua, sources: Sources, next_id: Rc<std::
     {
         let s = sources.clone();
         let ids = next_id.clone();
+        let lg = logs.clone();
         if let Ok(f) = lua.create_function(move |_, opts: Table| {
             check_keys(&opts, CREATE_KEYS, "scatter.create")?;
             // LOD bands: `lod = { {asset, distance}, ... }`, nearest first.
@@ -186,7 +201,7 @@ pub(crate) fn install_scatter_api(lua: &Lua, sources: Sources, next_id: Rc<std::
             };
             let id = ids.get().wrapping_add(1).max(1);
             ids.set(id);
-            s.borrow_mut().push(ScatterSource {
+            let src = ScatterSource {
                 id,
                 seed: num(&opts, "seed", 1.0) as u64,
                 region,
@@ -201,10 +216,55 @@ pub(crate) fn install_scatter_api(lua: &Lua, sources: Sources, next_id: Rc<std::
                 fade: num(&opts, "fade", 8.0) as f32,
                 density,
                 removed: Default::default(),
-            });
+            };
+            // Say what this costs, HERE, while the two numbers that decided it
+            // are still on screen (`floptle/0071`). The alternative is what
+            // happened: a day of "the engine is slow", and a clamp written in
+            // Lua from reading engine source.
+            let cost = floptle_core::scatter::cost(&src);
+            if cost.chunks > LOUD_CHUNKS {
+                let far = src.range();
+                lg.borrow_mut().push(crate::ScriptLog {
+                    level: crate::LogLevel::Warn,
+                    msg: format!(
+                        "scatter.create: source {id} is resident in {} chunks ({} props) every \
+                         frame. That is set by the outermost `lod` distance ({far:.0}) against \
+                         `chunk` ({:.0}) — cost grows with (lod/chunk)^2, so halving the \
+                         distance or doubling the chunk quarters it.",
+                        cost.chunks, cost.props, src.chunk
+                    ),
+                    source: None,
+                });
+            }
+            s.borrow_mut().push(src);
             Ok(id)
         }) {
             let _ = t.set("create", f);
+        }
+    }
+
+    // scatter.cost(id) → { chunks, props, far, chunkSize } — what this source
+    // asks for every frame, before it is asked for (`floptle/0071`).
+    //
+    // The knobs read as a look. `lod`'s outermost distance is really the budget:
+    // it sets how many chunks stay resident, as a sweep whose side grows with
+    // it, walked every frame. A game that wants to tune within a budget can now
+    // read the number instead of restating the engine's own arithmetic in Lua.
+    {
+        let s = sources.clone();
+        if let Ok(f) = lua.create_function(move |lua, id: u32| {
+            let out = lua.create_table()?;
+            let v = s.borrow();
+            let Some(src) = v.iter().find(|s| s.id == id) else { return Ok(out) };
+            let cost = floptle_core::scatter::cost(src);
+            out.set("chunks", cost.chunks as mlua::Integer)?;
+            out.set("props", cost.props as mlua::Integer)?;
+            out.set("far", src.range() as f64)?;
+            out.set("chunkSize", src.chunk)?;
+            out.set("perChunk", src.per_chunk as mlua::Integer)?;
+            Ok(out)
+        }) {
+            let _ = t.set("cost", f);
         }
     }
 
@@ -342,11 +402,96 @@ pub(crate) fn install_scatter_api(lua: &Lua, sources: Sources, next_id: Rc<std::
 mod tests {
     use super::*;
 
+    type Logs = Rc<RefCell<Vec<crate::ScriptLog>>>;
+
     fn host() -> (Lua, Sources) {
+        let (lua, sources, _) = host_with_logs();
+        (lua, sources)
+    }
+
+    fn host_with_logs() -> (Lua, Sources, Logs) {
         let lua = Lua::new();
         let sources: Sources = Rc::new(RefCell::new(Vec::new()));
-        install_scatter_api(&lua, sources.clone(), Rc::new(std::cell::Cell::new(0)));
-        (lua, sources)
+        let logs: Logs = Rc::new(RefCell::new(Vec::new()));
+        install_scatter_api(
+            &lua,
+            sources.clone(),
+            Rc::new(std::cell::Cell::new(0)),
+            logs.clone(),
+        );
+        (lua, sources, logs)
+    }
+
+    /// A field whose cost is not obvious says so AT DECLARE TIME, while the two
+    /// numbers that decided it are still on screen (`floptle/0071`).
+    ///
+    /// The configuration below is the one that shipped and froze a game. Its
+    /// knobs read as a look; nothing in the API, the docs or the Console said
+    /// that `lod`'s outermost distance was really the budget, and the fix was
+    /// eventually written in Lua by reading engine source.
+    #[test]
+    fn a_field_that_costs_a_frame_says_so_when_it_is_declared() {
+        let (lua, _, logs) = host_with_logs();
+        lua.load(
+            r#"scatter.create{ asset = "rock.glb", halfX = 5000, halfZ = 5000,
+                               range = 700, chunk = 22, perChunk = 26 }"#,
+        )
+        .exec()
+        .expect("a big field is allowed — it is reported, not refused");
+        let said = logs.borrow();
+        let warn = said
+            .iter()
+            .find(|l| l.level == crate::LogLevel::Warn)
+            .unwrap_or_else(|| panic!("nothing was said about it: {:?}", said.len()));
+        // It has to name the numbers. "Your scatter is expensive" sends someone
+        // back to the same three knobs with no more information than before.
+        for want in ["chunks", "props", "700", "22"] {
+            assert!(warn.msg.contains(want), "the warning never mentions {want}: {}", warn.msg);
+        }
+    }
+
+    /// …and an ordinary field says nothing at all. A warning every game trips
+    /// over is a warning every game learns to scroll past.
+    #[test]
+    fn a_field_of_a_sane_size_is_not_warned_about() {
+        let (lua, _, logs) = host_with_logs();
+        lua.load(
+            r#"scatter.create{ asset = "rock.glb", center = { x = 0, y = 0, z = 0 },
+                               radius = 107, lod = { { asset = "rock.glb", distance = 190 } },
+                               chunk = 34, perChunk = 14 }"#,
+        )
+        .exec()
+        .unwrap();
+        assert!(
+            logs.borrow().iter().all(|l| l.level != crate::LogLevel::Warn),
+            "warned about a field that is fine: {:?}",
+            logs.borrow()
+        );
+    }
+
+    /// A game can read the number instead of restating the engine's arithmetic
+    /// in Lua — which is what the game that hit this had to do.
+    #[test]
+    fn a_script_can_ask_what_a_source_costs() {
+        let (lua, _, _) = host_with_logs();
+        let cost: Table = lua
+            .load(
+                r#"local id = scatter.create{ asset = "rock.glb", halfX = 5000, halfZ = 5000,
+                                              range = 200, chunk = 20, perChunk = 10 }
+                   return scatter.cost(id)"#,
+            )
+            .eval()
+            .unwrap();
+        let chunks: i64 = cost.get("chunks").unwrap();
+        let props: i64 = cost.get("props").unwrap();
+        assert!(chunks > 0, "no chunk count");
+        assert_eq!(props, chunks * 10, "props is chunks x perChunk");
+        assert_eq!(cost.get::<f64>("far").unwrap(), 200.0);
+        assert_eq!(cost.get::<f64>("chunkSize").unwrap(), 20.0);
+        // An id nobody declared is an empty table, not an error — a query is
+        // not a place to blow up.
+        let none: Table = lua.load("return scatter.cost(9999)").eval().unwrap();
+        assert!(none.get::<Option<i64>>("chunks").unwrap().is_none());
     }
 
     /// The test that would have caught `collide`: every option the Lua surface

@@ -155,9 +155,49 @@ pub struct ScatterSource {
 
 impl ScatterSource {
     /// The cull distance — the last band's.
+    ///
+    /// **This is the budget, not a look.** It sets how many chunks are resident,
+    /// as a sweep whose side grows with it, and that sweep is walked every
+    /// frame. See [`cost`].
     pub fn range(&self) -> f32 {
         self.bands.last().map(|b| b.distance).unwrap_or(0.0)
     }
+}
+
+/// What a source's configuration costs every frame, countable before a game
+/// ships it (`floptle/0071`).
+///
+/// The knobs read as a look — how far props are drawn, how big a chunk is, how
+/// many per chunk — and one of them is secretly the whole budget. A field
+/// configured at `far = 700, chunk = 22` on a 214-unit planet came to 4,489
+/// chunks and ~117,000 props **per source**, and nothing in the API, the docs or
+/// the Console said so until the game was unplayable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cost {
+    /// Chunks resident at once.
+    pub chunks: u64,
+    /// Props in them, at full density.
+    pub props: u64,
+}
+
+/// Count what [`Cost`] describes, by running the real sweep.
+///
+/// Deliberately not a formula. `chunks_near` is the definition of residency, so
+/// counting its answer is the only version of this that cannot drift from the
+/// thing it claims to measure — and at a few thousand keys, once, at declare
+/// time, the honesty is free.
+pub fn cost(src: &ScatterSource) -> Cost {
+    if src.range() <= 0.0 || src.bands.is_empty() {
+        return Cost::default();
+    }
+    // A representative eye: standing in the middle of a ground region, or on
+    // the surface of a planet. Residency is the same size wherever you stand.
+    let eye = match src.region {
+        Region::Ground { center, .. } => center,
+        Region::Sphere { center, radius } => center + DVec3::new(0.0, radius, 0.0),
+    };
+    let chunks = chunks_near(src, eye, src.range() as f64).len() as u64;
+    Cost { chunks, props: chunks * src.per_chunk as u64 }
 }
 
 /// One resolved instance, ready to draw or to collide with.
@@ -337,15 +377,89 @@ pub fn band_at(src: &ScatterSource, dist: f32) -> Option<(usize, f32)> {
     None
 }
 
-/// Every chunk key whose chunk could contain something within `range` of `eye`.
+/// The world-space centre of a chunk.
+///
+/// Approximate on a sphere — a cube-face cell projects to a patch, not a disc,
+/// and its centre is off by a fraction of a chunk near a face edge. Everything
+/// that reads this allows a whole chunk of slack, so the approximation costs
+/// nothing.
+pub fn chunk_center(src: &ScatterSource, key: ChunkKey) -> DVec3 {
+    match src.region {
+        Region::Ground { center, .. } => DVec3::new(
+            center.x + (key.0 as f64 + 0.5) * src.chunk,
+            center.y,
+            center.z + (key.1 as f64 + 0.5) * src.chunk,
+        ),
+        Region::Sphere { center, radius } => {
+            let face = key.0.rem_euclid(6) as usize;
+            let (gu, gv) = ((key.0 >> 3) as f64, key.1 as f64);
+            let u = ((gu + 0.5) * src.chunk / radius).clamp(-1.0, 1.0);
+            let v = ((gv + 0.5) * src.chunk / radius).clamp(-1.0, 1.0);
+            center + cube_face_dir(face, u, v).normalize_or_zero() * radius
+        }
+    }
+}
+
+/// Which chunk the eye is standing in. The key set changes when this changes —
+/// which is when the sweep is worth redoing, and not once a frame
+/// (`floptle/0071`).
+pub fn eye_chunk(src: &ScatterSource, eye: DVec3) -> ChunkKey {
+    match src.region {
+        Region::Ground { center, .. } => {
+            let local = eye - center;
+            ((local.x / src.chunk).floor() as i64, (local.z / src.chunk).floor() as i64)
+        }
+        Region::Sphere { center, radius } => {
+            let dir = (eye - center).normalize_or_zero();
+            let face = dominant_face(dir);
+            let (u, v) = face_uv(face, dir);
+            (
+                (((u * radius / src.chunk).floor() as i64) << 3) | face as i64,
+                (v * radius / src.chunk).floor() as i64,
+            )
+        }
+    }
+}
+
+/// Every chunk key whose chunk could contain something within `range` of `eye`,
+/// **nearest first**.
 ///
 /// Deliberately generous: a chunk is included if its CENTRE is within
 /// `range + chunk`, so a prop near a chunk's far corner is never culled by the
 /// chunk it happens to live in. Missing props at a chunk seam is the classic
 /// scatter bug and it only shows up as you walk.
+///
+/// The order is load-bearing, not tidiness. A draw budget cuts the tail of this
+/// list, and the tail has to be the far side of the world rather than whichever
+/// chunks a nested loop happened to reach last — a budget that drops props at
+/// your feet and keeps the ones at the horizon is worse than no budget. The
+/// same order is what makes streaming spend its first frames on what you can
+/// actually see.
+///
+/// The square sweep is also cut to a disc here: a corner of the swept square is
+/// √2 range away and can hold nothing visible, and on the bad configuration
+/// that is a fifth of the chunks walked every frame for nothing.
+///
+/// **The answer depends on the eye's CHUNK, not on the eye.** Both the cull and
+/// the order measure from the centre of the chunk the eye stands in, so walking
+/// across a chunk cannot change the list — which is what makes it cacheable
+/// until you cross a boundary, and the slack below is sized for it.
 pub fn chunks_near(src: &ScatterSource, eye: DVec3, range: f64) -> Vec<ChunkKey> {
-    let mut keys = Vec::new();
+    let mut keys: Vec<(f64, ChunkKey)> = Vec::new();
     let reach = range + src.chunk;
+    // Two chunks of slack, measured centre to centre: one for the eye sitting
+    // in the corner of its own chunk, one for a prop sitting in the corner of
+    // the chunk being measured. Each is worth at most 0.71 of a chunk, so this
+    // is generous by design — a prop missing at a seam is the classic scatter
+    // bug and it only shows up as you walk.
+    let cull = (reach + src.chunk) * (reach + src.chunk);
+    let from = chunk_center(src, eye_chunk(src, eye));
+    let consider = |key: ChunkKey, keys: &mut Vec<(f64, ChunkKey)>| {
+        let d = (chunk_center(src, key) - from).length_squared();
+        if d <= cull {
+            keys.push((d, key));
+        }
+    };
     match src.region {
         Region::Ground { center, half } => {
             let local = eye - center;
@@ -357,7 +471,7 @@ pub fn chunks_near(src: &ScatterSource, eye: DVec3, range: f64) -> Vec<ChunkKey>
             for x in (cx - n)..=(cx + n) {
                 for z in (cz - n)..=(cz + n) {
                     if x.abs() <= lx + 1 && z.abs() <= lz + 1 {
-                        keys.push((x, z));
+                        consider((x, z), &mut keys);
                     }
                 }
             }
@@ -374,14 +488,27 @@ pub fn chunks_near(src: &ScatterSource, eye: DVec3, range: f64) -> Vec<ChunkKey>
                 (u * radius / src.chunk).floor() as i64,
                 (v * radius / src.chunk).floor() as i64,
             );
-            for du in (cu - n)..=(cu + n) {
-                for dv in (cv - n)..=(cv + n) {
-                    keys.push(((du << 3) | face as i64, dv));
+            // …and only as far as the face actually goes. A cube face runs
+            // `u, v` in [-1, 1], which is `radius / chunk` cells; a key beyond
+            // that clamps to the edge and re-derives points already covered.
+            // On a body SMALLER than the view distance that is nearly all of
+            // the sweep: 700 m of `lod` on a 107 m planet swept 4,489 keys for
+            // 174 distinct chunks, and piled three quarters of its props on the
+            // seam in a wall (`floptle/0071`). Residency saturates at the body.
+            //
+            // The ground path has always clamped to its region this way; the
+            // sphere path never did, and the difference was invisible until a
+            // planet was small.
+            let lim = (radius / src.chunk).ceil() as i64 + 1;
+            for du in (cu - n).max(-lim)..=(cu + n).min(lim) {
+                for dv in (cv - n).max(-lim)..=(cv + n).min(lim) {
+                    consider(((du << 3) | face as i64, dv), &mut keys);
                 }
             }
         }
     }
-    keys
+    keys.sort_by(|a, b| a.0.total_cmp(&b.0));
+    keys.into_iter().map(|(_, k)| k).collect()
 }
 
 fn dominant_face(d: DVec3) -> usize {
@@ -589,6 +716,185 @@ mod tests {
         for k in [(0, 0), (-1, 0), (0, -1), (-1, -1), (1, 1)] {
             assert!(keys.contains(&k), "chunk {k:?} was culled at a seam");
         }
+    }
+
+    /// The knobs read as a look and one of them is the whole budget. `cost`
+    /// says so in numbers, before a game ships it (`floptle/0071`).
+    ///
+    /// The two configurations here are the ones that actually happened: what
+    /// shipped, and what it became once someone worked out what `lod` was
+    /// really setting.
+    #[test]
+    fn cost_names_what_a_configuration_asks_for_every_frame() {
+        // A level big enough that the view distance, not the region, decides.
+        let big = |far: f32, chunk: f64, per: u32| ScatterSource {
+            region: Region::Ground { center: DVec3::ZERO, half: [5_000.0, 5_000.0] },
+            chunk,
+            per_chunk: per,
+            bands: vec![Band { asset: "rock.glb".into(), distance: far }],
+            ..ground(per)
+        };
+        let shipped = cost(&big(700.0, 22.0, 26));
+        let fixed = cost(&big(190.0, 34.0, 14));
+
+        assert!(
+            shipped.chunks > 3_000 && shipped.props > 90_000,
+            "the shape that froze a game should read as thousands of chunks: {shipped:?}"
+        );
+        assert!(
+            fixed.chunks < 200 && fixed.props < 3_000,
+            "the fixed one should read as hundreds: {fixed:?}"
+        );
+        // An order of magnitude between two configurations a reasonable person
+        // writes is the whole reason this number has to be visible.
+        assert!(shipped.props > fixed.props * 30, "{shipped:?} vs {fixed:?}");
+        assert_eq!(fixed.props, fixed.chunks * 14, "props is chunks x perChunk");
+
+        // …and it really is the SQUARE of the distance. Doubling `lod` is
+        // getting on for four times the work, which is the fact the knob's name
+        // hides. (Just under four: the sweep carries a fixed couple of chunks
+        // of slack, which weighs more on the smaller of the two.)
+        let (a, b) = (cost(&big(200.0, 20.0, 1)), cost(&big(400.0, 20.0, 1)));
+        let ratio = b.chunks as f64 / a.chunks as f64;
+        assert!((3.0..4.2).contains(&ratio), "doubling the distance cost {ratio:.2}x, not ~4x");
+    }
+
+    /// On a body SMALLER than the view distance, residency saturates at the
+    /// body. It used to keep growing: 700 m of `lod` on a 107 m planet swept
+    /// 4,489 keys that resolved to 174 distinct chunks, and piled three
+    /// quarters of its props on a cube-face seam (`floptle/0071`).
+    #[test]
+    fn a_planet_smaller_than_the_view_distance_does_not_keep_costing_more() {
+        let planet = |far: f32| ScatterSource {
+            region: Region::Sphere { center: DVec3::ZERO, radius: 107.0 },
+            chunk: 22.0,
+            per_chunk: 26,
+            bands: vec![Band { asset: "rock.glb".into(), distance: far }],
+            ..ground(26)
+        };
+        let near = cost(&planet(190.0));
+        let silly = cost(&planet(700.0));
+        assert_eq!(
+            near, silly,
+            "asking to see 700 m of a 214 m planet cost more than asking to see 190"
+        );
+        assert!(silly.chunks < 200, "the whole planet is {} chunks", silly.chunks);
+
+        // And the props are real places, not the same rock drawn over and over.
+        let eye = DVec3::new(0.0, 107.0, 0.0);
+        let s = planet(700.0);
+        let mut pos: Vec<String> = chunks_near(&s, eye, 700.0)
+            .iter()
+            .flat_map(|k| chunk_instances(&s, *k))
+            .map(|i| format!("{:.2},{:.2},{:.2}", i.pos.x, i.pos.y, i.pos.z))
+            .collect();
+        let total = pos.len();
+        pos.sort();
+        pos.dedup();
+        assert!(
+            pos.len() * 10 > total * 9,
+            "{} of {total} props are duplicates piled on a seam",
+            total - pos.len()
+        );
+    }
+
+    /// …and it counts the sweep rather than restating it. A formula beside
+    /// `chunks_near` is a second definition of residency, and the two would
+    /// drift the first time either changed.
+    #[test]
+    fn cost_counts_the_same_chunks_the_draw_walks() {
+        let s = ground(9);
+        let eye = DVec3::ZERO;
+        assert_eq!(
+            cost(&s).chunks,
+            chunks_near(&s, eye, s.range() as f64).len() as u64,
+            "cost and the real sweep disagree"
+        );
+        // A source with no bands costs nothing rather than dividing by zero.
+        let mut empty = s.clone();
+        empty.bands.clear();
+        assert_eq!(cost(&empty), Cost::default());
+    }
+
+    /// The sweep comes back NEAREST FIRST, and that order is load-bearing: a
+    /// draw budget cuts the tail of this list, and the tail has to be the
+    /// horizon rather than whichever chunks a nested loop reached last. A
+    /// budget that drops the props at your feet is worse than no budget.
+    #[test]
+    fn the_sweep_is_ordered_nearest_first() {
+        for s in [ground(8), ScatterSource {
+            region: Region::Sphere { center: DVec3::ZERO, radius: 300.0 },
+            chunk: 30.0,
+            ..ground(8)
+        }] {
+            let eye = match s.region {
+                Region::Sphere { radius, .. } => DVec3::new(0.0, radius, 0.0),
+                _ => DVec3::new(5.0, 0.0, -3.0),
+            };
+            let keys = chunks_near(&s, eye, s.range() as f64);
+            assert!(keys.len() > 4, "not much of a sweep to order");
+            // Measured from the eye's chunk, which is what the sweep is a
+            // function of — within half a chunk of the eye, and stable as it
+            // moves, which is the trade this makes on purpose.
+            let from = chunk_center(&s, eye_chunk(&s, eye));
+            let d: Vec<f64> =
+                keys.iter().map(|k| (chunk_center(&s, *k) - from).length()).collect();
+            assert!(
+                d.windows(2).all(|w| w[0] <= w[1] + 1e-9),
+                "the sweep is not nearest-first: {:?}",
+                &d[..d.len().min(8)]
+            );
+        }
+    }
+
+    /// The square sweep is cut to a disc. A corner of the swept square is √2
+    /// range away and can hold nothing visible — a fifth of the chunks walked
+    /// every frame for nothing.
+    #[test]
+    fn the_corners_of_a_square_sweep_are_not_walked() {
+        let mut s = ground(8);
+        s.region = Region::Ground { center: DVec3::ZERO, half: [5_000.0, 5_000.0] };
+        s.chunk = 10.0;
+        s.bands = vec![Band { asset: "a".into(), distance: 400.0 }];
+        let keys = chunks_near(&s, DVec3::ZERO, 400.0);
+        let n = (410.0f64 / 10.0).ceil() as i64;
+        let square = ((2 * n + 1) * (2 * n + 1)) as usize;
+        assert!(keys.len() < square * 9 / 10, "{} of {square} kept — no cull", keys.len());
+        // …and nothing that could hold a visible prop was cut. Every key within
+        // the honest reach is still there.
+        for x in -n..=n {
+            for z in -n..=n {
+                let c = chunk_center(&s, (x, z));
+                if c.length() <= 400.0 {
+                    assert!(keys.contains(&(x, z)), "chunk {x},{z} was culled inside range");
+                }
+            }
+        }
+    }
+
+    /// The key set changes when the eye crosses a chunk boundary, not when the
+    /// frame advances — which is what lets the draw skip the sweep entirely
+    /// while a player stands still.
+    #[test]
+    fn the_eyes_chunk_only_changes_at_a_boundary() {
+        let s = ground(8); // chunk = 16
+        let a = eye_chunk(&s, DVec3::new(1.0, 0.0, 1.0));
+        assert_eq!(a, eye_chunk(&s, DVec3::new(15.9, 40.0, 2.0)), "still the same chunk");
+        assert_ne!(a, eye_chunk(&s, DVec3::new(16.1, 0.0, 1.0)), "crossed into the next one");
+        // …and the sweep from anywhere in one chunk is the SAME LIST, order
+        // included. That is not tidiness: the draw caches this list until the
+        // eye crosses a boundary, so a sweep that drifted with sub-chunk
+        // movement would make the cache quietly wrong instead of merely stale.
+        assert_eq!(
+            chunks_near(&s, DVec3::new(1.0, 0.0, 1.0), 40.0),
+            chunks_near(&s, DVec3::new(14.0, 3.0, 14.0), 40.0),
+            "the sweep moved without the eye leaving its chunk"
+        );
+        assert_ne!(
+            chunks_near(&s, DVec3::new(1.0, 0.0, 1.0), 40.0),
+            chunks_near(&s, DVec3::new(20.0, 0.0, 1.0), 40.0),
+            "…but crossing a boundary does change it"
+        );
     }
 
     /// A planet's props sit ON the sphere — every one of them, at the radius

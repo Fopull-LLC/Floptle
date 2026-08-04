@@ -31,10 +31,37 @@ pub(crate) struct ResolvedChunk {
     pub removed_len: usize,
 }
 
+/// How many props may be dropped onto the ground in one frame, across every
+/// source (`floptle/0071`).
+///
+/// Settling is a raycast per prop, cached per chunk — so the FIRST frame a
+/// chunk comes into range pays for all of its props at once. A third-person
+/// camera swings the eye several metres just from looking around, which crosses
+/// chunk boundaries, which used to drag thousands of fresh raycasts into a
+/// single frame. The report was "it freezes more as I'm looking around", and
+/// that is exactly what that was.
+///
+/// The cost of the cap is that ground arriving all at once fills in over a few
+/// frames, furthest last. The cost of not having it is a frame that stops.
+const SETTLE_BUDGET: usize = 512;
+
+/// Which chunks one source is resident in, and where the eye was standing when
+/// that was worked out.
+struct Sweep {
+    /// The chunk the eye was in. The key set changes when THIS changes, not
+    /// when the frame advances. `None` = never swept.
+    at: Option<ChunkKey>,
+    /// Nearest first, as `chunks_near` returns them.
+    keys: Vec<ChunkKey>,
+}
+
 /// Per-source chunk caches, keyed by `(source id, chunk)`.
 #[derive(Default)]
 pub(crate) struct ScatterCache {
     chunks: HashMap<(u32, ChunkKey), ResolvedChunk>,
+    /// The resident key list per source — swept when the eye crosses a chunk
+    /// boundary, not once a frame (`floptle/0071`).
+    sweeps: HashMap<u32, Sweep>,
 }
 
 impl ScatterCache {
@@ -42,6 +69,7 @@ impl ScatterCache {
     /// ground out from under a whole region.
     pub(crate) fn clear(&mut self) {
         self.chunks.clear();
+        self.sweeps.clear();
     }
 
     /// Forget the chunks within `radius` of `p`: the ground there changed, so
@@ -58,6 +86,7 @@ impl ScatterCache {
     pub(crate) fn len(&self) -> usize {
         self.chunks.len()
     }
+
 }
 
 /// Drop an instance onto the real surface under it.
@@ -112,29 +141,52 @@ pub(crate) fn build_instances(
     budget: usize,
     out: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
 ) {
+    // Disjoint borrows: the sweep list and the resolved chunks are read and
+    // written in the same loop.
+    let ScatterCache { chunks: resolved, sweeps } = cache;
+    sweeps.retain(|id, _| sources.iter().any(|s| s.id == *id));
+    // Shared across sources, because it is a FRAME budget. A source that eats
+    // it all is fully resident afterwards and stops asking, so the next source
+    // gets the next frame's — it converges rather than starving anyone.
+    let mut settled = 0usize;
     for src in sources {
         let range = src.range();
         if range <= 0.0 || src.bands.is_empty() {
             continue;
         }
-        for key in scatter::chunks_near(src, eye, range as f64) {
+        // The key set changes when the eye crosses a chunk boundary, not when
+        // the frame advances (`floptle/0071`). Standing still, or walking
+        // within one chunk, this is a hash lookup — it used to be a square
+        // sweep, allocated and thrown away sixty times a second.
+        let at = scatter::eye_chunk(src, eye);
+        let sweep = sweeps.entry(src.id).or_insert_with(|| Sweep { at: None, keys: Vec::new() });
+        if sweep.at != Some(at) {
+            sweep.at = Some(at);
+            sweep.keys = scatter::chunks_near(src, eye, range as f64);
+        }
+        // Nearest first, so the draw budget below cuts the horizon rather than
+        // your feet, and so streaming spends its first frames on what you can
+        // actually see.
+        for &key in &sweep.keys {
             let ck = (src.id, key);
-            // Re-resolve when the chunk is new, or when something has been cut
-            // since it was resolved.
-            let stale = cache
-                .chunks
-                .get(&ck)
-                .is_none_or(|c| c.removed_len != src.removed.len());
-            if stale {
-                let instances = scatter::chunk_instances(src, key)
-                    .into_iter()
-                    .filter_map(|i| settle(src, i, ground))
-                    .collect();
-                cache
-                    .chunks
-                    .insert(ck, ResolvedChunk { instances, removed_len: src.removed.len() });
+            let known = resolved.get(&ck);
+            // Something has been cut since this chunk was resolved: redo it NOW,
+            // budget or no budget. That is one chunk, it is the player's own
+            // doing, and a prop that survives the swing that felled it is a bug.
+            let cut = known.is_some_and(|c| c.removed_len != src.removed.len());
+            if known.is_none() || cut {
+                // Arriving is the other case, and it is thousands of props at
+                // once. Let them come over the next few frames instead.
+                if known.is_none() && settled >= SETTLE_BUDGET {
+                    continue;
+                }
+                let rolled = scatter::chunk_instances(src, key);
+                settled += rolled.len();
+                let instances =
+                    rolled.into_iter().filter_map(|i| settle(src, i, ground)).collect();
+                resolved.insert(ck, ResolvedChunk { instances, removed_len: src.removed.len() });
             }
-            let Some(chunk) = cache.chunks.get(&ck) else { continue };
+            let Some(chunk) = resolved.get(&ck) else { continue };
             for inst in &chunk.instances {
                 if out.len() >= budget {
                     return;
@@ -425,6 +477,113 @@ mod tests {
             64, &mut out,
         );
         assert_eq!(out.len(), 64);
+    }
+
+    /// A field of the shape that froze a game: a long view distance against a
+    /// small chunk, over a region big enough that the distance is what decides.
+    fn big_field() -> ScatterSource {
+        ScatterSource {
+            region: Region::Ground { center: DVec3::ZERO, half: [5_000.0, 5_000.0] },
+            chunk: 22.0,
+            per_chunk: 26,
+            bands: vec![Band { asset: "rock.glb".into(), distance: 700.0 }],
+            ..src()
+        }
+    }
+
+    /// Settling is a raycast per prop, and a chunk arriving pays for all of its
+    /// props at once. Crossing a chunk boundary used to drag thousands of them
+    /// into one frame — "it freezes more as I'm looking around", which is what
+    /// a third-person camera swinging the eye several metres does
+    /// (`floptle/0071`).
+    #[test]
+    fn arriving_ground_is_settled_over_several_frames_not_all_at_once() {
+        let s = big_field();
+        let mut cache = ScatterCache::default();
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
+        let mat = MaterialParams::flat([1.0; 3]);
+        let eye = DVec3::ZERO;
+
+        // Left alone this configuration is ninety thousand props, every one of
+        // them a raycast on the frame its chunk arrives.
+        assert!(scatter::cost(&s).props > 80_000, "not the pathological case");
+
+        let mut worst = 0usize;
+        let mut frames = 0;
+        loop {
+            let mut casts = 0usize;
+            let mut ground = |_: DVec3, _: Vec3, _: f32| {
+                casts += 1;
+                Some((60.0f32, Vec3::Y))
+            };
+            let mut out = Vec::new();
+            build_instances(
+                &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut ground, &mat,
+                20_000, &mut out,
+            );
+            worst = worst.max(casts);
+            frames += 1;
+            if casts == 0 || frames > 400 {
+                break;
+            }
+        }
+        assert!(
+            worst <= SETTLE_BUDGET + s.per_chunk as usize,
+            "one frame settled {worst} props — the cap is {SETTLE_BUDGET}"
+        );
+        // …and standing still, a warmed field costs NO ground work at all.
+        let mut casts = 0usize;
+        let mut ground = |_: DVec3, _: Vec3, _: f32| {
+            casts += 1;
+            Some((60.0f32, Vec3::Y))
+        };
+        let mut out = Vec::new();
+        build_instances(
+            &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut ground, &mat, 20_000,
+            &mut out,
+        );
+        assert_eq!(casts, 0, "a stationary camera re-settled ground it had already settled");
+        assert!(!out.is_empty(), "…while still drawing the field");
+    }
+
+    /// The draw budget cuts the HORIZON, not your feet. The sweep is ordered
+    /// nearest first for exactly this reason: a budget spent on whichever
+    /// chunks a nested loop reached first leaves holes in front of the player
+    /// and props behind the fog.
+    #[test]
+    fn a_full_budget_drops_the_far_props_and_keeps_the_near_ones() {
+        let s = big_field();
+        let mut cache = ScatterCache::default();
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        let mat = MaterialParams::flat([1.0; 3]);
+        let eye = DVec3::ZERO;
+
+        // Warm, so the settle budget isn't what's limiting this.
+        for _ in 0..40 {
+            let mut out = Vec::new();
+            build_instances(
+                &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut ground, &mat,
+                20_000, &mut out,
+            );
+        }
+        let mut out = Vec::new();
+        build_instances(
+            &mut cache, std::slice::from_ref(&s), eye, &mut mesh, &mut ground, &mat, 300,
+            &mut out,
+        );
+        assert_eq!(out.len(), 300, "the budget is a hard stop");
+        // Every prop drawn is one of the nearest — nothing at the far edge of
+        // the range got in ahead of something underfoot. The model's
+        // translation is already camera-relative.
+        let far = out
+            .iter()
+            .map(|(_, _, r)| {
+                let m = r.model;
+                (m[3][0] * m[3][0] + m[3][1] * m[3][1] + m[3][2] * m[3][2]).sqrt()
+            })
+            .fold(0.0f32, f32::max);
+        assert!(far < 120.0, "a budgeted draw reached {far:.0} m out — the order is wrong");
     }
 
     /// Mid-fade draws BOTH bands. Drawing one and switching IS the pop.
