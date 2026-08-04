@@ -1,6 +1,16 @@
 ## Just shipped
 
-**v0.30.0 "Draw It Anywhere"** — sprites you draw in `update` now reach the
+**v0.31.0 "Say So Sooner"** — a field of scattered props now tells you what it
+costs at the moment you ask for it, rather than the moment your game stops. The
+outermost view distance was quietly the budget — cost grows with its square —
+and `scatter.cost` hands back the numbers, while a field big enough to matter
+says so in the Console as you declare it. A big field also degrades instead of
+stopping: ground arrives nearest-first over a few frames. Separately, `ui.make`
+stops answering typos — a `pin` it doesn't recognise raises and says what it
+takes, instead of quietly meaning "top left", and `topCenter`/`bottomCenter` now
+work because they are what people write.
+
+**v0.30.0 "Draw It Anywhere"** before it — sprites you draw in `update` now reach the
 screen. A sprite batch used to be emptied after every script pass, and a frame
 runs three, so anything drawn in `update` was wiped twice before it rendered —
 silently, and all of it at once. The frame is the unit now, so draw wherever you
@@ -9,7 +19,7 @@ like. A batch's `size` is also the sprite's true width at last (it was drawing
 in instead of popping. And a scene of thousands of scripted nodes no longer
 crashes the editor with your unsaved work in it.
 
-**v0.29.0 "Ask The Index"** before it — one script finding another stopped costing the
+**v0.29.0 "Ask The Index"** under those — one script finding another stopped costing the
 size of your scene: a 5,000-node game spent 25 ms a frame searching for things
 and now spends 0.2. Worlds can have biomes, because scattered props take a
 density rule; a prop your own script assembled can be scattered, because a
@@ -19,7 +29,7 @@ whole. Plus three silences broken — a scatter option that did nothing, a scene
 value your script no longer reads, and a scene value quietly pinning the number
 you just edited.
 
-**v0.28.0 "One Missing Section"** under those — a screen built with `ui.make` no longer
+**v0.28.0 "One Missing Section"** — a screen built with `ui.make` no longer
 disappears because one part of it isn't showing. A section written as `nil` —
 which is how anybody writes a HUD where parts come and go — used to take the
 whole screen down, or silently drop everything after it. Clicking also stopped
