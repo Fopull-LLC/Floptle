@@ -29,8 +29,52 @@ fn dvec3(t: &Table, key: &str) -> Option<glam::DVec3> {
     t.get::<Value>(key).ok().as_ref().and_then(crate::math_api::vec3_of)
 }
 
+/// Every key `scatter.create` reads. Anything else is refused.
+///
+/// **Why refusing is worth a breaking change.** A `collide` option was parsed,
+/// defaulted, stored — and read by nothing, for two releases. A game that asked
+/// for solid props got no error, no warning and props it walked straight
+/// through, and the only reason that could happen is that an unknown key was
+/// silently dropped (`floptle/0066`). A typo'd `perchunk` had exactly the same
+/// failure: the default, forever, with nothing to see.
+const CREATE_KEYS: &[&str] = &[
+    "asset", "lod", "range", "seed", "center", "radius", "halfX", "halfZ", "align", "perChunk",
+    "chunk", "scaleMin", "scaleMax", "fade", "density", "densityRows",
+];
+
+/// Refuse an options table containing anything the engine does not read.
+///
+/// Names the key, and suggests the nearest real one — a rejected typo that
+/// doesn't say what you meant is only half an error message.
+fn check_keys(opts: &Table, known: &[&str], call: &str) -> mlua::Result<()> {
+    for pair in opts.clone().pairs::<Value, Value>() {
+        let (k, _) = pair?;
+        let Value::String(k) = k else { continue };
+        let key = k.to_str()?.to_string();
+        if known.contains(&key.as_str()) {
+            continue;
+        }
+        // Case-insensitive near-miss first (`perchunk` for `perChunk`), then a
+        // shared prefix, which covers most of the rest.
+        let near = known.iter().find(|n| n.eq_ignore_ascii_case(&key)).or_else(|| {
+            known.iter().find(|n| {
+                let (a, b) = (n.to_ascii_lowercase(), key.to_ascii_lowercase());
+                a.len() >= 3 && b.len() >= 3 && a[..3] == b[..3]
+            })
+        });
+        let hint = match near {
+            Some(n) => format!(" (did you mean `{n}`?)"),
+            None => format!(" (it reads: {})", known.join(", ")),
+        };
+        return Err(mlua::Error::RuntimeError(format!(
+            "{call}: no option called `{key}`{hint}"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn install_scatter_api(lua: &Lua, sources: Sources, next_id: Rc<std::cell::Cell<u32>>) {
-    use floptle_core::scatter::{Align, Band, Proxy, Region, ScatterSource};
+    use floptle_core::scatter::{Align, Band, Region, ScatterSource};
     let Ok(t) = lua.create_table() else { return };
 
     // scatter.create{...} → a source id. Every knob has a default so the
@@ -39,6 +83,7 @@ pub(crate) fn install_scatter_api(lua: &Lua, sources: Sources, next_id: Rc<std::
         let s = sources.clone();
         let ids = next_id.clone();
         if let Ok(f) = lua.create_function(move |_, opts: Table| {
+            check_keys(&opts, CREATE_KEYS, "scatter.create")?;
             // LOD bands: `lod = { {asset, distance}, ... }`, nearest first.
             // A single `asset` is the one-band shorthand.
             let mut bands: Vec<Band> = Vec::new();
@@ -79,18 +124,66 @@ pub(crate) fn install_scatter_api(lua: &Lua, sources: Sources, next_id: Rc<std::
                 Some("world") | Some("up") => Align::World,
                 _ => Align::Surface,
             };
-            let collide = opts
-                .get::<Option<Table>>("collide")
-                .ok()
-                .flatten()
-                .map(|c| Proxy {
-                    radius: num(&c, "radius", 0.4) as f32,
-                    height: num(&c, "height", 2.0) as f32,
-                })
-                .or_else(|| {
-                    matches!(opts.get::<Option<bool>>("collide"), Ok(Some(true)))
-                        .then_some(Proxy { radius: 0.4, height: 2.0 })
-                });
+            // `density`: a rule evaluated ONCE, here, and kept as its answer.
+            // A function is sampled over the region; a flat array is taken as
+            // given. Either way nothing calls back into Lua while chunks build,
+            // which is what keeps placement a pure function of the seed.
+            let sphere = matches!(region, Region::Sphere { .. });
+            let rows = num(&opts, "densityRows", 64.0).clamp(2.0, 512.0) as u32;
+            let density = match opts.get::<Value>("density") {
+                Ok(Value::Function(f)) => {
+                    let cols = if sphere { rows * 2 } else { rows };
+                    let mut data = Vec::with_capacity((rows * cols) as usize);
+                    for r in 0..rows {
+                        for c in 0..cols {
+                            let u = c as f64 / (cols.max(2) - 1) as f64;
+                            let v = r as f64 / (rows.max(2) - 1) as f64;
+                            // The point the game is being asked about, in WORLD
+                            // space — a climate model is written against places,
+                            // not against grid indices.
+                            let p = match region {
+                                Region::Ground { center, half } => glam::DVec3::new(
+                                    center.x + (u - 0.5) * 2.0 * half[0],
+                                    center.y,
+                                    center.z + (v - 0.5) * 2.0 * half[1],
+                                ),
+                                Region::Sphere { center, radius } => {
+                                    let lon = (u - 0.5) * std::f64::consts::TAU;
+                                    let lat = v * std::f64::consts::PI;
+                                    center
+                                        + glam::DVec3::new(
+                                            lat.sin() * lon.cos(),
+                                            lat.cos(),
+                                            lat.sin() * lon.sin(),
+                                        ) * radius
+                                }
+                            };
+                            let d: f64 = f.call((p.x, p.y, p.z)).unwrap_or(1.0);
+                            data.push(d.clamp(0.0, 1.0) as f32);
+                        }
+                    }
+                    Some(floptle_core::scatter::Density { rows, data })
+                }
+                Ok(Value::Table(t)) => {
+                    let data: Vec<f32> = (1..=t.raw_len())
+                        .map(|i| t.raw_get::<f64>(i).unwrap_or(1.0).clamp(0.0, 1.0) as f32)
+                        .collect();
+                    // A grid handed over directly has to say how wide it is, or
+                    // it is a list of numbers with no shape.
+                    let cols = if sphere { rows * 2 } else { rows };
+                    if data.len() < (rows * cols) as usize {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "scatter.create: `density` has {} values but densityRows = {rows} \
+                             needs {} ({rows} x {cols}{})",
+                            data.len(),
+                            rows * cols,
+                            if sphere { ", doubled for a sphere's longitude" } else { "" }
+                        )));
+                    }
+                    Some(floptle_core::scatter::Density { rows, data })
+                }
+                _ => None,
+            };
             let id = ids.get().wrapping_add(1).max(1);
             ids.set(id);
             s.borrow_mut().push(ScatterSource {
@@ -106,7 +199,7 @@ pub(crate) fn install_scatter_api(lua: &Lua, sources: Sources, next_id: Rc<std::
                 ),
                 bands,
                 fade: num(&opts, "fade", 8.0) as f32,
-                collide,
+                density,
                 removed: Default::default(),
             });
             Ok(id)
@@ -243,4 +336,68 @@ pub(crate) fn install_scatter_api(lua: &Lua, sources: Sources, next_id: Rc<std::
     }
 
     let _ = lua.globals().set("scatter", t);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn host() -> (Lua, Sources) {
+        let lua = Lua::new();
+        let sources: Sources = Rc::new(RefCell::new(Vec::new()));
+        install_scatter_api(&lua, sources.clone(), Rc::new(std::cell::Cell::new(0)));
+        (lua, sources)
+    }
+
+    /// The test that would have caught `collide`: every option the Lua surface
+    /// accepts has to be one the engine reads.
+    ///
+    /// `CREATE_KEYS` is that list, and it is the same list the parser consults,
+    /// so the two cannot drift. What this pins down is the BEHAVIOUR — an
+    /// option outside it is refused rather than shrugged at, which is the only
+    /// reason a dead option could hide for two releases.
+    #[test]
+    fn an_option_the_engine_does_not_read_is_refused() {
+        let (lua, sources) = host();
+        let err = lua
+            .load(r#"return scatter.create{ asset = "tree.glb", collide = true }"#)
+            .exec()
+            .expect_err("a dead option must not be accepted");
+        let msg = err.to_string();
+        assert!(msg.contains("collide"), "it names the key: {msg}");
+        assert!(sources.borrow().is_empty(), "and nothing was declared");
+
+        // A typo had the same silent failure — the default, forever.
+        let err = lua
+            .load(r#"return scatter.create{ asset = "tree.glb", perchunk = 40 }"#)
+            .exec()
+            .expect_err("a typo must not be accepted");
+        assert!(
+            err.to_string().contains("perChunk"),
+            "…and it suggests the real one: {err}"
+        );
+    }
+
+    /// …and every key it DOES list still works, so the check cannot quietly
+    /// become "refuse everything".
+    #[test]
+    fn every_option_the_list_names_is_accepted() {
+        let (lua, sources) = host();
+        let src = format!(
+            "scatter.create{{ {} }}",
+            CREATE_KEYS
+                .iter()
+                .map(|k| match *k {
+                    "asset" => "asset = \"tree.glb\"".to_string(),
+                    "lod" => "lod = {}".to_string(),
+                    "align" => "align = \"world\"".to_string(),
+                    "center" => "center = { x = 0, y = 0, z = 0 }".to_string(),
+                    other => format!("{other} = 1"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        lua.load(&src).exec().unwrap_or_else(|e| panic!("{src}\n{e}"));
+        assert_eq!(sources.borrow().len(), 1, "the source was declared");
+    }
 }

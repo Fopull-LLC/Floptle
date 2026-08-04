@@ -86,6 +86,15 @@ fn settle(
     Some(inst)
 }
 
+/// One drawable piece of a scatter prototype: a mesh, its texture, and where it
+/// sits WITHIN the prop.
+///
+/// A `.glb` is one part at identity. A prefab is however many Mesh nodes it
+/// holds, each at its authored place — which is what lets a plant be a trunk
+/// and three fronds and still cost one instanced draw per piece rather than a
+/// scene node per piece (`floptle/0065`).
+pub(crate) type Part = (MeshId, Option<TexId>, Mat4);
+
 /// Everything visible from `eye`, packed as instanced draws.
 ///
 /// Returns `(mesh, texture, raw)` triples in the same shape `draw_scene` takes,
@@ -97,7 +106,7 @@ pub(crate) fn build_instances(
     cache: &mut ScatterCache,
     sources: &[ScatterSource],
     eye: DVec3,
-    mesh_of: &mut impl FnMut(&str) -> Option<(MeshId, Option<TexId>)>,
+    mesh_of: &mut impl FnMut(&str) -> Option<Vec<Part>>,
     ground: &mut impl FnMut(DVec3, Vec3, f32) -> Option<(f32, Vec3)>,
     material: &MaterialParams,
     budget: usize,
@@ -143,7 +152,7 @@ pub(crate) fn build_instances(
                 // metres of walking is what nobody notices.
                 let mut push = |b: usize, alpha: f32| {
                     let Some(asset) = src.bands.get(b) else { return };
-                    let Some((mesh, tex)) = mesh_of(&asset.asset) else { return };
+                    let Some(parts) = mesh_of(&asset.asset) else { return };
                     let mut mp = *material;
                     mp.alpha = alpha;
                     // The per-instance roll rides the albedo, so a game can
@@ -151,7 +160,13 @@ pub(crate) fn build_instances(
                     // per plant. Neutral at param 0.5.
                     let tintf = 0.85 + 0.3 * inst.param;
                     mp.color = [mp.color[0] * tintf, mp.color[1] * tintf, mp.color[2] * tintf];
-                    out.push((mesh, tex, instance_of_mat(model, &mp)));
+                    // A prototype may be several parts (a prefab's nodes), each
+                    // with its own mesh, texture and place within the prop. They
+                    // are still ONE instanced draw each — the prefab is resolved
+                    // to this list once, not instantiated per prop.
+                    for &(mesh, tex, local) in &parts {
+                        out.push((mesh, tex, instance_of_mat(model * local, &mp)));
+                    }
                 };
                 // At the very ends of a fade window one half rounds to nothing.
                 // Draw the OTHER half fully opaque rather than at 0.995: a
@@ -172,6 +187,105 @@ pub(crate) fn build_instances(
     }
 }
 
+impl crate::Editor {
+    /// A scatter prototype resolved to its drawable parts, baked ONCE and kept.
+    ///
+    /// A mesh file is one part at identity — what scatter has always drawn. A
+    /// **prefab** is each of its `Mesh` nodes at its authored place inside the
+    /// prop, which is the point of `floptle/0065`: a game whose props are
+    /// generated (Solar's plants are a trunk and a handful of fronds, assembled
+    /// by a script) had nothing to hand scatter, because scatter took a file
+    /// path and a plant is not a file.
+    ///
+    /// Baked at DECLARE time, not per instance: editing the prefab while the
+    /// game runs does not re-bake it, exactly as editing a `.glb` mid-run does
+    /// not re-import it.
+    ///
+    /// A prefab node the bake cannot use — anything that is not a Mesh with a
+    /// model — is skipped, and a prototype that yields nothing at all says so
+    /// once rather than drawing nothing in silence.
+    pub(crate) fn bake_scatter_prototypes(&mut self) {
+        let assets: Vec<String> = self
+            .script_host
+            .scatter_sources()
+            .iter()
+            .flat_map(|s| s.bands.iter().map(|b| b.asset.clone()))
+            .collect();
+        for a in assets {
+            if !self.scatter_protos.contains_key(&a) {
+                let _ = self.scatter_prototype(&a);
+            }
+        }
+    }
+
+    pub(crate) fn scatter_prototype(&mut self, asset: &str) -> Option<Vec<Part>> {
+        if let Some(cached) = self.scatter_protos.get(asset) {
+            return (!cached.is_empty()).then(|| cached.clone());
+        }
+        let parts = self.bake_scatter_prototype(asset);
+        if parts.is_empty() {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "scatter: `{asset}` has nothing to draw — a mesh file, or a prefab \
+                     containing at least one Mesh node, is what a scatter prototype is"
+                ),
+                None,
+            );
+        }
+        self.scatter_protos.insert(asset.to_string(), parts.clone());
+        (!parts.is_empty()).then_some(parts)
+    }
+
+    fn bake_scatter_prototype(&mut self, asset: &str) -> Vec<Part> {
+        // A prefab first, since a project may legitimately hold both names.
+        if let Some(path) = self.resolve_prefab_request(asset)
+            && let Ok(docs) = crate::prefab::load_prefab_docs(&path)
+        {
+            let mut out = Vec::new();
+            for (i, d) in docs.iter().enumerate() {
+                let floptle_scene::MatterDoc::Mesh { asset_path } = &d.matter else { continue };
+                if !self.import_model(asset_path) {
+                    continue;
+                }
+                let Some(a) = self.mesh_registry.get(asset_path) else { continue };
+                let parts: Vec<MeshId> = a.parts.clone();
+                let local = prefab_local(&docs, i);
+                out.extend(parts.into_iter().map(|m| (m, None, local)));
+            }
+            return out;
+        }
+        if !self.import_model(asset) {
+            return Vec::new();
+        }
+        self.mesh_registry
+            .get(asset)
+            .map(|a| a.parts.iter().map(|&m| (m, None, Mat4::IDENTITY)).collect())
+            .unwrap_or_default()
+    }
+}
+
+/// A prefab node's transform relative to the prefab's ROOT — its own, composed
+/// with every ancestor's, so a frond attached to a trunk lands on the trunk.
+fn prefab_local(docs: &[floptle_scene::NodeDoc], i: usize) -> Mat4 {
+    let mut m = Mat4::IDENTITY;
+    let mut cur = Some(i);
+    // Bounded by the list length: a malformed prefab with a parent cycle must
+    // not hang the frame it is first drawn in.
+    for _ in 0..=docs.len() {
+        let Some(idx) = cur else { break };
+        let Some(d) = docs.get(idx) else { break };
+        let t = &d.transform;
+        m = Mat4::from_scale_rotation_translation(
+            Vec3::from(t.scale),
+            floptle_core::math::Quat::from_array(t.rotation),
+            Vec3::new(t.translation[0] as f32, t.translation[1] as f32, t.translation[2] as f32),
+        ) * m;
+        cur = d.parent.filter(|p| *p != idx);
+    }
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,9 +302,57 @@ mod tests {
             scale: (1.0, 1.0),
             bands: vec![Band { asset: "a".into(), distance: 50.0 }],
             fade: 0.0,
-            collide: None,
+            density: None,
             removed: Default::default(),
         }
+    }
+
+    /// A prototype of several parts draws one instance PER PART, each at its
+    /// place within the prop and all sharing the prop's transform
+    /// (`floptle/0065`). That is what lets a generated plant — a trunk and
+    /// three fronds — be scattered without a scene node per frond.
+    #[test]
+    fn a_multi_part_prototype_draws_each_part_at_its_own_place() {
+        let s = src();
+        // Flat ground under everything, so props settle rather than being
+        // dropped for having nothing to stand on.
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        // Two parts: one at the origin, one a metre up.
+        let up = Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0));
+        let mut mesh = |_: &str| {
+            Some(vec![(MeshId(0), None, Mat4::IDENTITY), (MeshId(1), None, up)])
+        };
+        let mut one = Vec::new();
+        build_instances(
+            &mut ScatterCache::default(),
+            std::slice::from_ref(&s),
+            DVec3::ZERO,
+            &mut |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]),
+            &mut ground,
+            &MaterialParams::flat([1.0; 3]),
+            10_000,
+            &mut one,
+        );
+        let mut two = Vec::new();
+        build_instances(
+            &mut ScatterCache::default(),
+            &[s],
+            DVec3::ZERO,
+            &mut mesh,
+            &mut ground,
+            &MaterialParams::flat([1.0; 3]),
+            10_000,
+            &mut two,
+        );
+        assert!(!one.is_empty());
+        assert_eq!(two.len(), one.len() * 2, "one draw per part per prop");
+        assert!(
+            two.iter().any(|(m, ..)| *m == MeshId(1)),
+            "the second part is actually drawn"
+        );
+        // The parts of one prop are a metre apart, not on top of each other.
+        let ys: Vec<f32> = two.iter().take(2).map(|(_, _, r)| r.model[3][1]).collect();
+        assert!((ys[0] - ys[1]).abs() > 0.5, "the offset part moved: {ys:?}");
     }
 
     /// A prop with no ground under it is DROPPED, not left floating at the
@@ -224,7 +386,7 @@ mod tests {
     fn cutting_a_prop_invalidates_the_cache_immediately() {
         let mut cache = ScatterCache::default();
         let mut s = src();
-        let mut mesh = |_: &str| Some((MeshId(0), None));
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
         let mat = MaterialParams::flat([1.0, 1.0, 1.0]);
         let mut out = Vec::new();
@@ -254,7 +416,7 @@ mod tests {
         let mut s = src();
         s.per_chunk = 512;
         s.bands = vec![Band { asset: "a".into(), distance: 400.0 }];
-        let mut mesh = |_: &str| Some((MeshId(0), None));
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
         let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
         let mat = MaterialParams::flat([1.0, 1.0, 1.0]);
         let mut out = Vec::new();
@@ -283,7 +445,7 @@ mod tests {
         {
             let mut mesh = |a: &str| {
                 asked.push(a.to_string());
-                Some((MeshId(0), None))
+                Some(vec![(MeshId(0), None, Mat4::IDENTITY)])
             };
             // Stand ~35 m away: inside the first band's 10 m fade window.
             build_instances(

@@ -1211,12 +1211,13 @@ impl Editor {
                         .raycast(o, dir, max)
                         .map(|h| (h.distance, Vec3::from(h.normal)))
                 };
-                let mut mesh_of = |asset: &str| {
-                    self.mesh_registry
-                        .get(asset)
-                        .and_then(|a| a.parts.first().copied())
-                        .map(|m| (m, None))
-                };
+                // Baked before the frame's GPU borrow (see
+                // `bake_scatter_prototypes`); this only reads the answer. A
+                // prototype may be a prefab of several parts, and resolving
+                // that per prop would re-walk it twenty thousand times.
+                let protos = &self.scatter_protos;
+                let mut mesh_of =
+                    |asset: &str| protos.get(asset).filter(|p| !p.is_empty()).cloned();
                 // A hard cap, logged nowhere and needing none: a source with a
                 // silly density costs a frame-rate dip, never a frame that
                 // never ends.
@@ -5013,6 +5014,9 @@ impl Editor {
             // before attachments/particles so a spawned node is complete (body,
             // meshes, callback-configured) within this same frame.
             self.apply_script_spawns();
+            // Scatter prototypes: resolved here, before the frame's GPU borrow,
+            // because baking a prefab imports models and that needs `&mut self`.
+            self.bake_scatter_prototypes();
             // Bone attachments resolve AFTER physics: physics moves the mesh ROOT (a
             // character body), while animation only bent the bones — so a weapon on a
             // bone must read the POST-physics mesh world or it swims a frame behind.

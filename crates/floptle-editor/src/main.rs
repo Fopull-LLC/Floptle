@@ -1247,6 +1247,11 @@ struct Editor {
     mesh_ids: Vec<MeshId>,
     /// Imported glTF models, keyed by asset path ⏵ registered mesh parts.
     mesh_registry: HashMap<String, MeshAsset>,
+    /// Scatter prototypes resolved to their drawable parts, by asset string —
+    /// baked once (see `scatter_prototype`). An empty entry is a remembered
+    /// FAILURE, so a prototype that cannot be drawn is reported once rather
+    /// than every frame it is looked at.
+    scatter_protos: HashMap<String, Vec<crate::scatter_draw::Part>>,
     /// Per-entity vertex buffers for CPU-skinned parts (two characters sharing
     /// a model must not bake their poses into one buffer).
     skin_variants: anim::SkinVariants,

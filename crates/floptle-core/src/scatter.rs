@@ -72,13 +72,57 @@ pub struct Band {
     pub distance: f32,
 }
 
-/// Optional per-instance collision. A capsule proxy, not the prototype's real
-/// geometry: a tree you cannot walk through only has to be *a tree-sized thing
-/// in the way*, and a harvest tool only has to be able to aim at it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Proxy {
-    pub radius: f32,
-    pub height: f32,
+// There is no collision proxy here, and the absence is deliberate. One used to
+// be parsed, defaulted, stored — and read by nothing at all, so a game that
+// asked for solid props got no error and props it walked through
+// (`floptle/0066`). Scattered instances are drawn, queried (`scatter.near`) and
+// removed; they are not in the physics world. When that changes it will be a
+// feature with a test, not a field.
+
+/// A per-position density in 0..1, sampled instead of called.
+///
+/// **Why a grid and not a callback.** Placement has to stay a pure function of
+/// `(seed, chunk, index)`: walk away and back and the same props must stand in
+/// the same places, and two machines must agree without replicating anything. A
+/// hook that ran per instance could read live game state and answer differently
+/// on the second visit, which breaks that outright — and it would put a script
+/// call inside chunk generation besides.
+///
+/// So a game's rule is evaluated ONCE, when the source is declared, and what
+/// the engine keeps is the answer. Cheap to sample, deterministic by
+/// construction, and it replicates as a small array if it ever needs to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Density {
+    /// Rows. A sphere is sampled equirectangularly, so it has `2 × rows`
+    /// columns; a ground region is square, `rows × rows`.
+    pub rows: u32,
+    /// Row-major, `0..1`. Row 0 is the north pole / the region's -Z edge.
+    pub data: Vec<f32>,
+}
+
+impl Density {
+    /// Columns: twice the rows for a sphere's equirectangular map, else square.
+    fn cols(&self, sphere: bool) -> u32 {
+        if sphere { self.rows * 2 } else { self.rows }
+    }
+
+    /// Bilinear sample at `(u, v)`, both `0..1`. Out of range clamps — the edge
+    /// of the map is the edge of the world it describes.
+    fn sample(&self, u: f64, v: f64, sphere: bool) -> f32 {
+        let (rows, cols) = (self.rows.max(1), self.cols(sphere).max(1));
+        if self.data.len() < (rows * cols) as usize {
+            return 1.0;
+        }
+        let at = |r: u32, c: u32| self.data[(r.min(rows - 1) * cols + c.min(cols - 1)) as usize];
+        let (fu, fv) = (u.clamp(0.0, 1.0) * (cols - 1) as f64, v.clamp(0.0, 1.0) * (rows - 1) as f64);
+        let (c0, r0) = (fu.floor() as u32, fv.floor() as u32);
+        let (tu, tv) = ((fu - c0 as f64) as f32, (fv - r0 as f64) as f32);
+        let (a, b) = (at(r0, c0), at(r0, c0 + 1));
+        let (c, d) = (at(r0 + 1, c0), at(r0 + 1, c0 + 1));
+        let top = a + (b - a) * tu;
+        let bot = c + (d - c) * tu;
+        top + (bot - top) * tv
+    }
 }
 
 /// A scatter source: one rule, many instances.
@@ -101,7 +145,10 @@ pub struct ScatterSource {
     pub bands: Vec<Band>,
     /// Metres of cross-fade at each band boundary, so nothing pops.
     pub fade: f32,
-    pub collide: Option<Proxy>,
+    /// Where this source grows and how thickly, `0..1` (`None` = everywhere,
+    /// evenly). A density of 0 produces NO instance — not a hidden one, or the
+    /// whole point of scattering is lost.
+    pub density: Option<Density>,
     /// Instances the game has removed (harvested, dug out from under).
     pub removed: HashSet<InstanceId>,
 }
@@ -217,6 +264,30 @@ pub fn chunk_instances(src: &ScatterSource, key: ChunkKey) -> Vec<Instance> {
                 (center + dir * radius, dir.as_vec3())
             }
         };
+        // Density: a fresh hash stream, so surviving is uncorrelated with where
+        // you stand and how big you are. Rejecting rather than thinning at draw
+        // time is what makes an empty biome cost nothing.
+        if let Some(d) = &src.density {
+            let (u, v) = match src.region {
+                Region::Ground { center, half } => (
+                    ((pos.x - center.x) / (2.0 * half[0]) + 0.5),
+                    ((pos.z - center.z) / (2.0 * half[1]) + 0.5),
+                ),
+                Region::Sphere { center, .. } => {
+                    // Equirectangular: v is latitude from the north pole, u is
+                    // longitude — the same map a climate model is written on.
+                    let dir = (pos - center).normalize_or_zero();
+                    (
+                        dir.z.atan2(dir.x) / std::f64::consts::TAU + 0.5,
+                        dir.y.clamp(-1.0, 1.0).acos() / std::f64::consts::PI,
+                    )
+                }
+            };
+            let sphere = matches!(src.region, Region::Sphere { .. });
+            if unit(mix(id ^ 0xE5)) as f32 >= d.sample(u, v, sphere) {
+                continue;
+            }
+        }
         let (smin, smax) = src.scale;
         out.push(Instance {
             id,
@@ -356,7 +427,7 @@ mod tests {
                 Band { asset: "tree_far.glb".into(), distance: 120.0 },
             ],
             fade: 8.0,
-            collide: Some(Proxy { radius: 0.4, height: 3.0 }),
+            density: None,
             removed: HashSet::new(),
         }
     }
@@ -372,6 +443,56 @@ mod tests {
         let b = chunk_instances(&s, (3, -7));
         assert_eq!(a, b, "the same chunk gave two different answers");
         assert!(!a.is_empty());
+    }
+
+    /// Density: where the map says nothing grows, nothing is GENERATED — not
+    /// hidden at draw time, or the reason to scatter at all is gone
+    /// (`floptle/0064`).
+    #[test]
+    fn density_zero_grows_nothing_and_density_one_is_untouched() {
+        let mut s = ground(64);
+        let full = chunk_instances(&s, (0, 0));
+        assert!(!full.is_empty());
+
+        s.density = Some(Density { rows: 4, data: vec![0.0; 16] });
+        assert!(chunk_instances(&s, (0, 0)).is_empty(), "a dead biome makes nothing");
+
+        s.density = Some(Density { rows: 4, data: vec![1.0; 16] });
+        assert_eq!(chunk_instances(&s, (0, 0)), full, "a full map changes nothing at all");
+    }
+
+    /// A map that is dense on one side and empty on the other puts the props on
+    /// the dense side — the biome case, which is the whole point.
+    #[test]
+    fn a_half_empty_map_grows_on_one_side_only() {
+        let mut s = ground(256);
+        // 2×2: left column empty, right column full. u runs -X → +X.
+        s.density = Some(Density { rows: 2, data: vec![0.0, 1.0, 0.0, 1.0] });
+        let out = chunk_instances(&s, (0, 0));
+        assert!(!out.is_empty(), "the dense half still grows");
+        assert!(
+            out.iter().all(|i| i.pos.x > -1e-9),
+            "nothing grew in the empty half: {:?}",
+            out.iter().map(|i| i.pos.x).collect::<Vec<_>>()
+        );
+    }
+
+    /// The load-bearing property survives a mask: same chunk, same answer, and
+    /// the ids of the survivors do not shift when their neighbours vanish —
+    /// `scatter.remove` / `restore` address instances BY id.
+    #[test]
+    fn a_masked_chunk_is_still_recomputed_identically_and_keeps_its_ids() {
+        let mut s = ground(64);
+        let unmasked = chunk_instances(&s, (2, -3));
+        s.density = Some(Density { rows: 2, data: vec![0.0, 1.0, 0.0, 1.0] });
+        let a = chunk_instances(&s, (2, -3));
+        let b = chunk_instances(&s, (2, -3));
+        assert_eq!(a, b, "the same masked chunk gave two different answers");
+        assert!(!a.is_empty() && a.len() < unmasked.len(), "the mask actually removed some");
+        for inst in &a {
+            let same = unmasked.iter().find(|u| u.id == inst.id).expect("id survives masking");
+            assert_eq!(same.pos, inst.pos, "a survivor did not move because a neighbour went");
+        }
     }
 
     /// …and a different seed gives a different forest. A generator that
