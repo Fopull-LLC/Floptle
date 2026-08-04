@@ -1429,10 +1429,7 @@ impl Editor {
             if self.world.get::<UiLayer>(e).is_some() {
                 return Some(e);
             }
-            match self.world.get::<Parent>(e) {
-                Some(p) => e = p.0,
-                None => return None,
-            }
+            e = self.world.get::<Parent>(e)?.0;
         }
         None
     }

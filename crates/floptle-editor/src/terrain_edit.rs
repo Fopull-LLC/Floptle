@@ -375,6 +375,48 @@ const WORKER_IN_FLIGHT_CAP: usize = 16;
 /// the player is worse than a deep queue.
 const DIRTY_PRIORITY_BOOST: i32 = 1_000_000;
 
+/// How close to a body's centre, in body radii, counts as being ON it.
+///
+/// Generous — an aircraft at altitude, or a ship on approach, is still landing
+/// on the thing under it and still wants that ground first.
+const ON_BODY_RADII: f64 = 3.0;
+
+/// Where a chunk sits in the meshing queue: **metres from the camera**, so that
+/// chunks belonging to different terrains can be compared at all
+/// (`floptle/0074`).
+///
+/// One queue is shared by every resident terrain. The key used to be chunk
+/// distance in each terrain's own local frame, so a chunk three chunks from the
+/// camera on the planet under your feet tied with one three chunks from the
+/// camera on a planet twelve thousand units away — and which of them got the
+/// worker slot was whatever order a `HashMap` happened to iterate in. Distances
+/// in different terrains are only comparable once they are in the same units.
+pub(crate) fn chunk_priority(
+    coord: [i32; 3],
+    chunk_world: f32,
+    anchor: DVec3,
+    rot: Quat,
+    cam_world: DVec3,
+    on_body: bool,
+) -> i32 {
+    let mid = Vec3::new(coord[0] as f32 + 0.5, coord[1] as f32 + 0.5, coord[2] as f32 + 0.5);
+    let world = anchor + (rot * (mid * chunk_world)).as_dvec3();
+    // Saturating: a body on the far side of a solar system is millions of units
+    // away and must not wrap into the FRONT of the queue.
+    let metres = (world - cam_world).length().min(i32::MAX as f64 / 4.0) as i32;
+    if on_body { metres } else { metres.saturating_add(OFF_BODY_PENALTY) }
+}
+
+/// Added to every chunk of a body the camera is NOT on (`floptle/0074`).
+///
+/// Metres alone gets one case wrong: standing between two worlds, a chunk under
+/// your feet and a chunk on the horizon of the world you are landing on are
+/// similar distances away, and only one of them is holding you up. Bigger than
+/// any distance a streaming body is at (past sixty radii it is an impostor and
+/// queues nothing at all), smaller than the dirty boost, so a live sculpt still
+/// outranks everything.
+const OFF_BODY_PENALTY: i32 = 100_000;
+
 impl TerrainWorker {
     pub(crate) fn spawn() -> Self {
         let (jtx, jrx) = std::sync::mpsc::channel::<RemeshJob>();
@@ -527,11 +569,15 @@ impl Editor {
                     // The SDF shadow/AO atlas excludes impostor bodies — re-lay it out.
                     self.terrain_gpu_dirty = true;
                 }
+                // The body's surface colour is wanted whether it is far enough to
+                // BE an impostor or close enough to be streaming — a streaming
+                // body draws the same colour as a backstop under its arriving
+                // chunks (`floptle/0074`). Sampled once, on whichever comes first.
+                if render.impostor_color.is_none() {
+                    render.impostor_color =
+                        Some(impostor_surface_color(&terrain.field, cb.body_radius as f32));
+                }
                 if render.impostor {
-                    if render.impostor_color.is_none() {
-                        render.impostor_color =
-                            Some(impostor_surface_color(&terrain.field, cb.body_radius as f32));
-                    }
                     render.pending.clear();
                     render.empty.clear();
                     for (_, (mid, _)) in render.slots.drain() {
@@ -557,11 +603,38 @@ impl Editor {
             let cl = (rot.inverse() * (cam_world - anchor).as_vec3()) / (chunk_units * ts);
             let cam_chunk =
                 [cl.x.floor() as i32, cl.y.floor() as i32, cl.z.floor() as i32];
+            // LOD ring selection, in THIS terrain's chunk units — which is the
+            // right unit for a ring, and the wrong one for a queue position.
             let dist_of = |c: [i32; 3]| {
                 (c[0] - cam_chunk[0])
                     .abs()
                     .max((c[1] - cam_chunk[1]).abs())
                     .max((c[2] - cam_chunk[2]).abs())
+            };
+            // Queue position, in METRES, so chunks from different terrains can
+            // be compared at all (`floptle/0074`).
+            //
+            // One queue is shared by every resident terrain, and the sort key
+            // used to be `dist_of` — chunk distance in each terrain's own local
+            // frame. A chunk three chunks away on the planet under your feet
+            // therefore tied with one three chunks away on a planet twelve
+            // thousand units off, and the winner was whatever order the
+            // `terrains` map happened to iterate in. The report was "I can see
+            // through unloaded terrain and it needs to prioritize loading what's
+            // right under me".
+            // …and the ground you are STANDING on outranks everything, before any
+            // per-chunk comparison. Two bodies can otherwise interleave when you
+            // are between them, which is the one case metres alone gets wrong:
+            // the chunk under your feet and a chunk on the horizon of the world
+            // you are landing on are similar distances, and only one of them is
+            // holding you up.
+            let standing_on = self
+                .world
+                .get::<floptle_core::CelestialBody>(e)
+                .is_none_or(|cb| (cam_world - anchor).length() < cb.body_radius * ON_BODY_RADII);
+            let chunk_world = chunk_units * ts;
+            let prio_of = |c: [i32; 3]| {
+                chunk_priority(c, chunk_world, anchor, rot, cam_world, standing_on)
             };
 
             if structural {
@@ -609,7 +682,7 @@ impl Editor {
                             upload_chunk(gpu, raster, render, coord, &cm, 0, now);
                         }
                     } else {
-                        queue.push((dist - DIRTY_PRIORITY_BOOST, e, coord, lod));
+                        queue.push((prio_of(coord) - DIRTY_PRIORITY_BOOST, e, coord, lod));
                     }
                 }
             }
@@ -650,13 +723,13 @@ impl Editor {
                                 upload_chunk(gpu, raster, render, coord, &cm, 0, now);
                             }
                         } else {
-                            queue.push((d, e, coord, raw_lod(d, rings)));
+                            queue.push((prio_of(coord), e, coord, raw_lod(d, rings)));
                         }
                     }
                     Some(&(_, cur)) => {
                         let want = lod_for(dist_of(coord), cur, rings);
                         if want != cur && !render.pending.contains_key(&coord) {
-                            queue.push((dist_of(coord), e, coord, want));
+                            queue.push((prio_of(coord), e, coord, want));
                         }
                     }
                 }
@@ -778,10 +851,31 @@ pub(crate) fn push_terrain_instances(
             instances.push((sphere_mesh, None, floptle_render::instance_of_mat(model, &mp)));
             continue;
         }
+        let wt = floptle_core::world_transform(world, e);
+        // STREAMING BACKSTOP (`floptle/0074`). A chunk that has been queued but
+        // not yet meshed draws nothing at all, so the player sees space through
+        // the ground — "I can see through unloaded terrain". While a body is
+        // still streaming, fill the holes with one shaded sphere at its
+        // OCCLUDER radius: the ball it already declares as being wholly inside
+        // itself, which is exactly the property needed here. It can never poke
+        // through real ground, and real ground hides it the moment it lands.
+        if !render.pending.is_empty()
+            && let Some(cb) = world.get::<floptle_core::CelestialBody>(e)
+            && cb.occluder_radius > 0.0
+        {
+            let rel = (wt.translation - cam_world).as_vec3();
+            let scale = (cb.occluder_radius as f32 * wt.scale.x.max(1e-6)) / 0.85;
+            let model = Mat4::from_scale_rotation_translation(
+                Vec3::splat(scale),
+                Quat::IDENTITY,
+                rel,
+            );
+            let mp = MaterialParams::flat(render.impostor_color.unwrap_or([0.55, 0.55, 0.58]));
+            instances.push((sphere_mesh, None, floptle_render::instance_of_mat(model, &mp)));
+        }
         if render.slots.is_empty() {
             continue;
         }
-        let wt = floptle_core::world_transform(world, e);
         let scale = wt.scale.x.max(1e-6);
         let rot = wt.rotation.normalize();
         let rel = (wt.translation - cam_world).as_vec3();
@@ -2522,11 +2616,72 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::terrain_voxel_size;
-    use super::{CHUNK_FADE_SECS, chunk_fade, lod_for, raw_lod, rings_for_body, LOD_RINGS};
+    use super::{CHUNK_FADE_SECS, chunk_fade, chunk_priority, lod_for, raw_lod, rings_for_body, LOD_RINGS};
+    use floptle_core::math::{DVec3, Quat};
     use floptle_field::BakedSdf;
 
     /// A chunk that just arrived dissolves in over its first moments, monotonically
     /// (`floptle/0067`) — and a chunk with no arrival stamp is simply opaque, which
+    /// The reported bug, in numbers: *"I can see through unloaded terrain and it
+    /// needs to prioritize loading what's right under me"* (`floptle/0074`).
+    ///
+    /// One queue serves every terrain. Under the old key — chunk distance in
+    /// each terrain's OWN local frame — the ground under your feet and a chunk
+    /// on a planet twelve thousand units away were literally equal, and the
+    /// winner was `HashMap` iteration order.
+    #[test]
+    fn the_ground_under_your_feet_outranks_a_planet_twelve_thousand_units_away() {
+        let cam = DVec3::new(0.0, 100.0, 0.0);
+        let here = DVec3::ZERO; // the body you are standing on
+        let far = DVec3::new(12_000.0, 0.0, 0.0); // another world entirely
+        let chunk = 48.0f32;
+        let coord = [0, 2, 0]; // three chunks out in BOTH terrains' local frames
+
+        let under_me = chunk_priority(coord, chunk, here, Quat::IDENTITY, cam, true);
+        let over_there = chunk_priority(coord, chunk, far, Quat::IDENTITY, cam, false);
+        assert!(
+            under_me < over_there,
+            "the ground under the camera queued behind a planet 12 km away \
+             ({under_me} vs {over_there})"
+        );
+        // And it is not a near-tie decided by rounding — it is four orders of
+        // magnitude, which is the difference the old key threw away.
+        assert!(over_there > under_me * 100, "{under_me} vs {over_there}");
+    }
+
+    /// Within one terrain the key still orders by nearness, or the fix would
+    /// have traded a cross-terrain bug for an intra-terrain one.
+    #[test]
+    fn nearer_chunks_still_come_first_within_one_terrain() {
+        let cam = DVec3::ZERO;
+        let at = |c: [i32; 3]| chunk_priority(c, 48.0, DVec3::ZERO, Quat::IDENTITY, cam, true);
+        let mut d: Vec<i32> = (0..6).map(|i| at([i, 0, 0])).collect();
+        let sorted = {
+            let mut s = d.clone();
+            s.sort_unstable();
+            s
+        };
+        assert_eq!(d, sorted, "priority is not monotonic in distance: {d:?}");
+        d.dedup();
+        assert!(d.len() >= 5, "distinct distances collapsed to the same priority: {d:?}");
+
+        // A body the camera is NOT on is penalised as a whole, so no chunk of it
+        // can slip ahead of the ground being stood on.
+        let off = chunk_priority([0, 0, 0], 48.0, DVec3::ZERO, Quat::IDENTITY, cam, false);
+        assert!(off > at([200, 0, 0]), "an off-body chunk beat a distant on-body one");
+    }
+
+    /// A body on the far side of a solar system must not WRAP into the front of
+    /// the queue. Metres are an i32, and a real system is millions of units wide.
+    #[test]
+    fn an_absurdly_distant_body_does_not_wrap_to_the_front() {
+        let cam = DVec3::ZERO;
+        let miles_away = DVec3::new(9.0e14, 0.0, 0.0);
+        let p = chunk_priority([0, 0, 0], 48.0, miles_away, Quat::IDENTITY, cam, false);
+        assert!(p > 0, "distance overflowed to {p} and would be meshed first");
+        assert!(p > chunk_priority([9, 9, 9], 48.0, DVec3::ZERO, Quat::IDENTITY, cam, true));
+    }
+
     /// is what keeps every already-resident chunk from flickering on the frame this
     /// shipped.
     #[test]
