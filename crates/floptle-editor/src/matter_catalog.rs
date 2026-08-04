@@ -15,12 +15,24 @@ use floptle_scene::{MatterDoc, ShapeDoc};
 /// Hence one function, called twice — never two copies of the parameters.
 pub(crate) fn primitive_mesh(shape: Shape) -> MeshData {
     match shape {
-        Shape::Cube => floptle_render::cube(0.7),
+        Shape::Cube => floptle_render::cube(PRIMITIVE_HALF),
         Shape::Sphere => floptle_render::uv_sphere(0.85, 24, 36),
         Shape::Capsule => floptle_render::capsule(0.5, 0.5, 16, 24),
-        Shape::Plane => floptle_render::plane(0.7),
+        Shape::Plane => floptle_render::plane(PRIMITIVE_HALF),
     }
 }
+
+/// Half the edge of the built-in box and quad — so a Cube or Plane at scale 1
+/// is **1.4 units across**, not 1.
+///
+/// A historical choice, and harmless for a primitive you size by eye in the
+/// Inspector. It stops being harmless the moment something quotes a size in
+/// world units and builds it out of one of these: a sprite batch's `size` is
+/// documented as the edge length, so it has to divide this back out
+/// (`floptle/0070`, where every bullet in a game came out 40% too big and read
+/// as a tuning change). Anything else measuring against these meshes should
+/// name this constant rather than paste the number.
+pub(crate) const PRIMITIVE_HALF: f32 = 0.7;
 
 pub(crate) fn new_cube() -> MatterDoc {
     MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.8, 0.5, 0.4] }

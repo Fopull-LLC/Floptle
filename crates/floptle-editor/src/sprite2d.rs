@@ -158,10 +158,18 @@ pub(crate) fn tilemap_draw(
 
 /// One instance per sprite in a batch node.
 ///
-/// `size` is the batch's quad edge; each sprite scales it, rolls about the
-/// node's forward axis, and carries its own cell window and tint. The tint is
-/// multiplied into the material's colour rather than replacing it, so a batch
-/// can still be dimmed as a whole.
+/// `size` is the sprite's edge **in world units**; each sprite scales it, rolls
+/// about the node's forward axis, and carries its own cell window and tint. The
+/// tint is multiplied into the material's colour rather than replacing it, so a
+/// batch can still be dimmed as a whole.
+///
+/// The quad these instance is [`crate::matter_catalog::PRIMITIVE_HALF`] across
+/// — 1.4 units, not 1 — so `size` is divided by that rather than multiplied
+/// straight onto the mesh. It used to be multiplied straight on, which made
+/// `size = 1` draw a 1.4-unit sprite and the default the misleading case
+/// (`floptle/0070`): a game that moved its bullets onto a batch saw them all
+/// come out 40% too big, which reads as somebody's tuning change rather than a
+/// unit mismatch.
 pub(crate) fn sprite_draws(
     world: &World,
     e: Entity,
@@ -183,6 +191,9 @@ pub(crate) fn sprite_draws(
     let cells = sc * sr;
     // Per-cell packing costs a Material clone, so only do it for a real sheet.
     let sheet_of = (cells > 1).then(|| mat.cloned().unwrap_or_default());
+
+    // `size` is an edge length; the mesh is already 2 * PRIMITIVE_HALF across.
+    let size = size / (2.0 * crate::matter_catalog::PRIMITIVE_HALF);
 
     out.reserve(sprites.0.len());
     for s in &sprites.0 {
@@ -219,5 +230,79 @@ pub(crate) fn sprite_draws(
             mp.tile_rotation = packed.tile_rotation;
         }
         out.push(instance_of_mat(model * local, &mp));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floptle_core::math::{Mat4, Vec3, Vec4};
+    use floptle_core::{Sprite, World};
+
+    fn sprite(scale: [f32; 2]) -> Sprite {
+        Sprite { pos: [0.0; 3], rot: 0.0, scale, cell: 0, tint: [1.0; 4] }
+    }
+
+    /// The width the quad actually occupies, by pushing its own corners through
+    /// the instance matrix — rather than reading a scale lane and trusting that
+    /// the mesh behind it is a unit square, which is exactly the assumption
+    /// that was wrong.
+    fn drawn_extent(raw: &InstanceRaw) -> [f32; 2] {
+        let m = Mat4::from_cols_array_2d(&raw.model);
+        let corner = |x: f32, y: f32| m * Vec4::new(x, y, 0.0, 1.0);
+        let h = crate::matter_catalog::PRIMITIVE_HALF;
+        let (lo, hi) = (corner(-h, -h), corner(h, h));
+        [(hi.x - lo.x).abs(), (hi.y - lo.y).abs()]
+    }
+
+    fn draw_one(size: f32, s: Sprite) -> InstanceRaw {
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, floptle_core::Sprites(vec![s]));
+        let mut out = Vec::new();
+        sprite_draws(&world, e, size, Mat4::IDENTITY, None, [0.0, 0.0], &mut out);
+        assert_eq!(out.len(), 1, "one sprite in, one instance out");
+        out.remove(0)
+    }
+
+    /// `floptle/0070`: the doc comment says `size` is the sprite's edge in world
+    /// units. It used to be multiplied onto a 1.4-unit quad, so it was 1.4x that.
+    #[test]
+    fn size_is_the_edge_in_world_units() {
+        let [w, h] = drawn_extent(&draw_one(1.0, sprite([1.0, 1.0])));
+        assert!((w - 1.0).abs() < 1e-4, "a size-1 sprite is 1 unit wide, got {w}");
+        assert!((h - 1.0).abs() < 1e-4, "…and 1 unit tall, got {h}");
+
+        let [w2, _] = drawn_extent(&draw_one(2.5, sprite([1.0, 1.0])));
+        assert!((w2 - 2.5).abs() < 1e-4, "a size-2.5 sprite is 2.5 units wide, got {w2}");
+    }
+
+    /// A sprite's own scale still multiplies the batch's size, per axis — the
+    /// squash-and-stretch the two-component form exists for.
+    #[test]
+    fn a_sprites_own_scale_still_multiplies_per_axis() {
+        let [w, h] = drawn_extent(&draw_one(2.0, sprite([1.5, 0.5])));
+        assert!((w - 3.0).abs() < 1e-4, "2 * 1.5 = 3 wide, got {w}");
+        assert!((h - 1.0).abs() < 1e-4, "2 * 0.5 = 1 tall, got {h}");
+    }
+
+    /// The batch node's own transform still moves and sizes the whole thing —
+    /// dividing out the quad's extent must not have eaten the node's scale.
+    #[test]
+    fn the_batch_nodes_transform_still_applies() {
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, floptle_core::Sprites(vec![sprite([1.0, 1.0])]));
+        let mut out = Vec::new();
+        let model = Mat4::from_scale_rotation_translation(
+            Vec3::splat(3.0),
+            floptle_core::math::Quat::IDENTITY,
+            Vec3::new(10.0, 0.0, 0.0),
+        );
+        sprite_draws(&world, e, 1.0, model, None, [0.0, 0.0], &mut out);
+        let [w, _] = drawn_extent(&out[0]);
+        assert!((w - 3.0).abs() < 1e-4, "a 3x node makes its 1-unit sprites 3 units, got {w}");
+        let centre = Mat4::from_cols_array_2d(&out[0].model) * Vec4::W;
+        assert!((centre.x - 10.0).abs() < 1e-4, "and it is where the node is, got {}", centre.x);
     }
 }
