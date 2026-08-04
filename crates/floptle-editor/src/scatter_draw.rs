@@ -77,7 +77,10 @@ impl ScatterCache {
     /// the ground out from under one drops or despawns it" is made of.
     pub(crate) fn invalidate_near(&mut self, sources: &[ScatterSource], p: DVec3, radius: f64) {
         for src in sources {
-            for key in scatter::chunks_near(src, p, radius) {
+            // `p` is where the ground changed, in the world. The chunks are
+            // keyed in the source's own frame (`floptle/0073`).
+            let pl = src.frame.to_local(p);
+            for key in scatter::chunks_near(src, pl, radius) {
                 self.chunks.remove(&(src.id, key));
             }
         }
@@ -95,6 +98,10 @@ impl ScatterCache {
 /// A prop with no ground under it is DROPPED rather than left floating at the
 /// region's nominal height — a tree hanging in the air over a canyon reads as a
 /// bug, and a missing tree reads as a canyon.
+/// The instance stays in the source's own frame; only the RAY goes out to the
+/// world and only the normal comes back (`floptle/0073`). That is what lets a
+/// settled chunk survive its planet moving — the cached answer never mentioned
+/// the world, so the world moving cannot invalidate it.
 fn settle(
     src: &ScatterSource,
     mut inst: Instance,
@@ -103,14 +110,16 @@ fn settle(
     // Start above and cast down along the region's own up — which on a planet
     // is radial, so this works at the equator and at the pole alike.
     const LIFT: f32 = 60.0;
+    let f = &src.frame;
     let up = inst.up;
     let from = inst.pos + up.as_dvec3() * LIFT as f64;
-    let (dist, normal) = ground(from, -up, LIFT * 2.5)?;
+    let (dist, normal) =
+        ground(f.to_world(from), f.dir_to_world(-up), LIFT * 2.5)?;
     inst.pos = from - up.as_dvec3() * dist as f64;
     if src.align == Align::Surface {
         // The REAL normal, not the region's idealised one: a tree on a hillside
         // should lean with the hill.
-        inst.up = normal;
+        inst.up = f.dir_to_local(normal);
     }
     Some(inst)
 }
@@ -158,11 +167,16 @@ pub(crate) fn build_instances(
         // the frame advances (`floptle/0071`). Standing still, or walking
         // within one chunk, this is a hash lookup — it used to be a square
         // sweep, allocated and thrown away sixty times a second.
-        let at = scatter::eye_chunk(src, eye);
+        // Everything below happens in the SOURCE'S OWN FRAME (`floptle/0073`).
+        // The eye comes to the region rather than the region going to the world,
+        // so a body that orbits at 99 units/s changes exactly one number here —
+        // and no id, no local position, no settled height and no cached chunk.
+        let eye_local = src.frame.to_local(eye);
+        let at = scatter::eye_chunk(src, eye_local);
         let sweep = sweeps.entry(src.id).or_insert_with(|| Sweep { at: None, keys: Vec::new() });
         if sweep.at != Some(at) {
             sweep.at = Some(at);
-            sweep.keys = scatter::chunks_near(src, eye, range as f64);
+            sweep.keys = scatter::chunks_near(src, eye_local, range as f64);
         }
         // Nearest first, so the draw budget below cuts the horizon rather than
         // your feet, and so streaming spends its first frames on what you can
@@ -191,13 +205,18 @@ pub(crate) fn build_instances(
                 if out.len() >= budget {
                     return;
                 }
-                let d = (inst.pos - eye).length() as f32;
+                // Distance is measured in the source's frame, which is a rigid
+                // transform of the world's — so LOD bands are untouched by where
+                // the body happens to be.
+                let d = (inst.pos - eye_local).length() as f32;
                 let Some((band, blend)) = scatter::band_at(src, d) else { continue };
-                let rot = inst.rotation(src.align);
+                // …and only HERE does the world get involved: the instance's
+                // place in its region, carried out to wherever that region is.
+                let rot = src.frame.rot * inst.rotation(src.align);
                 let model = Mat4::from_scale_rotation_translation(
                     Vec3::splat(inst.scale),
                     rot,
-                    (inst.pos - eye).as_vec3(),
+                    (src.frame.to_world(inst.pos) - eye).as_vec3(),
                 );
                 // Mid-fade draws BOTH bands, cross-dissolved. Drawing one and
                 // switching is what a pop is; two half-opaque props for a few
@@ -356,6 +375,8 @@ mod tests {
             fade: 0.0,
             density: None,
             removed: Default::default(),
+            anchor: None,
+            frame: Default::default(),
         }
     }
 
@@ -584,6 +605,111 @@ mod tests {
             })
             .fold(0.0f32, f32::max);
         assert!(far < 120.0, "a budgeted draw reached {far:.0} m out — the order is wrong");
+    }
+
+    /// A body that orbits carries its props (`floptle/0073`).
+    ///
+    /// The reported symptom: *"the scattered props seem to just be being left
+    /// behind by the planet traveling in orbit"*. A region was pinned to the
+    /// world at declare time, and the spawn planet moves at 99 units/s — so a
+    /// 240-unit field was entirely behind its own planet in 2.4 seconds.
+    ///
+    /// What must NOT happen while it follows is anything being recomputed: same
+    /// ids, same local positions, same settled heights, same removals. A rock
+    /// stays the same rock.
+    #[test]
+    fn a_field_rides_its_planet_without_re_rolling_a_single_prop() {
+        let mut s = src();
+        s.anchor = Some("Umunquo".into());
+        let mut cache = ScatterCache::default();
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
+        let mat = MaterialParams::flat([1.0; 3]);
+
+        // Frame one: at the origin.
+        let casts = std::cell::Cell::new(0usize);
+        let mut ground = |_: DVec3, _: Vec3, _: f32| {
+            casts.set(casts.get() + 1);
+            Some((60.0f32, Vec3::Y))
+        };
+        // Stream in fully first — arriving ground settles over several frames
+        // on purpose (`floptle/0071`), and that is not what is being measured.
+        let mut before = Vec::new();
+        for _ in 0..40 {
+            before.clear();
+            build_instances(
+                &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut ground,
+                &mat, 20_000, &mut before,
+            );
+        }
+        assert!(!before.is_empty(), "nothing was drawn to begin with");
+        assert!(casts.get() > 0, "nothing settled");
+
+        // …and now the planet has moved 240 units — further than the whole
+        // field reaches — and turned. The eye rides with it.
+        let moved = DVec3::new(240.0, 0.0, 0.0);
+        s.frame = scatter::Frame {
+            origin: moved,
+            rot: floptle_core::math::Quat::from_rotation_y(0.7),
+        };
+        casts.set(0);
+        let mut after = Vec::new();
+        build_instances(
+            &mut cache, std::slice::from_ref(&s), moved, &mut mesh, &mut ground, &mat, 20_000,
+            &mut after,
+        );
+
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "the field changed size when its planet moved — props were left behind"
+        );
+        assert_eq!(
+            casts.get(), 0,
+            "{casts:?} props were re-settled onto the ground because their planet moved; \
+             a settled height is expressed in the body's own frame and cannot go stale"
+        );
+        // Every prop is in the same place ON THE PLANET as before. Draw
+        // positions are camera-relative, so read them back into the body's own
+        // frame — the planet turned as well as moved, and a prop that rode it
+        // correctly turned with it.
+        let on_body = |v: &Vec<(MeshId, Option<TexId>, InstanceRaw)>,
+                       eye: DVec3,
+                       f: &scatter::Frame| -> Vec<DVec3> {
+            v.iter()
+                .map(|(_, _, r)| {
+                    let rel =
+                        DVec3::new(r.model[3][0] as f64, r.model[3][1] as f64, r.model[3][2] as f64);
+                    f.to_local(rel + eye)
+                })
+                .collect()
+        };
+        let a = on_body(&before, DVec3::ZERO, &scatter::Frame::IDENTITY);
+        let b = on_body(&after, moved, &s.frame);
+        let worst =
+            a.iter().zip(&b).map(|(p, q)| (*p - *q).length()).fold(0.0f64, f64::max);
+        assert!(
+            worst < 0.01,
+            "a prop moved {worst:.3} units across the surface of its own planet when \
+             that planet orbited — the field is not riding the body"
+        );
+    }
+
+    /// …and an un-anchored source is untouched by any of it. Most scatter is on
+    /// ground that never moves, and it must not pay for the planet case.
+    #[test]
+    fn a_field_with_no_anchor_still_sits_where_the_world_says() {
+        let s = src();
+        assert!(s.anchor.is_none() && s.frame.is_identity());
+        let mut cache = ScatterCache::default();
+        let mut mesh = |_: &str| Some(vec![(MeshId(0), None, Mat4::IDENTITY)]);
+        let mut ground = |_: DVec3, _: Vec3, _: f32| Some((60.0f32, Vec3::Y));
+        let mat = MaterialParams::flat([1.0; 3]);
+        let mut out = Vec::new();
+        build_instances(
+            &mut cache, std::slice::from_ref(&s), DVec3::ZERO, &mut mesh, &mut ground, &mat,
+            20_000, &mut out,
+        );
+        assert!(!out.is_empty(), "an unanchored field stopped drawing");
     }
 
     /// Mid-fade draws BOTH bands. Drawing one and switching IS the pop.

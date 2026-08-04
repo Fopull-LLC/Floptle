@@ -2000,6 +2000,27 @@ impl ScriptHost {
         self.scatter_sources.borrow()
     }
 
+    /// Tell a source where its anchor node has got to (`floptle/0073`).
+    ///
+    /// Called once a frame by the driver, before the sources are drawn or
+    /// queried. This is the ONLY thing that changes when a planet orbits — every
+    /// id, every local position, every settled height and every removal is
+    /// expressed in the frame this describes, so none of them move.
+    pub fn set_scatter_frame(&self, id: u32, frame: floptle_core::scatter::Frame) {
+        if let Some(s) = self.scatter_sources.borrow_mut().iter_mut().find(|s| s.id == id) {
+            s.frame = frame;
+        }
+    }
+
+    /// Every source that rides a node, as `(id, node name)`.
+    pub fn anchored_scatter(&self) -> Vec<(u32, String)> {
+        self.scatter_sources
+            .borrow()
+            .iter()
+            .filter_map(|s| s.anchor.clone().map(|a| (s.id, a)))
+            .collect()
+    }
+
     /// Drop every scatter source — a SCENE SWITCH. A source names a region of
     /// the world that is about to stop existing.
     pub fn clear_scatter(&mut self) {

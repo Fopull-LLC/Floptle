@@ -188,6 +188,8 @@ fn field(far: f32) -> ScatterSource {
         fade: 0.0,
         density: None,
         removed: Default::default(),
+        anchor: None,
+        frame: Default::default(),
     }
 }
 

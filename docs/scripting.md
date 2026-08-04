@@ -3103,6 +3103,30 @@ LOD bands **cross-dissolve** rather than switching — the pop at a band boundar
 is the thing everyone notices about scatter and nothing else about it. Past the
 last band's distance an instance is culled.
 
+### On a body that moves, give the field a `parent`
+
+A region is pinned to the world unless you say otherwise. That is right for a
+landscape and wrong for every celestial body: a planet on orbital rails leaves
+its own props behind, and at a few hundred units a second it does it in seconds.
+
+```lua
+scatter.create{
+  parent = "Umunquo",              -- the node the region rides
+  center = planet.pos, radius = 107,
+  lod = { { asset = "rock.glb", distance = 190 } },
+}
+```
+
+With a `parent`, the region is expressed relative to that node and follows
+whatever it does — an orbit, a parent transform, a floating-origin rebase. It
+costs nothing per prop: every id, every position on the surface and every
+settled ground height is already stored in the body's own frame, so the body
+moving changes one transform and re-rolls nothing. The same rock stays the same
+rock, and anything you harvested stays harvested.
+
+`scatter.near` still takes and returns **world** positions — the frame is the
+engine's business, not yours.
+
 ### The outermost `lod` distance is your budget
 
 `lod` reads as a look — how far you can see rock. It is really the cost knob,

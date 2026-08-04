@@ -32,7 +32,7 @@
 
 use std::collections::HashSet;
 
-use crate::math::{DVec3, Quat, Vec3};
+use crate::math::{DQuat, DVec3, Quat, Vec3};
 
 /// A stable per-instance identifier: `hash(source, chunk, index)`.
 ///
@@ -125,6 +125,75 @@ impl Density {
     }
 }
 
+/// Where a source's region currently sits in the world (`floptle/0073`).
+///
+/// **Placement is expressed in this frame, not in world space.** That is the
+/// whole trick: a body that orbits at 99 units/s carries its props with it, and
+/// nothing about them is recomputed — same ids, same local positions, same
+/// settled heights, same removals — because none of those ever referred to the
+/// world in the first place. Only the last step, turning an instance into a
+/// matrix, asks where the body is now.
+///
+/// A source with no anchor keeps [`Frame::IDENTITY`] and behaves exactly as
+/// scatter always has.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    pub origin: DVec3,
+    pub rot: Quat,
+}
+
+impl Default for Frame {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl Frame {
+    pub const IDENTITY: Frame = Frame { origin: DVec3::ZERO, rot: Quat::IDENTITY };
+
+    /// Is this the identity? Worth asking, because the un-anchored case is the
+    /// common one and skipping two transforms per instance is free.
+    pub fn is_identity(&self) -> bool {
+        self.origin == DVec3::ZERO && self.rot == Quat::IDENTITY
+    }
+
+    /// The rotation in f64. A ground region can be tens of thousands of units
+    /// across, and rotating an offset that big through an f32 quaternion loses
+    /// centimetres — which a prop would show as a jitter against the ground it
+    /// is standing on.
+    fn drot(&self) -> DQuat {
+        DQuat::from_xyzw(
+            self.rot.x as f64,
+            self.rot.y as f64,
+            self.rot.z as f64,
+            self.rot.w as f64,
+        )
+    }
+
+    pub fn to_world(&self, local: DVec3) -> DVec3 {
+        if self.is_identity() {
+            return local;
+        }
+        self.origin + self.drot() * local
+    }
+
+    pub fn to_local(&self, world: DVec3) -> DVec3 {
+        if self.is_identity() {
+            return world;
+        }
+        self.drot().inverse() * (world - self.origin)
+    }
+
+    /// A direction, which carries the rotation but not the offset.
+    pub fn dir_to_world(&self, local: Vec3) -> Vec3 {
+        if self.is_identity() { local } else { self.rot * local }
+    }
+
+    pub fn dir_to_local(&self, world: Vec3) -> Vec3 {
+        if self.is_identity() { world } else { self.rot.inverse() * world }
+    }
+}
+
 /// A scatter source: one rule, many instances.
 #[derive(Clone, Debug)]
 pub struct ScatterSource {
@@ -151,6 +220,16 @@ pub struct ScatterSource {
     pub density: Option<Density>,
     /// Instances the game has removed (harvested, dug out from under).
     pub removed: HashSet<InstanceId>,
+    /// The node this source rides, by name (`floptle/0073`). Its `region` is
+    /// then expressed relative to that node rather than to the world, so a
+    /// planet that orbits carries its props instead of sliding out from under
+    /// them. `None` pins the region to the world, as it always was.
+    pub anchor: Option<String>,
+    /// Where [`anchor`](Self::anchor) currently is — refreshed once a frame by
+    /// the host, identity when there is no anchor. Not authored: this is a
+    /// cached answer, and every placement decision is made in the frame it
+    /// describes rather than in the world.
+    pub frame: Frame,
 }
 
 impl ScatterSource {
@@ -556,6 +635,8 @@ mod tests {
             fade: 8.0,
             density: None,
             removed: HashSet::new(),
+            anchor: None,
+            frame: Default::default(),
         }
     }
 

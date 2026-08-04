@@ -39,7 +39,7 @@ fn dvec3(t: &Table, key: &str) -> Option<glam::DVec3> {
 /// failure: the default, forever, with nothing to see.
 const CREATE_KEYS: &[&str] = &[
     "asset", "lod", "range", "seed", "center", "radius", "halfX", "halfZ", "align", "perChunk",
-    "chunk", "scaleMin", "scaleMax", "fade", "density", "densityRows",
+    "chunk", "scaleMin", "scaleMax", "fade", "density", "densityRows", "parent",
 ];
 
 /// Refuse an options table containing anything the engine does not read.
@@ -216,6 +216,15 @@ pub(crate) fn install_scatter_api(
                 fade: num(&opts, "fade", 8.0) as f32,
                 density,
                 removed: Default::default(),
+                // The node this region rides (`floptle/0073`). Without it a
+                // region is pinned to the world, and every prop on a planet
+                // that orbits is left behind by its own planet within seconds.
+                anchor: opts
+                    .get::<Option<String>>("parent")
+                    .ok()
+                    .flatten()
+                    .filter(|s| !s.is_empty()),
+                frame: Default::default(),
             };
             // Say what this costs, HERE, while the two numbers that decided it
             // are still on screen (`floptle/0071`). The alternative is what
@@ -370,11 +379,17 @@ pub(crate) fn install_scatter_api(
             let out = lua.create_table()?;
             let vols = s.borrow();
             let Some(src) = vols.iter().find(|s| s.id == id) else { return Ok(out) };
+            // The caller asks in WORLD space; the region lives in its anchor's
+            // frame (`floptle/0073`). Convert once, query locally, and hand back
+            // world positions — a game should never have to know the difference.
+            let pl = src.frame.to_local(p);
             let mut found: Vec<(f64, floptle_core::scatter::Instance)> = Vec::new();
-            for key in floptle_core::scatter::chunks_near(src, p, r) {
-                for i in floptle_core::scatter::chunk_instances(src, key) {
-                    let d = (i.pos - p).length();
+            for key in floptle_core::scatter::chunks_near(src, pl, r) {
+                for mut i in floptle_core::scatter::chunk_instances(src, key) {
+                    let d = (i.pos - pl).length();
                     if d <= r {
+                        i.pos = src.frame.to_world(i.pos);
+                        i.up = src.frame.dir_to_world(i.up);
                         found.push((d, i));
                     }
                 }

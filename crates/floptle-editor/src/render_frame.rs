@@ -1203,6 +1203,27 @@ impl Editor {
         // makes a shoreline forest go murky at the same rate as its ground.
         // Nothing here is a scene node.
         {
+            // Where each anchored source's node has got to THIS frame
+            // (`floptle/0073`). A celestial body orbits at ~99 units/s, so a
+            // region pinned to the world slides out from under its own props in
+            // about two seconds. Refreshing one transform per source is the
+            // whole cost of following it: placement lives in this frame, so
+            // nothing downstream is recomputed.
+            for (id, name) in self.script_host.anchored_scatter() {
+                let node = self
+                    .world
+                    .query::<floptle_core::Name>()
+                    .find(|(_, n)| n.0 == name)
+                    .map(|(e, _)| e);
+                let frame = node.map_or(floptle_core::scatter::Frame::IDENTITY, |e| {
+                    let wt = floptle_core::world_transform(&self.world, e);
+                    floptle_core::scatter::Frame {
+                        origin: wt.translation,
+                        rot: wt.rotation.normalize(),
+                    }
+                });
+                self.script_host.set_scatter_frame(id, frame);
+            }
             let sources: Vec<floptle_core::scatter::ScatterSource> =
                 self.script_host.scatter_sources().clone();
             if !sources.is_empty() {
