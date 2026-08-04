@@ -1129,11 +1129,25 @@ function scene.list() end
 ---@class Scatter
 scatter = {}
 ---Declare a scatter source; returns its id. `asset` (a mesh path) or a `lod`
----list is required; everything else defaults.
+---list is required; everything else defaults. An option this doesn't list is an
+---ERROR, not a shrug — scattered props have no collision, and the `collide`
+---option that suggested otherwise was never read by anything.
 ---
 ---Give `center` + `radius` for a planet's surface, or `center` + `halfX`/`halfZ`
 ---for a flat region.
----@param opts { asset?: string, lod?: { asset: string, distance: number }[], seed?: number, center?: Vec3, radius?: number, halfX?: number, halfZ?: number, perChunk?: number, chunk?: number, align?: string, scaleMin?: number, scaleMax?: number, range?: number, fade?: number, collide?: boolean }
+---
+---`asset` is a mesh file **or** a `.prefab.ron`. A prefab is baked ONCE into one
+---instanced draw per Mesh node it contains, each at its authored place within
+---the prop — so a plant your own generator assembled (a trunk and three fronds)
+---can be scattered without a scene node per frond. Nodes that are not Meshes are
+---skipped; a prototype that yields nothing says so in the Console.
+---
+---`density` gives a world biomes: a function(x, y, z) returning 0..1, sampled
+---ONCE when the source is declared into a `densityRows` grid. It is not called
+---per instance and never while chunks build — placement has to stay a pure
+---function of the seed, or walking away and back would regrow a different
+---world. Density 0 generates no instance at all.
+---@param opts { asset?: string, lod?: { asset: string, distance: number }[], seed?: number, center?: Vec3, radius?: number, halfX?: number, halfZ?: number, perChunk?: number, chunk?: number, align?: string, scaleMin?: number, scaleMax?: number, range?: number, fade?: number, density?: fun(x: number, y: number, z: number): number | number[], densityRows?: number }
 ---@return integer
 function scatter.create(opts) end
 ---Instances within `radius` of a point, nearest first. What a harvest verb aims
