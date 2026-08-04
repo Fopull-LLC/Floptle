@@ -50,8 +50,14 @@ pub struct Sprite {
     pub pos: [f32; 3],
     /// Roll about the view axis, radians. Sprites face +Z like the quad does.
     pub rot: f32,
-    /// Multiplies the batch's `size`.
-    pub scale: f32,
+    /// Multiplies the batch's `size`, per axis.
+    ///
+    /// Two numbers rather than one because squash-and-stretch is how a 2D game
+    /// telegraphs an attack, and a single factor made that the one effect a
+    /// batch could not do — so games kept their enemies on scene nodes and
+    /// maintained two rendering paths. `b:draw` still takes one number when one
+    /// is all you want.
+    pub scale: [f32; 2],
     /// Cell of the Material's sheet.
     pub cell: u32,
     /// Multiplied into the texture, RGBA. This is the thing a shared Material
@@ -61,7 +67,7 @@ pub struct Sprite {
 
 impl Default for Sprite {
     fn default() -> Self {
-        Self { pos: [0.0; 3], rot: 0.0, scale: 1.0, cell: 0, tint: [1.0; 4] }
+        Self { pos: [0.0; 3], rot: 0.0, scale: [1.0; 2], cell: 0, tint: [1.0; 4] }
     }
 }
 

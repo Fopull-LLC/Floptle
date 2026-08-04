@@ -187,7 +187,14 @@ pub(crate) fn sprite_draws(
     out.reserve(sprites.0.len());
     for s in &sprites.0 {
         let local = Mat4::from_scale_rotation_translation(
-            Vec3::splat((size * s.scale).max(1e-6)),
+            // Z takes the wider of the two: a sprite is flat, so its depth only
+            // has to stay non-degenerate — and a zero would collapse the
+            // matrix, not flatten the quad.
+            Vec3::new(
+                (size * s.scale[0]).max(1e-6),
+                (size * s.scale[1]).max(1e-6),
+                (size * s.scale[0].max(s.scale[1])).max(1e-6),
+            ),
             Quat::from_rotation_z(s.rot),
             Vec3::from(s.pos),
         );

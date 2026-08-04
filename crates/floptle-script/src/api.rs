@@ -1059,6 +1059,24 @@ fn new_tilemap_handle(
     Ok(t)
 }
 
+/// A sprite's scale argument: one number for both axes, or a `vec2` (or any
+/// `{x=, y=}` table) for squash-and-stretch. Missing = 1.
+///
+/// One argument slot rather than a trailing `sy`, because the tail of `b:draw`
+/// is already the tint and a game should not have to spell four colours to
+/// stretch a sprite.
+fn sprite_scale(v: &Value) -> [f32; 2] {
+    match v {
+        Value::Nil => [1.0, 1.0],
+        Value::Number(n) => [*n as f32; 2],
+        Value::Integer(i) => [*i as f32; 2],
+        other => match crate::math_api::vec3_of(other) {
+            Some(v) => [v.x as f32, v.y as f32],
+            None => [1.0, 1.0],
+        },
+    }
+}
+
 /// The handle `node:sprites()` returns.
 ///
 /// One method, on purpose. `b:draw(...)` is IMMEDIATE MODE — the same contract
@@ -1080,7 +1098,7 @@ fn new_sprite_batch_handle(
             f32,
             f32,
             Option<f32>,
-            Option<f32>,
+            Value,
             Option<f32>,
             Option<u32>,
             Option<f32>,
@@ -1092,7 +1110,7 @@ fn new_sprite_batch_handle(
             let sprite = floptle_core::Sprite {
                 pos: [x, y, z.unwrap_or(0.0)],
                 rot: rot.unwrap_or(0.0),
-                scale: scale.unwrap_or(1.0),
+                scale: sprite_scale(&scale),
                 cell: cell.unwrap_or(0),
                 // The tint defaults to white, so the common call is short and
                 // a game only pays for colour where it wants colour.

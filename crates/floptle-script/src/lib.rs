@@ -2180,6 +2180,7 @@ function update(node, dt)
   local b = node:sprites()
   b:draw(1, 2)                                   -- the short form
   b:draw(3, 4, 0, 2.0, 1.5, 6, 1, 0.2, 0.2, 0.5) -- …and the whole thing
+  b:draw(5, 6, 0, vec2(1.4, 0.6))                -- squash and stretch
 end
 ",
         );
@@ -2212,11 +2213,14 @@ end
         world.insert(e, floptle_core::Matter::SpriteBatch { size: 1.0 });
         host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
         let sprites = world.get::<floptle_core::Sprites>(e).expect("sprites");
-        assert_eq!(sprites.0.len(), 2, "two draws, two sprites");
+        assert_eq!(sprites.0.len(), 3, "three draws, three sprites");
         assert_eq!(sprites.0[0].pos, [1.0, 2.0, 0.0]);
         assert_eq!(sprites.0[0].tint, [1.0, 1.0, 1.0, 1.0], "the short form is untinted");
+        assert_eq!(sprites.0[0].scale, [1.0, 1.0], "…and unscaled");
         assert_eq!(sprites.0[1].cell, 6);
         assert_eq!(sprites.0[1].tint, [1.0, 0.2, 0.2, 0.5], "the per-sprite tint survives");
+        assert_eq!(sprites.0[1].scale, [2.0, 2.0], "one number scales both axes");
+        assert_eq!(sprites.0[2].scale, [1.4, 0.6], "…and a vec2 stretches one of them");
 
         // IMMEDIATE MODE: a pass that draws nothing leaves nothing behind.
         write_script(&dir, "flat", "function update(node, dt)\nend\n");
