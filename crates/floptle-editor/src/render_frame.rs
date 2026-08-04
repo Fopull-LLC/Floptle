@@ -1531,6 +1531,7 @@ impl Editor {
         let entity_names: Vec<(Entity, String)> =
             self.world.query::<Name>().map(|(e, n)| (e, n.0.clone())).collect();
         let old_retro_h = self.project.retro_height;
+        let old_retro_w = self.project.retro_width;
         let ppp = ctx.pixels_per_point();
         let dock_state = self.dock_state.get_or_insert_with(default_dock);
         // Bone names per rigged Mesh entity (name + parent index) — for the hierarchy's
@@ -3627,8 +3628,13 @@ impl Editor {
             // egui only un-hides on an icon CHANGE, which may never fire.
             window.set_cursor_visible(true);
         }
-        if self.project.retro_height != old_retro_h {
-            retro.resize(gpu, self.project.retro_height.max(80));
+        if self.project.retro_height != old_retro_h
+            || self.project.retro_width != old_retro_w
+        {
+            let (rw, rh) = self
+                .project
+                .retro_size(gpu.config.width as f32 / gpu.config.height.max(1) as f32);
+            retro.resize_to(gpu, rw, rh);
         }
 
         // Post-processing (SSAO/bloom/vignette, from the scene's PostProcess node —
@@ -3884,7 +3890,13 @@ impl Editor {
                     post.run(gpu, &post_settings, Some(&ssao_frame), out);
                 }
                 if self.project.retro {
-                    retro.blit(gpu, &frame);
+                    if self.project.retro_integer_scale {
+                        let dest =
+                            [gpu.config.width as f32, gpu.config.height.max(1) as f32];
+                        retro.blit_integer(gpu, &frame.view, dest);
+                    } else {
+                        retro.blit(gpu, &frame);
+                    }
                 }
 
                 // ---- game UI: over the finished frame (native res), before

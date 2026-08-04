@@ -1236,6 +1236,25 @@ impl LightDoc {
 pub struct ProjectConfigDoc {
     pub retro: bool,
     pub retro_height: u32,
+    /// Fixed internal WIDTH for the retro target, in pixels. `0` = derive it
+    /// from the window's aspect, which is the original behaviour.
+    ///
+    /// Deriving the width means the amount of world on screen changes with the
+    /// window: a 2.0-aspect panel shows 12% more than 16:9, which for a game
+    /// that has been balanced is a difficulty setting nobody chose. Pinning it
+    /// makes the framing the same everywhere, and the leftover becomes bars
+    /// rather than extra world.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub retro_width: u32,
+    /// Upscale the retro composite by a WHOLE number and centre it, letterboxing
+    /// the remainder, instead of stretching it to fill.
+    ///
+    /// A fractional upscale puts some source rows on two screen pixels and some
+    /// on three; on pixel art with a small font that is the difference between
+    /// crisp and mush, and it changes with every window size. Off by default —
+    /// stretching is what every existing project is drawn against.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retro_integer_scale: bool,
     pub matter: bool,
     /// The game's title: names exported builds (their binary + window title).
     /// `None` = untitled (exports fall back to the project folder's name).
@@ -1305,6 +1324,8 @@ impl ProjectConfigDoc {
         Self {
             retro: true,
             retro_height: 240,
+            retro_width: 0,
+            retro_integer_scale: false,
             matter: true,
             title: None,
             entry_scene: None,
@@ -1324,6 +1345,21 @@ impl ProjectConfigDoc {
     /// A higher-resolution PS2-ish look.
     pub fn ps2() -> Self {
         Self { retro_height: 480, ..Self::ps1() }
+    }
+
+    /// The retro target's internal size for a view of `aspect` (width / height).
+    ///
+    /// One answer for every place that sizes one — the window, a docked Game
+    /// tab, an exported build — so a project cannot look one way in the editor
+    /// and another in a build. With `retro_width` set the size is FIXED and the
+    /// aspect is ignored: that is the whole point of setting it.
+    pub fn retro_size(&self, aspect: f32) -> (u32, u32) {
+        let h = self.retro_height.max(80);
+        let w = match self.retro_width {
+            0 => ((h as f32 * aspect.max(0.05)).round() as u32).max(1),
+            fixed => fixed,
+        };
+        (w, h)
     }
 
     /// Resolve this project's named layers + no-collide exceptions into the

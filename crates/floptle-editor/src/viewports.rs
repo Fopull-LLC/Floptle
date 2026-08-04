@@ -452,12 +452,7 @@ impl Editor {
         // land on the same chunky pixel grid as the fullscreen view, THEN upscale), else
         // the panel res. This mirrors the surface path so a docked/split Game tab looks
         // identical to fullscreen instead of rendering crisp + unprocessed.
-        let (cw, ch) = if retro_on {
-            let rh = self.project.retro_height.max(80);
-            (((rh as f32 * aspect).round() as u32).max(1), rh)
-        } else {
-            (w, h)
-        };
+        let (cw, ch) = if retro_on { self.project.retro_size(aspect) } else { (w, h) };
         if let Some(gpu) = self.gpu.as_ref() {
             // The game's own retro pass, sized to the PANEL aspect (the shared `retro` is
             // window-sized, and same-frame reuse would fight the surface render).
@@ -536,7 +531,12 @@ impl Editor {
         }
         // Retro upscale: chunky nearest-neighbor blit of the retro color into game_vp.
         if retro_on && let (Some(gpu), Some(retro)) = (self.gpu.as_ref(), self.game_retro.as_ref()) {
-            retro.blit_to(gpu, &cv);
+            let dest = [w.max(1) as f32, h.max(1) as f32];
+            if self.project.retro_integer_scale {
+                retro.blit_integer(gpu, &cv, dest);
+            } else {
+                retro.blit_to(gpu, &cv);
+            }
         }
         // ---- game UI: the docked Game view shows exactly what a build shows ----
         let ui_layers = self.gather_game_ui([w.max(1) as f32, h.max(1) as f32]);

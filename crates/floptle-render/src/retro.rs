@@ -157,14 +157,34 @@ impl Retro {
         (self.width, self.height)
     }
 
+    /// Where this target lands in a `dest`-sized rectangle at a whole-number
+    /// upscale — see [`integer_fit`].
+    pub fn integer_fit(&self, dest: [f32; 2]) -> [f32; 4] {
+        integer_fit([self.width, self.height], dest)
+    }
+
     /// Upscale the low-res target into the window frame with nearest-neighbor.
     pub fn blit(&self, gpu: &Gpu, frame: &Frame) {
         self.blit_to(gpu, &frame.view);
     }
 
-    /// Upscale the low-res target into an arbitrary surface-format view (e.g. a
-    /// post-processing input target) with nearest-neighbor.
+    /// Upscale into `target`, stretched to fill whatever rectangle it is.
     pub fn blit_to(&self, gpu: &Gpu, target: &wgpu::TextureView) {
+        self.blit_into(gpu, target, None);
+    }
+
+    /// Upscale into `target` at a whole-number scale, centred, with the
+    /// remainder left as the black the pass clears to.
+    ///
+    /// `dest` is the target's size in pixels — the blit has to be told, because
+    /// a texture view doesn't carry one and the target is as often a docked
+    /// panel as it is the window.
+    pub fn blit_integer(&self, gpu: &Gpu, target: &wgpu::TextureView, dest: [f32; 2]) {
+        self.blit_into(gpu, target, Some(self.integer_fit(dest)));
+    }
+
+    /// `viewport` = where the image lands, or `None` to fill the target.
+    fn blit_into(&self, gpu: &Gpu, target: &wgpu::TextureView, viewport: Option<[f32; 4]>) {
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("retro-blit") });
@@ -185,6 +205,14 @@ impl Retro {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // The pass clears the WHOLE target and the viewport confines the
+            // triangle to part of it, so the bars need no geometry of their own.
+            if let Some([x, y, w, h]) = viewport
+                && w >= 1.0
+                && h >= 1.0
+            {
+                rp.set_viewport(x, y, w, h, 0.0, 1.0);
+            }
             rp.set_pipeline(&self.pipeline);
             rp.set_bind_group(0, &self.bind, &[]);
             rp.draw(0..3, 0..1);
@@ -261,4 +289,83 @@ fn make_bind(
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
         ],
     })
+}
+
+/// The largest WHOLE-number upscale of a `src`-sized image that fits inside
+/// `dest`, centred: `[x, y, w, h]` in pixels.
+///
+/// A fractional upscale is the whole reason a pixel-art game looks different in
+/// every window. At 6.0x every source row is six screen rows; at 2.025x some
+/// are two and some are three, so a row of an 8px font is a different thickness
+/// depending where it sits — and it changes as you resize. Rounding DOWN is
+/// what makes every source pixel the same size as its neighbours, and the
+/// remainder becomes bars.
+///
+/// Never smaller than 1x: a window too small for one whole pixel each is a
+/// window, not a reason to draw nothing.
+pub fn integer_fit(src: [u32; 2], dest: [f32; 2]) -> [f32; 4] {
+    let (sw, sh) = (src[0].max(1) as f32, src[1].max(1) as f32);
+    let s = (dest[0] / sw).min(dest[1] / sh).floor().max(1.0);
+    let (w, h) = (sw * s, sh * s);
+    [((dest[0] - w) * 0.5).floor().max(0.0), ((dest[1] - h) * 0.5).floor().max(0.0), w, h]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::integer_fit;
+
+    /// The case from the report: a 240-tall composite in a docked 486-tall
+    /// panel is 2.025x, and must become a clean 2x with the difference left
+    /// over as bars.
+    #[test]
+    fn a_fractional_upscale_becomes_a_whole_one_with_the_remainder_as_bars() {
+        let panel = integer_fit([427, 240], [864.0, 486.0]);
+        assert_eq!([panel[2], panel[3]], [854.0, 480.0], "2x, not 2.025x");
+        assert_eq!([panel[0], panel[1]], [5.0, 3.0], "centred, remainder split");
+
+        let exact = integer_fit([480, 270], [1920.0, 1080.0]);
+        assert_eq!(exact, [0.0, 0.0, 1920.0, 1080.0], "a size that divides in fills, no bars");
+    }
+
+    /// **The trap in deriving the internal width from the window aspect.**
+    ///
+    /// 240 rows at 16:9 rounds to a 427-wide target. Six of those is 2562 —
+    /// two pixels wider than a 2560 window — so the fit drops a whole step to
+    /// 5x and the image covers 83% of a screen it could have filled. The
+    /// rounding is invisible; losing a sixth of the screen is not.
+    ///
+    /// This is why an integer-scaled project should PIN its internal width
+    /// rather than let the panel choose it, and why the two settings are
+    /// documented together.
+    #[test]
+    fn a_width_rounded_off_the_aspect_can_cost_a_whole_scale_step() {
+        let derived = integer_fit([427, 240], [2560.0, 1440.0]);
+        assert_eq!([derived[2], derived[3]], [2135.0, 1200.0], "5x — one rounded pixel did that");
+
+        // Pinned to a width that divides the window: the step comes back.
+        let pinned = integer_fit([320, 240], [2560.0, 1440.0]);
+        assert_eq!([pinned[2], pinned[3]], [1920.0, 1440.0], "6x, full height");
+    }
+
+    /// Every source pixel the same size is the entire point, so the scale has
+    /// to come out whole on both axes — not merely close.
+    #[test]
+    fn the_scale_is_whole_on_both_axes() {
+        for dest in [[1920.0, 1080.0], [1280.0, 800.0], [1000.0, 613.0], [640.0, 361.0]] {
+            let [_, _, w, h] = integer_fit([320, 180], dest);
+            let (sx, sy) = (w / 320.0, h / 180.0);
+            assert_eq!(sx, sx.floor(), "{dest:?}: horizontal scale {sx} is not whole");
+            assert_eq!(sx, sy, "{dest:?}: the axes disagree ({sx} vs {sy})");
+            assert!(w <= dest[0] && h <= dest[1], "{dest:?}: {w}x{h} spills out of the panel");
+        }
+    }
+
+    /// A panel smaller than the composite still draws it. Cropping is the least
+    /// bad option and drawing nothing is the worst one.
+    #[test]
+    fn a_window_too_small_for_one_whole_pixel_still_draws() {
+        let [x, y, w, h] = integer_fit([427, 240], [200.0, 100.0]);
+        assert_eq!([w, h], [427.0, 240.0], "1x is the floor");
+        assert_eq!([x, y], [0.0, 0.0], "and it is not pushed off the top-left");
+    }
 }

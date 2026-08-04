@@ -332,6 +332,35 @@ impl<'a> SettingsCtx<'a> {
                     )
                     .changed();
             });
+            row(
+                ui,
+                "Pixel columns",
+                Some("horizontal resolution — 0 follows the window, so the amount of world on \
+                      screen changes with it"),
+                |ui| {
+                    out.save_project |= ui
+                        .add_sized(
+                            [220.0, 20.0],
+                            egui::DragValue::new(&mut project.retro_width)
+                                .range(0u32..=1920)
+                                .speed(1.0),
+                        )
+                        .changed();
+                    if project.retro_width == 0 {
+                        ui.label(egui::RichText::new("from the window").weak().small());
+                    }
+                },
+            );
+            row(
+                ui,
+                "Whole pixels",
+                Some("upscale by a whole number and letterbox the rest, so every pixel is the \
+                      same size at every window size"),
+                |ui| {
+                    out.save_project |=
+                        ui.checkbox(&mut project.retro_integer_scale, "integer scale").changed();
+                },
+            );
         });
         row(ui, "Matter", Some("the SDF raymarched geometry pass"), |ui| {
             out.save_project |= ui.checkbox(&mut project.matter, "SDF matter").changed();

@@ -2443,6 +2443,14 @@ impl ApplicationHandler for Editor {
         self.load_texture_settings();
 
         self.retro = Some(Retro::new(&gpu, self.project.retro_height.max(80)));
+        // …then size it the way every other retro target is sized (the project
+        // may pin the width, in which case the window's aspect has no say).
+        if let Some(r) = self.retro.as_mut() {
+            let (w, h) = self.project.retro_size(
+                gpu.config.width as f32 / gpu.config.height.max(1) as f32,
+            );
+            r.resize_to(&gpu, w, h);
+        }
         self.post = Some(floptle_render::PostStack::new(&gpu, gpu.config.width, gpu.config.height));
         self.outline = Some(Outline::new(&gpu));
         self.grid_render = Some(Grid::new(&gpu));
@@ -2545,7 +2553,10 @@ impl ApplicationHandler for Editor {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size.width, size.height);
                     if let Some(retro) = self.retro.as_mut() {
-                        retro.resize(gpu, self.project.retro_height.max(80));
+                        let (rw, rh) = self
+                            .project
+                            .retro_size(size.width as f32 / size.height.max(1) as f32);
+                        retro.resize_to(gpu, rw, rh);
                     }
                     if let Some(outline) = self.outline.as_mut() {
                         outline.resize(gpu, size.width, size.height);
