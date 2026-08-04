@@ -331,6 +331,9 @@ fn script_tunables_ui(
         }
     }
 
+    // A row whose stored value is OVERRIDING the script's default, dropped
+    // after the walk so the row itself can hold its `&mut` while it draws.
+    let mut reset: Option<(bool, usize)> = None; // (is a number, index)
     for name in order {
         let pm = cx.meta.param(&name);
         if pm.is_some_and(|m| m.hidden) {
@@ -339,15 +342,71 @@ fn script_tunables_ui(
         if let Some(h) = pm.and_then(|m| m.header.as_deref()) {
             param_header(ui, h);
         }
+        let declared = pm.and_then(|m| m.default.clone());
         if let Some(idx) = inst.params.iter().position(|(k, _)| *k == name) {
-            changed |= num_param_row(ui, &mut inst.params[idx], pm, cx.salt);
+            let over = pins(declared.as_deref(), &inst.params[idx].1.to_string());
+            ui.horizontal(|ui| {
+                changed |= num_param_row(ui, &mut inst.params[idx], pm, cx.salt);
+                if pinned_badge(ui, over.as_deref()) {
+                    reset = Some((true, idx));
+                }
+            });
         } else if let Some(idx) = inst.strs.iter().position(|(k, _)| *k == name) {
-            changed |= str_param_row(ui, &mut inst.strs[idx], pm, cx.salt);
+            let over = pins(declared.as_deref(), &format!("\"{}\"", inst.strs[idx].1));
+            ui.horizontal(|ui| {
+                changed |= str_param_row(ui, &mut inst.strs[idx], pm, cx.salt);
+                if pinned_badge(ui, over.as_deref()) {
+                    reset = Some((false, idx));
+                }
+            });
         } else if let Some(idx) = inst.refs.iter().position(|(k, _)| *k == name) {
             changed |= ref_param_row(ui, inst, idx, &cx);
         }
     }
+    if let Some((num, idx)) = reset {
+        if num {
+            inst.params.remove(idx);
+        } else {
+            inst.strs.remove(idx);
+        }
+        changed = true;
+    }
     changed
+}
+
+/// The script's declared value, when the scene is holding a DIFFERENT one —
+/// `None` when they agree, or when the script declares nothing comparable.
+///
+/// Compared as text on purpose: what a person wants to see is the literal they
+/// wrote in the file, and `4` and `4.0` are the same number written twice.
+fn pins(declared: Option<&str>, stored: &str) -> Option<String> {
+    let d = declared?.trim();
+    let same = match (d.parse::<f64>(), stored.trim().parse::<f64>()) {
+        (Ok(a), Ok(b)) => (a - b).abs() <= f64::EPSILON.max(a.abs() * 1e-6),
+        _ => d == stored.trim(),
+    };
+    (!same).then(|| d.to_string())
+}
+
+/// The "this scene is pinning the script's number" badge. Returns whether the
+/// reset was clicked.
+///
+/// This is the half of `floptle/0068` the Console cannot catch: the name is
+/// legitimate, the value is legitimate, and the only wrong thing about it is
+/// its AGE. From the outside it is indistinguishable from a script whose
+/// numbers do nothing — you edit one, press Play, and nothing happens.
+fn pinned_badge(ui: &mut egui::Ui, declared: Option<&str>) -> bool {
+    let Some(d) = declared else { return false };
+    ui.add(egui::Label::new(
+        egui::RichText::new("●").small().color(ui.visuals().warn_fg_color),
+    ))
+    .on_hover_text(format!(
+        "this scene overrides the script, which declares {d}.\n\
+         Editing the script's number will not change this node until you reset it."
+    ));
+    ui.small_button("↺")
+        .on_hover_text(format!("drop the scene's value and use the script's ({d})"))
+        .clicked()
 }
 
 /// A numeric tunable: checkbox (`--@bool` / a `true`/`false` default), dropdown

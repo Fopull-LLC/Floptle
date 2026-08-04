@@ -69,6 +69,13 @@ pub(crate) struct ParamMeta {
     pub(crate) units: Option<String>,
     /// `--@hidden` — a tunable the Inspector shouldn't show at all.
     pub(crate) hidden: bool,
+    /// The value the SCRIPT declares, as it is written in the file.
+    ///
+    /// Kept so the Inspector can tell a row that is overriding it from a row
+    /// that is merely showing it. A scene's stored param wins over the script's
+    /// default, silently and forever — so a number you edit in the script does
+    /// nothing, and there is nothing on screen to say why (`floptle/0068`).
+    pub(crate) default: Option<String>,
 }
 
 impl ParamMeta {
@@ -222,6 +229,7 @@ pub(crate) fn parse(src: &str) -> ScriptMeta {
         let at_top = depth == 1;
         if at_top && let Some(name) = key_of(code_t) {
             pending.name = name;
+            pending.default = literal_of(code_t);
             // `= true` / `= false` is a checkbox without saying so.
             if is_bool_literal(code_t) {
                 pending.boolean = true;
@@ -245,6 +253,19 @@ pub(crate) fn parse(src: &str) -> ScriptMeta {
         meta.about = Some(about.join(" "));
     }
     meta
+}
+
+/// The literal a `key = value,` line declares, as written — `"4.0"`, `"true"`,
+/// `"\"walk\""`. Only for showing back to a person, so a value this cannot make
+/// sense of (a table, a call, a `noderef()`) is simply absent rather than
+/// guessed at.
+fn literal_of(code: &str) -> Option<String> {
+    let (_, rhs) = code.split_once('=')?;
+    let v = rhs.trim().trim_end_matches(',').trim();
+    if v.is_empty() || v.starts_with('{') || v.contains('(') {
+        return None;
+    }
+    Some(v.to_string())
 }
 
 /// One `--@name args` annotation.
@@ -409,7 +430,27 @@ function roll(node) end
         let m = parse("defaults = {\n  walk = 4.5,\n  run = 8.0,\n}\n");
         let names: Vec<&str> = m.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["walk", "run"]);
-        assert_eq!(m.params[0], ParamMeta { name: "walk".into(), ..Default::default() });
+        assert_eq!(
+            m.params[0],
+            ParamMeta { name: "walk".into(), default: Some("4.5".into()), ..Default::default() }
+        );
+    }
+
+    /// The declared literal, kept so the Inspector can say "this scene is
+    /// overriding the script" (`floptle/0068`). Values it cannot make sense of
+    /// are absent rather than guessed at — a wrong answer here would put a
+    /// "you are overriding this" badge on a row that is not.
+    #[test]
+    fn the_declared_default_is_captured_as_written() {
+        let m = parse(
+            "defaults = {\n  walk = 4.5,\n  invert = false,\n  clip = \"footstep\",\n\
+             \x20 target = noderef(),\n  curve = { 1, 2 },\n}\n",
+        );
+        assert_eq!(m.param("walk").unwrap().default.as_deref(), Some("4.5"));
+        assert_eq!(m.param("invert").unwrap().default.as_deref(), Some("false"));
+        assert_eq!(m.param("clip").unwrap().default.as_deref(), Some("\"footstep\""));
+        assert_eq!(m.param("target").unwrap().default, None, "a call is not a literal");
+        assert_eq!(m.param("curve").unwrap().default, None, "nor is a table");
     }
 
     /// A `--` inside a string is not a comment, and a script with no `defaults`
