@@ -229,6 +229,7 @@ mod http_api;
 pub use http_api::open_in_browser;
 mod input_api;
 mod math_api;
+pub mod access_api;
 mod net_api;
 pub mod opts;
 mod perf_api;
@@ -539,6 +540,12 @@ pub struct ScriptHost {
     /// was the only report a game could make, and four such reports turned out to
     /// be four different numbers the game could have read itself.
     profile: SharedProfile,
+    /// The player's accessibility settings, shared with `access.*` in Lua and
+    /// read by the driver each frame (`floptle/0079`).
+    access: crate::access_api::SharedAccess,
+    /// Captions `caption(...)` asked for, drained by the driver and drawn by the
+    /// engine so every game gets the same readable placement.
+    caption_queue: crate::access_api::CaptionQueue,
     /// `params.X = value` writes queued this pass — (entity, script kind, key,
     /// value). Flushed to the node's stored `ScriptInst` params so tunables are
     /// TWO-WAY: the write persists across frames and shows live in the

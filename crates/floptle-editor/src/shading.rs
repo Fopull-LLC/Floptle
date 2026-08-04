@@ -503,6 +503,9 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
         ssao_radius: 0.5,
         posterize_bands: 0,
         posterize_dither: false,
+        color_filter: 0,
+        color_filter_strength: 1.0,
+        simulate_deficiency: false,
     };
     for (e, m) in world.query::<Matter>() {
         // Same rule as the skybox above: a disabled chain is not the scene's
@@ -541,6 +544,9 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
                 ssao_radius: *ao_radius,
                 posterize_bands: *posterize_bands,
                 posterize_dither: *posterize_dither,
+                color_filter: 0,
+                color_filter_strength: 1.0,
+                simulate_deficiency: false,
             };
             let ao_p =
                 if *ao == AoMode::Sdf { [1.0, *ao_strength, *ao_radius, 0.0] } else { [0.0; 4] };

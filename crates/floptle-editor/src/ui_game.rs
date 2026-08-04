@@ -526,6 +526,11 @@ impl Editor {
     /// test reads exactly like the mouse being offset from the cursor. The
     /// frame's `dt` is safe to hand to all of them (see `Editor::ui_style_dt`).
     fn style_layer(&mut self, roots: &mut [floptle_ui::Node]) {
+        // The player's text scale, applied BEFORE the solver measures anything —
+        // which is what makes it reflow instead of clip (`floptle/0079`). It runs
+        // whether or not the project has styles, because a game with no style
+        // sheet still has text somebody may need bigger.
+        floptle_ui::scale_text(roots, self.access.text_scale);
         if self.ui_styles.styles.is_empty() {
             return;
         }
@@ -536,6 +541,10 @@ impl Editor {
         };
         let (sheet, tokens) = (&self.ui_styles, &self.ui_tokens);
         let dt = self.ui_style_dt;
+        // Reduced motion snaps every transition to its target (`floptle/0079`) —
+        // a hover still CHANGES, it just does not slide, because a 40 ms slide is
+        // still a slide.
+        self.ui_style_rt.reduced_motion = self.access.reduced_motion;
         floptle_ui::apply_styles(roots, sheet, tokens, &input, &mut self.ui_style_rt, dt);
         // An element naming a style no sheet defines draws unstyled and used to
         // say nothing — the commonest thing to break in a rename, and invisible
@@ -696,6 +705,47 @@ impl Editor {
                 r.rect[0] -= o[0];
                 r.rect[1] -= o[1];
                 dl.texts.push(r);
+            }
+            out.push((dl, 1.0));
+        }
+        // Captions (`floptle/0079`), drawn by the ENGINE so every game gets the
+        // same readable placement: bottom-centre, on a dark plate, oldest first,
+        // and scaled by the same text scale as the rest of the UI. A game that
+        // hand-rolls this gets it subtly wrong — too high, too small, or behind
+        // the HUD — and a player who needs captions is the last to be asked.
+        if !self.captions.is_empty()
+            && let Some(uir) = self.ui_render.as_ref()
+        {
+            let scale = self.access.text_scale;
+            let size = 22.0 * scale;
+            let pad = 8.0 * scale;
+            let line_gap = 6.0 * scale;
+            let mut dl = floptle_ui::DrawList::default();
+            // Bottom up, so the newest line sits closest to the bottom edge and
+            // the older ones rise — the order captions are read in.
+            let mut y = viewport[1] - 40.0 * scale;
+            for (text, _) in self.captions.iter().rev() {
+                let spec = floptle_ui::TextSpec {
+                    text: text.clone(),
+                    size,
+                    ..Default::default()
+                };
+                let [w, h] = uir.measure_spec(&spec);
+                y -= h + pad * 2.0 + line_gap;
+                let x = (viewport[0] - w) * 0.5;
+                dl.quads.push(floptle_ui::Quad {
+                    rect: [x - pad, y - pad, w + pad * 2.0, h + pad * 2.0],
+                    color: [0.0, 0.0, 0.0, 0.72],
+                    radius: [4.0 * scale; 4],
+                    ..Default::default()
+                });
+                dl.texts.push(floptle_ui::TextRun {
+                    rect: [x, y, w, h],
+                    text: text.clone(),
+                    size,
+                    color: [1.0, 1.0, 1.0, 1.0],
+                    ..Default::default()
+                });
             }
             out.push((dl, 1.0));
         }

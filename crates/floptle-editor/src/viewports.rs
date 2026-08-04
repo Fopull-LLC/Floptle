@@ -486,7 +486,13 @@ impl Editor {
         else {
             return;
         };
-        let (post_settings, _) = post_process_uniforms(&self.world);
+        let (mut post_settings, _) = post_process_uniforms(&self.world);
+        // The Game panel gets the player's colour-vision filter too — the whole
+        // point of it being a player setting is that it applies wherever the game
+        // is shown (`floptle/0079`).
+        post_settings.color_filter = self.access.color_filter.lane();
+        post_settings.color_filter_strength = self.access.color_filter_strength;
+        post_settings.simulate_deficiency = self.access.simulate_deficiency;
         let post_on = post_settings.any();
         let retro_on = self.project.retro;
 

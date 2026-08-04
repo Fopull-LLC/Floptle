@@ -13,6 +13,8 @@ struct P {
     a: vec4<f32>, // xy = texel (1/size of src), z = bloom_threshold, w = bloom_intensity
     b: vec4<f32>, // x = vignette_strength, y = vignette_radius, zw = blur_dir (texels)
                   //   OR, in the terminal fs_finish pass: z = posterize bands, w = dither
+                  // a in fs_finish: x = simulate deficiency, z = colour filter mode,
+                  //   w = filter strength (floptle/0079)
 };
 @group(0) @binding(2) var<uniform> p: P;
 
@@ -86,6 +88,60 @@ fn bayer4(pix: vec2<u32>) -> f32 {
     return (f32(m[(pix.y % 4u) * 4u + (pix.x % 4u)]) + 0.5) / 16.0;
 }
 
+// Colour-vision filter (`floptle/0079`). `mode`: 1 = protanopia, 2 = deuteranopia,
+// 3 = tritanopia; 0 returns the colour untouched. `simulate` shows the deficiency
+// (for the developer) instead of correcting for it (for the player).
+//
+// The pipeline is the standard one: linear RGB → LMS cone response, collapse the
+// missing cone's axis (Viénot/Brettel/Mollon), LMS → RGB. Correcting then takes
+// the error the deficiency loses and pushes it into channels the viewer CAN
+// still separate — so two colours that were the same to them stop being the same,
+// which is the whole point. Simulating just returns the collapsed colour.
+//
+// Done in ~gamma space, like the posterize below: the matrices are derived for
+// display-encoded values, and running them on linear light shifts hues visibly.
+fn color_vision(c_lin: vec3<f32>, mode: f32, simulate: f32, strength: f32) -> vec3<f32> {
+    if (mode < 0.5 || strength <= 0.0) {
+        return c_lin;
+    }
+    let c = pow(max(c_lin, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+    // RGB → LMS.
+    let l = 17.8824 * c.r + 43.5161 * c.g + 4.11935 * c.b;
+    let m = 3.45565 * c.r + 27.1554 * c.g + 3.86714 * c.b;
+    let s = 0.0299566 * c.r + 0.184309 * c.g + 1.46709 * c.b;
+    var l2 = l;
+    var m2 = m;
+    var s2 = s;
+    if (mode < 1.5) {
+        l2 = 2.02344 * m - 2.52581 * s;          // protanopia: no L cone
+    } else if (mode < 2.5) {
+        m2 = 0.494207 * l + 1.24827 * s;         // deuteranopia: no M cone
+    } else {
+        s2 = -0.395913 * l + 0.801109 * m;       // tritanopia: no S cone
+    }
+    // LMS → RGB.
+    let sim = vec3<f32>(
+        0.0809444479 * l2 - 0.130504409 * m2 + 0.116721066 * s2,
+        -0.0102485335 * l2 + 0.0540193266 * m2 - 0.113614708 * s2,
+        -0.000365296938 * l2 - 0.00412161469 * m2 + 0.693511405 * s2,
+    );
+    var outc = sim;
+    if (simulate < 0.5) {
+        // Daltonize: redistribute what the deficient axis dropped.
+        let err = c - sim;
+        let shift = vec3<f32>(
+            0.0,
+            0.7 * err.r + 1.0 * err.g,
+            0.7 * err.r + 1.0 * err.b,
+        );
+        outc = c + shift;
+    }
+    // `strength` blends against the original, so a partial correction is a real
+    // setting rather than an on/off switch.
+    let mixed = clamp(mix(c, outc, strength), vec3<f32>(0.0), vec3<f32>(1.0));
+    return pow(mixed, vec3<f32>(2.2));
+}
+
 // Terminal color pass: vignette (radial darken) then optional posterize (quantize
 // each channel to a limited palette / band count). Both are no-ops at their
 // identity params (strength 0 / bands < 2), so this one pass serves vignette-only,
@@ -94,6 +150,11 @@ fn bayer4(pix: vec2<u32>) -> f32 {
 @fragment
 fn fs_finish(in: VsOut) -> @location(0) vec4<f32> {
     var c = textureSample(tex, samp, in.uv).rgb;
+    // Colour-vision filter first: it corrects the picture the game made, so it
+    // belongs before the looks the scene applies on top (`floptle/0079`).
+    // a.x = simulate, a.z = filter mode, a.w = strength — lanes the bloom pass
+    // uses and this one does not.
+    c = color_vision(c, p.a.z, p.a.x, p.a.w);
     // Vignette (skipped when strength p.b.x == 0; radius p.b.y = 1 is the identity).
     let d = distance(in.uv, vec2<f32>(0.5)) * 1.41421356; // 0 center .. ~1 corner
     let vg = smoothstep(1.0, p.b.y, d);                   // 1 inside radius → 0 at corners

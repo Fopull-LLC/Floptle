@@ -34,12 +34,31 @@ pub struct PostSettings {
     pub posterize_bands: u32,
     /// Ordered-dither the posterize quantization so smooth ramps don't hard-step.
     pub posterize_dither: bool,
+    /// Colour-vision filter: 0 = off, 1 = protanopia, 2 = deuteranopia,
+    /// 3 = tritanopia (`floptle_core::access::ColorFilter::lane`). Runs in the
+    /// terminal pass, before the scene's own looks (`floptle/0079`).
+    pub color_filter: u32,
+    /// How strongly the filter applies, 0..1.
+    pub color_filter_strength: f32,
+    /// Show the deficiency instead of correcting it — a developer's check of
+    /// what a colourblind player sees.
+    pub simulate_deficiency: bool,
 }
 
 impl PostSettings {
     /// True if any effect is enabled (else the stack is a no-op passthrough).
     pub fn any(&self) -> bool {
-        self.bloom || self.vignette || self.ssao || self.posterize_bands >= 2
+        self.bloom
+            || self.vignette
+            || self.ssao
+            || self.posterize_bands >= 2
+            || self.color_filter_on()
+    }
+
+    /// Is the colour-vision filter doing anything? (Mode 0 or zero strength is
+    /// the identity, and the chain must not pay for a pass that changes nothing.)
+    pub fn color_filter_on(&self) -> bool {
+        self.color_filter > 0 && self.color_filter_strength > 0.0
     }
 }
 
@@ -440,7 +459,8 @@ impl PostStack {
     pub fn run(&self, gpu: &Gpu, s: &PostSettings, ssao: Option<&SsaoFrame>, out: &wgpu::TextureView) {
         let ssao_on = s.ssao && ssao.is_some();
         let posterize_on = s.posterize_bands >= 2;
-        if !(ssao_on || s.bloom || s.vignette || posterize_on) {
+        let filter_on = s.color_filter_on();
+        if !(ssao_on || s.bloom || s.vignette || posterize_on || filter_on) {
             self.write_params(gpu, PostParams { a: [0.0; 4], b: [0.0; 4] });
             self.pass(gpu, &self.copy_pipeline, &self.scene.bind, out, wgpu::LoadOp::Clear(BLACK));
             return;
@@ -510,14 +530,22 @@ impl PostStack {
         // Terminal pass: vignette and/or posterize (one shader, no-op at identity
         // params). Reuses the dead blur_dir lanes b.zw for posterize (bands, dither),
         // so no uniform-layout change. Otherwise a straight passthrough copy to `out`.
-        if s.vignette || posterize_on {
+        if s.vignette || posterize_on || filter_on {
             let b = [
                 if s.vignette { s.vignette_strength } else { 0.0 },
                 if s.vignette { s.vignette_radius } else { 1.0 },
                 if posterize_on { s.posterize_bands as f32 } else { 0.0 },
                 if posterize_on && s.posterize_dither { 1.0 } else { 0.0 },
             ];
-            self.write_params(gpu, PostParams { a: [0.0; 4], b });
+            // The colour-vision filter rides the bloom lanes, which this pass
+            // does not use (`floptle/0079`).
+            let a = [
+                if s.simulate_deficiency { 1.0 } else { 0.0 },
+                0.0,
+                if filter_on { s.color_filter as f32 } else { 0.0 },
+                if filter_on { s.color_filter_strength } else { 0.0 },
+            ];
+            self.write_params(gpu, PostParams { a, b });
             self.pass(gpu, &self.finish_pipeline, &cur.bind, out, wgpu::LoadOp::Clear(BLACK));
         } else {
             self.write_params(gpu, PostParams { a: [0.0; 4], b: [0.0; 4] });

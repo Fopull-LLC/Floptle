@@ -87,6 +87,9 @@ fn main() {
         ssao_radius: 0.7,
         posterize_bands: 0,
         posterize_dither: false,
+        color_filter: 0,
+        color_filter_strength: 1.0,
+        simulate_deficiency: false,
     };
 
     // Pass 1: SSAO off (pure passthrough copy).

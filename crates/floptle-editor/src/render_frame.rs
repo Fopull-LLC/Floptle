@@ -1406,7 +1406,14 @@ impl Editor {
         };
         // The scene's PostProcess node drives the whole post chain (per scene, not
         // per project): PostStack settings + the raymarch SDF-AO params.
-        let (post_settings, rm_ao_params) = post_process_uniforms(&self.world);
+        let (mut post_settings, rm_ao_params) = post_process_uniforms(&self.world);
+        // The player's colour-vision filter rides ON TOP of the scene's chain,
+        // and deliberately survives a scene whose PostProcess node is disabled
+        // (`floptle/0079`): a scene must not be able to veto an accessibility
+        // setting the player turned on.
+        post_settings.color_filter = self.access.color_filter.lane();
+        post_settings.color_filter_strength = self.access.color_filter_strength;
+        post_settings.simulate_deficiency = self.access.simulate_deficiency;
         // Sky shader: when active, `sky_meta.x = 1` makes the raymarch's `sky_color` call the
         // spliced `flsl_sky`, and its uniforms (Inspector knobs over `.flsl` defaults) drive
         // `sky_uniforms`. (Captured before the closure — it can't borrow `self`.)
@@ -1966,6 +1973,9 @@ impl Editor {
         // ⚙ Settings tab inputs. Only gathered when the tab is actually open,
         // so a closed Settings tab costs nothing per frame.
         let settings_open = dock_state.find_tab(&crate::dock::EditorTab::Settings).is_some();
+        // Accessibility is `Copy`, so the tab edits a copy and reports back
+        // (`floptle/0079`) — no field borrow to thread through the tab viewer.
+        let access = self.access;
         let settings_scene_files = if settings_open {
             crate::project::scene_files_in(&self.project_root)
         } else {
@@ -2917,6 +2927,7 @@ impl Editor {
                     input_test: input_test_state,
                     pad_names: &settings_pad_names,
                     input_new_action,
+                    access,
                 },
                 cmd: &mut cmd,
             };
@@ -4782,6 +4793,25 @@ impl Editor {
                 self.ui_focus_set(want);
             }
             self.pending_scene.extend(self.script_host.take_scene_requests());
+            // Accessibility (`floptle/0079`): the settings a game's options menu
+            // wrote this frame come back OUT, and the captions it asked for join
+            // the on-screen queue. Read after the run so a menu that changes text
+            // scale is honoured by the very next layout.
+            self.access = self.script_host.access();
+            // Captions age out on their own — a line nobody removed is a line
+            // covering the game.
+            for c in &mut self.captions {
+                c.1 -= sdt;
+            }
+            self.captions.retain(|c| c.1 > 0.0);
+            for c in self.script_host.take_captions() {
+                // Newest last, and a modest cap: captions are read in order, and a
+                // game spamming them would otherwise cover its own screen.
+                self.captions.push((c.text, c.seconds));
+                if self.captions.len() > 4 {
+                    self.captions.remove(0);
+                }
+            }
             // `water.setFrozen(node, on)` — freezing is a STATE, so it lands on
             // the node and the physics field is rebuilt from it. The rebuild
             // preserves live velocities, so a sea freezing under a swimmer does
@@ -6011,6 +6041,13 @@ impl Editor {
             // Re-layer the live sim: bodies re-resolve via sync_dynamic_params,
             // but static colliders bake their bit at build — so rebuild.
             self.rebuild_sim();
+        }
+        if let Some(a) = cmd.access {
+            // One set of values, two ways in: this pane and a game's own options
+            // menu (`access.*`). Pushed into the host so Lua reads back what the
+            // editor just set, rather than the two disagreeing (`floptle/0079`).
+            self.access = a;
+            self.script_host.set_access(a);
         }
         if let Some((old, new)) = cmd.rename_layer {
             // The open scene's nodes follow a Project-Settings layer rename

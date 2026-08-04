@@ -1223,6 +1223,39 @@ pub fn sort_roots(roots: &mut [Node]) {
     roots.sort_by_key(|n| n.spec.order);
 }
 
+/// Multiply every text size in a tree by the player's text scale
+/// (`floptle/0079`).
+///
+/// Call this on the built tree **before** [`solve`], which is what makes text
+/// scaling *reflow*: the solver measures the scaled run, so a `fit`-height box
+/// grows and everything below it moves down. Scaling at draw time instead would
+/// paint bigger glyphs into the same box, i.e. clip — the failure that makes a
+/// text-size setting useless at exactly the sizes somebody needs it.
+///
+/// `fit` text is left alone deliberately: its size comes from the box it is
+/// filling, so it is already as large as it can be, and multiplying it would
+/// only overflow a rect the author sized on purpose.
+///
+/// A scale of 1 walks the tree and changes nothing, so callers need no branch.
+pub fn scale_text(roots: &mut [Node], scale: f32) {
+    if !scale.is_finite() || scale == 1.0 {
+        return;
+    }
+    fn walk(n: &mut Node, scale: f32) {
+        if let Some(t) = n.spec.text.as_mut()
+            && !t.fit
+        {
+            t.size *= scale;
+        }
+        for c in &mut n.children {
+            walk(c, scale);
+        }
+    }
+    for r in roots {
+        walk(r, scale);
+    }
+}
+
 /// A solved element: its rect in layer design units, `[x, y, w, h]`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placed {
@@ -2450,6 +2483,53 @@ mod tests {
         let placed = solve(&[parent], [1280.0, 720.0], &m);
         let r = rect_of(&placed, cid);
         assert_eq!([r[2], r[3]], [200.0, 100.0]);
+    }
+
+    /// Text scaling REFLOWS: the box grows and its neighbour moves down
+    /// (`floptle/0079`).
+    ///
+    /// The failure this rules out is the one that makes a text-size setting
+    /// useless: bigger glyphs painted into the same rect, clipped at exactly the
+    /// sizes somebody turned the setting up to reach.
+    #[test]
+    fn scaling_text_grows_its_box_and_pushes_the_next_one_down() {
+        let text = |s: &str| ElementSpec {
+            size: [Size::Fixed(400.0), Size::Fit],
+            text: Some(TextSpec { text: s.into(), size: 20.0, ..Default::default() }),
+            ..Default::default()
+        };
+        let build = || {
+            let a = el(text("first line"), vec![]);
+            let b = el(text("second line"), vec![]);
+            let (ida, idb) = (a.id, b.id);
+            let stack = el(
+                ElementSpec {
+                    place: Place::Free { pos: [0.0, 0.0] },
+                    size: [Size::Fixed(400.0), Size::Fit],
+                    stack: Some(StackCfg { dir: Dir::Column, ..Default::default() }),
+                    ..Default::default()
+                },
+                vec![a, b],
+            );
+            (stack, ida, idb)
+        };
+
+        let (one, a1, b1) = build();
+        let base = solve(&[one], [1280.0, 720.0], &m);
+        let (mut two, a2, b2) = build();
+        scale_text(std::slice::from_mut(&mut two), 2.0);
+        let big = solve(&[two], [1280.0, 720.0], &m);
+
+        // A scale of 1 is the identity, so every caller can pass it unguarded.
+        let (mut same, a3, _) = build();
+        scale_text(std::slice::from_mut(&mut same), 1.0);
+        let unchanged = solve(&[same], [1280.0, 720.0], &m);
+        assert_eq!(rect_of(&unchanged, a3)[3], rect_of(&base, a1)[3]);
+
+        let (ha1, ha2) = (rect_of(&base, a1)[3], rect_of(&big, a2)[3]);
+        assert!(ha2 > ha1, "the text's own box has to grow: {ha1} → {ha2}");
+        let (yb1, yb2) = (rect_of(&base, b1)[1], rect_of(&big, b2)[1]);
+        assert!(yb2 > yb1, "the element BELOW has to move down: {yb1} → {yb2}");
     }
 
     #[test]

@@ -20,6 +20,7 @@ linked here, it isn't finished — a test enforces that.
 | Build a level without leaving the engine | [map-tools.md](map-tools.md) |
 | Make a **2D** game — tiles and sprites | [2d.md](2d.md) |
 | Add a minimap, mirror, scope or split-screen | [render-targets.md](render-targets.md) |
+| Make your game playable by more people | [accessibility.md](accessibility.md) |
 | Sculpt terrain / build a planet | [subsystems/deformable-matter.md](subsystems/deformable-matter.md) |
 | Draw a texture | [image-editor.md](image-editor.md) |
 | Build a menu or a HUD | [ui-tab.md](ui-tab.md) → [ui-styles.md](ui-styles.md) → [ui-make.md](ui-make.md) |
@@ -65,6 +66,9 @@ The build-something guides. Each one is a path from nothing to a working result.
 - [render-targets.md](render-targets.md) — **a camera as a texture**: point a camera at
   a name and wear its picture on a material or a UI image — minimaps, mirrors, security
   monitors, scopes and split-screen, each at its own size and refresh rate.
+- [accessibility.md](accessibility.md) — **text scale, colour-vision filters, reduced
+  motion and captions**: four settings a game exposes and the engine honours, plus
+  what only your game can do (your camera shake reads the flag).
 - [multiplayer.md](multiplayer.md) — from a single-player scene to **two machines playing
   together**: which replication mode to pick, prediction, rollback for fighting games,
   testing on one desk, and shipping (relay, dedicated server, interest management).

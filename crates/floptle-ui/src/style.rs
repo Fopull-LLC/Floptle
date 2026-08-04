@@ -624,6 +624,15 @@ pub struct StyleRuntime {
     /// the first time it steps, so later passes over the same frame don't
     /// charge `dt` again.
     frame: u64,
+    /// The player asked for reduced motion, so transitions land immediately
+    /// (`floptle/0079`).
+    ///
+    /// Set here rather than passed to [`apply_styles`] because it belongs to the
+    /// session, not to a frame — and because SNAPPING is a property of the
+    /// transition, not of `dt`. Passing `dt = 0` instead would freeze every
+    /// element at whatever value it happened to hold, so a hover would stop
+    /// changing at all rather than changing instantly.
+    pub reduced_motion: bool,
     /// `style:` names no sheet defines, accumulated as they are met.
     ///
     /// An element naming a style that does not exist draws unstyled and says
@@ -676,6 +685,9 @@ impl StyleRuntime {
     /// and then leaving.
     fn step(&mut self, id: u32, state: UiState, target: Animated, tr: Transition, dt: f32) -> Animated {
         let frame = self.frame;
+        // A zero-duration transition is already "arrive immediately" everywhere
+        // below, so reduced motion needs no second code path.
+        let tr = if self.reduced_motion { Transition { duration: 0.0, ease: tr.ease } } else { tr };
         let entry = self.live.entry(id).or_insert_with(|| Anim {
             state,
             from: target,

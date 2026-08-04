@@ -272,6 +272,10 @@ struct EditorCmd {
     /// A project layer was renamed in Project Settings: (old, new). The open
     /// scene's nodes follow the rename (per keystroke, so they stay in sync).
     rename_layer: Option<(String, String)>,
+    /// New accessibility settings from the ⚙ Settings tab (`floptle/0079`),
+    /// applied after the frame and pushed into the script host so a game's own
+    /// options menu and this pane drive ONE set of values.
+    access: Option<floptle_core::access::Accessibility>,
     /// Open (or focus) the ⚙ Settings dock tab.
     open_settings: bool,
     /// project.ron changed in the Settings tab.
@@ -850,6 +854,9 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
                     self.cmd.rename_layer = out.rename_layer;
                 }
                 self.cmd.input_edits = Some(out.input);
+                if out.access.is_some() {
+                    self.cmd.access = out.access;
+                }
             }
         }
     }
@@ -1405,6 +1412,14 @@ struct Editor {
     /// gets the full `dt`; `StyleRuntime::begin_frame` is what keeps an element
     /// from spending it more than once.
     ui_style_dt: f32,
+    /// The player's accessibility settings (`floptle/0079`): UI text scale,
+    /// colour-vision filter, reduced motion, captions. Driven from Lua by a
+    /// game's options menu and from the editor's ⚙ Settings, and honoured
+    /// wherever the engine owns the behaviour.
+    access: floptle_core::access::Accessibility,
+    /// Captions queued by `caption(...)`: (text, seconds remaining). Drawn
+    /// bottom-centre while `access.captions` is on, oldest first.
+    captions: Vec<(String, f32)>,
     /// Style names that appeared in more than one sheet — surfaced in the
     /// Inspector so a silently shadowed style can't cost an afternoon.
     ui_style_clashes: Vec<String>,

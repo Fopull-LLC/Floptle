@@ -21,6 +21,7 @@ pub(crate) enum SettingsSection {
     Rendering,
     Layers,
     Input,
+    Access,
 }
 
 impl SettingsSection {
@@ -29,6 +30,7 @@ impl SettingsSection {
         SettingsSection::Rendering,
         SettingsSection::Layers,
         SettingsSection::Input,
+        SettingsSection::Access,
     ];
 
     fn title(self) -> &'static str {
@@ -37,6 +39,7 @@ impl SettingsSection {
             SettingsSection::Rendering => "Rendering",
             SettingsSection::Layers => "Layers",
             SettingsSection::Input => "Input",
+            SettingsSection::Access => "Accessibility",
         }
     }
 
@@ -46,6 +49,8 @@ impl SettingsSection {
             SettingsSection::Rendering => icons::SHADERS,
             SettingsSection::Layers => icons::MAP,
             SettingsSection::Input => icons::KEYBOARD,
+            // The international access symbol, which is what this is.
+            SettingsSection::Access => "♿",
         }
     }
 
@@ -58,6 +63,10 @@ impl SettingsSection {
             SettingsSection::Input => {
                 "Named actions your scripts read, and the keys, mouse buttons \
                  and gamepad controls that trigger them."
+            }
+            SettingsSection::Access => {
+                "What a player can change. Try your game with these on — \
+                 a game's own options menu drives the same values from Lua."
             }
         }
     }
@@ -72,6 +81,11 @@ impl SettingsSection {
             SettingsSection::Input => {
                 "action axis binding key keyboard mouse gamepad pad controller \
                  jump move look bind rebind deadzone socd motion buffer player"
+            }
+            SettingsSection::Access => {
+                "accessibility a11y colourblind colorblind deuteranopia protanopia \
+                 tritanopia daltonize text scale font size reduced motion \
+                 vestibular captions subtitles"
             }
         }
     }
@@ -133,12 +147,18 @@ pub(crate) struct SettingsCtx<'a> {
     pub(crate) input_test: &'a floptle_input::ActionState,
     pub(crate) pad_names: &'a [Option<String>],
     pub(crate) input_new_action: &'a mut String,
+    /// The player's accessibility settings, by value — `Accessibility` is `Copy`,
+    /// so the tab edits a copy and reports the change through
+    /// [`SettingsOut::access`], the same deferral every other panel here uses.
+    pub(crate) access: floptle_core::access::Accessibility,
 }
 
 /// What the tab changed, applied after the frame.
 #[derive(Default)]
 pub(crate) struct SettingsOut {
     pub(crate) save_project: bool,
+    /// Set when the Accessibility section changed something (`floptle/0079`).
+    pub(crate) access: Option<floptle_core::access::Accessibility>,
     pub(crate) rename_layer: Option<(String, String)>,
     pub(crate) input: crate::input_ui::InputEdits,
 }
@@ -260,6 +280,7 @@ impl<'a> SettingsCtx<'a> {
                                 }
                                 SettingsSection::Layers => self.settings_layers(ui, project, &mut out),
                                 SettingsSection::Input => self.settings_input(ui, &query, &mut out),
+                                SettingsSection::Access => self.settings_access(ui, &mut out),
                             }
                             ui.add_space(16.0);
                         });
@@ -269,6 +290,117 @@ impl<'a> SettingsCtx<'a> {
 
         *self.section = want_section;
         out
+    }
+
+    // --- Accessibility (`floptle/0079`) ----------------------------------
+    /// The player-facing settings, in the editor so they can be TRIED.
+    ///
+    /// A game drives the same values from Lua (`access.*`); this pane exists
+    /// because "text scaling that reflows" and "a colourblind-safe picture" are
+    /// claims you have to look at to believe, and because a developer wanting to
+    /// see their game through a deuteranope's eyes should not have to write a
+    /// script first.
+    fn settings_access(&mut self, ui: &mut egui::Ui, out: &mut SettingsOut) {
+        use floptle_core::access::{Accessibility, ColorFilter};
+        let mut a = self.access;
+        let mut changed = false;
+
+        row(ui, "Text scale", Some("multiplies every UI text size; layouts reflow"), |ui| {
+            let mut v = a.text_scale;
+            if ui
+                .add(
+                    egui::Slider::new(
+                        &mut v,
+                        Accessibility::TEXT_SCALE_MIN..=Accessibility::TEXT_SCALE_MAX,
+                    )
+                    .fixed_decimals(2)
+                    .suffix("×"),
+                )
+                .changed()
+            {
+                a.text_scale = v;
+                changed = true;
+            }
+            if ui.small_button("1×").on_hover_text("back to normal").clicked() {
+                a.text_scale = 1.0;
+                changed = true;
+            }
+        });
+
+        row(ui, "Colour vision", Some("corrects the picture for a colour deficiency"), |ui| {
+            egui::ComboBox::from_id_salt("access_filter")
+                .width(220.0)
+                .selected_text(a.color_filter.label())
+                .show_ui(ui, |ui| {
+                    for f in ColorFilter::ALL {
+                        if ui
+                            .selectable_label(a.color_filter == *f, f.label())
+                            .clicked()
+                        {
+                            a.color_filter = *f;
+                            changed = true;
+                        }
+                    }
+                });
+        });
+        if a.color_filter != ColorFilter::None {
+            row(ui, "Strength", Some("how far the correction goes"), |ui| {
+                let mut v = a.color_filter_strength;
+                if ui.add(egui::Slider::new(&mut v, 0.0..=1.0).fixed_decimals(2)).changed() {
+                    a.color_filter_strength = v;
+                    changed = true;
+                }
+            });
+            row(
+                ui,
+                "Simulate instead",
+                Some("show the deficiency rather than correcting it — for you, not for a player"),
+                |ui| {
+                    if ui.checkbox(&mut a.simulate_deficiency, "see what they see").changed() {
+                        changed = true;
+                    }
+                },
+            );
+        }
+
+        row(ui, "Reduced motion", Some("UI transitions snap; your shake should too"), |ui| {
+            if ui.checkbox(&mut a.reduced_motion, "less movement").changed() {
+                changed = true;
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "The engine snaps its own UI transitions. A camera shake your game \
+                 drives has to read access.reducedMotion() and skip it — the engine \
+                 cannot know which of your motion is the game.",
+            )
+            .weak()
+            .small(),
+        );
+        ui.add_space(6.0);
+
+        row(ui, "Captions", Some("caption(text) draws nothing while this is off"), |ui| {
+            if ui.checkbox(&mut a.captions, "show captions").changed() {
+                changed = true;
+            }
+        });
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(
+                "These are the PLAYER's settings, so they belong in the player's save: \
+                 read them back with access.* and store them with save.set. See \
+                 docs/accessibility.md.",
+            )
+            .weak()
+            .small(),
+        );
+
+        if changed {
+            out.access = Some(a.clamped());
+        }
     }
 
     // --- Game -----------------------------------------------------------
@@ -617,6 +749,7 @@ mod tests {
                             input_test: &test_state,
                             pad_names: &pad_names,
                             input_new_action: &mut new_action,
+                            access: Default::default(),
                         };
                         let _ = cx.ui(ui, &mut project);
                     });
@@ -693,6 +826,7 @@ mod tests {
                     input_test: &test_state,
                     pad_names: &pad_names,
                     input_new_action: &mut new_action,
+                    access: Default::default(),
                 };
                 let _ = cx.ui(ui, &mut project);
             });
@@ -737,6 +871,7 @@ mod tests {
                     input_test: &test_state,
                     pad_names: &pad_names,
                     input_new_action: &mut new_action,
+                    access: Default::default(),
                 };
                 let _ = cx.ui(ui, &mut project);
             });

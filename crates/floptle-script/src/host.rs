@@ -1739,6 +1739,14 @@ impl ScriptHost {
         if let Err(e) = crate::perf_api::install(&lua, &profile) {
             eprintln!("[lua] failed to install the perf API: {e}");
         }
+        // `access.*` + `caption(...)` — the accessibility surface a game offers
+        // its players (`floptle/0079`).
+        let access: crate::access_api::SharedAccess =
+            Rc::new(RefCell::new(floptle_core::access::Accessibility::default()));
+        let caption_queue: crate::access_api::CaptionQueue = Rc::new(RefCell::new(Vec::new()));
+        if let Err(e) = crate::access_api::install(&lua, &access, &caption_queue) {
+            eprintln!("[lua] failed to install the access API: {e}");
+        }
         // The `audio` API (one-shots, sound handles, mixer tracks) + `node:sound()`.
         // Must come after the handle API: it extends the node methods table.
         let audio_bridges = crate::audio_api::AudioBridges {
@@ -1952,6 +1960,8 @@ impl ScriptHost {
             mouse_lock,
             reserved_keys,
             profile,
+            access,
+            caption_queue,
             param_writes: RefCell::new(Vec::new()),
             scene_request,
             scene_loaded,
@@ -2045,6 +2055,26 @@ impl ScriptHost {
         let handle = new_node_handle(&host.lua, 1).map_err(|e| e.to_string())?;
         host.lua.globals().set("node", handle).map_err(|e| e.to_string())?;
         host.lua.load(src).exec().map_err(|e| e.to_string())
+    }
+
+    /// The player's accessibility settings as they stand — a game's options menu
+    /// writes them from Lua, and the driver honours them (`floptle/0079`).
+    pub fn access(&self) -> floptle_core::access::Accessibility {
+        self.access.borrow().clamped()
+    }
+
+    /// Push settings IN, so the editor's ⚙ Settings and a game's own menu drive
+    /// one set of values rather than two that disagree.
+    pub fn set_access(&self, a: floptle_core::access::Accessibility) {
+        *self.access.borrow_mut() = a.clamped();
+    }
+
+    /// Take the captions `caption(...)` asked for this frame.
+    ///
+    /// Drained, like every immediate-mode queue here: a caption the driver has
+    /// already shown must not be shown again next frame.
+    pub fn take_captions(&self) -> Vec<crate::access_api::Caption> {
+        std::mem::take(&mut *self.caption_queue.borrow_mut())
     }
 
     /// Feed the running scene's name (before `run`) — what `scene.current()` reads.

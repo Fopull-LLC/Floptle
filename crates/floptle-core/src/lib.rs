@@ -23,6 +23,7 @@
 
 // Phase 1 modules (the foundation the frame loop hangs on). `scene`, `pool`,
 // and `serde_ron` arrive in their roadmap phases; these are live.
+pub mod access;
 pub mod ecs;
 pub mod event;
 pub mod frames;

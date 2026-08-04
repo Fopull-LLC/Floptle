@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 23
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 24
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 18
 - [vectors, directions & easing](#vectors-directions--easing) — 47
@@ -35,6 +35,7 @@ each group, and meant to be searched.
 - [the camera & the screen](#the-camera--the-screen) — 7
 - [physics controls — pause & step](#physics-controls--pause--step) — 4
 - [frame cost — perf.*](#frame-cost--perf) — 11
+- [accessibility — access.*](#accessibility--access) — 11
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
@@ -47,6 +48,10 @@ each group, and meant to be searched.
 - [lua stdlib](#lua-stdlib) — 43
 
 ## script basics — lifecycle, params, log
+
+### `access`
+
+Accessibility a game offers its players: UI text scale, a colour-vision filter, reduced motion and captions. The engine honours what it owns — text sizes go through the LAYOUT so scaling reflows, the filter is a post-chain stage, and UI transitions snap when motion is reduced. What it cannot honour for you (your camera shake) reads access.reducedMotion(). These are the PLAYER's settings, so persist them with save.*; the editor's ⚙ Settings → Accessibility drives the same values so you can try them. See docs/accessibility.md.
 
 ### `createNode`
 
@@ -1975,6 +1980,52 @@ perf.slowestScript() → the name of the costliest script, or nil if none have r
 ### `perf.worstMs`
 
 perf.worstMs("scripts") — the WORST single frame in the last second. This is the one to watch: a 40 ms hitch once a second adds under a millisecond to a 60-frame average, so the mean hides exactly the thing you are chasing.
+
+## accessibility — access.*
+
+### `access.captions`
+
+access.captions() → is the player showing captions?
+
+### `access.colorFilter`
+
+access.colorFilter() → the active colour-vision filter's name ("none" / "protanopia" / "deuteranopia" / "tritanopia").
+
+### `access.colorFilterStrength`
+
+access.colorFilterStrength() → how strongly the colour filter applies, 0–1.
+
+### `access.filters`
+
+access.filters() → { {name=, label=}, … } — every colour filter in menu order, so an options dropdown does not hard-code a list that can go stale. `label` is the human one ("deuteranopia (green-blind)").
+
+### `access.reducedMotion`
+
+access.reducedMotion() → the player asked for less movement. The engine already snaps its OWN UI transitions; read this for the motion it cannot know about — your camera shake, screen flashes, big animated wipes. The engine cannot tell which of your movement is the game.
+
+### `access.setCaptions`
+
+access.setCaptions(true) — turn captions on. While off, caption(...) draws nothing, so a game writes caption() beside the sound and never an `if` around it.
+
+### `access.setColorFilter`
+
+access.setColorFilter("deuteranopia" [, strength]) — correct the picture for a colour vision deficiency, as a stage in the post chain (so it applies to everything the player sees, and a scene cannot veto it by disabling its PostProcess node). `strength` 0–1; full correction shifts hues a lot and some players want less. An unrecognised name raises naming the four it takes — a misspelled filter that quietly meant "off" is an accessibility setting that appears to do nothing.
+
+### `access.setReducedMotion`
+
+access.setReducedMotion(true) — ask for less movement. UI transitions SNAP rather than hurry (a 40 ms slide is still a slide).
+
+### `access.setTextScale`
+
+access.setTextScale(1.5) — set the UI text multiplier, 0.5–3.0. This is the single most-used accessibility setting in games. Out of range RAISES rather than clamping: a settings slider hands over a number it already bounded, so a value outside it means the caller computed it wrong. Persist it yourself with save.set — it is the player's setting, so it belongs in the player's save.
+
+### `access.textScale`
+
+access.textScale() → the player's UI text multiplier (1.0 = normal). Every UI text size is multiplied by it BEFORE layout, so text scaling reflows — a fit-height box grows and its neighbours move down — rather than painting bigger glyphs into the same rect and clipping.
+
+### `caption`
+
+caption("a door unlocks somewhere" [, seconds]) → true if it was shown. Says a line the engine draws bottom-centre on a dark plate, at the player's text scale, oldest first — so every game gets the same readable placement instead of hand-rolling one. A no-op (returning false) while access.captions() is off. Without `seconds` the duration suits the length of the line.
 
 ## persistence — save.*
 

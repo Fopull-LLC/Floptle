@@ -93,6 +93,9 @@ fn main() {
         ssao_radius: 0.9,
         posterize_bands: 6,
         posterize_dither: true,
+        color_filter: 0,
+        color_filter_strength: 1.0,
+        simulate_deficiency: false,
     };
     let clear = Some([0.55, 0.7, 0.9, 1.0]);
 
