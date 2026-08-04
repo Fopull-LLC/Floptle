@@ -4542,12 +4542,25 @@ impl Editor {
             // setMouseLocked every frame from update(), and re-issuing the OS grab at
             // frame rate tears down/recreates the pointer lock each time (on Wayland
             // that reads as a flickering, uncontrollable cursor).
-            if let Some(want) = self.script_host.take_mouse_lock()
-                && want != self.script_mouse_lock
-            {
-                self.script_mouse_lock = want;
-                if let Some(window) = self.window.as_ref() {
-                    self.cursor_lock_soft = grab_cursor(window, want);
+            if let Some(want) = self.script_host.take_mouse_lock() {
+                // An explicit UNLOCK is a game saying "the pointer is mine now",
+                // and it has to release the editor's click-to-play trap too —
+                // that is a second, invisible lock owner the game has no way to
+                // reach. Deduping it against `script_mouse_lock` would drop the
+                // call entirely in the case that matters, because a game opening
+                // a menu never locked the mouse in the first place.
+                let freed_trap = !want && std::mem::take(&mut self.game_trap);
+                if want != self.script_mouse_lock {
+                    self.script_mouse_lock = want;
+                    if let Some(window) = self.window.as_ref() {
+                        self.cursor_lock_soft = grab_cursor(window, want);
+                    }
+                } else if freed_trap
+                    && let Some(window) = self.window.as_ref()
+                {
+                    // Nothing changed as far as the script flag goes, but the
+                    // trap was the one holding the OS grab — let it go.
+                    self.cursor_lock_soft = grab_cursor(window, false);
                 }
             }
             // A `scene.load(...)` from this frame's scripts: queued, performed
@@ -5184,6 +5197,9 @@ impl Editor {
             };
             let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(cx, cy));
         }
+        // Hand the cursor back the moment the game puts something clickable on
+        // screen — asked every frame, not only at the click that trapped.
+        self.release_trap_for_ui();
         // Safety: never stay trapped once play stops (e.g. Stop while trapped, or a
         // layout change hid the Game tab). Escape/Stop already handle the common path.
         if self.game_trap && !self.playing {

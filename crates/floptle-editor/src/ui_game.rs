@@ -22,6 +22,23 @@ use floptle_ui::{
 
 use crate::Editor;
 
+/// Is this element something a POINTER drives — a button, an interactive
+/// slider, a text field, a draggable?
+///
+/// Asked of the elements layout actually PLACED, which is the whole point: an
+/// `ElementSpec` query over the world counts a button inside a hidden panel,
+/// because `visible` doesn't cascade through the ECS the way it cascades
+/// through the solver. A tooltip is deliberately not on this list — hovering is
+/// an interaction, but a HUD readout with a tooltip is not a menu, and it must
+/// not take back a cursor the game is aiming with.
+pub(crate) fn spec_wants_pointer(spec: &ElementSpec) -> bool {
+    !spec.disabled
+        && (spec.button
+            || spec.slider.is_some_and(|s| s.interact)
+            || spec.field.is_some()
+            || spec.draggable)
+}
+
 /// One world canvas as [`Editor::gather_ui_world`] returns it: its draw list,
 /// its solved rects, and the plane it lives on (origin + the two axes).
 pub(crate) type WorldCanvas = (
@@ -839,6 +856,30 @@ impl Editor {
         Some((p, size))
     }
 
+    /// Hand a trapped Game cursor back when the game puts something clickable
+    /// on screen. Returns whether the trap was released.
+    ///
+    /// The trap is *taken* at a click, and for a long time that was the only
+    /// time the question was asked — so a game with no buttons up while you
+    /// play (a twin-stick shooter, anything cursor-free) trapped on the first
+    /// click and could never un-trap, leaving its own shop screen unclickable
+    /// with nothing on screen to say that Escape was the way out.
+    pub(crate) fn release_trap_for_ui(&mut self) -> bool {
+        if !(self.game_trap && self.playing && self.ui_pointer_wanted) {
+            return false;
+        }
+        self.game_trap = false;
+        // …but not the OS grab if a script is holding the mouse itself:
+        // `game_trap` and `setMouseLocked` are separate owners, and free-look
+        // must survive a HUD button appearing.
+        if !self.script_mouse_lock
+            && let Some(window) = self.window.as_ref()
+        {
+            self.cursor_lock_soft = crate::grab_cursor(window, false);
+        }
+        true
+    }
+
     /// The game-UI interaction pass (buttons + draggable sliders), run each
     /// frame while playing, BEFORE the scripts (so a slider's new value is
     /// visible to this frame's `update`). Detected hook events land in
@@ -855,6 +896,7 @@ impl Editor {
         if !self.playing {
             self.ui_hover = None;
             self.ui_active = None;
+            self.ui_pointer_wanted = false;
             // Focus belongs to a running game. Clearing it on Stop means Play
             // never starts with a ring left over from the last session, and
             // means the editor's own arrow keys are never fighting a menu.
@@ -889,6 +931,9 @@ impl Editor {
         type InteractItem =
             (u32, [f32; 4], Option<[f32; 2]>, Option<SliderSpec>, Option<[f32; 4]>);
         let mut items: Vec<InteractItem> = Vec::new();
+        // Does anything the pointer CLICKS exist on screen this frame? Answered
+        // from the placed elements below, and published to `ui_pointer_wanted`.
+        let mut pointer_wanted = false;
         // The topmost scroll view under the pointer this frame → (entity id,
         // clamped new offset). Applied after the borrows drop; consumes the
         // wheel so gameplay zoom never fights a menu scroll.
@@ -1040,6 +1085,7 @@ impl Editor {
                         let slider = spec.slider.filter(|s| s.interact);
                         // Everything the pointer can do something with. A
                         // tooltip counts: hovering IS the interaction.
+                        pointer_wanted |= spec_wants_pointer(spec);
                         if spec.button
                             || slider.is_some()
                             || spec.field.is_some()
@@ -1108,6 +1154,10 @@ impl Editor {
                 }
             }
         }
+        // Published every frame, trapped or not — a shop that opens mid-fight
+        // has to be able to take the cursor back, and the trap can only give it
+        // back if somebody keeps asking.
+        self.ui_pointer_wanted = pointer_wanted;
         if let Some((id, next)) = wheel_target {
             let ent = self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == id);
             if let Some(e) = ent
@@ -2950,5 +3000,103 @@ impl Editor {
             world.insert(e, spec);
         }
         changed || c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floptle_ui::{Node, Size};
+
+    fn measure(_: &TextSpec) -> [f32; 2] {
+        [0.0, 0.0]
+    }
+
+    fn sized(spec: ElementSpec) -> ElementSpec {
+        ElementSpec { size: [Size::Fixed(100.0), Size::Fixed(40.0)], ..spec }
+    }
+
+    /// What the pointer can drive, and — just as important — what it can't.
+    #[test]
+    fn a_tooltip_is_not_a_menu_and_a_disabled_button_is_not_a_button() {
+        assert!(spec_wants_pointer(&ElementSpec { button: true, ..Default::default() }));
+        assert!(spec_wants_pointer(&ElementSpec { draggable: true, ..Default::default() }));
+        assert!(
+            !spec_wants_pointer(&ElementSpec {
+                button: true,
+                disabled: true,
+                ..Default::default()
+            }),
+            "a greyed-out button can't be clicked, so it is not a reason to give the cursor back"
+        );
+        assert!(
+            !spec_wants_pointer(&ElementSpec {
+                tooltip: "ammo".into(),
+                ..Default::default()
+            }),
+            "a HUD readout with a tooltip must not take the cursor off the crosshair"
+        );
+    }
+
+    /// The reason the frame answer is computed from PLACED elements: a closed
+    /// menu's buttons are still sitting in the world with `visible: true` on
+    /// them, and only the solver knows their panel is hidden.
+    #[test]
+    fn a_closed_menus_buttons_are_not_on_screen() {
+        let button = Node::with_children(
+            2,
+            sized(ElementSpec { button: true, ..Default::default() }),
+            vec![],
+        );
+        let panel = Node::with_children(
+            1,
+            sized(ElementSpec { visible: false, ..Default::default() }),
+            vec![button],
+        );
+        // The spec itself says "clickable" — a world query would stop here and
+        // wrongly conclude the game wants the pointer.
+        assert!(spec_wants_pointer(&panel.children[0].spec));
+        let placed = floptle_ui::solve(&[panel], [1280.0, 720.0], &measure);
+        assert!(placed.is_empty(), "a hidden panel places nothing, itself included");
+    }
+
+    /// The bug from the ledger, as a state machine: trapped with no UI up, then
+    /// the shop opens.
+    #[test]
+    fn a_menu_opening_mid_play_takes_the_cursor_back() {
+        let mut ed = Editor { playing: true, game_trap: true, ..Default::default() };
+        assert!(!ed.release_trap_for_ui(), "nothing clickable on screen: stay trapped");
+        assert!(ed.game_trap);
+        ed.ui_pointer_wanted = true; // the shop panel solved this frame
+        assert!(ed.release_trap_for_ui(), "the shop is up: hand the pointer back");
+        assert!(!ed.game_trap);
+        assert!(!ed.release_trap_for_ui(), "and it only fires once");
+    }
+
+    /// Free-look is a separate lock owner. A HUD button appearing releases the
+    /// trap, but must not drop a grab the game asked for itself.
+    #[test]
+    fn a_scripts_own_mouse_lock_survives_the_trap_being_released() {
+        let mut ed = Editor {
+            playing: true,
+            game_trap: true,
+            script_mouse_lock: true,
+            cursor_lock_soft: true,
+            ui_pointer_wanted: true,
+            ..Default::default()
+        };
+        assert!(ed.release_trap_for_ui());
+        assert!(ed.script_mouse_lock, "setMouseLocked(true) still holds");
+        assert!(ed.cursor_lock_soft, "so the OS grab stays");
+    }
+
+    /// Stopped means stopped: the trap is released elsewhere (and the pointer
+    /// answer is cleared), so this path must not fire on an editor that isn't
+    /// playing.
+    #[test]
+    fn a_stopped_editor_is_not_the_trap_releases_business() {
+        let mut ed =
+            Editor { playing: false, game_trap: true, ui_pointer_wanted: true, ..Default::default() };
+        assert!(!ed.release_trap_for_ui());
     }
 }

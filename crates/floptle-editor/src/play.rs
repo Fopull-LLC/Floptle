@@ -1236,7 +1236,7 @@ impl Editor {
         // live beside them rather than in one.
         let lights: Vec<floptle_core::Entity> =
             self.world.query::<floptle_core::Light>().map(|(e, _)| e).collect();
-        let incoming = doc.lighting.clone().to_light();
+        let incoming = doc.lighting.to_light();
         for e in lights {
             self.world.insert(e, incoming);
         }

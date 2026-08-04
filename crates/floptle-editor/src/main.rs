@@ -1324,6 +1324,15 @@ struct Editor {
     /// Game-UI interaction state: the element the pointer hovers / grabbed.
     ui_hover: Option<u32>,
     ui_active: Option<u32>,
+    /// Does the running game have anything on screen a POINTER drives — a
+    /// button, a slider, a text field, a draggable? Recomputed every frame from
+    /// the elements the layout actually placed, which is why it can be trusted
+    /// where a raw `ElementSpec` query cannot: `visible` doesn't cascade in the
+    /// ECS, so a query counts a button inside a hidden panel. This decides
+    /// whether clicking into the Game view traps the cursor, and — because a
+    /// menu can open two minutes into a session — whether an existing trap is
+    /// handed back (see `game_trap`).
+    ui_pointer_wanted: bool,
     /// The focused element (keyboard / gamepad). One at a time across every
     /// layer, the way focus works everywhere else. Cleared on Play start/stop
     /// so a menu never resumes with a stale ring.
@@ -2915,11 +2924,7 @@ impl ApplicationHandler for Editor {
                     // screen (a main menu's slot buttons, the ship's SAS cluster) the
                     // pointer IS the gameplay — trapping it froze the menu dead.
                     // Scripts still grab for free-look via input.setMouseLocked.
-                    let ui_interactive = self.ui_hover.is_some()
-                        || self
-                            .world
-                            .query::<floptle_ui::ElementSpec>()
-                            .any(|(_, s)| s.button && s.visible);
+                    let ui_interactive = self.ui_hover.is_some() || self.ui_pointer_wanted;
                     if self.playing
                         && !self.game_trap
                         && !ui_interactive

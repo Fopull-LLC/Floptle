@@ -540,6 +540,27 @@ Available while playing.
 | `input.scroll()` | wheel delta this frame |
 | `input.setMouseLocked(true)` | pin + hide the cursor (FPS mouselook); `false` releases. Also `input.lockMouse()` / `input.unlockMouse()` |
 
+### Getting the cursor back for your own menus
+
+Clicking into the Game view pins the pointer there, so playing doesn't let the
+mouse wander onto editor panels. The editor skips that if your game already has
+something clickable on screen — a menu's buttons *are* the gameplay, and pinning
+the pointer froze them dead.
+
+That question is asked **every frame**, so a shop or a pause menu that opens two
+minutes into a session takes the pointer back on its own; you don't have to do
+anything, and the player doesn't have to know that Escape was an option.
+
+`input.setMouseLocked(false)` also releases it explicitly, which is what to
+reach for if your menu is drawn some way the editor can't recognise as
+interactive (`draw.*`, a shader, your own hit-testing).
+
+> Before **0.26.0** the question was only asked at the click that pinned the
+> pointer. A game with no visible buttons during play — a twin-stick shooter,
+> anything cursor-free — could never get the cursor back, and `setMouseLocked`
+> did not release it either, because that is a separate lock owner. Its own
+> menus were unclickable for the rest of the session.
+
 Key names are **the same names the action map's key picker shows** (Project
 Settings ⏵ Input) — one list, so a key you can bind is a key you can poll:
 
