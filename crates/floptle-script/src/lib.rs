@@ -164,7 +164,7 @@ impl SceneRequest {
     pub fn name(&self) -> &str {
         match self {
             SceneRequest::Load { name }
-            | SceneRequest::Additive { name }
+            | SceneRequest::Additive { name, .. }
             | SceneRequest::Unload { name } => name,
         }
     }

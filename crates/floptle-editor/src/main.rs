@@ -2053,6 +2053,16 @@ struct Editor {
     /// scene for the session; Stop restores both alongside the snapshot so the
     /// editor's scene saves back to its own file, not the played one's.
     play_scene_name: Option<(String, String)>,
+    /// What an additive layer OWNING the world's environment borrowed, so
+    /// `scene.unload` can give it back: `(the layer's tag, the base scene's
+    /// Skybox/PostProcess nodes it put to sleep, the base scene's sun + fog)`.
+    ///
+    /// The sleeper LIST rather than "wake every environment node": that would
+    /// also undo one the author disabled on purpose. And the `Light` by value
+    /// because the base scene's file is not a reliable copy of it — a scene
+    /// edited since Play began, or one the session switched to, would restore
+    /// something the player never saw.
+    env_layer: Option<(String, Vec<Entity>, floptle_core::Light)>,
     /// Parsed prefab files by path (mtime-validated) — `spawn("…")` every tick
     /// must not re-read + re-parse the asset.
     prefab_cache: HashMap<std::path::PathBuf, (std::time::SystemTime, Vec<floptle_scene::NodeDoc>)>,

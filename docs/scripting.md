@@ -2476,13 +2476,45 @@ the world behind it, or keep a hub scene resident while a mission loads.
 
 - An additive scene brings **nodes only** — no second sun, skybox or
   post-processing chain. A world has one environment, and the base scene owns
-  it.
+  it. Unless you hand it over — see `environment` below.
 - `scene.unload(name)` removes exactly what the matching `load` brought, plus
   anything you parented under it (a projectile fired inside a room leaves with
   the room rather than becoming a child of nothing). The scene you opened is
   never a candidate — you cannot unload the world out from under yourself.
 - Additive loads and unloads are **local**, so a client may do them in a
   session. Only a full swap is the server's alone.
+
+#### `{ environment = true }` — letting the layer own the look
+
+```lua
+scene.load("weather/storm", { additive = true, environment = true })
+```
+
+The layer takes the world's environment over for as long as it is loaded: its
+scene-level `lighting` block (sun, shadows and **all** of the fog) replaces the
+base scene's, and its Skybox and PostProcess nodes replace the base scene's
+too. `scene.unload` gives every bit of it back.
+
+This exists because "nodes only" has one sharp edge. A Skybox *is* a node, so a
+layer carrying one does not fail — it quietly becomes the world's **second**
+skybox, and the renderer resolves both with a first-match query. Which one you
+get is then spawn order, which is the "the additive scene broke my lighting"
+failure the nodes-only rule was written to prevent. The option makes the
+handover explicit instead of leaving it to a race.
+
+- The base scene's environment nodes are **disabled, not destroyed** — they come
+  back on `unload` wearing exactly the values they were authored with. (A
+  disabled Skybox or PostProcess node is now skipped by the renderer generally,
+  which is what the Inspector's checkbox always implied.)
+- Load a second environment layer over the first and the second wins; unloading
+  it returns the **base scene's**, not the one it displaced. There is one
+  environment and one loan on it.
+- A full `scene.load` voids the loan — the world it applied to is gone.
+- It does nothing without `additive`; a swap already brings its own.
+
+**It does not carry map or paint sidecars.** Those are keyed by scene name and
+belong to the base scene, so a layer whose geometry is Map Mesh nodes arrives
+empty however its environment is set. Layer *look*, not blockout.
 - Several in one frame is fine and they all happen, in order. A full
   `scene.load` in the same frame ends the queue: everything behind it named a
   world that is about to stop existing.

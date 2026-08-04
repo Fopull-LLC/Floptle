@@ -663,6 +663,10 @@ impl Editor {
             if let Some(snap) = self.play_snapshot.take() {
                 self.restore(snap);
             }
+            // Any environment an additive layer was holding goes back with the
+            // rest of Play: the restored world is the authored one, whose
+            // environment was never lent out.
+            self.env_layer = None;
             // Paint belongs to the scene it was painted on. A switch swapped these for the
             // played scene's, and unlike terrain and map geometry they are far too big to
             // snapshot per Play — texture paint is images — so they come back off disk.
@@ -1002,6 +1006,10 @@ impl Editor {
         if !keepers.is_empty() {
             self.drop_duplicate_scene_singletons(&keep_ids);
         }
+        // Every additive layer went with the old world, so any environment loan
+        // is void — and its entity ids name a world that no longer exists. The
+        // scene just loaded owns its environment outright.
+        self.env_layer = None;
         self.set_scene_file(&path);
         self.adopt_terrain();
         // THE OUT-OF-DOCUMENT STORES, which a scene switch has to reload exactly as
@@ -1091,7 +1099,7 @@ impl Editor {
     /// tagged with the scene they came from, and wired into the running sim the
     /// same way a `spawn(...)`ed prefab is — which is what makes this cheap
     /// enough to use for streaming a level in pieces.
-    pub(crate) fn perform_scene_additive(&mut self, req: &str) {
+    pub(crate) fn perform_scene_additive(&mut self, req: &str, environment: bool) {
         let Some(path) = self.resolve_scene_request(req) else {
             self.console.push(
                 floptle_script::LogLevel::Error,
@@ -1116,6 +1124,11 @@ impl Editor {
         // copies carry the tag — `unload` then removes both, which is the only
         // answer that isn't arbitrary.
         let tag = req.trim().to_string();
+        // The handover happens BEFORE the layer's own nodes exist, so the
+        // environment being put to sleep is exactly the base scene's.
+        if environment {
+            self.take_environment(&doc, &tag);
+        }
         let ents = floptle_scene::spawn_additive(&doc, &mut self.world, &tag);
         if ents.is_empty() {
             self.console.push(
@@ -1170,6 +1183,86 @@ impl Editor {
         self.script_host.fire_scene_loaded(&mut self.world, &tag, true);
     }
 
+    /// Hand the world's environment to an additive layer
+    /// (`{ additive = true, environment = true }`).
+    ///
+    /// A world has ONE environment. Without this, a layer carrying a Skybox is
+    /// a second Skybox, and the renderer resolves both with a first-match query
+    /// (`shading::skybox_uniforms`) — so the look would be decided by spawn
+    /// order, which is the "the additive scene broke my lighting" failure the
+    /// nodes-only rule exists to prevent. This makes the handover EXPLICIT
+    /// instead: the base scene's environment steps aside, the layer's takes
+    /// over, and `scene.unload` puts the first one back.
+    ///
+    /// Its nodes are DISABLED rather than despawned, because a node that comes
+    /// back is a node whose authored values were never lost — and because the
+    /// base scene is not reloadable from disk mid-session without also undoing
+    /// everything else Play has done to it.
+    fn take_environment(&mut self, doc: &floptle_scene::SceneDoc, tag: &str) {
+        // A second environment layer over a first: the base's nodes are already
+        // asleep and its Light is already saved, so the loan must NOT be
+        // re-taken from the world (that would record the outgoing layer's
+        // environment as the base's, and unloading would restore the wrong
+        // one). Only the owning tag moves.
+        let first = self.env_layer.is_none();
+        let slept: Vec<floptle_core::Entity> = if first {
+            let sleepers: Vec<floptle_core::Entity> = self
+                .world
+                .query::<floptle_core::Matter>()
+                .filter(|(e, m)| {
+                    matches!(
+                        m,
+                        floptle_core::Matter::Skybox { .. }
+                            | floptle_core::Matter::PostProcess { .. }
+                    ) && self.world.get::<floptle_core::Disabled>(*e).is_none()
+                })
+                .map(|(e, _)| e)
+                .collect();
+            for &e in &sleepers {
+                self.world.insert(e, floptle_core::Disabled);
+            }
+            sleepers
+        } else {
+            // Keep the ORIGINAL loan; only its owner changes.
+            self.env_layer.as_ref().map(|(_, s, _)| s.clone()).unwrap_or_default()
+        };
+        let base_light = if first {
+            self.world.query::<floptle_core::Light>().map(|(_, l)| *l).next()
+        } else {
+            self.env_layer.as_ref().map(|(_, _, l)| *l)
+        };
+        // The scene-level block is the half an additive load cannot bring on
+        // its own: `spawn_additive` spawns nodes, and the sun + all of the fog
+        // live beside them rather than in one.
+        let lights: Vec<floptle_core::Entity> =
+            self.world.query::<floptle_core::Light>().map(|(e, _)| e).collect();
+        let incoming = doc.lighting.clone().to_light();
+        for e in lights {
+            self.world.insert(e, incoming);
+        }
+        self.env_layer = Some((tag.to_string(), slept, base_light.unwrap_or(incoming)));
+    }
+
+    /// Give the base scene's environment back when the layer holding it leaves.
+    ///
+    /// The layer's own Skybox/PostProcess nodes are already gone with it (they
+    /// carried its `SceneTag`), so only the sleepers have to wake.
+    fn return_environment(&mut self) {
+        let Some((_, slept, light)) = self.env_layer.take() else { return };
+        for e in slept {
+            // A node the layer's own lifetime outlived — the world may have
+            // despawned it since — is simply not there to wake.
+            if self.world.is_alive(e) {
+                self.world.remove::<floptle_core::Disabled>(e);
+            }
+        }
+        let lights: Vec<floptle_core::Entity> =
+            self.world.query::<floptle_core::Light>().map(|(e, _)| e).collect();
+        for e in lights {
+            self.world.insert(e, light);
+        }
+    }
+
     /// `scene.unload(name)` — remove an additively-loaded layer.
     ///
     /// Only nodes an additive load tagged are candidates: the scene you opened
@@ -1192,6 +1285,11 @@ impl Editor {
             return;
         }
         let n = floptle_scene::despawn_tagged(&mut self.world, &tag);
+        // If this layer held the environment, the base scene's comes back —
+        // after the despawn, so the nodes waking up are the only ones left.
+        if self.env_layer.as_ref().is_some_and(|(t, _, _)| *t == tag) {
+            self.return_environment();
+        }
         // Everything keyed by entity has to let go: physics bodies, audio
         // voices, effects, and the scripts that were running on them.
         self.rebuild_sim();

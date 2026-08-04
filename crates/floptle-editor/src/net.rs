@@ -714,8 +714,8 @@ impl Editor {
         // announced scene, its NetIds, its slot order) is untouched. A client
         // may do them; a swap is still the server's alone.
         match req {
-            SceneRequest::Additive { name } => {
-                self.perform_scene_additive(name);
+            SceneRequest::Additive { name, environment } => {
+                self.perform_scene_additive(name, *environment);
                 return;
             }
             SceneRequest::Unload { name } => {

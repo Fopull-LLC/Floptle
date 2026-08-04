@@ -448,8 +448,14 @@ pub(crate) type OccKey = (String, [i32; 4], [i32; 3]);
 pub(crate) fn skybox_uniforms(
     world: &floptle_core::World,
 ) -> ([f32; 4], [f32; 4], [[f32; 4]; 3], [f32; 3]) {
+    // A DISABLED Skybox is not the scene's sky. That matters beyond the
+    // Inspector's checkbox: it is how an additive layer loaded with
+    // `{ environment = true }` takes the environment over — the base scene's
+    // node steps aside rather than racing the layer's for this first match.
     let found = world.query::<Matter>().find_map(|(e, m)| match m {
-        Matter::Skybox { color, size, texture, tint, .. } => {
+        Matter::Skybox { color, size, texture, tint, .. }
+            if world.get::<floptle_core::Disabled>(e).is_none() =>
+        {
             Some((e, *color, *size, texture.is_some(), *tint))
         }
         _ => None,
@@ -498,7 +504,13 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
         posterize_bands: 0,
         posterize_dither: false,
     };
-    for (_, m) in world.query::<Matter>() {
+    for (e, m) in world.query::<Matter>() {
+        // Same rule as the skybox above: a disabled chain is not the scene's
+        // chain, so it is skipped rather than returning `off` — which would let
+        // a base scene's sleeping node veto the layer that replaced it.
+        if world.get::<floptle_core::Disabled>(e).is_some() {
+            continue;
+        }
         if let Matter::PostProcess {
             enabled,
             bloom,

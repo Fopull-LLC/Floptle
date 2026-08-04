@@ -759,11 +759,22 @@ impl ScriptHost {
                     // running one instead of replacing it. Anything else in the
                     // table is ignored rather than rejected, so the option set
                     // can grow without breaking a script that passed a table.
-                    let additive = opts
-                        .and_then(|o| o.get::<Option<bool>>("additive").ok().flatten())
-                        .unwrap_or(false);
+                    //
+                    // `{ environment = true }` additionally hands the world's
+                    // environment to the layer: its sun, fog, skybox and post
+                    // chain replace the base scene's for as long as it is
+                    // loaded. Meaningless without `additive` (a full swap
+                    // already brings its own), so it is read alongside it.
+                    let (additive, environment) = opts
+                        .map(|o| {
+                            (
+                                o.get::<Option<bool>>("additive").ok().flatten().unwrap_or(false),
+                                o.get::<Option<bool>>("environment").ok().flatten().unwrap_or(false),
+                            )
+                        })
+                        .unwrap_or((false, false));
                     let req = if additive {
-                        crate::SceneRequest::Additive { name }
+                        crate::SceneRequest::Additive { name, environment }
                     } else {
                         crate::SceneRequest::Load { name }
                     };
