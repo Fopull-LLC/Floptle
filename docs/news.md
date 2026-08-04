@@ -1,6 +1,15 @@
 ## Just shipped
 
-**v0.26.0 "Give It Back"** — a busy scene got much faster. Finding what a node
+**v0.27.0 "Same Everywhere"** — a pixel-art game can look the same in every
+window size. Two settings, both off by default: upscale the picture by a whole
+number and letterbox the rest, so every pixel is the same size instead of some
+being two screen pixels and some three; and pin the internal width, so a wide
+window stops showing 12% more of your level than a 16:9 one. UI layers get the
+same rule, which is what stops a pixel font being resampled off its own grid.
+Plus a fix for work a script queued on a session's last frame arriving in the
+next one.
+
+**v0.26.0 "Give It Back"** before it — a busy scene got much faster. Finding what a node
 has on it was a search through every node, so a scene's cost grew with the
 square of its size; it is now a direct lookup, and a 5,500-node scene went from
 60 ms a frame of pure lookups to 4. Nothing in your project changes. Alongside
@@ -9,7 +18,7 @@ mid-play used to be unclickable for the rest of the session — and sprites in a
 batch can squash and stretch, which is what a 2D game telegraphs an attack with.
 The 2D guide now says plainly, with numbers, when a batch stops being optional.
 
-**v0.25.0 "Follow Along"** before it — Floptle can teach you how to use it. A new
+**v0.25.0 "Follow Along"** under those — Floptle can teach you how to use it. A new
 **🎓 Learn** tab holds five follow-along tutorials that build a real game from an
 empty project, and because the editor can see what you've made, each step ticks
 itself off when you've actually done it — so you never get three steps past a
@@ -23,12 +32,12 @@ mesh — so the hairline gaps that open between tiles as the camera moves cannot
 happen — and sprite batches where every sprite carries its own colour, which is
 the difference between flashing an enemy red and blinking it off.
 
-**v0.24.1 "Plain Sight"** under those: two dozen buttons that had been drawing as
+**v0.24.1 "Plain Sight"**: two dozen buttons that had been drawing as
 empty boxes got their icons back, and the 188 scripting calls that had no
 description anywhere got one — plus a complete reference page and a search that
 finds what you typed.
 
-The release under both is **v0.24.0 "Say So"** — water you can float on and
+Under those, **v0.24.0 "Say So"** — water you can float on and
 freeze, scattered props that cost nothing, and scenes you can layer on top of
 each other rather than only swap between.
 
