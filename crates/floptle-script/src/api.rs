@@ -3260,13 +3260,12 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     {
         let scene = shared.scene.clone();
         let f = lua.create_function(move |lua, kind: String| {
+            // O(1) against the kind index (`floptle/0063`). Still the FIRST in
+            // scene order, because the index is built in scene order — call
+            // sites depend on which one they get.
             let found = {
                 let s = scene.borrow();
-                s.order
-                    .iter()
-                    .copied()
-                    .find(|e| s.scripts.get(e).map(|v| v.iter().any(|k| k == &kind)).unwrap_or(false))
-                    .map(|e| (e, kind.clone()))
+                s.by_kind.get(&kind).and_then(|v| v.first().copied()).map(|e| (e, kind.clone()))
             };
             Ok(match found {
                 Some((e, k)) => Value::Table(new_script_handle(lua, e, &k)?),
@@ -3286,13 +3285,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             lua.create_function(move |lua, kind: String| {
                 let ids: Vec<u32> = {
                     let s = scene.borrow();
-                    s.order
-                        .iter()
-                        .copied()
-                        .filter(|e| {
-                            s.scripts.get(e).map(|v| v.iter().any(|k| k == &kind)).unwrap_or(false)
-                        })
-                        .collect()
+                    s.by_kind.get(&kind).cloned().unwrap_or_default()
                 };
                 let arr = lua.create_table()?;
                 for (i, e) in ids.iter().enumerate() {
@@ -3311,11 +3304,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             lua.create_function(move |lua, tag: String| {
                 let ids: Vec<u32> = {
                     let s = scene.borrow();
-                    s.order
-                        .iter()
-                        .copied()
-                        .filter(|e| s.tags.get(e).map(|t| t.contains(&tag)).unwrap_or(false))
-                        .collect()
+                    s.by_tag.get(&tag).cloned().unwrap_or_default()
                 };
                 let arr = lua.create_table()?;
                 for (i, e) in ids.iter().enumerate() {

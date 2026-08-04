@@ -607,6 +607,10 @@ pub struct ScriptHost {
     /// (eid, script, var) combos already warned about failing the replication
     /// guardrails — so a hot loop doesn't spam the Console every tick.
     synced_warned: std::collections::HashSet<(u32, String, String)>,
+    /// `(script kind, param name)` already reported as stored-but-unread this
+    /// session, so a param carried on eighteen instances of the same script is
+    /// ONE Console line rather than eighteen (`floptle/0068`).
+    param_warned: std::collections::HashSet<(String, String)>,
     /// Entities whose scripts are SKIPPED this session (a networked CLIENT
     /// doesn't run server-authoritative nodes' scripts — their state arrives
     /// in snapshots; docs/netcode-design.md §6). Set by the driver.
@@ -811,6 +815,24 @@ pub(crate) struct SceneMirror {
     children: HashMap<u32, Vec<u32>>,
     /// Entity → the script kinds attached to it (for `node:getscript`).
     scripts: HashMap<u32, Vec<String>>,
+    /// script kind → every entity carrying it, IN SCENE ORDER — the index behind
+    /// `findScript` / `findScripts` (`floptle/0063`).
+    ///
+    /// These are the calls a gameplay codebase makes most, because they are how
+    /// one script reaches another and the alternative (an Inspector wire) does
+    /// not exist for a singleton sixteen panels want, for "is any craft being
+    /// flown", or for anything spawned at runtime. Walking the scene and
+    /// string-comparing per node made the cost of asking scale with the scene:
+    /// one real project issued 126 full-scene scans a frame, none of them
+    /// carelessly written.
+    ///
+    /// Scene order is load-bearing — `findScript` returns the FIRST, and call
+    /// sites depend on which — so this is built in the same pass and the same
+    /// order as `order` and `by_name`.
+    by_kind: HashMap<String, Vec<u32>>,
+    /// tag → every entity carrying it, in scene order. Same reasoning as
+    /// `by_kind`, for `findTagged`.
+    by_tag: HashMap<String, Vec<u32>>,
     /// Live transforms (read/written by node handles; flushed to the ECS after `run`).
     transforms: HashMap<u32, Transform>,
     /// Mesh nodes' current model path (so a script can read `node.model`).
@@ -2250,6 +2272,144 @@ end
         assert!(
             world.get::<floptle_core::Sprites>(batch).is_some_and(|s| s.0.is_empty()),
             "sprites must not survive a frame nobody drew them"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A scene param the script no longer declares is stored and never read —
+    /// and from the outside that is indistinguishable from a script whose
+    /// numbers do nothing (`floptle/0068`). One line, once per session.
+    #[test]
+    fn a_scene_param_the_script_does_not_declare_says_so_once() {
+        let dir = std::env::temp_dir().join(format!("floptle_0068_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "tool", "defaults = { reach = 4.0 }\nfunction update(node, dt)\nend\n");
+        let mut world = World::default();
+        // Three instances of the same script, all carrying the stale param —
+        // eighteen `sas_button`s must not be eighteen identical lines.
+        for i in 0..3 {
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(e, floptle_core::Name(format!("Belt{i}")));
+            world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+                kind: "tool".into(),
+                enabled: true,
+                params: vec![("reach".into(), 6.0), ("laser_range".into(), 26.0)],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]));
+        }
+        let mut host = ScriptHost::new();
+        host.set_scene_name("system");
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        let warns: Vec<String> = host
+            .drain_logs()
+            .into_iter()
+            .filter(|l| matches!(l.level, LogLevel::Warn))
+            .map(|l| l.msg)
+            .collect();
+        assert_eq!(warns.len(), 1, "once per (script, param), not per instance: {warns:?}");
+        let w = &warns[0];
+        assert!(w.contains("laser_range"), "it names the param: {w}");
+        assert!(w.contains("system"), "…the scene: {w}");
+        assert!(w.contains("Belt"), "…the node: {w}");
+        assert!(w.contains("tool"), "…and the script: {w}");
+        assert!(!w.contains("reach"), "a param the script DOES declare is not reported: {w}");
+
+        // Still silent on later passes — a warning per frame is a warning
+        // nobody reads.
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        assert!(
+            host.drain_logs().iter().all(|l| !matches!(l.level, LogLevel::Warn)),
+            "reported once, not every frame"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The kind/tag index behind `findScript` (`floptle/0063`) has to answer
+    /// exactly what the scan answered — FIRST IN SCENE ORDER — and it has to
+    /// keep answering it after the scene changes. A stale index handing back a
+    /// dead handle would be worse than the scan it replaced.
+    #[test]
+    fn the_script_index_answers_in_scene_order_and_follows_the_scene() {
+        let dir = std::env::temp_dir().join(format!("floptle_0063_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "manager",
+            "defaults = { id = 0 }\nfunction start(node)\n  myId = params.id\nend\n",
+        );
+        write_script(
+            &dir,
+            "probe",
+            "\
+function update(node, dt)
+  local one = findScript('manager')
+  log(string.format('%d %d %d', one and one.myId or -1,
+                    #findScripts('manager'), #findTagged('crew')))
+end
+",
+        );
+        let (mut world, _driver) = world_with_script("probe");
+        let mut managers = Vec::new();
+        for i in 0..3 {
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(e, floptle_core::Name(format!("m{i}")));
+            world.insert(e, floptle_core::Tags(vec!["crew".into()]));
+            world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+                kind: "manager".into(),
+                enabled: true,
+                params: vec![("id".into(), i as f32)],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]));
+            managers.push(e);
+        }
+        let mut host = ScriptHost::new();
+        // The script logs `first all tagged`; the last line is this pass's.
+        let answer = |host: &mut ScriptHost, world: &mut World, t: f32| -> (i32, i32, i32) {
+            host.run(world, &dir, 1.0 / 60.0, t);
+            assert!(host.errors().is_empty(), "{:?}", host.errors());
+            let last = host.drain_logs().pop().expect("the probe logged");
+            let n: Vec<i32> = last.msg.split_whitespace().map(|s| s.parse().unwrap()).collect();
+            (n[0], n[1], n[2])
+        };
+        // One pass to build every environment and seed its params; the reads
+        // that matter come after.
+        let _ = answer(&mut host, &mut world, 0.0);
+        assert_eq!(
+            answer(&mut host, &mut world, 1.0 / 60.0),
+            (0, 3, 3),
+            "the FIRST manager in scene order, and all three found"
+        );
+
+        // Despawn the first one: the index must follow, and the answer becomes
+        // the next in order rather than a handle to something that is gone.
+        // Despawn the first: the index must follow. WHICH survivor answers is
+        // the ECS column's business (a despawn swaps the last row into the
+        // hole, and the scan this replaced read the same order) — the
+        // guarantee is that it is never the dead one.
+        world.despawn(managers[0]);
+        let (first, all, tagged) = answer(&mut host, &mut world, 2.0 / 60.0);
+        assert!(first == 1 || first == 2, "a SURVIVING manager, not the despawned one: {first}");
+        assert_eq!((all, tagged), (2, 2), "the index followed the despawn");
+
+        // …and a script removed in the Inspector stops being found, while the
+        // node itself (and its tag) stays.
+        // A script removed in the Inspector stops being found; the node and
+        // its tag stay.
+        world.insert(managers[1], Scripts(Vec::new()));
+        let (first, all, tagged) = answer(&mut host, &mut world, 3.0 / 60.0);
+        assert_eq!((first, all, tagged), (2, 1, 2), "one manager script left, both tags stay");
+
+        // Nothing at all: an empty answer, not a stale one.
+        world.insert(managers[2], Scripts(Vec::new()));
+        assert_eq!(
+            answer(&mut host, &mut world, 4.0 / 60.0),
+            (-1, 0, 2),
+            "an empty answer, not a stale one"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

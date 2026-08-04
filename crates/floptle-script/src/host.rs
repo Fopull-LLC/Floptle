@@ -1909,6 +1909,7 @@ impl ScriptHost {
             net,
             synced_stores,
             synced_warned: std::collections::HashSet::new(),
+            param_warned: std::collections::HashSet::new(),
             script_skip: std::collections::HashSet::new(),
             frame_skip: std::collections::HashSet::new(),
             driver_skip: std::collections::HashSet::new(),
@@ -3059,6 +3060,7 @@ impl ScriptHost {
         *self.net.state.borrow_mut() = crate::NetState::default();
         *self.net.rewind.borrow_mut() = None;
         self.synced_warned.clear();
+        self.param_warned.clear();
     }
 
     /// Build the `synced` proxy for an instance whose script declares
@@ -4123,6 +4125,8 @@ impl ScriptHost {
         s.ui_textures.clear();
         s.tilemaps.clear();
         s.sprite_batches.clear();
+        s.by_kind.clear();
+        s.by_tag.clear();
         for (e, tr) in world.query::<Transform>() {
             let id = e.index();
             s.order.push(id);
@@ -4178,6 +4182,9 @@ impl ScriptHost {
                 s.layers.insert(id, l.0.clone());
             }
             if let Some(t) = world.get::<floptle_core::Tags>(e) {
+                for tag in &t.0 {
+                    s.by_tag.entry(tag.clone()).or_default().push(id);
+                }
                 s.tags.insert(id, t.0.clone());
             }
             if let Some(n) = world.get::<floptle_core::Name>(e) {
@@ -4190,6 +4197,9 @@ impl ScriptHost {
                 s.children.entry(pid).or_default().push(id);
             }
             if let Some(sc) = world.get::<Scripts>(e) {
+                for inst in &sc.0 {
+                    s.by_kind.entry(inst.kind.clone()).or_default().push(id);
+                }
                 s.scripts.insert(id, sc.0.iter().map(|i| i.kind.clone()).collect());
             }
         }
@@ -4330,6 +4340,77 @@ impl ScriptHost {
     /// Run one already-ensured `(entity, script)` instance's lifecycle for
     /// `pass` — per-frame (`start`/`update`), per-gameplay-tick
     /// (`fixedUpdate`), or post-physics (`lateUpdate`).
+    /// Report a scene param the script no longer declares — once per
+    /// `(script, param)` per session (`floptle/0068`).
+    ///
+    /// **Why this is worth a line in the Console.** A scene's `params:` list
+    /// overrides a script's `defaults`. An entry naming something the script
+    /// does not declare is not an error today — it is simply a value nobody
+    /// reads. Both that and its sibling (a name the script DOES still declare,
+    /// pinned to whatever it was when the scene was saved) look identical from
+    /// the outside: you change a number in the script, press Play, and nothing
+    /// happens. One real case cost two rounds of "the laser still feels wrong"
+    /// spent editing numbers the game was never reading.
+    ///
+    /// This catches the cheap half — the name that means nothing any more. The
+    /// pinned half is the Inspector's to show, because there the value is
+    /// legitimate and only its AGE is wrong.
+    fn warn_unread_params(
+        &mut self,
+        eid: u32,
+        kind: &str,
+        params: &[(String, f32)],
+        strs: &[(String, String)],
+        env: &Table,
+    ) {
+        if params.is_empty() && strs.is_empty() {
+            return;
+        }
+        let declared = env.get::<Table>("defaults").ok();
+        let known = |k: &str| {
+            declared.as_ref().is_some_and(|d| {
+                !matches!(d.get::<Value>(k), Ok(Value::Nil) | Err(_))
+            })
+        };
+        let unread: Vec<String> = params
+            .iter()
+            .map(|(k, _)| k)
+            .chain(strs.iter().map(|(k, _)| k))
+            .filter(|k| !known(k))
+            .filter(|k| self.param_warned.insert((kind.to_string(), (*k).to_string())))
+            .cloned()
+            .collect();
+        if unread.is_empty() {
+            return;
+        }
+        let node = self
+            .scene
+            .borrow()
+            .names
+            .get(&eid)
+            .cloned()
+            .unwrap_or_else(|| format!("node {eid}"));
+        let scene = self.scene_name.borrow().clone();
+        let where_ = if scene.is_empty() {
+            format!("{node} · {kind}")
+        } else {
+            format!("{scene} · {node} · {kind}")
+        };
+        let list = unread.join(", ");
+        let (is, does) = if unread.len() == 1 { ("is", "does") } else { ("are", "do") };
+        self.logs.borrow_mut().push(crate::ScriptLog {
+            level: crate::LogLevel::Warn,
+            msg: format!(
+                "{where_}: the scene sets {list}, which the script no longer declares — \
+                 {is} stored and never read. Delete the param, or add it to `defaults` if \
+                 it {does} belong."
+            ),
+            // Line 0: the param is in the SCENE file, not on a line of the
+            // script — pointing at line 1 would send you to the wrong file.
+            source: Some((kind.to_string(), 0)),
+        });
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn tick_instance(
         &mut self,
@@ -4360,6 +4441,9 @@ impl ScriptHost {
             (first, env, inst.node.take())
         };
         let eid = e.index();
+        if first {
+            self.warn_unread_params(eid, name, params, strs, &env);
+        }
         let body = self.bodies.borrow().get(&eid).copied();
         // Resolve reference params by NAME through the O(1) index — per tick, so
         // a target spawned or renamed mid-play rebinds automatically. The KIND
