@@ -333,7 +333,12 @@ struct Instance {
     /// re-stamped rather than rebuilt, so a handle a script stashed in `start()` keeps
     /// reading the live transform. `stamp` is what the engine last wrote into it, so a
     /// write made from outside a hook can be told apart from an untouched field.
-    node: Option<(mlua::Table, crate::env::NodeStamp)>,
+    ///
+    /// A `RegistryKey` and not a live `Table` for the same reason `env` is: a
+    /// Table held from Rust costs a slot on mlua's bounded auxiliary ref stack,
+    /// and one per instance put a hard ceiling of a few thousand scripted nodes
+    /// on a scene — reached as a PANIC (`floptle/0069`).
+    node: Option<(RegistryKey, crate::env::NodeStamp)>,
 }
 
 /// Embeds Lua and runs the scripts attached to a world's nodes.
@@ -375,6 +380,11 @@ pub struct ScriptHost {
     body_pos_changes: Rc<RefCell<HashMap<u32, [f64; 3]>>>,
     /// This frame's sprite-batch draws (see `Shared::sprite_draws`).
     sprite_draws: Rc<RefCell<HashMap<u32, Vec<floptle_core::Sprite>>>>,
+    /// How many sprites the last flush wrote into the ECS, so a pass that drew
+    /// nothing new skips the write — and the full-world scan that finds the
+    /// batches. `None` at the frame boundary forces one write per frame even
+    /// when the count is unchanged. See the flush in `host.rs`.
+    sprites_written: Option<usize>,
     /// `node:setShaderParam(name, x, y, z, w)` writes — (entity index, uniform
     /// name, vec4 lanes), drained by the editor into the node's Material or UI
     /// ElementSpec `shader_params` (the per-frame shader drivers then upload).
@@ -416,8 +426,9 @@ pub struct ScriptHost {
     rich_sets: Rc<RefCell<Vec<(u32, RichSet)>>>,
     /// The scene graph mirror the node handles read/write (synced each `run`).
     scene: Rc<RefCell<SceneMirror>>,
-    /// Live per-(entity, script) environments, for script handles.
-    envs: Rc<RefCell<HashMap<(u32, String), Table>>>,
+    /// Live per-(entity, script) environments, for script handles. Registry
+    /// keys — see the note on the `Shared` copy of this field.
+    envs: Rc<RefCell<HashMap<(u32, String), RegistryKey>>>,
     /// Mesh model paths scripts wrote this frame (entity index → new asset path), applied
     /// to the ECS `Matter::Mesh` in `run` and drained by the editor to re-import the GPU mesh.
     model_changes: Rc<RefCell<HashMap<u32, String>>>,
@@ -965,9 +976,16 @@ struct Shared {
     sprite_draws: Rc<RefCell<HashMap<u32, Vec<floptle_core::Sprite>>>>,
     /// `node:setShaderParam(...)` writes, drained by the editor per frame.
     shader_param_sets: ShaderParamSets,
-    /// (entity index, script kind) → that instance's live Lua environment table, so a
+    /// (entity index, script kind) → that instance's live Lua environment, so a
     /// script handle can read its state, call its methods, and read its params.
-    envs: Rc<RefCell<HashMap<(u32, String), Table>>>,
+    ///
+    /// A `RegistryKey`, resolved to a `Table` at each use. It held the `Table`
+    /// directly until a Table alive in Rust turned out to cost a slot on mlua's
+    /// AUXILIARY ref stack, which is bounded near 8,000 — so a scene of a few
+    /// thousand scripted nodes exhausted it and the engine PANICKED, in the
+    /// editor, where unsaved work lives (`floptle/0069`). The registry is an
+    /// ordinary Lua table with no such bound, and the key drops itself.
+    envs: Rc<RefCell<HashMap<(u32, String), RegistryKey>>>,
     /// `node.model = ...` writes (entity index → asset path), applied to `Matter::Mesh`.
     model_changes: Rc<RefCell<HashMap<u32, String>>>,
     /// `node.material = ...` writes (entity index → preset name / asset path).
@@ -2276,6 +2294,141 @@ end
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A sprite survives to the end of the FRAME whichever pass drew it
+    /// (`floptle/0070`).
+    ///
+    /// The batches used to be emptied after every pass, so the fixed pass wiped
+    /// whatever `update` drew and the late pass wiped that — leaving `lateUpdate`
+    /// as the only place a draw survived, silently, with no error and nothing on
+    /// screen. `update` is where every tutorial puts per-frame work and where
+    /// `draw.*` goes, so the one obvious spelling was the one that could not work.
+    #[test]
+    fn a_sprite_drawn_in_any_pass_survives_the_frame() {
+        let dir = std::env::temp_dir().join(format!("floptle_0070_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "render",
+            "\
+frames = 0
+function start(node)
+  node:setSpriteBatch{ size = 1.0 }
+  find('Fixed'):setSpriteBatch{ size = 1.0 }
+  find('Late'):setSpriteBatch{ size = 1.0 }
+end
+
+-- One batch per pass, so a wipe by a LATER pass is visible as an empty list
+-- rather than hidden by the next pass redrawing the same thing.
+function update(node, dt)
+  frames = frames + 1
+  if frames > 2 then return end     -- …and then the game stops drawing entirely
+  node:sprites():draw(1, 1)
+  node:sprites():draw(2, 2)
+end
+
+function fixedUpdate(node, dt)
+  if frames > 2 then return end
+  find('Fixed'):sprites():draw(3, 3)
+end
+
+function lateUpdate(node, dt)
+  if frames > 2 then return end
+  find('Late'):sprites():draw(4, 4)
+end
+",
+        );
+        let (mut world, e) = world_with_script("render");
+        world.insert(e, floptle_core::Name("Frame".into()));
+        world.insert(e, floptle_core::Matter::Empty);
+        let mut named = |n: &str| {
+            let b = world.spawn();
+            world.insert(b, Transform::IDENTITY);
+            world.insert(b, floptle_core::Name(n.into()));
+            world.insert(b, floptle_core::Matter::Empty);
+            b
+        };
+        let fixed = named("Fixed");
+        let late = named("Late");
+
+        let mut host = ScriptHost::new();
+        let count = |world: &World, b| {
+            world.get::<floptle_core::Sprites>(b).map(|s| s.0.len()).unwrap_or(0)
+        };
+        // The driver's whole frame, in its real order.
+        for f in 0..2 {
+            let t = f as f32 / 60.0;
+            host.run(&mut world, &dir, 1.0 / 60.0, t);
+            host.run_fixed(&mut world, 1.0 / 60.0, t);
+            host.run_late(&mut world, 1.0 / 60.0, t);
+            assert!(host.errors().is_empty(), "{:?}", host.errors());
+
+            assert_eq!(count(&world, e), 2, "frame {f}: the `update` draws survived to the end");
+            assert_eq!(count(&world, fixed), 1, "frame {f}: so did the `fixedUpdate` draw");
+            assert_eq!(count(&world, late), 1, "frame {f}: and the `lateUpdate` draw");
+        }
+
+        // Still immediate mode: the frame is the unit, so a frame nobody draws
+        // in clears every batch — no pool to grow, nothing to `clear()`.
+        host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
+        host.run_fixed(&mut world, 1.0 / 60.0, 2.0 / 60.0);
+        host.run_late(&mut world, 1.0 / 60.0, 2.0 / 60.0);
+        for (b, who) in [(e, "update"), (fixed, "fixedUpdate"), (late, "lateUpdate")] {
+            assert_eq!(count(&world, b), 0, "a frame with no draws empties the {who} batch");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A scene of thousands of scripted nodes runs (`floptle/0069`).
+    ///
+    /// It used to PANIC — `out of auxiliary stack space (used 7999 slots)` —
+    /// because the host held a live `mlua::Table` per instance in two places,
+    /// and each one costs a slot on a ref stack bounded near 8,000. Two holds
+    /// put the ceiling around four thousand, which a probe hit and a game
+    /// eventually would have. Registry keys have no such bound.
+    ///
+    /// 6,000 because it is comfortably past the old ceiling while staying a
+    /// second-ish test; `examples/auxstack_probe` runs it to 20,000 and shows
+    /// which of the two ways of holding a Lua value is the one that runs out.
+    #[test]
+    fn thousands_of_scripted_nodes_do_not_exhaust_lua() {
+        let dir = std::env::temp_dir().join(format!("floptle_0069_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "prop", "n = 0\nfunction update(node, dt)\n  n = n + 1\nend\n");
+
+        const NODES: usize = 6_000;
+        let mut world = World::default();
+        let mut last = None;
+        for i in 0..NODES {
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(e, floptle_core::Name(format!("prop{i}")));
+            world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+                kind: "prop".into(),
+                enabled: true,
+                params: Vec::new(),
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]));
+            last = Some(e);
+        }
+        let mut host = ScriptHost::new();
+        // Two frames: the first builds every environment, the second proves they
+        // are all still reachable — a registry key that was dropped on the way in
+        // would read as a script that silently stopped running.
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+
+        let last = last.expect("nodes");
+        let env = host.instance_env(last.index(), "prop").expect("the LAST instance still resolves");
+        assert_eq!(
+            env.get::<f64>("n").unwrap(),
+            2.0,
+            "every instance ran both frames, including the ones past the old ceiling"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A scene param the script no longer declares is stored and never read —
     /// and from the outside that is indistinguishable from a script whose
     /// numbers do nothing (`floptle/0068`). One line, once per session.
@@ -3357,11 +3510,7 @@ end
         host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
         // The health script's state took the damage call.
-        let hp: f64 = {
-            let key = (dummy.index(), "health".to_string());
-            let env = host.envs.borrow().get(&key).cloned().unwrap();
-            env.get("hp").unwrap()
-        };
+        let hp: f64 = host.instance_env(dummy.index(), "health").unwrap().get("hp").unwrap();
         assert_eq!(hp, 25.0);
         assert_eq!(world.get::<RigidBody>(dummy).unwrap().friction, 0.05);
         assert_eq!(world.get::<Transform>(attacker).unwrap().translation.x, 1.0);

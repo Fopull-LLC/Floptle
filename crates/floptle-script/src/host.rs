@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use floptle_core::transform::Transform;
 use floptle_core::{Entity, Material, Matter, Scripts, Visible, World};
-use mlua::{Lua, Table, Value, Variadic};
+use mlua::{Lua, RegistryKey, Table, Value, Variadic};
 
 use crate::api::{apply_component_field, mirror_components};
 use crate::env::{
@@ -1833,6 +1833,7 @@ impl ScriptHost {
             body_height_changes: shared.body_height_changes.clone(),
             body_pos_changes: shared.body_pos_changes.clone(),
             sprite_draws: shared.sprite_draws.clone(),
+            sprites_written: None,
             shader_param_sets: shared.shader_param_sets.clone(),
             colliders,
             hulls,
@@ -2705,7 +2706,7 @@ impl ScriptHost {
             .borrow()
             .iter()
             .filter(|((id, _), _)| *id == eid)
-            .map(|((_, kind), env)| (kind.clone(), env.clone()))
+            .filter_map(|((_, kind), key)| Some((kind.clone(), self.env_of(key)?)))
             .collect();
         let mut called = false;
         for (kind, env) in targets {
@@ -2826,7 +2827,7 @@ impl ScriptHost {
             .borrow()
             .iter()
             .filter(|((id, _), _)| *id == eid)
-            .map(|((_, kind), env)| (kind.clone(), env.clone()))
+            .filter_map(|((_, kind), key)| Some((kind.clone(), self.env_of(key)?)))
             .collect();
         if targets.is_empty() {
             return;
@@ -2893,7 +2894,7 @@ impl ScriptHost {
         sender: u64,
     ) {
         let targets: Vec<((u32, String), Table)> =
-            self.envs.borrow().iter().map(|(k, env)| (k.clone(), env.clone())).collect();
+            self.envs.borrow().iter().filter_map(|(k, key)| Some((k.clone(), self.env_of(key)?))).collect();
         let mut called = false;
         for ((eid, kind), env) in targets {
             // raw_get: never fall through the env metatable to globals.
@@ -3195,7 +3196,16 @@ impl ScriptHost {
     /// A live `(entity, script)` environment table, if built — for tests and
     /// tooling that read a script's state from Rust.
     pub fn instance_env(&self, eid: u32, kind: &str) -> Option<Table> {
-        self.envs.borrow().get(&(eid, kind.to_string())).cloned()
+        self.env_of(self.envs.borrow().get(&(eid, kind.to_string()))?)
+    }
+
+    /// Resolve a stored environment key to its Lua table.
+    ///
+    /// The one place the registry indirection is paid, and it is paid at USE
+    /// rather than held: see the note on `Shared::envs` for why holding it
+    /// capped how many scripted nodes a scene could have (`floptle/0069`).
+    fn env_of(&self, key: &RegistryKey) -> Option<Table> {
+        self.lua.registry_value::<Table>(key).ok()
     }
 
     /// Every script kind on `eid`, in the order the instances run. The rollback
@@ -3207,7 +3217,7 @@ impl ScriptHost {
             .borrow()
             .iter()
             .filter(|((id, _), _)| *id == eid)
-            .map(|((_, kind), env)| (kind.clone(), env.clone()))
+            .filter_map(|((_, kind), key)| Some((kind.clone(), self.env_of(key)?)))
             .collect();
         // `envs` is a HashMap; a rollback must be reproducible, and "which
         // script's restore ran first" is observable when two scripts on a node
@@ -3524,8 +3534,13 @@ impl ScriptHost {
     pub fn run(&mut self, world: &mut World, scripts_dir: &Path, dt: f32, time: f32) {
         self.errors.clear();
         // Gizmos are immediate mode — a fresh frame starts empty even if the last
-        // frame's batch was never drained.
+        // frame's batch was never drained. Sprite-batch draws are the same
+        // contract and so are cleared in the same place: every pass of the
+        // frame may draw, and the frame boundary — here — is the only thing
+        // that empties them (`floptle/0070`).
         self.gizmos.borrow_mut().clear();
+        self.sprite_draws.borrow_mut().clear();
+        self.sprites_written = None;
         for inst in self.instances.values_mut() {
             inst.seen = false;
         }
@@ -3836,24 +3851,44 @@ impl ScriptHost {
                 crate::api::apply_rich_sets(world, &ents, sets);
             }
         }
-        // 2D sprite batches (`floptle/0058`). IMMEDIATE MODE: whatever the
-        // scripts drew this pass becomes the node's whole set of sprites, and a
-        // batch nobody drew to this pass draws nothing. That is what makes
-        // `b:draw` behave like `draw.*` — no retained list, so no pool to grow
-        // and no `clear()` anyone can forget on the frame a wave dies.
+        // 2D sprite batches (`floptle/0058`). IMMEDIATE MODE, scoped to the
+        // FRAME: whatever the scripts drew since the frame began is the node's
+        // whole set of sprites, and a batch nobody drew to all frame draws
+        // nothing. That is what makes `b:draw` behave like `draw.*` — no
+        // retained list, so no pool to grow and no `clear()` anyone can forget
+        // on the frame a wave dies.
+        //
+        // The frame, not the pass, is the unit — and that distinction was worth
+        // a silent, total blackout (`floptle/0070`). Emptying per pass meant
+        // the fixed and late passes wiped whatever `update` drew, so a game
+        // that put its renderer where every tutorial puts per-frame work saw
+        // nothing at all: not a flicker, not a subset, every batch in the game.
+        // `draw.rect` and `draw.line` are drained once a frame by the driver
+        // and always behaved this way; these are described in the same sentence
+        // in the docs and now have the same lifetime to go with it.
+        //
+        // `sprites_written` is how a pass that drew nothing new costs nothing:
+        // the accumulator only grows within a frame, so an unchanged total
+        // means unchanged contents. It is reset (not zeroed) at the frame
+        // boundary, because a frame that happens to draw the same NUMBER of
+        // sprites as the last one is still drawing them somewhere else.
         {
-            let drawn = std::mem::take(&mut *self.sprite_draws.borrow_mut());
-            let batches: Vec<(Entity, u32)> = world
-                .query::<Matter>()
-                .filter(|(_, m)| matches!(m, Matter::SpriteBatch { .. }))
-                .map(|(e, _)| (e, e.index()))
-                .collect();
-            for (ent, id) in batches {
-                let list = drawn.get(&id).cloned().unwrap_or_default();
-                match world.get_mut::<floptle_core::Sprites>(ent) {
-                    Some(slot) => slot.0 = list,
-                    None => world.insert(ent, floptle_core::Sprites(list)),
+            let drawn = self.sprite_draws.borrow();
+            let n: usize = drawn.values().map(Vec::len).sum();
+            if self.sprites_written != Some(n) {
+                let batches: Vec<(Entity, u32)> = world
+                    .query::<Matter>()
+                    .filter(|(_, m)| matches!(m, Matter::SpriteBatch { .. }))
+                    .map(|(e, _)| (e, e.index()))
+                    .collect();
+                for (ent, id) in batches {
+                    let list = drawn.get(&id).cloned().unwrap_or_default();
+                    match world.get_mut::<floptle_core::Sprites>(ent) {
+                        Some(slot) => slot.0 = list,
+                        None => world.insert(ent, floptle_core::Sprites(list)),
+                    }
                 }
+                self.sprites_written = Some(n);
             }
         }
         // Persist `params.X = ...` writes into the node's stored ScriptInst —
@@ -4036,7 +4071,7 @@ impl ScriptHost {
                 .borrow()
                 .iter()
                 .filter(|((e, _), _)| e == eid)
-                .map(|((_, kind), env)| (kind.clone(), env.clone()))
+                .filter_map(|((_, kind), key)| Some((kind.clone(), self.env_of(key)?)))
                 .collect();
             for (kind, env) in envs {
                 let f = match env.get::<Value>(*hook) {
@@ -4333,7 +4368,10 @@ impl ScriptHost {
             let _ = env.set("node", h);
         }
         // Publish the live environment for other scripts' handles.
-        self.envs.borrow_mut().insert((e.index(), name.to_string()), env);
+        // Published as a registry key: a live `Table` per instance is what the
+        // auxiliary ref stack runs out of (`floptle/0069`).
+        let Ok(key) = self.lua.create_registry_value(&env) else { return false };
+        self.envs.borrow_mut().insert((e.index(), name.to_string()), key);
         true
     }
 
@@ -4627,7 +4665,7 @@ impl ScriptHost {
         eid: u32,
         body: Option<BodyState>,
         pass: Pass,
-        slot: &mut Option<(Table, crate::env::NodeStamp)>,
+        slot: &mut Option<(RegistryKey, crate::env::NodeStamp)>,
     ) -> mlua::Result<()> {
         env.set("params", params_table(&self.lua, env, params, refs, strs)?)?;
         env.set("time", time as f64)?;
@@ -4635,13 +4673,24 @@ impl ScriptHost {
 
         // ONE node table per instance, re-stamped each hook — see `node_table`. A handle
         // kept from `start()` is therefore the same table, and stays live.
-        let node = match slot {
-            // Entity indices are reused after a despawn; a table tagged with a different
-            // one is not this node's, so start over.
-            Some((t, _)) if t.raw_get::<u32>("__id").ok() == Some(eid) => t.clone(),
-            _ => {
+        // Held as a REGISTRY key, not a live `Table`, and resolved here — a
+        // `Table` alive in Rust occupies a slot on mlua's auxiliary ref stack,
+        // which is bounded at ~8,000, and one per script instance is a hard
+        // ceiling on how big a scene may be (`floptle/0069`). The registry has
+        // no such bound. Resolving costs one raw index, the same thing the
+        // instance's env two lines up already does every tick.
+        let cached =
+            slot.as_ref().and_then(|(k, _)| self.lua.registry_value::<Table>(k).ok()).filter(
+                // Entity indices are reused after a despawn; a table tagged with a
+                // different one is not this node's, so start over.
+                |t| t.raw_get::<u32>("__id").ok() == Some(eid),
+            );
+        let node = match cached {
+            Some(t) => t,
+            None => {
                 let t = node_table(&self.lua, eid, tr, body)?;
-                *slot = Some((t.clone(), crate::env::node_stamp(&t, tr)));
+                *slot =
+                    Some((self.lua.create_registry_value(&t)?, crate::env::node_stamp(&t, tr)));
                 t
             }
         };
@@ -4705,9 +4754,9 @@ impl ScriptHost {
         // Record what the table holds now, whatever happened — an errored hook's partial
         // writes are discarded (the read-back below is skipped), so they must not read as
         // pending writes on the next hook either.
-        let finish = |slot: &mut Option<(Table, crate::env::NodeStamp)>, tr: &Transform| {
-            if let Some((t, stamp)) = slot.as_mut() {
-                *stamp = crate::env::node_stamp(t, tr);
+        let finish = |slot: &mut Option<(RegistryKey, crate::env::NodeStamp)>, tr: &Transform| {
+            if let Some((_, stamp)) = slot.as_mut() {
+                *stamp = crate::env::node_stamp(&node, tr);
             }
         };
         match ran {

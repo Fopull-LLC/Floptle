@@ -3169,7 +3169,9 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 }
                 _ => {}
             }
-            let env = envs.borrow().get(&(e, name)).cloned();
+            // Resolved from the registry rather than held as a live table —
+            // see `Shared::envs` (`floptle/0069`).
+            let env = envs.borrow().get(&(e, name)).and_then(|k| lua.registry_value::<Table>(k).ok());
             match env {
                 Some(env) => env.get::<Value>(key),
                 None => Ok(Value::Nil),
@@ -3179,10 +3181,10 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     }
     {
         let envs = shared.envs.clone();
-        let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
+        let newidx = lua.create_function(move |lua, (this, key, val): (Table, String, Value)| {
             let e: u32 = this.raw_get("__id")?;
             let name: String = this.raw_get("__script")?;
-            let env = envs.borrow().get(&(e, name)).cloned();
+            let env = envs.borrow().get(&(e, name)).and_then(|k| lua.registry_value::<Table>(k).ok());
             if let Some(env) = env {
                 env.set(key, val)?;
             }
