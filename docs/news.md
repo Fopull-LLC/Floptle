@@ -1,5 +1,19 @@
 ## Just shipped
 
+**v0.33.0 "Say So"** — the engine tells you things it used to swallow. Every
+options table now refuses a key it does not recognise, naming the property, the
+value it got and what it accepts: a typo'd `perchunk` used to take the default
+forever, and a typo'd `addative` in `scene.load` **destroyed** the running scene
+instead of layering onto it. Four more of that shape are fixed with it. A camera
+can be a texture, at a size and refresh rate you pick — minimaps, mirrors,
+monitors, scopes and split-screen. There are four accessibility settings a game
+can offer (text scale that reflows, a colour-vision filter that corrects rather
+than simulates, reduced motion, captions the engine draws). Collision stops
+testing every body against every collider, which at 400 bodies over 1,681
+colliders is eight times faster. Tab reaches your game at last, a script can
+finally export a function called `name`, `-1` clears a tile, nothing behind you is
+drawn, and `perf.*` tells your game where its own frame went.
+
 **v0.32.0 "Under Your Feet"** — the ground you are standing on now loads before
 a planet twelve thousand units away. Terrain loaded nearest-first, but "nearest"
 was counted in each world's own chunks, so on a solar system the ground under
