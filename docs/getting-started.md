@@ -5,6 +5,12 @@ first-person. It ties together the editor, terrain, physics, and scripting. For 
 full reference on each piece see [scripting.md](./scripting.md) and
 [physics.md](./physics.md).
 
+> **Would rather build a whole small game?** [tutorials/](tutorials/README.md) walks
+> you through a 3D platformer, a top-down RPG or Flappy from an empty project — and
+> the editor's **🎓 Learn** tab has the same steps, ticking each one off as your
+> project comes to match it. Start there if you are new to game engines; this page
+> assumes you mostly want the tour.
+
 ## 1. The editor at a glance
 
 - **Scene tab** — the editor view: tools, gizmos, click-to-select, sculpting.

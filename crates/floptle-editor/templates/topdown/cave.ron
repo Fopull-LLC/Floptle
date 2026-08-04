@@ -1,0 +1,118 @@
+// The other side of the door.
+//
+// A scene load replaces the whole world, so this scene needs its own Player,
+// its own Camera and its own inventory node — nothing carries over except what
+// was written to save.*. That is the whole lesson of the second scene.
+(
+    name: "cave",
+    lighting: (
+        direction: (0.2, 0.9, 0.35),
+        color: (0.62, 0.68, 0.85),
+        ambient: (0.08, 0.09, 0.13),
+        intensity: 0.55,
+        fog: true,
+        fog_color: (0.1, 0.11, 0.16),
+        fog_start: 8.0,
+        fog_end: 45.0,
+        fog_dither: true,
+        fog_dither_strength: 0.5,
+    ),
+    nodes: [
+        (
+            id: Some(1),
+            name: "Gravity",
+            transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: GravityVolume(radial: false, strength: 9.81, radius: 400.0),
+            scripts: [],
+        ),
+        (
+            id: Some(2),
+            name: "Ground",
+            transform: (translation: (0.0, -0.5, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (24.0, 1.0, 24.0)),
+            matter: Primitive(shape: Cube, color: (0.22, 0.2, 0.19)),
+            scripts: [],
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(3),
+            name: "WallNorth",
+            transform: (translation: (0.0, 1.5, -12.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (24.0, 4.0, 1.0)),
+            matter: Primitive(shape: Cube, color: (0.26, 0.24, 0.23)),
+            scripts: [],
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(4),
+            name: "WallSouth",
+            transform: (translation: (0.0, 1.5, 12.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (24.0, 4.0, 1.0)),
+            matter: Primitive(shape: Cube, color: (0.26, 0.24, 0.23)),
+            scripts: [],
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(5),
+            name: "WallWest",
+            transform: (translation: (-12.0, 1.5, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 4.0, 24.0)),
+            matter: Primitive(shape: Cube, color: (0.26, 0.24, 0.23)),
+            scripts: [],
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(6),
+            name: "WallEast",
+            transform: (translation: (12.0, 1.5, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 4.0, 24.0)),
+            matter: Primitive(shape: Cube, color: (0.26, 0.24, 0.23)),
+            scripts: [],
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(7),
+            name: "Lantern",
+            transform: (translation: (0.0, 4.0, -2.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: PointLight(color: (1.0, 0.72, 0.42), intensity: 6.0, range: 22.0),
+            scripts: [],
+        ),
+        (
+            id: Some(10),
+            name: "Player",
+            transform: (translation: (0.0, 1.2, 9.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: Primitive(shape: Capsule, color: (0.45, 0.72, 0.95)),
+            rigidbody: Some((capsule: true, radius: 0.5, height: 2.0, friction: 0.0, lock_rot: (true, true, true))),
+            tags: ["player"],
+            scripts: [(kind: "topdownPlayer", params: [("speed", 5.0), ("faceTravel", 1.0)])],
+        ),
+        (
+            id: Some(11),
+            name: "Camera",
+            transform: (translation: (0.0, 14.0, 12.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: Camera(fov_y: 1.0471976, active: true),
+            scripts: [(kind: "topdownCamera", params: [("height", 13.0), ("leadZ", 5.0), ("smoothing", 8.0)], refs: [("target", "Player")])],
+        ),
+        (
+            id: Some(12),
+            name: "Game",
+            transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: Empty,
+            // A fresh inventory node — which reads back the same save store, so
+            // it already knows about the key you picked up in the village.
+            scripts: [(kind: "inventory")],
+        ),
+        (
+            id: Some(20),
+            name: "Hermit",
+            transform: (translation: (-3.0, 1.2, -6.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: Primitive(shape: Capsule, color: (0.6, 0.62, 0.7)),
+            scripts: [(kind: "npcTalk", params: [("range", 3.0)], strs: [("lines", "You got the door open, then.|Nobody has been down here in years.|There is nothing left. That is rather the point."), ("prompt", "E — talk")])],
+        ),
+        (
+            id: Some(30),
+            name: "Door",
+            transform: (translation: (0.0, 1.5, 11.5), rotation: (0.0, 0.0, 0.0, 1.0), scale: (3.0, 3.0, 1.0)),
+            matter: Primitive(shape: Cube, color: (0.4, 0.33, 0.28)),
+            rigidbody: Some((boxed: true, mode: Kinematic, gravity: false, half_extents: (0.5, 0.5, 0.5))),
+            trigger: true,
+            // The way back. An empty `needs` is a door with no lock.
+            scripts: [(kind: "door", strs: [("destination", "first"), ("needs", ""), ("refusal", "")])],
+        ),
+    ],
+)

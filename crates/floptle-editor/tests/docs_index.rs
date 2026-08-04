@@ -48,6 +48,14 @@ fn every_doc_is_linked_from_the_index() {
     assert_indexed("docs", "README.md");
 }
 
+/// The tutorials index is generated (`learn.rs`), but generated is not the same
+/// as correct: a renamed tutorial that left its old page behind would still be
+/// sitting in the folder, unreachable.
+#[test]
+fn every_tutorial_is_linked() {
+    assert_indexed("docs/tutorials", "README.md");
+}
+
 #[test]
 fn every_subsystem_doc_is_linked() {
     assert_indexed("docs/subsystems", "README.md");

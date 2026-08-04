@@ -12,6 +12,7 @@ linked here, it isn't finished — a test enforces that.
 
 | I want to… | Go to |
 | --- | --- |
+| **Learn by making a small game, step by step** | [tutorials/](tutorials/README.md) — or the editor's **🎓 Learn** tab |
 | Get something on screen and walk around in it | [getting-started.md](getting-started.md) |
 | Look up what a Lua call does | [lua-api.md](lua-api.md) — every name, or the editor's **§ Docs** page |
 | Learn scripting properly, in order | [scripting.md](scripting.md) |
@@ -28,6 +29,14 @@ linked here, it isn't finished — a test enforces that.
 | Ship a build | [export-builds.md](export-builds.md) |
 | Talk to a website / sell something | [web-api.md](web-api.md) |
 | Understand *why* it's built this way | [decisions/](decisions/README.md) |
+
+## Learning it
+
+- [tutorials/](tutorials/README.md) — **follow-along projects**: a 3D platformer, a
+  top-down RPG, Flappy, plus a first-hour introduction and a twenty-minute orientation
+  for people who already program. The same steps are in the editor's **🎓 Learn** tab,
+  where each one ticks itself off as your project comes to match it, and three of them
+  ship as starter templates you can create straight from the Hub.
 
 ## Using the engine
 

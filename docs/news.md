@@ -1,19 +1,22 @@
 ## Just shipped
 
-**v0.23.0 "Cut Corners"** — your UI can wear a sprite. A panel's edge, a
-button's outline, the box around whatever the player has selected: any of them
-can be a piece of pixel art you drew, 9-sliced so one small sprite stretches to
-any size without smearing its corners. Every frame in a game can live in one
-texture, and a frame takes its tint from the style it sits in — so one white
-sprite is a bright focused edge and a dim idle one, with the hover transition
-already attached.
+**v0.25.0 "Follow Along"** — Floptle can teach you how to use it. A new
+**🎓 Learn** tab holds five follow-along tutorials that build a real game from an
+empty project, and because the editor can see what you've made, each step ticks
+itself off when you've actually done it — so you never get three steps past a
+mistake without noticing. Build a 3D platformer, a top-down RPG, or Flappy; or
+start from the finished version of any of them in one click from the New project
+screen. There's a fifteen-minute first tutorial for people who have never
+programmed, and a twenty-minute orientation for people who have.
 
-**v0.22.3 "Which One"** before it, a Hub release about version numbers: the Hub
-shows its own version on every tab, and a release that changed only the Hub says
-so instead of appearing as a new engine to install.
+**v0.24.1 "Plain Sight"** before it: two dozen buttons that had been drawing as
+empty boxes got their icons back, and the 188 scripting calls that had no
+description anywhere got one — plus a complete reference page and a search that
+finds what you typed.
 
-The engine underneath both is **v0.22.0 "Hold Together"** — modelling that
-behaves and levels that survive a scene change.
+The release under both is **v0.24.0 "Say So"** — water you can float on and
+freeze, scattered props that cost nothing, and scenes you can layer on top of
+each other rather than only swap between.
 
 ## Being worked on
 

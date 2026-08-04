@@ -57,6 +57,8 @@ mod input_actions;
 mod input_scan;
 mod input_ui;
 mod inspector;
+mod learn;
+mod learn_content;
 mod settings_ui;
 mod shadow;
 mod lua_format;
@@ -94,6 +96,7 @@ mod script_meta;
 mod scene_tab;
 mod selection;
 mod shading;
+mod templates;
 mod terrain_edit;
 mod terrain_ui;
 mod theme;
@@ -349,6 +352,8 @@ struct EditorCmd {
     map_prune: bool,
     /// Focus the ▦ Map dock tab (Window menu).
     focus_map: bool,
+    /// Focus (or open) the 🎓 Learn dock tab (Help menu).
+    focus_learn: bool,
     /// Put every dock panel back to the shipped layout (Window menu).
     reset_layout: bool,
     /// Save the current scene.
@@ -670,6 +675,9 @@ struct EditorTabViewer<'a> {
     selected_asset: &'a mut Option<String>,
     asset_selection: &'a mut Vec<String>,
     ide: &'a mut IdeState,
+    /// 🎓 Learn tab state: the open tutorial, the step, and the last snapshot
+    /// its checks were answered from.
+    learn: &'a mut learn::LearnState,
     /// Errors from the last script frame (shown in the Scripting tab).
     script_errors: &'a [String],
     /// Syntax diagnostic for the active IDE file (line, message) — red squiggle.
@@ -830,6 +838,7 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
             }
             EditorTab::Map => self.map_ui(ui),
             EditorTab::UiDesign => self.ui_design_ui(ui),
+            EditorTab::Learn => self.learn_ui(ui),
             EditorTab::Settings => {
                 let out = self.settings.ui(ui, self.project);
                 self.cmd.save_project |= out.save_project;
@@ -888,6 +897,24 @@ fn main() {
         .filter(|v| !v.starts_with('-'))
         .cloned();
     let stamp = version_override.unwrap_or_else(distribution_version);
+    // Which starter project `--new` writes. Scanned the same position-independent
+    // way, so `--new x --template flappy` and `--template flappy --new x` both
+    // work — `--new` acts on the spot, and an option it needs cannot depend on
+    // having been typed first.
+    let template = args
+        .iter()
+        .position(|a| a == "--template")
+        .and_then(|p| args.get(p + 1))
+        .filter(|v| !v.starts_with('-'))
+        .cloned()
+        .unwrap_or_else(|| templates::EMPTY.to_string());
+    if !templates::known(&template) {
+        eprintln!(
+            "unknown template \"{template}\" — try one of: {}",
+            templates::names().join(", ")
+        );
+        std::process::exit(2);
+    }
     let mut project_path: Option<PathBuf> = None;
     let mut player_mode = false;
     let mut i = 1;
@@ -899,7 +926,7 @@ fn main() {
             }
             "--help" | "-h" => {
                 println!(
-                    "{} editor {}\n\nUSAGE:\n  floptle-editor [PROJECT_DIR]              open a project (default: assets/)\n  floptle-editor --play [PROJECT_DIR]      run the project as a GAME (no editor UI; F1 = multiplayer menu)\n  floptle-editor --new <DIR>               scaffold a new project and exit\n  floptle-editor --export <PROJ> <OUT> <PLATFORM> [TITLE]  stamp a build and exit\n                                           PLATFORM: host | windows-x86_64 | linux-x86_64 | macos-aarch64 | macos-x86_64\n  floptle-editor --migrate <DIR>           migrate a project's assets to this version and exit\n  floptle-editor --extract-clips <DIR> <MODEL>  re-bake a model's embedded glTF clips and exit\n  floptle-editor --engine-version <V>      version to stamp for --new/--migrate (Hub-driven)\n  floptle-editor --version                 print the engine version and exit\n\nA floptle-game.ron manifest next to the binary (File \u{2192} Export Game\u{2026}) implies --play.",
+                    "{} editor {}\n\nUSAGE:\n  floptle-editor [PROJECT_DIR]              open a project (default: assets/)\n  floptle-editor --play [PROJECT_DIR]      run the project as a GAME (no editor UI; F1 = multiplayer menu)\n  floptle-editor --new <DIR>               scaffold a new project and exit\n  floptle-editor --template <NAME>         which starter project --new scaffolds\n                                           (with --new; see --list-templates)\n  floptle-editor --list-templates          print the starter templates and exit\n  floptle-editor --export <PROJ> <OUT> <PLATFORM> [TITLE]  stamp a build and exit\n                                           PLATFORM: host | windows-x86_64 | linux-x86_64 | macos-aarch64 | macos-x86_64\n  floptle-editor --migrate <DIR>           migrate a project's assets to this version and exit\n  floptle-editor --extract-clips <DIR> <MODEL>  re-bake a model's embedded glTF clips and exit\n  floptle-editor --engine-version <V>      version to stamp for --new/--migrate (Hub-driven)\n  floptle-editor --version                 print the engine version and exit\n\nA floptle-game.ron manifest next to the binary (File \u{2192} Export Game\u{2026}) implies --play.",
                     floptle_core::ENGINE_NAME, distribution_version()
                 );
                 return;
@@ -914,7 +941,20 @@ fn main() {
                     eprintln!("--new needs a <dir>");
                     std::process::exit(2);
                 };
-                std::process::exit(new_project(Path::new(p), &stamp));
+                std::process::exit(new_project(Path::new(p), &stamp, &template));
+            }
+            // Consumed by the pre-scan above; skip the flag and its value.
+            "--template" => {
+                i += 2;
+                continue;
+            }
+            "--list-templates" => {
+                println!("Starter projects for --new <dir> --template <name>:\n");
+                println!("  {:<12}  a blank project (the default)", templates::EMPTY);
+                for t in templates::TEMPLATES {
+                    println!("  {:<12}  {}", t.name, t.blurb);
+                }
+                return;
             }
             "--migrate" => {
                 let Some(p) = args.get(i + 1).filter(|p| !p.starts_with('-')) else {
@@ -1031,7 +1071,7 @@ fn main() {
 /// scene, a `project.ron` pinned to `stamp`) without a window/GPU. `stamp` is the engine
 /// version to record — the Hub's chosen install label, or this build's distribution version.
 /// Returns the process exit code.
-fn new_project(path: &Path, stamp: &str) -> i32 {
+fn new_project(path: &Path, stamp: &str, template: &str) -> i32 {
     // Refuse to scaffold over an existing project — that would clobber its project.ron.
     if path.join("project.ron").exists() {
         eprintln!("{} already contains a project (project.ron); refusing to overwrite", path.display());
@@ -1045,6 +1085,17 @@ fn new_project(path: &Path, stamp: &str) -> i32 {
     // Default editor (no GPU) is a valid headless context for them.
     let ed = Editor { project_root: path.to_path_buf(), ..Default::default() };
     ed.seed_project_dirs();
+    // The template goes down FIRST, so its own `scenes/first.ron` is already
+    // there and the blank starter scene below leaves it alone. Everything else
+    // seeding wrote (default scripts, materials, the input map the templates'
+    // named actions resolve against) is untouched.
+    let chosen = templates::find(template);
+    if let Some(t) = chosen
+        && let Err(e) = templates::apply(t, path)
+    {
+        eprintln!("could not write the {} template: {e}", t.name);
+        return 1;
+    }
     let scene = path.join("scenes/first.ron");
     if !scene.exists()
         && let Err(e) = floptle_scene::save(&crate::project::default_scene(), &scene)
@@ -1054,13 +1105,20 @@ fn new_project(path: &Path, stamp: &str) -> i32 {
     }
     let cfg = floptle_scene::ProjectConfigDoc {
         engine_version: Some(stamp.to_string()),
+        title: chosen.map(|t| t.title.to_string()),
         ..floptle_scene::ProjectConfigDoc::default()
     };
     if let Err(e) = floptle_scene::save_project(&cfg, &ed.project_cfg_path()) {
         eprintln!("could not write project.ron: {e}");
         return 1;
     }
-    println!("created project at {}", path.display());
+    match chosen {
+        Some(t) => println!("created the {} project at {}", t.name, path.display()),
+        None => println!("created project at {}", path.display()),
+    }
+    if let Some(id) = chosen.and_then(|t| t.tutorial) {
+        println!("  the 🎓 Learn tab builds this one step at a time — tutorial \"{id}\"");
+    }
     0
 }
 
@@ -1600,6 +1658,8 @@ struct Editor {
     fullscreen_tab: Option<EditorTab>,
     /// The in-engine Scripting IDE (open files + Docs page).
     ide: IdeState,
+    /// 🎓 Learn tab state (see `learn.rs`).
+    learn: learn::LearnState,
     /// The asset selected in the browser (shown in the Inspector); `None` = a node.
     selected_asset: Option<String>,
     /// The full multi-selection in the browser (Ctrl/Shift-click); the primary is

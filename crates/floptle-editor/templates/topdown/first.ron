@@ -1,0 +1,126 @@
+// The finished "Build a top-down RPG" tutorial: the village.
+//
+// Walk to the villager and press E, take the key, then walk into the door.
+// The door reads the inventory, and the inventory writes to save.* — which is
+// why the key is still yours on the other side.
+(
+    name: "first",
+    lighting: (
+        direction: (0.3, 0.9, 0.32),
+        color: (1.0, 0.96, 0.88),
+        ambient: (0.2, 0.21, 0.26),
+        intensity: 1.0,
+        fog: true,
+        fog_color: (0.66, 0.71, 0.78),
+        fog_start: 40.0,
+        fog_end: 180.0,
+        fog_dither: true,
+        fog_dither_strength: 0.35,
+    ),
+    nodes: [
+        (
+            id: Some(1),
+            name: "Gravity",
+            transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: GravityVolume(radial: false, strength: 9.81, radius: 400.0),
+            scripts: [],
+        ),
+        (
+            id: Some(2),
+            name: "Ground",
+            transform: (translation: (0.0, -0.5, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (30.0, 1.0, 30.0)),
+            matter: Primitive(shape: Cube, color: (0.42, 0.5, 0.35)),
+            scripts: [],
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(3),
+            name: "WallNorth",
+            transform: (translation: (0.0, 1.0, -15.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (30.0, 3.0, 1.0)),
+            matter: Primitive(shape: Cube, color: (0.5, 0.47, 0.44)),
+            scripts: [],
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(4),
+            name: "WallSouth",
+            transform: (translation: (0.0, 1.0, 15.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (30.0, 3.0, 1.0)),
+            matter: Primitive(shape: Cube, color: (0.5, 0.47, 0.44)),
+            scripts: [],
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(5),
+            name: "WallWest",
+            transform: (translation: (-15.0, 1.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 3.0, 30.0)),
+            matter: Primitive(shape: Cube, color: (0.5, 0.47, 0.44)),
+            scripts: [],
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(6),
+            name: "WallEast",
+            transform: (translation: (15.0, 1.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 3.0, 30.0)),
+            matter: Primitive(shape: Cube, color: (0.5, 0.47, 0.44)),
+            scripts: [],
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(10),
+            name: "Player",
+            transform: (translation: (0.0, 1.2, 6.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: Primitive(shape: Capsule, color: (0.45, 0.72, 0.95)),
+            rigidbody: Some((capsule: true, radius: 0.5, height: 2.0, friction: 0.0, lock_rot: (true, true, true))),
+            tags: ["player"],
+            scripts: [(kind: "topdownPlayer", params: [("speed", 5.0), ("faceTravel", 1.0)])],
+        ),
+        (
+            id: Some(11),
+            name: "Camera",
+            transform: (translation: (0.0, 14.0, 12.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: Camera(fov_y: 1.0471976, active: true),
+            scripts: [(kind: "topdownCamera", params: [("height", 14.0), ("leadZ", 6.0), ("smoothing", 8.0)], refs: [("target", "Player")])],
+        ),
+        (
+            id: Some(12),
+            name: "Game",
+            transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: Empty,
+            scripts: [(kind: "inventory")],
+        ),
+        (
+            id: Some(20),
+            name: "Villager",
+            transform: (translation: (-5.0, 1.2, -2.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: Primitive(shape: Capsule, color: (0.85, 0.6, 0.4)),
+            scripts: [(kind: "npcTalk", params: [("range", 2.8)], strs: [("lines", "Hello, traveller.|The cave to the north is not safe.|The key by the well is yours, if you want it."), ("prompt", "E — talk")])],
+        ),
+        (
+            id: Some(21),
+            name: "Innkeeper",
+            transform: (translation: (7.0, 1.2, 3.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: Primitive(shape: Capsule, color: (0.7, 0.45, 0.65)),
+            // The SAME script. One file, two characters, different words — set
+            // in the Inspector rather than in the code.
+            scripts: [(kind: "npcTalk", params: [("range", 2.8)], strs: [("lines", "You look like you have walked a long way.|Rooms are two silver. You have no silver.|Come back when you do."), ("prompt", "E — talk")])],
+        ),
+        (
+            id: Some(30),
+            name: "Key",
+            transform: (translation: (4.0, 0.8, -8.0), rotation: (0.0, 0.4, 0.0, 0.92), scale: (0.4, 0.4, 0.8)),
+            matter: Primitive(shape: Cube, color: (0.9, 0.78, 0.35)),
+            rigidbody: Some((boxed: true, mode: Kinematic, gravity: false, half_extents: (0.5, 0.5, 0.5))),
+            trigger: true,
+            scripts: [(kind: "itemPickup", strs: [("item", "Rusty Key")])],
+        ),
+        (
+            id: Some(31),
+            name: "Door",
+            transform: (translation: (0.0, 1.0, -14.5), rotation: (0.0, 0.0, 0.0, 1.0), scale: (3.0, 3.0, 1.0)),
+            matter: Primitive(shape: Cube, color: (0.35, 0.28, 0.24)),
+            rigidbody: Some((boxed: true, mode: Kinematic, gravity: false, half_extents: (0.5, 0.5, 0.5))),
+            trigger: true,
+            scripts: [(kind: "door", strs: [("destination", "cave"), ("needs", "Rusty Key"), ("refusal", "It's locked. Something about a key.")])],
+        ),
+    ],
+)

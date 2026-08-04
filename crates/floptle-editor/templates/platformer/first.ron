@@ -1,0 +1,156 @@
+// The finished "Build a 3D platformer" tutorial, as a project you can play.
+//
+// Everything here was placed by hand in the editor and can be moved the same
+// way: there is no generated geometry and no engine magic. Open a script, drag
+// a node, press Play.
+(
+    name: "first",
+    lighting: (
+        direction: (0.35, 0.85, 0.4),
+        color: (1.0, 0.97, 0.9),
+        ambient: (0.17, 0.18, 0.23),
+        intensity: 1.0,
+        fog: true,
+        fog_color: (0.63, 0.68, 0.78),
+        fog_start: 55.0,
+        fog_end: 240.0,
+        fog_dither: true,
+        fog_dither_strength: 0.4,
+    ),
+    nodes: [
+        (
+            id: Some(1),
+            name: "Gravity",
+            transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: GravityVolume(radial: false, strength: 9.81, radius: 400.0),
+            scripts: [],
+        ),
+        (
+            id: Some(2),
+            name: "Ground",
+            transform: (translation: (0.0, -0.5, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (40.0, 1.0, 40.0)),
+            matter: Primitive(shape: Cube, color: (0.38, 0.45, 0.36)),
+            scripts: [],
+            // half_extents are multiplied by the node's scale, so a unit 0.5
+            // stays correct however wide you stretch the slab.
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(3),
+            name: "Ledge",
+            transform: (translation: (-7.0, 1.5, -6.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (5.0, 0.6, 5.0)),
+            matter: Primitive(shape: Cube, color: (0.55, 0.5, 0.45)),
+            scripts: [],
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(4),
+            name: "HighLedge",
+            transform: (translation: (-14.0, 4.0, -12.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (5.0, 0.6, 5.0)),
+            matter: Primitive(shape: Cube, color: (0.55, 0.5, 0.45)),
+            scripts: [],
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(5),
+            name: "Platform",
+            transform: (translation: (2.0, 2.2, -8.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (4.0, 0.5, 4.0)),
+            matter: Primitive(shape: Cube, color: (0.72, 0.52, 0.3)),
+            // Kinematic: the script moves it, physics never does, and dynamic
+            // bodies standing on it are carried along.
+            rigidbody: Some((boxed: true, mode: Kinematic, half_extents: (0.5, 0.5, 0.5))),
+            scripts: [(kind: "platformMover", params: [("dx", -9.0), ("dy", 0.0), ("dz", 0.0), ("speed", 0.18)])],
+        ),
+        (
+            id: Some(6),
+            name: "Lift",
+            transform: (translation: (-14.0, 1.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (3.0, 0.5, 3.0)),
+            matter: Primitive(shape: Cube, color: (0.72, 0.52, 0.3)),
+            rigidbody: Some((boxed: true, mode: Kinematic, half_extents: (0.5, 0.5, 0.5))),
+            scripts: [(kind: "platformMover", params: [("dx", 0.0), ("dy", 3.6), ("dz", 0.0), ("speed", 0.22)])],
+        ),
+        (
+            id: Some(10),
+            name: "Player",
+            transform: (translation: (0.0, 3.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: Primitive(shape: Capsule, color: (0.45, 0.72, 0.95)),
+            // Rotation frozen on every axis, or the capsule tips over the first
+            // time it touches anything.
+            rigidbody: Some((capsule: true, radius: 0.5, height: 2.0, friction: 0.0, lock_rot: (true, true, true))),
+            tags: ["player"],
+            scripts: [(kind: "platformerPlayer", params: [("speed", 6.0), ("jump", 8.5), ("groundRay", 1.2)])],
+        ),
+        (
+            id: Some(11),
+            name: "Camera",
+            transform: (translation: (0.0, 7.0, 10.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: Camera(fov_y: 1.0471976, active: true),
+            // `target` is a noderef param: wired by NAME, so renaming the player
+            // in the Hierarchy re-points it instead of breaking it.
+            scripts: [(kind: "platformerCamera", params: [("height", 7.0), ("distance", 10.0), ("smoothing", 6.0)], refs: [("target", "Player")])],
+        ),
+        (
+            id: Some(12),
+            name: "Game",
+            transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: Empty,
+            scripts: [(kind: "platformerGame", params: [("fallY", -20.0), ("spawnY", 3.0)])],
+        ),
+        (
+            id: Some(20),
+            name: "Coin",
+            transform: (translation: (0.0, 1.4, -5.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (0.4, 0.4, 0.4)),
+            matter: Primitive(shape: Sphere, color: (1.0, 0.83, 0.3)),
+            // Kinematic + trigger: it stays exactly where it was put, and
+            // reports what walks through instead of blocking it.
+            rigidbody: Some((radius: 0.45, mode: Kinematic, gravity: false)),
+            trigger: true,
+            scripts: [(kind: "coin")],
+        ),
+        (
+            id: Some(21),
+            name: "Coin",
+            transform: (translation: (-7.0, 2.6, -6.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (0.4, 0.4, 0.4)),
+            matter: Primitive(shape: Sphere, color: (1.0, 0.83, 0.3)),
+            rigidbody: Some((radius: 0.45, mode: Kinematic, gravity: false)),
+            trigger: true,
+            scripts: [(kind: "coin")],
+        ),
+        (
+            id: Some(22),
+            name: "Coin",
+            transform: (translation: (2.0, 3.4, -8.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (0.4, 0.4, 0.4)),
+            matter: Primitive(shape: Sphere, color: (1.0, 0.83, 0.3)),
+            rigidbody: Some((radius: 0.45, mode: Kinematic, gravity: false)),
+            trigger: true,
+            scripts: [(kind: "coin")],
+        ),
+        (
+            id: Some(23),
+            name: "Coin",
+            transform: (translation: (-14.0, 5.2, -12.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (0.4, 0.4, 0.4)),
+            matter: Primitive(shape: Sphere, color: (1.0, 0.83, 0.3)),
+            rigidbody: Some((radius: 0.45, mode: Kinematic, gravity: false)),
+            trigger: true,
+            scripts: [(kind: "coin")],
+        ),
+        (
+            id: Some(24),
+            name: "Coin",
+            transform: (translation: (-14.0, 6.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (0.4, 0.4, 0.4)),
+            matter: Primitive(shape: Sphere, color: (1.0, 0.83, 0.3)),
+            rigidbody: Some((radius: 0.45, mode: Kinematic, gravity: false)),
+            trigger: true,
+            scripts: [(kind: "coin")],
+        ),
+        (
+            id: Some(30),
+            name: "Goal",
+            transform: (translation: (-14.0, 5.2, -16.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (2.0, 3.0, 0.5)),
+            matter: Primitive(shape: Cube, color: (0.45, 0.95, 0.6)),
+            rigidbody: Some((boxed: true, mode: Kinematic, gravity: false, half_extents: (0.5, 0.5, 0.5))),
+            trigger: true,
+            scripts: [(kind: "goal")],
+        ),
+    ],
+)

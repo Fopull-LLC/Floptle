@@ -153,6 +153,35 @@ struct NewProjectForm {
     name: String,
     location: String,
     version: String,
+    /// Which starter project to scaffold — a name the chosen engine reported,
+    /// or empty for a blank one.
+    template: String,
+}
+
+/// The starter projects an engine bundle offers: `(name, one-line blurb)`.
+///
+/// Asked of the BINARY rather than assumed from its version number: an engine
+/// old enough not to know `--template` reports nothing, the picker doesn't
+/// appear, and creating a project there behaves exactly as it always did. No
+/// version comparison to get wrong, and a future engine that adds a template
+/// needs no change here.
+///
+/// Runs on the UI thread, but only when the form's engine choice changes, and
+/// the subprocess prints four lines and exits — this is not the install job,
+/// which is threaded because it downloads.
+fn probe_templates(bin: &std::path::Path) -> Vec<(String, String)> {
+    let Ok(out) = std::process::Command::new(bin).arg("--list-templates").output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.starts_with("  "))
+        .filter_map(|l| l.trim().split_once("  "))
+        .map(|(name, blurb)| (name.trim().to_string(), blurb.trim().to_string()))
+        .collect()
 }
 
 pub struct HubApp {
@@ -166,6 +195,11 @@ pub struct HubApp {
     /// start; not persisted — a keyring store is a later hardening step).
     token: String,
     new_project: Option<NewProjectForm>,
+    /// `probe_templates` output for the version it was read from — re-probed
+    /// when the form's engine choice changes, so the picker always describes
+    /// the bundle that will actually do the scaffolding.
+    templates: Vec<(String, String)>,
+    templates_for: Option<String>,
     add_path: String,
     proc: Option<ProcJob>,
     toast: Option<(String, bool)>,
@@ -257,6 +291,8 @@ impl HubApp {
             job: None,
             token,
             new_project: None,
+            templates: Vec::new(),
+            templates_for: None,
             add_path: String::new(),
             proc: None,
             toast: None,
@@ -900,15 +936,17 @@ impl HubApp {
         // authority so the new project's engine matches an installed one and can be opened).
         let pin = install.version.clone();
         let label = format!("creating {name}…");
+        let template = form.template.trim().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let out = match std::process::Command::new(&bin)
-                .arg("--new")
-                .arg(&path)
-                .arg("--engine-version")
-                .arg(&pin)
-                .status()
-            {
+            let mut cmd = std::process::Command::new(&bin);
+            cmd.arg("--new").arg(&path).arg("--engine-version").arg(&pin);
+            // Only when the user picked one — an engine that never reported a
+            // template list must not be handed a flag it doesn't know.
+            if !template.is_empty() {
+                cmd.arg("--template").arg(&template);
+            }
+            let out = match cmd.status() {
                 Ok(s) if s.success() => {
                     // Authoritatively pin the picked version, correcting an older binary
                     // that stamped its own compiled-in version.
@@ -1343,7 +1381,47 @@ impl HubApp {
                             }
                         });
                     ui.end_row();
+
+                    // Ask the CHOSEN bundle what it can scaffold, and re-ask
+                    // whenever that choice changes.
+                    if self.templates_for.as_deref() != Some(form.version.as_str()) {
+                        self.templates = self
+                            .install_for(Some(&form.version))
+                            .map(|i| probe_templates(&i.editor_bin()))
+                            .unwrap_or_default();
+                        self.templates_for = Some(form.version.clone());
+                        // Always hold a name that is actually in the list, so
+                        // what the box SAYS and what gets scaffolded can never
+                        // be two different things. The engine lists the blank
+                        // project first and calls it `empty`.
+                        if !self.templates.iter().any(|(n, _)| *n == form.template) {
+                            form.template =
+                                self.templates.first().map(|(n, _)| n.clone()).unwrap_or_default();
+                        }
+                    }
+                    // Absent on an engine too old to know about templates —
+                    // there is nothing to choose from, so there is no row.
+                    if !self.templates.is_empty() {
+                        ui.label("Start from");
+                        egui::ComboBox::from_id_salt("new-proj-template")
+                            .width(280.0)
+                            .selected_text(form.template.clone())
+                            .show_ui(ui, |ui| {
+                                for (name, blurb) in &self.templates {
+                                    ui.selectable_value(&mut form.template, name.clone(), name)
+                                        .on_hover_text(blurb);
+                                }
+                            });
+                        ui.end_row();
+                    }
                 });
+                // The blurb under the picker rather than only in a tooltip: it
+                // is the one sentence that says what you are about to get.
+                if let Some((_, blurb)) =
+                    self.templates.iter().find(|(n, _)| *n == form.template)
+                {
+                    ui.small(blurb.clone());
+                }
                 // Show exactly where it lands, so there are no surprises.
                 if !form.name.trim().is_empty() && !form.location.trim().is_empty() {
                     let dest = PathBuf::from(form.location.trim()).join(form.name.trim());

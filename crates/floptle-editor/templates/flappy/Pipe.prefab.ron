@@ -1,0 +1,35 @@
+// One obstacle, saved as a prefab so `spawn("Pipe", ...)` can stamp out copies
+// while the game runs.
+//
+// A prefab is a flat list of nodes where `parent` is an index into this list —
+// so the two solid halves are children of the root the script drives.
+//
+// This exists as a prefab rather than being built in Lua for one reason: a
+// script can create nodes but cannot give them colliders. Anything that has to
+// be solid is authored once and spawned.
+[
+    (
+        name: "Pipe",
+        transform: (translation: (0.0, 6.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+        matter: Empty,
+        scripts: [(kind: "flappyPipe", params: [("speed", 4.0), ("behind", 12.0)])],
+    ),
+    (
+        name: "Lower",
+        parent: Some(0),
+        transform: (translation: (0.0, -6.5, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.6, 9.0, 1.6)),
+        matter: Primitive(shape: Cube, color: (0.32, 0.62, 0.3)),
+        // Kinematic, not Static: the parent's script moves this every frame,
+        // and a static body is a baked collider that never moves with it.
+        rigidbody: Some((boxed: true, mode: Kinematic, gravity: false, half_extents: (0.5, 0.5, 0.5))),
+        scripts: [],
+    ),
+    (
+        name: "Upper",
+        parent: Some(0),
+        transform: (translation: (0.0, 6.5, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.6, 9.0, 1.6)),
+        matter: Primitive(shape: Cube, color: (0.32, 0.62, 0.3)),
+        rigidbody: Some((boxed: true, mode: Kinematic, gravity: false, half_extents: (0.5, 0.5, 0.5))),
+        scripts: [],
+    ),
+]

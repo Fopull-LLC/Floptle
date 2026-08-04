@@ -1929,7 +1929,8 @@ timer:cancel() — stop a pending after / every / tween. The handle those three 
 tween(seconds, fn [, ease]) — animate: fn(alpha) runs every tick with alpha easing 0→1, final call exactly at 1.0. ease: "linear" (default), "smooth", "in", "out". tween(0.5, function(a) node.y = startY + a * 3 end, "smooth"). Returns a cancellable handle.
 
 ```lua
-tween(0, 1, 0.4, function(t) node:getcomponent("UiElement").opacity = t end)
+-- SECONDS first, then the function; alpha eases 0 -> 1 and lands on 1.0
+tween(0.4, function(t) node:getcomponent("UiElement").opacity = t end, "smooth")
 ```
 
 ## space — orbits & time-warp

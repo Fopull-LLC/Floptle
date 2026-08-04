@@ -35,6 +35,9 @@ pub(crate) enum EditorTab {
     /// rulers, guides, snapping, align/distribute, state preview and an
     /// element outline (docs/ui-system-2-proposal.md, phase C).
     UiDesign,
+    /// 🎓 Learn: follow-along tutorials whose steps tick themselves off as the
+    /// project comes to match them (see `learn.rs`).
+    Learn,
     /// Project Settings: game/rendering/layers/input, searchable by section.
     /// Opened from Edit ⏵ Project Settings; a real dock tab, so it can be
     /// dragged anywhere, split beside the viewport, or left closed.
@@ -61,6 +64,7 @@ impl EditorTab {
             EditorTab::Paint => "◨ Paint",
             EditorTab::Image => "🖼 Image",
             EditorTab::UiDesign => "◫ UI",
+            EditorTab::Learn => "🎓 Learn",
             EditorTab::Settings => "⚙ Settings",
         }
     }
@@ -85,6 +89,7 @@ impl EditorTab {
         EditorTab::Image,
         EditorTab::Map,
         EditorTab::UiDesign,
+        EditorTab::Learn,
         EditorTab::Settings,
     ];
 }
@@ -129,9 +134,10 @@ pub(crate) fn scene_and_game_split(dock: &egui_dock::DockState<EditorTab>) -> bo
 /// - **centre** — the viewports and the full-canvas editors that replace them:
 ///   Scene / Game, Scripting, ◈ Shaders, ◎ Controller.
 /// - **right** — properties of whatever is selected: Inspector, Δ Terrain,
-///   🖌 Paint.
+///   ◨ Paint — and 🎓 Learn, which is read beside the viewport you're working
+///   in rather than instead of it.
 /// - **bottom** — the project and the timelines that scrub it: Assets,
-///   Console, ✏ Animating, ✨ Particles, 🎧 Mixer.
+///   Console, ⏱ Animating, ✱ Particles, ≣ Mixer.
 ///
 /// Users can drag/re-dock freely; **Window ▸ Reset layout** comes back here.
 pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
@@ -155,7 +161,7 @@ pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
     let [central, _] = surface.split_right(
         central,
         0.78,
-        vec![EditorTab::Inspector, EditorTab::Terrain, EditorTab::Paint],
+        vec![EditorTab::Inspector, EditorTab::Terrain, EditorTab::Paint, EditorTab::Learn],
     );
     let [_, _] = surface.split_below(
         central,
@@ -169,6 +175,19 @@ pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
         ],
     );
     dock
+}
+
+/// Focus the 🎓 Learn dock tab — creating it if it isn't open.
+///
+/// Needed because the tab arrived after the layout did: anyone upgrading has a
+/// saved dock with no Learn in it, and a tutorial nobody can find teaches
+/// nothing. Help ▸ 🎓 Learn comes here.
+pub(crate) fn focus_learn_tab(dock: &mut egui_dock::DockState<EditorTab>) {
+    if let Some(path) = dock.find_tab(&EditorTab::Learn) {
+        let _ = dock.set_active_tab(path);
+    } else {
+        dock.push_to_focused_leaf(EditorTab::Learn);
+    }
 }
 
 /// Focus the Scripting tab (used after double-click-to-open-a-script).

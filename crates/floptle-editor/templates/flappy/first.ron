@@ -1,0 +1,83 @@
+// The finished "Build Flappy" tutorial.
+//
+// A 3D engine playing a 2D game: everything sits at z = 0 and the camera looks
+// straight down -Z. There is no 2D mode, and none is needed.
+(
+    name: "first",
+    lighting: (
+        direction: (0.25, 0.7, 0.65),
+        color: (1.0, 0.95, 0.85),
+        ambient: (0.32, 0.36, 0.45),
+        intensity: 1.1,
+        fog: false,
+        fog_color: (0.55, 0.72, 0.88),
+        fog_start: 40.0,
+        fog_end: 160.0,
+        fog_dither: false,
+        fog_dither_strength: 0.0,
+    ),
+    nodes: [
+        (
+            id: Some(1),
+            name: "Gravity",
+            transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            // A gentler pull than Earth's: it is what makes a flap survivable.
+            // Drag it in the Inspector while playing — this one number decides
+            // most of how the game feels.
+            matter: GravityVolume(radial: false, strength: 14.0, radius: 400.0),
+            scripts: [],
+        ),
+        (
+            id: Some(2),
+            name: "Backdrop",
+            transform: (translation: (0.0, 4.0, -6.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (60.0, 30.0, 0.5)),
+            matter: Primitive(shape: Cube, color: (0.42, 0.62, 0.82)),
+            // No body at all: it is scenery, well behind the plane the game is
+            // played on, and nothing should ever collide with it.
+            scripts: [],
+        ),
+        (
+            id: Some(3),
+            name: "Floor",
+            transform: (translation: (0.0, -1.5, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (60.0, 1.0, 4.0)),
+            matter: Primitive(shape: Cube, color: (0.4, 0.55, 0.3)),
+            scripts: [],
+            // Solid, so landing counts as hitting something and ends the run.
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(4),
+            name: "Ceiling",
+            transform: (translation: (0.0, 13.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (60.0, 1.0, 4.0)),
+            matter: Primitive(shape: Cube, color: (0.4, 0.55, 0.3)),
+            scripts: [],
+            rigidbody: Some((boxed: true, mode: Static, half_extents: (0.5, 0.5, 0.5))),
+        ),
+        (
+            id: Some(10),
+            name: "Bird",
+            transform: (translation: (-4.0, 6.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (0.5, 0.5, 0.5)),
+            matter: Primitive(shape: Sphere, color: (0.98, 0.82, 0.25)),
+            // Rotation frozen: the script sets the pitch for looks, and a
+            // tumbling ball would fight it every tick.
+            rigidbody: Some((radius: 0.45, restitution: 0.0, friction: 0.0, lock_rot: (true, true, true))),
+            scripts: [(kind: "flappyBird", params: [("flap", 6.0), ("tilt", 1.0)])],
+        ),
+        (
+            id: Some(11),
+            name: "Camera",
+            transform: (translation: (0.0, 6.0, 18.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: Camera(fov_y: 1.0471976, active: true),
+            // No follow script: the whole stage fits on screen, so the camera
+            // never has to move. The simplest camera is no camera code.
+            scripts: [],
+        ),
+        (
+            id: Some(12),
+            name: "Game",
+            transform: (translation: (0.0, 0.0, 0.0), rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),
+            matter: Empty,
+            scripts: [(kind: "flappyGame", params: [("interval", 1.6), ("spawnX", 14.0), ("gapLow", 3.0), ("gapHigh", 9.0)], strs: [("pipe", "Pipe")])],
+        ),
+    ],
+)

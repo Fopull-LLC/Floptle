@@ -40,6 +40,29 @@ use crate::export::EXPORT_TARGETS;
 use crate::{Editor, EditorCmd, EditorTabViewer, FOCUS_SECS, MeshAsset, ProjectAction, Snapshot, anim, anim_ui, grab_cursor, scene_hit};
 
 impl Editor {
+    /// Re-take the 🎓 Learn tab's project snapshot, at most a few times a second
+    /// and only while the tab is on top of its dock leaf.
+    ///
+    /// `played` latches: `Check::Played` asks "have you run this yet", which
+    /// stays true after you press Stop — otherwise the step would tick and then
+    /// immediately un-tick itself, which reads as the editor changing its mind.
+    fn refresh_learn(&mut self) {
+        self.learn.played |= self.playing;
+        let front = self
+            .dock_state
+            .as_ref()
+            .is_some_and(|d| crate::dock::tab_is_front(d, EditorTab::Learn));
+        if !front {
+            return;
+        }
+        let now = self.started.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
+        if now < self.learn.next_scan {
+            return;
+        }
+        self.learn.next_scan = now + crate::learn::RESCAN_SECS;
+        self.learn.snap = crate::learn::scan(&self.world, &self.project_root, self.learn.played);
+    }
+
     pub(crate) fn render(&mut self) {
         // Terrain brush telegraph + throttled stroke (before the destructure, so it
         // can freely borrow `self`).
@@ -53,6 +76,12 @@ impl Editor {
         // before anything draws with a stale block.
         self.sync_map_paint();
         self.map_edit_frame_update();
+        // The 🎓 Learn tab answers its checks from a snapshot of the scene and
+        // the project's files. Taken up here with the other whole-`self` passes,
+        // before the GPU destructure below splits `self` apart — and only while
+        // the tab is actually visible, because it reads every script in the
+        // project and a panel nobody has open is not worth a file walk.
+        self.refresh_learn();
 
         // Inspector asset preview: render the spinning model/material (or load the
         // texture) before the GPU/egui destructure borrows below. `preview_dt` is a
@@ -1603,6 +1632,7 @@ impl Editor {
         let hier_scrolled = &mut self.hier_scrolled;
         let show_material_editor = &mut self.show_material_editor;
         let ide = &mut self.ide;
+        let learn = &mut self.learn;
         let script_errors = self.script_errors.as_slice();
         let ide_diag = self.ide_diag.as_ref();
         let selected_asset = &mut self.selected_asset;
@@ -1931,6 +1961,19 @@ impl Editor {
                     // to appear once, in the Hub's About tab, which is not where anybody
                     // is standing when something goes wrong.
                     ui.menu_button("Help", |ui| {
+                        if ui
+                            .button("🎓 Learn — follow-along tutorials")
+                            .on_hover_text(
+                                "build a platformer, a top-down RPG or Flappy step by \
+                                 step, with each step ticking itself off as your project \
+                                 comes to match it",
+                            )
+                            .clicked()
+                        {
+                            cmd.focus_learn = true;
+                            ui.close();
+                        }
+                        ui.separator();
                         if ui
                             .button("🐛 Report a bug")
                             .on_hover_text(crate::ISSUES_URL)
@@ -2614,6 +2657,7 @@ impl Editor {
                 selected_asset,
                 asset_selection,
                 ide,
+                learn,
                 script_errors,
                 ide_diag,
                 gizmo,
@@ -5141,6 +5185,11 @@ impl Editor {
         }
         if let Some((name, line)) = cmd.open_log_source {
             self.open_source_at(&name, line);
+        }
+        if cmd.focus_learn
+            && let Some(dock) = self.dock_state.as_mut()
+        {
+            crate::dock::focus_learn_tab(dock);
         }
         if cmd.focus_scripting
             && let Some(dock) = self.dock_state.as_mut() {

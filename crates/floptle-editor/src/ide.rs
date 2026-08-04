@@ -2338,7 +2338,7 @@ impl EditorTabViewer<'_> {
     /// because doc bodies are written by hand right here in the source and anything
     /// heavier would rot. Prose wraps to the panel, so the Scripting tab is
     /// readable docked narrow, which the old fixed-width monospace was not.
-    fn doc_body_ui(&self, ui: &mut egui::Ui, body: &str) {
+    pub(crate) fn doc_body_ui(&self, ui: &mut egui::Ui, body: &str) {
         let theme = CODE_THEMES[self.code_theme.min(CODE_THEMES.len() - 1)];
         let mono = egui::FontId::monospace(12.5);
         let mut code: Vec<&str> = Vec::new();
@@ -3310,7 +3310,7 @@ const API_EXAMPLES: &[(&str, &str)] = &[
     ("every", "-- a heartbeat that survives long sessions without drifting\nevery(1.0, function() hp = math.min(hp + 1, 100) end)"),
     (
         "tween",
-        "tween(0, 1, 0.4, function(t) node:getcomponent(\"UiElement\").opacity = t end)",
+        "-- SECONDS first, then the function; alpha eases 0 -> 1 and lands on 1.0\ntween(0.4, function(t) node:getcomponent(\"UiElement\").opacity = t end, \"smooth\")",
     ),
     (
         "input.action",
