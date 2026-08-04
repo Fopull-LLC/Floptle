@@ -648,6 +648,15 @@ pub enum MatterDoc {
         target: String,
         #[serde(default = "all_layers", skip_serializing_if = "is_all_layers")]
         cull_mask: u32,
+        /// Render-target size in pixels and refresh rate in Hz (0 = every
+        /// frame). Defaulted so a scene written before `floptle/0078` loads
+        /// with the size it used to get.
+        #[serde(default = "default_target_w", skip_serializing_if = "is_default_target_w")]
+        target_w: u32,
+        #[serde(default = "default_target_h", skip_serializing_if = "is_default_target_h")]
+        target_h: u32,
+        #[serde(default, skip_serializing_if = "is_zero_f32")]
+        target_hz: f32,
     },
     /// A placeable point/omni light (position = node transform).
     PointLight {
@@ -816,6 +825,21 @@ fn is_all_layers(m: &u32) -> bool {
 fn default_fov() -> f32 {
     60f32.to_radians()
 }
+fn default_target_w() -> u32 {
+    Matter::TARGET_W
+}
+fn default_target_h() -> u32 {
+    Matter::TARGET_H
+}
+fn is_default_target_w(v: &u32) -> bool {
+    *v == Matter::TARGET_W
+}
+fn is_default_target_h(v: &u32) -> bool {
+    *v == Matter::TARGET_H
+}
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
+}
 
 fn default_range() -> f32 {
     10.0
@@ -863,12 +887,17 @@ impl From<&Matter> for MatterDoc {
             Matter::Empty => MatterDoc::Empty,
             Matter::Terrain { id } => MatterDoc::Terrain { id: *id },
             Matter::MapMesh { id } => MatterDoc::MapMesh { id: *id, geo: None },
-            Matter::Camera { fov_y, active, target, cull_mask } => MatterDoc::Camera {
-                fov_y: *fov_y,
-                active: *active,
-                target: target.clone(),
-                cull_mask: *cull_mask,
-            },
+            Matter::Camera { fov_y, active, target, cull_mask, target_w, target_h, target_hz } => {
+                MatterDoc::Camera {
+                    fov_y: *fov_y,
+                    active: *active,
+                    target: target.clone(),
+                    cull_mask: *cull_mask,
+                    target_w: *target_w,
+                    target_h: *target_h,
+                    target_hz: *target_hz,
+                }
+            }
             Matter::PointLight { color, intensity, range } => {
                 MatterDoc::PointLight { color: *color, intensity: *intensity, range: *range }
             }
@@ -958,12 +987,18 @@ impl MatterDoc {
             MatterDoc::Empty => Matter::Empty,
             MatterDoc::Terrain { id } => Matter::Terrain { id: *id },
             MatterDoc::MapMesh { id, .. } => Matter::MapMesh { id: *id },
-            MatterDoc::Camera { fov_y, active, target, cull_mask } => Matter::Camera {
-                fov_y: *fov_y,
-                active: *active,
-                target: target.clone(),
-                cull_mask: *cull_mask,
-            },
+            MatterDoc::Camera { fov_y, active, target, cull_mask, target_w, target_h, target_hz } => {
+                let (w, h) = Matter::clamp_target_size(*target_w, *target_h);
+                Matter::Camera {
+                    fov_y: *fov_y,
+                    active: *active,
+                    target: target.clone(),
+                    cull_mask: *cull_mask,
+                    target_w: w,
+                    target_h: h,
+                    target_hz: target_hz.max(0.0),
+                }
+            }
             MatterDoc::PointLight { color, intensity, range } => {
                 Matter::PointLight { color: *color, intensity: *intensity, range: *range }
             }
@@ -2513,7 +2548,7 @@ mod tests {
                     terrain_gen: None,
                     name: "eye".into(),
                     transform: TransformDoc::default(),
-                    matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX },
+                    matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0 },
                     object_materials: Default::default(),
                     scripts: Vec::new(),
                     material: None,
@@ -2614,7 +2649,7 @@ mod tests {
         let eye = snap.nodes.iter().find(|n| n.name == "eye").unwrap();
         assert_eq!(
             eye.matter,
-            MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX }
+            MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0 }
         );
     }
 

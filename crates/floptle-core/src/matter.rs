@@ -635,7 +635,21 @@ pub enum Matter {
     /// (bit i = layer i visible; `u32::MAX` = everything) applied wherever
     /// this camera renders — the game view for the active camera, the target
     /// texture for a target camera.
-    Camera { fov_y: f32, active: bool, target: String, cull_mask: u32 },
+    ///
+    /// `target_w`/`target_h` are the target texture's size in pixels and
+    /// `target_hz` how often it redraws (0 = every frame). A minimap that only
+    /// needs 256×256 at 10 Hz costs a sixth of what it cost when every target
+    /// was 480×270 every frame (`floptle/0078`). Use [`Matter::TARGET_W`],
+    /// [`Matter::TARGET_H`] for the defaults.
+    Camera {
+        fov_y: f32,
+        active: bool,
+        target: String,
+        cull_mask: u32,
+        target_w: u32,
+        target_h: u32,
+        target_hz: f32,
+    },
     /// A placeable point/omni light. Its world position is the node's transform
     /// translation; `range` is the radius at which its contribution falls to ~zero.
     /// (The scene's single directional/ambient key stays the special `Light` node.)
@@ -777,6 +791,26 @@ pub enum Matter {
 }
 
 impl Matter {
+    /// Default render-target width, in pixels (`Matter::Camera`).
+    pub const TARGET_W: u32 = 480;
+    /// Default render-target height, in pixels (`Matter::Camera`).
+    pub const TARGET_H: u32 = 270;
+    /// Smallest render-target edge. Below this a target is not a picture, and a
+    /// zero would be an invalid texture.
+    pub const TARGET_MIN: u32 = 8;
+    /// Largest render-target edge the engine will allocate for a camera. 4096²
+    /// in the surface format plus depth is ~100 MB; anything past that is a
+    /// mistake rather than a choice, and refusing beats a device-lost.
+    pub const TARGET_MAX: u32 = 4096;
+    /// How many live render targets one scene may hold. Past this the extras
+    /// are dropped — loudly, by name (`floptle/0078`).
+    pub const TARGET_LIMIT: usize = 8;
+
+    /// A render target's size, clamped to what the engine will allocate.
+    pub fn clamp_target_size(w: u32, h: u32) -> (u32, u32) {
+        (w.clamp(Self::TARGET_MIN, Self::TARGET_MAX), h.clamp(Self::TARGET_MIN, Self::TARGET_MAX))
+    }
+
     /// The default skybox: solid mid-grey, a large radius, no texture.
     pub fn default_skybox() -> Self {
         Matter::Skybox {

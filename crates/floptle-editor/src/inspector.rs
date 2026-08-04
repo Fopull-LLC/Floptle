@@ -1690,7 +1690,15 @@ impl EditorTabViewer<'_> {
                                     cmd.focus_terrain = true;
                                 }
                             }
-                            Matter::Camera { fov_y, active, target, cull_mask } => {
+                            Matter::Camera {
+                                fov_y,
+                                active,
+                                target,
+                                cull_mask,
+                                target_w,
+                                target_h,
+                                target_hz,
+                            } => {
                                 ui.label("camera");
                                 ui.small("a viewpoint — play mode renders from the active camera");
                                 // Live preview of what this camera sees.
@@ -1722,6 +1730,50 @@ impl EditorTabViewer<'_> {
                                 });
                                 if !target.is_empty() {
                                     ui.small(format!("live texture: rt:{target}"));
+                                    // Size + refresh rate: a minimap is not worth a
+                                    // full-rate 480×270 (floptle/0078).
+                                    ui.horizontal(|ui| {
+                                        ui.label("size").on_hover_text(
+                                            "the target texture's pixel size — smaller is \
+                                             cheaper, and a screen a few metres away does \
+                                             not need many",
+                                        );
+                                        let mut w = *target_w as i32;
+                                        let mut h = *target_h as i32;
+                                        let lo = Matter::TARGET_MIN as i32;
+                                        let hi = Matter::TARGET_MAX as i32;
+                                        let cw = ui.add(egui::DragValue::new(&mut w).range(lo..=hi));
+                                        ui.label("×");
+                                        let ch = ui.add(egui::DragValue::new(&mut h).range(lo..=hi));
+                                        if cw.changed() || ch.changed() {
+                                            *target_w = w as u32;
+                                            *target_h = h as u32;
+                                            cmd.inspector_changed = true;
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("refresh").on_hover_text(
+                                            "how often the target redraws, in Hz. 0 = every \
+                                             frame. A 10 Hz minimap costs a sixth of a 60 Hz one.",
+                                        );
+                                        let mut hz = *target_hz;
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut hz)
+                                                    .range(0.0..=240.0)
+                                                    .speed(0.5),
+                                            )
+                                            .changed()
+                                        {
+                                            *target_hz = hz.max(0.0);
+                                            cmd.inspector_changed = true;
+                                        }
+                                        ui.small(if *target_hz <= 0.0 {
+                                            "every frame".to_string()
+                                        } else {
+                                            format!("{:.0} Hz", *target_hz)
+                                        });
+                                    });
                                 }
                                 // Per-layer cull checkboxes (bit i = project layer i).
                                 let label = if *cull_mask == u32::MAX {

@@ -19,6 +19,7 @@ linked here, it isn't finished — a test enforces that.
 | Make things fall, collide, be stood on | [physics.md](physics.md) |
 | Build a level without leaving the engine | [map-tools.md](map-tools.md) |
 | Make a **2D** game — tiles and sprites | [2d.md](2d.md) |
+| Add a minimap, mirror, scope or split-screen | [render-targets.md](render-targets.md) |
 | Sculpt terrain / build a planet | [subsystems/deformable-matter.md](subsystems/deformable-matter.md) |
 | Draw a texture | [image-editor.md](image-editor.md) |
 | Build a menu or a HUD | [ui-tab.md](ui-tab.md) → [ui-styles.md](ui-styles.md) → [ui-make.md](ui-make.md) |
@@ -61,6 +62,9 @@ The build-something guides. Each one is a path from nothing to a working result.
   engine and watch it change on the mesh (pixels, paint and vectors, one document).
 - [2d.md](2d.md) — **tilemaps and sprite batches**: a level as one seamless mesh, and
   many sprites from one node with a tint each.
+- [render-targets.md](render-targets.md) — **a camera as a texture**: point a camera at
+  a name and wear its picture on a material or a UI image — minimaps, mirrors, security
+  monitors, scopes and split-screen, each at its own size and refresh rate.
 - [multiplayer.md](multiplayer.md) — from a single-player scene to **two machines playing
   together**: which replication mode to pick, prediction, rollback for fighting games,
   testing on one desk, and shipping (relay, dedicated server, interest management).

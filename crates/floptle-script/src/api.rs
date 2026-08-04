@@ -423,12 +423,19 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             );
         }
     }
-    if let Some(Matter::Camera { fov_y, active, .. }) = world.get::<Matter>(e) {
+    if let Some(Matter::Camera { fov_y, active, target_w, target_h, target_hz, .. }) =
+        world.get::<Matter>(e)
+    {
         out.insert(
             "Camera".to_string(),
             HashMap::from([
                 ("fovY".to_string(), *fov_y as f64),
                 ("active".to_string(), if *active { 1.0 } else { 0.0 }),
+                // The render target's shape, readable so a game can size its
+                // minimap UI to the texture it is actually getting.
+                ("width".to_string(), f64::from(*target_w)),
+                ("height".to_string(), f64::from(*target_h)),
+                ("hz".to_string(), f64::from(*target_hz)),
             ]),
         );
     }
@@ -679,10 +686,30 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
             }
         }
         "Camera" => {
-            if let Some(Matter::Camera { fov_y, active, .. }) = world.get_mut::<Matter>(ent) {
+            if let Some(Matter::Camera {
+                fov_y,
+                active,
+                target_w,
+                target_h,
+                target_hz,
+                ..
+            }) = world.get_mut::<Matter>(ent)
+            {
                 match field {
                     "fovY" => *fov_y = (val as f32).clamp(0.05, 3.0),
                     "active" => *active = val != 0.0,
+                    // The live-mirror spelling of the same three fields
+                    // `node:setCamera{...}` sets (`floptle/0078`), so a game can
+                    // drop a target's rate while it is behind a wall.
+                    "width" => {
+                        let (w, _) = Matter::clamp_target_size(val.max(0.0) as u32, *target_h);
+                        *target_w = w;
+                    }
+                    "height" => {
+                        let (_, h) = Matter::clamp_target_size(*target_w, val.max(0.0) as u32);
+                        *target_h = h;
+                    }
+                    "hz" => *target_hz = (val as f32).clamp(0.0, 240.0),
                     _ => {}
                 }
             }
@@ -935,6 +962,84 @@ pub(crate) fn apply_rich_sets(
                     world.remove::<floptle_core::TerrainGen>(e);
                 }
             },
+            // `node:setCamera{...}` (`floptle/0078`). Values were checked at the
+            // call, so everything present here is something to write.
+            RichSet::MatterCamera {
+                fov_y,
+                active,
+                target,
+                target_w,
+                target_h,
+                target_hz,
+                cull_mask,
+            } => {
+                // A node that is not a camera becomes one, the way setPrimitive
+                // and setTerrain also set the node's Matter.
+                if !matches!(world.get::<Matter>(e), Some(Matter::Camera { .. })) {
+                    world.insert(
+                        e,
+                        Matter::Camera {
+                            fov_y: 60f32.to_radians(),
+                            active: false,
+                            target: String::new(),
+                            cull_mask: u32::MAX,
+                            target_w: Matter::TARGET_W,
+                            target_h: Matter::TARGET_H,
+                            target_hz: 0.0,
+                        },
+                    );
+                }
+                // Authority is exclusive: two `active` cameras and the game view
+                // renders from whichever the query reaches first, which is not a
+                // decision anybody made.
+                if active == Some(true) {
+                    let others: Vec<Entity> = world
+                        .query::<Matter>()
+                        .filter_map(|(c, m)| {
+                            (c != e && matches!(m, Matter::Camera { active: true, .. }))
+                                .then_some(c)
+                        })
+                        .collect();
+                    for c in others {
+                        if let Some(Matter::Camera { active: a, .. }) = world.get_mut::<Matter>(c) {
+                            *a = false;
+                        }
+                    }
+                }
+                let Some(Matter::Camera {
+                    fov_y: f,
+                    active: a,
+                    target: t,
+                    cull_mask: cm,
+                    target_w: tw,
+                    target_h: th,
+                    target_hz: thz,
+                }) = world.get_mut::<Matter>(e)
+                else {
+                    continue;
+                };
+                if let Some(v) = fov_y {
+                    *f = v;
+                }
+                if let Some(v) = active {
+                    *a = v;
+                }
+                if let Some(v) = target {
+                    *t = v;
+                }
+                if let Some(v) = target_w {
+                    *tw = v;
+                }
+                if let Some(v) = target_h {
+                    *th = v;
+                }
+                if let Some(v) = target_hz {
+                    *thz = v;
+                }
+                if let Some(v) = cull_mask {
+                    *cm = v;
+                }
+            }
             RichSet::MatterPrimitive(shape, color) => {
                 let shape = match shape.as_str() {
                     "Sphere" | "sphere" => floptle_core::Shape::Sphere,
@@ -1037,6 +1142,11 @@ fn describe_cell_range() -> String {
         floptle_core::EMPTY_TILE - 1
     )
 }
+
+/// Every key `node:setCamera{...}` reads. Anything else is refused, naming the
+/// nearest real one (`floptle/0078`, `floptle/0082`).
+pub(crate) const CAMERA_KEYS: &[&str] =
+    &["fovY", "active", "target", "width", "height", "hz", "cullMask"];
 
 /// The handle `node:tilemap()` returns: read and write single squares.
 ///
@@ -2384,6 +2494,68 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         ));
                     }
                     q.borrow_mut().push((e, crate::RichSet::MatterSpriteBatch { size }));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            // node:setCamera{ fovY =, active =, target =, width =, height =,
+            // hz =, cullMask = } — the whole camera surface a game needs
+            // (`floptle/0078`). With a `target` the camera renders into a live
+            // texture any material or UI image wears as `rt:<name>`: minimaps,
+            // mirrors, security monitors, scopes, split-screen.
+            //
+            // Every value is checked HERE, at the call. `hz = "10"` and
+            // `width = 0` raise with the property, the value and the range —
+            // not three frames later as a black rectangle (`floptle/0082`).
+            let q = q.clone();
+            methods.set(
+                "setCamera",
+                lua.create_function(move |_, (this, t): (Table, Table)| {
+                    use crate::opts::{check_keys, opt_bool, opt_num, opt_str};
+                    const CALL: &str = "node:setCamera";
+                    let e: u32 = this.raw_get("__id")?;
+                    check_keys(&t, CAMERA_KEYS, CALL)?;
+                    let target = opt_str(&t, CALL, "target")?;
+                    if let Some(name) = &target
+                        && let Some(bare) = name.strip_prefix("rt:")
+                    {
+                        // `target = "rt:minimap"` would make the texture
+                        // `rt:rt:minimap`, which resolves to nothing and says
+                        // nothing. The prefix belongs to the texture ref, not
+                        // to the name.
+                        return Err(mlua::Error::runtime(format!(
+                            "{CALL}: `target = \"{name}\"` — the target name is bare; write \
+                             `target = \"{bare}\"` and then use the texture \"rt:{bare}\""
+                        )));
+                    }
+                    q.borrow_mut().push((
+                        e,
+                        crate::RichSet::MatterCamera {
+                            fov_y: opt_num(&t, CALL, "fovY", 0.05, 3.0)?.map(|v| v as f32),
+                            active: opt_bool(&t, CALL, "active")?,
+                            target,
+                            target_w: opt_num(
+                                &t,
+                                CALL,
+                                "width",
+                                floptle_core::Matter::TARGET_MIN as f64,
+                                floptle_core::Matter::TARGET_MAX as f64,
+                            )?
+                            .map(|v| v as u32),
+                            target_h: opt_num(
+                                &t,
+                                CALL,
+                                "height",
+                                floptle_core::Matter::TARGET_MIN as f64,
+                                floptle_core::Matter::TARGET_MAX as f64,
+                            )?
+                            .map(|v| v as u32),
+                            target_hz: opt_num(&t, CALL, "hz", 0.0, 240.0)?.map(|v| v as f32),
+                            cull_mask: opt_num(&t, CALL, "cullMask", 0.0, u32::MAX as f64)?
+                                .map(|v| v as u32),
+                        },
+                    ));
                     Ok(())
                 })?,
             )?;

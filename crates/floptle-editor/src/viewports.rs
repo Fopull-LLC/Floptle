@@ -295,47 +295,89 @@ impl Editor {
     /// the world into its live `rt:<name>` texture — BEFORE any pass that
     /// might sample it (the main surface, the game viewport, previews).
     /// Runs in edit mode too, so a cockpit screen shows its feed while you
-    /// place it. Capped so a scene can't turn into a render farm.
+    /// place it.
+    ///
+    /// Each target carries its own size and refresh rate (`floptle/0078`), and
+    /// the two things this cannot serve — more targets than
+    /// [`Matter::TARGET_LIMIT`], and two cameras claiming one name — are
+    /// reported once each rather than dropped quietly. See
+    /// [`crate::render_targets`] for the decision itself.
     pub(crate) fn update_render_targets(&mut self, elapsed: f32) {
-        const RT_W: u32 = 480;
-        const RT_H: u32 = 270;
-        const RT_MAX: usize = 4;
-        let cams: Vec<(floptle_core::Entity, String, f32, u32)> = self
-            .world
-            .query::<Matter>()
-            .filter_map(|(e, m)| match m {
-                Matter::Camera { fov_y, target, cull_mask, .. } if !target.is_empty() => {
-                    Some((e, target.clone(), *fov_y, *cull_mask))
+        let reqs = crate::render_targets::target_requests(&self.world);
+        if reqs.is_empty() {
+            return;
+        }
+        let plan = crate::render_targets::plan_render_targets(
+            reqs,
+            elapsed,
+            &self.render_target_last,
+        );
+        for name in plan.dropped.iter().chain(plan.duplicates.iter()) {
+            // Warned once per name: a per-frame log line would bury everything
+            // else in the Console, and this is a scene-authoring mistake that
+            // does not change until the scene does.
+            if self.render_target_warned.insert(name.clone()) {
+                if plan.dropped.contains(name) {
+                    log::warn!(
+                        "render target \"{name}\" is not being drawn: a scene may hold {} live \
+                         targets and this one is past the limit. Lower a camera's refresh rate \
+                         and share one target, or clear the `target` on a camera that no longer \
+                         needs one.",
+                        Matter::TARGET_LIMIT
+                    );
+                } else {
+                    log::warn!(
+                        "render target \"{name}\" is claimed by more than one camera — only the \
+                         first draws. Two cameras writing one texture would flicker between two \
+                         viewpoints; give each its own target name."
+                    );
                 }
-                _ => None,
-            })
-            .take(RT_MAX)
-            .collect();
-        for (e, name, fov_y, mask) in cams {
-            if !self.render_targets.contains_key(&name) {
+            }
+        }
+        for r in plan.draw {
+            // Allocate on first use, and RE-allocate when the camera asks for a
+            // different size — otherwise a script that resizes its minimap gets
+            // the old texture and nothing says why.
+            let stale = self
+                .render_targets
+                .get(&r.name)
+                .is_none_or(|t| (t.w, t.h) != (r.w, r.h));
+            if stale {
                 let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
                     return;
                 };
-                let (tex, color, depth) = raster.register_render_target(gpu, RT_W, RT_H);
+                let (tex, color, depth) = raster.register_render_target(gpu, r.w, r.h);
                 // The registry key materials/UI use. Stale entries from renamed
                 // targets keep their last frame — harmless, and re-rendered the
                 // moment a camera claims the name again.
-                self.texture_registry.insert(format!("rt:{name}"), tex);
-                self.render_targets.insert(name.clone(), (tex, color, depth));
+                self.texture_registry.insert(format!("rt:{}", r.name), tex);
+                self.render_targets.insert(
+                    r.name.clone(),
+                    crate::render_targets::RenderTarget { tex, color, depth, w: r.w, h: r.h },
+                );
             }
             let (tex, cv, dv) = {
-                let s = &self.render_targets[&name];
-                (s.0, s.1.clone(), s.2.clone())
+                let s = &self.render_targets[&r.name];
+                (s.tex, s.color.clone(), s.depth.clone())
             };
-            let wt = floptle_core::world_transform(&self.world, e);
+            let wt = floptle_core::world_transform(&self.world, r.e);
             let cam = RenderCamera::new(
                 wt.translation,
                 wt.rotation,
-                Projection::Perspective { fov_y, near: 0.05, far: 300000.0 },
+                Projection::Perspective { fov_y: r.fov_y, near: 0.05, far: 300000.0 },
             );
             // skip_tex = its own target: a camera can film another camera's
             // screen, never its own mid-pass (wgpu forbids it).
-            self.render_world_into(&cv, &dv, &cam, RT_W as f32 / RT_H as f32, elapsed, mask, Some(tex));
+            self.render_world_into(
+                &cv,
+                &dv,
+                &cam,
+                r.w as f32 / r.h as f32,
+                elapsed,
+                r.mask,
+                Some(tex),
+            );
+            self.render_target_last.insert(r.name, elapsed);
         }
     }
 
@@ -716,6 +758,9 @@ impl Editor {
                 active,
                 target: String::new(),
                 cull_mask: u32::MAX,
+                target_w: Matter::TARGET_W,
+                target_h: Matter::TARGET_H,
+                target_hz: 0.0,
             },
         );
         if let Some(p) = parent {

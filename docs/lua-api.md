@@ -16,7 +16,7 @@ each group, and meant to be searched.
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 23
 - [node — transform & body fields](#node--transform--body-fields) — 36
-- [node — methods & handles](#node--methods--handles) — 17
+- [node — methods & handles](#node--methods--handles) — 18
 - [vectors, directions & easing](#vectors-directions--easing) — 47
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
@@ -405,6 +405,10 @@ node:hasTag("enemy") — whether the node carries that exact tag. The classic hi
 ### `node:removeTag`
 
 node:removeTag("burning") — remove a tag (no-op when absent).
+
+### `node:setCamera`
+
+node:setCamera{fovY=1.0, active=true, target="minimap", width=256, height=256, hz=10, cullMask=…} — aim a camera, hand it play-mode authority, and point it at a RENDER TARGET. With a `target` the camera draws the world into a live texture any material or UI image wears as "rt:<name>" — minimaps, mirrors, security monitors, scopes, split-screen. `width`/`height` are the texture's pixels (8–4096) and `hz` how often it redraws (0 = every frame), so a 10 Hz minimap costs a sixth of a 60 Hz one. `active=true` clears every other camera's authority, because two active cameras is not a choice anyone made. fovY is RADIANS. Every value is checked at the call: an unknown key, a `width=0` or an `hz="10"` raises naming the property, the value and the range.
 
 ### `node:setCelestial`
 

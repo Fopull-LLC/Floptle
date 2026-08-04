@@ -1494,6 +1494,9 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
             active: true,
             target: String::new(),
             cull_mask: u32::MAX,
+            target_w: floptle_core::Matter::TARGET_W,
+            target_h: floptle_core::Matter::TARGET_H,
+            target_hz: 0.0,
         },
         // The default camera flies on play (hold right-mouse to look, WASD to move).
         scripts: vec![floptle_scene::ScriptDoc {

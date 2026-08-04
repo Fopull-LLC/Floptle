@@ -88,6 +88,7 @@ mod map_keys;
 mod prefs;
 mod project;
 mod render_frame;
+mod render_targets;
 mod rollback;
 mod rollback_session;
 mod rig_overrides;
@@ -1824,12 +1825,17 @@ struct Editor {
     /// Kepler conic). While warp > 1 each in-flight body is driven analytically
     /// from its cached conic — drift-free at any warp; cleared at warp 1.
     space_coast: std::collections::HashMap<u32, (u32, floptle_core::frames::Kepler)>,
-    /// A1 render targets: target name → (material TexId, color attachment,
-    /// depth). Registered in the raster texture table as `rt:<name>` so
-    /// materials/UI images sample the live feed; rendered per frame by
-    /// `update_render_targets`.
-    render_targets:
-        std::collections::HashMap<String, (floptle_render::TexId, wgpu::TextureView, wgpu::TextureView)>,
+    /// A1 render targets: target name → its allocated texture + views.
+    /// Registered in the raster texture table as `rt:<name>` so materials/UI
+    /// images sample the live feed; rendered by `update_render_targets` at the
+    /// camera's own size and refresh rate.
+    render_targets: std::collections::HashMap<String, crate::render_targets::RenderTarget>,
+    /// When each render target last redrew (the elapsed clock), which is what
+    /// turns a camera's `target_hz` into skipped frames (`floptle/0078`).
+    render_target_last: std::collections::HashMap<String, f32>,
+    /// Target names already warned about (over the limit, or claimed twice), so
+    /// a scene-authoring mistake is reported once and not every frame.
+    render_target_warned: std::collections::HashSet<String>,
     /// Each dynamic body's current dominant celestial (sim body eid → celestial
     /// node index): the carried patched-conic frame. On a dominance change the
     /// body's sim velocity is re-expressed in the new frame so its WORLD

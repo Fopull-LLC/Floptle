@@ -230,6 +230,7 @@ pub use http_api::open_in_browser;
 mod input_api;
 mod math_api;
 mod net_api;
+pub mod opts;
 mod perf_api;
 pub mod rollback_api;
 mod preprocess;
@@ -979,6 +980,23 @@ pub enum RichSet {
     /// On-demand generation spec (RON `PlanetFill`) for a Terrain node —
     /// `None` clears it. See `floptle_core::TerrainGen` (G2 galaxy streaming).
     TerrainGen(Option<String>),
+    /// `node:setCamera{...}` — aim a camera, hand it authority, and point it at
+    /// a live `rt:<name>` texture at a chosen size and refresh rate
+    /// (`floptle/0078`).
+    ///
+    /// Every field is an `Option` of a value the engine will act on, not a
+    /// `(name, value)` pair: the table is validated at the CALL, where a
+    /// traceback points at the line that wrote it, so nothing here can be
+    /// silently unread on the way out.
+    MatterCamera {
+        fov_y: Option<f32>,
+        active: Option<bool>,
+        target: Option<String>,
+        target_w: Option<u32>,
+        target_h: Option<u32>,
+        target_hz: Option<f32>,
+        cull_mask: Option<u32>,
+    },
 }
 
 /// The interior-mutable state the Lua handle closures share with the host: the scene
@@ -2229,6 +2247,96 @@ end
             strs: Vec::new(),
         }]));
         (world, e)
+    }
+
+    /// A script points a camera at a render target and reads back what it got
+    /// (`floptle/0078`).
+    ///
+    /// The camera group had seven entries and not one of them rendered
+    /// anything: `target` was settable only in the Inspector, so a minimap was
+    /// impossible from script even though the engine had been rendering camera
+    /// targets for two releases.
+    #[test]
+    fn a_script_aims_a_camera_at_a_render_target_and_sizes_it() {
+        let dir = std::env::temp_dir().join(format!("floptle_rt_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "minimap",
+            "\
+function start(node)
+  local eye = find('MapEye')
+  eye:setCamera{ target = 'minimap', width = 256, height = 256, hz = 10, fovY = 1.2 }
+  node:setMaterial{ texture = 'rt:minimap', unlit = true }
+end
+",
+        );
+        let (mut world, e) = world_with_script("minimap");
+        // The camera is a scene node the script finds and aims, which is how a
+        // game's minimap camera is authored: once, then driven.
+        let eye = world.spawn();
+        world.insert(eye, Transform::IDENTITY);
+        world.insert(eye, floptle_core::Name("MapEye".into()));
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        // The screen wears the live feed.
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let m = world.get::<floptle_core::Material>(e).expect("setMaterial ran");
+        assert_eq!(m.texture.as_deref(), Some("rt:minimap"));
+        // The camera the script created carries its own size and rate — not the
+        // 480×270-every-frame every target used to get.
+        let cam = world
+            .query::<Matter>()
+            .find_map(|(_, m)| match m {
+                Matter::Camera { target, target_w, target_h, target_hz, fov_y, .. }
+                    if target == "minimap" =>
+                {
+                    Some((*target_w, *target_h, *target_hz, *fov_y))
+                }
+                _ => None,
+            })
+            .expect("setCamera made a render-target camera");
+        assert_eq!((cam.0, cam.1), (256, 256), "the size the script asked for");
+        assert_eq!(cam.2, 10.0, "the rate the script asked for");
+        assert!((cam.3 - 1.2).abs() < 1e-5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every way of getting `setCamera` wrong raises AT THE CALL, naming the
+    /// property, the value and what is accepted (`floptle/0082`).
+    ///
+    /// A silently-defaulted render target is invisible: the texture resolves,
+    /// the picture is there, and it is simply the wrong size or rate forever.
+    #[test]
+    fn a_bad_camera_option_is_refused_where_it_was_written() {
+        let dir = std::env::temp_dir().join(format!("floptle_rt_bad_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // (what the script writes, what the message must contain)
+        let cases: &[(&str, &[&str])] = &[
+            ("node:setCamera{ targt = 'minimap' }", &["targt", "did you mean `target`"]),
+            ("node:setCamera{ width = 0 }", &["width", "8"]),
+            ("node:setCamera{ hz = '10' }", &["hz", "string"]),
+            ("node:setCamera{ active = 0 }", &["active", "true or false"]),
+            ("node:setCamera{ target = 42 }", &["target", "integer"]),
+            // The prefix belongs to the texture ref, not to the name — this
+            // would otherwise make a texture called `rt:rt:minimap`, which
+            // resolves to nothing and says nothing.
+            ("node:setCamera{ target = 'rt:minimap' }", &["rt:minimap", "target = \"minimap\""]),
+        ];
+        for (i, (src, wants)) in cases.iter().enumerate() {
+            let name = format!("bad{i}");
+            write_script(&dir, &name, &format!("function start(node)\n  {src}\nend\n"));
+            let (mut world, _e) = world_with_script(&name);
+            let mut host = ScriptHost::new();
+            host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+            let errs = host.errors().to_vec();
+            assert!(!errs.is_empty(), "`{src}` was accepted silently");
+            let msg = errs.join(" | ");
+            for want in *wants {
+                assert!(msg.contains(want), "`{src}` error is missing {want:?}: {msg}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The 2D layer, end to end from Lua (`floptle/0058`): build a grid, paint

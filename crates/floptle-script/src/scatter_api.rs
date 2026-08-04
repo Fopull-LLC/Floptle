@@ -17,6 +17,8 @@ use std::rc::Rc;
 
 use mlua::{Lua, Table, Value};
 
+use crate::opts::check_keys;
+
 /// A scatter source a script declared, plus the ids it has removed.
 pub type Sources = Rc<RefCell<Vec<floptle_core::scatter::ScatterSource>>>;
 
@@ -41,37 +43,6 @@ const CREATE_KEYS: &[&str] = &[
     "asset", "lod", "range", "seed", "center", "radius", "halfX", "halfZ", "align", "perChunk",
     "chunk", "scaleMin", "scaleMax", "fade", "density", "densityRows", "parent",
 ];
-
-/// Refuse an options table containing anything the engine does not read.
-///
-/// Names the key, and suggests the nearest real one — a rejected typo that
-/// doesn't say what you meant is only half an error message.
-fn check_keys(opts: &Table, known: &[&str], call: &str) -> mlua::Result<()> {
-    for pair in opts.clone().pairs::<Value, Value>() {
-        let (k, _) = pair?;
-        let Value::String(k) = k else { continue };
-        let key = k.to_str()?.to_string();
-        if known.contains(&key.as_str()) {
-            continue;
-        }
-        // Case-insensitive near-miss first (`perchunk` for `perChunk`), then a
-        // shared prefix, which covers most of the rest.
-        let near = known.iter().find(|n| n.eq_ignore_ascii_case(&key)).or_else(|| {
-            known.iter().find(|n| {
-                let (a, b) = (n.to_ascii_lowercase(), key.to_ascii_lowercase());
-                a.len() >= 3 && b.len() >= 3 && a[..3] == b[..3]
-            })
-        });
-        let hint = match near {
-            Some(n) => format!(" (did you mean `{n}`?)"),
-            None => format!(" (it reads: {})", known.join(", ")),
-        };
-        return Err(mlua::Error::RuntimeError(format!(
-            "{call}: no option called `{key}`{hint}"
-        )));
-    }
-    Ok(())
-}
 
 /// Chunks resident at once, above which a source is reported rather than left
 /// to be discovered as "the engine is slow" (`floptle/0071`).
