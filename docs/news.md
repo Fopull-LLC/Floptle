@@ -1,6 +1,15 @@
 ## Just shipped
 
-**v0.29.0 "Ask The Index"** — one script finding another stopped costing the
+**v0.30.0 "Draw It Anywhere"** — sprites you draw in `update` now reach the
+screen. A sprite batch used to be emptied after every script pass, and a frame
+runs three, so anything drawn in `update` was wiped twice before it rendered —
+silently, and all of it at once. The frame is the unit now, so draw wherever you
+like. A batch's `size` is also the sprite's true width at last (it was drawing
+40% too big). Landing on a small planet, terrain that has just arrived dissolves
+in instead of popping. And a scene of thousands of scripted nodes no longer
+crashes the editor with your unsaved work in it.
+
+**v0.29.0 "Ask The Index"** before it — one script finding another stopped costing the
 size of your scene: a 5,000-node game spent 25 ms a frame searching for things
 and now spends 0.2. Worlds can have biomes, because scattered props take a
 density rule; a prop your own script assembled can be scattered, because a
@@ -10,7 +19,7 @@ whole. Plus three silences broken — a scatter option that did nothing, a scene
 value your script no longer reads, and a scene value quietly pinning the number
 you just edited.
 
-**v0.28.0 "One Missing Section"** before it — a screen built with `ui.make` no longer
+**v0.28.0 "One Missing Section"** under those — a screen built with `ui.make` no longer
 disappears because one part of it isn't showing. A section written as `nil` —
 which is how anybody writes a HUD where parts come and go — used to take the
 whole screen down, or silently drop everything after it. Clicking also stopped
@@ -19,7 +28,7 @@ no longer asks for, so a row that used to be a Buy button and is now a label
 stops answering the old one. And a script can make a sprite batch
 (`node:setSpriteBatch`) instead of authoring one node per style into the scene.
 
-**v0.27.0 "Same Everywhere"** under those — a pixel-art game can look the same in every
+**v0.27.0 "Same Everywhere"** — a pixel-art game can look the same in every
 window size. Two settings, both off by default: upscale the picture by a whole
 number and letterbox the rest, so every pixel is the same size instead of some
 being two screen pixels and some three; and pin the internal width, so a wide
