@@ -1,6 +1,15 @@
 ## Just shipped
 
-**v0.31.0 "Say So Sooner"** — a field of scattered props now tells you what it
+**v0.32.0 "Under Your Feet"** — the ground you are standing on now loads before
+a planet twelve thousand units away. Terrain loaded nearest-first, but "nearest"
+was counted in each world's own chunks, so on a solar system the ground under
+your feet queued behind worlds you could barely see — and while it waited you
+could see straight through the planet into space. Both fixed. Scattered props
+also stay on the planet they grow on: a field can now ride a node with `parent`,
+so a world that orbits carries its rocks instead of sliding out from under them,
+and every rock keeps its identity — anything you harvested stays harvested.
+
+**v0.31.0 "Say So Sooner"** before it — a field of scattered props now tells you what it
 costs at the moment you ask for it, rather than the moment your game stops. The
 outermost view distance was quietly the budget — cost grows with its square —
 and `scatter.cost` hands back the numbers, while a field big enough to matter
@@ -10,7 +19,7 @@ stops answering typos — a `pin` it doesn't recognise raises and says what it
 takes, instead of quietly meaning "top left", and `topCenter`/`bottomCenter` now
 work because they are what people write.
 
-**v0.30.0 "Draw It Anywhere"** before it — sprites you draw in `update` now reach the
+**v0.30.0 "Draw It Anywhere"** under those — sprites you draw in `update` now reach the
 screen. A sprite batch used to be emptied after every script pass, and a frame
 runs three, so anything drawn in `update` was wiped twice before it rendered —
 silently, and all of it at once. The frame is the unit now, so draw wherever you
@@ -19,7 +28,7 @@ like. A batch's `size` is also the sprite's true width at last (it was drawing
 in instead of popping. And a scene of thousands of scripted nodes no longer
 crashes the editor with your unsaved work in it.
 
-**v0.29.0 "Ask The Index"** under those — one script finding another stopped costing the
+**v0.29.0 "Ask The Index"** — one script finding another stopped costing the
 size of your scene: a 5,000-node game spent 25 ms a frame searching for things
 and now spends 0.2. Worlds can have biomes, because scattered props take a
 density rule; a prop your own script assembled can be scattered, because a

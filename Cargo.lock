@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-account"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
@@ -1356,14 +1356,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-anim"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "floptle-core",
 ]
 
 [[package]]
 name = "floptle-assets"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "floptle-anim",
  "floptle-core",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-audio"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "cpal",
  "env_logger",
@@ -1388,14 +1388,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-core"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "glam",
 ]
 
 [[package]]
 name = "floptle-dist"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "directories",
  "flate2",
@@ -1410,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-editor"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "egui",
  "egui-wgpu",
@@ -1454,7 +1454,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-field"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "floptle-core",
  "serde",
@@ -1462,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-hub"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "directories",
  "eframe",
@@ -1484,7 +1484,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-image"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "image",
  "ron",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-input"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "env_logger",
  "floptle-core",
@@ -1505,7 +1505,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-map"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "glam",
  "serde",
@@ -1513,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-matter"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "floptle-core",
  "floptle-field",
@@ -1523,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-net"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "bytes",
  "floptle-core",
@@ -1539,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-physics"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "floptle-core",
  "floptle-field",
@@ -1548,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-proof"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "bytemuck",
  "env_logger",
@@ -1561,14 +1561,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-relay"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "floptle-net",
 ]
 
 [[package]]
 name = "floptle-render"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "bytemuck",
  "floptle-core",
@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-rules"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "floptle-core",
  "floptle-field",
@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-runtime"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "env_logger",
  "floptle-anim",
@@ -1622,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-scene"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "floptle-audio",
  "floptle-core",
@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-script"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "floptle-account",
  "floptle-audio",
@@ -1654,14 +1654,14 @@ dependencies = [
 
 [[package]]
 name = "floptle-shader"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "naga",
 ]
 
 [[package]]
 name = "floptle-ui"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "ron",
  "serde",
@@ -1669,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "floptle-vfx"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "floptle-core",
  "floptle-render",
