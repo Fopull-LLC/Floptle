@@ -189,15 +189,32 @@ Names are the same ones a script writes through
 can't express. **A name that isn't in this list raises**, with a suggestion —
 a declarative screen that silently ignores a line is worse than one that stops.
 
-**Placement** — `pin` (`"topLeft"`…`"bottomRight"`, `"center"`), `inset`
-(fill the parent with a margin), `stretch` `{minX, minY, maxX, maxY}`, `margin`,
-`x`, `y`, `pos`, `order`.
+**So does a value.** Where a property takes a fixed set of words, a word outside
+it raises too, naming what it got and what it takes. It used to answer with a
+default: `pin = "topCenter"` meant `topLeft`, silently, and four HUD elements
+would pile into one corner while looking for all the world like a layout bug.
+The sets are listed below.
+
+**Placement** — `pin`, `inset` (fill the parent with a margin), `stretch`
+`{minX, minY, maxX, maxY}`, `margin`, `x`, `y`, `pos`, `order`.
+
+`pin` takes one of nine anchors:
+
+| | | |
+| --- | --- | --- |
+| `"topLeft"` | `"top"` | `"topRight"` |
+| `"left"` | `"center"` | `"right"` |
+| `"bottomLeft"` | `"bottom"` | `"bottomRight"` |
+
+The four middle edges also answer to the longer spelling people reach for —
+`"topCenter"`, `"bottomCenter"`, `"leftCenter"`, `"rightCenter"` — and `centre`
+works anywhere `center` does.
 
 **Size** — `w`, `h`, `size`, `minW`, `minH`, `maxW`, `maxH`. A number is design
 units; `"50%"` is a fraction of the parent; `"grow"` / `"grow 2"` shares the
 leftover space in a stack; `"fit"` wraps the content.
 
-**Stack** — `dir` (`"row"` / `"col"`), `gap`, `pad`, `justify` (`"start"`,
+**Stack** — `dir` (`"row"` / `"column"`), `gap`, `pad`, `justify` (`"start"`,
 `"center"`, `"end"`, `"between"`), `align` (`"start"`, `"center"`, `"end"`,
 `"stretch"`). Any one of them makes the element a container.
 

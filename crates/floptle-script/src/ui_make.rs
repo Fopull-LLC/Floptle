@@ -276,6 +276,20 @@ fn parse_node(
                 "ui.make{trail}: no UI property called `{key}`{hint}"
             )));
         }
+        // …and the same treatment for a value the property does not take
+        // (`floptle/0072`). `pin = "topCenter"` used to answer `topLeft`,
+        // silently and forever — four HUD elements stacked into one corner, a
+        // report that read as a layout bug, and an afternoon spent nowhere near
+        // the spelling that caused it.
+        if let Some(accepts) = floptle_ui::make::prop_values(&key)
+            && !floptle_ui::make::known_value(&key, &val)
+        {
+            return Err(mlua::Error::runtime(format!(
+                "ui.make{trail}: `{key}` does not take {}; it takes {}",
+                describe(&val),
+                accepts.join(", ")
+            )));
+        }
         node.props.push((key, val));
     }
     // A stable order, so two calls that describe the same screen produce the
@@ -359,6 +373,21 @@ fn string_of(v: &Value) -> String {
         Value::Integer(i) => i.to_string(),
         Value::Number(n) => format!("{n}"),
         _ => String::new(),
+    }
+}
+
+/// A property value as it should read back in an error message: quoted if it
+/// was a word, named by shape if it was not.
+///
+/// The value has to be IN the message. "`pin` takes topLeft, top, …" leaves you
+/// re-reading your own table to find which of five pins was the wrong one.
+fn describe(v: &PropVal) -> String {
+    match v {
+        PropVal::Str(s) => format!("`{s}`"),
+        PropVal::Num(n) => format!("the number {n}"),
+        PropVal::Bool(b) => format!("`{b}`"),
+        PropVal::Color(_) => "a colour".into(),
+        PropVal::List(_) => "a list".into(),
     }
 }
 

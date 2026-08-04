@@ -2643,6 +2643,61 @@ end
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `ui.make` raises on a property NAME it does not know, and the reasoning
+    /// is right: a declarative screen that silently ignores a line is worse
+    /// than one that stops. The same has to be true of a VALUE (`floptle/0072`).
+    ///
+    /// `pin = "topCenter"` used to answer `topLeft`, silently and forever. Four
+    /// HUD elements — a floor readout, a controls hint, an interaction prompt
+    /// and every shop note — stacked into one corner underneath the panel that
+    /// legitimately lived there. The player's report was "the HUD is clipping
+    /// over things and covering the scene", which is a perfect description of
+    /// the symptom and points nowhere near the spelling that caused it.
+    #[test]
+    fn ui_make_refuses_a_value_a_property_does_not_take() {
+        let dir = std::env::temp_dir().join(format!("floptle_uimake_val_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "hud",
+            "function update(node, dt)\n  ui.make(node, { { 'text', text = 'X', pin = 'middle' } })\nend\n",
+        );
+        let (mut world, e) = world_with_script("hud");
+        world.insert(e, floptle_core::Matter::Empty);
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        let err = host.errors().join(" ");
+        assert!(!err.is_empty(), "a bad pin was accepted");
+        // The message has to carry all three: which property, what it got, and
+        // what it takes. Any one missing and you are back to re-reading a table.
+        for want in ["pin", "middle", "topLeft", "bottomRight"] {
+            assert!(err.contains(want), "the error never mentions {want}: {err}");
+        }
+
+        // …and the spelling people actually write is ANSWERED. This is the one
+        // that was reported; refusing it would have been correct and useless.
+        write_script(
+            &dir,
+            "hud",
+            "function update(node, dt)\n  ui.make(node, { { 'text', text = 'X', pin = 'bottomCenter' } })\nend\n",
+        );
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+        host.apply_ui_makes(&mut world);
+        let pinned = world
+            .query::<floptle_ui::ElementSpec>()
+            .filter_map(|(_, s)| match s.place {
+                floptle_ui::Place::Pin { anchor, .. } => Some(anchor),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            pinned.contains(&floptle_ui::Anchor::Bottom),
+            "bottomCenter did not land at the bottom: {pinned:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Reconcile REUSES entities, so an element that was a buy button and is
     /// now a sold-out label is the same entity with no `clicked` in its new
     /// description. Its old closure used to stay armed — clicking one thing did

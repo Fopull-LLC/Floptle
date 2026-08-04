@@ -334,16 +334,34 @@ fn is_place_mode(name: &str) -> bool {
     matches!(name, "pin" | "inset" | "stretch")
 }
 
-/// Set one property. Returns false — and changes nothing — when the name isn't
-/// one of ours, which is how a typo becomes an error message instead of a
-/// screen that silently ignores a line.
+/// What [`apply_prop`] made of one `(name, value)` pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Applied {
+    /// Set.
+    Set,
+    /// No property by that name. Nothing changed.
+    NoSuchProp,
+    /// The name is ours; the value is not one it takes. Nothing changed — see
+    /// [`prop_values`] for what it does take.
+    BadValue,
+}
+
+/// Set one property. Changes nothing and says which kind of mistake it was when
+/// the name isn't one of ours, or the value isn't one that name takes — which is
+/// how a typo becomes an error message instead of a screen that silently
+/// ignores a line, or answers it with a default.
 ///
 /// The vocabulary is the one a script already writes through
 /// `node:getcomponent("UiElement")`, plus the structural properties a live
 /// field write can't express (a stack, a placement mode, a sub-spec that
 /// doesn't exist yet). Deliberately not a second naming scheme: a test in
 /// `floptle-script` asserts every mirrored field name is accepted here.
-pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> bool {
+pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> Applied {
+    // An enumerated property is checked BEFORE anything is written, so a
+    // refused value leaves the spec exactly as it found it.
+    if prop_values(name).is_some() && !enum_ok(name, &v.text()) {
+        return Applied::BadValue;
+    }
     // Sub-specs appear on demand, so `{ "box", text = "hi" }` is a label and
     // `{ "text", texture = ... }` is a label with a picture behind it. Nothing
     // has to be declared before it is used.
@@ -439,18 +457,11 @@ pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> bool {
         // ---- stack ---------------------------------------------------------
         // Any one of these makes the element a container, so `{ "box", gap = 8 }`
         // needs no second word for "and also flow your children".
-        "dir" => stack!().dir = if v.text().starts_with("row") { Dir::Row } else { Dir::Column },
+        "dir" => stack!().dir = dir_of(&v.text()).unwrap_or_default(),
         "gap" => stack!().gap = v.num(),
         "pad" => stack!().pad = v.num(),
-        "align" => stack!().align = align(&v.text()),
-        "justify" => {
-            stack!().justify = match v.text().as_str() {
-                "center" | "centre" => Justify::Center,
-                "end" => Justify::End,
-                "between" | "spaceBetween" => Justify::SpaceBetween,
-                _ => Justify::Start,
-            }
-        }
+        "align" => stack!().align = align(&v.text()).unwrap_or_default(),
+        "justify" => stack!().justify = justify_of(&v.text()).unwrap_or_default(),
 
         // ---- shape ---------------------------------------------------------
         "fill" => shape!().fill = v.color(),
@@ -476,29 +487,16 @@ pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> bool {
         "textSize" => text!().size = v.num(),
         "textColor" => text!().color = v.color(),
         "textR" | "textG" | "textB" | "textA" => text!().color[rgba(name)] = v.num(),
-        "textAlign" => text!().align = align(&v.text()),
-        "textValign" => text!().valign = align(&v.text()),
+        "textAlign" => text!().align = align(&v.text()).unwrap_or_default(),
+        "textValign" => text!().valign = align(&v.text()).unwrap_or_default(),
         "tracking" => text!().tracking = v.num(),
         "lineHeight" => text!().line_height = v.num(),
         "font" => text!().font = v.text(),
         "wrap" => text!().wrap = v.bool(),
         "maxLines" => text!().max_lines = v.num().max(0.0) as u32,
         "textFit" => text!().fit = v.bool(),
-        "case" => {
-            text!().case = match v.text().as_str() {
-                "upper" => Case::Upper,
-                "lower" => Case::Lower,
-                "title" => Case::Title,
-                _ => Case::AsIs,
-            }
-        }
-        "overflow" => {
-            text!().overflow = match v.text().as_str() {
-                "clip" => Overflow::Clip,
-                "ellipsis" => Overflow::Ellipsis,
-                _ => Overflow::Show,
-            }
-        }
+        "case" => text!().case = case_of(&v.text()).unwrap_or_default(),
+        "overflow" => text!().overflow = overflow_of(&v.text()).unwrap_or_default(),
 
         // ---- image ---------------------------------------------------------
         "texture" | "image" => image!().texture = v.text(),
@@ -509,13 +507,7 @@ pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> bool {
         "cell" => image!().cell = v.num().max(0.0) as u32,
         "slice" => image!().slice = v.quad(),
         "tiling" => image!().tiling = v.pair(),
-        "imageFit" => {
-            image!().fit = match v.text().as_str() {
-                "contain" => ImageFit::Contain,
-                "cover" => ImageFit::Cover,
-                _ => ImageFit::Stretch,
-            }
-        }
+        "imageFit" => image!().fit = image_fit_of(&v.text()).unwrap_or_default(),
 
         // ---- interaction ---------------------------------------------------
         "button" => spec.button = v.bool(),
@@ -537,13 +529,7 @@ pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> bool {
                 _ => n.right = v.text(),
             }
         }
-        "part" => {
-            spec.part = match v.text().as_str() {
-                "fill" => Some(SliderPart::Fill),
-                "handle" => Some(SliderPart::Handle),
-                _ => None,
-            }
-        }
+        "part" => spec.part = part_of(&v.text()).unwrap_or_default(),
 
         // ---- look ------------------------------------------------------------
         "style" => spec.style = v.text(),
@@ -578,9 +564,7 @@ pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> bool {
         "value" => slider!().value = v.num(),
         "interact" => slider!().interact = v.bool(),
         "flip" => slider!().flip = v.bool(),
-        "sliderDir" => {
-            slider!().dir = if v.text().starts_with("row") { Dir::Row } else { Dir::Column }
-        }
+        "sliderDir" => slider!().dir = dir_of(&v.text()).unwrap_or_default(),
 
         // ---- scroll ----------------------------------------------------------
         "scrollY" => scroll!().offset = v.num().max(0.0),
@@ -593,7 +577,7 @@ pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> bool {
         }
         "scrollbarAxis" => {
             let bar = spec.scrollbar.get_or_insert_with(Default::default);
-            bar.axis = if v.text().starts_with("row") { Dir::Row } else { Dir::Column };
+            bar.axis = dir_of(&v.text()).unwrap_or_default();
         }
 
         // ---- repeater ----------------------------------------------------------
@@ -606,15 +590,23 @@ pub fn apply_prop(spec: &mut ElementSpec, name: &str, v: &PropVal) -> bool {
         }
         "count" => spec.repeater.get_or_insert_with(Default::default).count = v.num().max(0.0) as u32,
 
-        _ => return false,
+        _ => return Applied::NoSuchProp,
     }
-    true
+    Applied::Set
 }
 
 /// Whether `apply_prop` would accept this name — the check the parser makes so
 /// a mistyped property is reported instead of dropped.
 pub fn known_prop(name: &str) -> bool {
-    apply_prop(&mut ElementSpec::default(), name, &PropVal::Num(0.0))
+    // A number is not a valid value for any of the enumerated properties, so
+    // this asks only about the NAME — which is the question.
+    apply_prop(&mut ElementSpec::default(), name, &PropVal::Num(0.0)) != Applied::NoSuchProp
+}
+
+/// Whether this property accepts this value. Always true for a property that
+/// isn't enumerated — see [`prop_values`].
+pub fn known_value(name: &str, v: &PropVal) -> bool {
+    apply_prop(&mut ElementSpec::default(), name, v) != Applied::BadValue
 }
 
 /// The closest few property names to a typo, for the error message.
@@ -714,28 +706,142 @@ fn quad_i(name: &str, keys: [&str; 4]) -> usize {
     keys.iter().position(|k| name.ends_with(k)).unwrap_or(0)
 }
 
-fn align(s: &str) -> Align {
-    match s {
+fn align(s: &str) -> Option<Align> {
+    Some(match s {
+        "start" | "left" | "top" => Align::Start,
         "center" | "centre" => Align::Center,
         "end" | "right" | "bottom" => Align::End,
         "stretch" => Align::Stretch,
-        _ => Align::Start,
-    }
+        _ => return None,
+    })
 }
 
 fn anchor(s: &str) -> Option<Anchor> {
     Some(match s {
         "topLeft" => Anchor::TopLeft,
-        "top" => Anchor::Top,
+        // `topCenter` and `bottomCenter` are what people write, because the
+        // other seven anchors are `topLeft`, `bottomRight` and friends — the
+        // two that take a bare direction are the two you have to look up. They
+        // were the four HUD elements that all landed in one corner
+        // (`floptle/0072`).
+        "top" | "topCenter" | "topCentre" => Anchor::Top,
         "topRight" => Anchor::TopRight,
-        "left" => Anchor::Left,
+        "left" | "leftCenter" | "leftCentre" => Anchor::Left,
         "center" | "centre" => Anchor::Center,
-        "right" => Anchor::Right,
+        "right" | "rightCenter" | "rightCentre" => Anchor::Right,
         "bottomLeft" => Anchor::BottomLeft,
-        "bottom" => Anchor::Bottom,
+        "bottom" | "bottomCenter" | "bottomCentre" => Anchor::Bottom,
         "bottomRight" => Anchor::BottomRight,
         _ => return None,
     })
+}
+
+/// The values an enumerated property takes, or `None` for a property that takes
+/// free text, a number or a boolean.
+///
+/// Used to REFUSE anything else, and to say what was expected. `ui.make` has
+/// always raised on a property NAME it doesn't know — "a declarative screen
+/// that silently ignores a line is worse than one that stops" — and a value it
+/// doesn't know is the same bug wearing different clothes. `pin = "topCenter"`
+/// answered `TopLeft`, silently, forever, and four HUD elements stacked into one
+/// corner over the panel that legitimately lived there. It read as a layout bug
+/// and pointed nowhere near the spelling that caused it (`floptle/0072`).
+///
+/// Spelling variants are accepted but not listed: `centre` for `center` is not
+/// a different answer, and an error message that lists both teaches neither.
+pub fn prop_values(name: &str) -> Option<&'static [&'static str]> {
+    Some(match name {
+        "pin" => &[
+            "topLeft", "top", "topRight", "left", "center", "right", "bottomLeft", "bottom",
+            "bottomRight", "topCenter", "bottomCenter", "leftCenter", "rightCenter",
+        ],
+        "align" | "textAlign" | "textValign" => {
+            &["start", "left", "top", "center", "end", "right", "bottom", "stretch"]
+        }
+        "justify" => &["start", "center", "end", "between", "spaceBetween"],
+        "dir" | "sliderDir" | "scrollbarAxis" => &["row", "column"],
+        "case" => &["asIs", "upper", "lower", "title"],
+        "overflow" => &["show", "clip", "ellipsis"],
+        "imageFit" => &["stretch", "contain", "cover"],
+        "part" => &["fill", "handle", "none"],
+        _ => return None,
+    })
+}
+
+/// A direction word: `row` or `column`, and nothing else.
+fn dir_of(s: &str) -> Option<Dir> {
+    match s {
+        "row" => Some(Dir::Row),
+        "column" | "col" => Some(Dir::Column),
+        _ => None,
+    }
+}
+
+fn justify_of(s: &str) -> Option<Justify> {
+    Some(match s {
+        "start" => Justify::Start,
+        "center" | "centre" => Justify::Center,
+        "end" => Justify::End,
+        "between" | "spaceBetween" => Justify::SpaceBetween,
+        _ => return None,
+    })
+}
+
+fn case_of(s: &str) -> Option<Case> {
+    Some(match s {
+        "asIs" | "none" => Case::AsIs,
+        "upper" => Case::Upper,
+        "lower" => Case::Lower,
+        "title" => Case::Title,
+        _ => return None,
+    })
+}
+
+fn overflow_of(s: &str) -> Option<Overflow> {
+    Some(match s {
+        "show" => Overflow::Show,
+        "clip" => Overflow::Clip,
+        "ellipsis" => Overflow::Ellipsis,
+        _ => return None,
+    })
+}
+
+fn image_fit_of(s: &str) -> Option<ImageFit> {
+    Some(match s {
+        "stretch" => ImageFit::Stretch,
+        "contain" => ImageFit::Contain,
+        "cover" => ImageFit::Cover,
+        _ => return None,
+    })
+}
+
+/// A slider part, where "none" is itself an answer — hence the nested option.
+fn part_of(s: &str) -> Option<Option<SliderPart>> {
+    Some(match s {
+        "fill" => Some(SliderPart::Fill),
+        "handle" => Some(SliderPart::Handle),
+        "none" => None,
+        _ => return None,
+    })
+}
+
+/// Whether an enumerated property accepts this value.
+///
+/// Delegates to the same parsers the `match` arms use, so the check and the
+/// behaviour cannot disagree — a second list to keep in step is how `collide`
+/// survived two releases.
+fn enum_ok(name: &str, s: &str) -> bool {
+    match name {
+        "pin" => anchor(s).is_some(),
+        "align" | "textAlign" | "textValign" => align(s).is_some(),
+        "justify" => justify_of(s).is_some(),
+        "dir" | "sliderDir" | "scrollbarAxis" => dir_of(s).is_some(),
+        "case" => case_of(s).is_some(),
+        "overflow" => overflow_of(s).is_some(),
+        "imageFit" => image_fit_of(s).is_some(),
+        "part" => part_of(s).is_some(),
+        _ => true,
+    }
 }
 
 fn place_offset(p: &Place) -> [f32; 2] {
@@ -897,6 +1003,98 @@ mod tests {
             Place::Stretch { margin, .. } => assert_eq!(margin, [12.0; 4]),
             p => panic!("expected a stretch, got {p:?}"),
         }
+    }
+
+    /// Every value the error message promises actually works. A list that
+    /// drifted from the `match` would send someone to a spelling that also
+    /// does nothing — worse than no list, which is why `enum_ok` asks the same
+    /// parsers the arms do.
+    #[test]
+    fn every_value_the_message_offers_is_one_the_property_takes() {
+        for name in ALL_PROPS {
+            let Some(values) = prop_values(name) else { continue };
+            assert!(!values.is_empty(), "{name} lists no values");
+            for v in values {
+                assert_eq!(
+                    apply_prop(&mut ElementSpec::default(), name, &PropVal::Str((*v).into())),
+                    Applied::Set,
+                    "{name} offers `{v}` and then refuses it"
+                );
+            }
+            // …and it is a real check, not one that accepts everything.
+            assert_eq!(
+                apply_prop(&mut ElementSpec::default(), name, &PropVal::Str("wumpus".into())),
+                Applied::BadValue,
+                "{name} accepted a value that is not a value"
+            );
+        }
+    }
+
+    /// The bug itself: an unrecognised `pin` answered `TopLeft`, silently and
+    /// forever. Four HUD elements stacked into one corner on top of the panel
+    /// that legitimately lived there, and the report was "the HUD is clipping
+    /// over things" — a perfect description that points nowhere near a spelling
+    /// mistake (`floptle/0072`).
+    #[test]
+    fn an_unknown_pin_is_refused_rather_than_answered_with_the_top_left_corner() {
+        let mut spec = ElementSpec {
+            place: Place::Pin { anchor: Anchor::Center, offset: [4.0, 5.0] },
+            ..Default::default()
+        };
+        let before = spec.clone();
+        assert_eq!(
+            apply_prop(&mut spec, "pin", &PropVal::Str("middle".into())),
+            Applied::BadValue
+        );
+        assert_eq!(spec, before, "a refused value still changed the element");
+
+        // …and the two spellings people actually write are ANSWERED, not
+        // refused. The other seven anchors are `topLeft` and friends; the two
+        // that take a bare direction are the two you have to look up.
+        for (wrote, meant) in [
+            ("topCenter", Anchor::Top),
+            ("bottomCenter", Anchor::Bottom),
+            ("leftCenter", Anchor::Left),
+            ("rightCenter", Anchor::Right),
+            ("bottomCentre", Anchor::Bottom),
+            ("bottom", Anchor::Bottom),
+        ] {
+            match prop("pin", PropVal::Str(wrote.into())).build().place {
+                Place::Pin { anchor, .. } => assert_eq!(anchor, meant, "pin = {wrote:?}"),
+                p => panic!("pin = {wrote:?} gave {p:?}"),
+            }
+        }
+    }
+
+    /// The quieter half of the same bug. `Align::Start` for a bad `align` is
+    /// less dramatic than `TopLeft` for a bad `pin`, and it would have been
+    /// found the same way — by a player saying something looks wrong.
+    #[test]
+    fn the_other_enumerated_properties_are_refused_the_same_way() {
+        for (name, junk) in [
+            ("align", "middle"),
+            ("justify", "spread"),
+            ("dir", "horizontal"),
+            ("case", "caps"),
+            ("overflow", "hidden"),
+            ("imageFit", "fill"),
+            ("textAlign", "centered"),
+            ("sliderDir", "vertical"),
+        ] {
+            assert_eq!(
+                apply_prop(&mut ElementSpec::default(), name, &PropVal::Str(junk.into())),
+                Applied::BadValue,
+                "{name} = {junk:?} was answered instead of refused"
+            );
+        }
+        // A number where a word belongs is refused too — it is the same mistake.
+        assert_eq!(
+            apply_prop(&mut ElementSpec::default(), "pin", &PropVal::Num(3.0)),
+            Applied::BadValue
+        );
+        // …while the name itself is still known, so the message can say which
+        // of the two mistakes it was.
+        assert!(known_prop("pin") && known_prop("align"));
     }
 
     #[test]
