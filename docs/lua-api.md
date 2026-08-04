@@ -30,7 +30,7 @@ each group, and meant to be searched.
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 14
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
-- [2D — tilemaps & sprite batches](#2d--tilemaps--sprite-batches) — 9
+- [2D — tilemaps & sprite batches](#2d--tilemaps--sprite-batches) — 11
 - [vessels — assembly.*](#vessels--assembly) — 14
 - [the camera & the screen](#the-camera--the-screen) — 7
 - [physics controls — pause & step](#physics-controls--pause--step) — 4
@@ -1771,6 +1771,10 @@ scatter.restore(sourceId [, instanceId]) — put one prop back, or all of them w
 
 ## 2D — tilemaps & sprite batches
 
+### `EMPTY_TILE`
+
+EMPTY_TILE — the tilemap cell value that leaves a square empty (u32::MAX, 4294967295). Prefer -1: any negative cell means empty, which is the convention in Tiled, Godot and LDtk. This constant exists because the API documented the name long before Lua could resolve it.
+
 ### `batch:draw`
 
 b:draw(x, y [, z] [, scale] [, rot] [, cell] [, r, g, b, a]) — draw one sprite THIS FRAME, positioned in the batch node's local space. Immediate mode, exactly like draw.* : what you draw this frame is what shows, and next frame starts empty — there is no pool to grow and no clear() to forget. `scale` is one number, or a vec2 for squash-and-stretch: b:draw(x, y, 0, vec2(1.4, 0.6)). The tint is the thing a shared Material could never give one sprite: flash one enemy red without blinking it off.
@@ -1791,9 +1795,13 @@ node:sprites() — a handle to this node's SpriteBatch (make it one with node:se
 
 node:tilemap() — a handle to this node's tilemap grid: tm:set / tm:get / tm:fill / tm:size. Re-dress a room per floor without rebuilding the node.
 
+### `tm.EMPTY`
+
+tm.EMPTY — the cell value that means "no tile here", on the handle rather than only as a global. Same number as EMPTY_TILE; -1 and nil mean it too.
+
 ### `tm:fill`
 
-tm:fill(cell) — set every square, including the empty ones. The fast way to reset a room before re-dressing it.
+tm:fill(cell) — set every square, including the empty ones. The fast way to reset a room before re-dressing it. tm:fill() with no argument, tm:fill(-1) and tm:fill(EMPTY_TILE) all clear the grid.
 
 ### `tm:get`
 
@@ -1801,7 +1809,7 @@ tm:get(x, y) → cell, or nil outside the grid and on an empty square.
 
 ### `tm:set`
 
-tm:set(x, y, cell) — set one square, 0-based from the TOP-LEFT. Outside the grid is a no-op rather than a wrap. Pass EMPTY_TILE (or use tm:fill) to clear.
+tm:set(x, y, cell) — set one square, 0-based from the TOP-LEFT. Outside the grid is a no-op rather than a wrap. To clear a square pass -1 (any negative works, as in Tiled/Godot/LDtk), nil, or the EMPTY_TILE constant — all three are the same value. A cell that is not a whole number in range is an error naming what it got and what it accepts, never a neighbouring tile.
 
 ### `tm:size`
 

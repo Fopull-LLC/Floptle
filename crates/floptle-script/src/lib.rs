@@ -43,6 +43,9 @@ use mlua::{Lua, RegistryKey, Table};
 /// Queued `node:setShaderParam(...)` writes: (entity index, uniform name, vec4 lanes).
 type ShaderParamSets = Rc<RefCell<Vec<(u32, String, [f32; 4])>>>;
 
+/// `(script key name, why the host keeps it)` — see [`ScriptHost::set_reserved_keys`].
+type ReservedKeys = Rc<RefCell<Vec<(String, String)>>>;
+
 /// One world-space line segment a script queued via `draw.line(...)` this tick
 /// (immediate mode — re-queued every tick while wanted). Drawn depth-tested by
 /// the runtime line layer; the S6 v2 map draws its orbit conics with these.
@@ -511,6 +514,16 @@ pub struct ScriptHost {
     /// `Some(true)` = lock (grab + hide the cursor), `Some(false)` = unlock, `None` = no
     /// change this frame. The editor drains it after `run` and applies it to the window.
     mouse_lock: Rc<RefCell<Option<bool>>>,
+    /// Keys the HOST answers itself, so a script polling one is never going to
+    /// see it — `(script name, why)`, filled by the driver
+    /// ([`ScriptHost::set_reserved_keys`]). The editor reserves Play/Pause/Step;
+    /// a headless harness reserves nothing.
+    ///
+    /// It exists so the first poll of such a key writes a Console line instead of
+    /// returning `false` forever (`floptle/0084`). Being unavailable used to look
+    /// exactly like not being pressed, which is why a game shipped an inventory
+    /// bound to Tab and heard about it from a player rather than from a test.
+    reserved_keys: ReservedKeys,
     /// `params.X = value` writes queued this pass — (entity, script kind, key,
     /// value). Flushed to the node's stored `ScriptInst` params so tunables are
     /// TWO-WAY: the write persists across frames and shows live in the
@@ -2291,6 +2304,132 @@ end
             world.get::<floptle_core::Sprites>(batch).is_some_and(|s| s.0.is_empty()),
             "sprites must not survive a frame nobody drew them"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Polling a key the host keeps says so, once, instead of reading `false`
+    /// forever (`floptle/0084`).
+    ///
+    /// The failure this replaces has no symptom: `input.pressed(k)` returning
+    /// false is what a key nobody pressed also looks like, so there is nothing
+    /// to log, nothing to assert and nothing to fall back to from inside the
+    /// game. One Console line is the whole difference between a five-second fix
+    /// and a player telling you your feature does not exist.
+    #[test]
+    fn polling_a_reserved_key_warns_once_and_says_what_takes_it() {
+        let dir = std::env::temp_dir().join(format!("floptle_reserved_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "hotkey",
+            "\
+function update(node, dt)
+  if input.pressed('f1') then end
+  if input.key('F1') then end      -- same key, different spelling
+  if input.pressed('i') then end   -- a key the game actually gets
+end
+",
+        );
+        let (mut world, _e) = world_with_script("hotkey");
+        let mut host = ScriptHost::new();
+        host.set_reserved_keys(&[("f1", "Play / Stop")]);
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        let warns: Vec<String> = host
+            .drain_logs()
+            .into_iter()
+            .filter(|l| l.level == LogLevel::Warn)
+            .map(|l| l.msg)
+            .collect();
+        assert_eq!(warns.len(), 1, "one line per key, not one per poll: {warns:?}");
+        assert!(warns[0].contains("f1"), "names the key: {}", warns[0]);
+        assert!(warns[0].contains("Play / Stop"), "names what takes it: {}", warns[0]);
+
+        // …and it does not repeat every frame. A warning that floods the Console
+        // is a warning that gets scrolled past.
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        assert!(
+            host.drain_logs().iter().all(|l| l.level != LogLevel::Warn),
+            "the same key warned twice"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With nothing reserved — a headless harness, or a build that keeps no keys
+    /// — the check is silent. The default must not invent warnings.
+    #[test]
+    fn nothing_is_reserved_by_default() {
+        let dir = std::env::temp_dir().join(format!("floptle_unreserved_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "poll", "function update(node, dt)\n  if input.pressed('f1') then end\nend\n");
+        let (mut world, _e) = world_with_script("poll");
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.drain_logs().iter().all(|l| l.level != LogLevel::Warn));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The arena loop that shipped with its walls missing now runs to the end
+    /// (`floptle/0083`).
+    ///
+    /// This is the real thing, not a unit test of the converter: a wall tilemap
+    /// written row by row with the play area punched out of the middle, and a
+    /// line AFTER the loop that has to be reached. `-1` used to fail the `u32`
+    /// conversion and raise, so the loop died on the first inside square — two
+    /// rows in — the mesh kept its padding, and the node never reached the line
+    /// that positions it. What the player saw was "the walls are not visible".
+    ///
+    /// The `EMPTY_TILE` global is checked in the same pass because it is what
+    /// the editor's autocomplete has told people to write since tilemaps
+    /// shipped; before this it resolved to `nil`, which then also failed to
+    /// convert.
+    #[test]
+    fn punching_a_hole_in_a_wall_tilemap_runs_to_the_end_of_the_loop() {
+        let dir = std::env::temp_dir().join(format!("floptle_empty_tile_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "arena",
+            "\
+function start(node)
+  local gw, gh, band = 5, 5, 1
+  node:setTilemap{ cols = gw, rows = gh, tile = 1.0 }
+  local tm = node:tilemap()
+  for gy = 0, gh - 1 do
+    for gx = 0, gw - 1 do
+      local inside = gx >= band and gx < gw - band and gy >= band and gy < gh - band
+      tm:set(gx, gy, inside and -1 or 4)
+    end
+  end
+  -- The three other spellings of empty all have to reach the same value.
+  tm:set(2, 2, EMPTY_TILE)
+  tm:set(3, 2, tm.EMPTY)
+  tm:set(1, 3, nil)
+  -- The line after the loop. This is the one the raise used to eat.
+  reachedTheEnd = true
+end
+",
+        );
+        let (mut world, e) = world_with_script("arena");
+        world.insert(e, floptle_core::Matter::Empty);
+        let mut host = ScriptHost::new();
+        // `start` queues the grid and the writes; the second pass applies them.
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        assert!(host.errors().is_empty(), "a negative cell must not raise: {:?}", host.errors());
+
+        let Some(floptle_core::Matter::Tilemap { data, .. }) =
+            world.get::<floptle_core::Matter>(e)
+        else {
+            panic!("no tilemap")
+        };
+        // The border is wall on every side — the loop got all the way round,
+        // rather than dying on the first square that wanted to be empty.
+        for (i, cell) in data.iter().enumerate() {
+            let (x, y) = (i as u32 % 5, i as u32 / 5);
+            let border = x == 0 || y == 0 || x == 4 || y == 4;
+            let want = if border { 4 } else { floptle_core::EMPTY_TILE };
+            assert_eq!(*cell, want, "cell ({x}, {y}) is wrong: the play area is the empty part");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

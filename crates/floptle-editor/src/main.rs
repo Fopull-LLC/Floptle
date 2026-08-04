@@ -44,6 +44,7 @@ mod console;
 mod curve_edit;
 mod dock;
 mod export;
+mod game_keys;
 mod gizmo;
 mod hierarchy;
 mod history;

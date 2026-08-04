@@ -203,6 +203,11 @@ impl Editor {
     /// unbinding every control looks like broken hardware.
     pub(crate) fn load_input_map(&mut self) {
         self.input_map_mtime = input_map_mtime(&self.project_root);
+        // Tell scripts which keys the editor keeps, so polling one says so
+        // instead of returning false forever (`floptle/0084`). Declared here
+        // because this is the one place the project's bindings are installed, so
+        // the two facts about "what a key does" arrive together.
+        self.script_host.set_reserved_keys(crate::game_keys::RESERVED);
         match floptle_input::load_map(&self.project_root) {
             Ok(Some(map)) => self.script_host.set_input_map(map),
             Ok(None) => self.script_host.set_input_map(InputMap::starter()),

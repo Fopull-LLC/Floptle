@@ -2477,6 +2477,9 @@ impl EditorTabViewer<'_> {
                     // This one IS a defect, and a total one: the hook raises on
                     // its first sum, so the script does nothing whatsoever.
                     crate::lua_lint::LintKind::HookSignature => "✖",
+                    // Also a defect: the binding cannot ever fire, and the
+                    // failure is silent from inside the game.
+                    crate::lua_lint::LintKind::ReservedKey => "✖",
                 };
                 if ui
                     .add(
@@ -3043,6 +3046,7 @@ fn api_category(label: &str) -> &'static str {
         || label == "node:setSpriteBatch"
         || label == "node:tilemap"
         || label == "node:sprites"
+        || label == "EMPTY_TILE"
     {
         "2D — tilemaps & sprite batches"
     } else if starts(label, "hit") {
@@ -3853,9 +3857,11 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node:setTilemap", insert: ":setTilemap{", doc: "node:setTilemap{cols=13, rows=7, tile=1.5 [, data={…}]} — make this node a TILEMAP: a grid of spritesheet cells drawn as one mesh, one draw call. The sheet is the node's own Material (texture + sheetCols/sheetRows). Neighbouring tiles share an exact edge, so the hairline gaps a grid of separate quads opens up as the camera moves cannot happen. `data` is row-major from the top-left; leave it out for an empty grid you fill with tm:set." },
     ApiEntry { label: "node:tilemap", insert: ":tilemap()", doc: "node:tilemap() — a handle to this node's tilemap grid: tm:set / tm:get / tm:fill / tm:size. Re-dress a room per floor without rebuilding the node." },
     ApiEntry { label: "node:sprites", insert: ":sprites()", doc: "node:sprites() — a handle to this node's SpriteBatch (make it one with node:setSpriteBatch{} first; on any other node this is an error rather than a handle that silently draws nothing): b:draw(...) queues one sprite for this frame. N sprites from one node, each with its own position, rotation, scale, cell AND tint — no scene node per sprite and no pool to grow." },
-    ApiEntry { label: "tm:set", insert: ":set(", doc: "tm:set(x, y, cell) — set one square, 0-based from the TOP-LEFT. Outside the grid is a no-op rather than a wrap. Pass EMPTY_TILE (or use tm:fill) to clear." },
+    ApiEntry { label: "tm:set", insert: ":set(", doc: "tm:set(x, y, cell) — set one square, 0-based from the TOP-LEFT. Outside the grid is a no-op rather than a wrap. To clear a square pass -1 (any negative works, as in Tiled/Godot/LDtk), nil, or the EMPTY_TILE constant — all three are the same value. A cell that is not a whole number in range is an error naming what it got and what it accepts, never a neighbouring tile." },
     ApiEntry { label: "tm:get", insert: ":get(", doc: "tm:get(x, y) → cell, or nil outside the grid and on an empty square." },
-    ApiEntry { label: "tm:fill", insert: ":fill(", doc: "tm:fill(cell) — set every square, including the empty ones. The fast way to reset a room before re-dressing it." },
+    ApiEntry { label: "tm:fill", insert: ":fill(", doc: "tm:fill(cell) — set every square, including the empty ones. The fast way to reset a room before re-dressing it. tm:fill() with no argument, tm:fill(-1) and tm:fill(EMPTY_TILE) all clear the grid." },
+    ApiEntry { label: "tm.EMPTY", insert: ".EMPTY", doc: "tm.EMPTY — the cell value that means \"no tile here\", on the handle rather than only as a global. Same number as EMPTY_TILE; -1 and nil mean it too." },
+    ApiEntry { label: "EMPTY_TILE", insert: "EMPTY_TILE", doc: "EMPTY_TILE — the tilemap cell value that leaves a square empty (u32::MAX, 4294967295). Prefer -1: any negative cell means empty, which is the convention in Tiled, Godot and LDtk. This constant exists because the API documented the name long before Lua could resolve it." },
     ApiEntry { label: "tm:size", insert: ":size()", doc: "tm:size() → cols, rows." },
     ApiEntry { label: "batch:draw", insert: ":draw(", doc: "b:draw(x, y [, z] [, scale] [, rot] [, cell] [, r, g, b, a]) — draw one sprite THIS FRAME, positioned in the batch node's local space. Immediate mode, exactly like draw.* : what you draw this frame is what shows, and next frame starts empty — there is no pool to grow and no clear() to forget. `scale` is one number, or a vec2 for squash-and-stretch: b:draw(x, y, 0, vec2(1.4, 0.6)). The tint is the thing a shared Material could never give one sprite: flash one enemy red without blinking it off." },
     ApiEntry { label: "destroy", insert: "destroy(", doc: "destroy(node) — remove a node AND its whole subtree (physics body included). Queued: applied after the pass, so the handle stays readable through the current call. Method form: node:destroy(). On a client, replicated nodes refuse (server authority — net.despawn)." },
@@ -4934,6 +4940,7 @@ mod tests {
             ("UiSliderHandle", "slider"),
             ("UiLayerHandle", "layer"),
             ("MaterialHandle", "mat"),
+            ("TilemapHandle", "tm"),
             ("ParticleSystemHandle", "particles"),
             ("AudioSourceHandle", "source"),
             ("SoundHandle", "sound"),

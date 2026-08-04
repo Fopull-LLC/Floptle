@@ -9,6 +9,9 @@
 //! * **accidental global** — an assignment to a name that is not a local, not a
 //!   declared lifecycle hook, and not part of the engine API. The typo catcher.
 //! * **unused local** — declared, never read. Usually a rename half-done.
+//! * **reserved key** — a raw poll for a key the editor answers itself, which
+//!   reads `false` for the life of the project and looks exactly like nobody
+//!   pressing it (`floptle/0084`).
 //! * **upvalue pressure** — LuaJIT allows **60** upvalues per function, and a
 //!   file-scope `local` is an upvalue of every function below it. `vessel_controller`
 //!   hit the ceiling and the error ("too many upvalues") names no fix, so warn at 50
@@ -44,6 +47,11 @@ pub(crate) enum LintKind {
     /// node to `dt`, and the first arithmetic that touches it raises — every
     /// frame, before anything visible has happened.
     HookSignature,
+    /// A poll for a key the editor answers itself, which therefore reads `false`
+    /// forever (`floptle/0084`). The whole hazard is that this is
+    /// indistinguishable from "the player did not press it", so the only way to
+    /// find out used to be a confused player.
+    ReservedKey,
 }
 
 /// Hooks the engine calls as `(node, dt)`, and `start`, which gets `(node)`.
@@ -486,6 +494,39 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
                 });
             }
         }
+        // Pass 6: a poll for a key the editor keeps (`floptle/0084`). The host
+        // warns at runtime too, but that needs somebody to press it and look at
+        // the Console; a lint says so while you are typing the binding, which is
+        // when changing it is free.
+        for call in ["key", "pressed", "released"] {
+            let needle = format!("input.{call}(");
+            let mut from = 0;
+            while let Some(rel) = code[from..].find(&needle) {
+                let at = from + rel;
+                from = at + needle.len();
+                let rest = code[from..].trim_start();
+                let Some(lit) = rest
+                    .strip_prefix('"')
+                    .and_then(|r| r.split('"').next())
+                    .or_else(|| rest.strip_prefix('\'').and_then(|r| r.split('\'').next()))
+                else {
+                    continue;
+                };
+                let Some(why) = crate::game_keys::reserved_reason(&lit.to_lowercase()) else {
+                    continue;
+                };
+                out.push(Lint {
+                    line: n + 1,
+                    message: format!(
+                        "`input.{call}(\"{lit}\")` will never be true — the editor answers \
+                         \"{lit}\" itself ({why}), so the key never reaches a script. Bind \
+                         something else; every other key reaches a focused Game view, Tab \
+                         included."
+                    ),
+                    kind: LintKind::ReservedKey,
+                });
+            }
+        }
     }
 
     out.sort_by_key(|l| (l.line, l.message.clone()));
@@ -632,6 +673,40 @@ print(used)
         // A key with no shipped action isn't second-guessed.
         let quiet = lint("function update(node, dt)\n  if input.pressed(\"k\") then k() end\nend\n", &api);
         assert!(!quiet.iter().any(|l| l.kind == LintKind::RawInput));
+    }
+
+    /// Polling a key the editor keeps is flagged where it is written, because
+    /// the runtime symptom is nothing at all (`floptle/0084`).
+    ///
+    /// `false` forever reads exactly like "the player did not press it", so
+    /// without this the only route to the truth is a player reporting that a
+    /// feature you tested does not exist.
+    #[test]
+    fn polling_a_reserved_key_is_flagged_before_it_is_run() {
+        let api: Vec<&str> = Vec::new();
+        let ls = lint("function update(node, dt)\n  if input.pressed(\"f1\") then menu() end\nend\n", &api);
+        let hit = ls.iter().find(|l| l.kind == LintKind::ReservedKey).expect("reserved key flagged");
+        assert_eq!(hit.line, 2);
+        assert!(hit.message.contains("Play / Stop"), "names what takes it: {}", hit.message);
+        // Case and quote style don't matter — a game writes either.
+        assert!(
+            lint("if input.key('F2') then end\n", &api)
+                .iter()
+                .any(|l| l.kind == LintKind::ReservedKey)
+        );
+        // Tab is the key the whole task is about, and it now ARRIVES. Flagging
+        // it would be telling a developer to work around a bug that is fixed.
+        assert!(
+            !lint("if input.pressed(\"tab\") then bag() end\n", &api)
+                .iter()
+                .any(|l| l.kind == LintKind::ReservedKey),
+            "Tab reaches a focused Game view now; nothing should warn about it"
+        );
+        assert!(
+            !lint("if input.pressed(\"i\") then bag() end\n", &api)
+                .iter()
+                .any(|l| l.kind == LintKind::ReservedKey)
+        );
     }
 
     #[test]

@@ -182,6 +182,19 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field sheetCols number Sheet columns (0 = not a sheet — the whole texture).
 ---@field sheetRows number Sheet rows.
 
+---A node's tilemap grid, from `node:tilemap()`. Read and write single squares
+---to re-dress a room without rebuilding the node.
+---
+---`cell` is an index into the node's Material spritesheet. To clear a square,
+---pass `-1` (any negative works, as in Tiled, Godot and LDtk), `nil`, or the
+---`EMPTY_TILE` global — the three are the same value (`floptle/0083`).
+---@class TilemapHandle
+---@field EMPTY number The cell value meaning \"no tile here\". Same as the EMPTY_TILE global; -1 and nil mean it too.
+---@field set fun(self: TilemapHandle, x: number, y: number, cell: number|nil) Set one square, 0-based from the TOP-LEFT. Outside the grid is a no-op, not a wrap. A negative or nil cell empties the square; anything that is not a whole number in range is an error naming what it got.
+---@field get fun(self: TilemapHandle, x: number, y: number): number|nil The cell at (x, y), or nil outside the grid and on an empty square.
+---@field fill fun(self: TilemapHandle, cell: number|nil) Set every square, including the empty ones. No argument (or -1) clears the whole grid.
+---@field size fun(self: TilemapHandle): number, number cols, rows.
+
 ---A node's Particle System, controlled from a script via `node:particles()`.
 ---Start/stop the effect at runtime and read whether it's playing.
 ---@class ParticleSystemHandle

@@ -577,6 +577,33 @@ Settings ⏵ Input) — one list, so a key you can bind is a key you can poll:
 > permanently `false` while the *same* key bound fine in Settings. If you worked
 > around it, the workaround is no longer needed.
 
+#### Which keys reach the game
+
+Every key in that list, with **three exceptions the editor keeps for itself**:
+
+| key | what takes it |
+|---|---|
+| `f1` | Play / Stop |
+| `f2` | Pause |
+| `f3` | Step one tick (Shift+F3 steps back) |
+
+Those are the transport controls, and a game that could take `f1` could stop you
+stopping it — which is the one key you need when a script has gone wrong. Polling
+one of them writes a Console line the first time, and the Scripting tab lints it
+where you wrote it, so it is never a mystery.
+
+Everything else is the game's, **`tab` included**. That is worth stating because
+until **0.33.0** it was not: egui gave Tab to the editor's own focus traversal
+before the game saw it, so a press cycled the editor's panels and
+`input.pressed("tab")` returned `false` (`floptle/0084`). Tab is *the* convention
+for opening an inventory — Minecraft, Terraria, Valheim, Don't Starve — so it is
+the first key both a player and a developer reach for, and the failure had no
+symptom: `false` is exactly what a key nobody pressed looks like. A game shipped a
+bag on Tab, passed its headless tests, and heard about it from a player. It also
+worked in an exported build, so the binding looked broken for the whole time you
+were making the game and correct only after you stopped testing it. A focused Game
+view now claims the keyboard in the editor and in a build alike.
+
 A locked cursor is genuinely pinned to the window center (hardware lock where
 the OS supports it, per-frame re-centering where it doesn't) — read motion with
 `input.mouse_delta()`. Stop always releases the lock.

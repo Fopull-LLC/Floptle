@@ -990,6 +990,54 @@ pub(crate) fn apply_rich_sets(
     }
 }
 
+/// One tilemap cell as Lua spells it, in the widest form a caller might try
+/// (`floptle/0083`).
+///
+/// **Anything negative is the empty square.** That is the convention in Tiled,
+/// Godot's TileMap, LDtk and every hand-rolled tilemap, so `-1` is the first
+/// thing a game will write and it now means what it looks like. `nil` is empty
+/// too, matching the `data` list where a hole has always meant empty.
+///
+/// Everything else has to be a whole number that fits a cell index. A float or
+/// an out-of-range integer refuses and names the value it got and what it
+/// accepts, rather than truncating to a neighbouring tile.
+fn tile_cell(v: &Value) -> mlua::Result<u32> {
+    let n = match v {
+        Value::Nil => return Ok(floptle_core::EMPTY_TILE),
+        Value::Integer(i) => *i,
+        // A number that happens to be whole is fine — `gx * 2` in LuaJIT is a
+        // float. One that is not is a mistake worth naming.
+        Value::Number(f) if f.fract() == 0.0 && f.is_finite() => *f as i64,
+        other => {
+            return Err(mlua::Error::runtime(format!(
+                "tilemap cell: expected a whole number, a negative for empty, or nil, got {} \
+                 ({})",
+                other.type_name(),
+                describe_cell_range(),
+            )))
+        }
+    };
+    if n < 0 {
+        // The whole point of the task: the obvious guess is now the right answer.
+        return Ok(floptle_core::EMPTY_TILE);
+    }
+    u32::try_from(n).map_err(|_| {
+        mlua::Error::runtime(format!(
+            "tilemap cell: {n} is out of range ({})",
+            describe_cell_range()
+        ))
+    })
+}
+
+/// The accepted-values half of a cell error. Split out so the two messages
+/// cannot drift.
+fn describe_cell_range() -> String {
+    format!(
+        "accepted: 0 .. {}, any negative number or nil for an empty square, or EMPTY_TILE",
+        floptle_core::EMPTY_TILE - 1
+    )
+}
+
 /// The handle `node:tilemap()` returns: read and write single squares.
 ///
 /// Deliberately tiny. A game re-dresses a room per floor, so `set` and `fill`
@@ -1002,13 +1050,18 @@ fn new_tilemap_handle(
 ) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.raw_set("__id", e)?;
+    // `tm.EMPTY`, beside the methods that take it. The global `EMPTY_TILE` is
+    // the same number; this spelling is here because a handle is where somebody
+    // holding one will look (`floptle/0083`).
+    t.raw_set("EMPTY", floptle_core::EMPTY_TILE)?;
 
     // tm:set(x, y, cell) — 0-based from the TOP-LEFT, matching the data order.
     let qs = q.clone();
     t.raw_set(
         "set",
-        lua.create_function(move |_, (this, x, y, cell): (Table, u32, u32, u32)| {
+        lua.create_function(move |_, (this, x, y, cell): (Table, u32, u32, Value)| {
             let e: u32 = this.raw_get("__id")?;
+            let cell = tile_cell(&cell)?;
             qs.borrow_mut().push((e, crate::RichSet::TileCells(vec![(x, y, cell)])));
             Ok(())
         })?,
@@ -1019,8 +1072,9 @@ fn new_tilemap_handle(
     let sf = scene.clone();
     t.raw_set(
         "fill",
-        lua.create_function(move |_, (this, cell): (Table, u32)| {
+        lua.create_function(move |_, (this, cell): (Table, Value)| {
             let e: u32 = this.raw_get("__id")?;
+            let cell = tile_cell(&cell)?;
             let (cols, rows) = sf.borrow().tilemaps.get(&e).map(|(c, r, _)| (*c, *r)).unwrap_or((0, 0));
             let mut writes = Vec::with_capacity((cols * rows) as usize);
             for y in 0..rows {
@@ -2296,8 +2350,9 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         Some(list) => {
                             let mut v = Vec::with_capacity(list.raw_len());
                             for i in 1..=list.raw_len() {
-                                // Lua is 1-based; a nil hole is an empty tile.
-                                v.push(list.raw_get::<Option<u32>>(i)?.unwrap_or(floptle_core::EMPTY_TILE));
+                                // Lua is 1-based; a nil hole — and, since
+                                // `floptle/0083`, any negative — is an empty tile.
+                                v.push(tile_cell(&list.raw_get::<Value>(i)?)?);
                             }
                             v
                         }
@@ -3209,6 +3264,12 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             })?,
         )?;
     }
+    // EMPTY_TILE: the cell value that leaves a square empty. The editor's own
+    // autocomplete has told people to pass this since tilemaps shipped, and for
+    // that whole time it was a Rust constant Lua could not name — so following
+    // the documentation produced `nil` (`floptle/0083`). Negative cells mean the
+    // same thing now; this exists so the documented spelling resolves.
+    lua.globals().set("EMPTY_TILE", floptle_core::EMPTY_TILE)?;
     // noderef(): mark a `defaults` entry as a node-reference param — the Inspector
     // shows a node picker for it and the script receives a node handle (or nil).
     lua.globals().set(
@@ -3323,6 +3384,56 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
 mod tests {
     use super::*;
     use floptle_core::Material;
+
+    /// `-1` means empty, and so does every other negative, and so does `nil`
+    /// (`floptle/0083`).
+    ///
+    /// The bug this pins was not that the engine lacked an empty value — it was
+    /// that the only one it had was a Rust constant Lua could not name, so the
+    /// universal convention (`-1`) hit the `u32` conversion and RAISED, inside a
+    /// `createNode` callback, taking the rest of the callback with it. A game
+    /// shipped a level with two-thirds of its walls missing because of it.
+    #[test]
+    fn a_negative_tilemap_cell_is_the_empty_square() {
+        for n in [-1i64, -2, -999, i32::MIN as i64] {
+            assert_eq!(
+                tile_cell(&Value::Integer(n)).unwrap(),
+                floptle_core::EMPTY_TILE,
+                "{n} should mean empty, the way it does in Tiled, Godot and LDtk"
+            );
+        }
+        // A nil hole has always meant empty in the `data` list; `set` and `fill`
+        // agree with it now.
+        assert_eq!(tile_cell(&Value::Nil).unwrap(), floptle_core::EMPTY_TILE);
+        // And the constant the editor's autocomplete has always named round-trips.
+        assert_eq!(
+            tile_cell(&Value::Integer(floptle_core::EMPTY_TILE as i64)).unwrap(),
+            floptle_core::EMPTY_TILE
+        );
+    }
+
+    /// Ordinary cells pass through untouched, including the whole-valued floats
+    /// LuaJIT hands back from arithmetic like `gx * 2`.
+    #[test]
+    fn a_real_tilemap_cell_survives_the_conversion() {
+        assert_eq!(tile_cell(&Value::Integer(0)).unwrap(), 0);
+        assert_eq!(tile_cell(&Value::Integer(37)).unwrap(), 37);
+        assert_eq!(tile_cell(&Value::Number(12.0)).unwrap(), 12);
+    }
+
+    /// A cell that is neither a tile nor an empty marker REFUSES, and the error
+    /// names the value and the accepted range — the 0082 shape. Truncating a
+    /// float would paint a neighbouring tile and say nothing.
+    #[test]
+    fn a_nonsense_tilemap_cell_names_what_it_wanted() {
+        let err = tile_cell(&Value::Number(2.5)).unwrap_err().to_string();
+        assert!(err.contains("accepted"), "no accepted-values list in: {err}");
+        let err = tile_cell(&Value::Boolean(true)).unwrap_err().to_string();
+        assert!(err.contains("boolean"), "the type it got is not named in: {err}");
+        assert!(err.contains("accepted"), "no accepted-values list in: {err}");
+        // Past the top of a u32 is out of range, not a wrap to a low tile.
+        assert!(tile_cell(&Value::Integer(1i64 << 33)).is_err());
+    }
 
     /// A material's spritesheet frame is reachable from a script the same way a UI
     /// image's is: `getcomponent("Material").cell = n`. That means BOTH halves —

@@ -1530,7 +1530,17 @@ impl Editor {
         };
 
         // ---- build the egui UI (mutating the World) ----
-        let raw_input = egui.state.take_egui_input(&window);
+        let mut raw_input = egui.state.take_egui_input(&window);
+        // A focused game owns the keyboard (`floptle/0084`). egui hands Tab to
+        // widget focus traversal before anything else sees it, which put every
+        // press on the dock's tab bar and left `input.pressed("tab")` returning
+        // false — the same as not being pressed, so a game bound to the most
+        // conventional inventory key there is had no way to tell. Gated on a text
+        // field NOT wanting input, so typing into the Console or the Inspector
+        // during play still works; a click is how you go back to the editor.
+        if self.playing && game_focused && !egui.ctx.egui_wants_keyboard_input() {
+            crate::game_keys::claim_keys_for_game(&mut raw_input, &egui.ctx);
+        }
         let ctx = egui.ctx.clone();
         // Apply the selected engine (chrome) theme, then a play-mode tint on top so you
         // never mistake play mode for edit mode (and lose edits on Stop). Reapplied each

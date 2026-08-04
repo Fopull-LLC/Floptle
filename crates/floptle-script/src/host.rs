@@ -272,28 +272,76 @@ impl ScriptHost {
             Rc::new(std::cell::Cell::new(floptle_input::Domain::Frame));
         // Mouse-lock request channel (drained by the editor each frame). See the field docs.
         let mouse_lock: Rc<RefCell<Option<bool>>> = Rc::new(RefCell::new(None));
+        // Keys the HOST keeps for itself, and which of them a script has already
+        // been told about (`floptle/0084`). The driver fills the list — the editor
+        // reserves Play/Pause/Step; a headless test reserves nothing — and the
+        // first poll of a reserved key writes one Console line naming it and what
+        // takes it. A key that is never going to arrive must not be
+        // indistinguishable from a key the player did not press: that is exactly
+        // how a game shipped a bag on Tab and heard about it from a player.
+        let reserved_keys: crate::ReservedKeys = Rc::new(RefCell::new(Vec::new()));
+        let reserved_warned: Rc<RefCell<std::collections::HashSet<String>>> =
+            Rc::new(RefCell::new(std::collections::HashSet::new()));
         if let Ok(t) = lua.create_table() {
+            // One check behind all three raw pollers, so they cannot disagree
+            // about which keys are reachable.
+            let warn_reserved = {
+                let list = reserved_keys.clone();
+                let warned = reserved_warned.clone();
+                let sink = logs.clone();
+                move |lua: &Lua, name: &str| {
+                    let Some(why) = list
+                        .borrow()
+                        .iter()
+                        .find(|(k, _)| k == name)
+                        .map(|(_, why)| why.clone())
+                    else {
+                        return;
+                    };
+                    if !warned.borrow_mut().insert(name.to_string()) {
+                        return;
+                    }
+                    sink.borrow_mut().push(ScriptLog {
+                        level: LogLevel::Warn,
+                        msg: format!(
+                            "input: \"{name}\" is reserved by the editor for {why}, so this \
+                             script will never see it pressed — bind something else. (Every \
+                             other key reaches a focused Game view, Tab included.)"
+                        ),
+                        source: caller(lua),
+                    });
+                }
+            };
             let held = input.clone();
+            let wr = warn_reserved.clone();
             let _ = t.set(
                 "key",
-                lua.create_function(move |_, name: String| {
-                    Ok(held.borrow().keys_down.contains(&name.to_lowercase()))
+                lua.create_function(move |lua, name: String| {
+                    let name = name.to_lowercase();
+                    wr(lua, &name);
+                    Ok(held.borrow().keys_down.contains(&name))
                 })
                 .ok(),
             );
             let pressed = input.clone();
+            let wr = warn_reserved.clone();
             let _ = t.set(
                 "pressed",
-                lua.create_function(move |_, name: String| {
-                    Ok(pressed.borrow().keys_pressed.contains(&name.to_lowercase()))
+                lua.create_function(move |lua, name: String| {
+                    let name = name.to_lowercase();
+                    wr(lua, &name);
+                    Ok(pressed.borrow().keys_pressed.contains(&name))
                 })
                 .ok(),
             );
             let released = input.clone();
+            let wr = warn_reserved;
             let _ = t.set(
                 "released",
-                lua.create_function(move |_, name: String| {
-                    Ok(released.borrow().keys_released.contains(&name.to_lowercase()))
+                lua.create_function(move |lua, name: String| {
+                    let name = name.to_lowercase();
+                    wr(lua, &name);
+                    Ok(released.borrow().keys_released.contains(&name))
                 })
                 .ok(),
             );
@@ -1873,6 +1921,7 @@ impl ScriptHost {
             frame_step_request,
             physics_paused,
             mouse_lock,
+            reserved_keys,
             param_writes: RefCell::new(Vec::new()),
             scene_request,
             scene_loaded,
@@ -3206,6 +3255,23 @@ impl ScriptHost {
     /// indices may have moved.
     pub fn set_input_map(&self, map: floptle_input::InputMap) {
         self.input_sys.borrow_mut().set_map(map);
+    }
+
+    /// Declare the keys the HOST answers itself, as `(script name, why)`.
+    ///
+    /// A script polling one of these gets a Console warning naming the key and
+    /// what takes it, once, the first time — instead of `false` forever
+    /// (`floptle/0084`). The editor passes its three transport controls; a
+    /// headless harness passes nothing, which is why the default is empty.
+    ///
+    /// The point is the *reachability* of the information, not the reservation:
+    /// a key that will never arrive reads identically to a key the player did not
+    /// press, so there is nothing to detect from inside the game and nothing to
+    /// fall back to. A game shipped an inventory bound to Tab, passed its
+    /// headless tests, and learnt about it from a player.
+    pub fn set_reserved_keys(&self, keys: &[(&str, &str)]) {
+        *self.reserved_keys.borrow_mut() =
+            keys.iter().map(|(k, w)| (k.to_lowercase(), (*w).to_owned())).collect();
     }
 
     /// Lend the project's resolved layer table (call at Play start, alongside
