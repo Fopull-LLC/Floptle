@@ -1525,38 +1525,19 @@ drifts behind the pipes and sails through them.",
             check: Check::NodeRuns { node: "Bird", script: "flappyBird" },
         },
         Step {
-            title: "Build one pipe, then make it a prefab",
+            title: "Build one pipe and give it its behaviour",
             body: "\
-Add an **Empty** node called `Pipe`. Under it (drag them onto its row in the
-Hierarchy to parent them) add two **Cubes**: one stretched upward above the gap,
-one below it. Give each cube a **Rigidbody** with **mode** **Static** — that is what the bird
-will hit.
+Add an **Empty** node called `Pipe`. Under it — drag them onto its row in the
+Hierarchy to parent them — add two **Cubes**: one stretched upward above the
+gap, one below it.
 
-Then drag the `Pipe` node from the Hierarchy into the **Assets** panel. That
-writes `prefabs/Pipe.prefab.ron`.
+The two cubes are what the bird actually hits, so give each a **Rigidbody** with
+**mode** **Kinematic**. Kinematic, not Static, because the script below moves
+the parent every frame and a static body is a baked collider that would stay
+behind.
 
-## What a prefab is, and why this game needs one
-
-A prefab is a saved node and everything under it — the shapes, the bodies, the
-scripts, the settings. `spawn(\"Pipe\", position)` stamps out a fresh copy while
-the game runs.
-
-You need it here because a script can *create* nodes but can't give them
-colliders. Anything that has to be solid must be authored once and spawned.
-That's not a limitation you'll fight; it's the normal way to make bullets,
-enemies, debris and pipes.
-
-Once the prefab is saved, **delete** the `Pipe` node from the scene. The spawner
-will make its own.",
-            code: None,
-            check: Check::Prefab("Pipe"),
-        },
-        Step {
-            title: "Make the pipe move and score",
-            body: "\
-Create the script below and attach it to the `Pipe` **prefab** — select it in
-Assets and attach there, or re-open the prefab, add the script, and save it
-again.
+Then create the script and attach it to the `Pipe` **root** (not to the cubes —
+moving the parent carries both halves).
 
 ## Every pipe cleans up after itself
 
@@ -1579,6 +1560,30 @@ The `scored` flag is what stops one pipe scoring sixty times a second while it
 crosses the line.",
             code: Some(("flappyPipe", FLAPPY_PIPE_LUA)),
             check: Check::Script("flappyPipe"),
+        },
+        Step {
+            title: "Save it as a prefab",
+            body: "\
+Drag the `Pipe` node from the Hierarchy into the **Assets** panel. That writes
+`prefabs/Pipe.prefab.ron` — the node, its two children, their bodies and the
+script, all saved together.
+
+Then **delete** the `Pipe` node from the scene. The spawner will make its own.
+
+## What a prefab is, and why this game needs one
+
+A prefab is a saved node and everything under it. `spawn(\"Pipe\", position)`
+stamps out a fresh copy while the game runs.
+
+You need one here because a script can *create* nodes but can't give them
+colliders. Anything that has to be solid is authored once and spawned. That is
+not a limitation you'll fight — it is the normal way to make bullets, enemies,
+debris and pipes.
+
+Changing a prefab later works the same way round: drag it back into the scene,
+edit it, drag it into Assets again.",
+            code: None,
+            check: Check::Prefab("Pipe"),
         },
         Step {
             title: "The rules",
