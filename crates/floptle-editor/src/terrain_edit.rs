@@ -422,10 +422,16 @@ impl TerrainWorker {
 impl Editor {
     /// Seconds since the editor started — a monotonic clock for anything that
     /// animates on wall time rather than on the play session's `play_t`, which
-    /// restarts with every Play. Zero before there is a window, which is the
-    /// headless case: a test's chunks are all born at 0 and fully faded in.
-    pub(crate) fn now(&self) -> f32 {
-        self.started.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0)
+    /// restarts with every Play.
+    ///
+    /// `None` before there is a window, and deliberately an `Option` rather
+    /// than a zero: a clock that never advances is not "time zero", it is no
+    /// time at all, and anything measuring an age against a frozen zero would
+    /// read as *permanently* mid-animation. For the terrain dissolve that
+    /// means terrain that is never drawn, which is the one outcome worth
+    /// making unrepresentable.
+    pub(crate) fn now(&self) -> Option<f32> {
+        self.started.map(|s| s.elapsed().as_secs_f32())
     }
 
     /// Keep every terrain's render meshes in sync with its field + the camera (P4).
@@ -706,7 +712,7 @@ pub(crate) fn push_terrain_instances(
     cam_world: DVec3,
     view_proj: Mat4,
     sphere_mesh: MeshId,
-    now: f32,
+    now: Option<f32>,
     instances: &mut Vec<(MeshId, Option<floptle_render::TexId>, floptle_render::InstanceRaw)>,
 ) {
     // Frustum planes (Gribb–Hartmann) in CAMERA-RELATIVE space — the same
@@ -819,7 +825,7 @@ pub(crate) fn push_terrain_instances(
             // existing lane, which matters when the raster budget is full at
             // 16/16. An unstamped chunk is fully opaque, so nothing that was
             // already on screen flickers when this ships.
-            if let Some(&born) = render.born.get(coord) {
+            if let (Some(now), Some(&born)) = (now, render.born.get(coord)) {
                 mp.alpha = chunk_fade(now, born);
             }
             instances.push((mid, None, floptle_render::instance_of_mat(model, &mp)));
@@ -852,6 +858,10 @@ pub(crate) fn chunk_fade(now: f32, born: f32) -> f32 {
 /// Register (or overwrite) one chunk's dynamic slot in a terrain's render set,
 /// recording the LOD the mesh was extracted at — and, for a chunk arriving from
 /// nothing, the moment it arrived (see [`TerrainRender::born`]).
+///
+/// `now` is `None` when there is no clock yet, and then nothing is stamped: an
+/// unstamped chunk draws opaque, so a terrain built before the window exists is
+/// simply there rather than frozen at the start of a dissolve.
 fn upload_chunk(
     gpu: &floptle_render::Gpu,
     raster: &mut floptle_render::Raster,
@@ -859,13 +869,15 @@ fn upload_chunk(
     coord: [i32; 3],
     cm: &floptle_field::ChunkMesh,
     lod: u8,
-    now: f32,
+    now: Option<f32>,
 ) {
     let data = floptle_render::chunk_mesh_data(cm);
     // Before the match, because two of its three arms are also "already
     // resident" — an LOD swap and an outgrown slot are both re-meshes of
     // something the player can already see, and neither should dissolve.
-    if !render.slots.contains_key(&coord) {
+    if let Some(now) = now
+        && !render.slots.contains_key(&coord)
+    {
         render.born.insert(coord, now);
     }
     match render.slots.get(&coord).copied() {
@@ -2537,6 +2549,13 @@ mod tests {
         // A clock that restarted under a loaded scene must not leave chunks
         // invisible forever — the one failure worse than never fading.
         assert_eq!(chunk_fade(0.5, 900.0), 1.0, "a stamp in the future reads as opaque");
+
+        // …and with no clock at all there is no stamp, so nothing is mid-fade.
+        // `now()` is an Option for exactly this: a frozen zero would read as
+        // "every chunk started dissolving and never finished", which draws no
+        // terrain at all. An Editor with no window has no clock.
+        let ed = crate::Editor::default();
+        assert!(ed.now().is_none(), "no window, no clock — and so nothing to fade against");
     }
 
     /// The LOD rings hold their chunk at the boundary (±1 hysteresis) so a camera
