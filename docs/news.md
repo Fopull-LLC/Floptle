@@ -1,5 +1,19 @@
 ## Just shipped
 
+**v0.37.1 "Where You Left It"** — a scene in a folder now saves back to the file
+it was opened from. It didn't: the editor kept only the file's NAME and rebuilt
+the path from that, so `scenes/cutscenes/Opening.ron` was loaded and
+`scenes/Opening.ron` was written — a different file, at the top of the scenes
+folder. Reopen the project and the original came back, so every edit looked
+undone. Nothing warned, because nothing failed: the save refuses to run during
+Play, logs real failures loudly, and only clears the unsaved marker when the
+write succeeds — and the write did succeed, to a file the game never reads.
+Scenes sitting directly in `scenes/` were never affected; anything in a subfolder
+always was. **No work was lost** — it is all in the stray file, and opening a
+project now names any scene that has one, without moving anything, because two
+files both plausibly wanted is exactly the choice an editor should not make
+quietly.
+
 **v0.37.0 "The View That Is The Game"** — a 2D level draws in the Game view. The
 editor works out what to draw twice — once for the Scene view, once for every
 other view — and the second one had never learned about tilemaps or sprite
