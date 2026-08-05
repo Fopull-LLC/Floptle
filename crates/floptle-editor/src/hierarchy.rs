@@ -30,10 +30,30 @@ impl EditorTabViewer<'_> {
 }
 impl<'a> EditorTabViewer<'a> {
     pub(crate) fn hierarchy_ui(&mut self, ui: &mut egui::Ui) {
-        // Scene name + save at the top of the hierarchy.
+        // Scene name + save at the top of the hierarchy. A PREFAB open on its
+        // own says so, in its own colour and with its own glyph: the editing
+        // surface is identical, and a save goes somewhere completely different,
+        // so the one place that names what you are editing has to be unambiguous
+        // about which it is (`floptle/0090`).
         ui.horizontal(|ui| {
-            ui.strong(format!("⎙ {}", self.scene_name));
-            if ui.small_button("Save").on_hover_text("Save scene (Ctrl+S)").clicked() {
+            if self.editing_prefab {
+                ui.colored_label(
+                    egui::Color32::from_rgb(210, 170, 90),
+                    egui::RichText::new(format!("◇ {} (prefab)", self.scene_name)).strong(),
+                )
+                .on_hover_text(
+                    "Editing this prefab on its own. Save writes back to the prefab file.\n\
+                     Open any scene in the Assets panel to go back to editing a scene.",
+                );
+            } else {
+                ui.strong(format!("⎙ {}", self.scene_name));
+            }
+            let save_tip = if self.editing_prefab {
+                "Save the prefab, in place (Ctrl+S)"
+            } else {
+                "Save scene (Ctrl+S)"
+            };
+            if ui.small_button("Save").on_hover_text(save_tip).clicked() {
                 self.cmd.save_scene = true;
             }
             ui.label("?").on_hover_text(

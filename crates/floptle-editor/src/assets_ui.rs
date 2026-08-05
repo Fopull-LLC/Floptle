@@ -364,7 +364,12 @@ impl<'a> EditorTabViewer<'a> {
     /// tile: scenes open, editors (anim graph / particles) focus, audio
     /// previews, scripts/markdown open in the IDE. Other kinds just select.
     fn asset_open(&mut self, path: &str) {
-        if is_scene(path) {
+        // Prefabs FIRST: a prefab lives under `scenes/` in some projects, and
+        // `is_scene` is "a .ron under scenes/" — so the more specific test has
+        // to win or a prefab there would be handed to the scene loader.
+        if is_prefab(path) {
+            self.cmd.open_prefab = Some(path.to_string());
+        } else if is_scene(path) {
             self.cmd.open_scene = Some(path.to_string());
         } else if anim_ui::is_anim_ctl(path) {
             self.cmd.open_anim_graph = Some(anim::asset_key(
@@ -396,6 +401,14 @@ impl<'a> EditorTabViewer<'a> {
     /// The shared file context menu (tree row + grid tile).
     fn asset_file_menu(&mut self, ui: &mut egui::Ui, path: &str, dir: Option<&Path>) {
         if is_prefab(path) {
+            if ui
+                .button("◇ Edit on its own")
+                .on_hover_text("open this prefab by itself — Save writes back to this file (or just double-click it)")
+                .clicked()
+            {
+                self.cmd.open_prefab = Some(path.to_string());
+                ui.close();
+            }
             if ui
                 .button("◇ Add to scene")
                 .on_hover_text("place an instance in front of the camera — or just drag the prefab into the viewport")

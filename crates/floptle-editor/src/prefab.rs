@@ -25,6 +25,151 @@ pub(crate) fn load_prefab_docs(path: &Path) -> Result<Vec<NodeDoc>, String> {
 }
 
 impl Editor {
+    /// Open a prefab for editing **on its own** (`floptle/0090`): its nodes
+    /// become the whole world, and saving writes back to this same file.
+    ///
+    /// A prefab is a reusable subtree, and the only way to change one used to be
+    /// to drop it into whatever scene happened to be open, edit the instance and
+    /// re-save — which never overwrites, so the obvious route left a second file
+    /// beside the one you meant to change.
+    ///
+    /// The editing surface is the ordinary one: Hierarchy, Inspector, gizmos,
+    /// undo, Play. What differs is only where a save goes, and that is decided by
+    /// `editing_prefab` being set — see [`Editor::save_scene`].
+    ///
+    /// Note what a prefab does NOT bring with it. A scene open adopts terrain
+    /// fields, tilesets, map geometry and paint from beside the scene file; a
+    /// prefab is nodes and nothing else. So those stores are cleared rather than
+    /// left holding the previous scene's, which would otherwise sit under the
+    /// prefab looking like part of it — and would be written out under the
+    /// prefab's name on the next scene save.
+    pub(crate) fn open_prefab_file(&mut self, path: &str) {
+        let p = Path::new(path);
+        let docs = match load_prefab_docs(p) {
+            Ok(d) if !d.is_empty() => d,
+            Ok(_) => {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!("{} has no nodes in it", p.display()),
+                    None,
+                );
+                return;
+            }
+            Err(e) => {
+                self.console.push(floptle_script::LogLevel::Error, e, None);
+                return;
+            }
+        };
+        self.reset_anim_bindings();
+        self.playing = false;
+        self.paused = false;
+        self.play_snapshot = None;
+        self.world = floptle_core::World::new();
+        self.editing_prefab = Some(p.to_path_buf());
+        // The prefab's own name, so every readout that says "which scene" says
+        // which prefab instead. `scene_rel` stays the real path, which is what
+        // the title bar wants. Set BEFORE the adopts below, because the stores
+        // they clear-then-reload are keyed by this name.
+        self.scene_name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().trim_end_matches(".prefab.ron").to_string())
+            .unwrap_or_else(|| "prefab".into());
+        self.scene_rel = p
+            .strip_prefix(&self.project_root)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| path.to_string());
+        self.spawn_docs(&docs);
+        // The same sequence a scene open runs, and for the opposite reason: each
+        // of these clears its store before reloading, and a prefab has no
+        // terrain, no map geometry and no paint of its own — so running them
+        // empties the previous scene's out instead of leaving it underneath the
+        // prefab, looking like part of it.
+        self.adopt_terrain();
+        self.adopt_tilesets();
+        self.adopt_maps();
+        self.adopt_paint();
+        self.adopt_tex_paint();
+        self.hier_fold_pending = true;
+        self.collapsed.clear();
+        self.register_scene_meshes();
+        self.selection.clear();
+        self.selected_asset = None;
+        self.history = crate::History::default();
+        self.scene_dirty = false;
+        self.check_autosave(); // crash recovery, same as a scene open
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            format!(
+                "◇ editing prefab {} ({} node{}) — Save writes back to this file",
+                self.scene_rel,
+                docs.len(),
+                if docs.len() == 1 { "" } else { "s" }
+            ),
+            None,
+        );
+    }
+
+    /// Write the whole world back over the prefab file being edited.
+    ///
+    /// Overwrites, deliberately: this is the "in place" half of the task, and it
+    /// is the difference between editing a prefab and making another one.
+    pub(crate) fn save_prefab_in_place(&mut self) -> bool {
+        let Some(path) = self.editing_prefab.clone() else { return false };
+        // Every node in the world, top level first — `subtree_docs` walks the
+        // children itself. Nodes are enumerated by their `Matter`, the same way
+        // the scene serializer does it, so the two agree about what a node is.
+        let roots: Vec<Entity> = self
+            .world
+            .query::<floptle_core::Matter>()
+            .map(|(e, _)| e)
+            .filter(|e| self.world.get::<floptle_core::Parent>(*e).is_none())
+            .collect();
+        let docs = self.subtree_docs(&roots);
+        // An empty write would silently destroy the prefab. Refuse: the file on
+        // disk is the only copy, and "I deleted everything" and "something went
+        // wrong" look identical afterwards.
+        if docs.is_empty() {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "💾 not saved — {} would be left with no nodes in it",
+                    path.display()
+                ),
+                None,
+            );
+            return false;
+        }
+        match ron::ser::to_string_pretty(&docs, ron::ser::PrettyConfig::default())
+            .map_err(|e| e.to_string())
+            .and_then(|ron| std::fs::write(&path, ron).map_err(|e| e.to_string()))
+        {
+            Ok(()) => {
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!(
+                        "💾 saved prefab {} ({} node{})",
+                        path.display(),
+                        docs.len(),
+                        if docs.len() == 1 { "" } else { "s" }
+                    ),
+                    None,
+                );
+                true
+            }
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!(
+                        "💾 SAVE FAILED — {} — {e} (your changes are still unsaved!)",
+                        path.display()
+                    ),
+                    None,
+                );
+                false
+            }
+        }
+    }
+
     /// Save `roots` — whole subtrees — as one prefab file in `dir`, named after
     /// the first root's node name. Never overwrites (auto-suffixes).
     pub(crate) fn save_prefab(&mut self, roots: &[Entity], dir: &Path) {
@@ -754,6 +899,158 @@ mod tests {
     use floptle_ui::UiLayer;
 
     use crate::Editor;
+
+    /// Editing a prefab on its own, end to end (`floptle/0090`): open it, change
+    /// something, save, reopen.
+    ///
+    /// The load-bearing assertion is that the save landed **in the same file**.
+    /// Before this, the only route to changing a prefab was Save-as-Prefab,
+    /// which never overwrites — so the obvious thing to do produced a second
+    /// file beside the one you meant to edit and left the original untouched.
+    #[test]
+    fn a_prefab_opens_on_its_own_and_saves_back_over_itself() {
+        let dir = std::env::temp_dir().join(format!("floptle_0090_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("prefabs"));
+        let path = dir.join("prefabs").join("Turret.prefab.ron");
+
+        // Author a prefab the way the editor does: a root with one child.
+        let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
+        let root = ed.world.spawn();
+        ed.world.insert(root, Transform::IDENTITY);
+        ed.world.insert(root, Name("Turret".into()));
+        ed.world.insert(root, Matter::Empty);
+        let barrel = ed.world.spawn();
+        ed.world.insert(barrel, Transform::IDENTITY);
+        ed.world.insert(barrel, Name("Barrel".into()));
+        ed.world.insert(barrel, Matter::Empty);
+        ed.world.insert(barrel, floptle_core::Parent(root));
+        let docs = ed.subtree_docs(&[root]);
+        std::fs::write(
+            &path,
+            ron::ser::to_string_pretty(&docs, ron::ser::PrettyConfig::default()).unwrap(),
+        )
+        .unwrap();
+
+        // Open it on its own. The world becomes the prefab and nothing else.
+        let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
+        // A leftover scene node, to prove the open REPLACES the world rather
+        // than adding to it.
+        let stale = ed.world.spawn();
+        ed.world.insert(stale, Transform::IDENTITY);
+        ed.world.insert(stale, Name("SomeOtherScene".into()));
+        ed.world.insert(stale, Matter::Empty);
+
+        ed.open_prefab_file(&path.to_string_lossy());
+        let names = |ed: &Editor| -> Vec<String> {
+            let mut v: Vec<String> = ed
+                .world
+                .query::<Matter>()
+                .filter_map(|(e, _)| ed.world.get::<Name>(e).map(|n| n.0.clone()))
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(names(&ed), vec!["Barrel".to_string(), "Turret".to_string()]);
+        assert!(ed.editing_prefab.is_some(), "the editor must know it is on a prefab");
+        assert_eq!(ed.scene_name, "Turret", "the name shown is the prefab's");
+
+        // Edit it: rename the child and add a second one.
+        let barrel = ed
+            .world
+            .query::<Matter>()
+            .map(|(e, _)| e)
+            .find(|e| ed.world.get::<Name>(*e).is_some_and(|n| n.0 == "Barrel"))
+            .expect("child came back");
+        ed.world.insert(barrel, Name("LongBarrel".into()));
+        let root = ed
+            .world
+            .query::<Matter>()
+            .map(|(e, _)| e)
+            .find(|e| ed.world.get::<Name>(*e).is_some_and(|n| n.0 == "Turret"))
+            .expect("root came back");
+        let sight = ed.world.spawn();
+        ed.world.insert(sight, Transform::IDENTITY);
+        ed.world.insert(sight, Name("Sight".into()));
+        ed.world.insert(sight, Matter::Empty);
+        ed.world.insert(sight, floptle_core::Parent(root));
+
+        assert!(ed.save_scene(), "saving a prefab must succeed");
+
+        // In place: one file, and it is the one we opened.
+        let files: Vec<String> = std::fs::read_dir(dir.join("prefabs"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(files, vec!["Turret.prefab.ron".to_string()], "a save must not make a SECOND prefab");
+        assert!(
+            !dir.join("scenes").exists(),
+            "editing a prefab must not write a scene"
+        );
+
+        // And the edit survived the round trip.
+        let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
+        ed.open_prefab_file(&path.to_string_lossy());
+        assert_eq!(
+            names(&ed),
+            vec!["LongBarrel".to_string(), "Sight".to_string(), "Turret".to_string()]
+        );
+    }
+
+    /// Opening a scene is the way out of prefab editing — and it has to be,
+    /// because otherwise the next Ctrl+S would write the scene over the prefab.
+    #[test]
+    fn opening_a_scene_leaves_prefab_editing() {
+        let dir = std::env::temp_dir().join(format!("floptle_0090_exit_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("prefabs"));
+        let _ = std::fs::create_dir_all(dir.join("scenes"));
+        let path = dir.join("prefabs").join("Crate.prefab.ron");
+
+        let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
+        let root = ed.world.spawn();
+        ed.world.insert(root, Transform::IDENTITY);
+        ed.world.insert(root, Name("Crate".into()));
+        ed.world.insert(root, Matter::Empty);
+        let docs = ed.subtree_docs(&[root]);
+        std::fs::write(
+            &path,
+            ron::ser::to_string_pretty(&docs, ron::ser::PrettyConfig::default()).unwrap(),
+        )
+        .unwrap();
+
+        ed.open_prefab_file(&path.to_string_lossy());
+        assert!(ed.editing_prefab.is_some());
+
+        ed.new_scene("level");
+        assert!(ed.editing_prefab.is_none(), "a new scene is a scene, not a prefab");
+        assert!(ed.save_scene(), "and saving now writes a scene");
+        assert!(dir.join("scenes").join("level.ron").exists());
+    }
+
+    /// A prefab that would be saved empty is refused. The file on disk is the
+    /// only copy, and afterwards "I deleted everything" and "something went
+    /// wrong" look exactly alike.
+    #[test]
+    fn an_emptied_prefab_is_not_written_over_itself() {
+        let dir = std::env::temp_dir().join(format!("floptle_0090_empty_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("prefabs"));
+        let path = dir.join("prefabs").join("Lamp.prefab.ron");
+
+        let mut ed = Editor { project_root: dir.clone(), ..Default::default() };
+        let root = ed.world.spawn();
+        ed.world.insert(root, Transform::IDENTITY);
+        ed.world.insert(root, Name("Lamp".into()));
+        ed.world.insert(root, Matter::Empty);
+        let docs = ed.subtree_docs(&[root]);
+        let authored =
+            ron::ser::to_string_pretty(&docs, ron::ser::PrettyConfig::default()).unwrap();
+        std::fs::write(&path, &authored).unwrap();
+
+        ed.open_prefab_file(&path.to_string_lossy());
+        ed.world = floptle_core::World::new(); // everything deleted
+        assert!(!ed.save_scene(), "an empty prefab save must be refused");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), authored, "the file is untouched");
+    }
 
     /// A HUD described with `ui.make`, over two Play sessions with a Stop in
     /// between — the shape of the report in `floptle/0061`: "after playing the

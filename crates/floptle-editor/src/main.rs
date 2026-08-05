@@ -328,6 +328,10 @@ struct EditorCmd {
     fill_bounds: bool,
     /// Open this scene file (double-clicked in Assets) — prompts on unsaved changes.
     open_scene: Option<String>,
+    /// Open a `.prefab.ron` for editing on its own (`floptle/0090`). Goes through
+    /// the same unsaved-changes gate as `open_scene`, because it replaces the
+    /// world just as thoroughly.
+    open_prefab: Option<String>,
     /// Confirmed scene open from the unsaved-changes modal: (path, save_first).
     do_open_scene: Option<(String, bool)>,
     /// Change a texture's sampling (filter/wrap): (image path, new setting).
@@ -760,6 +764,10 @@ struct EditorTabViewer<'a> {
     aspect: &'a mut AspectMode,
     zoom: &'a mut f32,
     scene_name: &'a str,
+    /// Whether `scene_name` names a PREFAB being edited on its own rather than a
+    /// scene (`floptle/0090`). The two must not look the same — a save goes
+    /// somewhere different.
+    editing_prefab: bool,
     ppp: f32,
     /// The selected code-editor theme index (into `CODE_THEMES`) for the Scripting tab.
     code_theme: usize,
@@ -1764,6 +1772,15 @@ struct Editor {
     /// The Scene tab's rect (logical points), captured each frame — gates picking.
     scene_rect: Option<egui::Rect>,
     scene_name: String,
+    /// The prefab being edited on its own, if any (`floptle/0090`).
+    ///
+    /// A prefab is a reusable subtree, and reusable things get edited in
+    /// isolation — so double-clicking one loads it into the world by itself and
+    /// sets this. While it is set, saving writes the world back to THIS file as
+    /// a prefab, not to a scene, and the viewport says so. Opening a scene
+    /// clears it, which is the only way out and is what makes "am I editing a
+    /// prefab" a question with one answer.
+    editing_prefab: Option<PathBuf>,
     /// Selected entities (multi-select); the gizmo/inspector act on the last one.
     selection: Vec<Entity>,
     /// A selected armature bone `(rigged-mesh entity, skeleton node index)` — clicked in

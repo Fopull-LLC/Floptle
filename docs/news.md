@@ -7,7 +7,12 @@ them ate a third of a 60 fps frame before anything drew. That work moved to the
 graphics card, and the processor's share of it is now about a thousandth of what
 it was. Identical characters also share their geometry again — they could not
 before, because two copies of one model would overwrite each other's pose — so
-twenty guards of the same model are one draw instead of twenty. Nothing about
+twenty guards of the same model are one draw instead of twenty. Prefabs can now be
+opened and edited on their own: double-click one in the Assets panel and its nodes
+become the whole viewport — Hierarchy, Inspector, gizmos, undo and Play — with
+Save writing back to that prefab file in place, instead of the old route of
+dropping it into a scene, editing the copy and using Save as Prefab, which never
+overwrote and left a second file beside the one you meant to change. Nothing about
 using characters changed: bone attachments, animation events, painted skinned
 meshes and pose-hugging selection outlines all behave exactly as they did. And
 when a Lua script grows past Lua's 60-variable-per-function ceiling and stops

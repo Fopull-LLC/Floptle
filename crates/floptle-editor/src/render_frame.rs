@@ -2961,6 +2961,7 @@ impl Editor {
                 aspect: aspect_mode,
                 zoom: viewport_zoom,
                 scene_name: &scene_name,
+                editing_prefab: self.editing_prefab.is_some(),
                 ppp,
                 code_theme,
                 anim: anim_sys,
@@ -3811,6 +3812,11 @@ impl Editor {
             // ---- open-scene unsaved-changes confirm ----
             if let Some(path) = pending_open_scene.clone() {
                 let name = Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                // One gate, both directions: a prefab replaces the world exactly
+                // as thoroughly as a scene does, so it comes through here too and
+                // only the wording differs (`floptle/0090`).
+                let kind = if crate::assets::is_prefab(&path) { "prefab" } else { "scene" };
+                let name = name.trim_end_matches(".prefab").to_string();
                 let mut keep = true;
                 egui::Window::new("Unsaved changes")
                     .open(&mut keep)
@@ -3818,7 +3824,7 @@ impl Editor {
                     .collapsible(false)
                     .default_width(320.0)
                     .show(ui.ctx(), |ui| {
-                        ui.label(format!("Open scene \"{name}\"?"));
+                        ui.label(format!("Open {kind} \"{name}\"?"));
                         ui.label("The current scene has unsaved changes.");
                         ui.separator();
                         ui.horizontal(|ui| {
@@ -6628,11 +6634,27 @@ impl Editor {
                 self.open_scene_file(&path);
             }
         }
+        if let Some(path) = cmd.open_prefab {
+            // Same shape as opening a scene, for the same reason: this replaces
+            // the world (`floptle/0090`).
+            if self.playing {
+                self.toggle_play();
+            }
+            if self.scene_dirty {
+                self.pending_open_scene = Some(path);
+            } else {
+                self.open_prefab_file(&path);
+            }
+        }
         if let Some((path, save_first)) = cmd.do_open_scene {
             if save_first {
                 self.save_all();
             }
-            self.open_scene_file(&path);
+            if crate::assets::is_prefab(&path) {
+                self.open_prefab_file(&path);
+            } else {
+                self.open_scene_file(&path);
+            }
         }
         if cmd.open_new_scene {
             self.new_scene_buf = Some(String::new());

@@ -311,6 +311,7 @@ impl Editor {
     /// Create a new blank scene `<name>.ron`, save it, and switch the editor to it.
     pub(crate) fn new_scene(&mut self, name: &str) {
         self.reset_anim_bindings();
+        self.editing_prefab = None; // a new scene is a scene (`floptle/0090`)
         let name = {
             let n = name.trim();
             if n.is_empty() { "untitled".to_string() } else { n.to_string() }
@@ -370,6 +371,10 @@ impl Editor {
     /// it, loads its terrain + meshes. The caller handles unsaved-changes prompting.
     pub(crate) fn open_scene_file(&mut self, path: &str) {
         self.reset_anim_bindings();
+        // Opening a scene is the way OUT of prefab editing, and the only one —
+        // which is what keeps "am I editing a prefab" a question with one answer
+        // (`floptle/0090`).
+        self.editing_prefab = None;
         let p = Path::new(path);
         let doc = match floptle_scene::load(p) {
             Ok(d) => d,
@@ -1114,6 +1119,20 @@ impl Editor {
             );
             return false;
         }
+        // Editing a prefab on its own (`floptle/0090`): the world IS the prefab,
+        // so a save writes it back over that file and stops. None of what
+        // follows applies — a prefab has no terrain fields, no map geometry and
+        // no paint sidecars, and writing them out under its name is exactly the
+        // mess this branch exists to avoid.
+        if self.editing_prefab.is_some() {
+            let ok = self.save_prefab_in_place();
+            if ok {
+                self.scene_dirty = false;
+                self.toast = Some(("💾  Saved".into(), 2.2));
+                let _ = std::fs::remove_file(self.autosave_path()); // saved for real
+            }
+            return ok;
+        }
         let _ = std::fs::create_dir_all(self.project_root.join("scenes"));
         let path = self.scene_path();
         let doc = floptle_scene::to_doc(self.scene_name.clone(), &self.world);
@@ -1232,7 +1251,21 @@ impl Editor {
     /// Where this scene's crash-recovery autosave lives (`.floptle` is the
     /// project's editor-cache dir, never exported).
     pub(crate) fn autosave_path(&self) -> PathBuf {
-        self.project_root.join(".floptle/autosave").join(format!("{}.ron", self.scene_name))
+        let dir = self.project_root.join(".floptle/autosave");
+        match &self.editing_prefab {
+            // A prefab's autosave gets its own name (`floptle/0090`). Sharing the
+            // scene's would mean a project that later grows a scene of the same
+            // name is offered a recovery holding a prefab's nodes — a trap worth
+            // one suffix to close.
+            Some(_) => dir.join(format!("{}.prefab-autosave.ron", self.scene_name)),
+            None => dir.join(format!("{}.ron", self.scene_name)),
+        }
+    }
+
+    /// The file the editor is currently editing — the open prefab, or the
+    /// scene. What an autosave is judged newer or older *than*.
+    pub(crate) fn edited_file_path(&self) -> PathBuf {
+        self.editing_prefab.clone().unwrap_or_else(|| self.scene_path())
     }
 
     /// Periodic crash safety: while the scene is dirty in edit mode, snapshot
@@ -1268,7 +1301,7 @@ impl Editor {
         self.autosave_prompt = None;
         let auto = self.autosave_path();
         let Ok(auto_m) = std::fs::metadata(&auto).and_then(|m| m.modified()) else { return };
-        let scene_m = std::fs::metadata(self.scene_path()).and_then(|m| m.modified()).ok();
+        let scene_m = std::fs::metadata(self.edited_file_path()).and_then(|m| m.modified()).ok();
         if scene_m.is_none_or(|s| auto_m > s) {
             self.autosave_prompt = Some(auto);
         }

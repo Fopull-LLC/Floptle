@@ -2890,6 +2890,16 @@ right-click the node → **◇ Save as Prefab**. Place instances by dragging the
 prefab into the viewport, dropping it on a Hierarchy row (spawns as that
 node's child), or right-click → **Add to scene**.
 
+**To change a prefab, open it on its own:** double-click it in the Assets panel
+(or right-click → **◇ Edit on its own**). Its nodes become the whole viewport —
+same Hierarchy, same Inspector, same gizmos, same undo, and you can press Play —
+and **Save writes back to that prefab file, in place**. Open any scene to go
+back to editing a scene.
+
+Two things a prefab does not carry, because it is nodes and nothing else:
+terrain and blockout map geometry, which live beside a *scene* file. A prefab
+holding a Map Mesh node will show the node and not its geometry.
+
 At runtime, scripts spawn and remove them:
 
 ```lua
