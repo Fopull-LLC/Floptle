@@ -87,31 +87,95 @@ pub(crate) struct SplitLights {
 /// be turned into rank bits once here rather than per fragment. A name the
 /// project no longer has contributes no bit — the light simply does not reach a
 /// layer that does not exist.
+///
+/// **Sixteen slots a side, and the seventeenth is dropped on purpose.** A light
+/// that is switched off does not take one, and when more than sixteen qualify
+/// the survivors are the ones contributing most at the camera — see
+/// [`contribution`]. Both matter for the same reason: the set has to hold still
+/// between frames in which nothing about the lights changed, or a torch goes out
+/// for no reason the room explains.
 pub(crate) fn split_point_lights(
     world: &World,
     cam_world: DVec3,
     sorting_names: &[String],
     flat_camera: bool,
 ) -> SplitLights {
-    let mut three: LightSlots = (0, [[0.0; 4]; 16], [[0.0; 4]; 16], [[0; 4]; 16]);
-    let mut two: LightSlots = (0, [[0.0; 4]; 16], [[0.0; 4]; 16], [[0; 4]; 16]);
     let facts = floptle_core::Lit2DFacts { emits: true, flat_matter: false, flat_camera };
+    let mut three: Vec<Candidate> = Vec::new();
+    let mut two: Vec<Candidate> = Vec::new();
     for (e, m) in world.query::<Matter>() {
         let Matter::PointLight { color, intensity, range } = m else { continue };
-        let lit = world.get::<floptle_core::Lighting2D>(e).cloned().unwrap_or_default();
-        let (is_2d, _) = floptle_core::resolve_2d(lit.mode, facts);
-        let side = if is_2d { &mut two } else { &mut three };
-        if side.0 >= 16 {
+        // A light turned off does not take a slot. Keeping N lights and parking
+        // the spare ones at zero is the standard way to pool a capped resource —
+        // and scripts cannot create a PointLight, so it is the ONLY way. A
+        // parked light holding a slot would mean a pool exhausts the budget and
+        // lights nothing (`floptle/0116`).
+        if *intensity <= 0.0 || *range <= 0.0 {
             continue;
         }
+        let lit = world.get::<floptle_core::Lighting2D>(e).cloned().unwrap_or_default();
+        let (is_2d, _) = floptle_core::resolve_2d(lit.mode, facts);
         let wp = floptle_core::world_transform(world, e).translation;
         let c = (wp - cam_world).as_vec3();
-        side.1[side.0] = [c.x, c.y, c.z, range.max(0.0001)];
-        side.2[side.0] = [color[0] * intensity, color[1] * intensity, color[2] * intensity, 0.0];
-        side.3[side.0] = layer_mask(&lit, sorting_names);
-        side.0 += 1;
+        let side = if is_2d { &mut two } else { &mut three };
+        side.push(Candidate {
+            order: e.index(),
+            score: contribution(c.length(), *range, *color, *intensity),
+            pos: [c.x, c.y, c.z, range.max(0.0001)],
+            color: [color[0] * intensity, color[1] * intensity, color[2] * intensity, 0.0],
+            mask: layer_mask(&lit, sorting_names),
+        });
     }
-    SplitLights { three_d: three, two_d: two }
+    SplitLights { three_d: fill(three), two_d: fill(two) }
+}
+
+/// One light that qualified, before the sixteen are chosen.
+struct Candidate {
+    /// The node's own index, purely to break a tie between two lights that
+    /// contribute exactly the same — so even that is not decided by whatever
+    /// order the ECS happened to yield.
+    order: u32,
+    score: f32,
+    pos: [f32; 4],
+    color: [f32; 4],
+    mask: [u32; 4],
+}
+
+/// How much a light can matter to this frame: how bright it is, against how far
+/// its reach stops short of the eye.
+///
+/// A light whose sphere contains the camera scores its full brightness. Beyond
+/// that it falls off with the gap, so a bright distant lamp can still outrank a
+/// dim near one — which is what somebody looking at the screen would expect.
+///
+/// It depends only on the light and the camera. That is the whole point: the
+/// same scene and the same camera choose the same sixteen every frame, so a
+/// torch cannot go out for four frames because an enemy died somewhere else and
+/// moved the ECS's iteration order (`floptle/0116`).
+fn contribution(distance: f32, range: f32, color: [f32; 3], intensity: f32) -> f32 {
+    let bright = (0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]).max(0.0) * intensity;
+    bright / (distance - range).max(1.0)
+}
+
+/// Take the best sixteen, in a stable order, into the slots the shader reads.
+///
+/// Ranking only happens when there ARE more than sixteen: under the cap every
+/// light gets in whatever order it was found, which is exactly what this did
+/// before and what nearly every scene sees.
+fn fill(mut lights: Vec<Candidate>) -> LightSlots {
+    if lights.len() > 16 {
+        lights.sort_by(|a, b| {
+            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then(a.order.cmp(&b.order))
+        });
+        lights.truncate(16);
+    }
+    let mut out: LightSlots = (lights.len(), [[0.0; 4]; 16], [[0.0; 4]; 16], [[0; 4]; 16]);
+    for (i, l) in lights.iter().enumerate() {
+        out.1[i] = l.pos;
+        out.2[i] = l.color;
+        out.3[i] = l.mask;
+    }
+    out
 }
 
 /// A light's named sorting layers as a bitmask over their RANKS, four words of
@@ -726,6 +790,55 @@ mod light_split_tests {
         );
         let s = split_point_lights(&world, DVec3::ZERO, &names, false);
         assert_eq!(s.two_d.3[0], [0, 1 << 3, 0, 0], "rank 35 is bit 3 of word 1");
+    }
+
+    /// A light turned off must not hold a slot. Scripts cannot create a
+    /// `PointLight`, so authoring N and parking the spare ones at zero is the
+    /// only pool available — and a parked light that consumed the budget would
+    /// mean the pool exhausts all sixteen and lights nothing.
+    #[test]
+    fn a_light_switched_off_does_not_hold_a_slot() {
+        let mut world = World::default();
+        let dark = light_at(&mut world, 0.0, None);
+        world.insert(
+            dark,
+            Matter::PointLight { color: [1.0; 3], intensity: 0.0, range: 8.0 },
+        );
+        let spent = light_at(&mut world, 1.0, None);
+        world.insert(spent, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 0.0 });
+        light_at(&mut world, 2.0, None); // the only one actually lighting anything
+
+        let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
+        assert_eq!(s.three_d.0, 1, "a parked light took a slot");
+        assert_eq!(s.three_d.1[0][0], 2.0, "…and the wrong one survived");
+    }
+
+    /// Which sixteen survive must depend on the lights and the camera, and on
+    /// nothing else. The bug this guards is the nastiest kind: ECS iteration
+    /// order moves as things spawn and despawn, so an order-dependent choice
+    /// would drop a different light from frame to frame with nothing in the
+    /// scene having changed — a torch that goes out when an enemy dies
+    /// somewhere else, which a player reads as a tell.
+    #[test]
+    fn the_chosen_sixteen_do_not_depend_on_iteration_order() {
+        let build = |near_first: bool| {
+            let mut world = World::default();
+            let xs: Vec<i32> = if near_first { (0..24).collect() } else { (0..24).rev().collect() };
+            for x in xs {
+                light_at(&mut world, x as f64 * 10.0, None);
+            }
+            let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
+            let mut got: Vec<i32> =
+                (0..s.three_d.0).map(|i| s.three_d.1[i][0].round() as i32).collect();
+            got.sort_unstable();
+            got
+        };
+        let near_first = build(true);
+        assert_eq!(near_first.len(), 16, "the cap still caps");
+        assert_eq!(near_first, build(false), "the same scene chose a different sixteen");
+        // …and it kept the ones nearest the camera, not the first it happened
+        // to walk over.
+        assert_eq!(near_first, (0..16).map(|i| i * 10).collect::<Vec<_>>());
     }
 
     /// Sixteen slots per side, and running out of one must not spill into the
