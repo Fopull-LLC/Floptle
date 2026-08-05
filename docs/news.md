@@ -1,6 +1,13 @@
 ## Just shipped
 
-**v0.36.0 "In Plain Sight"** — a flat 2D scene built the obvious way now draws in
+**v0.36.0 "In Plain Sight"** — animated characters stop flickering. v0.35.0 moved
+skinning onto the graphics card and left the depth pass posing the skeleton from
+one frame ago, so it decided the shape of a character standing where they had
+just been and the pass that draws them put them where they now are; triangles lost
+that argument one at a time, differently every frame. Standing still hid it
+perfectly. It reached past the characters too — that depth is what the raymarched
+scene uses to know when to stop marching, so the floor and walls behind a moving
+fighter flashed as well. Also: a flat 2D scene built the obvious way now draws in
 the Game view. An orthographic camera sitting in the plane of its own art was
 clipping everything at its own depth, so the map showed in the Scene view and the
 Game view was empty with nothing said; both views take that depth from the same

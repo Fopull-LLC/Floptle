@@ -3742,8 +3742,10 @@ mod tests {
     /// it says so rather than floating an empty session.
     #[test]
     fn duplicating_nothing_does_nothing() {
-        let mut st = ImageEditState::default();
-        st.doc = Some(Image::new(16, 16, Mode::Pixel));
+        let mut st = ImageEditState {
+            doc: Some(Image::new(16, 16, Mode::Pixel)),
+            ..Default::default()
+        };
         assert!(!st.duplicate_selection());
         assert!(st.xform.is_none());
     }

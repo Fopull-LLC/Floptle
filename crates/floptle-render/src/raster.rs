@@ -1901,6 +1901,21 @@ impl Raster {
         gpu.queue.write_buffer(&self.skin_meta_buf, 0, bytemuck::cast_slice(&self.skin_meta_cpu));
     }
 
+    /// Open a pass: publish its globals and make sure this frame's bone palettes
+    /// have reached the GPU.
+    ///
+    /// Every pass that binds `globals_bind` goes through here, and that is the
+    /// point rather than a tidiness: the skinning stores hang off THAT bind
+    /// group, so a pass which sets its globals without this one still draws —
+    /// silently, and with the PREVIOUS frame's pose. The depth prepass did
+    /// exactly that: it primed depth (and the raymarch's per-pixel march cap)
+    /// from where the character was last frame, so this frame's triangles
+    /// depth-failed against their own stale silhouette and flickered.
+    fn begin_pass(&mut self, gpu: &Gpu, globals: Globals) {
+        gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        self.upload_skin_frame(gpu);
+    }
+
     /// A skinned draw's instance data with its pose index stamped into the lane
     /// `vs_skin` reads it from — so no caller has to know which lane that is.
     fn skin_instance(d: &SkinDraw) -> InstanceRaw {
@@ -2262,8 +2277,7 @@ impl Raster {
         instances: &[(MeshId, InstanceRaw)],
         skins: &[SkinDraw],
     ) {
-        gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
-        self.upload_skin_frame(gpu);
+        self.begin_pass(gpu, globals);
 
         let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
         let mut buckets: Vec<(usize, u32, u32)> = Vec::new();
@@ -2364,8 +2378,7 @@ impl Raster {
         clear: Option<[f64; 4]>,
         field: Option<&wgpu::BindGroup>,
     ) {
-        gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
-        self.upload_skin_frame(gpu);
+        self.begin_pass(gpu, globals);
 
         // Clear when we own the frame; Load when a prior pass (raymarch) already
         // filled the color + depth targets, so the two compose in one depth buffer.
@@ -2590,7 +2603,7 @@ impl Raster {
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
             self.prepass_tex = Some((tex, view));
         }
-        gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        self.begin_pass(gpu, globals);
 
         // Opaque instances only, bucketed by (mesh, texture) exactly like
         // `draw_scene` (the texture is bound for the per-texel alpha discard).

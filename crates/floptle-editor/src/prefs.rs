@@ -369,10 +369,12 @@ mod canvas_look_tests {
 
     #[test]
     fn the_canvas_look_round_trips_through_its_file_format() {
-        let mut look = CanvasLook::default();
-        look.pixel_grid_alpha = 200;
-        look.checker_a = [10, 20, 30];
-        look.cell_grid = false;
+        let look = CanvasLook {
+            pixel_grid_alpha: 200,
+            checker_a: [10, 20, 30],
+            cell_grid: false,
+            ..Default::default()
+        };
         let s = ron::ser::to_string_pretty(&look, ron::ser::PrettyConfig::default()).unwrap();
         assert_eq!(ron::from_str::<CanvasLook>(&s).unwrap(), look);
     }
