@@ -235,7 +235,8 @@ mod tests {
     /// A tilemap's radius reaches past its far corner.
     #[test]
     fn a_tilemap_covers_its_whole_grid() {
-        let tm = Matter::Tilemap { cols: 20, rows: 12, tile: 1.5, data: Vec::new() };
+        let tm =
+            Matter::Tilemap { cols: 20, rows: 12, tile: 1.5, data: Vec::new(), tileset: String::new() };
         let r = local_radius(&tm, Measured::default()).expect("measurable");
         // Half-diagonal of the real grid: the honest minimum.
         let real = ((20.0 * 1.5f32 / 2.0).powi(2) + (12.0 * 1.5f32 / 2.0).powi(2)).sqrt();
@@ -281,7 +282,13 @@ mod tests {
             Matter::Primitive { shape: Shape::Cube, color: [1.0; 3] },
             Matter::Mesh { asset_path: "a.glb".into() },
             Matter::MapMesh { id: 1 },
-            Matter::Tilemap { cols: 2, rows: 2, tile: 1.0, data: Vec::new() },
+            Matter::Tilemap {
+                cols: 2,
+                rows: 2,
+                tile: 1.0,
+                data: Vec::new(),
+                tileset: String::new(),
+            },
             Matter::SpriteBatch { size: 1.0 },
             water(WaterKind::Sea, 1.0, [1.0; 3]),
         ];

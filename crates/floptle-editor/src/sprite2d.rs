@@ -38,7 +38,16 @@ pub(crate) struct TileGpu {
 /// Includes the sheet dimensions and the texel size because the UVs are baked
 /// into the mesh: swap the material's sheet and the geometry is stale even
 /// though every cell index is identical.
-fn signature(cols: u32, rows: u32, tile: f32, data: &[u32], sheet: (u32, u32), texel: [f32; 2]) -> u64 {
+#[allow(clippy::too_many_arguments)]
+fn signature(
+    cols: u32,
+    rows: u32,
+    tile: f32,
+    data: &[u32],
+    sheet: (u32, u32),
+    texel: [f32; 2],
+    anim_step: u32,
+) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (cols, rows, sheet).hash(&mut h);
@@ -46,7 +55,62 @@ fn signature(cols: u32, rows: u32, tile: f32, data: &[u32], sheet: (u32, u32), t
     texel[0].to_bits().hash(&mut h);
     texel[1].to_bits().hash(&mut h);
     data.hash(&mut h);
+    // The animation STEP, not the clock: a map with animated tiles rebuilds when
+    // the frame it shows changes, not sixty times a second. A tilemap with nothing
+    // animated reports step 0 forever and is never rebuilt at all — which is what
+    // keeps this feature free for the maps that do not use it.
+    anim_step.hash(&mut h);
     h.finish()
+}
+
+/// Substitute each animated tile's current frame into a copy of the grid.
+///
+/// `None` when nothing in this map animates — the common case, and the one that
+/// must not allocate a copy of the grid every frame.
+///
+/// The orientation is carried across, so a tile turned by hand keeps its angle
+/// through every frame of its animation (what a rotated conveyor needs).
+fn animate(data: &[u32], set: &floptle_tiles::TileSet, t: f32) -> Option<Vec<u32>> {
+    if !set.animated() {
+        return None;
+    }
+    let cells = set.cells();
+    let mut out: Option<Vec<u32>> = None;
+    for (i, &packed) in data.iter().enumerate() {
+        if floptle_core::tile_is_empty(packed, cells) {
+            continue;
+        }
+        let cell = floptle_core::tile_index(packed);
+        let Some(info) = set.info(cell) else { continue };
+        let frame = info.frame_at(cell, t);
+        if frame == cell {
+            continue;
+        }
+        out.get_or_insert_with(|| data.to_vec())[i] =
+            floptle_core::tile_pack(frame, floptle_core::tile_xform(packed));
+    }
+    out
+}
+
+/// Where every animated tile in a tileset is in its cycle at time `t`, folded
+/// into one number for the rebuild signature.
+///
+/// One number rather than per-tile phases because the signature only has to
+/// CHANGE when the picture does. Two tiles at different rates both advance it
+/// whenever either ticks, which rebuilds a few times more than strictly needed
+/// and never fewer — the safe direction.
+fn anim_step(set: &floptle_tiles::TileSet, t: f32) -> u32 {
+    if !t.is_finite() {
+        return 0;
+    }
+    set.tiles
+        .values()
+        .filter(|i| !i.frames.is_empty() && i.anim_fps > 0.0)
+        .map(|i| {
+            let n = i.frames.len() as u32 + 1;
+            ((t * i.anim_fps).max(0.0) as u32) % n
+        })
+        .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b))
 }
 
 impl Editor {
@@ -59,12 +123,12 @@ impl Editor {
     pub(crate) fn sync_tilemaps(&mut self) {
         // Collect first: building needs `&mut self.raster` and the walk holds
         // `&self.world`.
-        let live: Vec<(Entity, u32, u32, f32, Vec<u32>)> = self
+        let live: Vec<(Entity, u32, u32, f32, Vec<u32>, String)> = self
             .world
             .query::<Matter>()
             .filter_map(|(e, m)| match m {
-                Matter::Tilemap { cols, rows, tile, data } => {
-                    Some((e, *cols, *rows, *tile, data.clone()))
+                Matter::Tilemap { cols, rows, tile, data, tileset } => {
+                    Some((e, *cols, *rows, *tile, data.clone(), tileset.clone()))
                 }
                 _ => None,
             })
@@ -88,7 +152,11 @@ impl Editor {
             return; // no GPU yet — try again next frame
         };
 
-        for (e, cols, rows, tile, data) in live {
+        // Animated tiles advance on the EDIT clock as well as the play clock, so a
+        // torch flickers while you are placing torches. That is the whole point of
+        // authoring animation in the editor rather than discovering it in Play.
+        let now = self.started.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
+        for (e, cols, rows, tile, data, tileset) in live {
             let mat = self.world.get::<Material>(e).cloned().unwrap_or_default();
             let (sc, sr) = mat.sheet();
             // The texel size is what the half-texel inset is measured in. An
@@ -102,12 +170,21 @@ impl Editor {
                 .map(|[w, h]| [1.0 / w.max(1.0), 1.0 / h.max(1.0)])
                 .unwrap_or([0.0, 0.0]);
 
-            let sig = signature(cols, rows, tile, &data, (sc, sr), texel);
+            let set = (!tileset.is_empty()).then(|| self.tiles.get(&tileset)).flatten();
+            let step = set.map(|s| anim_step(s, now)).unwrap_or(0);
+            let sig = signature(cols, rows, tile, &data, (sc, sr), texel, step);
             if self.tilemaps.get(&e).is_some_and(|t| t.sig == sig) {
                 continue;
             }
+            // The grid AS DRAWN: the stored squares, with each animated tile's
+            // current frame swapped in. `data` on the component is untouched —
+            // animation is a VIEW of the map, not an edit to it, and writing the
+            // frame back would make a saved scene record whichever moment the
+            // artist happened to hit Ctrl-S on.
+            let animated = set.and_then(|s| animate(&data, s, now));
+            let draw = animated.as_deref().unwrap_or(&data);
             let mesh_data =
-                floptle_render::mesh::tilemap(cols, rows, tile, sc, sr, texel, &data);
+                floptle_render::mesh::tilemap(cols, rows, tile, sc, sr, texel, draw);
             let empty = mesh_data.indices.is_empty();
             let (nv, ni) = (mesh_data.vertices.len() as u32, mesh_data.indices.len() as u32);
 

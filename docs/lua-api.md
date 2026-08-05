@@ -30,7 +30,7 @@ each group, and meant to be searched.
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 14
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
-- [2D — tilemaps & sprite batches](#2d--tilemaps--sprite-batches) — 11
+- [2D — tilemaps & sprite batches](#2d--tilemaps--sprite-batches) — 22
 - [vessels — assembly.*](#vessels--assembly) — 14
 - [the camera & the screen](#the-camera--the-screen) — 7
 - [physics controls — pause & step](#physics-controls--pause--step) — 4
@@ -1799,7 +1799,7 @@ node:setSpriteBatch{size=1.0} — make this node a SPRITE BATCH, so node:sprites
 
 ### `node:setTilemap`
 
-node:setTilemap{cols=13, rows=7, tile=1.5 [, data={…}]} — make this node a TILEMAP: a grid of spritesheet cells drawn as one mesh, one draw call. The sheet is the node's own Material (texture + sheetCols/sheetRows). Neighbouring tiles share an exact edge, so the hairline gaps a grid of separate quads opens up as the camera moves cannot happen. `data` is row-major from the top-left; leave it out for an empty grid you fill with tm:set.
+node:setTilemap{cols=13, rows=7, tile=1.5 [, data={…}] [, tileset="tilesets/bricks.tileset.ron"]} — make this node a TILEMAP: a grid of spritesheet cells drawn as one mesh, one draw call. The sheet is the node's own Material (texture + sheetCols/sheetRows). Neighbouring tiles share an exact edge, so the hairline gaps a grid of separate quads opens up as the camera moves cannot happen. `data` is row-major from the top-left; leave it out for an empty grid you fill with tm:set.
 
 ### `node:sprites`
 
@@ -1807,19 +1807,43 @@ node:sprites() — a handle to this node's SpriteBatch (make it one with node:se
 
 ### `node:tilemap`
 
-node:tilemap() — a handle to this node's tilemap grid: tm:set / tm:get / tm:fill / tm:size. Re-dress a room per floor without rebuilding the node.
+node:tilemap() — a handle to this node's tilemap grid. Squares: tm:set / tm:get / tm:at / tm:fill / tm:fillRect / tm:size / tm:resize. World space: tm:cellAt (which tile is the player standing on) / tm:worldAt / tm:tileSize. What a tile IS, from the node's tileset: tm:solid / tm:tags / tm:hasTag / tm:autotile.
 
 ### `tm.EMPTY`
 
 tm.EMPTY — the cell value that means "no tile here", on the handle rather than only as a global. Same number as EMPTY_TILE; -1 and nil mean it too.
 
+### `tm:at`
+
+tm:at(x, y) → cell, rot, flipX — the WHOLE answer for a square, where tm:get gives only the cell. `rot` is degrees clockwise (0/90/180/270). For art that faces a direction: a conveyor, a pipe, a one-way platform.
+
+### `tm:autotile`
+
+tm:autotile(x0, y0, x1, y1) — recompute the region's autotiled squares, plus the one-square ring around it (which is where the stale edge tiles are). Call it after a run of tm:set, not per square: retiling per write would be O(area) each time and would fight a stroke still being laid down. Does nothing when the map has no tileset.
+
+### `tm:cellAt`
+
+tm:cellAt(worldPos) → x, y — which square a WORLD position falls in, or nil off the map. Takes a vec3, an {x=,y=,z=} table, or a node. Goes through the tilemap node's own transform, so a map that has been moved, turned or scaled still answers correctly — which is the part a game cannot reasonably compute itself.
+
 ### `tm:fill`
 
 tm:fill(cell) — set every square, including the empty ones. The fast way to reset a room before re-dressing it. tm:fill() with no argument, tm:fill(-1) and tm:fill(EMPTY_TILE) all clear the grid.
 
+### `tm:fillRect`
+
+tm:fillRect(x0, y0, x1, y1, cell [, xform]) — fill a rectangle. Corners in either order, clipped to the grid, so dragging past the edge fills to the edge.
+
 ### `tm:get`
 
 tm:get(x, y) → cell, or nil outside the grid and on an empty square.
+
+### `tm:hasTag`
+
+tm:hasTag(x, y, "ice") → the common case of tm:tags without allocating a table per square. What a per-frame ground check should call.
+
+### `tm:resize`
+
+tm:resize{ cols =, rows =, offsetX =, offsetY = } — resize the grid, keeping whatever overlaps. offsetX/offsetY is where the OLD top-left lands in the new grid, so offsetY = 1 grows a row on top rather than at the bottom. Give at least one of cols / rows.
 
 ### `tm:set`
 
@@ -1828,6 +1852,26 @@ tm:set(x, y, cell) — set one square, 0-based from the TOP-LEFT. Outside the gr
 ### `tm:size`
 
 tm:size() → cols, rows.
+
+### `tm:solid`
+
+tm:solid(x, y) → whether the tileset says that square collides. False on an empty square and false with no tileset. Reads the TILESET, so marking one brick solid answers for every brick in every scene — a game keeping its own table of solid cell indices goes stale the day the artist reorders the sheet.
+
+### `tm:tags`
+
+tm:tags(x, y) → the tileset's tags for that square, as a list. This is how a tilemap carries gameplay ("ice", "water", "damage") without the game keeping a second table keyed by cell index.
+
+### `tm:tileSize`
+
+tm:tileSize() → the world edge length of one square. What tm:cellAt divides by, and what a game placing something on a tile needs.
+
+### `tm:tileset`
+
+tm:tileset() → the project-relative .tileset.ron this map is cut from, or nil. The tileset is what says whether a tile collides, what it is tagged, and how it autotiles — see docs/tilemaps.md.
+
+### `tm:worldAt`
+
+tm:worldAt(x, y) → the world position of that square's CENTRE (a vec3), or nil off the grid. The centre and not a corner, because what you do with it is put something on the tile.
 
 ## vessels — assembly.*
 

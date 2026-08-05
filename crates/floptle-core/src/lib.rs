@@ -38,6 +38,7 @@ pub mod origin;
 pub mod profile;
 pub mod script;
 pub mod spatial;
+pub mod tile;
 pub mod time;
 pub mod transform;
 
@@ -53,6 +54,11 @@ pub use matter::{
     Visible, EMPTY_TILE,
 };
 pub use net::{NetId, Replicated, ReplicationMode};
+pub use tile::{
+    tile_corner, tile_corner_drawn, tile_index, tile_is_empty, tile_pack, tile_point_drawn,
+    tile_reoriented, tile_xform, TileXform, TILE_CELL_MASK, TILE_FLIP_X, TILE_ROT_SHIFT,
+    TILE_XFORM_MASK,
+};
 pub use script::{ScriptInst, Scripts};
 pub use origin::FloatingOrigin;
 pub use time::{FixedTimestep, Time};

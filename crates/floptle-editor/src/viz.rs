@@ -127,30 +127,51 @@ pub(crate) fn camera_frustum_lines(
     vp: Mat4,
     w: f32,
     h: f32,
+    ortho_height: Option<f32>,
 ) -> Vec<(Vec2, Vec2)> {
     let fwd = rot * Vec3::NEG_Z;
     let up = rot * Vec3::Y;
     let right = rot * Vec3::X;
     let far = 2.2f32; // a compact visualization length, not the real far plane
-    let hh = far * (fov_y * 0.5).tan();
+    // An ORTHOGRAPHIC camera has no apex: its frame is the same rectangle at
+    // every distance, so the gizmo is a BOX. Drawing the perspective cone for it
+    // would say the shot narrows toward the camera, which is the one thing
+    // choosing orthographic means it does not — and a gizmo that contradicts the
+    // projection is worse than no gizmo, because people frame shots by it.
+    let hh = match ortho_height {
+        Some(height) => height * 0.5,
+        None => far * (fov_y * 0.5).tan(),
+    };
     let hw = hh * aspect.max(0.1);
-    let apex = pos;
-    let center = pos + (fwd * far).as_dvec3();
-    let corners = [
-        center + ((right * hw + up * hh).as_dvec3()),
-        center + ((-right * hw + up * hh).as_dvec3()),
-        center + ((-right * hw - up * hh).as_dvec3()),
-        center + ((right * hw - up * hh).as_dvec3()),
-    ];
-    let pa = project(apex, cam_world, vp, w, h);
+    let rect_at = |d: f32| {
+        let c = pos + (fwd * d).as_dvec3();
+        [
+            c + ((right * hw + up * hh).as_dvec3()),
+            c + ((-right * hw + up * hh).as_dvec3()),
+            c + ((-right * hw - up * hh).as_dvec3()),
+            c + ((right * hw - up * hh).as_dvec3()),
+        ]
+    };
+    let corners = rect_at(far);
     let pc: Vec<Option<Vec2>> = corners.iter().map(|&c| project(c, cam_world, vp, w, h)).collect();
     let mut lines = Vec::new();
+    // The near end: the apex for a perspective camera, the near RECT for an
+    // orthographic one.
+    let near: Vec<Option<Vec2>> = match ortho_height {
+        Some(_) => rect_at(0.0).iter().map(|&c| project(c, cam_world, vp, w, h)).collect(),
+        None => vec![project(pos, cam_world, vp, w, h); 4],
+    };
     for i in 0..4 {
-        if let (Some(a), Some(b)) = (pa, pc[i]) {
-            lines.push((a, b)); // apex → corner
+        if let (Some(a), Some(b)) = (near[i], pc[i]) {
+            lines.push((a, b)); // apex/near corner → far corner
         }
         if let (Some(a), Some(b)) = (pc[i], pc[(i + 1) % 4]) {
             lines.push((a, b)); // far-rect edge
+        }
+        if ortho_height.is_some()
+            && let (Some(a), Some(b)) = (near[i], near[(i + 1) % 4])
+        {
+            lines.push((a, b)); // near-rect edge — the box's other face
         }
     }
     lines

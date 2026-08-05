@@ -1873,6 +1873,11 @@ impl Editor {
                         sim.add_static_mesh(anchor, &verts, &indices, layer);
                     }
                 }
+                // Tilemaps: the SAME merged boxes the play sim builds, through the
+                // same function — server truth matches what the client walks on.
+                Some(m @ Matter::Tilemap { .. }) => {
+                    crate::tile_edit::add_tilemap_colliders(sim, &self.tiles, &wt, m, layer);
+                }
                 Some(Matter::Primitive { shape, .. }) => match shape {
                     floptle_core::Shape::Cube => {
                         sim.add_static_box(

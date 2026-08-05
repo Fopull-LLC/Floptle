@@ -660,6 +660,18 @@ pub enum Matter {
     /// needs 256×256 at 10 Hz costs a sixth of what it cost when every target
     /// was 480×270 every frame (`floptle/0078`). Use [`Matter::TARGET_W`],
     /// [`Matter::TARGET_H`] for the defaults.
+    ///
+    /// `ortho` switches the camera to an **orthographic** projection of
+    /// `ortho_height` world units, top to bottom, at every distance — and
+    /// `fov_y` then means nothing, because there is no angle. This is what a 2D
+    /// game wants: under perspective a tilemap two units further back is drawn
+    /// slightly smaller, so a parallax layer changes scale as well as speed and
+    /// two tilemaps at different Z cannot line up. It is also what a strategy or
+    /// isometric camera wants, and what a technical shot wants.
+    ///
+    /// The height is the FULL height, not a half-extent — the same number
+    /// [`floptle_render::Projection::Orthographic`] takes, so there is no factor
+    /// of two hiding at the boundary. Width follows from the viewport's aspect.
     Camera {
         fov_y: f32,
         active: bool,
@@ -668,6 +680,10 @@ pub enum Matter {
         target_w: u32,
         target_h: u32,
         target_hz: f32,
+        /// Orthographic rather than perspective. `fov_y` is unused when set.
+        ortho: bool,
+        /// The world-space height the view covers when `ortho`. Ignored otherwise.
+        ortho_height: f32,
     },
     /// A placeable point/omni light. Its world position is the node's transform
     /// translation; `range` is the radius at which its contribution falls to ~zero.
@@ -740,13 +756,29 @@ pub enum Matter {
     ///
     /// `data` is row-major, `rows * cols` long, from the top-left.
     /// [`EMPTY_TILE`] leaves a hole rather than drawing cell 0.
+    /// `tileset` names the project-relative `.tileset.ron` that says what each
+    /// cell of the sheet MEANS — whether it collides, what it is tagged, which
+    /// autotile group it belongs to, whether it animates. Empty = none, and the
+    /// tilemap is then art only.
+    ///
+    /// It is a path rather than inline data because those answers belong to the
+    /// SHEET, not to this grid: tick "solid" on the brick once and every brick in
+    /// every scene collides, including the ones already placed. Inline, the answer
+    /// would be recorded per node and a level built last month would keep the old
+    /// one.
+    ///
+    /// Each square of `data` is a packed cell index + orientation — see
+    /// [`crate::tile`]. A grid written before orientations existed is a list of
+    /// bare indices and still means exactly what it did.
     Tilemap {
         cols: u32,
         rows: u32,
         /// World size of one tile's edge.
         tile: f32,
-        /// Row-major cell indices into the Material's sheet.
+        /// Row-major packed squares (cell index + orientation).
         data: Vec<u32>,
+        /// Project-relative path to this map's `.tileset.ron`, or empty.
+        tileset: String,
     },
     /// N sprites drawn from one node, each with its own position, rotation,
     /// scale, sheet cell **and tint** (`floptle/0058`).
@@ -810,6 +842,53 @@ pub enum Matter {
 }
 
 impl Matter {
+    /// The height a fresh orthographic camera covers, in world units.
+    ///
+    /// Ten, because a tilemap's default tile is one unit: a new 2D camera frames
+    /// ten tiles vertically, which is a room. A number derived from the tile size
+    /// beats a round number that happens to look like a room on the machine it
+    /// was chosen on.
+    pub const ORTHO_HEIGHT: f32 = 10.0;
+    /// The smallest orthographic height. Not zero: a zero-height projection
+    /// matrix is singular, and every ray reconstructed through its inverse comes
+    /// back NaN — which shows up as a black screen rather than as a small camera.
+    pub const ORTHO_MIN: f32 = 1e-3;
+    /// The largest. Past this the depth range a single-precision matrix can
+    /// resolve is coarser than the things being drawn, so the picture z-fights
+    /// instead of zooming out.
+    pub const ORTHO_MAX: f32 = 1.0e6;
+
+    /// Every spelling `projection = ...` accepts, and the list an error prints.
+    ///
+    /// One list, read by both [`parse_projection`](Self::parse_projection) and
+    /// the message — `floptle/0082`'s rule, because the two drifting is how
+    /// `pin = "topCenter"` ended up silently meaning top-left.
+    pub const PROJECTION_ACCEPTS: &'static [&'static str] =
+        &["perspective", "persp", "3d", "orthographic", "ortho", "2d"];
+
+    /// Whether a projection name means orthographic. `None` for a name that is
+    /// neither, so the caller can refuse it by name rather than default it.
+    pub fn parse_projection(s: &str) -> Option<bool> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "perspective" | "persp" | "3d" => Some(false),
+            "orthographic" | "ortho" | "orthogonal" | "2d" => Some(true),
+            _ => None,
+        }
+    }
+
+    /// An orthographic height clamped into what the projection can express.
+    ///
+    /// NaN is handled explicitly rather than by `clamp` (which propagates it):
+    /// an ortho height that arrived as NaN through some arithmetic would make the
+    /// whole view matrix NaN, and a camera that renders nothing at all is much
+    /// harder to trace back than one that snapped to its default.
+    pub fn clamp_ortho_height(h: f32) -> f32 {
+        if !h.is_finite() {
+            return Self::ORTHO_HEIGHT;
+        }
+        h.clamp(Self::ORTHO_MIN, Self::ORTHO_MAX)
+    }
+
     /// Default render-target width, in pixels (`Matter::Camera`).
     pub const TARGET_W: u32 = 480;
     /// Default render-target height, in pixels (`Matter::Camera`).

@@ -19,6 +19,7 @@ linked here, it isn't finished — a test enforces that.
 | Make things fall, collide, be stood on | [physics.md](physics.md) |
 | Build a level without leaving the engine | [map-tools.md](map-tools.md) |
 | Make a **2D** game — tiles and sprites | [2d.md](2d.md) |
+| Paint a tile level: palettes, autotiling, collision | [tilemaps.md](tilemaps.md) |
 | Add a minimap, mirror, scope or split-screen | [render-targets.md](render-targets.md) |
 | Make your game playable by more people | [accessibility.md](accessibility.md) |
 | Sculpt terrain / build a planet | [subsystems/deformable-matter.md](subsystems/deformable-matter.md) |
@@ -63,6 +64,10 @@ The build-something guides. Each one is a path from nothing to a working result.
   engine and watch it change on the mesh (pixels, paint and vectors, one document).
 - [2d.md](2d.md) — **tilemaps and sprite batches**: a level as one seamless mesh, and
   many sprites from one node with a tint each.
+- [tilemaps.md](tilemaps.md) — the **◫ Tiles** suite: paint a level with brush,
+  rectangle, line and bucket; a palette that is also the tileset editor (per-tile
+  collision, tags and animation); autotile groups that pick their own corners;
+  merged tile colliders; and the orthographic camera.
 - [render-targets.md](render-targets.md) — **a camera as a texture**: point a camera at
   a name and wear its picture on a material or a UI image — minimaps, mirrors, security
   monitors, scopes and split-screen, each at its own size and refresh rate.

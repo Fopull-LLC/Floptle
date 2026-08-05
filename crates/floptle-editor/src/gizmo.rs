@@ -45,6 +45,11 @@ pub(crate) enum Tool {
     /// Map-building sub-object editor: select/drag vertices, edges, faces of a
     /// `Matter::MapMesh` node, extrude, assign per-face materials (▦ Map tab).
     MapEdit,
+    /// Tile painting: the ◫ Tiles tab's brush, in the Scene view. Which tool the
+    /// pointer actually holds (brush, rectangle, bucket, …) is the Tiles tab's
+    /// own `TileTool` — this is only "the pointer paints tiles now", the same
+    /// relationship `Sculpt` has to the terrain brush.
+    Tiles,
 }
 
 impl Tool {
@@ -52,7 +57,7 @@ impl Tool {
     /// `digit`, and the viewport toolbar all read it, so the toolbar can never again
     /// disagree with the number keys (it used to list Rect before Sculpt while the keys
     /// said otherwise). Add a tool here and it appears, in order, everywhere.
-    pub(crate) const ALL: [Tool; 8] = [
+    pub(crate) const ALL: [Tool; 9] = [
         Tool::Select,
         Tool::Move,
         Tool::Rotate,
@@ -61,6 +66,7 @@ impl Tool {
         Tool::Rect,
         Tool::Paint,
         Tool::MapEdit,
+        Tool::Tiles,
     ];
 
     pub(crate) fn from_digit(n: u32) -> Option<Tool> {
@@ -80,6 +86,7 @@ impl Tool {
             Tool::Rotate => "rotate",
             Tool::Scale => "scale",
             Tool::Sculpt => "sculpt",
+            Tool::Tiles => "tiles",
             Tool::Rect => "rect",
             Tool::Paint => "paint",
             Tool::MapEdit => "map",
@@ -238,7 +245,7 @@ pub(crate) fn build_gizmo(
     rect_half: Option<Vec3>,
     xf_override: Option<Transform>,
 ) -> Option<GizmoFrame> {
-    if tool == Tool::Select || tool == Tool::Sculpt || tool == Tool::Paint {
+    if tool == Tool::Select || tool == Tool::Sculpt || tool == Tool::Paint || tool == Tool::Tiles {
         return None;
     }
     // The Map tool only shows a (Move-style) gizmo when a sub-object selection
@@ -411,7 +418,7 @@ pub(crate) fn hit_test(
             // The trackball ring (free rotate) — only when not closer to an axis ring.
             cands.push((Handle::Center, ring_dist(center_ring)));
         }
-        Tool::Select | Tool::Sculpt | Tool::Paint | Tool::Rect => {} // Rect hit-tests in build_gizmo
+        Tool::Select | Tool::Sculpt | Tool::Paint | Tool::Tiles | Tool::Rect => {} // Rect hit-tests in build_gizmo
     }
     cands
         .into_iter()
@@ -536,6 +543,6 @@ pub(crate) fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, g
                 }
             }
         }
-        Tool::Select | Tool::Sculpt | Tool::Paint => {}
+        Tool::Select | Tool::Sculpt | Tool::Paint | Tool::Tiles => {}
     }
 }

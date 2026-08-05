@@ -103,6 +103,8 @@ mod shading;
 mod templates;
 mod terrain_edit;
 mod terrain_ui;
+mod tile_edit;
+mod tile_ui;
 mod theme;
 mod ui_design;
 mod ui_design_ui;
@@ -317,6 +319,8 @@ struct EditorCmd {
     terrain_palette_changed: bool,
     /// Focus (or open) the Terrain dock tab.
     focus_terrain: bool,
+    /// Focus (or open) the ◫ Tiles dock tab, and arm the tile tool.
+    focus_tiles: bool,
     /// Fill the whole target terrain with a color or texture slot.
     fill_terrain: Option<TerrainFill>,
     /// "Fill bounds" tool: lay flat ground across the active terrain (uses the brush's
@@ -346,6 +350,11 @@ struct EditorCmd {
     add_map_shape: Option<map_edit::MapShape>,
     /// A Map-tab modeling op on the current sub-object selection.
     map_op: Option<map_edit::MapOp>,
+    /// ◫ Tiles tab intents, in the order they were pressed. A queue rather than
+    /// an `Option` because a single frame legitimately produces several (clicking
+    /// a preset assigns a group AND masks), and dropping all but the last would
+    /// lose the ones nobody thought to look for.
+    tile_cmds: Vec<tile_ui::TileCmd>,
     /// Switch the Map tool's vertex/edge/face sub-mode.
     set_map_mode: Option<map_edit::MapSubMode>,
     /// Arm (or disarm, with `None`) a shape for interactive drawing.
@@ -502,6 +511,25 @@ fn key_name(code: KeyCode) -> Option<&'static str> {
 }
 
 /// Map a top-row number key to its digit (1-9), else `None`.
+/// The lowercase letter a key code is, for the ◫ Tiles tool shortcuts.
+///
+/// Only the letters those tools use, so this cannot quietly become a second
+/// keyboard map that drifts from the editor's own.
+fn letter_of(code: KeyCode) -> Option<char> {
+    Some(match code {
+        KeyCode::KeyB => 'b',
+        KeyCode::KeyE => 'e',
+        KeyCode::KeyR => 'r',
+        KeyCode::KeyF => 'f',
+        KeyCode::KeyL => 'l',
+        KeyCode::KeyG => 'g',
+        KeyCode::KeyI => 'i',
+        KeyCode::KeyS => 's',
+        KeyCode::KeyM => 'm',
+        _ => return None,
+    })
+}
+
 fn digit_of(code: KeyCode) -> Option<u32> {
     match code {
         KeyCode::Digit1 => Some(1),
@@ -566,6 +594,8 @@ struct EditorTabViewer<'a> {
     map_mode: map_edit::MapSubMode,
     map_slot_name: &'a mut String,
     map_opts: &'a mut map_edit::MapOpts,
+    tiles: &'a mut tile_edit::TileStore,
+    tile_tools: &'a mut tile_edit::TileTools,
     map_size_buf: &'a mut Option<Vec3>,
     map_spec_buf: &'a mut Option<floptle_map::ShapeSpec>,
     map_arm: Option<map_edit::MapShape>,
@@ -587,6 +617,7 @@ struct EditorTabViewer<'a> {
     /// move/rotate/scale mode — see `Editor::gizmo_tool`).
     gizmo_tool: Tool,
     map_viz: &'a Option<map_edit::MapViz>,
+    tile_viz: &'a Option<tile_edit::TileViz>,
     /// Game-UI element outlines for the Scene view (index, rect pts, scale).
     ui_overlay: &'a [(u32, [f32; 4], f32)],
     /// The selected node's reference-param kinds ((script kind, param) → kind),
@@ -711,6 +742,8 @@ struct EditorTabViewer<'a> {
     show_gizmos: &'a mut bool,
     /// Which plane the Scene view is locked to (2D authoring).
     view_lock: &'a mut floptle_render::ViewLock,
+    /// Scene-view orthographic height, or `None` for perspective.
+    view_ortho: &'a mut Option<f32>,
     gizmo_filter: &'a mut GizmoFilter,
     grabbed: Option<Handle>,
     tool: Tool,
@@ -845,6 +878,17 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
                 cx.ui(ui);
             }
             EditorTab::Map => self.map_ui(ui),
+            EditorTab::Tiles => {
+                let mut cx = tile_ui::TileCtx {
+                    store: self.tiles,
+                    tools: self.tile_tools,
+                    world: self.world,
+                    project_root: self.project_root,
+                    cmds: &mut self.cmd.tile_cmds,
+                    playing: self.playing,
+                };
+                cx.ui(ui);
+            }
             EditorTab::UiDesign => self.ui_design_ui(ui),
             EditorTab::Learn => self.learn_ui(ui),
             EditorTab::Settings => {
@@ -1282,6 +1326,8 @@ struct Editor {
     map_mode: map_edit::MapSubMode,
     /// This frame's Map-tool overlay (projected wireframe + selection).
     map_viz: Option<map_edit::MapViz>,
+    /// The ◫ Tiles overlay for this frame (grid, collision, cursor, selection).
+    tile_viz: Option<tile_edit::TileViz>,
     /// Live sub-object gizmo drag (pre-drag vert positions).
     map_drag: Option<map_edit::MapDrag>,
     /// Pre-gesture mesh snapshot, banked as one undo step on release.
@@ -1302,6 +1348,10 @@ struct Editor {
     map_slot_name: String,
     /// Shape resolution + op distances for the Map tool.
     map_opts: map_edit::MapOpts,
+    /// The project's tilesets (◫ Tiles): per-tile collision, tags, autotile groups.
+    tiles: tile_edit::TileStore,
+    /// The ◫ Tiles tool state: which layer, which tool, the armed stamp.
+    tile_tools: tile_edit::TileTools,
     /// Live value of the Map tab's size fields while they are being dragged.
     /// The resize only APPLIES on release — a per-frame resize would push one
     /// undo step per mouse move.
@@ -2472,6 +2522,7 @@ impl ApplicationHandler for Editor {
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.report_scene_wiring(&doc);
         self.adopt_terrain();
+        self.adopt_tilesets();
         // NOTE: adopt_paint/adopt_tex_paint happen AFTER `self.gpu = Some(..)` below —
         // both allocate GPU blocks/textures, and at this point gpu/raster are still
         // locals. Calling them here silently no-ops and boot loses all saved paint.
@@ -2938,6 +2989,26 @@ impl ApplicationHandler for Editor {
                                 } else if in_image {
                                     crate::image_edit::image_key(&mut self.image, code, self.shift);
                                 } else if !in_timeline {
+                                    // ◫ Tiles letter shortcuts CLAIM their key while the
+                                    // tile tool is held, and fall through otherwise. Two
+                                    // of them (F, G) are the editor's frame-selection and
+                                    // grid toggle everywhere else — claiming beats doing
+                                    // BOTH, which is what running after the match would
+                                    // do. The Tiles tab has its own Grid checkbox, and
+                                    // switching tools hands F back.
+                                    let claimed = self.tool == Tool::Tiles
+                                        && !self.playing
+                                        && letter_of(code)
+                                            .and_then(|c| {
+                                                crate::tile_edit::TileTool::ALL
+                                                    .into_iter()
+                                                    .find(|t| t.key() == c)
+                                            })
+                                            .map(|t| self.tile_tools.tool = t)
+                                            .is_some();
+                                    if claimed {
+                                        return;
+                                    }
                                     match code {
                                         // Never delete a scene node while an object/bone is
                                         // selected for animation (there's no scene selection
@@ -3018,6 +3089,14 @@ impl ApplicationHandler for Editor {
                         self.last_dab_time = None;
                         self.paint_stroke_snapshot = None;
                         self.paint_stroke_dabbed = false;
+                    } else if over_scene && self.tool == Tool::Tiles && !self.playing {
+                        // The tile tools take the whole click: painting a square is
+                        // not a pick, and a stray pick mid-stroke would swap the
+                        // layer out from under the brush.
+                        self.context_menu = None;
+                        if let Some(cursor) = self.cursor {
+                            self.tile_press(cursor);
+                        }
                     } else if over_scene && self.tool == Tool::Sculpt {
                         // Sculpt tool: start a brush stroke on the terrain (applied
                         // next frame in terrain_frame_update).
@@ -3150,6 +3229,12 @@ impl ApplicationHandler for Editor {
                     self.grabbed = None;
                     self.drag = None;
                     self.drag_group.clear();
+                    // End of a tile gesture: a rubber-band tool commits here (the
+                    // rectangle is not known until the release), and a stroke's
+                    // writes were already coalesced into one `begin_edit` step.
+                    // Before `self.editing = false`, because committing needs the
+                    // step still open.
+                    self.tile_release(self.cursor);
                     self.editing = false;
                     self.sculpting = false;
                     // End of a paint stroke: bank the whole stroke as ONE undo step.

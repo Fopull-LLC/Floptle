@@ -272,15 +272,17 @@ impl Editor {
     /// to the selected camera.
     pub(crate) fn update_camera_preview(&mut self, elapsed: f32) {
         let Some(e) = self.selection.last().copied() else { return };
-        let (fov_y, mask) = match self.world.get::<Matter>(e) {
-            Some(Matter::Camera { fov_y, cull_mask, .. }) => (*fov_y, *cull_mask),
+        let (fov_y, mask, ortho, oh) = match self.world.get::<Matter>(e) {
+            Some(Matter::Camera { fov_y, cull_mask, ortho, ortho_height, .. }) => {
+                (*fov_y, *cull_mask, *ortho, *ortho_height)
+            }
             _ => return,
         };
         let wt = floptle_core::world_transform(&self.world, e);
         let cam = RenderCamera::new(
             wt.translation,
             wt.rotation,
-            Projection::Perspective { fov_y, near: 0.05, far: 300000.0 },
+            Projection::of_camera(fov_y, ortho, oh, 0.05, 300000.0),
         );
         self.ensure_cam_preview_target();
         let Some((cv, dv)) =
@@ -364,7 +366,7 @@ impl Editor {
             let cam = RenderCamera::new(
                 wt.translation,
                 wt.rotation,
-                Projection::Perspective { fov_y: r.fov_y, near: 0.05, far: 300000.0 },
+                Projection::of_camera(r.fov_y, r.ortho, r.ortho_height, 0.05, 300000.0),
             );
             // skip_tex = its own target: a camera can film another camera's
             // screen, never its own mid-pass (wgpu forbids it).
@@ -429,18 +431,18 @@ impl Editor {
             });
             match active {
                 Some(e) => {
-                    let fov_y = match self.world.get::<Matter>(e) {
-                        Some(Matter::Camera { fov_y, cull_mask: cm, .. }) => {
+                    let (fov_y, ortho, oh) = match self.world.get::<Matter>(e) {
+                        Some(Matter::Camera { fov_y, cull_mask: cm, ortho, ortho_height, .. }) => {
                             cull_mask = *cm;
-                            *fov_y
+                            (*fov_y, *ortho, *ortho_height)
                         }
-                        _ => 60f32.to_radians(),
+                        _ => (60f32.to_radians(), false, Matter::ORTHO_HEIGHT),
                     };
                     let wt = floptle_core::world_transform(&self.world, e);
                     RenderCamera::new(
                         wt.translation,
                         wt.rotation,
-                        Projection::Perspective { fov_y, near: 0.05, far: 300000.0 },
+                        Projection::of_camera(fov_y, ortho, oh, 0.05, 300000.0),
                     )
                 }
                 None => self.camera.render_camera(),
@@ -767,6 +769,8 @@ impl Editor {
                 target_w: Matter::TARGET_W,
                 target_h: Matter::TARGET_H,
                 target_hz: 0.0,
+                ortho: false,
+                ortho_height: Matter::ORTHO_HEIGHT,
             },
         );
         if let Some(p) = parent {

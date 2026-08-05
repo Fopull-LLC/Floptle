@@ -361,10 +361,12 @@ pub fn tilemap(
     let mut indices = Vec::with_capacity(data.len() * 6);
     for row in 0..rows {
         for col in 0..cols {
-            let Some(&cell) = data.get((row * cols + col) as usize) else { continue };
-            if cell >= cells {
+            let Some(&packed) = data.get((row * cols + col) as usize) else { continue };
+            if floptle_core::tile_is_empty(packed, cells) {
                 continue; // EMPTY_TILE, or past the end of the sheet
             }
+            let cell = floptle_core::tile_index(packed);
+            let xf = floptle_core::tile_xform(packed);
             // The two expressions below are the ONLY place a tile edge is
             // computed, which is what makes neighbouring edges identical.
             let (x0, x1) = (col as f32 * tile - w, (col + 1) as f32 * tile - w);
@@ -376,9 +378,17 @@ pub fn tilemap(
             let (v0, v1) = (cy as f32 * dv + iv, (cy + 1) as f32 * dv - iv);
 
             let base = vertices.len() as u32;
-            for (px, py, u, v) in
-                [(x0, y0, u0, v1), (x1, y0, u1, v1), (x1, y1, u1, v0), (x0, y1, u0, v0)]
+            // The quad's four corners in (s, t) — s left→right, t bottom→top —
+            // paired with the position they sit at. The UV comes from asking the
+            // orientation which corner of the ART lands here, so a rotated tile
+            // is the SAME geometry with permuted UVs: shared edges stay
+            // bit-identical and the seam fix survives rotation.
+            for (s, t, px, py) in [(0u8, 0u8, x0, y0), (1, 0, x1, y0), (1, 1, x1, y1), (0, 1, x0, y1)]
             {
+                let (a, b) = floptle_core::tile_corner(s, t, xf);
+                let u = if a == 0 { u0 } else { u1 };
+                // Texture v runs DOWN, so the art's top (b = 1) is the smaller v.
+                let v = if b == 0 { v1 } else { v0 };
                 vertices.push(Vertex { pos: [px, py, 0.0], normal: [0.0, 0.0, 1.0], uv: [u, v] });
             }
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -681,6 +691,49 @@ mod tilemap_tests {
         assert_eq!(ys.iter().cloned().fold(f32::MIN, f32::max), 2.0);
         // The first tile written is row 0, and it sits in the upper half.
         assert!(m.vertices[0].pos[1] >= 0.0, "row 0 must be the top of the map");
+    }
+
+    /// A rotated or mirrored tile is the SAME geometry with permuted UVs.
+    ///
+    /// That is the whole reason the orientation rides in the cell value rather
+    /// than being a per-tile transform: if a turned tile moved its own corners,
+    /// its edges would stop being bit-identical to its neighbours' and the
+    /// hairline seam this mesh exists to prevent would come back for exactly the
+    /// tiles somebody rotated.
+    #[test]
+    fn an_orientation_permutes_uvs_and_never_moves_a_vertex() {
+        use floptle_core::{tile_pack, TileXform};
+        let plain = tilemap(3, 3, 1.0, 4, 4, [0.0, 0.0], &[5; 9]);
+        for xf in TileXform::ALL {
+            let data: Vec<u32> = (0..9).map(|_| tile_pack(5, xf)).collect();
+            let turned = tilemap(3, 3, 1.0, 4, 4, [0.0, 0.0], &data);
+            assert_eq!(turned.indices, plain.indices, "{xf:?} changed the topology");
+            for (i, (a, b)) in plain.vertices.iter().zip(&turned.vertices).enumerate() {
+                assert_eq!(a.pos.map(f32::to_bits), b.pos.map(f32::to_bits), "{xf:?} moved vertex {i}");
+            }
+            // The UVs of one tile are the same FOUR corners, reordered — never a
+            // different window, and never fewer than four distinct corners.
+            let uvs = |m: &MeshData| {
+                let mut v: Vec<[u32; 2]> =
+                    m.vertices[..4].iter().map(|x| [x.uv[0].to_bits(), x.uv[1].to_bits()]).collect();
+                v.sort_unstable();
+                v
+            };
+            assert_eq!(uvs(&turned), uvs(&plain), "{xf:?} sampled outside its own cell");
+        }
+    }
+
+    /// The one orientation whose effect is easy to state: a half-turn puts the
+    /// art's bottom-left corner at the quad's top-right.
+    #[test]
+    fn a_half_turn_swaps_opposite_corners() {
+        use floptle_core::{tile_pack, TileXform};
+        let m = tilemap(1, 1, 1.0, 2, 1, [0.0, 0.0], &[tile_pack(0, TileXform::new(2, false))]);
+        // Cell 0 of a 2x1 sheet is u in [0, 0.5], v in [0, 1].
+        // Vertex 0 is the quad's bottom-left; under a half-turn it samples the
+        // art's top-right, i.e. u = 0.5 and (v runs down) v = 0.
+        assert_eq!(m.vertices[0].uv, [0.5, 0.0], "bottom-left must sample the art's top-right");
+        assert_eq!(m.vertices[2].uv, [0.0, 1.0], "…and top-right the art's bottom-left");
     }
 
     /// The UV window comes from the sheet, and the inset pulls it in.

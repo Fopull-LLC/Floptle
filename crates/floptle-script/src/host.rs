@@ -3372,6 +3372,19 @@ impl ScriptHost {
         *self.layer_table.borrow_mut() = layers;
     }
 
+    /// Lend the project's loaded tilesets, keyed by project-relative path.
+    ///
+    /// The host does no file I/O, so the parse belongs to whoever owns the project
+    /// — the editor at Play start, the runtime at load. A path the map references
+    /// but this map does not contain makes `tm:solid` answer `false`; the caller is
+    /// the one positioned to say why, and does.
+    pub fn set_tilesets(
+        &self,
+        sets: std::collections::HashMap<String, floptle_tiles::TileSet>,
+    ) {
+        self.scene.borrow_mut().tilesets = sets;
+    }
+
     /// A live `(entity, script)` environment table, if built — for tests and
     /// tooling that read a script's state from Rust.
     pub fn instance_env(&self, eid: u32, kind: &str) -> Option<Table> {
@@ -4037,8 +4050,11 @@ impl ScriptHost {
         {
             let sets = std::mem::take(&mut *self.rich_sets.borrow_mut());
             if !sets.is_empty() {
-                let ents = self.scene.borrow().ents.clone();
-                crate::api::apply_rich_sets(world, &ents, sets);
+                let (ents, tilesets) = {
+                    let s = self.scene.borrow();
+                    (s.ents.clone(), s.tilesets.clone())
+                };
+                crate::api::apply_rich_sets(world, &ents, sets, &tilesets);
             }
         }
         // 2D sprite batches (`floptle/0058`). IMMEDIATE MODE, scoped to the
@@ -4361,8 +4377,17 @@ impl ScriptHost {
                 Some(Matter::Mesh { asset_path }) => {
                     s.models.insert(id, asset_path.clone());
                 }
-                Some(Matter::Tilemap { cols, rows, data, .. }) => {
-                    s.tilemaps.insert(id, (*cols, *rows, data.clone()));
+                Some(Matter::Tilemap { cols, rows, tile, data, tileset }) => {
+                    s.tilemaps.insert(
+                        id,
+                        crate::TilemapMirror {
+                            cols: *cols,
+                            rows: *rows,
+                            tile: *tile,
+                            data: data.clone(),
+                            tileset: tileset.clone(),
+                        },
+                    );
                 }
                 Some(Matter::SpriteBatch { .. }) => {
                     s.sprite_batches.insert(id);

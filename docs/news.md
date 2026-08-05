@@ -1,5 +1,19 @@
 ## Just shipped
 
+**v0.34.0 "Square By Square"** — there is a tile editor now. Press 9 and paint a
+level in the Scene view with a brush, a rectangle, a line and a bucket; drag a
+block of tiles in the palette and paint the whole block; turn and mirror any tile
+or any selection. Tell a tile ONCE that it is solid and every one of them
+collides, in every scene, including the ones you already placed — and the
+colliders are merged, so a solid floor is one box rather than ten thousand and a
+character stops catching on the seams between them. Autotile groups pick their own
+corners and edges, with each tile's neighbourhood drawn on the palette so a preset
+that guessed your sheet's order wrong is something you can see and fix in a click
+rather than something that reads as bad art. Tiles can carry gameplay tags your
+game reads off the map, and tiles can animate. There is an orthographic camera at
+last — in your game, in render targets and in the editor's own Scene view — so
+parallax layers stop changing size as well as speed.
+
 **v0.33.0 "Say So"** — the engine tells you things it used to swallow. Every
 options table now refuses a key it does not recognise, naming the property, the
 value it got and what it accepts: a typo'd `perchunk` used to take the default

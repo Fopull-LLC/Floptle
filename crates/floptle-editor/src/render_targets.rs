@@ -40,6 +40,11 @@ pub(crate) struct TargetReq {
     pub(crate) h: u32,
     /// Redraws per second; 0 means every frame.
     pub(crate) hz: f32,
+    /// Orthographic rather than perspective — a target camera has the same
+    /// choice the game view does. A minimap is very often the one place a
+    /// perspective game wants an orthographic shot.
+    pub(crate) ortho: bool,
+    pub(crate) ortho_height: f32,
 }
 
 /// What to do about render targets this frame.
@@ -109,9 +114,17 @@ pub(crate) fn target_requests(world: &floptle_core::World) -> Vec<TargetReq> {
     world
         .query::<Matter>()
         .filter_map(|(e, m)| match m {
-            Matter::Camera { fov_y, target, cull_mask, target_w, target_h, target_hz, .. }
-                if !target.is_empty() =>
-            {
+            Matter::Camera {
+                fov_y,
+                target,
+                cull_mask,
+                target_w,
+                target_h,
+                target_hz,
+                ortho,
+                ortho_height,
+                ..
+            } if !target.is_empty() => {
                 let (w, h) = Matter::clamp_target_size(*target_w, *target_h);
                 Some(TargetReq {
                     e,
@@ -121,6 +134,8 @@ pub(crate) fn target_requests(world: &floptle_core::World) -> Vec<TargetReq> {
                     w,
                     h,
                     hz: target_hz.max(0.0),
+                    ortho: *ortho,
+                    ortho_height: *ortho_height,
                 })
             }
             _ => None,
@@ -148,6 +163,8 @@ mod tests {
             w: 256,
             h: 256,
             hz,
+            ortho: false,
+            ortho_height: floptle_core::Matter::ORTHO_HEIGHT,
         }
     }
 

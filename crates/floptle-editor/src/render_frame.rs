@@ -68,6 +68,12 @@ impl Editor {
         // can freely borrow `self`).
         self.terrain_frame_update();
         self.vertex_paint_frame_update();
+        // ◫ Tiles: keep painting while the button is held. Here rather than in the
+        // winit handler because a stroke has to follow the pointer every frame,
+        // not only on the events that happen to arrive.
+        if self.tool == crate::gizmo::Tool::Tiles && !self.playing {
+            self.tile_frame_update(self.cursor);
+        }
         // Map meshes: heal duplicated ids and re-upload edited geometry so the
         // gather below always finds a current `@map/<id>` registry entry; then
         // the Map tool's hover/selection overlay.
@@ -76,6 +82,7 @@ impl Editor {
         // before anything draws with a stale block.
         self.sync_map_paint();
         self.map_edit_frame_update();
+        self.tile_frame_viz();
         // 2D: rebuild any tilemap whose grid or sheet changed (`floptle/0058`).
         self.sync_tilemaps();
         // The 🎓 Learn tab answers its checks from a snapshot of the scene and
@@ -441,18 +448,18 @@ impl Editor {
             };
             match active {
                 Some(e) => {
-                    let fov_y = match self.world.get::<Matter>(e) {
-                        Some(Matter::Camera { fov_y, cull_mask, .. }) => {
+                    let (fov_y, ortho, oh) = match self.world.get::<Matter>(e) {
+                        Some(Matter::Camera { fov_y, cull_mask, ortho, ortho_height, .. }) => {
                             game_cull_mask = *cull_mask;
-                            *fov_y
+                            (*fov_y, *ortho, *ortho_height)
                         }
-                        _ => 60f32.to_radians(),
+                        _ => (60f32.to_radians(), false, Matter::ORTHO_HEIGHT),
                     };
                     let wt = floptle_core::world_transform(&self.world, e);
                     RenderCamera::new(
                         wt.translation,
                         wt.rotation,
-                        Projection::Perspective { fov_y, near: 0.05, far: 300000.0 },
+                        Projection::of_camera(fov_y, ortho, oh, 0.05, 300000.0),
                     )
                 }
                 None => self.camera.render_camera(),
@@ -524,7 +531,7 @@ impl Editor {
             // Only cameras and point lights get gizmos — gather the few Copy fields we
             // need (no per-frame Matter clone over the whole world).
             enum Giz {
-                Cam(f32, bool),
+                Cam(f32, bool, Option<f32>),
                 Light(f32),
                 Gravity(bool, f32), // radial?, radius
             }
@@ -533,8 +540,10 @@ impl Editor {
                 .world
                 .query::<Matter>()
                 .filter_map(|(e, m)| match m {
-                    Matter::Camera { fov_y, active, .. } if filter.cameras => {
-                        Some((e, Giz::Cam(*fov_y, *active)))
+                    Matter::Camera { fov_y, active, ortho, ortho_height, .. }
+                        if filter.cameras =>
+                    {
+                        Some((e, Giz::Cam(*fov_y, *active, ortho.then_some(*ortho_height))))
                     }
                     Matter::PointLight { range, .. } if filter.lights => {
                         Some((e, Giz::Light(*range)))
@@ -548,9 +557,10 @@ impl Editor {
             for (e, g) in gizmos {
                 let wt = floptle_core::world_transform(&self.world, e);
                 match g {
-                    Giz::Cam(fov_y, active) => {
+                    Giz::Cam(fov_y, active, ortho_height) => {
                         let lines = camera_frustum_lines(
                             wt.translation, wt.rotation, fov_y, aspect, cam.world_position, view_proj, gw, gh,
+                            ortho_height,
                         );
                         if !lines.is_empty() {
                             self.camera_gizmos.push(CameraGizmo { lines, active });
@@ -1709,6 +1719,7 @@ impl Editor {
         let map_mode = self.map_mode;
         let map_slot_name = &mut self.map_slot_name;
         let map_viz = &self.map_viz;
+        let tile_viz = &self.tile_viz;
         let map_opts = &mut self.map_opts;
         let map_size_buf = &mut self.map_size_buf;
         let map_spec_buf = &mut self.map_spec_buf;
@@ -1833,6 +1844,7 @@ impl Editor {
         let particle_gizmo = self.particle_gizmo.as_slice();
         let show_gizmos = &mut self.show_gizmos;
         let mut view_lock = self.camera.lock;
+        let mut view_ortho = self.camera.ortho;
         let gizmo_filter = &mut self.gizmo_filter;
         let grabbed = self.grabbed;
         let tool = self.tool;
@@ -2808,7 +2820,10 @@ impl Editor {
                 map_mode,
                 map_slot_name,
                 map_viz,
+                tile_viz,
                 map_opts,
+                tiles: &mut self.tiles,
+                tile_tools: &mut self.tile_tools,
                 map_size_buf,
                 map_spec_buf,
                 map_arm,
@@ -2890,6 +2905,7 @@ impl Editor {
                 particle_gizmo,
                 show_gizmos,
                 view_lock: &mut view_lock,
+                view_ortho: &mut view_ortho,
                 gizmo_filter,
                 grabbed,
                 tool,
@@ -2991,7 +3007,11 @@ impl Editor {
             }
             // The Scene view's plane lock, chosen in the viewport toolbar.
             // `set_lock` snaps the camera square without moving it.
-            view_lock = *viewer.view_lock;
+            // Read both out in one go: each is a `&mut` into the local below, so
+            // the borrow has to be finished with before either can be written.
+            let (chosen_lock, chosen_ortho) = (*viewer.view_lock, *viewer.view_ortho);
+            view_lock = chosen_lock;
+            view_ortho = chosen_ortho;
 
             // Viewport drop: spawn a model when an asset is released over the Scene
             // tab (panel drops — script-on-node — are consumed by those tabs first).
@@ -3780,6 +3800,9 @@ impl Editor {
         });
         if view_lock != self.camera.lock {
             self.camera.set_lock(view_lock);
+        }
+        if view_ortho != self.camera.ortho {
+            self.camera.set_ortho(view_ortho);
         }
         egui.state.handle_platform_output(&window, full_output.platform_output);
         // egui-winit's cursor-icon handling calls set_cursor_visible(true) whenever
@@ -5588,6 +5611,11 @@ impl Editor {
         if let Some(op) = cmd.map_op.take() {
             self.apply_map_op(op);
         }
+        // ◫ Tiles intents, in the order they were pressed.
+        if !cmd.tile_cmds.is_empty() {
+            let cmds = std::mem::take(&mut cmd.tile_cmds);
+            self.apply_tile_cmds(cmds);
+        }
         if let Some(mode) = cmd.set_map_mode {
             // Converts rather than clears — see `set_map_mode`.
             self.set_map_mode(mode);
@@ -6511,6 +6539,22 @@ impl Editor {
             }
         if cmd.focus_terrain {
             self.focus_terrain();
+        }
+        if cmd.focus_tiles {
+            // The tab AND the tool: reaching the Tiles tab and finding the pointer
+            // still on Select is the "why is nothing painting" moment, and it is
+            // avoidable with one line.
+            if let Some(dock) = self.dock_state.as_mut() {
+                crate::dock::focus_tiles_tab(dock);
+            }
+            self.tool = Tool::Tiles;
+            // …and make the node you came from the layer, since that is the one you
+            // were looking at when you pressed the button.
+            if let Some(e) = self.primary()
+                && matches!(self.world.get::<Matter>(e), Some(Matter::Tilemap { .. }))
+            {
+                self.tile_tools.layer = Some(e);
+            }
         }
         if cmd.focus_image {
             self.focus_image_tab();

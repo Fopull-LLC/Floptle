@@ -25,6 +25,9 @@ impl Editor {
         if tool == Tool::Sculpt {
             self.focus_terrain();
         }
+        if tool == Tool::Tiles {
+            self.focus_tiles();
+        }
         if tool == Tool::Paint {
             self.focus_paint();
         }
@@ -481,7 +484,7 @@ impl Editor {
                 self.set_world_transform(e, xf);
                 self.apply_group_transform(start, xf);
             }
-            Tool::Select | Tool::Sculpt | Tool::Paint => {}
+            Tool::Select | Tool::Sculpt | Tool::Paint | Tool::Tiles => {}
         }
     }
 

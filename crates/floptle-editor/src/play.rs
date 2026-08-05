@@ -247,6 +247,25 @@ impl Editor {
                 }
                 // Primitive geometry → matching analytic collider, sized to match the
                 // mesh the renderer draws (cube half 0.7, sphere r 0.85, capsule r/half 0.5).
+                // A TILEMAP's solid tiles, merged into as few boxes as the shape
+                // allows (`floptle_tiles::collision_boxes`). Two reasons it is
+                // merged rather than one box per square:
+                //
+                // 1. A 100x100 solid floor is 10,000 squares and ONE box. Ten
+                //    thousand static colliders is more than most whole 3D levels
+                //    have, and the sim rebuilds its index over all of them.
+                // 2. A character sliding along a row of separate boxes catches on
+                //    the seams between them — each box's face is its own plane, and
+                //    at a shallow angle the depenetration pass ticks across each
+                //    boundary. One merged box has no interior seams.
+                //
+                // Depth is one tile: a 2D game's collider has to have SOME depth to
+                // be a box, and a tile's own size is the only defensible choice —
+                // it keeps a character with any thickness at all inside the layer
+                // rather than passing through a paper-thin wall.
+                Some(m @ Matter::Tilemap { .. }) => {
+                    crate::tile_edit::add_tilemap_colliders(sim, &self.tiles, &wt, m, layer);
+                }
                 Some(Matter::Primitive { shape, .. }) => match shape {
                     floptle_core::Shape::Cube => {
                         sim.add_static_box(anchor, Vec3::new(0.7 * s.x, 0.7 * s.y, 0.7 * s.z), wt.rotation, layer);
@@ -338,6 +357,10 @@ impl Editor {
         // Water is a static field like gravity, sampled per step (`floptle/0038`).
         sim.world.water = Self::build_water_field(&self.world, origin);
         self.script_host.set_layers(sim.layers().clone());
+        // …and the tilesets this scene's tilemaps reference, so `tm:solid` /
+        // `tm:tags` / `tm:autotile` can answer. Lent rather than loaded by the
+        // host: the host does no file I/O, so who owns the parse is unambiguous.
+        self.script_host.set_tilesets(self.scene_tilesets());
         sim
     }
 

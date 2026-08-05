@@ -455,8 +455,46 @@ impl EditorTabViewer<'_> {
                                             .clicked()
                                         {
                                             *self.view_lock = l;
+                                            // Squaring the view to a plane is
+                                            // almost always the 2D intent, so
+                                            // bring the projection with it — a
+                                            // locked PERSPECTIVE view still
+                                            // draws a layer 2 units back at a
+                                            // different scale, which is the
+                                            // thing that stops two tilemaps
+                                            // lining up. Free goes back to 3D.
+                                            *self.view_ortho = l
+                                                .is_locked()
+                                                .then(|| self.view_ortho.unwrap_or(12.0));
                                             ui.close();
                                         }
+                                    }
+                                    ui.separator();
+                                    // …and it is still a separate switch, because
+                                    // an orthographic FREE view is a real thing to
+                                    // want (a technical shot, an isometric look).
+                                    let mut ortho = self.view_ortho.is_some();
+                                    if ui
+                                        .checkbox(&mut ortho, "Orthographic")
+                                        .on_hover_text(
+                                            "draw everything at the same scale at every \
+                                             distance. The wheel zooms the view height \
+                                             instead of moving the camera.",
+                                        )
+                                        .changed()
+                                    {
+                                        *self.view_ortho = ortho.then_some(12.0);
+                                    }
+                                    if let Some(h) = self.view_ortho.as_mut() {
+                                        ui.horizontal(|ui| {
+                                            ui.label("height");
+                                            ui.add(
+                                                egui::DragValue::new(h)
+                                                    .speed(0.2)
+                                                    .range(0.02..=100_000.0)
+                                                    .suffix(" units"),
+                                            );
+                                        });
                                     }
                                     ui.separator();
                                     ui.small(
@@ -572,6 +610,57 @@ impl EditorTabViewer<'_> {
                 let mut pts: Vec<egui::Pos2> = viz.ring.iter().map(|v| pt(*v)).collect();
                 pts.push(pts[0]); // close the loop
                 painter.line(pts, egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 120, 220)));
+            }
+        }
+
+        // ◫ Tiles overlay: the grid, the collision the tileset gives it, where a
+        // click will land, and the selection. Drawn under the Map overlay because
+        // the two tools are never both active.
+        if let Some(viz) = self.tile_viz.as_ref().filter(|_| !game) {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Background,
+                    egui::Id::new("tile_edit"),
+                ))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
+            let closed = |painter: &egui::Painter, ring: &[Vec2], stroke: egui::Stroke| {
+                let mut pts: Vec<egui::Pos2> = ring.iter().map(|v| pt(*v)).collect();
+                if let Some(&first) = pts.first() {
+                    pts.push(first);
+                }
+                painter.line(pts, stroke);
+            };
+            let faint = egui::Color32::from_rgba_unmultiplied(150, 165, 190, 46);
+            for &(a, b) in &viz.grid {
+                painter.line_segment([pt(a), pt(b)], egui::Stroke::new(1.0, faint));
+            }
+            if !viz.bounds.is_empty() {
+                closed(
+                    &painter,
+                    &viz.bounds,
+                    egui::Stroke::new(1.6, egui::Color32::from_rgba_unmultiplied(150, 175, 210, 150)),
+                );
+            }
+            // Collision in red, matching the palette's overlay — the same fact
+            // shown the same colour in both places it appears.
+            for ring in &viz.collision {
+                closed(
+                    &painter,
+                    ring,
+                    egui::Stroke::new(1.6, egui::Color32::from_rgba_unmultiplied(255, 110, 110, 190)),
+                );
+            }
+            if let Some(ring) = &viz.selection {
+                closed(&painter, ring, egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 220, 255)));
+            }
+            if let Some(ring) = &viz.band {
+                closed(&painter, ring, egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 80)));
+            }
+            if let Some(ring) = &viz.cursor {
+                closed(&painter, ring, egui::Stroke::new(2.0, egui::Color32::WHITE));
             }
         }
 

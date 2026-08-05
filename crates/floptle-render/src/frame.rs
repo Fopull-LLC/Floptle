@@ -33,6 +33,39 @@ impl Projection {
         }
     }
 
+    /// The projection a `Matter::Camera` node describes.
+    ///
+    /// The ONE place a camera component becomes a matrix, called by the editor's
+    /// Scene view, its Game view, each render target and the runtime. Four
+    /// copies of `if ortho { … } else { … }` is how a game ends up orthographic
+    /// in Play and perspective in a build — or, worse, orthographic on the
+    /// screen and perspective in the minimap, where nobody thinks to look.
+    pub fn of_camera(fov_y: f32, ortho: bool, ortho_height: f32, near: f32, far: f32) -> Projection {
+        if ortho {
+            Projection::Orthographic { height: ortho_height.max(1e-3), near, far }
+        } else {
+            Projection::Perspective { fov_y, near, far }
+        }
+    }
+
+    /// Whether this is the orthographic case — for the frustum gizmo, which draws
+    /// a box rather than a pyramid.
+    pub fn is_ortho(&self) -> bool {
+        matches!(self, Projection::Orthographic { .. })
+    }
+
+    /// The view's height in world units at `distance` from the camera.
+    ///
+    /// The number a 2D game actually wants: it is what `camera.pixelsPerUnit`
+    /// divides by, and under an orthographic projection it is constant — which is
+    /// the whole reason to use one.
+    pub fn height_at(&self, distance: f32) -> f32 {
+        match *self {
+            Projection::Perspective { fov_y, .. } => 2.0 * distance * (fov_y * 0.5).tan(),
+            Projection::Orthographic { height, .. } => height,
+        }
+    }
+
     /// The vertical field of view, radians.
     ///
     /// An orthographic camera has none — its view is the same height at every

@@ -140,6 +140,8 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
             target_w: Matter::TARGET_W,
             target_h: Matter::TARGET_H,
             target_hz: 0.0,
+            ortho: false,
+            ortho_height: Matter::ORTHO_HEIGHT,
         }),
         ("●  Point Light", Matter::PointLight { color: [1.0, 0.95, 0.85], intensity: 1.0, range: 10.0 }),
         ("⬇  Gravity Volume", Matter::GravityVolume { mode: GravityMode::Down, strength: 9.81, radius: 20.0 }),

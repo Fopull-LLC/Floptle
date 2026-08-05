@@ -71,6 +71,15 @@ impl Editor {
         }
     }
 
+    /// Bring the ◫ Tiles tab to the front (re-adding it if closed) — choosing
+    /// the tile tool and finding no palette is the "why is nothing painting"
+    /// moment, and it costs one line to avoid.
+    pub(crate) fn focus_tiles(&mut self) {
+        if let Some(dock) = self.dock_state.as_mut() {
+            crate::dock::focus_tiles_tab(dock);
+        }
+    }
+
     /// Bring the ▦ Map tab to the front (re-adding it if closed) — the Map
     /// tool's shape/op controls live there.
     pub(crate) fn focus_map(&mut self) {

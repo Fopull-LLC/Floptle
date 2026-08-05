@@ -344,6 +344,7 @@ impl Editor {
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.set_scene_file(&path);
         self.adopt_terrain();
+        self.adopt_tilesets();
         // Maps FIRST: a blockout node's paint is keyed to its triangulation,
         // and the triangulation comes out of the map store — loading paint
         // before the geometry it belongs to would find nothing to attach to
@@ -382,6 +383,7 @@ impl Editor {
         self.migrate_legacy_post(&doc);
         self.set_scene_file(p);
         self.adopt_terrain();
+        self.adopt_tilesets();
         // Maps FIRST: a blockout node's paint is keyed to its triangulation,
         // and the triangulation comes out of the map store — loading paint
         // before the geometry it belongs to would find nothing to attach to
@@ -966,6 +968,7 @@ impl Editor {
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.report_scene_wiring(&doc);
         self.adopt_terrain();
+        self.adopt_tilesets();
         // Maps FIRST: a blockout node's paint is keyed to its triangulation,
         // and the triangulation comes out of the map store — loading paint
         // before the geometry it belongs to would find nothing to attach to
@@ -1286,6 +1289,7 @@ impl Editor {
         self.world = World::new();
         floptle_scene::spawn_into(&doc, &mut self.world);
         self.adopt_terrain();
+        self.adopt_tilesets();
         // Maps FIRST: a blockout node's paint is keyed to its triangulation,
         // and the triangulation comes out of the map store — loading paint
         // before the geometry it belongs to would find nothing to attach to
@@ -1497,6 +1501,8 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
             target_w: floptle_core::Matter::TARGET_W,
             target_h: floptle_core::Matter::TARGET_H,
             target_hz: 0.0,
+            ortho: false,
+            ortho_height: floptle_core::Matter::ORTHO_HEIGHT,
         },
         // The default camera flies on play (hold right-mouse to look, WASD to move).
         scripts: vec![floptle_scene::ScriptDoc {

@@ -191,10 +191,21 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---`EMPTY_TILE` global — the three are the same value (`floptle/0083`).
 ---@class TilemapHandle
 ---@field EMPTY number The cell value meaning \"no tile here\". Same as the EMPTY_TILE global; -1 and nil mean it too.
----@field set fun(self: TilemapHandle, x: number, y: number, cell: number|nil) Set one square, 0-based from the TOP-LEFT. Outside the grid is a no-op, not a wrap. A negative or nil cell empties the square; anything that is not a whole number in range is an error naming what it got.
----@field get fun(self: TilemapHandle, x: number, y: number): number|nil The cell at (x, y), or nil outside the grid and on an empty square.
----@field fill fun(self: TilemapHandle, cell: number|nil) Set every square, including the empty ones. No argument (or -1) clears the whole grid.
+---@field set fun(self: TilemapHandle, x: number, y: number, cell: number|nil, xform: table|nil) Set one square, 0-based from the TOP-LEFT. Outside the grid is a no-op, not a wrap. A negative or nil cell empties the square. The optional 4th argument turns it: { rot = 0|90|180|270, flipX = bool, flipY = bool }.
+---@field get fun(self: TilemapHandle, x: number, y: number): number|nil The cell at (x, y), orientation stripped — nil outside the grid and on an empty square.
+---@field at fun(self: TilemapHandle, x: number, y: number): number|nil, number|nil, boolean|nil cell, rot (degrees clockwise), flipX. The whole answer, for art that faces a direction.
+---@field fill fun(self: TilemapHandle, cell: number|nil, xform: table|nil) Set every square, including the empty ones. No argument (or -1) clears the whole grid.
+---@field fillRect fun(self: TilemapHandle, x0: number, y0: number, x1: number, y1: number, cell: number|nil, xform: table|nil) Fill a rectangle; corners in either order, clipped to the grid.
 ---@field size fun(self: TilemapHandle): number, number cols, rows.
+---@field tileSize fun(self: TilemapHandle): number The world edge length of one square.
+---@field resize fun(self: TilemapHandle, opts: table) tm:resize{ cols =, rows =, offsetX =, offsetY = } — keeps whatever overlaps. offsetX/Y is where the old top-left lands, so offsetY = 1 grows a row on top.
+---@field cellAt fun(self: TilemapHandle, p: any): number|nil, number|nil Which square a WORLD position (vec3, {x=,y=,z=} or a node) falls in — through the map's own transform, so a moved, turned or scaled map still answers. nil off the map.
+---@field worldAt fun(self: TilemapHandle, x: number, y: number): any|nil The world position of that square's CENTRE, or nil off the grid.
+---@field tileset fun(self: TilemapHandle): string|nil The project-relative .tileset.ron this map is cut from, or nil.
+---@field solid fun(self: TilemapHandle, x: number, y: number): boolean Whether the tileset says that square collides. False with no tileset.
+---@field tags fun(self: TilemapHandle, x: number, y: number): table The tileset's tags for that square, as a list. Empty with no tileset.
+---@field hasTag fun(self: TilemapHandle, x: number, y: number, tag: string): boolean The common case of tags(), without allocating a table per square.
+---@field autotile fun(self: TilemapHandle, x0: number, y0: number, x1: number, y1: number) Recompute the region's autotiled squares (and the one-square ring around it, which is where the stale edges are). Does nothing without a tileset.
 
 ---A node's Particle System, controlled from a script via `node:particles()`.
 ---Start/stop the effect at runtime and read whether it's playing.

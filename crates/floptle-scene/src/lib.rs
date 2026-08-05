@@ -657,6 +657,14 @@ pub enum MatterDoc {
         target_h: u32,
         #[serde(default, skip_serializing_if = "is_zero_f32")]
         target_hz: f32,
+        /// Orthographic rather than perspective — the 2D / strategy projection.
+        #[serde(default, skip_serializing_if = "is_false")]
+        ortho: bool,
+        /// World-space height the orthographic view covers. Only meaningful with
+        /// `ortho`, and skipped at its default so a perspective camera's `.ron`
+        /// does not carry a number that does nothing.
+        #[serde(default = "default_ortho_height", skip_serializing_if = "is_default_ortho_height")]
+        ortho_height: f32,
     },
     /// A placeable point/omni light (position = node transform).
     PointLight {
@@ -712,9 +720,16 @@ pub enum MatterDoc {
         rows: u32,
         #[serde(default = "one_f32")]
         tile: f32,
-        /// Row-major cell indices from the top-left, `cols * rows` long.
+        /// Row-major packed squares (cell index + orientation) from the top-left,
+        /// `cols * rows` long. A grid written before orientations existed is a
+        /// list of bare indices and loads unchanged.
         #[serde(default)]
         data: Vec<u32>,
+        /// Project-relative `.tileset.ron` giving each cell its collision, tags,
+        /// autotile group and animation. Skipped when empty, so an art-only
+        /// tilemap's `.ron` does not carry the field at all.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        tileset: String,
     },
     /// N sprites from one node, each with its own transform, cell and tint. The
     /// sprites themselves are runtime-only and deliberately not saved.
@@ -840,6 +855,15 @@ fn is_default_target_h(v: &u32) -> bool {
 fn is_zero_f32(v: &f32) -> bool {
     *v == 0.0
 }
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+fn default_ortho_height() -> f32 {
+    Matter::ORTHO_HEIGHT
+}
+fn is_default_ortho_height(v: &f32) -> bool {
+    *v == Matter::ORTHO_HEIGHT
+}
 
 fn default_range() -> f32 {
     10.0
@@ -887,17 +911,27 @@ impl From<&Matter> for MatterDoc {
             Matter::Empty => MatterDoc::Empty,
             Matter::Terrain { id } => MatterDoc::Terrain { id: *id },
             Matter::MapMesh { id } => MatterDoc::MapMesh { id: *id, geo: None },
-            Matter::Camera { fov_y, active, target, cull_mask, target_w, target_h, target_hz } => {
-                MatterDoc::Camera {
-                    fov_y: *fov_y,
-                    active: *active,
-                    target: target.clone(),
-                    cull_mask: *cull_mask,
-                    target_w: *target_w,
-                    target_h: *target_h,
-                    target_hz: *target_hz,
-                }
-            }
+            Matter::Camera {
+                fov_y,
+                active,
+                target,
+                cull_mask,
+                target_w,
+                target_h,
+                target_hz,
+                ortho,
+                ortho_height,
+            } => MatterDoc::Camera {
+                fov_y: *fov_y,
+                active: *active,
+                target: target.clone(),
+                cull_mask: *cull_mask,
+                target_w: *target_w,
+                target_h: *target_h,
+                target_hz: *target_hz,
+                ortho: *ortho,
+                ortho_height: *ortho_height,
+            },
             Matter::PointLight { color, intensity, range } => {
                 MatterDoc::PointLight { color: *color, intensity: *intensity, range: *range }
             }
@@ -928,11 +962,12 @@ impl From<&Matter> for MatterDoc {
                 visibility: *visibility,
             },
             Matter::FieldShape { radius } => MatterDoc::FieldShape { radius: *radius },
-            Matter::Tilemap { cols, rows, tile, data } => MatterDoc::Tilemap {
+            Matter::Tilemap { cols, rows, tile, data, tileset } => MatterDoc::Tilemap {
                 cols: *cols,
                 rows: *rows,
                 tile: *tile,
                 data: data.clone(),
+                tileset: tileset.clone(),
             },
             Matter::SpriteBatch { size } => MatterDoc::SpriteBatch { size: *size },
             Matter::Skybox { color, size, texture, tint, shader, shader_params } => {
@@ -987,7 +1022,17 @@ impl MatterDoc {
             MatterDoc::Empty => Matter::Empty,
             MatterDoc::Terrain { id } => Matter::Terrain { id: *id },
             MatterDoc::MapMesh { id, .. } => Matter::MapMesh { id: *id },
-            MatterDoc::Camera { fov_y, active, target, cull_mask, target_w, target_h, target_hz } => {
+            MatterDoc::Camera {
+                fov_y,
+                active,
+                target,
+                cull_mask,
+                target_w,
+                target_h,
+                target_hz,
+                ortho,
+                ortho_height,
+            } => {
                 let (w, h) = Matter::clamp_target_size(*target_w, *target_h);
                 Matter::Camera {
                     fov_y: *fov_y,
@@ -997,6 +1042,11 @@ impl MatterDoc {
                     target_w: w,
                     target_h: h,
                     target_hz: target_hz.max(0.0),
+                    ortho: *ortho,
+                    // Clamped on the way IN, so a hand-edited `.ron` with a zero
+                    // height cannot hand a singular projection matrix to the
+                    // renderer — every ray through its inverse would be NaN.
+                    ortho_height: Matter::clamp_ortho_height(*ortho_height),
                 }
             }
             MatterDoc::PointLight { color, intensity, range } => {
@@ -1033,11 +1083,12 @@ impl MatterDoc {
                 visibility: *visibility,
             },
             MatterDoc::FieldShape { radius } => Matter::FieldShape { radius: *radius },
-            MatterDoc::Tilemap { cols, rows, tile, data } => Matter::Tilemap {
+            MatterDoc::Tilemap { cols, rows, tile, data, tileset } => Matter::Tilemap {
                 cols: *cols,
                 rows: *rows,
                 tile: *tile,
                 data: data.clone(),
+                tileset: tileset.clone(),
             },
             MatterDoc::SpriteBatch { size } => Matter::SpriteBatch { size: *size },
             MatterDoc::Skybox { color, size, texture, tint, shader, shader_params } => {
@@ -2548,7 +2599,7 @@ mod tests {
                     terrain_gen: None,
                     name: "eye".into(),
                     transform: TransformDoc::default(),
-                    matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0 },
+                    matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT },
                     object_materials: Default::default(),
                     scripts: Vec::new(),
                     material: None,
@@ -2649,7 +2700,7 @@ mod tests {
         let eye = snap.nodes.iter().find(|n| n.name == "eye").unwrap();
         assert_eq!(
             eye.matter,
-            MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0 }
+            MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT }
         );
     }
 

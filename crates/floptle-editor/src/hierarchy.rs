@@ -152,7 +152,13 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             )
             .clicked()
         {
-            pick = Some(MatterDoc::Tilemap { cols: 16, rows: 16, tile: 1.0, data: Vec::new() });
+            pick = Some(MatterDoc::Tilemap {
+                cols: 16,
+                rows: 16,
+                tile: 1.0,
+                data: Vec::new(),
+                tileset: String::new(),
+            });
             ui.close();
         }
         if ui

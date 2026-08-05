@@ -31,6 +31,9 @@ pub(crate) enum EditorTab {
     /// The map-building suite: blockout shapes, sub-object mode, modeling ops,
     /// per-face material slots (docs/map-tools-proposal.md).
     Map,
+    /// The tilemap suite: layers, tools, the palette, and the tileset editor
+    /// (per-tile collision, tags, autotile groups, animation). See docs/tilemaps.md.
+    Tiles,
     /// The UI authoring canvas: one game-UI layer at design resolution, with
     /// rulers, guides, snapping, align/distribute, state preview and an
     /// element outline (docs/ui-system-2-proposal.md, phase C).
@@ -51,6 +54,7 @@ impl EditorTab {
             EditorTab::Inspector => "Inspector",
             EditorTab::Terrain => "Δ Terrain",
             EditorTab::Map => "▦ Map",
+            EditorTab::Tiles => "◫ Tiles",
             EditorTab::Assets => "Assets",
             EditorTab::Console => "Console",
             EditorTab::Scene => "⌖ Scene",
@@ -88,6 +92,7 @@ impl EditorTab {
         EditorTab::Paint,
         EditorTab::Image,
         EditorTab::Map,
+        EditorTab::Tiles,
         EditorTab::UiDesign,
         EditorTab::Learn,
         EditorTab::Settings,
@@ -215,6 +220,15 @@ pub(crate) fn focus_terrain_tab(dock: &mut egui_dock::DockState<EditorTab>) {
         let _ = dock.set_active_tab(path);
     } else {
         dock.push_to_focused_leaf(EditorTab::Terrain);
+    }
+}
+
+/// Focus the ◫ Tiles dock tab, re-adding it if it was closed.
+pub(crate) fn focus_tiles_tab(dock: &mut egui_dock::DockState<EditorTab>) {
+    if let Some(path) = dock.find_tab(&EditorTab::Tiles) {
+        let _ = dock.set_active_tab(path);
+    } else {
+        dock.push_to_focused_leaf(EditorTab::Tiles);
     }
 }
 

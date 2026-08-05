@@ -1,0 +1,16 @@
+[package]
+name = "floptle-tiles"
+description = "Tilemap kernel: tilesets (per-tile collision, tags, animation), autotile rule tables, grid edit ops and stamps, and the greedy rect merge that turns solid tiles into colliders."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The packed cell encoding (index + orientation) and EMPTY_TILE live in core, so
+# the mesh builder, the script host and this kernel all agree on what a square is.
+floptle-core = { path = "../floptle-core" }
+serde = { workspace = true } # a TileSet persists to <project>/tilesets/<name>.tileset.ron
+ron = { workspace = true }   # …and the read/write of that file lives with the type, not the editor

@@ -1583,7 +1583,7 @@ impl EditorTabViewer<'_> {
                             // Lua — a room is re-dressed per floor — so the
                             // Inspector states the shape and the one thing that
                             // is easy to get wrong: the sheet is the MATERIAL's.
-                            Matter::Tilemap { cols, rows, tile, data } => {
+                            Matter::Tilemap { cols, rows, tile, data, tileset } => {
                                 ui.horizontal(|ui| {
                                     ui.label("grid");
                                     cmd.inspector_changed |= ui
@@ -1598,15 +1598,37 @@ impl EditorTabViewer<'_> {
                                     .on_hover_text("world size of one tile's edge")
                                     .changed();
                                 let want = (*cols as usize) * (*rows as usize);
-                                ui.small(format!("{} of {want} cells filled", data.len().min(want)));
+                                let placed = data
+                                    .iter()
+                                    .filter(|&&p| p != floptle_core::EMPTY_TILE)
+                                    .count();
+                                ui.small(format!("{placed} of {want} squares placed"));
                                 if data.len() != want && ui.button("resize to fit").clicked() {
                                     data.resize(want, floptle_core::EMPTY_TILE);
                                     cmd.inspector_changed = true;
                                 }
+                                // The tileset — what says whether these tiles collide,
+                                // what they are tagged, and how they autotile. Read-only
+                                // here on purpose: attaching one is a ◫ Tiles operation
+                                // (it needs the sheet's dimensions to make sense of), and
+                                // a free-text path field is a way to typo a level solid.
+                                ui.horizontal(|ui| {
+                                    ui.label("tileset");
+                                    if tileset.is_empty() {
+                                        ui.small("none — these tiles collide with nothing");
+                                    } else {
+                                        ui.small(
+                                            floptle_tiles::tileset_name(tileset).unwrap_or(tileset),
+                                        );
+                                    }
+                                    if ui.small_button("◫ Tiles").clicked() {
+                                        cmd.focus_tiles = true;
+                                    }
+                                });
                                 ui.small(
                                     "the sheet comes from this node's Material (texture + \
-                                     sheet cols/rows). Fill the grid from a script: \
-                                     node:setTilemap{...} then tm:set(x, y, cell).",
+                                     sheet cols/rows). Paint it in the ◫ Tiles tab, or fill \
+                                     it from a script: node:setTilemap{...} then tm:set(x, y, cell).",
                                 );
                             }
                             Matter::SpriteBatch { size } => {
@@ -1698,6 +1720,8 @@ impl EditorTabViewer<'_> {
                                 target_w,
                                 target_h,
                                 target_hz,
+                                ortho,
+                                ortho_height,
                             } => {
                                 ui.label("camera");
                                 ui.small("a viewpoint — play mode renders from the active camera");
@@ -1708,14 +1732,58 @@ impl EditorTabViewer<'_> {
                                     ui.add(egui::Image::new((tex, size)).corner_radius(4.0));
                                     ui.small("preview — what this camera sees");
                                 }
+                                // Perspective or orthographic. The two knobs are
+                                // exclusive and only the live one is shown —
+                                // greying out the other would still invite
+                                // dragging a number that does nothing.
                                 ui.horizontal(|ui| {
-                                    ui.label("field of view");
-                                    let mut deg = fov_y.to_degrees();
-                                    if ui.add(egui::Slider::new(&mut deg, 20.0..=120.0).suffix("°")).changed() {
-                                        *fov_y = deg.to_radians();
-                                        cmd.inspector_changed = true;
+                                    ui.label("projection").on_hover_text(
+                                        "orthographic draws everything at the same scale at \
+                                         every distance — what a 2D, isometric or strategy \
+                                         camera wants. Perspective is the 3D default.",
+                                    );
+                                    for (label, want) in
+                                        [("perspective", false), ("orthographic", true)]
+                                    {
+                                        if ui.selectable_label(*ortho == want, label).clicked()
+                                            && *ortho != want
+                                        {
+                                            *ortho = want;
+                                            cmd.inspector_changed = true;
+                                        }
                                     }
                                 });
+                                if *ortho {
+                                    ui.horizontal(|ui| {
+                                        ui.label("height").on_hover_text(
+                                            "how many world units the view covers top to \
+                                             bottom. With 1-unit tiles this is how many tiles \
+                                             tall the shot is; the width follows the aspect.",
+                                        );
+                                        let mut h = *ortho_height;
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut h)
+                                                    .speed(0.1)
+                                                    .range(0.1..=1000.0)
+                                                    .suffix(" units"),
+                                            )
+                                            .changed()
+                                        {
+                                            *ortho_height = Matter::clamp_ortho_height(h);
+                                            cmd.inspector_changed = true;
+                                        }
+                                    });
+                                } else {
+                                    ui.horizontal(|ui| {
+                                        ui.label("field of view");
+                                        let mut deg = fov_y.to_degrees();
+                                        if ui.add(egui::Slider::new(&mut deg, 20.0..=120.0).suffix("°")).changed() {
+                                            *fov_y = deg.to_radians();
+                                            cmd.inspector_changed = true;
+                                        }
+                                    });
+                                }
                                 // A1: render-target name — a live texture any material
                                 // or UI image can wear as `rt:<name>`.
                                 ui.horizontal(|ui| {

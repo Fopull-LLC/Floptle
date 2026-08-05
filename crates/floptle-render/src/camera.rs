@@ -91,6 +91,15 @@ pub struct FlyCamera {
     pub sensitivity: f32,
     /// Plane lock (Scene view). [`ViewLock::Free`] is the ordinary camera.
     pub lock: ViewLock,
+    /// Orthographic Scene view: the world-space height the view covers, or
+    /// `None` for the ordinary perspective camera.
+    ///
+    /// This is the other half of [`ViewLock`]. A locked view is square to its
+    /// plane, but under perspective it is still a *cone* — so a tilemap at
+    /// z = 0 and one at z = -2 are drawn at different scales and the two cannot
+    /// be lined up by eye. Orthographic makes the view a box, which is what
+    /// "looking at a flat thing" actually means.
+    pub ortho: Option<f32>,
 }
 
 impl Default for FlyCamera {
@@ -102,6 +111,7 @@ impl Default for FlyCamera {
             speed: 4.0,
             sensitivity: 0.0026,
             lock: ViewLock::Free,
+            ortho: None,
         }
     }
 }
@@ -145,21 +155,59 @@ impl FlyCamera {
         }
     }
 
+    /// Turn the orthographic Scene view on (at `height` world units) or off.
+    pub fn set_ortho(&mut self, height: Option<f32>) {
+        self.ortho = height.map(|h| h.clamp(Self::ORTHO_MIN, Self::ORTHO_MAX));
+    }
+
+    pub fn is_ortho(&self) -> bool {
+        self.ortho.is_some()
+    }
+
+    /// The smallest / largest orthographic Scene-view height. The floor keeps the
+    /// projection matrix invertible (every picking ray goes through its inverse);
+    /// the ceiling is where f32 depth stops resolving what it is drawing.
+    pub const ORTHO_MIN: f32 = 0.02;
+    pub const ORTHO_MAX: f32 = 100_000.0;
+
     /// Slide the camera in its own view plane by a screen-drag delta (pixels): the
     /// world tracks the pointer (drag right ⏵ the scene moves right). Speed scales
     /// with the fly speed so it feels consistent as you dial that up/down.
+    ///
+    /// Under an orthographic view it scales with the view HEIGHT instead, because
+    /// that is what zoom means there: pan at a 4-unit zoom would otherwise fling
+    /// the view across the map at the same pixels-per-second as at 400.
     pub fn pan(&mut self, dx: f32, dy: f32) {
         let rot = self.rotation();
         let right = rot * Vec3::X;
         let up = rot * Vec3::Y;
-        let k = self.speed as f32 * 0.01;
+        let k = match self.ortho {
+            // Roughly one world unit per (height / 900) pixels — the drag tracks
+            // the pointer at any zoom, which a fly-speed-scaled pan cannot.
+            Some(h) => h / 900.0,
+            None => self.speed as f32 * 0.01,
+        };
         self.position += ((right * -dx) + (up * dy)).as_dvec3() * k as f64;
     }
 
     /// Dolly along the view direction (mouse wheel): positive `amount` moves forward
     /// (toward what you're looking at). Steps scale with the fly speed.
+    ///
+    /// Under an orthographic view, moving forward changes NOTHING you can see — the
+    /// view is the same height at every distance. So there the wheel changes the
+    /// height instead, multiplicatively, which is the only thing "zoom" can mean.
+    /// (Getting this wrong is not subtle: the wheel simply appears dead, and the
+    /// view eventually slides through whatever it was looking at.)
     pub fn dolly(&mut self, amount: f32) {
         if amount == 0.0 {
+            return;
+        }
+        if let Some(h) = self.ortho {
+            // Multiplicative, so each notch is the same proportion of zoom at
+            // every scale — additive steps are unusably coarse zoomed in and
+            // unusably fine zoomed out.
+            let next = h * 0.88f32.powf(amount);
+            self.ortho = Some(next.clamp(Self::ORTHO_MIN, Self::ORTHO_MAX));
             return;
         }
         let forward = self.rotation() * Vec3::NEG_Z;
@@ -206,11 +254,15 @@ impl FlyCamera {
 
     /// The renderer-facing camera for this frame.
     pub fn render_camera(&self) -> RenderCamera {
-        RenderCamera::new(
-            self.position,
-            self.rotation(),
-            Projection::Perspective { fov_y: 60f32.to_radians(), near: 0.1, far: 2000.0 },
-        )
+        // An orthographic view needs its near plane BEHIND the camera: the box
+        // has no apex, so things level with the camera are in frame, and a near
+        // plane at +0.1 would slice the layer you are working on in half. Half
+        // the depth range each way keeps the whole box symmetric about the eye.
+        let proj = match self.ortho {
+            Some(height) => Projection::Orthographic { height, near: -10_000.0, far: 10_000.0 },
+            None => Projection::Perspective { fov_y: 60f32.to_radians(), near: 0.1, far: 2000.0 },
+        };
+        RenderCamera::new(self.position, self.rotation(), proj)
     }
 }
 
@@ -307,5 +359,104 @@ mod tests {
         cam.set_lock(ViewLock::Front);
         cam.update(&Input { forward: true, ..Default::default() }, 1.0);
         assert!(cam.position.y > 0.5 && cam.position.x.abs() < 1e-3, "{:?}", cam.position);
+    }
+
+    /// The wheel has to do SOMETHING under an orthographic view. Moving forward
+    /// changes nothing you can see there, so it must change the height instead —
+    /// otherwise the wheel simply appears dead.
+    #[test]
+    fn the_wheel_zooms_an_orthographic_view_instead_of_moving_it() {
+        let mut cam = FlyCamera { position: DVec3::new(1.0, 2.0, 3.0), ..Default::default() };
+        cam.set_ortho(Some(10.0));
+        let where_it_was = cam.position;
+
+        cam.dolly(1.0);
+        assert_eq!(cam.position, where_it_was, "an ortho dolly must not move the camera");
+        let zoomed_in = cam.ortho.unwrap();
+        assert!(zoomed_in < 10.0, "scrolling forward zooms IN: {zoomed_in}");
+
+        cam.dolly(-1.0);
+        assert!(
+            (cam.ortho.unwrap() - 10.0).abs() < 1e-3,
+            "one notch back is where it began, got {}",
+            cam.ortho.unwrap()
+        );
+
+        // Multiplicative, so a notch is the same proportion at every scale.
+        let ratio_at = |h: f32| {
+            let mut c = FlyCamera::default();
+            c.set_ortho(Some(h));
+            c.dolly(1.0);
+            c.ortho.unwrap() / h
+        };
+        assert!((ratio_at(4.0) - ratio_at(400.0)).abs() < 1e-4, "zoom must be proportional");
+    }
+
+    /// Zoom cannot walk out of the range the projection matrix can express — a
+    /// zero-height ortho is singular, and every picking ray through its inverse
+    /// comes back NaN.
+    #[test]
+    fn zoom_stays_inside_what_the_projection_can_express() {
+        let mut cam = FlyCamera::default();
+        cam.set_ortho(Some(10.0));
+        for _ in 0..500 {
+            cam.dolly(1.0);
+        }
+        assert!(cam.ortho.unwrap() >= FlyCamera::ORTHO_MIN);
+        for _ in 0..2000 {
+            cam.dolly(-1.0);
+        }
+        assert!(cam.ortho.unwrap() <= FlyCamera::ORTHO_MAX);
+        // …and the matrix it produces is usable, which is the thing that matters.
+        let m = cam.render_camera().view_proj(16.0 / 9.0);
+        assert!(m.is_finite() && m.inverse().is_finite(), "the projection must stay invertible");
+    }
+
+    /// An orthographic view's near plane sits BEHIND the eye. Otherwise the layer
+    /// you are working on is sliced in half by the near plane the moment the
+    /// camera is level with it — which is exactly where a 2D view sits.
+    #[test]
+    fn an_orthographic_view_does_not_clip_the_layer_it_is_level_with() {
+        let mut cam = FlyCamera { position: DVec3::ZERO, ..Default::default() };
+        cam.set_lock(ViewLock::Front);
+        cam.set_ortho(Some(10.0));
+        let vp = cam.render_camera().view_proj(1.0);
+        // A point AT the camera plane, in camera-relative render space.
+        let p = vp * floptle_core::math::Vec4::new(0.0, 0.0, 0.0, 1.0);
+        assert!(p.z >= 0.0 && p.z <= 1.0, "the camera's own plane must be in frame, z = {}", p.z);
+        // …and so is something a little behind it.
+        let p = vp * floptle_core::math::Vec4::new(0.0, 0.0, 5.0, 1.0);
+        assert!(p.z >= 0.0 && p.z <= 1.0, "5 units behind must be in frame, z = {}", p.z);
+    }
+
+    /// Panning must track the pointer at any zoom. Scaled by fly speed instead, a
+    /// pan is either glacial or wild depending on how far you have zoomed.
+    #[test]
+    fn panning_tracks_the_pointer_at_any_zoom() {
+        let pan_for = |h: f32| {
+            let mut cam = FlyCamera { position: DVec3::ZERO, ..Default::default() };
+            cam.set_lock(ViewLock::Front);
+            cam.set_ortho(Some(h));
+            cam.pan(100.0, 0.0);
+            cam.position.x.abs()
+        };
+        // Ten times the zoom, ten times the world distance for the same drag.
+        let (near, far) = (pan_for(10.0), pan_for(100.0));
+        assert!((far / near - 10.0).abs() < 1e-3, "pan should scale with height: {near} vs {far}");
+    }
+
+    /// The ortho flag is orthogonal to the lock — you can have either, both, or
+    /// neither, and turning one on must not disturb the other.
+    #[test]
+    fn ortho_and_the_plane_lock_are_independent() {
+        let mut cam = FlyCamera::default();
+        cam.set_ortho(Some(20.0));
+        assert!(cam.is_ortho() && !cam.lock.is_locked());
+        cam.set_lock(ViewLock::Front);
+        assert!(cam.is_ortho(), "locking must not clear the projection");
+        assert_eq!(cam.ortho, Some(20.0));
+        cam.set_ortho(None);
+        assert!(!cam.is_ortho() && cam.lock == ViewLock::Front, "and the reverse");
+        assert!(!cam.render_camera().projection.is_ortho());
     }
 }

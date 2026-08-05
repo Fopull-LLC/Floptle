@@ -887,10 +887,19 @@ pub(crate) struct SceneMirror {
     transforms: HashMap<u32, Transform>,
     /// Mesh nodes' current model path (so a script can read `node.model`).
     models: HashMap<u32, String>,
-    /// Tilemap nodes' grid: `(cols, rows, row-major cells)`, so a handle can
-    /// answer `tm:get` / `tm:size` without reaching into the world
+    /// Tilemap nodes' grid and what it is cut from, so a handle can answer
+    /// `tm:get` / `tm:size` / `tm:solid` without reaching into the world
     /// (`floptle/0058`).
-    tilemaps: HashMap<u32, (u32, u32, Vec<u32>)>,
+    tilemaps: HashMap<u32, TilemapMirror>,
+    /// The project's loaded tilesets, keyed by their project-relative path.
+    ///
+    /// LENT by the host (`ScriptHost::set_tilesets`), the same way the layer table
+    /// is: the script host does no file I/O of its own, so who owns the parse is
+    /// unambiguous and a headless test can hand in a tileset without a project on
+    /// disk. A path with no entry means the tileset failed to load or was never
+    /// referenced — `tm:solid` then answers `false` rather than guessing, and the
+    /// editor is the one that says so in the Console.
+    tilesets: HashMap<String, floptle_tiles::TileSet>,
     /// Entities that ARE sprite batches, so `node:sprites()` can refuse a node
     /// that is not one instead of handing back a handle whose every draw is
     /// silently dropped.
@@ -981,7 +990,16 @@ pub enum RichSet {
     /// (`floptle/0082`).
     MatterPrimitive(floptle_core::Shape, [f64; 3]),
     /// `node:setTilemap{...}` — build (or re-shape) a 2D grid on this node.
-    MatterTilemap { cols: u32, rows: u32, tile: f32, data: Vec<u32> },
+    MatterTilemap {
+        cols: u32,
+        rows: u32,
+        tile: f32,
+        data: Vec<u32>,
+        /// `None` KEEPS whatever the node already referenced — `setTilemap` is
+        /// also how a script resizes a map, and dropping the tileset on a resize
+        /// would silently un-solid the level.
+        tileset: Option<String>,
+    },
     /// `node:setSpriteBatch{ size = }` — the other half of the 2D pair. A
     /// game's sprite styles are DATA (one batch per material, one material per
     /// style), so the nodes that draw them have to be makeable from the same
@@ -991,6 +1009,13 @@ pub enum RichSet {
     /// `tm:set(x, y, cell)` writes, batched per call site. Applied in order, so
     /// two writes to one square land the way the script wrote them.
     TileCells(Vec<(u32, u32, u32)>),
+    /// `tm:resize{...}` — a new grid size, keeping whatever overlaps. `ox`/`oy`
+    /// are where the old top-left lands in the new grid, so growing a map
+    /// upward is `oy = 1` rather than a second call shape.
+    TileResize { cols: Option<u32>, rows: Option<u32>, ox: i32, oy: i32 },
+    /// `tm:autotile(x0, y0, x1, y1)` — recompute the region's autotiled squares
+    /// (and the one-square ring around it, which is where the stale edges are).
+    TileAutotile { x0: i32, y0: i32, x1: i32, y1: i32 },
     /// On-demand generation spec (RON `PlanetFill`) for a Terrain node —
     /// `None` clears it. See `floptle_core::TerrainGen` (G2 galaxy streaming).
     TerrainGen(Option<String>),
@@ -1010,7 +1035,30 @@ pub enum RichSet {
         target_h: Option<u32>,
         target_hz: Option<f32>,
         cull_mask: Option<u32>,
+        /// `projection = "orthographic" | "perspective"`, parsed at the call.
+        ortho: Option<bool>,
+        ortho_height: Option<f32>,
     },
+}
+
+/// What a script can ask about a tilemap node without reaching into the ECS.
+///
+/// The grid is cloned per frame, which is the same deal every other mirror entry
+/// makes: a handle's reads have to be answerable inside a Lua closure that holds
+/// no `&World`. A 200x200 map is 40,000 `u32` — 160 KB a frame — so a scene of
+/// several large tilemaps is worth knowing about, and the alternative (handing
+/// Lua a live borrow) is not one this host can offer.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TilemapMirror {
+    pub(crate) cols: u32,
+    pub(crate) rows: u32,
+    /// World edge length of one square — what `tm:tileSize()` answers and what
+    /// the world/cell conversions divide by.
+    pub(crate) tile: f32,
+    /// Row-major packed squares (cell index + orientation).
+    pub(crate) data: Vec<u32>,
+    /// Project-relative `.tileset.ron`, or empty.
+    pub(crate) tileset: String,
 }
 
 /// The interior-mutable state the Lua handle closures share with the host: the scene
@@ -2502,7 +2550,7 @@ end
         host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
         assert!(host.errors().is_empty(), "{:?}", host.errors());
 
-        let Some(floptle_core::Matter::Tilemap { cols, rows, tile, data }) =
+        let Some(floptle_core::Matter::Tilemap { cols, rows, tile, data, .. }) =
             world.get::<floptle_core::Matter>(e)
         else {
             panic!("setTilemap did not make a tilemap: {:?}", world.get::<floptle_core::Matter>(e))
@@ -2663,6 +2711,153 @@ end
         let mut host = ScriptHost::new();
         host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
         assert!(host.drain_logs().iter().all(|l| l.level != LogLevel::Warn));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The 2D surface a real tilemap game reaches for, end to end through Lua.
+    ///
+    /// Every one of these was hand-rolled in both in-house games before it
+    /// existed, and each hand-rolled copy was wrong in the same way: it
+    /// duplicated the grid's centring and its row-0-is-the-top convention, and
+    /// went stale the moment the map was moved. So the test that matters is not
+    /// "does `set` write a square" — it is "does the WORLD conversion survive the
+    /// node's transform", which is the part a script cannot check for itself.
+    #[test]
+    fn a_script_can_place_read_and_locate_tiles_through_the_handle() {
+        let dir = std::env::temp_dir().join(format!("floptle_tiles2d_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "level",
+            "\
+function start(node)
+  node:setTilemap{ cols = 4, rows = 3, tile = 2.0 }
+  local tm = node:tilemap()
+  tm:fill(0)
+  -- A turned tile: rot is degrees clockwise, and the pair reads back canonically.
+  tm:set(1, 1, 5, { rot = 90 })
+  tm:set(2, 1, 6, { flipX = true })
+  -- A rectangle, corners in either order, clipped at the edge.
+  tm:fillRect(3, 0, 9, 9, 7)
+end
+
+-- The reads live in `update`, because the construction API is DEFERRED: what
+-- `start` queued lands in the flush after it, and the scene mirror a handle
+-- reads is rebuilt at the top of the next pass. A game reading back its own
+-- writes in the same hook is reading the frame before.
+function update(node, dt)
+  local tm = node:tilemap()
+  cols, rows = tm:size()
+  edge = tm:tileSize()
+  cellAt11, xf11, flip11 = tm:at(1, 1)
+  plainGet = tm:get(1, 1)
+  -- World <-> cell, through the node's own transform.
+  local c = tm:worldAt(0, 0)
+  cx, cy = tm:cellAt(c)
+  -- …and a point well outside the map is off the map, not clamped to an edge.
+  offX, offY = tm:cellAt(vec3(1000, 0, 0))
+  clipped = tm:get(3, 2)
+end
+",
+        );
+        let (mut world, e) = world_with_script("level");
+        world.insert(e, floptle_core::Matter::Empty);
+        // A MOVED, TURNED and SCALED map — the case a Lua copy of the maths gets
+        // wrong. If `cellAt(worldAt(0, 0))` still comes back (0, 0) here, the
+        // conversion is going through the transform rather than assuming
+        // identity.
+        world.insert(
+            e,
+            Transform {
+                translation: glam::DVec3::new(37.0, -12.0, 4.0),
+                rotation: glam::Quat::from_rotation_z(0.7),
+                scale: glam::Vec3::new(1.5, 1.5, 1.0),
+            },
+        );
+        let mut host = ScriptHost::new();
+        // Two passes: `start` queues the construction writes, and the second run
+        // re-mirrors the scene so the reads see them.
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        assert!(host.errors().is_empty(), "{:?}", host.errors());
+
+        let env = host.instance_env(e.index(), "level").expect("the script ran");
+        let num = |k: &str| env.get::<f64>(k).unwrap_or(-999.0);
+        assert_eq!((num("cols"), num("rows")), (4.0, 3.0));
+        assert_eq!(num("edge"), 2.0, "tm:tileSize is the world edge of one square");
+
+        assert_eq!(num("cellAt11"), 5.0, "tm:at gives the cell");
+        assert_eq!(num("xf11"), 90.0, "…and the rotation, in degrees clockwise");
+        assert_eq!(num("plainGet"), 5.0, "tm:get strips the orientation");
+        assert!(
+            !env.get::<bool>("flip11").unwrap_or(true),
+            "a pure rotation is not mirrored"
+        );
+
+        assert_eq!(
+            (num("cx"), num("cy")),
+            (0.0, 0.0),
+            "worldAt then cellAt must round-trip THROUGH the node's transform"
+        );
+        assert!(
+            env.get::<mlua::Value>("offX").map(|v| v.is_nil()).unwrap_or(false),
+            "a point off the map is nil, not clamped to an edge square"
+        );
+        assert_eq!(num("clipped"), 7.0, "the rectangle clipped to the grid and filled the corner");
+
+        // The component itself carries the packed orientation, so a saved scene
+        // records it and the mesh draws it.
+        let Some(floptle_core::Matter::Tilemap { data, .. }) =
+            world.get::<floptle_core::Matter>(e)
+        else {
+            panic!("setTilemap did not make a tilemap")
+        };
+        // row 1, column 1 of a 4-wide grid.
+        let turned = data[4 + 1];
+        assert_eq!(floptle_core::tile_index(turned), 5);
+        assert_eq!(floptle_core::tile_xform(turned), floptle_core::TileXform::new(1, false));
+        let mirrored = data[4 + 2];
+        assert_eq!(floptle_core::tile_index(mirrored), 6);
+        assert!(floptle_core::tile_xform(mirrored).flip_x, "flipX = true must mirror it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A wrong orientation is refused where it was written, not rounded down to
+    /// something that looks almost right (`floptle/0082`).
+    #[test]
+    fn a_bad_tile_orientation_is_refused_at_the_call() {
+        let dir = std::env::temp_dir().join(format!("floptle_tilexf_bad_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cases: &[(&str, &[&str])] = &[
+            // 45 degrees is not one of the eight things a square tile can be.
+            ("tm:set(0, 0, 1, { rot = 45 })", &["rot = 45", "quarter-turns"]),
+            // A typo in an orientation key is a tile placed unturned, silently.
+            ("tm:set(0, 0, 1, { flipx = true })", &["flipx", "did you mean `flipX`"]),
+            // A resize with nothing to resize to is a mistake, not a no-op.
+            ("tm:resize{}", &["cols", "rows"]),
+            ("tm:resize{ colls = 4 }", &["colls", "did you mean `cols`"]),
+        ];
+        for (i, (src, wants)) in cases.iter().enumerate() {
+            let name = format!("tbad{i}");
+            write_script(
+                &dir,
+                &name,
+                &format!(
+                    "function start(node)\n  node:setTilemap{{ cols = 2, rows = 2 }}\n  \
+                     local tm = node:tilemap()\n  {src}\nend\n"
+                ),
+            );
+            let (mut world, e) = world_with_script(&name);
+            world.insert(e, floptle_core::Matter::Empty);
+            let mut host = ScriptHost::new();
+            host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+            let errs = host.errors().to_vec();
+            assert!(!errs.is_empty(), "`{src}` was accepted silently");
+            let msg = errs.join(" | ");
+            for want in *wants {
+                assert!(msg.contains(want), "`{src}` error is missing {want:?}: {msg}");
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

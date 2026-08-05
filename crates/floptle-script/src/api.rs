@@ -852,6 +852,7 @@ pub(crate) fn apply_rich_sets(
     world: &mut World,
     ents: &std::collections::HashMap<u32, Entity>,
     sets: Vec<(u32, crate::RichSet)>,
+    tilesets: &std::collections::HashMap<String, floptle_tiles::TileSet>,
 ) {
     use crate::{CompVal, RichSet};
     let num = |v: &CompVal| match v {
@@ -972,6 +973,8 @@ pub(crate) fn apply_rich_sets(
                 target_h,
                 target_hz,
                 cull_mask,
+                ortho,
+                ortho_height,
             } => {
                 // A node that is not a camera becomes one, the way setPrimitive
                 // and setTerrain also set the node's Matter.
@@ -986,6 +989,8 @@ pub(crate) fn apply_rich_sets(
                             target_w: Matter::TARGET_W,
                             target_h: Matter::TARGET_H,
                             target_hz: 0.0,
+                            ortho: false,
+                            ortho_height: Matter::ORTHO_HEIGHT,
                         },
                     );
                 }
@@ -1014,6 +1019,8 @@ pub(crate) fn apply_rich_sets(
                     target_w: tw,
                     target_h: th,
                     target_hz: thz,
+                    ortho: orth,
+                    ortho_height: oh,
                 }) = world.get_mut::<Matter>(e)
                 else {
                     continue;
@@ -1039,6 +1046,12 @@ pub(crate) fn apply_rich_sets(
                 if let Some(v) = cull_mask {
                     *cm = v;
                 }
+                if let Some(v) = ortho {
+                    *orth = v;
+                }
+                if let Some(v) = ortho_height {
+                    *oh = Matter::clamp_ortho_height(v);
+                }
             }
             RichSet::MatterPrimitive(shape, color) => {
                 world.insert(
@@ -1051,14 +1064,22 @@ pub(crate) fn apply_rich_sets(
             }
             // 2D (`floptle/0058`). The sheet is the node's Material, so a
             // tilemap only ever carries its grid.
-            RichSet::MatterTilemap { cols, rows, tile, mut data } => {
+            RichSet::MatterTilemap { cols, rows, tile, mut data, tileset } => {
                 let want = (cols as usize) * (rows as usize);
                 // A short `data` fills the rest with holes rather than
                 // repeating or refusing: a caller who sized the grid and then
                 // filled part of it meant the rest to be empty.
                 data.resize(want, floptle_core::EMPTY_TILE);
                 data.truncate(want);
-                world.insert(e, Matter::Tilemap { cols, rows, tile, data });
+                // Keep whatever tileset the node already had unless one was
+                // given: `setTilemap` is also how a script RESIZES a map, and
+                // dropping the tileset on a resize would silently un-solid the
+                // level.
+                let tileset = tileset.unwrap_or_else(|| match world.get::<Matter>(e) {
+                    Some(Matter::Tilemap { tileset, .. }) => tileset.clone(),
+                    _ => String::new(),
+                });
+                world.insert(e, Matter::Tilemap { cols, rows, tile, data, tileset });
             }
             // The counterpart setter (`floptle/0062`). Like a tilemap, a batch
             // takes its sheet from the node's ordinary Material — so this
@@ -1084,6 +1105,36 @@ pub(crate) fn apply_rich_sets(
                         }
                     }
                 }
+            }
+            RichSet::TileResize { cols, rows, ox, oy } => {
+                let Some(Matter::Tilemap { cols: c, rows: r, data, .. }) =
+                    world.get_mut::<Matter>(e)
+                else {
+                    continue;
+                };
+                let (want_c, want_r) = (cols.unwrap_or(*c).max(1), rows.unwrap_or(*r).max(1));
+                let (nc, nr, next) = floptle_tiles::TileGrid::new(*c, *r, data)
+                    .resized(want_c, want_r, ox, oy);
+                *c = nc;
+                *r = nr;
+                *data = next;
+            }
+            RichSet::TileAutotile { x0, y0, x1, y1 } => {
+                // The tileset is what says which tiles are in which group, so
+                // there is nothing to do without one. Silently doing nothing is
+                // the right answer here rather than an error: a map may be
+                // art-only on purpose, and `tm:autotile` in a shared behaviour
+                // script should not blow up on the one map that is.
+                let Some(Matter::Tilemap { cols, rows, data, tileset, .. }) =
+                    world.get_mut::<Matter>(e)
+                else {
+                    continue;
+                };
+                let Some(set) = tilesets.get(tileset.as_str()) else { continue };
+                let at = floptle_tiles::Autotiler::build(set);
+                let (cols, rows) = (*cols, *rows);
+                floptle_tiles::TileGrid::new(cols, rows, data)
+                    .retile((x0, y0), (x1, y1), set, &at);
             }
         }
     }
@@ -1156,8 +1207,9 @@ pub const HANDLE_KEYS: &[(&str, &str)] = &[
 
 /// Every key `node:setCamera{...}` reads. Anything else is refused, naming the
 /// nearest real one (`floptle/0078`, `floptle/0082`).
-pub(crate) const CAMERA_KEYS: &[&str] =
-    &["fovY", "active", "target", "width", "height", "hz", "cullMask"];
+pub(crate) const CAMERA_KEYS: &[&str] = &[
+    "fovY", "active", "target", "width", "height", "hz", "cullMask", "projection", "orthoHeight",
+];
 
 /// Every key `node:setMaterial{...}` reads (`floptle/0082`).
 ///
@@ -1176,15 +1228,84 @@ pub(crate) const CELESTIAL_KEYS: &[&str] = &[
 ];
 
 /// Every key `node:setTilemap{...}` reads (`floptle/0082`).
-pub(crate) const TILEMAP_KEYS: &[&str] = &["cols", "rows", "tile", "data"];
+pub(crate) const TILEMAP_KEYS: &[&str] = &["cols", "rows", "tile", "data", "tileset"];
 
 /// Every key `node:setSpriteBatch{...}` reads (`floptle/0082`).
 pub(crate) const SPRITE_BATCH_KEYS: &[&str] = &["size"];
 
-/// The handle `node:tilemap()` returns: read and write single squares.
+/// Every key a tile-orientation table (`{ rot =, flipX =, flipY = }`) reads.
 ///
-/// Deliberately tiny. A game re-dresses a room per floor, so `set` and `fill`
-/// are what it needs; anything richer belongs in Lua on top of these.
+/// `flipY` is here even though there is no vertical-mirror bit, because it is
+/// what somebody will write. It composes to `flipX` plus a half-turn — the eight
+/// orientations are the square's symmetries and a vertical mirror is one of them,
+/// just not an independent one. Refusing it would be pedantry; silently ignoring
+/// it would be `floptle/0082` all over again. See `floptle_core::TileXform`.
+pub(crate) const TILE_XFORM_KEYS: &[&str] = &["rot", "flipX", "flipY"];
+
+/// Every key `tm:resize{...}` reads.
+pub(crate) const TILE_RESIZE_KEYS: &[&str] = &["cols", "rows", "offsetX", "offsetY"];
+
+/// A tile orientation as Lua spells it: `{ rot = 90, flipX = true }`.
+///
+/// `rot` is degrees clockwise and must be a multiple of 90 — a rotation of 45 is
+/// not one of the eight things a square tile can be, and rounding it to 0 would
+/// mean the tile came out unturned with nothing said.
+fn tile_xform_opts(v: &Value, call: &str) -> mlua::Result<floptle_core::TileXform> {
+    use floptle_core::TileXform;
+    let Value::Table(t) = v else {
+        if matches!(v, Value::Nil) {
+            return Ok(TileXform::NONE);
+        }
+        return Err(mlua::Error::runtime(format!(
+            "{call}: the orientation is a table like {{ rot = 90, flipX = true }}, got {}",
+            v.type_name()
+        )));
+    };
+    crate::opts::check_keys(t, TILE_XFORM_KEYS, call)?;
+    let mut xf = TileXform::NONE;
+    if let Some(deg) = crate::opts::opt_num(t, call, "rot", -1080.0, 1080.0)? {
+        if deg % 90.0 != 0.0 {
+            return Err(mlua::Error::runtime(format!(
+                "{call}: `rot = {deg}` — a square tile turns in quarter-turns, so rot takes \
+                 0, 90, 180 or 270 (negatives and multiples wrap)"
+            )));
+        }
+        // Fold into 0..3 the long way round so -90 means 270 rather than erroring.
+        let quarters = (((deg / 90.0) as i64 % 4) + 4) % 4;
+        xf = TileXform::new(quarters as u8, false);
+    }
+    if crate::opts::opt_bool(t, call, "flipX")? == Some(true) {
+        xf = xf.flipped_x();
+    }
+    if crate::opts::opt_bool(t, call, "flipY")? == Some(true) {
+        xf = xf.flipped_y();
+    }
+    Ok(xf)
+}
+
+/// The handle `node:tilemap()` returns: the grid, and what the tileset says
+/// about it.
+///
+/// ## Why this grew
+///
+/// It shipped with four methods on the reasoning that a game "re-dresses a room
+/// per floor, so `set` and `fill` are what it needs; anything richer belongs in
+/// Lua on top of these". That was half right. Building the rest in Lua is fine
+/// for a rectangle fill; it is not fine for the three things below, and both
+/// in-house games hand-rolled all three:
+///
+/// * **World ↔ cell.** Every 2D game needs "which tile did the player click / is
+///   the character standing on". Written in Lua it means duplicating the grid's
+///   centring and its row-0-is-the-top convention, and the copy is wrong the day
+///   the map is moved, rotated or scaled — because a Lua copy divides by a tile
+///   size and cannot see the node's transform.
+/// * **What a tile IS.** Solidity and tags live in the tileset, keyed by cell
+///   index. A game reading them in Lua keeps its own table keyed by cell index,
+///   which goes stale the moment the artist reorders the sheet — silently, and as
+///   a gameplay bug rather than an art one.
+/// * **Orientation.** There is no way to spell "this tile, mirrored" in Lua at
+///   all without knowing the bit layout, and a game that hard-codes the bits is
+///   a game that breaks when the layout changes.
 fn new_tilemap_handle(
     lua: &Lua,
     e: u32,
@@ -1198,36 +1319,91 @@ fn new_tilemap_handle(
     // holding one will look (`floptle/0083`).
     t.raw_set("EMPTY", floptle_core::EMPTY_TILE)?;
 
-    // tm:set(x, y, cell) — 0-based from the TOP-LEFT, matching the data order.
+    // tm:set(x, y, cell [, {rot=, flipX=, flipY=}]) — 0-based from the TOP-LEFT.
     let qs = q.clone();
     t.raw_set(
         "set",
-        lua.create_function(move |_, (this, x, y, cell): (Table, u32, u32, Value)| {
-            let e: u32 = this.raw_get("__id")?;
-            let cell = tile_cell(&cell)?;
-            qs.borrow_mut().push((e, crate::RichSet::TileCells(vec![(x, y, cell)])));
-            Ok(())
-        })?,
+        lua.create_function(
+            move |_, (this, x, y, cell, xf): (Table, u32, u32, Value, Value)| {
+                let e: u32 = this.raw_get("__id")?;
+                let cell = tile_cell(&cell)?;
+                let xf = tile_xform_opts(&xf, "tm:set")?;
+                let packed = if cell == floptle_core::EMPTY_TILE {
+                    cell
+                } else {
+                    floptle_core::tile_pack(cell, xf)
+                };
+                qs.borrow_mut().push((e, crate::RichSet::TileCells(vec![(x, y, packed)])));
+                Ok(())
+            },
+        )?,
     )?;
 
-    // tm:fill(cell) — every square, including the empty ones.
+    // tm:fill(cell [, xform]) — every square, including the empty ones.
     let qf = q.clone();
     let sf = scene.clone();
     t.raw_set(
         "fill",
-        lua.create_function(move |_, (this, cell): (Table, Value)| {
+        lua.create_function(move |_, (this, cell, xf): (Table, Value, Value)| {
             let e: u32 = this.raw_get("__id")?;
             let cell = tile_cell(&cell)?;
-            let (cols, rows) = sf.borrow().tilemaps.get(&e).map(|(c, r, _)| (*c, *r)).unwrap_or((0, 0));
+            let xf = tile_xform_opts(&xf, "tm:fill")?;
+            let packed = if cell == floptle_core::EMPTY_TILE {
+                cell
+            } else {
+                floptle_core::tile_pack(cell, xf)
+            };
+            let (cols, rows) =
+                sf.borrow().tilemaps.get(&e).map(|m| (m.cols, m.rows)).unwrap_or((0, 0));
             let mut writes = Vec::with_capacity((cols * rows) as usize);
             for y in 0..rows {
                 for x in 0..cols {
-                    writes.push((x, y, cell));
+                    writes.push((x, y, packed));
                 }
             }
             qf.borrow_mut().push((e, crate::RichSet::TileCells(writes)));
             Ok(())
         })?,
+    )?;
+
+    // tm:fillRect(x0, y0, x1, y1, cell [, xform]) — corners in either order,
+    // clipped to the grid.
+    let qr = q.clone();
+    t.raw_set(
+        "fillRect",
+        lua.create_function(
+            move |_, (this, x0, y0, x1, y1, cell, xf): (Table, i64, i64, i64, i64, Value, Value)| {
+                let e: u32 = this.raw_get("__id")?;
+                let cell = tile_cell(&cell)?;
+                let xf = tile_xform_opts(&xf, "tm:fillRect")?;
+                let packed = if cell == floptle_core::EMPTY_TILE {
+                    cell
+                } else {
+                    floptle_core::tile_pack(cell, xf)
+                };
+                // Clip HERE rather than relying on the write to drop what falls
+                // outside: a rect from -1e9 to 1e9 would otherwise queue four
+                // quintillion writes before anything looked at the bounds.
+                let (lo_x, hi_x) = (x0.min(x1).max(0), x0.max(x1));
+                let (lo_y, hi_y) = (y0.min(y1).max(0), y0.max(y1));
+                let mut writes = Vec::new();
+                for y in lo_y..=hi_y {
+                    for x in lo_x..=hi_x {
+                        if let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) {
+                            writes.push((x, y, packed));
+                        }
+                    }
+                    if writes.len() > 4_000_000 {
+                        return Err(mlua::Error::runtime(
+                            "tm:fillRect: that rectangle is larger than any tilemap — check \
+                             the corners (they are tile coordinates, not world units)",
+                        ));
+                    }
+                }
+                qr.borrow_mut().push((e, crate::RichSet::TileCells(writes)));
+                Ok(())
+            },
+        )?,
     )?;
 
     // tm:size() -> cols, rows
@@ -1236,30 +1412,286 @@ fn new_tilemap_handle(
         "size",
         lua.create_function(move |_, this: Table| {
             let e: u32 = this.raw_get("__id")?;
-            let (c, r) = ss.borrow().tilemaps.get(&e).map(|(c, r, _)| (*c, *r)).unwrap_or((0, 0));
+            let (c, r) = ss.borrow().tilemaps.get(&e).map(|m| (m.cols, m.rows)).unwrap_or((0, 0));
             Ok((c, r))
         })?,
     )?;
 
+    // tm:tileSize() -> the world edge length of one square.
+    let st = scene.clone();
+    t.raw_set(
+        "tileSize",
+        lua.create_function(move |_, this: Table| {
+            let e: u32 = this.raw_get("__id")?;
+            Ok(st.borrow().tilemaps.get(&e).map(|m| m.tile).unwrap_or(0.0))
+        })?,
+    )?;
+
+    // tm:tileset() -> the project-relative .tileset.ron, or nil.
+    let sts = scene.clone();
+    t.raw_set(
+        "tileset",
+        lua.create_function(move |_, this: Table| {
+            let e: u32 = this.raw_get("__id")?;
+            let s = sts.borrow();
+            Ok(s.tilemaps
+                .get(&e)
+                .map(|m| m.tileset.clone())
+                .filter(|p| !p.is_empty()))
+        })?,
+    )?;
+
     // tm:get(x, y) -> cell, or nil outside the grid / on an empty square.
+    // The ORIENTATION is stripped: `tm:get` answers "which tile", which is what
+    // every comparison against it wants. `tm:at` answers the whole question.
+    let sg = scene.clone();
     t.raw_set(
         "get",
         lua.create_function(move |_, (this, x, y): (Table, u32, u32)| {
             let e: u32 = this.raw_get("__id")?;
-            let s = scene.borrow();
-            // Outside the grid reads as absent rather than wrapping round to
-            // the far side: a loop that runs one past the edge is a bug in the
-            // caller's bounds, and wrapping would hide it.
-            let cell = s.tilemaps.get(&e).and_then(|(cols, rows, data)| {
-                (x < *cols && y < *rows).then(|| data.get((y * cols + x) as usize).copied())?
-            });
-            match cell {
-                Some(c) if c != floptle_core::EMPTY_TILE => Ok(Value::Integer(c as i64)),
+            let s = sg.borrow();
+            match packed_at(&s, e, x, y) {
+                Some(p) if p != floptle_core::EMPTY_TILE => {
+                    Ok(Value::Integer(floptle_core::tile_index(p) as i64))
+                }
                 _ => Ok(Value::Nil),
             }
         })?,
     )?;
+
+    // tm:at(x, y) -> cell, rot, flipX — the full answer, for a game that cares
+    // which way a tile faces (a conveyor, a pipe, a one-way platform).
+    let sa = scene.clone();
+    t.raw_set(
+        "at",
+        lua.create_function(move |_, (this, x, y): (Table, u32, u32)| {
+            let e: u32 = this.raw_get("__id")?;
+            let s = sa.borrow();
+            match packed_at(&s, e, x, y) {
+                Some(p) if p != floptle_core::EMPTY_TILE => {
+                    let xf = floptle_core::tile_xform(p);
+                    Ok((
+                        Value::Integer(floptle_core::tile_index(p) as i64),
+                        Value::Integer(xf.rot as i64 * 90),
+                        Value::Boolean(xf.flip_x),
+                    ))
+                }
+                _ => Ok((Value::Nil, Value::Nil, Value::Nil)),
+            }
+        })?,
+    )?;
+
+    // tm:cellAt(worldPoint) -> x, y — or nil off the map.
+    //
+    // Takes a WORLD point (or a node handle) and goes through the tilemap node's
+    // own world transform, so a map that has been moved, turned or scaled still
+    // answers correctly. That is the part a game cannot reasonably write itself.
+    let sc = scene.clone();
+    t.raw_set(
+        "cellAt",
+        lua.create_function(move |_, (this, p): (Table, Value)| {
+            let e: u32 = this.raw_get("__id")?;
+            let s = sc.borrow();
+            let Some(p) = world_pos_of_value(&s, &p) else {
+                return Err(mlua::Error::runtime(
+                    "tm:cellAt: expected a world position (a vec3, {x=,y=,z=} or a node)",
+                ));
+            };
+            match cell_of_world(&s, e, p) {
+                Some((x, y)) => Ok((Value::Integer(x as i64), Value::Integer(y as i64))),
+                None => Ok((Value::Nil, Value::Nil)),
+            }
+        })?,
+    )?;
+
+    // tm:worldAt(x, y) -> the world position of that square's CENTRE.
+    //
+    // The centre and not a corner, because what a game does with this is put
+    // something on the tile.
+    let sw = scene.clone();
+    t.raw_set(
+        "worldAt",
+        lua.create_function(move |lua, (this, x, y): (Table, i64, i64)| {
+            let e: u32 = this.raw_get("__id")?;
+            let s = sw.borrow();
+            match world_of_cell(&s, e, x, y) {
+                Some(p) => Ok(Value::UserData(
+                    lua.create_userdata(crate::math_api::LuaVec3(p))?,
+                )),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    // tm:resize{ cols =, rows =, offsetX =, offsetY = } — keep what overlaps.
+    let qz = q.clone();
+    t.raw_set(
+        "resize",
+        lua.create_function(move |_, (this, opts): (Table, Table)| {
+            const CALL: &str = "tm:resize";
+            let e: u32 = this.raw_get("__id")?;
+            crate::opts::check_keys(&opts, TILE_RESIZE_KEYS, CALL)?;
+            // A resize with no size is a mistake, not a no-op: somebody meant to
+            // pass one and mistyped it, and the typo is already refused above.
+            let cols = crate::opts::opt_num(&opts, CALL, "cols", 0.0, 8192.0)?;
+            let rows = crate::opts::opt_num(&opts, CALL, "rows", 0.0, 8192.0)?;
+            if cols.is_none() && rows.is_none() {
+                return Err(mlua::Error::runtime(format!(
+                    "{CALL}: give at least one of cols / rows"
+                )));
+            }
+            qz.borrow_mut().push((
+                e,
+                crate::RichSet::TileResize {
+                    cols: cols.map(|v| v as u32),
+                    rows: rows.map(|v| v as u32),
+                    ox: crate::opts::opt_num(&opts, CALL, "offsetX", -8192.0, 8192.0)?
+                        .map(|v| v as i32)
+                        .unwrap_or(0),
+                    oy: crate::opts::opt_num(&opts, CALL, "offsetY", -8192.0, 8192.0)?
+                        .map(|v| v as i32)
+                        .unwrap_or(0),
+                },
+            ));
+            Ok(())
+        })?,
+    )?;
+
+    // tm:solid(x, y) -> whether the tileset says that square collides.
+    let ssl = scene.clone();
+    t.raw_set(
+        "solid",
+        lua.create_function(move |_, (this, x, y): (Table, u32, u32)| {
+            let e: u32 = this.raw_get("__id")?;
+            let s = ssl.borrow();
+            let Some(p) = packed_at(&s, e, x, y) else { return Ok(false) };
+            let Some(set) = tileset_of(&s, e) else { return Ok(false) };
+            let cells = set.cells();
+            if floptle_core::tile_is_empty(p, cells) {
+                return Ok(false);
+            }
+            Ok(set.collision(floptle_core::tile_index(p)).is_solid())
+        })?,
+    )?;
+
+    // tm:tags(x, y) -> the tileset's tags for that square, as a list.
+    let stg = scene.clone();
+    t.raw_set(
+        "tags",
+        lua.create_function(move |lua, (this, x, y): (Table, u32, u32)| {
+            let e: u32 = this.raw_get("__id")?;
+            let s = stg.borrow();
+            let out = lua.create_table()?;
+            let (Some(p), Some(set)) = (packed_at(&s, e, x, y), tileset_of(&s, e)) else {
+                return Ok(out);
+            };
+            if floptle_core::tile_is_empty(p, set.cells()) {
+                return Ok(out);
+            }
+            for (i, tag) in set.tags(floptle_core::tile_index(p)).iter().enumerate() {
+                out.raw_set(i + 1, tag.clone())?;
+            }
+            Ok(out)
+        })?,
+    )?;
+
+    // tm:hasTag(x, y, tag) -> the common case of the above without a table
+    // allocation per square, because a per-frame ground check does this.
+    let sht = scene.clone();
+    t.raw_set(
+        "hasTag",
+        lua.create_function(move |_, (this, x, y, tag): (Table, u32, u32, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            let s = sht.borrow();
+            let (Some(p), Some(set)) = (packed_at(&s, e, x, y), tileset_of(&s, e)) else {
+                return Ok(false);
+            };
+            if floptle_core::tile_is_empty(p, set.cells()) {
+                return Ok(false);
+            }
+            Ok(set.tags(floptle_core::tile_index(p)).contains(&tag))
+        })?,
+    )?;
+
+    // tm:autotile(x0, y0, x1, y1) — recompute the region's autotiled squares.
+    //
+    // A script that paints into an autotiled group has to say when it is done,
+    // because retiling per `set` would be O(area) per square and would also fight
+    // a stroke that is still being laid down.
+    let qa = q.clone();
+    t.raw_set(
+        "autotile",
+        lua.create_function(move |_, (this, x0, y0, x1, y1): (Table, i32, i32, i32, i32)| {
+            let e: u32 = this.raw_get("__id")?;
+            qa.borrow_mut().push((e, crate::RichSet::TileAutotile { x0, y0, x1, y1 }));
+            Ok(())
+        })?,
+    )?;
     Ok(t)
+}
+
+/// One square as the mirror holds it, or `None` outside the grid.
+///
+/// Outside reads as absent rather than wrapping: a loop that runs one past the
+/// edge is a bug in the caller's bounds, and wrapping would hide it by answering
+/// about the far side of the map.
+fn packed_at(s: &crate::SceneMirror, e: u32, x: u32, y: u32) -> Option<u32> {
+    let m = s.tilemaps.get(&e)?;
+    (x < m.cols && y < m.rows).then(|| m.data.get((y * m.cols + x) as usize).copied())?
+}
+
+/// The tileset a tilemap node references, if it has one and it is loaded.
+fn tileset_of(s: &crate::SceneMirror, e: u32) -> Option<&floptle_tiles::TileSet> {
+    let path = &s.tilemaps.get(&e)?.tileset;
+    (!path.is_empty()).then(|| s.tilesets.get(path))?
+}
+
+/// Which square of a tilemap a world point falls in.
+///
+/// Goes through the node's full world transform, so a rotated or scaled tilemap
+/// answers correctly. The grid is centred on the node and row 0 is the TOP —
+/// both conventions come from the mesh builder, and this is the only place a
+/// script has to trust rather than reproduce them.
+fn cell_of_world(s: &crate::SceneMirror, e: u32, p: glam::DVec3) -> Option<(u32, u32)> {
+    let m = s.tilemaps.get(&e)?;
+    if m.tile <= 0.0 || m.cols == 0 || m.rows == 0 {
+        return None;
+    }
+    let xf = world_transform_of(s, e);
+    // World -> local. Scale is divided out per axis; a zero axis makes the map
+    // degenerate, and answering about a collapsed grid would be a made-up number.
+    let rel = xf.rotation.inverse() * (p - xf.translation).as_vec3();
+    let s3 = xf.scale;
+    if s3.x.abs() < 1e-9 || s3.y.abs() < 1e-9 {
+        return None;
+    }
+    let local = glam::Vec2::new(rel.x / s3.x, rel.y / s3.y);
+    let (w, h) = (m.cols as f32 * m.tile * 0.5, m.rows as f32 * m.tile * 0.5);
+    let fx = (local.x + w) / m.tile;
+    // Row 0 is the top, so the row index counts DOWN from +h.
+    let fy = (h - local.y) / m.tile;
+    if fx < 0.0 || fy < 0.0 {
+        return None;
+    }
+    let (x, y) = (fx.floor() as i64, fy.floor() as i64);
+    (x >= 0 && y >= 0 && x < m.cols as i64 && y < m.rows as i64)
+        .then_some((x as u32, y as u32))
+}
+
+/// The world position of a square's centre — the inverse of [`cell_of_world`].
+fn world_of_cell(s: &crate::SceneMirror, e: u32, x: i64, y: i64) -> Option<glam::DVec3> {
+    let m = s.tilemaps.get(&e)?;
+    if x < 0 || y < 0 || x >= m.cols as i64 || y >= m.rows as i64 {
+        return None;
+    }
+    let (w, h) = (m.cols as f32 * m.tile * 0.5, m.rows as f32 * m.tile * 0.5);
+    let local = glam::Vec3::new(
+        x as f32 * m.tile - w + m.tile * 0.5,
+        h - (y as f32 * m.tile + m.tile * 0.5),
+        0.0,
+    );
+    let xf = world_transform_of(s, e);
+    Some(xf.translation + (xf.rotation * (xf.scale * local)).as_dvec3())
 }
 
 /// A sprite's scale argument: one number for both axes, or a `vec2` (or any
@@ -2504,7 +2936,16 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         }
                         None => Vec::new(),
                     };
-                    q.borrow_mut().push((e, crate::RichSet::MatterTilemap { cols, rows, tile, data }));
+                    q.borrow_mut().push((
+                        e,
+                        crate::RichSet::MatterTilemap {
+                            cols,
+                            rows,
+                            tile,
+                            data,
+                            tileset: crate::opts::opt_str(&t, "node:setTilemap", "tileset")?,
+                        },
+                    ));
                     Ok(())
                 })?,
             )?;
@@ -2597,6 +3038,24 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                             target_hz: opt_num(&t, CALL, "hz", 0.0, 240.0)?.map(|v| v as f32),
                             cull_mask: opt_num(&t, CALL, "cullMask", 0.0, u32::MAX as f64)?
                                 .map(|v| v as u32),
+                            ortho: match opt_str(&t, CALL, "projection")? {
+                                Some(s) => Some(crate::opts::parse_enum(
+                                    CALL,
+                                    "projection",
+                                    &s,
+                                    floptle_core::Matter::PROJECTION_ACCEPTS,
+                                    floptle_core::Matter::parse_projection,
+                                )?),
+                                None => None,
+                            },
+                            ortho_height: opt_num(
+                                &t,
+                                CALL,
+                                "orthoHeight",
+                                floptle_core::Matter::ORTHO_MIN as f64,
+                                floptle_core::Matter::ORTHO_MAX as f64,
+                            )?
+                            .map(|v| v as f32),
                         },
                     ));
                     Ok(())
@@ -3763,6 +4222,7 @@ mod tests {
                     ("cell".into(), crate::CompVal::Num(11.0)),
                 ]),
             )],
+            &std::collections::HashMap::new(),
         );
         let m = world.get::<Material>(e).expect("setMaterial inserts the component");
         assert_eq!((m.sheet_cols, m.sheet_rows, m.cell), (8, 2, 11));
