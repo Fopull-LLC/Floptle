@@ -58,6 +58,7 @@ pub(crate) fn value_or_curve(
     expanded: &mut Option<String>,
     sel_key: &mut Option<usize>,
     vrange: &mut Option<(f32, f32)>,
+    floor: Option<f32>,
 ) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -136,7 +137,7 @@ pub(crate) fn value_or_curve(
     if let VfxPropDoc::Curve(c) = prop
         && expanded.as_deref() == Some(label)
     {
-        changed |= curve_editor(ui, c, sel_key, vrange);
+        changed |= curve_editor(ui, c, sel_key, vrange, floor);
     }
     changed
 }
@@ -182,7 +183,7 @@ pub(crate) fn sparkline(ui: &egui::Ui, curve: &VfxCurveDoc, kind: CurveKind, rec
     }
     let chans = curve.keys.first().map(|k| channels_of(&k.v).len()).unwrap_or(1);
     let cols = [Color32::from_rgb(230, 120, 120), Color32::from_rgb(120, 220, 120), Color32::from_rgb(120, 160, 240)];
-    let (lo, hi) = value_range(&rt, chans);
+    let (lo, hi) = value_range(&rt, chans, None);
     for (ch, col) in cols.iter().enumerate().take(chans) {
         let mut pts = Vec::new();
         let n = 24;
@@ -197,7 +198,14 @@ pub(crate) fn sparkline(ui: &egui::Ui, curve: &VfxCurveDoc, kind: CurveKind, rec
 }
 
 /// Auto-fit value range across all channels of a runtime curve, sampled.
-fn value_range(rt: &floptle_vfx::Curve, chans: usize) -> (f32, f32) {
+///
+/// **Zero is kept in frame when it is anywhere near the data.** A curve that has
+/// never been negative used to fit to itself, so there was no zero line to see —
+/// and you found out you had crossed zero by the line appearing *after* you did
+/// it, which is exactly backwards. Once the curve is a long way from zero (more
+/// than its own span away) it is squashed rather than helped by including it, so
+/// there the axis labels carry the meaning instead.
+fn value_range(rt: &floptle_vfx::Curve, chans: usize, floor: Option<f32>) -> (f32, f32) {
     let (mut lo, mut hi) = (f32::MAX, f32::MIN);
     for i in 0..=32 {
         let c = rt.eval(i as f32 / 32.0);
@@ -209,11 +217,23 @@ fn value_range(rt: &floptle_vfx::Curve, chans: usize) -> (f32, f32) {
     if !lo.is_finite() || !hi.is_finite() {
         return (0.0, 1.0);
     }
+    let span = hi - lo;
+    if lo > 0.0 && lo <= span.max(0.25) {
+        lo = 0.0;
+    } else if hi < 0.0 && -hi <= span.max(0.25) {
+        hi = 0.0;
+    }
     // A generous minimum span keeps flat/near-flat curves comfortably draggable
     // (a tiny fitted range would otherwise map the whole graph height to a sliver
     // of value, making the key feel stuck).
     let pad = ((hi - lo) * 0.15).max(0.25);
-    (lo - pad, hi + pad)
+    let (mut lo, hi) = (lo - pad, hi + pad);
+    // A property with a floor does not get graph below it — a size axis that
+    // shows -0.4 invites a value that means nothing.
+    if let Some(f) = floor {
+        lo = lo.max(f);
+    }
+    (lo, hi)
 }
 
 /// The full graph editor for one curve. Domain is the normalized `[0,1]`; the
@@ -223,6 +243,10 @@ pub(crate) fn curve_editor(
     curve: &mut VfxCurveDoc,
     sel_key: &mut Option<usize>,
     vrange: &mut Option<(f32, f32)>,
+    // `floor`: a value this property cannot meaningfully go below (a size of
+    // -0.4 is not a small particle, it is a wrong one). `None` for genuinely
+    // signed properties like velocity and rotation.
+    floor: Option<f32>,
 ) -> bool {
     let mut changed = false;
     let kind = curve.keys.first().map(|k| kind_of(&k.v)).unwrap_or(CurveKind::Scalar);
@@ -268,6 +292,16 @@ pub(crate) fn curve_editor(
             *sel_key = None;
             changed = true;
         }
+        // Re-fitting is something you ASK for. It used to happen every time the
+        // pointer lifted, which is why the same curve kept being drawn at a
+        // different scale.
+        if ui
+            .small_button("⛶")
+            .on_hover_text("fit the value axis to the curve — it does not do this on its own")
+            .clicked()
+        {
+            *vrange = None;
+        }
     });
 
     let width = ui.available_width().clamp(160.0, 280.0);
@@ -302,21 +336,38 @@ pub(crate) fn curve_editor(
         CurveKind::Color => vec![3],
         CurveKind::Vector => vec![0, 1, 2],
     };
-    // The value axis auto-fits — but ONLY while the pointer is up. During a drag we
-    // reuse the frozen range so lifting a key can't expand the axis, which would
-    // remap the same pointer position to an ever-larger value (a positive-feedback
-    // runaway that overflowed to a NaN screen coord and panicked the tessellator).
+    // ---- the value axis ----------------------------------------------------
+    //
+    // It used to REFIT every time the pointer lifted, so the same curve was drawn
+    // at a different scale after each edit and a key you dragged upward sprang
+    // back toward the middle. An axis that moves under you is an axis you cannot
+    // read a change against, which was most of "it's hard to tell how my change
+    // will affect it".
+    //
+    // So: fit once, then keep it. It may only GROW, and only when the curve has
+    // actually left it — that way an edit can never push a key off-screen, and
+    // the graph is never redrawn smaller than it was a moment ago. Frozen
+    // outright mid-drag, which is the original NaN guard: an axis that grew while
+    // a key was held remapped the same pointer position to an ever-larger value,
+    // a runaway that overflowed a screen coordinate and panicked the tessellator.
     let pointer_down = ui.input(|i| i.pointer.any_down());
     let (lo, hi) = match kind {
         CurveKind::Color => (0.0, 1.0),
-        _ => match (pointer_down, *vrange) {
-            (true, Some(r)) => r,
-            _ => {
-                let r = value_range(&rt, plot_chans.len());
-                *vrange = Some(r);
-                r
+        _ => {
+            let fit = value_range(&rt, plot_chans.len(), floor);
+            match *vrange {
+                Some(r) if pointer_down => r,
+                Some(r) => {
+                    let grown = (r.0.min(fit.0), r.1.max(fit.1));
+                    *vrange = Some(grown);
+                    grown
+                }
+                None => {
+                    *vrange = Some(fit);
+                    fit
+                }
             }
-        },
+        }
     };
     let to_y = |val: f32| graph.bottom() - ((val - lo) / (hi - lo).max(1e-4)) * graph.height();
     let to_x = |t: f32| graph.left() + t.clamp(0.0, 1.0) * graph.width();
@@ -328,10 +379,7 @@ pub(crate) fn curve_editor(
         let x = graph.left() + i as f32 / 4.0 * graph.width();
         painter.line_segment([Pos2::new(x, graph.top()), Pos2::new(x, graph.bottom())], Stroke::new(0.5, grid));
     }
-    if lo < 0.0 && hi > 0.0 {
-        let y0 = to_y(0.0);
-        painter.line_segment([Pos2::new(graph.left(), y0), Pos2::new(graph.right(), y0)], Stroke::new(1.0, grid.gamma_multiply(2.0)));
-    }
+    draw_value_axis(&painter, ui, graph, lo, hi, &to_y);
 
     // The curve polyline(s).
     let cols = [Color32::from_rgb(230, 120, 120), Color32::from_rgb(120, 220, 120), Color32::from_rgb(120, 160, 240)];
@@ -431,6 +479,70 @@ pub(crate) fn curve_editor(
     changed
 }
 
+/// A number as short as it can be and still be read at 9pt: `0`, `1.5`, `-0.25`.
+fn axis_label(v: f32) -> String {
+    if v == 0.0 {
+        "0".into()
+    } else if v.abs() >= 100.0 {
+        format!("{v:.0}")
+    } else if v.abs() >= 1.0 {
+        format!("{v:.2}").trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        format!("{v:.3}").trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+/// Label the value axis, and say where zero is.
+///
+/// The graph used to carry no numbers at all — an unlabelled point in an
+/// unlabelled box — and drew its zero line only `if lo < 0.0 && hi > 0.0`, i.e.
+/// only once the curve had already gone negative. Both halves of "I can't tell
+/// what this is going to do" (`floptle/0098`).
+///
+/// When zero is off the top or bottom, the edge says so rather than the graph
+/// staying silent about which side of it you are on.
+fn draw_value_axis(
+    painter: &egui::Painter,
+    ui: &egui::Ui,
+    graph: Rect,
+    lo: f32,
+    hi: f32,
+    to_y: &impl Fn(f32) -> f32,
+) {
+    let faint = ui.visuals().weak_text_color();
+    let mark = |v: f32, at: Pos2, anchor: Align2| {
+        painter.text(at, anchor, axis_label(v), FontId::proportional(9.0), faint);
+    };
+    mark(hi, Pos2::new(graph.left() + 3.0, graph.top() + 2.0), Align2::LEFT_TOP);
+    mark(lo, Pos2::new(graph.left() + 3.0, graph.bottom() - 2.0), Align2::LEFT_BOTTOM);
+
+    if (lo..=hi).contains(&0.0) {
+        let y0 = to_y(0.0);
+        painter.line_segment(
+            [Pos2::new(graph.left(), y0), Pos2::new(graph.right(), y0)],
+            Stroke::new(1.0, faint.gamma_multiply(0.8)),
+        );
+        // Only worth labelling when it is not already one of the two extents.
+        if lo != 0.0 && hi != 0.0 {
+            painter.text(
+                Pos2::new(graph.right() - 3.0, y0 - 1.0),
+                Align2::RIGHT_BOTTOM,
+                "0",
+                FontId::proportional(9.0),
+                faint,
+            );
+        }
+    } else {
+        // Off-screen: say which way, so "am I near zero" is still answerable.
+        let (at, anchor, text) = if lo > 0.0 {
+            (Pos2::new(graph.right() - 3.0, graph.bottom() - 2.0), Align2::RIGHT_BOTTOM, "0 ↓")
+        } else {
+            (Pos2::new(graph.right() - 3.0, graph.top() + 2.0), Align2::RIGHT_TOP, "0 ↑")
+        };
+        painter.text(at, anchor, text, FontId::proportional(9.0), faint);
+    }
+}
+
 /// Drag the in/out tangent handles of a bezier key (slope in value-units per unit t).
 #[allow(clippy::too_many_arguments)]
 fn tangent_handles(
@@ -497,5 +609,72 @@ fn value_from_channels(ch: &[f32]) -> VfxValueDoc {
             }
             VfxValueDoc::Rgba(v)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floptle_scene::{VfxCurveDoc, VfxExtrapolateDoc, VfxInterpDoc, VfxKeyDoc, VfxValueDoc};
+
+    fn curve(vals: &[(f32, f32)]) -> VfxCurveDoc {
+        VfxCurveDoc {
+            keys: vals
+                .iter()
+                .map(|&(t, v)| VfxKeyDoc {
+                    t,
+                    v: VfxValueDoc::F32(v),
+                    interp: VfxInterpDoc::Linear,
+                    in_tan: 0.0,
+                    out_tan: 0.0,
+                })
+                .collect(),
+            extrapolate: VfxExtrapolateDoc::Clamp,
+        }
+    }
+
+    /// The reported bug: a curve that has never been negative got no zero line,
+    /// so you crossed zero with no landmark and the line appeared AFTER the
+    /// mistake. Zero is in frame while the curve is anywhere near it.
+    #[test]
+    fn zero_is_in_frame_before_a_curve_goes_negative() {
+        let rt = curve_from_doc(&curve(&[(0.0, 1.0), (1.0, 2.0)]));
+        let (lo, hi) = value_range(&rt, 1, None);
+        assert!(lo <= 0.0 && hi >= 0.0, "zero must be plottable, got {lo}..{hi}");
+    }
+
+    /// A curve a long way from zero is squashed rather than helped by including
+    /// it — there the axis labels carry the meaning instead.
+    #[test]
+    fn a_curve_far_from_zero_is_not_squashed_to_reach_it() {
+        let rt = curve_from_doc(&curve(&[(0.0, 900.0), (1.0, 901.0)]));
+        let (lo, hi) = value_range(&rt, 1, None);
+        assert!(lo > 100.0, "a curve at 900 should not plot from 0, got {lo}..{hi}");
+        assert!(hi - lo < 50.0, "and should still be readable, got {lo}..{hi}");
+    }
+
+    /// A property with a floor gets no graph below it: a size axis showing -0.4
+    /// invites a value that means nothing.
+    #[test]
+    fn a_floored_property_never_shows_axis_below_its_floor() {
+        let rt = curve_from_doc(&curve(&[(0.0, 0.0), (1.0, 1.0)]));
+        let (lo, _) = value_range(&rt, 1, Some(0.0));
+        assert_eq!(lo, 0.0);
+        // ...and without a floor the padding below zero is still there, because
+        // a velocity curve sitting at 0 genuinely may go either way.
+        let (lo, _) = value_range(&rt, 1, None);
+        assert!(lo < 0.0);
+    }
+
+    /// Every extent gets a label short enough to read at 9pt, and zero says "0"
+    /// rather than "0.000".
+    #[test]
+    fn axis_labels_are_short() {
+        assert_eq!(axis_label(0.0), "0");
+        assert_eq!(axis_label(1.0), "1");
+        assert_eq!(axis_label(1.5), "1.5");
+        assert_eq!(axis_label(-0.25), "-0.25");
+        assert_eq!(axis_label(1234.0), "1234");
+        assert!(axis_label(0.125).len() <= 5);
     }
 }

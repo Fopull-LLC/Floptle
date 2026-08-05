@@ -689,12 +689,12 @@ fn particle_section(
 ) {
     ui.small("hover a value, tap 📈 to animate it over the particle's life");
     let (exp, sk, vr) = (&mut st.expanded_prop, &mut st.sel_key, &mut st.curve_vrange);
-    *dirty |= value_or_curve(ui, "velocity", &mut track.velocity, exp, sk, vr);
-    *dirty |= value_or_curve(ui, "size", &mut track.size, exp, sk, vr);
-    *dirty |= value_or_curve(ui, "rotation", &mut track.rotation, exp, sk, vr);
-    *dirty |= value_or_curve(ui, "angular vel", &mut track.angular_velocity, exp, sk, vr);
+    *dirty |= value_or_curve(ui, "velocity", &mut track.velocity, exp, sk, vr, None);
+    *dirty |= value_or_curve(ui, "size", &mut track.size, exp, sk, vr, Some(0.0));
+    *dirty |= value_or_curve(ui, "rotation", &mut track.rotation, exp, sk, vr, None);
+    *dirty |= value_or_curve(ui, "angular vel", &mut track.angular_velocity, exp, sk, vr, None);
     ui.small("rotation/angular are Euler radians (x=pitch, y=yaw, z=roll). Meshes use all three; billboards use roll (z) only — and 'velocity'/'upright' alignment ignore roll.");
-    *dirty |= value_or_curve(ui, "color", &mut track.color, exp, sk, vr);
+    *dirty |= value_or_curve(ui, "color", &mut track.color, exp, sk, vr, Some(0.0));
     ui.horizontal(|ui| {
         ui.label("gravity ×");
         *dirty |= ui

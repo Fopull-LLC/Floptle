@@ -90,6 +90,15 @@ pub(crate) struct VfxUiState {
     /// that drag (auto-fit lanes only — so lifting a point can't stretch the axis).
     pub lane_drag: Option<(usize, LaneRef)>,
     pub lane_vrange: Option<(f32, f32)>,
+    /// The SETTLED value axis of each auto-fit lane, by `(track, lane)`.
+    ///
+    /// A life-curve lane used to refit every frame, so the same curve was drawn
+    /// at a different scale after each edit and a point you dragged upward
+    /// sprang back toward the middle. It is fitted once and then only GROWS —
+    /// never shrinking, so a key can never be edited off the strip, and never
+    /// re-fitting on its own, so a change is legible against a stable axis
+    /// (`floptle/0098`).
+    pub lane_settled: std::collections::HashMap<(usize, LaneRef), (f32, f32)>,
 }
 
 impl Default for VfxUiState {
@@ -120,6 +129,7 @@ impl Default for VfxUiState {
             auto_sel: None,
             lane_drag: None,
             lane_vrange: None,
+            lane_settled: std::collections::HashMap::new(),
         }
     }
 }
@@ -143,6 +153,7 @@ impl VfxUiState {
             self.auto_sel = None;
             self.lane_drag = None;
             self.lane_vrange = None;
+            self.lane_settled.clear();
             self.bump();
         }
     }
@@ -182,6 +193,17 @@ const ZOOM_MAX: f32 = 4000.0;
 /// Vertical-zoom (row-height) bounds.
 const ROW_SCALE_MIN: f32 = 0.5;
 const ROW_SCALE_MAX: f32 = 4.0;
+
+/// A lane extent as short as it can be and still be read at 8pt.
+fn lane_axis_label(v: f32) -> String {
+    if v == 0.0 {
+        "0".into()
+    } else if v.abs() >= 100.0 {
+        format!("{v:.0}")
+    } else {
+        format!("{v:.2}").trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
 
 /// Every automation target, for the track's "Add automation" menu.
 const ALL_TARGETS: [VfxLaneTargetDoc; 7] = [
@@ -1416,7 +1438,12 @@ fn curve_lane_ui(
     let (lo, hi) = match lane_fixed_range(track, lref) {
         Some(r) => r,
         None if st.lane_drag == Some((ti, lref)) => st.lane_vrange.unwrap_or_else(&fit),
-        None => fit(),
+        None => {
+            let f = fit();
+            let settled = st.lane_settled.entry((ti, lref)).or_insert(f);
+            *settled = (settled.0.min(f.0), settled.1.max(f.1));
+            *settled
+        }
     };
     let to_x = |t: f32| strip.left() + (t / dmax).clamp(0.0, 1.0) * strip.width();
     let v_to_y = |v: f32| strip.bottom() - ((v - lo) / (hi - lo).max(1e-4)) * strip.height();
@@ -1523,13 +1550,45 @@ fn curve_lane_ui(
             }
         }
         LaneVis::Scalar => {
-            if lo < 1.0 && hi > 1.0 {
-                let y1 = v_to_y(1.0);
+            // The value that means "no change", drawn and NAMED. For an
+            // automation lane that is x1 — its neutral sits a quarter of the way
+            // up a 0..4 strip, so "am I boosting or cutting" was a judgement
+            // about pixel height. For a life curve it is 0, which used not to be
+            // drawn at all until the curve had already gone negative
+            // (`floptle/0098`).
+            let multiplier = lane_fixed_range(track, lref).is_some();
+            let neutral = if multiplier { 1.0 } else { 0.0 };
+            let weak = ui.visuals().weak_text_color();
+            if (lo..=hi).contains(&neutral) {
+                let y = v_to_y(neutral);
                 painter.line_segment(
-                    [Pos2::new(strip.left(), y1), Pos2::new(strip.right(), y1)],
-                    Stroke::new(0.5, ui.visuals().weak_text_color().gamma_multiply(0.4)),
+                    [Pos2::new(strip.left(), y), Pos2::new(strip.right(), y)],
+                    Stroke::new(1.0, weak.gamma_multiply(0.75)),
+                );
+                painter.text(
+                    Pos2::new(strip.right() - 2.0, y - 1.0),
+                    Align2::RIGHT_BOTTOM,
+                    if multiplier { "x1" } else { "0" },
+                    FontId::proportional(8.0),
+                    weak,
                 );
             }
+            // What the strip's top and bottom actually mean. Without these the
+            // lane is a shape in an unlabelled box.
+            painter.text(
+                Pos2::new(strip.left() + 2.0, strip.top() + 1.0),
+                Align2::LEFT_TOP,
+                lane_axis_label(hi),
+                FontId::proportional(8.0),
+                weak,
+            );
+            painter.text(
+                Pos2::new(strip.left() + 2.0, strip.bottom() - 1.0),
+                Align2::LEFT_BOTTOM,
+                lane_axis_label(lo),
+                FontId::proportional(8.0),
+                weak,
+            );
             let mut pts = Vec::new();
             let n = 48;
             let dch = channel.unwrap_or(0);
