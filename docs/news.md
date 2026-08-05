@@ -1,5 +1,25 @@
 ## Just shipped
 
+**v0.37.0 "The View That Is The Game"** — a 2D level draws in the Game view. The
+editor works out what to draw twice — once for the Scene view, once for every
+other view — and the second one had never learned about tilemaps or sprite
+batches, so a 2D game was invisible in the one view that IS the game while the
+Scene view insisted the level was fine. It has been that way since the 2D layer
+arrived. A tileset now carries its own art instead of describing a sheet it did
+not draw: point it at an image and it draws, drop images onto the sheets list to
+add more, and the grid is worked out from the filename or the pixel size rather
+than counted by hand. Nothing had ever uploaded a tileset's sheet to the graphics
+card at all — only Material textures — so the extra sheets added last release
+have never worked on their own. Setting up an autotile is now clicking a shape
+and then the tile that draws it, one rule at a time, each visible as art; it used
+to mean selecting every tile in the preset's own order and pressing one button,
+with nothing showing what went where. And painting with an autotile no longer
+depends on a checkbox elsewhere in the panel, which when unticked silently placed
+one fixed corner piece everywhere. Finally: sorting layers. What draws in front
+is a named layer with an order inside it, referenced by name so reordering the
+list cannot re-sort a scene, and offsetting what is drawn rather than moving
+anything.
+
 **v0.36.0 "In Plain Sight"** — animated characters stop flickering. v0.35.0 moved
 skinning onto the graphics card and left the depth pass posing the skeleton from
 one frame ago, so it decided the shape of a character standing where they had
