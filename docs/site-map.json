@@ -1,0 +1,155 @@
+{
+  "//": "Which docs fopull.com publishes, in what order, under what heading. Read by scripts/build-docs-feed.sh, which emits the docs.json the website renders; see contracts/engine-site-feed.md in floptle-platform.",
+
+  "//why": "Every page under docs/ is already public — the repo is open source — so this is not about secrecy. It is curation: a docs SITE is a finished surface, and this tree also holds the working material that got us here (handoffs, roadmaps, proposals, a checklist for one game's netcode). Publishing those alongside the guides makes the guides look like drafts.",
+
+  "//maintenance": "A page's title and its one-line summary come from the page itself — the H1 and the first sentence — so adding a doc is not two jobs. What you must do is CLASSIFY it: `every_doc_is_classified` fails until a new file is listed here or in `internal`, and names the file. That failure is the point. Silence would mean a new guide never reaches the site, or an internal note quietly does.",
+
+  "sections": [
+    {
+      "id": "start",
+      "title": "Start here",
+      "blurb": "Install it, get something on screen, walk around in it.",
+      "pages": ["getting-started.md", "tutorials/first-steps.md", "tutorials/for-programmers.md"]
+    },
+    {
+      "id": "tutorials",
+      "title": "Follow-along projects",
+      "blurb": "Whole small games, step by step. The same steps are in the editor's Learn tab, where each one ticks itself off as your project comes to match it.",
+      "pages": ["tutorials/platformer.md", "tutorials/topdown.md", "tutorials/flappy.md"]
+    },
+    {
+      "id": "scripting",
+      "title": "Scripting",
+      "blurb": "Lua, and every call the engine answers.",
+      "pages": ["scripting.md", "lua-api.md", "web-api.md"]
+    },
+    {
+      "id": "building",
+      "title": "Building a world",
+      "blurb": "The tools that come with the engine, rather than around it.",
+      "pages": [
+        "map-tools.md",
+        "2d.md",
+        "tilemaps.md",
+        "image-editor.md",
+        "animation.md",
+        "physics.md",
+        "render-targets.md"
+      ]
+    },
+    {
+      "id": "interface",
+      "title": "Menus and HUDs",
+      "blurb": "The UI layer, from the tab that draws it to the code that binds it.",
+      "pages": ["ui-tab.md", "ui-styles.md", "ui-make.md", "ui-navigation.md", "ui-demo.md"]
+    },
+    {
+      "id": "shipping",
+      "title": "Shipping a game",
+      "blurb": "Getting it to players, and to more of them.",
+      "pages": ["export-builds.md", "multiplayer.md", "accessibility.md", "updating-the-hub.md"]
+    },
+    {
+      "id": "engine",
+      "title": "How the engine works",
+      "blurb": "Each subsystem, in its own words. Read these to find out what the engine can actually do.",
+      "pages": [
+        "ARCHITECTURE.md",
+        "subsystems/renderer.md",
+        "subsystems/scene-and-nodes.md",
+        "subsystems/editor.md",
+        "subsystems/physics.md",
+        "subsystems/physics-slices.md",
+        "subsystems/deformable-matter.md",
+        "subsystems/materials-and-textures.md",
+        "subsystems/shaders.md",
+        "subsystems/shadows.md",
+        "subsystems/light.md",
+        "subsystems/post-processing.md",
+        "subsystems/particles-vfx.md",
+        "subsystems/animation.md",
+        "subsystems/audio.md",
+        "subsystems/input.md",
+        "subsystems/ui.md",
+        "subsystems/asset-pipeline.md",
+        "subsystems/object-pooling.md",
+        "subsystems/large-world-space.md",
+        "subsystems/gravity-and-density.md",
+        "subsystems/field-interaction.md",
+        "subsystems/world-rules.md",
+        "subsystems/time.md",
+        "subsystems/camera-and-dialogue.md",
+        "subsystems/networking-future.md"
+      ]
+    },
+    {
+      "id": "why",
+      "title": "Why it is built this way",
+      "blurb": "The decisions, each with the alternative it beat and what it cost. Written when the decision was made, not afterwards.",
+      "pages": [
+        "VISION.md",
+        "decisions/0001-language-rust.md",
+        "decisions/0002-render-backend-wgpu.md",
+        "decisions/0003-scripting-lua.md",
+        "decisions/0004-editor-egui.md",
+        "decisions/0005-scene-model-ecs-node-hybrid.md",
+        "decisions/0006-asset-pipeline-gltf.md",
+        "decisions/0007-shader-ir.md",
+        "decisions/0008-object-pooling.md",
+        "decisions/0009-license.md",
+        "decisions/0010-temporary-assets.md",
+        "decisions/0011-vscode-integration.md",
+        "decisions/0012-physics-sdf-first.md",
+        "decisions/0013-deformable-matter.md",
+        "decisions/0014-gravity-fields.md",
+        "decisions/0015-large-world-space.md",
+        "decisions/0016-programmable-light.md",
+        "decisions/0017-time-as-a-field.md",
+        "decisions/0018-lawset-realm.md",
+        "decisions/0019-field-interaction-graph.md",
+        "decisions/0020-fractal-shape-primitive.md",
+        "decisions/0021-hub-and-distribution.md",
+        "decisions/0022-networking-and-cloud.md",
+        "decisions/0023-audio-system.md",
+        "decisions/0024-input-action-map.md",
+        "decisions/0025-rollback-netcode.md",
+        "decisions/0026-body-vs-body-contacts-and-the-rollback-contract.md"
+      ]
+    }
+  ],
+
+  "internal": {
+    "//": "Working material. Public in the repo, deliberately not on the site — each line says why, because 'it wasn't on the list' is not a reason anybody can check later.",
+
+    "README.md": "the docs index — becomes the site's navigation, not a page in it",
+    "HANDOFF.md": "cold-start orientation for whoever picks the engine up next; it is about the work, not the engine",
+    "ROADMAP.md": "unshipped intentions — a docs site that lists them reads as a list of things the engine does not do",
+    "engine-roadmap.md": "same, and sequenced by task id",
+    "game-roadmap.md": "the roadmap for a game built IN the engine, not for the engine",
+    "solar-demo-plan.md": "the build plan for one demo game",
+    "rollback-p7-fofighter-checklist.md": "a checklist for one game's netcode bring-up",
+    "scripting-experience-handoff.md": "a handoff between work sessions",
+    "netcode-design.md": "design notes superseded by multiplayer.md, which is the guide",
+    "rollback-netcode-design.md": "same",
+    "news.md": "reaches the site through the releases manifest's `news`, not as a docs page",
+    "releases/STYLE.md": "how release notes are written — a rule for us, not a doc for a player",
+    "releases/": "every version's notes already reach the site through the releases manifest, which carries them in full; re-publishing them as docs pages would be the same text at a second URL",
+    "animation-system-proposal.md": "a proposal; the shipped guide is animation.md",
+    "galaxy-streaming-proposal.md": "a proposal for unshipped work",
+    "hub-proposal.md": "a proposal; the shipped guide is updating-the-hub.md",
+    "image-editor-proposal.md": "a proposal; the shipped guide is image-editor.md",
+    "map-tools-proposal.md": "a proposal; the shipped guide is map-tools.md",
+    "networking-proposal.md": "a proposal; the shipped guide is multiplayer.md",
+    "particle-system-proposal.md": "a proposal; the shipped reference is subsystems/particles-vfx.md",
+    "scripting-experience-proposal.md": "a proposal; the shipped guide is scripting.md",
+    "shader-system-proposal.md": "a proposal; the shipped reference is subsystems/shaders.md",
+    "terrain-mesh-proposal.md": "a proposal; the shipped reference is subsystems/deformable-matter.md",
+    "ui-system-proposal.md": "a proposal; the shipped guides are the ui-*.md set",
+    "ui-system-2-proposal.md": "same",
+    "vertex-paint-proposal.md": "a proposal; the shipped reference is subsystems/materials-and-textures.md",
+    "decisions/README.md": "folder index — the section heading covers it",
+    "subsystems/README.md": "folder index — the section heading covers it",
+    "tutorials/README.md": "folder index — the section heading covers it"
+  }
+}

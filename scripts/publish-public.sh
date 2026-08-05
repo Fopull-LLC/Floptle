@@ -27,7 +27,10 @@ gh release upload "$TAG" "$WORK"/* --clobber --repo "$PUBLIC"
 echo "updating the manifest release…"
 gh release create manifest --repo "$PUBLIC" --title "Release manifest" --prerelease \
   --notes "Machine-readable version manifest for the Floptle Hub — not a download page." 2>/dev/null || true
-gh release upload manifest "$WORK/releases.json" --clobber --repo "$PUBLIC"
+# `docs.json` rides along: the website reads both from this one stable release,
+# and a manifest updated without its docs feed would leave fopull.com describing
+# the previous version's engine beside the current version's download.
+gh release upload manifest "$WORK/releases.json" "$WORK/docs.json" --clobber --repo "$PUBLIC"
 # Keep /releases/latest on the real bundles, never the manifest holder.
 gh release edit manifest --repo "$PUBLIC" --prerelease
 case "$TAG" in *-*) ;; *) gh release edit "$TAG" --repo "$PUBLIC" --latest;; esac

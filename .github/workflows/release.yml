@@ -212,6 +212,16 @@ jobs:
           scripts/embed-release-notes.sh releases.json docs/releases docs/news.md
           jq '{schema, channels, news: (.news | length), versions: [.versions[] | {version, title, notes: (.notes | length), changed: (.changed // "both"), engine: (.artifacts | keys), hub: (.hub_artifacts // {} | keys)}]}' releases.json
 
+      # The docs feed fopull.com renders (contracts/engine-site-feed.md). It rides
+      # the release rather than the website reading `main`, for the same reason the
+      # notes do: docs describe a BUILD. Scraping the branch would put a guide to
+      # an unreleased feature next to a download button for the version without it.
+      - name: Build the docs feed
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/build-docs-feed.sh docs.json docs "${GITHUB_REF_NAME#v}"
+
       # The release notes ARE docs/releases/<tag>.md. One file, written once, shown on the
       # GitHub release page and inside the Hub — rather than a page nobody reads saying
       # "Automated release v0.21.0" beside a document that says what actually changed.
@@ -239,7 +249,7 @@ jobs:
           shopt -s nullglob
           BUNDLES=(artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip)
           gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes-file NOTES.md || true
-          gh release upload "$TAG" "${BUNDLES[@]}" releases.json --clobber --repo "$REPO"
+          gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json --clobber --repo "$REPO"
 
       - name: Publish to the public releases repo
         env:
@@ -256,13 +266,13 @@ jobs:
           shopt -s nullglob
           BUNDLES=(artifacts/*/floptle-*.tar.gz artifacts/*/floptle-*.zip)
           gh release create "$TAG" --repo "$PUBLIC_REPO" --title "$TAG" --notes-file NOTES.md || true
-          gh release upload "$TAG" "${BUNDLES[@]}" releases.json --clobber --repo "$PUBLIC_REPO"
+          gh release upload "$TAG" "${BUNDLES[@]}" releases.json docs.json --clobber --repo "$PUBLIC_REPO"
           # A stable 'manifest' release so the Hub's default manifest URL always resolves to
           # the newest list (releases/download/manifest/releases.json). It's a PRERELEASE
           # and the version release is explicitly marked LATEST: GitHub otherwise crowns
           # the most recently CREATED release, which made /releases/latest land on the
           # manifest holder (a page with no downloads) instead of the real bundles.
           gh release create manifest --repo "$PUBLIC_REPO" --title "Release manifest" --prerelease --notes "Machine-readable version manifest for the Floptle Hub — not a download page. Get Floptle from the LATEST release instead." || true
-          gh release upload manifest releases.json --clobber --repo "$PUBLIC_REPO"
+          gh release upload manifest releases.json docs.json --clobber --repo "$PUBLIC_REPO"
           gh release edit manifest --repo "$PUBLIC_REPO" --prerelease
           case "$TAG" in *-*) ;; *) gh release edit "$TAG" --repo "$PUBLIC_REPO" --latest;; esac

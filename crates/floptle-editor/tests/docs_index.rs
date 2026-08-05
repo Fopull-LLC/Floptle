@@ -85,6 +85,97 @@ fn every_release_has_notes_with_a_title() {
     assert!(bad.is_empty(), "release notes with no heading:\n  {}", bad.join("\n  "));
 }
 
+/// Every `.md` under `docs/` is either published to fopull.com or explicitly not.
+///
+/// `docs/site-map.json` decides which docs the website renders. A file in neither
+/// list is the failure this exists to prevent, and it fails in the expensive
+/// direction silently: a new guide simply never appears on the site, and nobody
+/// finds out from the site, because a missing page looks exactly like a page
+/// nobody wrote. Being told which file, at the moment it is added, is the
+/// difference.
+///
+/// Note this asks for a DECISION, not for publication — "internal, because it is
+/// a proposal" is a perfectly good answer and the map records the reason.
+#[test]
+fn every_doc_is_classified_for_the_website() {
+    let root = repo().join("docs");
+    let map = std::fs::read_to_string(root.join("site-map.json")).expect("docs/site-map.json");
+    let mut unclassified: Vec<String> = Vec::new();
+    for rel in all_docs(&root) {
+        // A quoted whole-path match: bare `contains("physics.md")` would also
+        // hit `"subsystems/physics.md"` and call the wrong file classified.
+        if map.contains(&format!("\"{rel}\"")) {
+            continue;
+        }
+        // A trailing-slash key covers a whole folder — `docs/releases/` reaches
+        // the site through the release manifest rather than page by page.
+        if rel
+            .rmatch_indices('/')
+            .any(|(i, _)| map.contains(&format!("\"{}/\"", &rel[..i])))
+        {
+            continue;
+        }
+        unclassified.push(rel);
+    }
+    unclassified.sort();
+    assert!(
+        unclassified.is_empty(),
+        "{} doc(s) are in neither the published set nor the internal list in \
+         docs/site-map.json, so the website silently does not have them:\n  {}",
+        unclassified.len(),
+        unclassified.join("\n  ")
+    );
+}
+
+/// …and every page the site map promises has to exist.
+///
+/// The other half of the same guarantee: renaming a doc without touching the map
+/// drops it from the website, and the website has no way to notice — it is handed
+/// a list and renders what it gets.
+#[test]
+fn the_site_map_only_promises_pages_that_exist() {
+    let root = repo().join("docs");
+    let map = std::fs::read_to_string(root.join("site-map.json")).expect("docs/site-map.json");
+    // Path-shaped strings only. The `internal` map's REASONS routinely end in a
+    // filename ("a proposal; the shipped guide is animation.md"), and reading
+    // those as promises makes this test fail on its own prose.
+    let listed: Vec<String> = map
+        .split('"')
+        .filter(|s| s.ends_with(".md") && !s.contains(char::is_whitespace))
+        .map(|s| s.to_owned())
+        .collect();
+    assert!(listed.len() > 50, "only {} pages parsed out of the site map", listed.len());
+    let missing: Vec<&String> = listed.iter().filter(|p| !root.join(p).exists()).collect();
+    assert!(
+        missing.is_empty(),
+        "docs/site-map.json lists {} page(s) that do not exist:\n  {}",
+        missing.len(),
+        missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n  ")
+    );
+}
+
+/// Every `.md` under `docs/`, relative to it, with `/` separators.
+fn all_docs(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "md") {
+                out.push(
+                    p.strip_prefix(root)
+                        .unwrap_or(&p)
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+    out
+}
+
 /// Relative links between docs must actually resolve.
 ///
 /// A dead link in an index is worse than no index: it reads as "this exists"
