@@ -7,8 +7,9 @@
 //!
 //! The container is shaped like `.tpaint` (magic + version + header + PNG-
 //! compressed payloads) for the same reason: layers are mostly flat and PNG
-//! shrinks them by an order of magnitude. A version mismatch is **refused, not
-//! scrambled**.
+//! shrinks them by an order of magnitude. A version from the FUTURE is
+//! **refused, not scrambled**; a version from the past is read with the fields
+//! it had, because adding a field must never cost anybody their art.
 
 use std::path::Path;
 
@@ -22,9 +23,21 @@ use crate::vector::VPath;
 use crate::Blend;
 
 const MAGIC: &[u8; 4] = b"FLIM";
-/// v1: the first shipped layout. Bump ONLY with a matching reader, and refuse
-/// anything you don't recognise (the `.tpaint` v1→v2 rule).
-pub const VERSION: u16 = 1;
+/// The layout this build WRITES. Bump it together with a reader that still
+/// handles every version back to [`MIN_VERSION`], and append new fields at the
+/// end so the older layout's byte offsets are untouched.
+///
+/// * v1 — the first shipped layout.
+/// * v2 — the sheet cell grid ([`V_SHEET`]).
+pub const VERSION: u16 = 2;
+
+/// The oldest container this build reads. Versions between this and
+/// [`VERSION`] are read with the fields they had — a `.flimg` written before a
+/// field existed must keep opening, or adding one costs everybody their art.
+const MIN_VERSION: u16 = 1;
+
+/// The version that added the sheet cell grid ([`Image::sheet`]).
+const V_SHEET: u16 = 2;
 
 /// The document file extension.
 pub const DOC_EXT: &str = "flimg";
@@ -213,6 +226,13 @@ pub fn encode(img: &Image) -> Vec<u8> {
             }
         }
     }
+    // v2: the sheet cell grid, appended AFTER the layers so a v1 file's bytes
+    // are unchanged up to here and the old reader's offsets all still hold.
+    // `0, 0` means "not a sheet" — one spelling, so a half-written pair cannot
+    // mean something.
+    let (sc, sr) = img.sheet.unwrap_or((0, 0));
+    put_u32(&mut o, sc);
+    put_u32(&mut o, sr);
     o
 }
 
@@ -223,7 +243,8 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
         return None;
     }
     let mut r = Rd { b: bytes, p: 4 };
-    if r.u16()? != VERSION {
+    let version = r.u16()?;
+    if !(MIN_VERSION..=VERSION).contains(&version) {
         return None;
     }
     let w = r.u32()?;
@@ -302,7 +323,18 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
     if layers.is_empty() {
         layers.push(Layer::raster("Layer 1", w, h));
     }
+    // A file written before the sheet grid existed simply has no cell grid;
+    // that is the honest answer, not a guessed one.
+    let sheet = if version >= V_SHEET {
+        match (r.u32()?, r.u32()?) {
+            (0, _) | (_, 0) => None,
+            (c, s) => Some((c, s)),
+        }
+    } else {
+        None
+    };
     Some(Image {
+        sheet,
         w,
         h,
         mode,
@@ -499,5 +531,57 @@ mod tests {
     fn path_helpers_pair_up() {
         assert_eq!(png_path_for(Path::new("a/b.flimg")), Path::new("a/b.png"));
         assert_eq!(doc_path_for(Path::new("a/b.png")), Path::new("a/b.flimg"));
+    }
+
+    /// The sheet cell grid is a fact about the art, so it must survive the file.
+    #[test]
+    fn the_sheet_cell_grid_round_trips() {
+        let mut img = sample_doc();
+        img.sheet = Some((3, 2));
+        let back = decode(&encode(&img)).expect("decodes");
+        assert_eq!(back.sheet, Some((3, 2)));
+        assert_eq!(back.cell_size(), Some((8, 8)), "24x16 cut 3x2 is 8x8 cells");
+
+        img.sheet = None;
+        assert_eq!(decode(&encode(&img)).unwrap().sheet, None);
+    }
+
+    /// A grid that does not divide the canvas evenly has no cell size — a 10.6
+    /// px cell is a mistake to draw against, not a number to round.
+    #[test]
+    fn a_grid_that_does_not_divide_the_canvas_has_no_cell_size() {
+        let mut img = Image::new(24, 16, Mode::Pixel);
+        img.sheet = Some((5, 2));
+        assert_eq!(img.cell_size(), None);
+        img.sheet = Some((0, 0));
+        assert_eq!(img.cell_size(), None);
+    }
+
+    /// Adding a field to the container must not cost anybody their art: a file
+    /// written by the build before it still opens, with the field defaulted.
+    ///
+    /// Built by taking a real v2 file, stamping the version back to 1 and
+    /// dropping the bytes v1 did not have — which is byte-for-byte what the old
+    /// encoder wrote.
+    #[test]
+    fn a_file_from_the_previous_version_still_opens() {
+        let mut img = sample_doc();
+        img.sheet = Some((4, 4));
+        let mut bytes = encode(&img);
+        bytes.truncate(bytes.len() - 8); // the two u32s v1 did not write
+        bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+        let back = decode(&bytes).expect("a v1 document must still open");
+        assert_eq!(back.sheet, None, "it had no cell grid, and none is invented");
+        assert_eq!((back.w, back.h), (img.w, img.h));
+        assert_eq!(back.layers.len(), img.layers.len());
+    }
+
+    /// And a version this build has never heard of is still refused outright,
+    /// rather than half-read into something that looks like a document.
+    #[test]
+    fn a_version_from_the_future_is_refused() {
+        let mut bytes = encode(&sample_doc());
+        bytes[4..6].copy_from_slice(&(VERSION + 1).to_le_bytes());
+        assert!(decode(&bytes).is_none());
     }
 }

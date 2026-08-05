@@ -43,6 +43,19 @@ pub(crate) struct ImageCtx<'a> {
     pub(crate) cmd: &'a mut EditorCmd,
 }
 
+/// A first cell grid for a canvas that has just been declared a sheet: the
+/// largest square cell that divides both sides and leaves at least a 2x2 of
+/// them. Better than `1x1`, and always overridable — the point is that the
+/// numbers start somewhere plausible, not that they are guessed correctly.
+fn guess_sheet(w: u32, h: u32) -> (u32, u32) {
+    for px in [64u32, 48, 32, 24, 16, 8] {
+        if w.is_multiple_of(px) && h.is_multiple_of(px) && w / px >= 2 && h / px >= 2 {
+            return (w / px, h / px);
+        }
+    }
+    (1, 1)
+}
+
 impl ImageCtx<'_> {
     pub(crate) fn ui(&mut self, ui: &mut egui::Ui) {
         self.st.tab_visible = true;
@@ -134,6 +147,7 @@ impl ImageCtx<'_> {
                 self.image_layer_menu(ui);
                 self.image_select_menu(ui);
                 self.image_filter_menu(ui);
+                self.image_view_menu(ui);
                 ui.separator();
                 // Undo / redo, tab-local (Ctrl+Z over the canvas).
                 if ui
@@ -173,6 +187,148 @@ impl ImageCtx<'_> {
                 ui.label(RichText::new(self.st.title()).small().weak());
             });
         });
+    }
+
+    /// **View** — the overlays, and the sheet grid you draw a tileset against.
+    ///
+    /// The two toggles here had no UI at all before: `show_grid` and
+    /// `show_checker` were fields hard-coded to `true` and reachable from
+    /// nowhere. Everything below them was a literal in the draw code
+    /// (`floptle/0096`, `floptle/0097`).
+    fn image_view_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("View", |ui| {
+            let before = self.st.look;
+            let l = &mut self.st.look;
+
+            ui.checkbox(&mut l.checker, "Transparency checker");
+            ui.add_enabled_ui(l.checker, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    ui.color_edit_button_srgb(&mut l.checker_a);
+                    ui.color_edit_button_srgb(&mut l.checker_b);
+                    ui.add(
+                        egui::DragValue::new(&mut l.checker_px)
+                            .range(2.0..=64.0)
+                            .speed(0.5)
+                            .suffix(" px"),
+                    )
+                    .on_hover_text("square edge in SCREEN pixels, so it looks the same at any zoom");
+                });
+            });
+
+            ui.separator();
+            ui.checkbox(&mut l.pixel_grid, "Pixel grid").on_hover_text("one line per texel");
+            ui.add_enabled_ui(l.pixel_grid, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    ui.color_edit_button_srgb(&mut l.pixel_grid_color);
+                    ui.add(egui::DragValue::new(&mut l.pixel_grid_alpha).range(0..=255).prefix("α "));
+                    ui.add(
+                        egui::DragValue::new(&mut l.pixel_grid_zoom)
+                            .range(1.0..=32.0)
+                            .speed(0.2)
+                            .prefix("from "),
+                    )
+                    .on_hover_text("zoom below which the grid is more noise than grid");
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    ui.checkbox(&mut l.pixel_grid_two_tone, "Two-tone")
+                        .on_hover_text(
+                            "dark dashes over the light line, so one of the two shows against \
+                             art of any colour — legible without being configured for it",
+                        );
+                });
+            });
+
+            ui.separator();
+            // The cell grid needs a sheet to draw, and the sheet is a property of
+            // the IMAGE — so its numbers are here, beside the toggle that shows
+            // them, rather than in a settings file the art does not travel with.
+            ui.checkbox(&mut l.cell_grid, "Sheet cell grid");
+            ui.add_enabled_ui(l.cell_grid, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    ui.color_edit_button_srgb(&mut l.cell_grid_color);
+                    ui.add(egui::DragValue::new(&mut l.cell_grid_alpha).range(0..=255).prefix("α "));
+                });
+            });
+            let look = *l;
+            if look != before {
+                crate::prefs::save_canvas_look(&look);
+            }
+            if ui.button("Reset overlays to defaults").clicked() {
+                self.st.look = crate::prefs::CanvasLook::default();
+                crate::prefs::save_canvas_look(&self.st.look);
+            }
+
+            ui.separator();
+            self.image_sheet_controls(ui);
+        });
+    }
+
+    /// The image's own cell grid: how many cells across and down it is cut into.
+    ///
+    /// Offered as a **cell size** as well as a count, because that is the number
+    /// a pixel artist has in their head ("16x16 tiles"), and refusing a grid that
+    /// does not divide the canvas evenly, because a 10.6-px cell is a mistake to
+    /// draw against rather than a number to round.
+    fn image_sheet_controls(&mut self, ui: &mut egui::Ui) {
+        let Some((w, h)) = self.st.doc.as_ref().map(|d| (d.w, d.h)) else { return };
+        let mut sheet = self.st.doc.as_ref().and_then(|d| d.sheet);
+        let mut on = sheet.is_some();
+        let mut changed = false;
+        if ui
+            .checkbox(&mut on, "This image is a sheet")
+            .on_hover_text("its cell grid is saved with the image, and drawn over it as you work")
+            .changed()
+        {
+            // A first guess from the canvas rather than 1x1: a square cell that
+            // divides both sides is what a sheet almost always is.
+            sheet = on.then(|| guess_sheet(w, h));
+            changed = true;
+        }
+        if let Some((c, r)) = sheet.as_mut() {
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                changed |= ui
+                    .add(egui::DragValue::new(c).range(1..=1024).speed(0.2).prefix("cols "))
+                    .changed();
+                changed |= ui
+                    .add(egui::DragValue::new(r).range(1..=1024).speed(0.2).prefix("rows "))
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                if w.is_multiple_of(*c) && h.is_multiple_of(*r) {
+                    ui.small(format!("{}×{} px per cell", w / *c, h / *r));
+                } else {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 200, 80),
+                        format!("⚠ {w}×{h} does not divide into {c}×{r}"),
+                    );
+                    ui.small("no grid is drawn until it does");
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                ui.small("cell size");
+                for px in [8u32, 16, 24, 32, 48, 64] {
+                    if w.is_multiple_of(px)
+                        && h.is_multiple_of(px)
+                        && ui.small_button(format!("{px}")).clicked()
+                    {
+                        *c = w / px;
+                        *r = h / px;
+                        changed = true;
+                    }
+                }
+            });
+        }
+        if changed && let Some(d) = self.st.doc.as_mut() {
+            d.sheet = sheet;
+            self.st.mark_dirty();
+        }
     }
 
     fn image_file_menu(&mut self, ui: &mut egui::Ui) {

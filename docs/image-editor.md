@@ -99,6 +99,34 @@ Nothing moves on its own: the view is never re-centred or re-fitted except when
 you ask. Opening a document is the single exception, because there is no previous
 view to preserve.
 
+### What the cursor tells you
+
+The brush telegraph outlines **the texels the brush is actually going to
+change**, on the pixel grid, taken from the brush's own footprint. A one-pixel
+pencil shows one square texel under the cursor — not a small circle floating
+between them. A soft brush shows two contours: the solid one is where the brush
+is, the faint one is how far it reaches, so a soft brush never claims a hard edge
+and a hard one is never given a halo it does not have.
+
+Very large brushes and very low zooms fall back to a plain circle: at that size
+there is nothing to learn from the exact texels.
+
+### View ▸ the overlays
+
+Everything drawn over your art is yours to set, because whether an overlay is
+visible depends on art nobody can predict.
+
+| Setting | Notes |
+|---|---|
+| Transparency checker | Both colours and the square size (in **screen** pixels, so it looks the same at any zoom) |
+| Pixel grid | Colour, opacity, and the zoom it starts appearing at |
+| Pixel grid ▸ Two-tone | Dark dashes over the light line, so one of the two shows against art of any colour. On by default — legible without being configured for it |
+| Sheet cell grid | Colour and opacity; see §9 |
+
+**Reset overlays to defaults** puts them all back. These are per-user settings,
+saved beside your other preferences — how you like to look at images, rather than
+a fact about one image.
+
 ### Tools
 
 Letter keys, live only while this tab has focus (the viewport's tool digits are
@@ -270,6 +298,22 @@ frames are wired straight into that.
   and writes `cols`/`rows` into `.floptle/textures.ron` — so the sheet the packer
   makes is exactly the sheet the runtime can address. No manual counting.
 - **Frames → animated GIF** for sharing.
+
+### Drawing a tileset: the cell grid
+
+A sheet is a uniform grid of cells, and until you can see that grid you are
+counting texels by hand to find where tile 3 starts.
+
+**View ▸ This image is a sheet** turns the grid on and saves it *with the image*,
+because how the art is cut is a fact about the art: close the file, reopen it,
+the grid is still there. Set it as **cols × rows**, or click a **cell size**
+(8, 16, 24, 32, 48, 64) and the counts follow.
+
+A grid that does not divide the canvas evenly draws nothing and says so — a
+10.6-pixel cell is a mistake to draw against, not a number to round.
+
+The cell grid is deliberately not a heavier pixel grid: it is a different colour,
+about a different unit, and it draws over the pixel grid where the two coincide.
 
 ---
 

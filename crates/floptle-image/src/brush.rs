@@ -111,6 +111,41 @@ impl Brush {
         }
     }
 
+    /// The dab's own footprint: coverage `0..1` for every pixel of
+    /// [`Self::dab_rect`], row-major.
+    ///
+    /// This exists so the editor's cursor telegraph can be drawn from what the
+    /// brush will *actually* stamp rather than re-derived from `radius`. Derived
+    /// twice, the two disagreed: a one-pixel pencil drew a small circle floating
+    /// between texels while a single square texel landed (`floptle/0094`). One
+    /// function, one answer, and a new brush shape cannot ship with a preview
+    /// that does not know about it.
+    ///
+    /// Cheap for the sizes a preview is worth drawing per-texel at; the caller
+    /// decides where to stop (see [`Self::footprint_is_cheap`]).
+    pub fn footprint(&self, x: f32, y: f32) -> (Rect, Vec<f32>) {
+        let rect = self.dab_rect(x, y);
+        let mut cov = Vec::with_capacity((rect.w * rect.h) as usize);
+        for row in 0..rect.h as i32 {
+            for col in 0..rect.w as i32 {
+                let (cx, cy) = (rect.x + col, rect.y + row);
+                let d = ((cx as f32 + 0.5 - x).powi(2) + (cy as f32 + 0.5 - y).powi(2)).sqrt();
+                cov.push(self.coverage(d));
+            }
+        }
+        (rect, cov)
+    }
+
+    /// Whether a per-texel footprint is worth building rather than approximating.
+    ///
+    /// A radius-300 brush is 360,000 cells and its outline is a circle anyway —
+    /// there is nothing to learn from the exact texels, and building them every
+    /// frame the cursor moves is not free.
+    pub fn footprint_is_cheap(&self) -> bool {
+        let r = self.radius.max(0.5) + 1.0;
+        (2.0 * r) * (2.0 * r) <= 4096.0
+    }
+
     /// The pixel box one dab touches, centred on (x, y) in *canvas* space.
     pub fn dab_rect(&self, x: f32, y: f32) -> Rect {
         let r = self.radius.max(0.5) + 1.0;
@@ -850,5 +885,81 @@ mod tests {
         clear_region(&mut g, Rect::size(16, 16), Some(&sel));
         assert_eq!(g.get(5, 5)[3], 0);
         assert_eq!(g.get(1, 1)[3], 255);
+    }
+
+    // ---- floptle/0094: the telegraph and the stamp must agree ----------------
+
+    /// The preview's contour is drawn at coverage >= 0.5, so every texel it
+    /// claims must actually change — and nothing outside the footprint may.
+    #[test]
+    fn the_footprint_is_the_texels_the_dab_actually_changes() {
+        for (radius, pixel, hardness) in
+            [(0.5f32, true, 1.0f32), (1.0, true, 1.0), (3.0, true, 1.0), (4.0, false, 1.0), (5.0, false, 0.2)]
+        {
+            let b = Brush { radius, pixel_perfect: pixel, hardness, ..Brush::default() };
+            let (w, h) = (32u32, 32u32);
+            let mut grid = TileGrid::new(w, h);
+            let ctx = DabCtx::simple(w, h);
+            let mut st = StrokeState::default();
+            let (x, y) = (16.3f32, 16.7f32);
+            stamp(&mut grid, &b, x, y, [255, 0, 0, 255], &ctx, &mut st);
+
+            let (rect, cov) = b.footprint(x, y);
+            let mut claimed = 0;
+            for row in 0..rect.h as i32 {
+                for col in 0..rect.w as i32 {
+                    let (px, py) = (rect.x + col, rect.y + row);
+                    let c = cov[row as usize * rect.w as usize + col as usize];
+                    let painted = grid.get(px as i64, py as i64)[3] > 0;
+                    if c >= 0.5 {
+                        claimed += 1;
+                        assert!(
+                            painted,
+                            "r={radius} pixel={pixel}: the outline claims ({px},{py}) and \
+                             nothing was painted there"
+                        );
+                    }
+                    if painted {
+                        assert!(c > 0.0, "r={radius}: ({px},{py}) painted, outside the footprint");
+                    }
+                }
+            }
+            assert!(claimed > 0, "r={radius}: a dab that outlines nothing");
+            // Nothing outside the footprint rect was touched at all.
+            for y0 in 0..h as i32 {
+                for x0 in 0..w as i32 {
+                    let inside = x0 >= rect.x
+                        && y0 >= rect.y
+                        && x0 < rect.x + rect.w as i32
+                        && y0 < rect.y + rect.h as i32;
+                    if !inside {
+                        assert_eq!(grid.get(x0 as i64, y0 as i64)[3], 0, "r={radius}: paint outside dab_rect");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The reported case: a one-pixel pencil paints ONE square texel, so its
+    /// telegraph is one square texel — not a circle floating between them.
+    #[test]
+    fn a_one_pixel_pencil_outlines_exactly_one_texel() {
+        let b = Brush::default(); // radius 0.5, pixel-perfect — the pencil
+        let (rect, cov) = b.footprint(8.5, 8.5);
+        let claimed: Vec<(i32, i32)> = (0..rect.h as i32)
+            .flat_map(|row| (0..rect.w as i32).map(move |col| (col, row)))
+            .filter(|(col, row)| cov[*row as usize * rect.w as usize + *col as usize] >= 0.5)
+            .map(|(col, row)| (rect.x + col, rect.y + row))
+            .collect();
+        assert_eq!(claimed, vec![(8, 8)], "one texel, and it is the one under the cursor");
+    }
+
+    /// A big brush is a circle whatever its texels say, and building 360,000 of
+    /// them every frame the cursor moves is not free — the caller is told where
+    /// to stop rather than finding out in a profile.
+    #[test]
+    fn a_huge_brush_declines_the_per_texel_footprint() {
+        assert!(Brush { radius: 8.0, ..Brush::default() }.footprint_is_cheap());
+        assert!(!Brush { radius: 300.0, ..Brush::default() }.footprint_is_cheap());
     }
 }

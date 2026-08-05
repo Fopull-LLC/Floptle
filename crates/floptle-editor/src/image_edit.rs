@@ -352,8 +352,9 @@ pub(crate) struct ImageEditState {
     /// Set once when a document opens; the view is never re-fitted after that.
     pub(crate) fit_pending: bool,
     pub(crate) tiled_view: bool,
-    pub(crate) show_grid: bool,
-    pub(crate) show_checker: bool,
+    /// How the overlays draw — colours, opacities, and the zoom the pixel grid
+    /// starts at. Per-user, loaded once and saved when the View menu changes it.
+    pub(crate) look: crate::prefs::CanvasLook,
     pub(crate) onion: bool,
     pub(crate) frame: usize,
     pub(crate) playing: bool,
@@ -467,8 +468,7 @@ impl Default for ImageEditState {
             pan: Vec2::ZERO,
             fit_pending: true,
             tiled_view: false,
-            show_grid: true,
-            show_checker: true,
+            look: crate::prefs::load_canvas_look(),
             onion: false,
             frame: 0,
             playing: false,
@@ -2325,8 +2325,8 @@ impl ImageEditState {
         let img_rect = ERect::from_min_max(tl, br);
 
         // Transparency checker, only under the canvas itself.
-        if self.show_checker {
-            draw_checker(&p, img_rect.intersect(view), self.zoom);
+        if self.look.checker {
+            draw_checker(&p, img_rect.intersect(view), &self.look);
         }
         let Some(tex) = &self.tex else { return };
         let tint = Color32::WHITE;
@@ -2369,19 +2369,66 @@ impl ImageEditState {
         );
 
         // Pixel grid, once a texel is comfortably bigger than a screen pixel.
-        if self.show_grid && self.zoom >= 6.0 {
-            let c = Color32::from_white_alpha(28);
+        if self.look.pixel_grid && self.zoom >= self.look.pixel_grid_zoom.max(1.0) {
+            let l = &self.look;
+            let c = rgba(l.pixel_grid_color, l.pixel_grid_alpha);
+            // Two-tone: a light line with dark dashes over it, so one of the two
+            // shows against a background of any colour. This is the part that
+            // does not need configuring to be legible; the colours above are the
+            // escape hatch for when it still is not.
+            let dark = Color32::from_black_alpha(l.pixel_grid_alpha);
+            let dash = |p: &egui::Painter, a: Pos2, b: Pos2| {
+                p.line_segment([a, b], EStroke::new(1.0, c));
+                if l.pixel_grid_two_tone {
+                    p.add(egui::Shape::dashed_line(&[a, b], EStroke::new(1.0, dark), 3.0, 3.0));
+                }
+            };
             let mut x = 0.0;
             while x <= w {
                 let sx = self.to_screen(view, x, 0.0).x;
-                p.line_segment([Pos2::new(sx, img_rect.top()), Pos2::new(sx, img_rect.bottom())], EStroke::new(1.0, c));
+                dash(&p, Pos2::new(sx, img_rect.top()), Pos2::new(sx, img_rect.bottom()));
                 x += 1.0;
             }
             let mut y = 0.0;
             while y <= h {
                 let sy = self.to_screen(view, 0.0, y).y;
-                p.line_segment([Pos2::new(img_rect.left(), sy), Pos2::new(img_rect.right(), sy)], EStroke::new(1.0, c));
+                dash(&p, Pos2::new(img_rect.left(), sy), Pos2::new(img_rect.right(), sy));
                 y += 1.0;
+            }
+        }
+
+        // The SHEET's cell grid — heavier than the pixel grid, a different
+        // colour, and drawn after it so it wins where they coincide. This is the
+        // grid a tileset is actually cut on, and drawing it is the difference
+        // between laying out a sheet and counting texels by hand
+        // (`floptle/0096`).
+        if self.look.cell_grid
+            && let Some((cw, ch)) = doc.cell_size()
+        {
+            let l = &self.look;
+            let c = rgba(l.cell_grid_color, l.cell_grid_alpha);
+            // A cell smaller than a few screen pixels is a solid block of lines,
+            // which hides the art the grid exists to help you place.
+            let step = (cw.min(ch) as f32) * self.zoom;
+            if step >= 5.0 {
+                let mut x = 0.0;
+                while x <= w {
+                    let sx = self.to_screen(view, x, 0.0).x;
+                    p.line_segment(
+                        [Pos2::new(sx, img_rect.top()), Pos2::new(sx, img_rect.bottom())],
+                        EStroke::new(1.0, c),
+                    );
+                    x += cw as f32;
+                }
+                let mut y = 0.0;
+                while y <= h {
+                    let sy = self.to_screen(view, 0.0, y).y;
+                    p.line_segment(
+                        [Pos2::new(img_rect.left(), sy), Pos2::new(img_rect.right(), sy)],
+                        EStroke::new(1.0, c),
+                    );
+                    y += ch as f32;
+                }
             }
         }
 
@@ -2577,13 +2624,16 @@ impl ImageEditState {
         // --- brush telegraph ---
         // Drawn DURING a stroke as well — a brush you can't see the size of
         // halfway through a stroke is a brush you're guessing with.
+        //
+        // And drawn from the brush's OWN footprint, so what you see outlined is
+        // the set of texels that will change. The circle this used to draw was
+        // re-derived from `radius` and was wrong for every brush that is not a
+        // smooth disc — most visibly the one-pixel pencil, which showed a small
+        // circle floating between texels (`floptle/0094`).
         if let Some((cx, cy)) = self.cursor
             && self.tool.is_paint()
         {
-            let s = self.to_screen(view, cx, cy);
-            let r = (self.brush.radius * self.zoom).max(2.0);
-            p.circle_stroke(s, r, EStroke::new(1.0, Color32::from_white_alpha(160)));
-            p.circle_stroke(s, r + 1.0, EStroke::new(1.0, Color32::from_black_alpha(120)));
+            self.draw_brush_telegraph(&p, view, cx, cy);
         }
         // Clone source marker.
         if let Some((sx, sy)) = self.clone_src
@@ -2591,6 +2641,89 @@ impl ImageEditState {
         {
             let s = self.to_screen(view, sx, sy);
             p.circle_stroke(s, 5.0, EStroke::new(1.0, Color32::from_rgb(255, 200, 100)));
+        }
+    }
+
+    /// The cursor telegraph: the outline of the texels this dab would touch.
+    ///
+    /// Two contours rather than one, because a brush has two interesting edges
+    /// and conflating them is what made the old circle a lie:
+    ///
+    /// * the **half-coverage** contour — where the brush actually is. For a
+    ///   pixel brush this is the exact set of texels that change, drawn on the
+    ///   texel grid, so preview and result are the same shape in the same place.
+    /// * the **outer reach**, drawn faintly and only when the brush is soft. A
+    ///   soft brush must not claim a hard edge it does not have, and a hard one
+    ///   must not be given a halo it does not have either.
+    ///
+    /// Both are drawn light-over-dark so they survive art of any colour without
+    /// being configured for it.
+    fn draw_brush_telegraph(&self, p: &egui::Painter, view: ERect, cx: f32, cy: f32) {
+        let light = Color32::from_white_alpha(190);
+        let dark = Color32::from_black_alpha(130);
+        let soft = !self.brush.pixel_perfect && self.brush.hardness < 0.99;
+
+        // Below a couple of screen pixels per texel the per-texel outline is
+        // noise, and a very large brush is a circle whatever its texels say.
+        let per_texel = self.zoom;
+        if per_texel < 2.0 || !self.brush.footprint_is_cheap() {
+            let s = self.to_screen(view, cx, cy);
+            let r = (self.brush.radius * self.zoom).max(2.0);
+            p.circle_stroke(s, r + 1.0, EStroke::new(1.0, dark));
+            p.circle_stroke(s, r, EStroke::new(1.0, light));
+            return;
+        }
+
+        let (rect, cov) = self.brush.footprint(cx, cy);
+        let at = |col: i32, row: i32| -> f32 {
+            if col < 0 || row < 0 || col >= rect.w as i32 || row >= rect.h as i32 {
+                return 0.0;
+            }
+            cov[row as usize * rect.w as usize + col as usize]
+        };
+        // The boundary of a threshold set: every edge a covered texel does not
+        // share with another covered texel. Exact, and no marching-squares
+        // ambiguity to get wrong at a diagonal.
+        let edges = |t: f32, out: &mut Vec<[Pos2; 2]>| {
+            for row in 0..rect.h as i32 {
+                for col in 0..rect.w as i32 {
+                    if at(col, row) < t {
+                        continue;
+                    }
+                    let (x0, y0) = ((rect.x + col) as f32, (rect.y + row) as f32);
+                    let tl = self.to_screen(view, x0, y0);
+                    let br = self.to_screen(view, x0 + 1.0, y0 + 1.0);
+                    if at(col, row - 1) < t {
+                        out.push([tl, Pos2::new(br.x, tl.y)]);
+                    }
+                    if at(col, row + 1) < t {
+                        out.push([Pos2::new(tl.x, br.y), br]);
+                    }
+                    if at(col - 1, row) < t {
+                        out.push([tl, Pos2::new(tl.x, br.y)]);
+                    }
+                    if at(col + 1, row) < t {
+                        out.push([Pos2::new(br.x, tl.y), br]);
+                    }
+                }
+            }
+        };
+
+        // The outer reach first, so the real edge draws over it.
+        if soft {
+            let mut reach = Vec::new();
+            edges(0.06, &mut reach);
+            for [a, b] in reach {
+                p.line_segment([a, b], EStroke::new(1.0, Color32::from_white_alpha(60)));
+            }
+        }
+        let mut body = Vec::new();
+        edges(0.5, &mut body);
+        for [a, b] in &body {
+            p.line_segment([*a + Vec2::splat(1.0), *b + Vec2::splat(1.0)], EStroke::new(1.0, dark));
+        }
+        for [a, b] in &body {
+            p.line_segment([*a, *b], EStroke::new(1.0, light));
         }
     }
 
@@ -3018,15 +3151,20 @@ fn paint_mask(doc: &mut Image, brush: &Brush, x: f32, y: f32, erase: bool) -> Re
     r
 }
 
-fn draw_checker(p: &egui::Painter, rect: ERect, zoom: f32) {
+/// An opaque colour with an explicit alpha, the shape every overlay setting has.
+fn rgba(c: [u8; 3], a: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(c[0], c[1], c[2], a)
+}
+
+fn draw_checker(p: &egui::Painter, rect: ERect, look: &crate::prefs::CanvasLook) {
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
         return;
     }
     // A checker sized in SCREEN pixels, so it doesn't turn into a moiré at
     // high zoom or vanish at low zoom.
-    let step = if zoom >= 4.0 { 8.0 } else { 6.0 };
-    let a = Color32::from_gray(58);
-    let b = Color32::from_gray(48);
+    let step = look.checker_px.clamp(2.0, 64.0);
+    let a = Color32::from_rgb(look.checker_a[0], look.checker_a[1], look.checker_a[2]);
+    let b = Color32::from_rgb(look.checker_b[0], look.checker_b[1], look.checker_b[2]);
     p.rect_filled(rect, 0.0, a);
     let mut y = rect.top();
     let mut row = 0;

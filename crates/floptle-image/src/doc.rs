@@ -249,6 +249,15 @@ pub struct Image {
     pub selection: Option<Mask>,
     /// Editing wraps at the canvas edges (tiling mode).
     pub tiling: bool,
+    /// The uniform cell grid this image is cut into, if it is a sheet —
+    /// `(cols, rows)`, the one layout the engine can address.
+    ///
+    /// A property of the IMAGE and not of the view, because it is a fact about
+    /// the art: a 16x16 tileset is 16x16 whoever opens it. Kept here so the
+    /// grid you drew against is the grid you get back, and so a material and a
+    /// tileset can be told the numbers rather than have them re-typed (and
+    /// mistyped) in three places. `None` = an ordinary image, no cell grid.
+    pub sheet: Option<(u32, u32)>,
 }
 
 impl Image {
@@ -267,7 +276,17 @@ impl Image {
             palette_lock: false,
             selection: None,
             tiling: false,
+            sheet: None,
         }
+    }
+
+    /// The pixel size of one cell, when this image is a sheet. `None` when it is
+    /// not one, or when the grid does not divide the canvas evenly — a cell that
+    /// is 10.6 px wide is a mistake to draw against, not a number to round.
+    pub fn cell_size(&self) -> Option<(u32, u32)> {
+        let (c, r) = self.sheet?;
+        (c > 0 && r > 0 && self.w.is_multiple_of(c) && self.h.is_multiple_of(r))
+            .then(|| (self.w / c, self.h / r))
     }
 
     /// Wrap a flat RGBA8 image (an opened PNG) as a one-layer document.

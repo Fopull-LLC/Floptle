@@ -276,3 +276,114 @@ pub(crate) fn open_external_editor(cmd: &str, project_root: &Path, file: &str, l
         eprintln!("  Open in IDE ({prog}) failed: {e}");
     }
 }
+
+// --- the 🖼 image canvas's overlays ----------------------------------------
+
+/// How the image canvas draws everything that is **not** your art: the
+/// transparency checker, the pixel grid, the sheet cell grid.
+///
+/// Every one of these used to be a literal in the draw code, which is fine right
+/// up until the art is the colour of the overlay — and which art that is, is not
+/// knowable in advance. A 28-alpha white grid over pale pixel art is invisible at
+/// exactly the zoom you need it at, and a grey checker under grey art says
+/// nothing at all (`floptle/0097`).
+///
+/// Per-user and not per-document: this is how somebody likes to LOOK at images,
+/// not a fact about one image. (The cell grid's size is the fact — that lives in
+/// the document.)
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct CanvasLook {
+    pub(crate) checker: bool,
+    pub(crate) checker_a: [u8; 3],
+    pub(crate) checker_b: [u8; 3],
+    /// Checker square edge in SCREEN pixels, so it neither moirés at high zoom
+    /// nor vanishes at low zoom.
+    pub(crate) checker_px: f32,
+
+    pub(crate) pixel_grid: bool,
+    pub(crate) pixel_grid_color: [u8; 3],
+    pub(crate) pixel_grid_alpha: u8,
+    /// Screen pixels per texel below which the pixel grid is more noise than
+    /// grid. Was a hard-coded 6, which suits one art scale.
+    pub(crate) pixel_grid_zoom: f32,
+    /// Draw the pixel grid as a light line under dark dashes, so it survives a
+    /// background of any colour without being configured for it. The setting is
+    /// the escape hatch; this is the design.
+    pub(crate) pixel_grid_two_tone: bool,
+
+    pub(crate) cell_grid: bool,
+    pub(crate) cell_grid_color: [u8; 3],
+    pub(crate) cell_grid_alpha: u8,
+}
+
+impl Default for CanvasLook {
+    fn default() -> Self {
+        CanvasLook {
+            checker: true,
+            checker_a: [58, 58, 58],
+            checker_b: [48, 48, 48],
+            checker_px: 8.0,
+            pixel_grid: true,
+            pixel_grid_color: [255, 255, 255],
+            // 28/255 was 11% — present in a screenshot, absent over real art.
+            pixel_grid_alpha: 46,
+            pixel_grid_zoom: 6.0,
+            pixel_grid_two_tone: true,
+            cell_grid: true,
+            // Deliberately not white: the cell grid must not read as a heavier
+            // pixel grid, it is a different thing about a different unit.
+            cell_grid_color: [120, 190, 255],
+            cell_grid_alpha: 170,
+        }
+    }
+}
+
+pub(crate) fn canvas_look_path() -> Option<PathBuf> {
+    floptle_config_dir().map(|d| d.join("canvas_look.ron"))
+}
+
+/// Load the canvas overlay settings. Anything missing or unreadable falls back
+/// per-field (`#[serde(default)]`), so a file written by an older build — or a
+/// half-edited one — still opens rather than resetting the lot.
+pub(crate) fn load_canvas_look() -> CanvasLook {
+    canvas_look_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| ron::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn save_canvas_look(look: &CanvasLook) {
+    let Some(p) = canvas_look_path() else { return };
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(s) = ron::ser::to_string_pretty(look, ron::ser::PrettyConfig::default()) {
+        let _ = std::fs::write(p, s);
+    }
+}
+
+#[cfg(test)]
+mod canvas_look_tests {
+    use super::*;
+
+    #[test]
+    fn the_canvas_look_round_trips_through_its_file_format() {
+        let mut look = CanvasLook::default();
+        look.pixel_grid_alpha = 200;
+        look.checker_a = [10, 20, 30];
+        look.cell_grid = false;
+        let s = ron::ser::to_string_pretty(&look, ron::ser::PrettyConfig::default()).unwrap();
+        assert_eq!(ron::from_str::<CanvasLook>(&s).unwrap(), look);
+    }
+
+    /// A settings file from a build that had fewer fields must not reset the
+    /// ones it did have — which is what a non-`default` deserialize would do.
+    #[test]
+    fn an_older_settings_file_keeps_what_it_says_and_defaults_the_rest() {
+        let look: CanvasLook = ron::from_str("(pixel_grid_alpha: 90)").unwrap();
+        assert_eq!(look.pixel_grid_alpha, 90);
+        assert_eq!(look.checker_a, CanvasLook::default().checker_a);
+        assert!(look.pixel_grid_two_tone);
+    }
+}
