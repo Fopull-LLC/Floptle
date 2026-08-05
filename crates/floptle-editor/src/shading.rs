@@ -61,22 +61,17 @@ pub(crate) fn collect_point_lights(
 
 /// One side of the light split: how many, where, what colour, and — for the 2D
 /// side — which sorting layers each one reaches.
-pub(crate) type LightSlots = (usize, [[f32; 4]; 16], [[f32; 4]; 16], [u32; 16]);
+pub(crate) type LightSlots = (usize, [[f32; 4]; 16], [[f32; 4]; 16], [[u32; 4]; 16]);
 
 /// The scene's placeable lights, separated into the two systems that light with
 /// them.
 pub(crate) struct SplitLights {
     /// Lights that shade meshes the way they always have.
     pub three_d: LightSlots,
-    /// Lights on the 2D path. `masks[i]` is a bitmask over SORTING-LAYER RANK —
-    /// bit `r` set means the light reaches rank `r`. All-ones = every layer,
-    /// which is what a light that named none does.
-    ///
-    /// **Nothing reads this yet.** The accumulation pass is step 2 of
-    /// `docs/2d-lighting-proposal.md` and is not built; the split is here
-    /// because it is what decides that a 2D light does NOT also shade meshes,
-    /// and that is testable now. Deliberately unread, not accidentally.
-    #[allow(dead_code)]
+    /// Lights on the 2D path, read by the accumulation pass. `masks[i]` is a
+    /// bitmask over SORTING-LAYER RANK spread across four words — bit `r` of
+    /// word `r / 32` set means the light reaches rank `r`. All-ones = every
+    /// layer, which is what a light that named none does.
     pub two_d: LightSlots,
 }
 
@@ -98,8 +93,8 @@ pub(crate) fn split_point_lights(
     sorting_names: &[String],
     flat_camera: bool,
 ) -> SplitLights {
-    let mut three: LightSlots = (0, [[0.0; 4]; 16], [[0.0; 4]; 16], [0; 16]);
-    let mut two: LightSlots = (0, [[0.0; 4]; 16], [[0.0; 4]; 16], [0; 16]);
+    let mut three: LightSlots = (0, [[0.0; 4]; 16], [[0.0; 4]; 16], [[0; 4]; 16]);
+    let mut two: LightSlots = (0, [[0.0; 4]; 16], [[0.0; 4]; 16], [[0; 4]; 16]);
     let facts = floptle_core::Lit2DFacts { emits: true, flat_matter: false, flat_camera };
     for (e, m) in world.query::<Matter>() {
         let Matter::PointLight { color, intensity, range } = m else { continue };
@@ -119,19 +114,27 @@ pub(crate) fn split_point_lights(
     SplitLights { three_d: three, two_d: two }
 }
 
-/// A light's named sorting layers as a bitmask over their RANKS.
+/// A light's named sorting layers as a bitmask over their RANKS, four words of
+/// it — bit `r` of word `r / 32`.
 ///
-/// Naming none is every layer — `!0`, not `0`. A light that reached nothing
-/// until a list was filled in would read as a broken light, and that default has
-/// to survive the trip to the GPU as well as the trip to the Inspector.
-fn layer_mask(lit: &floptle_core::Lighting2D, sorting_names: &[String]) -> u32 {
+/// Four words rather than one because a sorting layer's rank runs to 63
+/// (`SORT_LAYER_STEP` is 1/64) and the shader has the space either way: a
+/// single word would leave every layer past the 32nd unreachable by any light,
+/// and unreachable *silently*, which is the failure shape this codebase keeps
+/// paying for.
+///
+/// Naming no layers is every layer — all ones, not zero. A light that reached
+/// nothing until a list was filled in would read as a broken light, and that
+/// default has to survive the trip to the GPU as well as the trip to the
+/// Inspector.
+fn layer_mask(lit: &floptle_core::Lighting2D, sorting_names: &[String]) -> [u32; 4] {
     if lit.layers.is_empty() {
-        return !0;
+        return [!0; 4];
     }
-    let mut mask = 0u32;
-    for (rank, name) in sorting_names.iter().enumerate().take(32) {
+    let mut mask = [0u32; 4];
+    for (rank, name) in sorting_names.iter().enumerate().take(128) {
         if lit.reaches(name) {
-            mask |= 1 << rank;
+            mask[rank / 32] |= 1 << (rank % 32);
         }
     }
     mask
@@ -688,7 +691,7 @@ mod light_split_tests {
         light_at(&mut world, 0.0, Some(Lighting2D { mode: Lit2D::Yes, layers: vec![] }));
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
         assert_eq!(s.two_d.0, 1);
-        assert_eq!(s.two_d.3[0], !0u32, "the mask must be all-ones, never zero");
+        assert_eq!(s.two_d.3[0], [!0u32; 4], "the mask must be all-ones, never zero");
     }
 
     /// Named layers become RANK bits, so the shader compares a number rather
@@ -706,7 +709,23 @@ mod light_split_tests {
             }),
         );
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
-        assert_eq!(s.two_d.3[0], 1 << 2, "only Characters, which is rank 2");
+        assert_eq!(s.two_d.3[0], [1 << 2, 0, 0, 0], "only Characters, which is rank 2");
+    }
+
+    /// A rank past the 32nd has to land in a later WORD, not fall off the end of
+    /// the first one. A project with that many sorting layers would otherwise
+    /// find every layer past the 32nd unlit by every light, with nothing said.
+    #[test]
+    fn a_layer_past_the_thirty_second_still_gets_a_bit() {
+        let mut world = World::default();
+        let names: Vec<String> = (0..40).map(|i| format!("layer{i}")).collect();
+        light_at(
+            &mut world,
+            0.0,
+            Some(Lighting2D { mode: Lit2D::Yes, layers: vec!["layer35".into()] }),
+        );
+        let s = split_point_lights(&world, DVec3::ZERO, &names, false);
+        assert_eq!(s.two_d.3[0], [0, 1 << 3, 0, 0], "rank 35 is bit 3 of word 1");
     }
 
     /// Sixteen slots per side, and running out of one must not spill into the

@@ -302,7 +302,11 @@ impl<'a> TileGrid<'a> {
                 // one group retiles as the FIRST that claims it — the square has
                 // to pick one, and any other answer would depend on which
                 // neighbour was looked at first.
-                let Some(group) = set.group_of(tile_index(p)) else { continue };
+                //
+                // Asked of the resolver's index rather than of the tileset: the
+                // same answer, but `TileSet::group_of` walks every group's every
+                // rule, and this is the inside of the paint loop.
+                let Some(group) = at.first_group(tile_index(p)) else { continue };
                 if !at.has_group(group) {
                     continue;
                 }

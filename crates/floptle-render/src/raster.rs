@@ -2646,6 +2646,11 @@ impl Raster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // The G-buffer only GROWS (see `ensure_targets`), so confine the
+            // fill to this frame's corner of it. Frame pixel (0,0) is then
+            // G-buffer texel (0,0) and the accumulation's integer reads line up
+            // whatever size the buffer happens to have grown to.
+            rp.set_viewport(0.0, 0.0, size.0.max(1) as f32, size.1.max(1) as f32, 0.0, 1.0);
             rp.set_pipeline(&self.light2d.fill_pipeline);
             rp.set_bind_group(0, &self.light2d.fill_bind, &[]);
             rp.set_vertex_buffer(1, self.light2d.instance_slice());

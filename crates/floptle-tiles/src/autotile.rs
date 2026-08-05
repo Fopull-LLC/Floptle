@@ -209,6 +209,17 @@ impl Autotiler {
             .is_some_and(|gs| gs.iter().any(|&other| set.joins(group, other)))
     }
 
+    /// The lowest-numbered group that draws `cell`, matching
+    /// [`TileSet::group_of`] exactly — what a square already painted with this
+    /// tile retiles as.
+    ///
+    /// Off the same index [`Self::counts_as`] uses, and for the same reason:
+    /// `retile` asks this once per square, and answering it by scanning every
+    /// group's every rule would put the whole rule table inside the paint loop.
+    pub fn first_group(&self, cell: u32) -> Option<u16> {
+        self.members.get(&cell).and_then(|gs| gs.first().copied())
+    }
+
     /// Every tile a group draws for a raw 8-neighbour mask, in authoring order.
     /// Empty when the group has nothing authored for it.
     pub fn variants(&self, group: u16, mask: u8) -> &[u32] {
@@ -459,6 +470,31 @@ mod tests {
             }
         }
         assert!(common > rare * 2, "3:1 was authored, got {common}:{rare}");
+    }
+
+    /// `retile` asks the resolver which group a square's tile belongs to, once
+    /// per square. That has to be the same answer the tileset gives, or a
+    /// painted level retiles as a different group than the panel shows.
+    #[test]
+    fn the_resolvers_group_index_agrees_with_the_tilesets() {
+        let mut set = TileSet { sheet_cols: 8, sheet_rows: 8, ..Default::default() };
+        for name in ["grass", "stone"] {
+            set.groups.push(AutotileGroup {
+                name: name.into(),
+                kind: AutotileKind::Edge4,
+                ..Default::default()
+            });
+        }
+        set.groups[0].add_to_rule(0, 1);
+        set.groups[1].add_to_rule(0, 2);
+        // Tile 3 is drawn by BOTH — the lower group has to win on either side.
+        set.groups[1].add_to_rule(4, 3);
+        set.groups[0].add_to_rule(4, 3);
+        let at = Autotiler::build(&set);
+        for cell in 0..8 {
+            assert_eq!(at.first_group(cell), set.group_of(cell), "cell {cell}");
+        }
+        assert_eq!(at.first_group(3), Some(0), "the lower group claims a shared tile");
     }
 
     /// The same tile in several rules — the other half of "duplicates". One

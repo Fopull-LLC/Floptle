@@ -96,10 +96,10 @@ struct Lights {
     pos: array<vec4<f32>, 16>,
     // rgb = colour × intensity.
     color: array<vec4<f32>, 16>,
-    // x = a bitmask over sorting-layer RANK; bit r set = this light reaches rank
-    // r. Each mask costs a whole vec4 because a uniform array's stride is 16
-    // bytes — packing them tighter would be a silent alignment bug on some
-    // backends, and 192 wasted bytes is not worth that.
+    // A bitmask over sorting-layer RANK: bit r of word r/32 set = this light
+    // reaches rank r. All four words are used, because a uniform array's stride
+    // is 16 bytes whatever we put in it and one word would cover only 32 of the
+    // 64 ranks a sorting layer can have.
     mask: array<vec4<u32>, 16>,
 };
 
@@ -160,7 +160,9 @@ fn fs_light(in: FullOut) -> LitOut {
         // A light that does not reach this pixel's sorting layer contributes
         // nothing — this is how a torch passes over a background without
         // lighting it, which is the single most-asked-for thing in 2D lighting.
-        if ((L.mask[i].x & (1u << rank)) == 0u) {
+        // Split across the mask's four words: a rank of 40 is bit 8 of word 1,
+        // and shifting by 40 would be an out-of-range shift, not a big number.
+        if ((L.mask[i][rank >> 5u] & (1u << (rank & 31u))) == 0u) {
             continue;
         }
         let lp = L.pos[i];

@@ -101,10 +101,14 @@ pub struct Light2dUniform {
     pub pos: [[f32; 4]; 16],
     /// rgb = colour × intensity.
     pub color: [[f32; 4]; 16],
-    /// x = a bitmask over sorting-layer RANK. A whole `vec4` each because a
-    /// uniform array's stride is 16 bytes on every backend — packing four masks
-    /// per element would be a silent alignment bug on some of them, and 192
-    /// wasted bytes does not buy that risk.
+    /// A bitmask over sorting-layer RANK, one `vec4` per light: bit `r` of word
+    /// `r / 32` set means this light reaches rank `r`.
+    ///
+    /// All four words, not just `x`. A uniform array's stride is 16 bytes on
+    /// every backend, so the space is paid for whether or not it is used — and a
+    /// single word would cover only 32 of the 64 ranks a sorting layer can have
+    /// (`SORT_LAYER_STEP` is 1/64), leaving every layer past the 32nd silently
+    /// unlit by every light.
     pub mask: [[u32; 4]; 16],
 }
 
@@ -359,12 +363,24 @@ impl Light2d {
         }
     }
 
-    /// Size (or resize) the G-buffer to the frame being drawn. Returns whether
-    /// the targets were rebuilt.
+    /// Make sure the G-buffer is at least as big as the frame being drawn.
+    /// Returns whether the targets were rebuilt.
+    ///
+    /// **Grows, never shrinks**, and the fill pass draws into the top-left
+    /// `width × height` of it via a viewport. One `Raster` serves several
+    /// viewports of different sizes in one frame — the Scene view, a docked Game
+    /// view, camera previews, render targets — so sizing exactly to the frame
+    /// would tear down and rebuild three textures and a bind group *between*
+    /// every pair of them, every frame, for the whole session. The accumulation
+    /// reads by integer texel, so a larger buffer costs nothing but the memory.
     fn ensure_targets(&mut self, gpu: &Gpu, width: u32, height: u32) -> bool {
-        let (w, h) = (width.max(1), height.max(1));
-        if self.targets.as_ref().is_some_and(|t| t.width == w && t.height == h) {
-            return false;
+        let (mut w, mut h) = (width.max(1), height.max(1));
+        if let Some(t) = self.targets.as_ref() {
+            if t.width >= w && t.height >= h {
+                return false;
+            }
+            w = w.max(t.width);
+            h = h.max(t.height);
         }
         let size = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
         let make = |label: &str, format: wgpu::TextureFormat| {

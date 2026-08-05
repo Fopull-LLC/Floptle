@@ -278,8 +278,12 @@ impl AutotileKind {
 pub struct AutotileRule {
     /// The neighbourhood this answers, canonical for the group's kind.
     pub mask: u8,
-    /// The tiles that draw it, in authoring order. Empty = the rule is a blank
-    /// slot: a square with these neighbours is left exactly as painted.
+    /// The tiles that draw it, in authoring order.
+    ///
+    /// Never empty in a rule this code keeps: emptying one drops the rule, and
+    /// the two mean the same thing anyway — a neighbourhood with no tile leaves
+    /// its square exactly as painted rather than erasing it. A hand-written file
+    /// may still carry an empty rule, and it resolves to nothing.
     pub tiles: Vec<u32>,
 }
 

@@ -1493,7 +1493,7 @@ impl TileCtx<'_> {
                         describe_mask(mask, kind)
                     ),
                     1 => format!(
-                        "{}\ndrawn by tile {}— click to add another, or to swap it",
+                        "{}\ndrawn by tile {} — click to arm it, then click tiles to add more",
                         describe_mask(mask, kind),
                         variants[0]
                     ),

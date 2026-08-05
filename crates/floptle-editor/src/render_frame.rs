@@ -83,8 +83,14 @@ fn light2d_uniform(
     let ambient = if n == 0 {
         [1.0, 1.0, 1.0, 0.0]
     } else {
-        let a = world.query::<floptle_core::Light>().next().map(|(_, l)| l.ambient);
-        let a = a.unwrap_or([0.12, 0.12, 0.16]);
+        // The scene's own key-light ambient, chosen exactly as the 3D path
+        // chooses it — first `Light` node, else the default — so the two agree
+        // about how dark "unlit" is.
+        let a = world
+            .query::<floptle_core::Light>()
+            .next()
+            .map(|(_, l)| l.ambient)
+            .unwrap_or(floptle_core::Light::default().ambient);
         [a[0], a[1], a[2], 0.0]
     };
     floptle_render::Light2dUniform {
@@ -93,7 +99,7 @@ fn light2d_uniform(
         inv_view_proj: view_proj.inverse().to_cols_array_2d(),
         pos,
         color,
-        mask: mask.map(|m| [m, 0, 0, 0]),
+        mask,
     }
 }
 

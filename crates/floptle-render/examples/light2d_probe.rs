@@ -12,8 +12,11 @@
 //!   background without lighting it" case, and it is the one thing a 2D artist
 //!   asks for that nothing else in the engine does.
 //!
-//! It writes all three PNGs, because the numbers below say *whether* something
-//! changed and only the picture says whether it looks like light.
+//! Then once more at a smaller size, because one renderer serves viewports of
+//! several sizes and the G-buffer they share only ever grows.
+//!
+//! It writes every shot as a PNG, because the numbers below say *whether*
+//! something changed and only the picture says whether it looks like light.
 //!
 //! Run: cargo run -p floptle-render --example light2d_probe -- <outdir>
 
@@ -89,44 +92,11 @@ fn main() {
     let mut edge = [0f32; 3];
 
     for (i, (name, lights)) in shots.iter().enumerate() {
-        let color = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("light2d-color"),
-            size: wgpu::Extent3d { width: S, height: S, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: gpu.surface_format(),
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = color.create_view(&wgpu::TextureViewDescriptor::default());
-        let globals =
-            Globals { view_proj: view_proj.to_cols_array_2d(), ..Default::default() };
-        raster.draw_scene(
-            &gpu,
-            &view,
-            gpu.depth_view(),
-            globals,
-            &[(map, Some::<TexId>(tex), raw)],
-            Some([0.02, 0.02, 0.04, 1.0]),
-            None,
-        );
-        if let Some(l) = lights {
-            raster.light2d_pass(
-                &gpu,
-                &view,
-                gpu.depth_view(),
-                (S, S),
-                view_proj.to_cols_array_2d(),
-                l,
-                &flat,
-            );
-        }
-        let px = readback(&gpu, &color);
-        mid[i] = luma(&px, S / 2, S / 2);
-        edge[i] = luma(&px, 6, S / 2);
+        let px = shot(&gpu, &mut raster, S, view_proj, map, tex, &raw, &flat, lights.as_ref());
+        mid[i] = luma(&px, S, S / 2, S / 2);
+        edge[i] = luma(&px, S, 6, S / 2);
         let out = format!("{dir}/light2d_{name}.png");
-        save_png(&px, &out);
+        save_png(&px, S, &out);
         println!("{name}: centre {:.3}, edge {:.3} — wrote {out}", mid[i], edge[i]);
     }
 
@@ -176,22 +146,98 @@ fn main() {
         mid[2],
         mid[1]
     );
+
+    // ---- a smaller frame through a G-buffer that has already grown ----------
+    //
+    // One renderer serves several viewports of different sizes in a frame — the
+    // Scene view, a docked Game view, camera previews, render targets — and the
+    // G-buffer only grows, so the small ones draw into a corner of a buffer
+    // sized for the biggest. If that corner were addressed wrongly the lighting
+    // would land offset or scaled, and only in the smaller view: the exact shape
+    // of "fine in the Scene view, wrong in the Game view" this renderer has paid
+    // for three times.
+    const SMALL: u32 = 96;
+    let px = shot(&gpu, &mut raster, SMALL, view_proj, map, tex, &raw, &flat, Some(&lit));
+    let small_mid = luma(&px, SMALL, SMALL / 2, SMALL / 2);
+    let small_edge = luma(&px, SMALL, 2, SMALL / 2);
+    let out = format!("{dir}/light2d_small.png");
+    save_png(&px, SMALL, &out);
+    println!("small: centre {small_mid:.3}, edge {small_edge:.3} — wrote {out}");
+    // The same scene through the same camera: the same picture, fewer pixels.
+    assert!(
+        (small_mid - mid[1]).abs() < 0.05,
+        "the light moved when the frame shrank: {small_mid:.3} against {:.3}",
+        mid[1]
+    );
+    assert!(
+        (small_edge - edge[1]).abs() < 0.05,
+        "the falloff moved when the frame shrank: {small_edge:.3} against {:.3}",
+        edge[1]
+    );
     println!("2D lighting OK");
 }
 
+/// Draw the map once at `s`×`s`, with the 2D lighting pass over it when there
+/// are lights, and read the result back.
+#[allow(clippy::too_many_arguments)]
+fn shot(
+    gpu: &Gpu,
+    raster: &mut Raster,
+    s: u32,
+    view_proj: glam::Mat4,
+    map: floptle_render::MeshId,
+    tex: TexId,
+    raw: &floptle_render::InstanceRaw,
+    flat: &[(floptle_render::MeshId, Option<TexId>, Light2dInstance)],
+    lights: Option<&Light2dUniform>,
+) -> Vec<[u8; 4]> {
+    let size = wgpu::Extent3d { width: s, height: s, depth_or_array_layers: 1 };
+    let make = |label: &str, format: wgpu::TextureFormat, extra: wgpu::TextureUsages| {
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
+            view_formats: &[],
+        })
+    };
+    let color = make("light2d-color", gpu.surface_format(), wgpu::TextureUsages::COPY_SRC);
+    // Its own depth, because every attachment in a pass must be the same size.
+    let depth = make("light2d-probe-depth", Gpu::DEPTH_FORMAT, wgpu::TextureUsages::empty());
+    let view = color.create_view(&wgpu::TextureViewDescriptor::default());
+    let dview = depth.create_view(&wgpu::TextureViewDescriptor::default());
+    let globals = Globals { view_proj: view_proj.to_cols_array_2d(), ..Default::default() };
+    raster.draw_scene(
+        gpu,
+        &view,
+        &dview,
+        globals,
+        &[(map, Some::<TexId>(tex), *raw)],
+        Some([0.02, 0.02, 0.04, 1.0]),
+        None,
+    );
+    if let Some(l) = lights {
+        raster.light2d_pass(gpu, &view, &dview, (s, s), view_proj.to_cols_array_2d(), l, flat);
+    }
+    readback(gpu, &color, s)
+}
+
 /// Perceptual-ish brightness of one pixel, 0..1.
-fn luma(px: &[[u8; 4]], x: u32, y: u32) -> f32 {
-    let p = px[(y * S + x) as usize];
+fn luma(px: &[[u8; 4]], s: u32, x: u32, y: u32) -> f32 {
+    let p = px[(y * s + x) as usize];
     (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0
 }
 
-fn readback(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<[u8; 4]> {
+fn readback(gpu: &Gpu, tex: &wgpu::Texture, s: u32) -> Vec<[u8; 4]> {
     let bpp = 4u32;
-    let padded = (S * bpp).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+    let padded = (s * bpp).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
         * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
-        size: (padded * S) as u64,
+        size: (padded * s) as u64,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -210,10 +256,10 @@ fn readback(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<[u8; 4]> {
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(padded),
-                rows_per_image: Some(S),
+                rows_per_image: Some(s),
             },
         },
-        wgpu::Extent3d { width: S, height: S, depth_or_array_layers: 1 },
+        wgpu::Extent3d { width: s, height: s, depth_or_array_layers: 1 },
     );
     gpu.queue.submit(Some(enc.finish()));
     buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
@@ -223,10 +269,10 @@ fn readback(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<[u8; 4]> {
         gpu.surface_format(),
         wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
     );
-    let mut o = Vec::with_capacity((S * S) as usize);
-    for y in 0..S {
+    let mut o = Vec::with_capacity((s * s) as usize);
+    for y in 0..s {
         let row = (y * padded) as usize;
-        for x in 0..S {
+        for x in 0..s {
             let i = row + (x * bpp) as usize;
             let p = [view[i], view[i + 1], view[i + 2], view[i + 3]];
             o.push(if bgra { [p[2], p[1], p[0], p[3]] } else { p });
@@ -237,10 +283,10 @@ fn readback(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<[u8; 4]> {
     o
 }
 
-fn save_png(px: &[[u8; 4]], path: &str) {
+fn save_png(px: &[[u8; 4]], s: u32, path: &str) {
     let flat: Vec<u8> = px.iter().flat_map(|p| *p).collect();
     let file = std::fs::File::create(path).expect("create png");
-    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), S, S);
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), s, s);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header().unwrap().write_image_data(&flat).unwrap();
