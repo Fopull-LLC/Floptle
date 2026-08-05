@@ -1,5 +1,20 @@
 ## Just shipped
 
+**v0.35.0 "A Crowd Of Them"** — animated characters got a lot cheaper. Reshaping a
+skinned model used to happen on the processor, one vertex at a time, every frame:
+a character of average detail cost about a third of a millisecond, so fifty of
+them ate a third of a 60 fps frame before anything drew. That work moved to the
+graphics card, and the processor's share of it is now about a thousandth of what
+it was. Identical characters also share their geometry again — they could not
+before, because two copies of one model would overwrite each other's pose — so
+twenty guards of the same model are one draw instead of twenty. Nothing about
+using characters changed: bone attachments, animation events, painted skinned
+meshes and pose-hugging selection outlines all behave exactly as they did. And
+when a Lua script grows past Lua's 60-variable-per-function ceiling and stops
+loading, the engine now names the file, the limit and the fix — it used to print
+a line you never edited and leave every script that depended on it silently
+empty. A script within ten of the ceiling gets told before it crosses.
+
 **v0.34.0 "Square By Square"** — there is a tile editor now. Press 9 and paint a
 level in the Scene view with a brush, a rectangle, a line and a bucket; drag a
 block of tiles in the palette and paint the whole block; turn and mirror any tile

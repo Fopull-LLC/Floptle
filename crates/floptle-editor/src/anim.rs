@@ -1739,7 +1739,13 @@ mod tests {
     /// a bone translates the vertices weighted to it while others stay put — a two-joint
     /// blend interpolates. This is the math that makes a vertex-skinned mesh (Ty) animate.
     /// The CPU skinning cost, at a stated character count — the "before" number
-    /// for moving this to the GPU (`floptle/0080`).
+    /// for `floptle/0080`, kept because it is still the FALLBACK path's cost.
+    ///
+    /// Nothing draws through this any more unless the skinning store refused the
+    /// part or a custom `.flsl` material owns the draw. The number below is what
+    /// those cases still pay, and what every character paid before v0.35.0; the
+    /// after-number lives in `gpu_skinning_leaves_the_cpu_a_fraction_of_the_work`,
+    /// which measures both halves in one run so the comparison is honest.
     ///
     /// Ignored by default because it is a measurement, not a guard: it prints a
     /// duration, and a duration on a shared runner is a coin flip. Run it when
