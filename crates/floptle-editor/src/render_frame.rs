@@ -6905,7 +6905,6 @@ impl Editor {
     /// texture from resolution — a target camera must not sample its OWN
     /// render target mid-pass (wgpu forbids attachment+sampled in one pass).
     #[allow(clippy::too_many_arguments)]
-
     pub(crate) fn render_world_into(
         &mut self,
         color: &wgpu::TextureView,
