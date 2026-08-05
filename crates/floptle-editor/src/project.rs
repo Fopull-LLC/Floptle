@@ -425,8 +425,22 @@ impl Editor {
     }
 
     // ---- project paths (everything resolves against `project_root`) ----
+
+    /// The file the open scene loads from and saves to.
+    ///
+    /// **This is `scene_rel`, not `scenes/{scene_name}.ron`** (`floptle/0111`).
+    /// `scene_name` is only the file STEM — it is what the hierarchy header and
+    /// the window title show, and what `scene.current()` hands a script. Building
+    /// a save path out of it threw the subfolder away, so
+    /// `scenes/cutscenes/Opening.ron` was loaded and `scenes/Opening.ron` was
+    /// written: a different file, at the project root, reported as a success.
+    /// Reopening loaded the original, so every edit looked reverted, while a
+    /// stray file quietly accumulated the real work. Hours of it, in one report.
+    ///
+    /// `scene_rel` has recorded the true relative path all along — multiplayer
+    /// names scenes by it on the wire. It simply was not the thing the save used.
     pub(crate) fn scene_path(&self) -> PathBuf {
-        self.project_root.join("scenes").join(format!("{}.ron", self.scene_name))
+        self.project_root.join(self.scene_rel_or_default())
     }
 
     pub(crate) fn project_cfg_path(&self) -> PathBuf {
@@ -952,6 +966,39 @@ impl Editor {
         self.collapsed.clear();
     }
 
+    /// Say so when this project is already split by `floptle/0111`.
+    ///
+    /// The fix stops NEW saves going astray; it cannot know that the stray file
+    /// is there, and the user has no reason to look. Left unsaid, they reopen
+    /// the project, see the old values again, and conclude the fix did not work
+    /// — while their real edits sit in a file nothing loads.
+    ///
+    /// Names files and stops. Merging is the user's call: two files, both
+    /// plausibly wanted, and an editor quietly picking one is how this started.
+    fn warn_about_shadowed_scenes(&mut self) {
+        let split = scenes_shadowed_by_a_root_copy(&self.project_root);
+        if split.is_empty() {
+            return;
+        }
+        for rel in &split {
+            let stem = rel.rsplit('/').next().unwrap_or(rel);
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "⚠ {rel} is shadowed by scenes/{stem} — a version of Floptle before v0.37.1 \
+                     saved subfolder scenes to the project root, so scenes/{stem} probably holds \
+                     edits you made and never saw. Compare the two; the root one is usually the \
+                     newer. Nothing has been moved."
+                ),
+                None,
+            );
+        }
+        self.toast = Some((
+            format!("⚠  {} scene(s) have a stray copy at scenes/ — see the Console", split.len()),
+            8.0,
+        ));
+    }
+
     /// `scene_rel`, or the `scenes/<name>.ron` convention if it was never set.
     pub(crate) fn scene_rel_or_default(&self) -> String {
         if self.scene_rel.is_empty() {
@@ -992,6 +1039,7 @@ impl Editor {
         self.load_input_map();
         self.migrate_legacy_post(&doc);
         self.check_autosave(); // offer crash recovery if an autosave is newer
+        self.warn_about_shadowed_scenes();
         self.materials = self.load_materials();
         // Re-scan the animation + particle registries against the NEW project
         // root. Without this they kept pointing at whatever was scanned at editor
@@ -1133,8 +1181,14 @@ impl Editor {
             }
             return ok;
         }
-        let _ = std::fs::create_dir_all(self.project_root.join("scenes"));
         let path = self.scene_path();
+        // The scene's OWN directory, not `scenes/` — a scene under
+        // `scenes/cutscenes/` needs that folder to exist, and hardcoding the
+        // parent was half of why a subfolder scene could never be written back
+        // (`floptle/0111`).
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
         let doc = floptle_scene::to_doc(self.scene_name.clone(), &self.world);
         let ok = match floptle_scene::save(&doc, &path) {
             Ok(()) => {
@@ -1674,6 +1728,64 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+
+/// Scenes in a subfolder that have a same-named file sitting at `scenes/` root.
+///
+/// That pair is the signature of `floptle/0111`: before the fix, editing
+/// `scenes/<sub>/<name>.ron` wrote `scenes/<name>.ron` instead. A project
+/// carrying both has edits in the root copy that the game has never loaded, and
+/// the root one is almost certainly the newer, wanted work.
+///
+/// Returned as the SUBFOLDER paths, because that is the file the user thinks
+/// they have been editing and the one they will want the other merged into.
+/// This only reports; nothing is moved. Guessing which of two files a person
+/// wants to keep is not a guess an editor gets to make silently — and the whole
+/// bug was an editor being confident about a path.
+pub(crate) fn scenes_shadowed_by_a_root_copy(root: &Path) -> Vec<String> {
+    let scenes = root.join("scenes");
+    let at_root: std::collections::HashSet<String> = std::fs::read_dir(&scenes)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.strip_suffix(".ron").map(str::to_owned)
+        })
+        .collect();
+    if at_root.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut stack: Vec<std::path::PathBuf> = std::fs::read_dir(&scenes)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let Some(stem) = p.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".ron"))
+            else {
+                continue;
+            };
+            if at_root.contains(stem)
+                && let Ok(rel) = p.strip_prefix(root)
+            {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 #[cfg(test)]
 mod path_tests {
     use super::*;
@@ -1756,4 +1868,57 @@ mod path_tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A scene loaded from a subfolder must save back to that same file
+    /// (`floptle/0111`).
+    ///
+    /// It used to save to `scenes/<stem>.ron` — the subfolder thrown away — so
+    /// the editor loaded one file and wrote another, reported success, cleared
+    /// the dirty marker, and left every edit in a stray file at the project
+    /// root. Reopening loaded the original, so the work looked reverted. The
+    /// user lost hours to it before anyone found the second file.
+    #[test]
+    fn a_scene_in_a_subfolder_saves_to_the_file_it_came_from() {
+        let root = std::env::temp_dir().join(format!("flop-scenepath-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(root.join("scenes/cutscenes"));
+        let file = root.join("scenes/cutscenes/Opening.ron");
+        let _ = std::fs::write(&file, "()");
+
+        let mut ed = Editor { project_root: root.clone(), ..Default::default() };
+        ed.set_scene_file(&file);
+
+        assert_eq!(ed.scene_path(), file, "a save must land on the file that was opened");
+        // The stem stays the stem: it is the hierarchy header, the window title
+        // and what `scene.current()` hands a script, and a game keys off it.
+        assert_eq!(ed.scene_name, "Opening");
+        // …and the round trip holds at any depth.
+        for rel in ["scenes/first.ron", "scenes/maps/arena.ron", "scenes/a/b/c/deep.ron"] {
+            let p = root.join(rel);
+            let _ = std::fs::create_dir_all(p.parent().unwrap());
+            ed.set_scene_file(&p);
+            assert_eq!(ed.scene_path(), p, "{rel} did not round-trip");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A project already split by this bug is found and named, rather than left
+    /// for the user to notice that half their edits are missing.
+    #[test]
+    fn a_project_already_split_by_the_old_bug_is_reported() {
+        let root = std::env::temp_dir().join(format!("flop-scenesplit-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(root.join("scenes/cutscenes"));
+        let _ = std::fs::write(root.join("scenes/cutscenes/Opening.ron"), "()");
+        let _ = std::fs::write(root.join("scenes/Opening.ron"), "()");
+        let _ = std::fs::write(root.join("scenes/first.ron"), "()");
+
+        let split = super::scenes_shadowed_by_a_root_copy(&root);
+        assert_eq!(split, vec!["scenes/cutscenes/Opening.ron".to_string()]);
+
+        // A project with no collision reports nothing — this must not cry wolf
+        // at every project that happens to use subfolders.
+        let _ = std::fs::remove_file(root.join("scenes/Opening.ron"));
+        assert!(super::scenes_shadowed_by_a_root_copy(&root).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
 }

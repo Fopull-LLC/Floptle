@@ -33,6 +33,7 @@ linked here, it isn't finished — a test enforces that.
 | Ship a build | [export-builds.md](export-builds.md) |
 | Talk to a website / sell something | [web-api.md](web-api.md) |
 | Understand *why* it's built this way | [decisions/](decisions/README.md) |
+| See what 2D lighting is going to be | [2d-lighting-proposal.md](2d-lighting-proposal.md) — design, not built |
 
 ## Learning it
 
