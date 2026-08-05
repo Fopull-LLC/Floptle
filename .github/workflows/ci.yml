@@ -59,3 +59,41 @@ jobs:
       # means a broken example in a doc comment ships.
       - name: doc tests
         run: cargo test --workspace --doc
+
+      # The self-asserting render probes. `--all-targets` COMPILES every example
+      # and runs none of them, so until this step the visual regressions each of
+      # these was written for were guarded only by someone remembering to run it
+      # — the exact bet this whole workflow exists to stop making.
+      #
+      # Only probes whose assertion is backend-INDEPENDENT belong here. Each of
+      # these compares two renders from the same device (before/after, CPU/GPU,
+      # frame/frame) or reads a flat colour, so a software rasteriser answers
+      # them the same way a real card does. A probe that asserts an exact shade
+      # or a frame time is a probe for a human to look at, and stays out.
+      - name: software Vulkan (lavapipe)
+        run: sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+      # Each probe's argument follows its own convention — a directory, a file, or
+      # a filename prefix — so they are listed with their argument rather than
+      # looped over blindly. `$P` is a directory that exists; anything deeper is
+      # the probe's to create.
+      - name: render probes
+        env:
+          WGPU_BACKEND: vulkan
+        run: |
+          P="$RUNNER_TEMP/probes"; mkdir -p "$P"
+          run() { echo "::group::$1"; shift; cargo run -q -p floptle-render --example "$@" || exit 1; echo "::endgroup::"; }
+          run skin_prepass_probe  skin_prepass_probe  -- "$P/skin_prepass"
+          run skin_probe          skin_probe          -- "$P/skin.png"
+          run ortho_camera_probe  ortho_camera_probe  -- "$P"
+          run tilemap_pages_probe tilemap_pages_probe -- "$P"
+
+      # On a failure the PNGs are the evidence — these probes exist because the
+      # bugs they catch are visual, and a red X with no image to look at makes
+      # the next person reproduce it locally before they can even start.
+      - name: keep the probe images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-images
+          path: ${{ runner.temp }}/probes
+          if-no-files-found: warn
