@@ -55,22 +55,86 @@ pub(crate) fn collect_point_lights(
     world: &World,
     cam_world: DVec3,
 ) -> ([f32; 4], [[f32; 4]; 16], [[f32; 4]; 16]) {
-    let mut pos = [[0.0f32; 4]; 16];
-    let mut col = [[0.0f32; 4]; 16];
-    let mut n = 0usize;
+    let (n, pos, col, _) = split_point_lights(world, cam_world, &[], false).three_d;
+    ([n as f32, 0.0, 0.0, 0.0], pos, col)
+}
+
+/// One side of the light split: how many, where, what colour, and — for the 2D
+/// side — which sorting layers each one reaches.
+pub(crate) type LightSlots = (usize, [[f32; 4]; 16], [[f32; 4]; 16], [u32; 16]);
+
+/// The scene's placeable lights, separated into the two systems that light with
+/// them.
+pub(crate) struct SplitLights {
+    /// Lights that shade meshes the way they always have.
+    pub three_d: LightSlots,
+    /// Lights on the 2D path. `masks[i]` is a bitmask over SORTING-LAYER RANK —
+    /// bit `r` set means the light reaches rank `r`. All-ones = every layer,
+    /// which is what a light that named none does.
+    ///
+    /// **Nothing reads this yet.** The accumulation pass is step 2 of
+    /// `docs/2d-lighting-proposal.md` and is not built; the split is here
+    /// because it is what decides that a 2D light does NOT also shade meshes,
+    /// and that is testable now. Deliberately unread, not accidentally.
+    #[allow(dead_code)]
+    pub two_d: LightSlots,
+}
+
+/// Split the scene's point lights by which lighting system owns them.
+///
+/// **A light belongs to exactly one side.** A 2D light that also lit meshes
+/// would make a torch in a flat scene wash over any 3D prop that wandered into
+/// it, and the whole point of the flag is that the two systems are separable.
+/// The 3D array is what it always was for a scene with no 2D lights in it, so
+/// nothing that exists today shades differently.
+///
+/// `sorting_names` is the project's layer order, so a light's named layers can
+/// be turned into rank bits once here rather than per fragment. A name the
+/// project no longer has contributes no bit — the light simply does not reach a
+/// layer that does not exist.
+pub(crate) fn split_point_lights(
+    world: &World,
+    cam_world: DVec3,
+    sorting_names: &[String],
+    flat_camera: bool,
+) -> SplitLights {
+    let mut three: LightSlots = (0, [[0.0; 4]; 16], [[0.0; 4]; 16], [0; 16]);
+    let mut two: LightSlots = (0, [[0.0; 4]; 16], [[0.0; 4]; 16], [0; 16]);
+    let facts = floptle_core::Lit2DFacts { emits: true, flat_matter: false, flat_camera };
     for (e, m) in world.query::<Matter>() {
-        if let Matter::PointLight { color, intensity, range } = m {
-            if n >= 16 {
-                break;
-            }
-            let wp = floptle_core::world_transform(world, e).translation;
-            let c = (wp - cam_world).as_vec3();
-            pos[n] = [c.x, c.y, c.z, range.max(0.0001)];
-            col[n] = [color[0] * intensity, color[1] * intensity, color[2] * intensity, 0.0];
-            n += 1;
+        let Matter::PointLight { color, intensity, range } = m else { continue };
+        let lit = world.get::<floptle_core::Lighting2D>(e).cloned().unwrap_or_default();
+        let (is_2d, _) = floptle_core::resolve_2d(lit.mode, facts);
+        let side = if is_2d { &mut two } else { &mut three };
+        if side.0 >= 16 {
+            continue;
+        }
+        let wp = floptle_core::world_transform(world, e).translation;
+        let c = (wp - cam_world).as_vec3();
+        side.1[side.0] = [c.x, c.y, c.z, range.max(0.0001)];
+        side.2[side.0] = [color[0] * intensity, color[1] * intensity, color[2] * intensity, 0.0];
+        side.3[side.0] = layer_mask(&lit, sorting_names);
+        side.0 += 1;
+    }
+    SplitLights { three_d: three, two_d: two }
+}
+
+/// A light's named sorting layers as a bitmask over their RANKS.
+///
+/// Naming none is every layer — `!0`, not `0`. A light that reached nothing
+/// until a list was filled in would read as a broken light, and that default has
+/// to survive the trip to the GPU as well as the trip to the Inspector.
+fn layer_mask(lit: &floptle_core::Lighting2D, sorting_names: &[String]) -> u32 {
+    if lit.layers.is_empty() {
+        return !0;
+    }
+    let mut mask = 0u32;
+    for (rank, name) in sorting_names.iter().enumerate().take(32) {
+        if lit.reaches(name) {
+            mask |= 1 << rank;
         }
     }
-    ([n as f32, 0.0, 0.0, 0.0], pos, col)
+    mask
 }
 
 /// The key light as the `light_dir` uniform vec4 for THIS camera. Directional:
@@ -554,4 +618,110 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
         }
     }
     (off, [0.0; 4])
+}
+
+#[cfg(test)]
+mod light_split_tests {
+    use super::*;
+    use floptle_core::{Lighting2D, Lit2D, Matter, World};
+
+    fn light_at(world: &mut World, x: f64, mode: Option<Lighting2D>) -> floptle_core::Entity {
+        let e = world.spawn();
+        world.insert(e, Matter::PointLight { color: [1.0, 0.5, 0.25], intensity: 2.0, range: 8.0 });
+        world.insert(
+            e,
+            floptle_core::transform::Transform {
+                translation: DVec3::new(x, 0.0, 0.0),
+                ..Default::default()
+            },
+        );
+        if let Some(l) = mode {
+            world.insert(e, l);
+        }
+        e
+    }
+
+    fn layers() -> Vec<String> {
+        vec!["Default".into(), "Terrain".into(), "Characters".into()]
+    }
+
+    /// A light belongs to exactly ONE system. A 2D torch that also lit meshes
+    /// would wash over any 3D prop that wandered into a flat scene, and the
+    /// whole point of the flag is that the two are separable.
+    #[test]
+    fn a_light_lands_on_one_side_and_only_one() {
+        let mut world = World::default();
+        light_at(&mut world, 0.0, None); // auto
+        light_at(&mut world, 1.0, Some(Lighting2D { mode: Lit2D::No, ..Default::default() }));
+
+        // Flat scene: auto is 2D, the stated 3D one is not.
+        let s = split_point_lights(&world, DVec3::ZERO, &layers(), true);
+        assert_eq!((s.two_d.0, s.three_d.0), (1, 1));
+        // Perspective scene: both are 3D and nothing is on the 2D side.
+        let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
+        assert_eq!((s.two_d.0, s.three_d.0), (0, 2));
+    }
+
+    /// A scene with no 2D lights in it must hand the 3D shader exactly what it
+    /// always got — same count, same slots, same numbers.
+    #[test]
+    fn a_scene_with_no_2d_lights_shades_as_it_always_did() {
+        let mut world = World::default();
+        light_at(&mut world, 3.0, None);
+        light_at(&mut world, -2.0, None);
+        let (count, pos, col) = collect_point_lights(&world, DVec3::new(1.0, 0.0, 0.0));
+        let s = split_point_lights(&world, DVec3::new(1.0, 0.0, 0.0), &layers(), false);
+        assert_eq!(count[0] as usize, s.three_d.0);
+        assert_eq!(pos, s.three_d.1);
+        assert_eq!(col, s.three_d.2);
+        assert_eq!(pos[0], [2.0, 0.0, 0.0, 8.0], "camera-relative, range in w");
+        assert_eq!(col[0], [2.0, 1.0, 0.5, 0.0], "colour times intensity");
+    }
+
+    /// Naming no layers is EVERY layer, all the way to the GPU. A default that
+    /// arrived as a zero mask would light nothing, which is the same bug as a
+    /// light that lit nothing until a list was filled in — just further away
+    /// from where anybody would look for it.
+    #[test]
+    fn a_light_that_names_no_layers_arrives_reaching_all_of_them() {
+        let mut world = World::default();
+        light_at(&mut world, 0.0, Some(Lighting2D { mode: Lit2D::Yes, layers: vec![] }));
+        let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
+        assert_eq!(s.two_d.0, 1);
+        assert_eq!(s.two_d.3[0], !0u32, "the mask must be all-ones, never zero");
+    }
+
+    /// Named layers become RANK bits, so the shader compares a number rather
+    /// than a string. A name the project no longer has contributes no bit — the
+    /// light does not reach a layer that does not exist.
+    #[test]
+    fn named_layers_become_rank_bits() {
+        let mut world = World::default();
+        light_at(
+            &mut world,
+            0.0,
+            Some(Lighting2D {
+                mode: Lit2D::Yes,
+                layers: vec!["Characters".into(), "Gone".into()],
+            }),
+        );
+        let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
+        assert_eq!(s.two_d.3[0], 1 << 2, "only Characters, which is rank 2");
+    }
+
+    /// Sixteen slots per side, and running out of one must not spill into the
+    /// other or drop the side that had room.
+    #[test]
+    fn each_side_fills_its_own_sixteen() {
+        let mut world = World::default();
+        for i in 0..20 {
+            light_at(&mut world, i as f64, Some(Lighting2D { mode: Lit2D::Yes, ..Default::default() }));
+        }
+        for i in 0..3 {
+            light_at(&mut world, i as f64, Some(Lighting2D { mode: Lit2D::No, ..Default::default() }));
+        }
+        let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
+        assert_eq!(s.two_d.0, 16, "the 2D side fills up");
+        assert_eq!(s.three_d.0, 3, "…and the 3D side still gets all of its own");
+    }
 }
