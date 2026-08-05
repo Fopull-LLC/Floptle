@@ -543,7 +543,15 @@ impl<'a> SettingsCtx<'a> {
                 ui.add_sized([200.0, 20.0], egui::Label::new(egui::RichText::new("Default").weak()));
                 ui.small("always first");
             });
-            let mut drop: Option<usize> = None;
+            // An explicit action rather than an integer encoding a swap: the
+            // encoded version tripped clippy and, more to the point, nobody
+            // reading it could tell a "move up" from a "remove index 3".
+            enum SortEdit {
+                Up(usize),
+                Down(usize),
+                Remove(usize),
+            }
+            let mut edit: Option<SortEdit> = None;
             let n = project.sorting_layers.len();
             for i in 0..n {
                 ui.horizontal(|ui| {
@@ -552,27 +560,30 @@ impl<'a> SettingsCtx<'a> {
                     // Reordering is the whole point of the list, so it is two
                     // buttons rather than a drag nobody discovers.
                     if ui.add_enabled(i > 0, egui::Button::new("▲")).on_hover_text("further back").clicked() {
-                        drop = Some(usize::MAX - i); // encode a swap-up
+                        edit = Some(SortEdit::Up(i));
                     }
                     if ui.add_enabled(i + 1 < n, egui::Button::new("▼")).on_hover_text("further front").clicked() {
-                        drop = Some(usize::MAX / 2 - i); // encode a swap-down
+                        edit = Some(SortEdit::Down(i));
                     }
                     if ui.button("✖").on_hover_text("remove — nodes naming it draw in FRONT until repointed").clicked() {
-                        drop = Some(i);
+                        edit = Some(SortEdit::Remove(i));
                     }
                 });
             }
-            if let Some(code) = drop {
-                if code >= usize::MAX / 2 + 1 {
-                    let i = usize::MAX - code;
+            match edit {
+                Some(SortEdit::Up(i)) => {
                     project.sorting_layers.swap(i, i - 1);
-                } else if code >= usize::MAX / 4 {
-                    let i = usize::MAX / 2 - code;
-                    project.sorting_layers.swap(i, i + 1);
-                } else {
-                    project.sorting_layers.remove(code);
+                    out.save_project = true;
                 }
-                out.save_project = true;
+                Some(SortEdit::Down(i)) => {
+                    project.sorting_layers.swap(i, i + 1);
+                    out.save_project = true;
+                }
+                Some(SortEdit::Remove(i)) => {
+                    project.sorting_layers.remove(i);
+                    out.save_project = true;
+                }
+                None => {}
             }
             if ui.button("✚ Add sorting layer").clicked() {
                 project.sorting_layers.push(format!("Layer {}", project.sorting_layers.len() + 1));
