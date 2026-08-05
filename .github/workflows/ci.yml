@@ -59,3 +59,25 @@ jobs:
       # means a broken example in a doc comment ships.
       - name: doc tests
         run: cargo test --workspace --doc
+
+      # The self-asserting render probes. `--all-targets` COMPILES every example
+      # and runs none of them, so until this step the visual regressions each of
+      # these was written for were guarded only by someone remembering to run it
+      # — the exact bet this whole workflow exists to stop making.
+      #
+      # Only probes whose assertion is backend-INDEPENDENT belong here. Each of
+      # these compares two renders from the same device (before/after, CPU/GPU,
+      # frame/frame) or reads a flat colour, so a software rasteriser answers
+      # them the same way a real card does. A probe that asserts an exact shade
+      # or a frame time is a probe for a human to look at, and stays out.
+      - name: software Vulkan (lavapipe)
+        run: sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+      - name: render probes
+        env:
+          WGPU_BACKEND: vulkan
+        run: |
+          for p in skin_prepass_probe skin_probe ortho_camera_probe tilemap_pages_probe; do
+            echo "::group::$p"
+            cargo run -p floptle-render --example "$p" -- "$RUNNER_TEMP/$p" || exit 1
+            echo "::endgroup::"
+          done
