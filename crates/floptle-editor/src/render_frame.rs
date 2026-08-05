@@ -7039,7 +7039,71 @@ impl Editor {
                         );
                     }
                 }
-                _ => {}
+                // The 2D layer, for exactly the reason the arm above it exists.
+                // A tilemap and a sprite batch were gathered only by the main
+                // surface pass, so every view that comes through here — the
+                // docked or split Game view, a camera preview, any render
+                // target — drew a 2D game as an empty background while the
+                // Scene view showed the level. Which is to say a 2D game was
+                // invisible in the one view that is the game.
+                Matter::Tilemap { .. } => {
+                    let model = t.render_matrix(cam.world_position);
+                    let mut draws = Vec::new();
+                    crate::sprite2d::tilemap_draws(
+                        &self.tilemaps,
+                        &self.texture_registry,
+                        *ent,
+                        model,
+                        mat.as_ref(),
+                        tex,
+                        &mut draws,
+                    );
+                    for draw in draws {
+                        match flsl {
+                            Some(b) => flsl_draws.push((draw.0, draw.1, b, draw.2)),
+                            None => instances.push(draw),
+                        }
+                    }
+                }
+                Matter::SpriteBatch { size } => {
+                    if let Some(&mesh) = self.mesh_ids.get(floptle_core::Shape::Plane as usize) {
+                        let model = t.render_matrix(cam.world_position);
+                        let texel = self
+                            .raster
+                            .as_ref()
+                            .zip(tex)
+                            .and_then(|(r, id)| r.texture_size(id))
+                            .map(|[w, h]| [1.0 / w.max(1.0), 1.0 / h.max(1.0)])
+                            .unwrap_or([0.0, 0.0]);
+                        let mut raws = Vec::new();
+                        crate::sprite2d::sprite_draws(
+                            &self.world, *ent, *size, model, mat.as_ref(), texel, &mut raws,
+                        );
+                        for raw in raws {
+                            match flsl {
+                                Some(b) => flsl_draws.push((mesh, tex, b, raw)),
+                                None => instances.push((mesh, tex, raw)),
+                            }
+                        }
+                    }
+                }
+                // Listed rather than `_ => {}`, and that is the point. This
+                // match silently dropped Tilemap and SpriteBatch for two
+                // releases, and had already done the same to MapMesh before
+                // them — a catch-all arm cannot be reviewed, and the next kind
+                // of matter would have joined them without a word. Naming each
+                // one makes the compiler ask.
+                //
+                // Everything below is drawn somewhere else in THIS function or
+                // is not drawable at all:
+                Matter::Terrain { .. } => {} // push_terrain_instances, further down
+                Matter::WaterVolume { .. } | Matter::FieldShape { .. } => {} // the raymarch pass
+                Matter::Skybox { .. } => {}      // skybox_uniforms → the sky stage
+                Matter::PointLight { .. } => {}  // collect_point_lights, into globals
+                Matter::Camera { .. } => {}      // it is the eye, not a thing seen
+                Matter::PostProcess { .. } => {} // post_process_uniforms
+                Matter::GravityVolume { .. } => {} // physics only; no visual
+                Matter::Empty => {}              // a transform with nothing on it
             }
         }
 
