@@ -112,50 +112,85 @@ pub fn preset_len(kind: AutotileKind) -> usize {
     }
 }
 
-/// A resolver built once from a tileset, so painting a stroke does not re-scan
-/// the tile table per square.
+/// Mix three integers into a well-spread one.
 ///
-/// Holds, per group, a 256-entry table from raw mask to cell. Raw rather than
-/// canonical so a lookup is one index with no branching, and so a group with an
-/// incomplete sheet still answers *something* for every neighbourhood (see
-/// [`Autotiler::resolve`]).
+/// The murmur3 finaliser, written out. It is here rather than behind a `Hasher`
+/// because the numbers this produces are baked into levels: two squares must
+/// pick the same variant on every machine, in every build, forever, and
+/// `DefaultHasher` explicitly does not promise that.
+fn spread(x: i32, y: i32, salt: u16) -> u64 {
+    let mut h = ((x as u32 as u64) << 32) | (y as u32 as u64);
+    h ^= (salt as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^ (h >> 33)
+}
+
+/// A resolver built once from a tileset, so painting a stroke does not re-scan
+/// the group list per square.
+///
+/// Holds, per group, a 256-entry table from raw mask to a rule index. Raw rather
+/// than canonical so a lookup is one index with no branching, and so a group
+/// with an incomplete sheet still answers *something* for every neighbourhood
+/// (see [`Autotiler::resolve`]).
 pub struct Autotiler {
-    /// `tables[group][mask]` = the cell to draw, or `u32::MAX` for "no tile
-    /// authored for this neighbourhood".
-    tables: Vec<[u32; 256]>,
+    /// `tables[group][mask]` = an index into `rules[group]`, or `u16::MAX` for
+    /// "no tile authored for this neighbourhood".
+    tables: Vec<[u16; 256]>,
+    /// `rules[group][i]` = the tiles that rule draws, in authoring order.
+    rules: Vec<Vec<Vec<u32>>>,
     kinds: Vec<AutotileKind>,
+    /// Which groups draw a cell. The masking question — "does the tile next to
+    /// me count as my stuff?" — is asked eight times per square of every
+    /// retiled region, so it cannot be a scan of every group's rules.
+    members: std::collections::HashMap<u32, Vec<u16>>,
 }
 
 impl Autotiler {
     pub fn build(set: &TileSet) -> Self {
-        let mut tables: Vec<[u32; 256]> = vec![[u32::MAX; 256]; set.groups.len()];
+        let mut tables: Vec<[u16; 256]> = vec![[u16::MAX; 256]; set.groups.len()];
+        let mut rules: Vec<Vec<Vec<u32>>> = vec![Vec::new(); set.groups.len()];
         let kinds: Vec<AutotileKind> = set.groups.iter().map(|g| g.kind).collect();
+        let mut members: std::collections::HashMap<u32, Vec<u16>> =
+            std::collections::HashMap::new();
 
-        // Assign each authored tile to every RAW mask that canonicalises to its
-        // mask. A group therefore answers all 256 neighbourhoods as soon as its
-        // canonical set is covered, and a half-authored group answers the ones
-        // it can.
-        for (&cell, info) in &set.tiles {
-            let Some(g) = info.group else { continue };
-            let (Some(table), Some(&kind)) = (tables.get_mut(g as usize), kinds.get(g as usize))
-            else {
-                continue;
-            };
-            let want = canonical(kind, info.mask);
-            for raw in 0u16..=255 {
-                if canonical(kind, raw as u8) == want {
-                    // First tile wins for a mask. Two tiles claiming one mask is
-                    // an authoring mistake the palette flags; picking the lower
-                    // cell makes it at least deterministic, which matters because
-                    // an autotiled level must come out the same on every machine.
-                    let slot = &mut table[raw as usize];
-                    if *slot == u32::MAX || cell < *slot {
-                        *slot = cell;
+        for (gi, group) in set.groups.iter().enumerate() {
+            let g = gi as u16;
+            for rule in &group.rules {
+                if rule.tiles.is_empty() {
+                    continue;
+                }
+                let want = canonical(group.kind, rule.mask);
+                // A hand-edited file could name one mask twice; the later rule's
+                // tiles join the earlier one rather than replacing it, because
+                // silently dropping authored art is the worse failure.
+                let at = match tables[gi][want as usize] {
+                    u16::MAX => {
+                        rules[gi].push(Vec::new());
+                        rules[gi].len() - 1
+                    }
+                    i => i as usize,
+                };
+                rules[gi][at].extend_from_slice(&rule.tiles);
+                for &cell in &rule.tiles {
+                    let list = members.entry(cell).or_default();
+                    if !list.contains(&g) {
+                        list.push(g);
+                    }
+                }
+                // Every RAW mask that canonicalises to this one answers here, so
+                // a group covers all 256 neighbourhoods as soon as its canonical
+                // set is covered.
+                for raw in 0u16..=255 {
+                    if canonical(group.kind, raw as u8) == want {
+                        tables[gi][raw as usize] = at as u16;
                     }
                 }
             }
         }
-        Self { tables, kinds }
+        Self { tables, rules, kinds, members }
     }
 
     pub fn has_group(&self, group: u16) -> bool {
@@ -166,15 +201,53 @@ impl Autotiler {
         self.kinds.get(group as usize).copied()
     }
 
+    /// Whether the tile in `cell` counts as `group`'s own stuff when masking:
+    /// drawn by that group, or by one it joins.
+    pub fn counts_as(&self, set: &TileSet, cell: u32, group: u16) -> bool {
+        self.members
+            .get(&cell)
+            .is_some_and(|gs| gs.iter().any(|&other| set.joins(group, other)))
+    }
+
+    /// Every tile a group draws for a raw 8-neighbour mask, in authoring order.
+    /// Empty when the group has nothing authored for it.
+    pub fn variants(&self, group: u16, mask: u8) -> &[u32] {
+        let Some(&i) = self.tables.get(group as usize).and_then(|t| t.get(mask as usize)) else {
+            return &[];
+        };
+        if i == u16::MAX {
+            return &[];
+        }
+        self.rules[group as usize].get(i as usize).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
     /// The cell a group draws for a raw 8-neighbour mask, or `None` when the
     /// group has nothing authored for it.
+    ///
+    /// The FIRST variant — what the panel previews for a rule. A paint stroke
+    /// wants [`Self::resolve_at`], which spreads the variants across the map.
     ///
     /// `None` means *leave the square alone* to every caller — never "erase it".
     /// A half-drawn autotile group should leave holes in the shape you painted,
     /// not delete the tiles that were already there.
     pub fn resolve(&self, group: u16, mask: u8) -> Option<u32> {
-        let c = *self.tables.get(group as usize)?.get(mask as usize)?;
-        (c != u32::MAX).then_some(c)
+        self.variants(group, mask).first().copied()
+    }
+
+    /// The cell a group draws at a particular square.
+    ///
+    /// With one tile on the rule this is [`Self::resolve`]. With several it
+    /// picks one from the square's own coordinates, so a field of grass varies
+    /// and — the part that matters — varies the SAME way every time the map is
+    /// retiled, on every machine. A variant chosen from a random number
+    /// generator would reshuffle the level on every load.
+    pub fn resolve_at(&self, group: u16, mask: u8, x: i32, y: i32) -> Option<u32> {
+        let tiles = self.variants(group, mask);
+        match tiles.len() {
+            0 => None,
+            1 => Some(tiles[0]),
+            n => Some(tiles[(spread(x, y, group) % n as u64) as usize]),
+        }
     }
 
     /// Which canonical masks a group has no tile for — what the palette shows as
@@ -191,12 +264,21 @@ impl Autotiler {
 
 /// Assign preset masks to a run of tiles, in cell order.
 ///
-/// Returns `(cell, mask)` pairs to write. Extra tiles past the preset's length
-/// get no mask (and the caller should say so) rather than wrapping round — a
-/// wrapped mask would make two tiles claim one neighbourhood, and the loser
-/// would simply never appear.
+/// Returns `(cell, mask)` pairs to write.
+///
+/// **A selection that is a whole multiple of the preset's length is read as
+/// variants.** Select 32 tiles for the 16-shape preset and each shape gets two,
+/// which is exactly how a sheet with alternates is laid out — pass after pass in
+/// the same order. Anything else assigns one tile per shape in order and stops
+/// at the shorter of the two; the caller says what was left over, because a
+/// preset that silently truncates is the failure shape this codebase keeps
+/// paying for.
 pub fn assign_preset(kind: AutotileKind, cells: &[u32]) -> Vec<(u32, u8)> {
     let masks = preset_masks(kind);
+    let n = masks.len();
+    if !cells.is_empty() && cells.len().is_multiple_of(n) {
+        return cells.iter().copied().enumerate().map(|(i, c)| (c, masks[i % n])).collect();
+    }
     cells.iter().copied().zip(masks).collect()
 }
 
@@ -266,11 +348,9 @@ mod tests {
 
     fn grass_set(kind: AutotileKind, cells: &[u32]) -> TileSet {
         let mut set = TileSet { sheet_cols: 8, sheet_rows: 8, ..Default::default() };
-        set.groups.push(AutotileGroup { name: "grass".into(), kind, joins: vec![] });
+        set.groups.push(AutotileGroup { name: "grass".into(), kind, ..Default::default() });
         for (cell, mask) in assign_preset(kind, cells) {
-            let info = set.info_mut(cell);
-            info.group = Some(0);
-            info.mask = mask;
+            set.groups[0].add_to_rule(mask, cell);
         }
         set
     }
@@ -310,16 +390,96 @@ mod tests {
         assert_eq!(at.resolve(0, gap), None);
     }
 
+    /// Two tiles on one rule are VARIANTS, not a conflict. This is the thing the
+    /// old model could not express at all: a mask held one cell, so a second
+    /// tile for the same shape silently replaced the first or was ignored.
     #[test]
-    fn two_tiles_claiming_one_mask_resolve_deterministically() {
+    fn a_rule_with_several_tiles_spreads_them_across_the_map() {
         let mut set = grass_set(AutotileKind::Edge4, &(0..16).collect::<Vec<_>>());
-        // Tile 20 also claims the mask tile 5 has.
-        let mask = set.info(5).unwrap().mask;
-        let info = set.info_mut(20);
-        info.group = Some(0);
-        info.mask = mask;
+        let mask = EDGES; // surrounded
+        let base = set.groups[0].tiles_for(mask)[0];
+        set.groups[0].add_to_rule(mask, 20);
+        set.groups[0].add_to_rule(mask, 21);
         let at = Autotiler::build(&set);
-        assert_eq!(at.resolve(0, mask), Some(5), "the lower cell wins, every time");
+
+        assert_eq!(at.variants(0, mask), &[base, 20, 21]);
+        assert_eq!(at.resolve(0, mask), Some(base), "the preview is the first variant");
+
+        // Over a field, every variant gets used and nothing else appears.
+        let mut seen = std::collections::BTreeSet::new();
+        for y in 0..40 {
+            for x in 0..40 {
+                seen.insert(at.resolve_at(0, mask, x, y).unwrap());
+            }
+        }
+        assert_eq!(seen, [base, 20, 21].into_iter().collect(), "all three, and only those");
+    }
+
+    /// The variant a square gets must depend ONLY on where it is — asked twice,
+    /// asked in another process, asked next year, the same square answers the
+    /// same tile. A level that reshuffled itself on load would be unusable.
+    #[test]
+    fn a_squares_variant_is_the_same_every_time_it_is_asked() {
+        let mut set = grass_set(AutotileKind::Edge4, &(0..16).collect::<Vec<_>>());
+        for cell in [20, 21, 22] {
+            set.groups[0].add_to_rule(EDGES, cell);
+        }
+        let at = Autotiler::build(&set);
+        let once: Vec<u32> =
+            (0..50).map(|i| at.resolve_at(0, EDGES, i, i * 3 - 7).unwrap()).collect();
+        // A second resolver built from the same tileset, as a fresh load would.
+        let again = Autotiler::build(&set);
+        let twice: Vec<u32> =
+            (0..50).map(|i| again.resolve_at(0, EDGES, i, i * 3 - 7).unwrap()).collect();
+        assert_eq!(once, twice);
+        // ...and neighbouring squares are not all the same one, which is the
+        // whole point of having variants.
+        assert!(once.windows(2).any(|w| w[0] != w[1]), "the spread is not spreading");
+    }
+
+    /// Listing a tile twice doubles its share. It is how an artist asks for a
+    /// rare flower without drawing nine plain squares.
+    #[test]
+    fn a_tile_listed_twice_comes_up_twice_as_often() {
+        let mut set = grass_set(AutotileKind::Edge4, &(0..16).collect::<Vec<_>>());
+        set.groups[0].clear_rule(EDGES);
+        for cell in [90, 90, 90, 91] {
+            set.groups[0].add_to_rule(EDGES, cell);
+        }
+        let at = Autotiler::build(&set);
+        let mut common = 0;
+        let mut rare = 0;
+        for y in 0..60 {
+            for x in 0..60 {
+                match at.resolve_at(0, EDGES, x, y) {
+                    Some(90) => common += 1,
+                    Some(91) => rare += 1,
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+        }
+        assert!(common > rare * 2, "3:1 was authored, got {common}:{rare}");
+    }
+
+    /// The same tile in several rules — the other half of "duplicates". One
+    /// plain fill square standing in for six neighbourhoods is ordinary.
+    #[test]
+    fn one_tile_can_answer_several_neighbourhoods() {
+        let mut set = TileSet { sheet_cols: 8, sheet_rows: 8, ..Default::default() };
+        set.groups.push(AutotileGroup {
+            name: "grass".into(),
+            kind: AutotileKind::Edge4,
+            ..Default::default()
+        });
+        for mask in preset_masks(AutotileKind::Edge4) {
+            set.groups[0].add_to_rule(mask, 4); // one tile, every shape
+        }
+        let at = Autotiler::build(&set);
+        assert!(at.missing(0).is_empty(), "one tile covered the whole preset");
+        for raw in 0u16..=255 {
+            assert_eq!(at.resolve(0, raw as u8), Some(4));
+        }
+        assert_eq!(set.group_cells(0), vec![4], "and it is counted once, not sixteen times");
     }
 
     #[test]

@@ -113,7 +113,7 @@ exactly what it always did.
 ## 4. Tilesets — what a tile *is*
 
 A **tileset** says what each cell of a spritesheet means: whether it collides,
-what it is tagged, which autotile group it is in, whether it animates. It lives at
+what it is tagged, which autotile shapes it draws, whether it animates. It lives at
 `<project>/tilesets/<name>.tileset.ron` and is shared by every layer cut from that
 sheet.
 
@@ -159,7 +159,8 @@ also draws what it knows, over the art:
 
 * a solid tile gets a **collision overlay in the shape of its collider** — so a
   half-tile collider looks like a half tile, not like a tick;
-* an autotiled tile gets a **3×3 neighbourhood diagram** of the mask it answers;
+* an autotiled tile gets a **3×3 neighbourhood diagram** of a shape it draws,
+  and `+2` beside it if it draws more than one;
 * an animated tile gets a ▷.
 
 ### Collision
@@ -224,13 +225,43 @@ them: paint a shape and the corners, edges and ends appear.
 
 1. In ◫ Tiles ⏵ AUTOTILE, add a group — **Edges (16 tiles)** or **Blob (47
    tiles)**.
-2. Drag out the run of tiles in the palette.
-3. Press **Assign preset to N selected**.
-4. Click one of the group's tiles and paint.
+2. In its **RULES** grid, click a shape, then click the tile that draws it. The
+   next empty shape arms itself, so filling a preset is one run of alternating
+   clicks.
+3. Click any of the group's tiles in the palette and paint.
+
+If your sheet happens to be laid out in the preset's own order you can skip step
+2: drag out the run of tiles and press **Assign preset to N selected**.
 
 **Edges** uses the four orthogonal neighbours: a path, a wall run, a pipe network.
 **Blob** uses all eight with the corner rule, which is what you need for terrain
 that has inside corners as well as outside ones.
+
+### One tile, many shapes — one shape, many tiles
+
+Both directions are ordinary, and neither costs you anything.
+
+**A tile can draw as many shapes as you like.** One plain fill square is usually
+the answer to several neighbourhoods, and a sheet where the artist drew a single
+inside corner rather than four wants that one tile in four shapes. Click the
+shapes and click the same tile each time; nothing is moved off anything.
+
+**A shape can hold as many tiles as you like.** They are *variants* — four grass
+squares that all mean "surrounded" — and which one a square gets is decided by
+where that square is, so a field varies without any two loads of the level
+disagreeing. A shape with alternates is marked **×N** in the grid; arm it to see
+them all, and click one to take it back off.
+
+Listing the same tile twice makes it twice as likely, which is how you get a
+rare flower without drawing nine plain squares.
+
+The **next shape after the first tile** checkbox is what makes both work: it
+advances only when a shape goes from empty to having something, so a second
+click stays on the shape you are looking at. Turn it off to stay put entirely.
+
+**Assign preset** understands variants too. Select a whole multiple of the
+preset's length — 32 tiles for the 16-shape preset — and it reads them as
+pass after pass, giving every shape two.
 
 ### About the presets
 
@@ -240,9 +271,10 @@ order and gets it wrong produces *plausible* wrongness — it tiles, it just til
 with the wrong corners, and it reads as bad art rather than a wrong table.
 
 So: the presets here are **ascending mask order**, stated rather than named after
-a tool, and **every tile's mask is drawn on the palette as a 3×3 diagram**. If a
-preset guessed wrong you can see which tiles disagree, and clicking a cell of the
-diagram fixes one. That is what makes offering a guess safe.
+a tool, and **every shape is drawn as a 3×3 diagram** — in the RULES grid, and
+on the palette beside any tile that answers one. If a preset guessed wrong you
+can see which tiles disagree, and pointing a shape at a different tile is two
+clicks. That is what makes offering a guess safe.
 
 Masks are one bit per neighbour, clockwise from north:
 
@@ -288,6 +320,11 @@ square changes what its neighbours should draw, so anything narrower leaves a se
 of stale edge tiles exactly one square wide around every stroke.
 
 A square you turned by hand keeps its orientation through a retile.
+
+A square's **variant** is decided by where the square is, not by a random number,
+so retiling the same map twice gives the same result — and so does opening it
+tomorrow, or on another machine. A level that reshuffled its own grass on load
+would be unusable.
 
 ## 6. The orthographic camera
 

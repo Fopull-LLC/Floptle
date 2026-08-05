@@ -152,6 +152,10 @@ impl TileCollision {
     }
 }
 
+fn is_zero(m: &u8) -> bool {
+    *m == 0
+}
+
 /// Everything a tileset knows about one cell of the sheet.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -159,11 +163,23 @@ pub struct TileInfo {
     pub collision: TileCollision,
     /// Gameplay tags a script reads. Order is authoring order.
     pub tags: Vec<String>,
-    /// The autotile group this tile belongs to, as an index into
-    /// [`TileSet::groups`]. `None` = an ordinary hand-placed tile.
+    /// **Legacy.** The autotile group this tile belonged to, back when the
+    /// mapping lived on the tile.
+    ///
+    /// A tile could name one group and one mask, which meant one tile could
+    /// answer exactly one neighbourhood and no neighbourhood could offer a
+    /// choice of tiles. Both are things an artist asks for constantly — a plain
+    /// fill that serves several shapes, four grass tiles that vary — so the
+    /// mapping now lives on the group as [`AutotileGroup::rules`].
+    ///
+    /// Kept only so a tileset written before that loads: it is read once by
+    /// [`TileSet::migrate_legacy_autotile`], moved into the group's rules, and
+    /// cleared. Never written back out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<u16>,
-    /// The 8-neighbour bitmask this tile is the answer to, within its group.
-    /// Meaningless without `group`. See [`crate::autotile::Neighbours`].
+    /// **Legacy.** The neighbourhood `group` said this tile answered. See
+    /// `group`.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub mask: u8,
     /// Extra cells this tile cycles through, `anim_fps` per second. The tile's
     /// own index is frame 0 and is NOT repeated here, so a two-frame flicker is
@@ -181,8 +197,11 @@ impl TileInfo {
     pub fn is_blank(&self) -> bool {
         self.collision == TileCollision::None
             && self.tags.is_empty()
-            && self.group.is_none()
             && self.frames.is_empty()
+            // Only true between parsing an old file and migrating it — after
+            // that these are always clear. Kept so a prune in that window
+            // cannot drop the assignment before it has been converted.
+            && self.group.is_none()
     }
 
     /// Which cell this tile shows at time `t` seconds.
@@ -236,6 +255,34 @@ impl AutotileKind {
     }
 }
 
+/// One rule of an autotile group: a neighbourhood, and the tiles that draw it.
+///
+/// `tiles` is a LIST, and both directions of that matter to somebody drawing a
+/// tileset:
+///
+/// * **The same tile may appear in any number of rules.** A plain fill square
+///   is usually the answer to several neighbourhoods, and a sheet where the
+///   artist drew one inside-corner rather than four wants that one tile in four
+///   rules.
+/// * **A rule may hold any number of tiles.** They are *variants*: four grass
+///   tiles that all mean "surrounded", picked per square so a field is not one
+///   image repeated. Listing a tile twice makes it twice as likely, which is how
+///   you get a rare flower without drawing nine plain squares.
+///
+/// The choice is made from the square's own position ([`Autotiler::resolve_at`])
+/// and never from a random number generator, so the same map comes out the same
+/// on every machine and in every session — a level that reshuffled itself on
+/// load would be unusable.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutotileRule {
+    /// The neighbourhood this answers, canonical for the group's kind.
+    pub mask: u8,
+    /// The tiles that draw it, in authoring order. Empty = the rule is a blank
+    /// slot: a square with these neighbours is left exactly as painted.
+    pub tiles: Vec<u32>,
+}
+
 /// A named set of tiles that pick themselves by what is next to them.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -251,11 +298,86 @@ pub struct AutotileGroup {
     /// occasionally what you want (a cliff edges against sky but sky does not
     /// edge against the cliff).
     pub joins: Vec<u16>,
+    /// Which tile to draw for which neighbourhood. At most one rule per mask;
+    /// order is the preset's ascending mask order.
+    pub rules: Vec<AutotileRule>,
 }
 
 impl Default for AutotileGroup {
     fn default() -> Self {
-        Self { name: "group".into(), kind: AutotileKind::Edge4, joins: Vec::new() }
+        Self {
+            name: "group".into(),
+            kind: AutotileKind::Edge4,
+            joins: Vec::new(),
+            rules: Vec::new(),
+        }
+    }
+}
+
+impl AutotileGroup {
+    /// The tiles this group draws for `mask`, in authoring order. The mask is
+    /// canonicalised first, so asking with a raw neighbourhood works.
+    pub fn tiles_for(&self, mask: u8) -> &[u32] {
+        let want = crate::autotile::canonical(self.kind, mask);
+        self.rules
+            .iter()
+            .find(|r| r.mask == want)
+            .map(|r| r.tiles.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The rule for `mask`, created empty if this group has none yet.
+    pub fn rule_mut(&mut self, mask: u8) -> &mut AutotileRule {
+        let want = crate::autotile::canonical(self.kind, mask);
+        let at = match self.rules.iter().position(|r| r.mask == want) {
+            Some(i) => i,
+            None => {
+                // Keep the list in ascending mask order — it is the order the
+                // preset states and the order the panel draws, and a file whose
+                // rules are in click order would diff against itself.
+                let i = self.rules.iter().take_while(|r| r.mask < want).count();
+                self.rules.insert(i, AutotileRule { mask: want, tiles: Vec::new() });
+                i
+            }
+        };
+        &mut self.rules[at]
+    }
+
+    /// Add a tile to a rule. The same tile twice is allowed and meaningful —
+    /// it doubles that tile's share of the variants.
+    pub fn add_to_rule(&mut self, mask: u8, cell: u32) {
+        self.rule_mut(mask).tiles.push(cell);
+    }
+
+    /// Drop ONE occurrence of `cell` from a rule, at `nth` among its variants.
+    /// Removing by position rather than by value is what lets a duplicate be
+    /// removed once without taking its twin with it.
+    pub fn remove_variant(&mut self, mask: u8, nth: usize) {
+        let want = crate::autotile::canonical(self.kind, mask);
+        if let Some(r) = self.rules.iter_mut().find(|r| r.mask == want)
+            && nth < r.tiles.len()
+        {
+            r.tiles.remove(nth);
+        }
+        self.rules.retain(|r| !r.tiles.is_empty());
+    }
+
+    pub fn clear_rule(&mut self, mask: u8) {
+        let want = crate::autotile::canonical(self.kind, mask);
+        self.rules.retain(|r| r.mask != want);
+    }
+
+    /// Every tile this group draws, deduplicated, in cell order.
+    pub fn cells(&self) -> Vec<u32> {
+        let mut out: Vec<u32> = self.rules.iter().flat_map(|r| r.tiles.iter().copied()).collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Whether this group draws `cell` anywhere.
+    pub fn draws(&self, cell: u32) -> bool {
+        self.rules.iter().any(|r| r.tiles.contains(&cell))
     }
 }
 
@@ -393,8 +515,24 @@ impl TileSet {
         self.tiles.get(&cell).map(|t| t.tags.as_slice()).unwrap_or(&[])
     }
 
+    /// The first group that draws `cell`, for the panel's "clicking this tile
+    /// arms its autotile".
+    ///
+    /// A tile can now be drawn by more than one group, so this is a UI
+    /// convenience and NOT what masking asks — masking wants every group the
+    /// tile belongs to, which is [`Self::groups_of`] (and, in the inner loop,
+    /// [`crate::Autotiler::counts_as`]).
     pub fn group_of(&self, cell: u32) -> Option<u16> {
-        self.tiles.get(&cell)?.group
+        self.groups_of(cell).next()
+    }
+
+    /// Every group that draws `cell`, ascending.
+    pub fn groups_of(&self, cell: u32) -> impl Iterator<Item = u16> + '_ {
+        self.groups
+            .iter()
+            .enumerate()
+            .filter(move |(_, g)| g.draws(cell))
+            .map(|(i, _)| i as u16)
     }
 
     /// Whether the tileset animates at all — the editor asks this before it
@@ -409,33 +547,59 @@ impl TileSet {
         self.tiles.retain(|_, t| !t.is_blank());
     }
 
-    /// Every cell in a group, in cell order.
+    /// Every cell a group draws, deduplicated, in cell order.
     pub fn group_cells(&self, group: u16) -> Vec<u32> {
-        self.tiles
-            .iter()
-            .filter(|(_, t)| t.group == Some(group))
-            .map(|(c, _)| *c)
-            .collect()
+        self.groups.get(group as usize).map(|g| g.cells()).unwrap_or_default()
     }
 
-    /// Remove a group and un-assign its tiles, fixing up the indices of the
-    /// groups after it (and anybody's `joins` that named them).
+    /// Move a tileset written before rules lived on the group into the shape
+    /// this code reads. Idempotent, and a no-op for anything already migrated.
+    ///
+    /// Runs on load ([`Self::from_ron`]), so the rest of the engine never sees
+    /// the old shape. Only groups with NO rules are migrated — a group that has
+    /// been authored since is left exactly alone, so re-reading a half-converted
+    /// project cannot undo work.
+    ///
+    /// Cell order is preserved as variant order, which makes the conversion
+    /// behaviour-identical: the old resolver broke a tie between two tiles
+    /// claiming one mask by taking the lower cell, and the lower cell is still
+    /// what a single-variant lookup returns.
+    pub fn migrate_legacy_autotile(&mut self) {
+        let legacy: Vec<(u32, u16, u8)> = self
+            .tiles
+            .iter()
+            .filter_map(|(&cell, t)| t.group.map(|g| (cell, g, t.mask)))
+            .collect();
+        if legacy.is_empty() {
+            return;
+        }
+        // Decided BEFORE anything is written: a group that already has rules is
+        // authored, and folding the stale per-tile masks into it would resurrect
+        // assignments somebody deliberately changed.
+        let convert: Vec<bool> = self.groups.iter().map(|g| g.rules.is_empty()).collect();
+        for (cell, g, mask) in legacy {
+            if convert.get(g as usize) != Some(&true) {
+                continue;
+            }
+            if let Some(group) = self.groups.get_mut(g as usize) {
+                group.add_to_rule(mask, cell);
+            }
+        }
+        for t in self.tiles.values_mut() {
+            t.group = None;
+            t.mask = 0;
+        }
+        self.prune();
+    }
+
+    /// Remove a group, fixing up the indices of the groups after it (and
+    /// anybody's `joins` that named them).
     ///
     /// Index fix-up is the whole content of this function. A group list where
     /// removing the first entry silently re-points every tile at its neighbour
     /// is the positional-id bug this codebase has already paid for twice
     /// (`floptle/0046`, and the builder scene's button ids).
     pub fn remove_group(&mut self, group: u16) {
-        self.tiles.values_mut().for_each(|t| {
-            t.group = match t.group {
-                Some(g) if g == group => None,
-                Some(g) if g > group => Some(g - 1),
-                other => other,
-            };
-            if t.group.is_none() {
-                t.mask = 0;
-            }
-        });
         if (group as usize) < self.groups.len() {
             self.groups.remove(group as usize);
         }
@@ -463,8 +627,13 @@ impl TileSet {
         ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::new().struct_names(true))
     }
 
+    /// Parse a tileset file, converting anything written before autotile rules
+    /// moved onto the group. This is the ONE parse point, so no other code has
+    /// to know the old shape existed.
     pub fn from_ron(text: &str) -> Result<Self, ron::de::SpannedError> {
-        ron::from_str(text)
+        let mut set: Self = ron::from_str(text)?;
+        set.migrate_legacy_autotile();
+        Ok(set)
     }
 }
 
@@ -502,12 +671,12 @@ mod tests {
     #[test]
     fn a_round_trip_through_ron_keeps_everything() {
         let mut set = TileSet { name: "bricks".into(), sheet_cols: 4, sheet_rows: 4, ..Default::default() };
-        set.groups.push(AutotileGroup { name: "wall".into(), kind: AutotileKind::Blob8, joins: vec![] });
+        set.groups.push(AutotileGroup { name: "wall".into(), kind: AutotileKind::Blob8, ..Default::default() });
         set.info_mut(3).collision = TileCollision::Half(TileSide::Top);
         set.info_mut(3).tags = vec!["ice".into()];
         set.info_mut(5).collision = TileCollision::Full;
-        set.info_mut(5).group = Some(0);
-        set.info_mut(5).mask = 0b0101_0101;
+        set.groups[0].add_to_rule(0b0101_0101, 5);
+        set.groups[0].add_to_rule(0b0101_0101, 6); // a second variant of one rule
         set.info_mut(7).frames = vec![8, 9];
         set.info_mut(7).anim_fps = 6.0;
 
@@ -516,6 +685,8 @@ mod tests {
         assert_eq!(back.tiles, set.tiles);
         assert_eq!(back.groups.len(), 1);
         assert_eq!(back.groups[0].kind, AutotileKind::Blob8);
+        assert_eq!(back.groups[0].rules, set.groups[0].rules, "the rules survive the file");
+        assert_eq!(back.groups[0].tiles_for(0b0101_0101), &[5, 6]);
         assert_eq!(back.sheet_cols, 4);
     }
 
@@ -546,17 +717,15 @@ mod tests {
         // stone joins grass; dirt joins stone.
         set.groups[2].joins = vec![0];
         set.groups[1].joins = vec![2];
-        set.info_mut(0).group = Some(0);
-        set.info_mut(1).group = Some(1);
-        set.info_mut(2).group = Some(2);
-        set.info_mut(2).mask = 0b1010;
+        set.groups[0].add_to_rule(0, 0);
+        set.groups[1].add_to_rule(0, 1);
+        set.groups[2].add_to_rule(0b1010, 2);
 
         set.remove_group(0); // drop grass
 
         assert_eq!(set.groups.len(), 2);
         assert_eq!(set.groups[0].name, "dirt");
-        assert_eq!(set.group_of(0), None, "a tile in the removed group is un-assigned");
-        assert_eq!(set.info(0).unwrap().mask, 0, "…and loses its mask with it");
+        assert_eq!(set.group_of(0), None, "the removed group's rules went with it");
         assert_eq!(set.group_of(1), Some(0), "dirt slid down to 0");
         assert_eq!(set.group_of(2), Some(1), "stone slid down to 1");
         assert_eq!(set.groups[0].joins, vec![1], "dirt still joins stone at its new index");
@@ -598,6 +767,102 @@ mod tests {
         assert_eq!(set.tiles.len(), 3);
         set.prune();
         assert_eq!(set.tiles.keys().copied().collect::<Vec<_>>(), vec![1, 3]);
+    }
+
+    // ---- rules moved from the tile to the group ------------------------------
+
+    /// The tileset every project on disk today is written in: the group/mask
+    /// pair sat on each tile. It has to come back as rules, drawing the same
+    /// tiles for the same shapes, or every level made so far retiles wrong.
+    #[test]
+    fn a_tileset_that_kept_its_autotile_on_the_tiles_is_converted() {
+        let old = r#"TileSet(
+            name: "cave",
+            texture: "cave.png",
+            sheet_cols: 8,
+            sheet_rows: 8,
+            tiles: {
+                0: TileInfo(collision: Full, group: Some(0), mask: 0),
+                1: TileInfo(collision: Full, group: Some(0), mask: 1),
+                2: TileInfo(group: Some(0), mask: 5),
+                9: TileInfo(tags: ["ice"]),
+            },
+            groups: [(name: "wall", kind: Edge4, joins: [])],
+        )"#;
+        let set = TileSet::from_ron(old).expect("an older tileset must load");
+
+        assert_eq!(set.groups[0].tiles_for(0), &[0]);
+        assert_eq!(set.groups[0].tiles_for(1), &[1]);
+        assert_eq!(set.groups[0].tiles_for(5), &[2]);
+        assert_eq!(set.group_cells(0), vec![0, 1, 2]);
+        // Everything that was NOT autotile data is untouched.
+        assert_eq!(set.collision(0), TileCollision::Full);
+        assert_eq!(set.tags(9), ["ice"]);
+
+        // The legacy fields are cleared, so the file it saves back is in the new
+        // shape and this conversion happens exactly once.
+        assert!(set.tiles.values().all(|t| t.group.is_none() && t.mask == 0));
+        let text = set.to_ron().expect("serialize");
+        assert!(!text.contains("group:"), "the legacy field is not written back:\n{text}");
+        assert!(text.contains("rules:"));
+        // ...and a second pass over the saved file changes nothing.
+        let again = TileSet::from_ron(&text).expect("reload");
+        assert_eq!(again.groups[0].rules, set.groups[0].rules);
+    }
+
+    /// Tiles that carried an autotile assignment and nothing else must not be
+    /// pruned out from under the conversion.
+    #[test]
+    fn a_tile_that_only_ever_had_an_autotile_assignment_survives_the_move() {
+        let old = r#"TileSet(name: "t", sheet_cols: 4, sheet_rows: 4,
+            tiles: {3: TileInfo(group: Some(0), mask: 4)},
+            groups: [(name: "g", kind: Edge4, joins: [])])"#;
+        let set = TileSet::from_ron(old).expect("load");
+        assert_eq!(set.groups[0].tiles_for(4), &[3]);
+        assert!(set.tiles.is_empty(), "the entry itself had nothing left to say");
+    }
+
+    /// A group somebody has authored rules for is NOT re-converted — the stale
+    /// per-tile masks would resurrect assignments that were deliberately moved.
+    #[test]
+    fn a_group_that_already_has_rules_is_left_alone() {
+        let mixed = r#"TileSet(name: "t", sheet_cols: 4, sheet_rows: 4,
+            tiles: {3: TileInfo(group: Some(0), mask: 4), 7: TileInfo(group: Some(1), mask: 1)},
+            groups: [
+                (name: "authored", kind: Edge4, joins: [], rules: [(mask: 4, tiles: [11, 12])]),
+                (name: "old", kind: Edge4, joins: []),
+            ])"#;
+        let set = TileSet::from_ron(mixed).expect("load");
+        assert_eq!(set.groups[0].tiles_for(4), &[11, 12], "tile 3 was not folded back in");
+        assert_eq!(set.groups[1].tiles_for(1), &[7], "the untouched group still converts");
+    }
+
+    #[test]
+    fn a_rule_keeps_its_masks_in_order_however_they_are_added() {
+        let mut g = AutotileGroup { kind: AutotileKind::Edge4, ..Default::default() };
+        for mask in [20, 4, 17, 0] {
+            g.add_to_rule(mask, mask as u32);
+        }
+        let masks: Vec<u8> = g.rules.iter().map(|r| r.mask).collect();
+        assert_eq!(masks, vec![0, 4, 17, 20], "ascending, so the file diffs against itself");
+    }
+
+    /// Removing one variant of a duplicated tile must not take its twin.
+    #[test]
+    fn removing_a_variant_removes_one_of_them() {
+        let mut g = AutotileGroup { kind: AutotileKind::Edge4, ..Default::default() };
+        for cell in [7, 9, 7] {
+            g.add_to_rule(4, cell);
+        }
+        g.remove_variant(4, 0);
+        assert_eq!(g.tiles_for(4), &[9, 7]);
+        g.remove_variant(4, 1);
+        assert_eq!(g.tiles_for(4), &[9]);
+        // Emptying a rule drops it, so "how many shapes are drawn" stays honest.
+        g.remove_variant(4, 0);
+        assert!(g.rules.is_empty());
+        // And an index past the end is a no-op, not a panic.
+        g.remove_variant(4, 3);
     }
 
     // ---- floptle/0092: more than one sheet behind one grid -------------------

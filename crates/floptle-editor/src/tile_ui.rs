@@ -37,7 +37,7 @@
 use egui::{Color32, RichText};
 use floptle_core::{Entity, Matter, TileXform};
 use floptle_tiles::{
-    AutotileGroup, AutotileKind, Stamp, TileCollision, TileSet, TileSide, autotile, tile_mask,
+    AutotileGroup, AutotileKind, Stamp, TileCollision, TileSet, TileSide, autotile,
 };
 
 use crate::tile_edit::{TileStore, TileTool, TileTools};
@@ -84,10 +84,19 @@ pub(crate) enum TileCmd {
     SetCollision(u32, TileCollision),
     /// Replace one tile's tag list.
     SetTags(u32, Vec<String>),
-    /// Put a tile in a group (`None` = take it out).
-    SetGroup(u32, Option<u16>),
-    /// Set a tile's neighbour mask.
-    SetMask(u32, u8),
+    /// Add a tile to one of a group's rules: `(group, neighbourhood, cell)`.
+    ///
+    /// Adds, never replaces. A rule holding several tiles is a set of variants,
+    /// and the same cell added twice is twice as likely — both are things an
+    /// artist asks for, and both were impossible while the assignment lived on
+    /// the tile as one group and one mask.
+    AddToRule(u16, u8, u32),
+    /// Drop the `n`th variant of a rule. By position, so removing one of a pair
+    /// of duplicates does not take its twin.
+    RemoveVariant(u16, u8, usize),
+    /// Empty a rule: the shape goes back to having no tile, and squares with
+    /// those neighbours are left as painted.
+    ClearRule(u16, u8),
     /// Set a tile's animation: extra frames and the rate.
     SetAnim(u32, Vec<u32>, f32),
     /// Add a group to the tileset being edited.
@@ -105,6 +114,13 @@ pub(crate) enum TileCmd {
     /// Save the dirty tilesets now.
     SaveTilesets,
 }
+
+/// One variant of an autotile rule: its cell, and the sheet page its art is on.
+///
+/// A named type because the strip under the rules grid has to look these up
+/// while the sheet closure is still the only borrow of `self`, and draw them
+/// after that closure has let go.
+type VariantThumb = (u32, Option<(egui::TextureHandle, u32, u32)>);
 
 /// What the tab borrows. A `Ctx` rather than more `EditorTabViewer` fields,
 /// following the 🖼 Image tab: the tab needs a lot of state and none of the rest
@@ -912,16 +928,24 @@ impl TileCtx<'_> {
             // picking a brush, and the next empty rule arms itself so filling a
             // preset is one run of alternating clicks.
             if let Some((g, mask)) = self.tools.fill_mask {
-                self.cmds.push(TileCmd::SetGroup(idx, Some(g)));
-                self.cmds.push(TileCmd::SetMask(idx, mask));
-                self.tools.fill_mask = set.as_ref().and_then(|s| {
-                    let kind = s.groups.get(g as usize)?.kind;
-                    let at = floptle_tiles::Autotiler::build(s);
-                    autotile::preset_masks(kind)
-                        .into_iter()
-                        .find(|m| *m != mask && at.resolve(g, *m).is_none())
-                        .map(|m| (g, m))
-                });
+                let had_one = set
+                    .as_ref()
+                    .and_then(|s| s.groups.get(g as usize))
+                    .is_some_and(|group| !group.tiles_for(mask).is_empty());
+                self.cmds.push(TileCmd::AddToRule(g, mask, idx));
+                // Only move on once a shape has SOMETHING. Clicking on to the
+                // next rule the moment a second tile lands would make adding a
+                // variant impossible — you would be typing into the next shape.
+                if self.tools.fill_advance && !had_one {
+                    self.tools.fill_mask = set.as_ref().and_then(|s| {
+                        let kind = s.groups.get(g as usize)?.kind;
+                        let at = floptle_tiles::Autotiler::build(s);
+                        autotile::preset_masks(kind)
+                            .into_iter()
+                            .find(|m| *m != mask && at.resolve(g, *m).is_none())
+                            .map(|m| (g, m))
+                    });
+                }
             } else if !shift {
                 let local = floptle_core::tile_in_page(idx);
                 self.tools.palette = Some((local % sc, local / sc, 1, 1));
@@ -1166,6 +1190,10 @@ impl TileCtx<'_> {
                  the group's tiles in the palette — painting retiles as you go, until you \
                  pick a tile that is not in a group.",
             );
+            ui.small(
+                "One tile can draw as many shapes as you like, and one shape can hold \
+                 several tiles — those take turns, so a field of grass varies.",
+            );
         }
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.tools.auto_retile, "Retile as I paint").on_hover_text(
@@ -1271,22 +1299,65 @@ impl TileCtx<'_> {
                 ui.small(format!("{} tiles in this group", cells.len()));
                 self.rules_grid(ui, &set, g, group.kind, &at);
 
-                // Per-tile mask editing, for the tiles a preset got wrong.
-                if let Some(cell) = self.tools.inspect_cell
-                    && set.group_of(cell) == Some(g)
-                    && let Some((_, mask)) = tile_mask(&set, cell)
-                {
+                // Where the selected tile is used, and one click to take it out
+                // of a shape it should not be in. A tile can be on several
+                // shapes now, so this is a list rather than the single-mask
+                // editor it replaces — that editor could only move a tile from
+                // one shape to another, which is what made duplicates
+                // impossible in the first place.
+                if let Some(cell) = self.tools.inspect_cell {
+                    let here: Vec<u8> = floptle_tiles::tile_masks(&set, cell)
+                        .into_iter()
+                        .filter(|(og, _)| *og == g)
+                        .map(|(_, m)| m)
+                        .collect();
                     ui.separator();
-                    ui.small(format!("tile {cell}'s neighbourhood"));
-                    if let Some(next) = mask_editor(ui, mask, group.kind) {
-                        self.cmds.push(TileCmd::SetMask(cell, next));
+                    if here.is_empty() {
+                        ui.small(format!("tile {cell} draws none of this group's shapes"));
+                        if self.tools.fill_mask.is_none()
+                            && ui
+                                .small_button("add it to a shape")
+                                .on_hover_text("arms the first shape with no tile")
+                                .clicked()
+                        {
+                            self.tools.fill_mask = autotile::preset_masks(group.kind)
+                                .into_iter()
+                                .find(|m| at.resolve(g, *m).is_none())
+                                .map(|m| (g, m));
+                        }
+                    } else {
+                        ui.small(format!("tile {cell} draws {} of this group's shapes", here.len()));
+                        let mut off: Option<u8> = None;
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+                            for mask in here {
+                                let (rect, resp) = ui.allocate_exact_size(
+                                    egui::vec2(24.0, 24.0),
+                                    egui::Sense::click(),
+                                );
+                                ui.painter().rect_filled(rect, 2.0, Color32::from_gray(30));
+                                paint_mask_glyph(ui, rect, mask, group.kind, true);
+                                if resp.hovered() {
+                                    ui.painter().rect_stroke(
+                                        rect,
+                                        2.0,
+                                        egui::Stroke::new(1.0, ACCENT),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                }
+                                if resp.clicked() {
+                                    off = Some(mask);
+                                }
+                                resp.on_hover_text(format!(
+                                    "{}\nclick to arm this shape",
+                                    describe_mask(mask, group.kind)
+                                ));
+                            }
+                        });
+                        if let Some(mask) = off {
+                            self.tools.fill_mask = Some((g, mask));
+                        }
                     }
-                }
-                if let Some(cell) = self.tools.inspect_cell
-                    && set.group_of(cell) != Some(g)
-                    && ui.small_button(format!("put tile {cell} in this group")).clicked()
-                {
-                    self.cmds.push(TileCmd::SetGroup(cell, Some(g)));
                 }
             });
         }
@@ -1331,13 +1402,24 @@ impl TileCtx<'_> {
         ui.horizontal(|ui| {
             ui.small(RichText::new("RULES").strong());
             if armed.is_some() {
-                ui.colored_label(ACCENT, RichText::new("click a tile in the palette").small());
-                if ui.small_button("stop").clicked() {
+                ui.colored_label(
+                    ACCENT,
+                    RichText::new("click tiles in the palette — every one you click is added")
+                        .small(),
+                );
+                if ui.small_button("done").clicked() {
                     self.tools.fill_mask = None;
                 }
             } else {
                 ui.small("click a shape, then click the tile that draws it");
             }
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.tools.fill_advance, "next shape after the first tile")
+                .on_hover_text(
+                    "on: filling a preset is one run of alternating clicks. off: stay on \
+                     one shape, which is what you want while adding variants.",
+                );
         });
         // The sheet the palette is showing, so a slot draws the real art rather
         // than a cell number. A group's tiles can come from any page; the slot
@@ -1358,7 +1440,8 @@ impl TileCtx<'_> {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
             for &mask in &masks {
-                let drawn = at.resolve(g, mask);
+                let variants = at.variants(g, mask);
+                let drawn = variants.first().copied();
                 let (rect, resp) = ui.allocate_exact_size(
                     egui::vec2(cell_px, cell_px),
                     egui::Sense::click(),
@@ -1375,6 +1458,23 @@ impl TileCtx<'_> {
                     }
                 }
                 paint_mask_glyph(ui, rect, mask, kind, drawn.is_some());
+                // A rule with alternates says so on its face. Without this the
+                // grid looks identical whether a shape has one tile or five,
+                // and the variants are invisible until something is painted.
+                if variants.len() > 1 {
+                    let tag = egui::Rect::from_min_size(
+                        rect.right_bottom() - egui::vec2(15.0, 11.0),
+                        egui::vec2(15.0, 11.0),
+                    );
+                    ui.painter().rect_filled(tag, 2.0, Color32::from_black_alpha(190));
+                    ui.painter().text(
+                        tag.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("×{}", variants.len()),
+                        egui::FontId::proportional(9.0),
+                        ACCENT,
+                    );
+                }
                 let on = armed == Some(mask);
                 if on || resp.hovered() {
                     ui.painter().rect_stroke(
@@ -1387,25 +1487,91 @@ impl TileCtx<'_> {
                 if resp.clicked() {
                     pick = Some(mask);
                 }
-                resp.on_hover_text(match drawn {
-                    Some(cell) => format!(
-                        "{}\ndrawn by tile {cell} — click to point it at a different tile",
+                resp.on_hover_text(match variants.len() {
+                    0 => format!(
+                        "{}\nno tile yet: a square with these neighbours stays as painted",
                         describe_mask(mask, kind)
                     ),
-                    None => format!(
-                        "{}\nno tile yet: a square with these neighbours stays as painted",
+                    1 => format!(
+                        "{}\ndrawn by tile {}— click to add another, or to swap it",
+                        describe_mask(mask, kind),
+                        variants[0]
+                    ),
+                    n => format!(
+                        "{}\n{n} tiles take turns here, chosen by where the square is",
                         describe_mask(mask, kind)
                     ),
                 });
             }
         });
+        // The armed rule's tiles, one by one, because the grid only has room to
+        // show the first. This is where a duplicate is added or taken back out.
+        //
+        // Their art is looked up HERE, while `sheet_of` is still the only thing
+        // borrowing self — the strip below both mutates `fill_mask` and pushes
+        // commands.
+        let strip: Vec<VariantThumb> = armed
+            .map(|mask| {
+                at.variants(g, mask).iter().map(|&c| (c, sheet_of(ui, c))).collect()
+            })
+            .unwrap_or_default();
         if let Some(mask) = pick {
             self.tools.fill_mask =
                 if armed == Some(mask) { None } else { Some((g, mask)) };
         }
+        // Only when the arming did not just change under it: a strip drawn from
+        // the rule that was armed a moment ago, labelled with the one that is
+        // armed now, would be showing somebody else's tiles.
+        if let Some(mask) = armed.filter(|_| pick.is_none()) {
+            ui.add_space(2.0);
+            ui.small(RichText::new(describe_mask(mask, kind)).color(ACCENT));
+            if strip.is_empty() {
+                ui.small("nothing yet — click a tile in the palette above");
+            }
+            let mut drop: Option<usize> = None;
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+                for (n, (cell, art)) in strip.iter().enumerate() {
+                    let cell = *cell;
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::click());
+                    match art {
+                        Some((h, c, r)) => {
+                            paint_tile(ui, rect, h, *c, *r, floptle_core::tile_index(cell));
+                        }
+                        None => {
+                            ui.painter().rect_filled(rect, 2.0, Color32::from_gray(30));
+                        }
+                    }
+                    if resp.hovered() {
+                        ui.painter().rect_filled(rect, 2.0, Color32::from_black_alpha(150));
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "✖",
+                            egui::FontId::proportional(15.0),
+                            ACCENT,
+                        );
+                    }
+                    if resp.clicked() {
+                        drop = Some(n);
+                    }
+                    resp.on_hover_text(format!("tile {cell} — click to take it off this shape"));
+                }
+                if strip.len() > 1 && ui.small_button("clear").clicked() {
+                    self.cmds.push(TileCmd::ClearRule(g, mask));
+                }
+            });
+            if let Some(n) = drop {
+                self.cmds.push(TileCmd::RemoveVariant(g, mask, n));
+            }
+            if strip.len() > 1 {
+                ui.small("these take turns — which one a square gets is fixed by where it is");
+            }
+        }
         let missing = at.missing(g).len();
         if missing == 0 && !masks.is_empty() {
-            ui.small(RichText::new("every neighbourhood has a tile").color(ACCENT));
+            ui.small(RichText::new("every shape has a tile").color(ACCENT));
         }
     }
 
@@ -1615,8 +1781,10 @@ fn draw_tile_overlays(ui: &egui::Ui, rect: egui::Rect, set: &TileSet, cell: u32,
             egui::StrokeKind::Inside,
         );
     }
-    // The neighbourhood diagram — three by three dots in the corner.
-    if let Some((_, mask)) = tile_mask(set, cell)
+    // The neighbourhood diagram — three by three dots in the corner. A tile can
+    // answer several shapes now, so this draws the first and says how many more.
+    let shapes = floptle_tiles::tile_masks(set, cell);
+    if let Some(&(_, mask)) = shapes.first()
         && cell_px >= 24.0
     {
         let d = (cell_px / 9.0).clamp(2.0, 4.0);
@@ -1637,6 +1805,15 @@ fn draw_tile_overlays(ui: &egui::Ui, rect: egui::Rect, set: &TileSet, cell: u32,
                 c,
             );
         }
+        if shapes.len() > 1 {
+            ui.painter().text(
+                egui::pos2(base.x + 3.6 * d, base.y + d),
+                egui::Align2::LEFT_CENTER,
+                format!("+{}", shapes.len() - 1),
+                egui::FontId::proportional(8.0),
+                ACCENT,
+            );
+        }
     }
     // An animated tile gets a mark, because otherwise the only way to know is to
     // press Play.
@@ -1649,58 +1826,6 @@ fn draw_tile_overlays(ui: &egui::Ui, rect: egui::Rect, set: &TileSet, cell: u32,
             Color32::from_rgb(160, 255, 180),
         );
     }
-}
-
-/// A clickable 3×3 neighbourhood: which neighbours this tile is the answer for.
-/// Returns the new mask when a cell was clicked.
-///
-/// The corners are disabled for an `Edge4` group, because that kind does not
-/// distinguish them — an editable control that changed nothing would be a lie
-/// about what the rules are.
-fn mask_editor(ui: &mut egui::Ui, mask: u8, kind: AutotileKind) -> Option<u8> {
-    let mut out = None;
-    let corners_live = kind == AutotileKind::Blob8;
-    ui.vertical(|ui| {
-        for dy in -1i32..=1 {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 1.0;
-                for dx in -1i32..=1 {
-                    if (dx, dy) == (0, 0) {
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
-                        ui.painter().rect_filled(rect, 2.0, ACCENT);
-                        continue;
-                    }
-                    let bit = autotile::OFFSETS
-                        .iter()
-                        .find(|(ox, oy, _)| *ox == dx && *oy == dy)
-                        .map(|(_, _, b)| *b)
-                        .unwrap_or(0);
-                    let is_corner = dx != 0 && dy != 0;
-                    let on = mask & bit != 0;
-                    let enabled = corners_live || !is_corner;
-                    let (rect, resp) = ui.allocate_exact_size(
-                        egui::vec2(20.0, 20.0),
-                        if enabled { egui::Sense::click() } else { egui::Sense::hover() },
-                    );
-                    let c = match (enabled, on) {
-                        (false, _) => Color32::from_gray(45),
-                        (true, true) => Color32::from_rgb(140, 220, 255),
-                        (true, false) => Color32::from_gray(70),
-                    };
-                    ui.painter().rect_filled(rect, 2.0, c);
-                    if enabled && resp.clicked() {
-                        out = Some(mask ^ bit);
-                    }
-                    if !enabled {
-                        resp.on_hover_text("an Edges group does not distinguish corners");
-                    }
-                }
-            });
-        }
-    });
-    ui.small("filled = a neighbour of this group. North is up.");
-    out
 }
 
 fn tile_tooltip(set: &TileSet, cell: u32) -> String {
@@ -1784,14 +1909,21 @@ impl crate::Editor {
         match cmd {
             TileCmd::SetCollision(cell, c) => set.info_mut(cell).collision = c,
             TileCmd::SetTags(cell, tags) => set.info_mut(cell).tags = tags,
-            TileCmd::SetGroup(cell, g) => {
-                let info = set.info_mut(cell);
-                info.group = g;
-                if g.is_none() {
-                    info.mask = 0;
+            TileCmd::AddToRule(g, mask, cell) => {
+                if let Some(group) = set.groups.get_mut(g as usize) {
+                    group.add_to_rule(mask, cell);
                 }
             }
-            TileCmd::SetMask(cell, m) => set.info_mut(cell).mask = m,
+            TileCmd::RemoveVariant(g, mask, n) => {
+                if let Some(group) = set.groups.get_mut(g as usize) {
+                    group.remove_variant(mask, n);
+                }
+            }
+            TileCmd::ClearRule(g, mask) => {
+                if let Some(group) = set.groups.get_mut(g as usize) {
+                    group.clear_rule(mask);
+                }
+            }
             TileCmd::SetAnim(cell, frames, fps) => {
                 let info = set.info_mut(cell);
                 info.frames = frames;
@@ -1830,7 +1962,11 @@ impl crate::Editor {
             }
             TileCmd::AddGroup(kind) => {
                 let n = set.groups.len() + 1;
-                set.groups.push(AutotileGroup { name: format!("group {n}"), kind, joins: vec![] });
+                set.groups.push(AutotileGroup {
+                    name: format!("group {n}"),
+                    kind,
+                    ..Default::default()
+                });
             }
             TileCmd::RemoveGroup(g) => {
                 set.remove_group(g);
@@ -1861,28 +1997,38 @@ impl crate::Editor {
                     .flat_map(|dy| (0..w).map(move |dx| (py + dy) * sc + px + dx))
                     .collect();
                 let want = autotile::preset_len(kind);
-                for cell in &cells {
-                    let info = set.info_mut(*cell);
-                    info.group = Some(g);
-                }
-                for (cell, mask) in autotile::assign_preset(kind, &cells) {
-                    set.info_mut(cell).mask = mask;
+                let pairs = autotile::assign_preset(kind, &cells);
+                if let Some(group) = set.groups.get_mut(g as usize) {
+                    // Replace, not merge: pressing the preset button twice should
+                    // leave the group the preset describes, not two of everything.
+                    for (_, mask) in &pairs {
+                        group.clear_rule(*mask);
+                    }
+                    for (cell, mask) in &pairs {
+                        group.add_to_rule(*mask, *cell);
+                    }
                 }
                 // Say what was NOT covered rather than leaving it to be discovered
                 // as a hole in a level: a preset silently truncating is the exact
                 // shape of failure this codebase keeps paying for.
                 let n = cells.len();
-                if n != want {
+                if n.is_multiple_of(want) && n > want {
+                    self.tile_note(&format!(
+                        "{n} tiles over {want} shapes — each shape got {} that take turns",
+                        n / want
+                    ));
+                } else if n != want {
                     let msg = if n < want {
                         format!(
                             "assigned {n} of the {want} tiles this preset needs — the other \
-                             {} neighbourhoods have no tile and stay as painted",
+                             {} shapes have no tile and stay as painted",
                             want - n
                         )
                     } else {
                         format!(
                             "the preset needs {want} tiles and {n} were selected — the last \
-                             {} got no mask (two tiles cannot answer one neighbourhood)",
+                             {} were left over. Select a whole multiple of {want} and the \
+                             extra passes become variants.",
                             n - want
                         )
                     };
@@ -2112,7 +2258,7 @@ mod tests {
         set.groups.push(floptle_tiles::AutotileGroup {
             name: "grass".into(),
             kind,
-            joins: vec![],
+            ..Default::default()
         });
         let mut store = TileStore::default();
         store.sets.insert(path.clone(), set);
@@ -2169,9 +2315,7 @@ mod tests {
         let set = store.get_mut(&path).unwrap();
         // What the palette click does when `fill_mask` is armed.
         let mask = autotile::preset_masks(AutotileKind::Blob8)[0];
-        let info = set.info_mut(6);
-        info.group = Some(0);
-        info.mask = mask;
+        set.groups[0].add_to_rule(mask, 6);
         let at = floptle_tiles::Autotiler::build(store.get(&path).unwrap());
         assert_eq!(at.resolve(0, mask), Some(6), "the rule must resolve to the tile clicked");
         // …and the rest of the preset is still waiting, rather than the whole
@@ -2180,6 +2324,78 @@ mod tests {
             at.missing(0).len(),
             autotile::preset_len(AutotileKind::Blob8) - 1,
             "one click fills exactly one rule"
+        );
+    }
+
+    /// The reported bug: *"I can only have one tile assigned to one rule at a
+    /// time so I can't have duplicates."* Both directions of duplicate have to
+    /// work — one tile on many shapes, many tiles on one shape.
+    #[test]
+    fn a_tile_can_draw_more_than_one_shape_and_a_shape_more_than_one_tile() {
+        let (_, _, path, mut store) = grouped_world(AutotileKind::Edge4);
+        let set = store.get_mut(&path).unwrap();
+        let masks = autotile::preset_masks(AutotileKind::Edge4);
+
+        // One tile, three shapes. Under the old model the second assignment
+        // moved the tile off the first shape and the first shape went blank.
+        for m in masks.iter().take(3) {
+            set.groups[0].add_to_rule(*m, 6);
+        }
+        // One shape, three tiles.
+        for cell in [10, 11, 12] {
+            set.groups[0].add_to_rule(masks[5], cell);
+        }
+        let at = floptle_tiles::Autotiler::build(store.get(&path).unwrap());
+        for m in masks.iter().take(3) {
+            assert_eq!(at.resolve(0, *m), Some(6), "tile 6 stopped drawing shape {m:#b}");
+        }
+        assert_eq!(at.variants(0, masks[5]), &[10, 11, 12]);
+    }
+
+    /// While a rule is armed, a palette click ADDS. Advancing to the next shape
+    /// happens on the first tile only, or the second click would land on some
+    /// other shape and adding a variant would be impossible.
+    #[test]
+    fn clicking_a_second_tile_for_one_shape_adds_it_rather_than_replacing() {
+        let (_, _, path, mut store) = grouped_world(AutotileKind::Edge4);
+        let mask = autotile::preset_masks(AutotileKind::Edge4)[3];
+        let set = store.get_mut(&path).unwrap();
+        set.groups[0].add_to_rule(mask, 4);
+        set.groups[0].add_to_rule(mask, 5);
+        set.groups[0].add_to_rule(mask, 4); // the same tile twice: a weighting
+        assert_eq!(set.groups[0].tiles_for(mask), &[4, 5, 4]);
+
+        // …and taking one back out takes ONE.
+        set.groups[0].remove_variant(mask, 2);
+        assert_eq!(set.groups[0].tiles_for(mask), &[4, 5], "the twin went with it");
+    }
+
+    /// A shape holding several tiles has to SAY so in the grid — otherwise a
+    /// rule with one tile and a rule with five look identical, and the variants
+    /// are invisible until something is painted.
+    #[test]
+    fn the_panel_says_a_shape_has_variants() {
+        let (world, e, path, mut store) = grouped_world(AutotileKind::Edge4);
+        let mask = autotile::preset_masks(AutotileKind::Edge4)[2];
+        let set = store.get_mut(&path).unwrap();
+        for cell in [4, 5, 6] {
+            set.groups[0].add_to_rule(mask, cell);
+        }
+        let mut tools = TileTools {
+            layer: Some(e),
+            editing: Some(path),
+            group: Some(0),
+            fill_mask: Some((0, mask)),
+            ..Default::default()
+        };
+        let text = panel_text(&world, &mut tools, &mut store);
+        assert!(
+            text.contains("take turns"),
+            "nothing tells you the shape has alternates:\n{text}"
+        );
+        assert!(
+            text.contains("added"),
+            "and nothing says a palette click ADDS rather than replaces:\n{text}"
         );
     }
 

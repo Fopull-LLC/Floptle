@@ -257,15 +257,13 @@ impl<'a> TileGrid<'a> {
     /// should not grow a coastline against the border — the map ends there, it is
     /// not a hole. This is the one rule people notice immediately when it is
     /// wrong, because every level's outer wall comes out edged.
-    pub fn neighbour_mask(&self, x: i32, y: i32, group: u16, set: &TileSet) -> u8 {
+    pub fn neighbour_mask(&self, x: i32, y: i32, group: u16, set: &TileSet, at: &Autotiler) -> u8 {
         let mut mask = 0u8;
         for (dx, dy, bit) in OFFSETS {
             let (nx, ny) = (x + dx, y + dy);
             let filled = match self.get(nx, ny) {
                 None => true, // off the map
-                Some(p) => set
-                    .group_of(tile_index(p))
-                    .is_some_and(|g| set.joins(group, g)),
+                Some(p) => at.counts_as(set, tile_index(p), group),
             };
             if filled {
                 mask |= bit;
@@ -300,12 +298,16 @@ impl<'a> TileGrid<'a> {
         for y in y0..=y1 {
             for x in x0..=x1 {
                 let Some(p) = self.get(x, y) else { continue };
+                // The group whose art is already here. A tile drawn by more than
+                // one group retiles as the FIRST that claims it — the square has
+                // to pick one, and any other answer would depend on which
+                // neighbour was looked at first.
                 let Some(group) = set.group_of(tile_index(p)) else { continue };
                 if !at.has_group(group) {
                     continue;
                 }
-                let mask = self.neighbour_mask(x, y, group, set);
-                if let Some(cell) = at.resolve(group, mask) {
+                let mask = self.neighbour_mask(x, y, group, set, at);
+                if let Some(cell) = at.resolve_at(group, mask, x, y) {
                     // Keep the square's own orientation: somebody who turned an
                     // autotiled tile by hand meant it.
                     writes.push((x, y, tile_pack(cell, tile_xform(p))));
@@ -479,13 +481,28 @@ impl Stamp {
     }
 }
 
-/// The mask a tile is assigned, canonicalised for its group — the number the
-/// palette's 3×3 diagram draws.
+/// Every neighbourhood this tile answers, as `(group, mask)` pairs in group then
+/// mask order — what the palette's 3×3 diagrams draw.
+///
+/// A list, because a tile may now be the answer to several shapes (and in
+/// several groups). One plain fill square standing in for six neighbourhoods is
+/// the ordinary case, not an edge one.
+pub fn tile_masks(set: &TileSet, cell: u32) -> Vec<(u16, u8)> {
+    let mut out = Vec::new();
+    for (gi, group) in set.groups.iter().enumerate() {
+        for rule in &group.rules {
+            if rule.tiles.contains(&cell) {
+                out.push((gi as u16, canonical(group.kind, rule.mask)));
+            }
+        }
+    }
+    out
+}
+
+/// The first neighbourhood a tile answers, or `None` if it is not part of an
+/// autotile. See [`tile_masks`].
 pub fn tile_mask(set: &TileSet, cell: u32) -> Option<(u16, u8)> {
-    let info = set.info(cell)?;
-    let group = info.group?;
-    let kind = set.groups.get(group as usize)?.kind;
-    Some((group, canonical(kind, info.mask)))
+    tile_masks(set, cell).into_iter().next()
 }
 
 #[cfg(test)]
@@ -792,14 +809,17 @@ mod tests {
         set.groups.push(AutotileGroup {
             name: "path".into(),
             kind: AutotileKind::Edge4,
-            joins: vec![],
+            ..Default::default()
         });
         for (cell, mask) in assign_preset(AutotileKind::Edge4, &(0..16).collect::<Vec<_>>()) {
-            let info = set.info_mut(cell);
-            info.group = Some(0);
-            info.mask = mask;
+            set.groups[0].add_to_rule(mask, cell);
         }
         set
+    }
+
+    /// Which neighbourhood the tile now at `(x, y)` answers.
+    fn mask_at(set: &TileSet, g: &TileGrid<'_>, x: i32, y: i32) -> u8 {
+        tile_mask(set, tile_index(g.get(x, y).expect("a square"))).expect("an autotile tile").1
     }
 
     /// Off the map counts as filled, so a shape painted to the edge does not grow
@@ -811,13 +831,14 @@ mod tests {
         let g = TileGrid::new(3, 3, &mut d);
         // The top-left corner has two neighbours in the grid (E, S) and two off
         // the map (N, W) — all four read as filled.
-        assert_eq!(g.neighbour_mask(0, 0, 0, &set) & EDGES, EDGES);
+        let at = Autotiler::build(&set);
+        assert_eq!(g.neighbour_mask(0, 0, 0, &set, &at) & EDGES, EDGES);
         // A hole IS a hole, though.
         let mut d = vec![0u32; 9];
         let mut g = TileGrid::new(3, 3, &mut d);
         g.set(1, 0, EMPTY_TILE); // north of centre
-        assert_eq!(g.neighbour_mask(1, 1, 0, &set) & N, 0, "the hole above is not filled");
-        assert_eq!(g.neighbour_mask(1, 1, 0, &set) & EDGES, E | S | W);
+        assert_eq!(g.neighbour_mask(1, 1, 0, &set, &at) & N, 0, "the hole above is not filled");
+        assert_eq!(g.neighbour_mask(1, 1, 0, &set, &at) & EDGES, E | S | W);
     }
 
     #[test]
@@ -831,11 +852,10 @@ mod tests {
         g.fill_rect((1, 1), (3, 3), 0);
         g.retile((1, 1), (3, 3), &set, &at);
 
-        let mask_of = |cell: u32| set.info(cell).unwrap().mask;
-        assert_eq!(mask_of(tile_index(g.get(2, 2).unwrap())), EDGES, "the centre is surrounded");
-        assert_eq!(mask_of(tile_index(g.get(2, 1).unwrap())), E | S | W, "the top edge has no north");
-        assert_eq!(mask_of(tile_index(g.get(1, 1).unwrap())), E | S, "the top-left corner");
-        assert_eq!(mask_of(tile_index(g.get(3, 3).unwrap())), N | W, "the bottom-right corner");
+        assert_eq!(mask_at(&set, &g, 2, 2), EDGES, "the centre is surrounded");
+        assert_eq!(mask_at(&set, &g, 2, 1), E | S | W, "the top edge has no north");
+        assert_eq!(mask_at(&set, &g, 1, 1), E | S, "the top-left corner");
+        assert_eq!(mask_at(&set, &g, 3, 3), N | W, "the bottom-right corner");
     }
 
     /// The one-ring: a retile of the squares you painted must also fix the ones
@@ -850,15 +870,13 @@ mod tests {
         // map border.
         g.set(2, 2, 0);
         g.retile((2, 2), (2, 2), &set, &at);
-        let lone = tile_index(g.get(2, 2).unwrap());
-        assert_eq!(set.info(lone).unwrap().mask, 0, "a lone square has no neighbours");
+        assert_eq!(mask_at(&set, &g, 2, 2), 0, "a lone square has no neighbours");
 
         // Now paint the square to its east and retile ONLY that square. The
         // one-ring must update the first square to see a neighbour to the east.
         g.set(3, 2, 0);
         g.retile((3, 2), (3, 2), &set, &at);
-        let west = tile_index(g.get(2, 2).unwrap());
-        assert_eq!(set.info(west).unwrap().mask, E, "the neighbour was not retiled");
+        assert_eq!(mask_at(&set, &g, 2, 2), E, "the neighbour was not retiled");
     }
 
     #[test]
@@ -885,14 +903,8 @@ mod tests {
     #[test]
     fn a_retile_never_erases_what_it_cannot_answer() {
         let mut set = edge4_set();
-        // Un-assign the tile that answers "surrounded on all four sides".
-        let all = set
-            .tiles
-            .iter()
-            .find(|(_, t)| t.mask == EDGES)
-            .map(|(c, _)| *c)
-            .expect("the preset has an all-four tile");
-        set.info_mut(all).group = None;
+        // Un-assign the rule that answers "surrounded on all four sides".
+        set.groups[0].clear_rule(EDGES);
         let at = Autotiler::build(&set);
 
         let mut d = grid(5, 5);
@@ -923,10 +935,9 @@ mod tests {
     #[test]
     fn tile_mask_reports_the_canonical_mask() {
         let mut set = TileSet { sheet_cols: 8, sheet_rows: 8, ..Default::default() };
-        set.groups.push(AutotileGroup { name: "g".into(), kind: AutotileKind::Edge4, joins: vec![] });
-        let info = set.info_mut(3);
-        info.group = Some(0);
-        info.mask = N | crate::autotile::NE; // a corner bit Edge4 ignores
+        set.groups.push(AutotileGroup { name: "g".into(), kind: AutotileKind::Edge4, ..Default::default() });
+        // A corner bit Edge4 ignores: the rule is stored canonicalised.
+        set.groups[0].add_to_rule(N | crate::autotile::NE, 3);
         assert_eq!(tile_mask(&set, 3), Some((0, N)), "Edge4 drops the corner");
         assert_eq!(tile_mask(&set, 4), None, "an unassigned tile has no mask");
     }

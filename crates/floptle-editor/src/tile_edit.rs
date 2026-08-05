@@ -212,6 +212,15 @@ pub(crate) struct TileTools {
     /// works only for a sheet already laid out in the preset's order and gives
     /// no clue what went where when it isn't.
     pub(crate) fill_mask: Option<(u16, u8)>,
+    /// After a rule is given its first tile, arm the next empty one.
+    ///
+    /// On, because filling a 47-shape preset is otherwise 94 clicks with half of
+    /// them spent re-arming. Off is what you want while adding VARIANTS — the
+    /// second, third and fourth tile for one shape — so it is a checkbox beside
+    /// the grid rather than a rule of the tool. Clicking a rule that already has
+    /// a tile never advances either way, because asking for a filled rule is
+    /// almost always asking to add to it.
+    pub(crate) fill_advance: bool,
     /// The rectangle the Select tool has, `(x0, y0, x1, y1)` inclusive.
     pub(crate) selection: Option<(i32, i32, i32, i32)>,
     /// The clipboard: a stamp lifted by Copy.
@@ -251,6 +260,7 @@ impl Default for TileTools {
             group: None,
             auto_retile: true,
             fill_mask: None,
+            fill_advance: true,
             selection: None,
             clipboard: None,
             show_grid: true,
