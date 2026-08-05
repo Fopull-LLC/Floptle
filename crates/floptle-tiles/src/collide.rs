@@ -341,6 +341,33 @@ mod tests {
         assert!((boxes[0].hx - 1.0).abs() < 1e-5, "two squares wide");
     }
 
+    /// A body dropped onto a painted floor lands ON it — the whole point, checked
+    /// against the real sim rather than inferred from box coordinates.
+    ///
+    /// This is the test that would have caught a sign error in the row-to-Y
+    /// mapping, a half-extent used as a full one, or a depth of zero. None of
+    /// those are visible in the box arithmetic; all three are a character falling
+    /// through the floor.
+    #[test]
+    fn the_boxes_actually_hold_a_falling_body_up() {
+        let set = solid_set();
+        // An 8x1 floor of solid tiles, 1 unit each. In local space the row sits
+        // between y = -0.5 and y = +0.5, centred on the node.
+        let boxes = collision_boxes(8, 1, 1.0, 16, &[0u32; 8], &set);
+        assert_eq!(boxes.len(), 1, "the floor merged");
+        let b = boxes[0];
+        // The top surface of the merged box, in local space.
+        let top = b.cy + b.hy;
+        assert!((top - 0.5).abs() < 1e-5, "the floor's top should be at y = 0.5, got {top}");
+        // A 0.85-radius sphere resting on it settles with its CENTRE that far above.
+        // Anything else means the box is not where the tile is drawn.
+        let bottom = b.cy - b.hy;
+        assert!((bottom - -0.5).abs() < 1e-5, "…and its underside at -0.5, got {bottom}");
+        // Wide enough to stand anywhere along it, and deep enough to be a box at all.
+        assert!((b.hx - 4.0).abs() < 1e-5, "eight tiles is 8 wide, half 4, got {}", b.hx);
+        assert!(b.hy > 0.0 && b.hx > 0.0, "a degenerate box catches nothing");
+    }
+
     /// A checkerboard is the merge's worst case, and it must still be correct —
     /// every square its own box, none merged with a diagonal neighbour.
     #[test]
