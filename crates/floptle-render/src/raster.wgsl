@@ -39,6 +39,31 @@ struct RasterGlobals {
 @group(0) @binding(3) var terrain_pal: texture_2d_array<f32>;
 @group(0) @binding(4) var terrain_pal_samp: sampler;
 @group(0) @binding(5) var terrain_pal_samp_nearest: sampler;
+// GPU skinning (`floptle/0080`). Three stores, all read in `vs_skin` and nowhere
+// else, all following the `vpaint` pattern: ONE buffer per scene, indexed by a
+// per-instance base, so skinned characters stay ordinary instanced draws instead
+// of each needing a bind group of its own.
+//
+//   skin_joints[skin_base + vertex_index]  → the four palette slots this vertex
+//   skin_weights[skin_base + vertex_index]   is weighted to, and by how much.
+//   skin_palette[palette_base]             → the FALLBACK matrix (the part's own
+//                                            node, for zero-weight vertices).
+//   skin_palette[palette_base + 1 + slot]  → that slot's `nodeWorld · inverseBind`.
+//
+// Both bases arrive through ONE instance lane — `n0.w`, which carries the terrain
+// color base for `vs` and is free here because terrain is never skinned. It holds
+// an index into `skin_meta`, whose entry says where this instance's vertex
+// attributes and bone palette begin. One lane rather than two because the raster
+// attribute budget is FULL at 16/16: there was no second lane to spend, and an
+// indirection costs one buffer read against a table sized by the frame's skinned
+// draws.
+//
+//   skin_meta[n0.w].x = skin_base    (into skin_joints / skin_weights)
+//   skin_meta[n0.w].y = palette_base (into skin_palette)
+@group(0) @binding(6) var<storage, read> skin_joints: array<vec4<u32>>;
+@group(0) @binding(7) var<storage, read> skin_weights: array<vec4<f32>>;
+@group(0) @binding(8) var<storage, read> skin_palette: array<mat4x4<f32>>;
+@group(0) @binding(9) var<storage, read> skin_meta: array<vec4<u32>>;
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
 // The shared SDF field (struct + all functions in field.wgsl): the raymarch
@@ -124,13 +149,66 @@ struct VsOut {
 
 @vertex
 fn vs(in: VsIn) -> VsOut {
+    // `n0.w` is the terrain color base and `n2.w` the terrain-splat flag on this
+    // path; `vs_skin` spends the same two lanes on skinning, which is safe
+    // because terrain is never skinned.
+    return build_vs(in, in.pos, in.normal, u32(in.n0.w), in.n2.w);
+}
+
+/// The skinned entry point (`floptle/0080`): deform the vertex by the bone
+/// palette here instead of on the CPU, then run the identical shading tail.
+///
+/// The arithmetic is the same as `cpu_skin_part` line for line — weights
+/// normalized by their own sum, a zero-weight vertex falling back to the part's
+/// node matrix (which is what the importer's zero-weight pad means) — so the two
+/// paths cannot drift. What changes is where it happens: the CPU path deformed
+/// every vertex of every character every frame and re-uploaded the result to a
+/// PRIVATE per-entity vertex buffer, because two characters sharing one `.glb`
+/// would otherwise share one buffer and the last one baked would win for both.
+/// Here every instance reads the same bind-pose buffer and supplies its own
+/// palette, so that whole mechanism has nothing left to do.
+@vertex
+fn vs_skin(in: VsIn) -> VsOut {
+    let entry = skin_meta[min(u32(in.n0.w), arrayLength(&skin_meta) - 1u)];
+    let sbase = entry.x;
+    let pbase = entry.y;
+    let idx = min(sbase + in.vid, arrayLength(&skin_joints) - 1u);
+    let j = skin_joints[idx];
+    let w = skin_weights[min(sbase + in.vid, arrayLength(&skin_weights) - 1u)];
+    let wsum = w.x + w.y + w.z + w.w;
+    var m = skin_palette[min(pbase, arrayLength(&skin_palette) - 1u)];
+    if (wsum > 1e-4) {
+        let n = arrayLength(&skin_palette) - 1u;
+        let inv = 1.0 / wsum;
+        m = skin_palette[min(pbase + 1u + j.x, n)] * (w.x * inv)
+          + skin_palette[min(pbase + 1u + j.y, n)] * (w.y * inv)
+          + skin_palette[min(pbase + 1u + j.z, n)] * (w.z * inv)
+          + skin_palette[min(pbase + 1u + j.w, n)] * (w.w * inv);
+    }
+    let p = (m * vec4<f32>(in.pos, 1.0)).xyz;
+    let raw_n = mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz) * in.normal;
+    let len = length(raw_n);
+    // `normalize_or_zero`, matching the CPU path: a fully-collapsed bone would
+    // otherwise produce a NaN normal and a black — or missing — triangle.
+    let n = select(vec3<f32>(0.0), raw_n / len, len > 1e-6);
+    // A skinned instance spends `n0.w` on its skin table index, so it can carry
+    // no terrain color block — and terrain is never skinned, so the splat flag is
+    // constant here too.
+    return build_vs(in, p, n, 0u, 0.0);
+}
+
+/// Everything after the vertex has its final object-space position and normal:
+/// clip position, the material varyings, triplanar space and the vertex-paint
+/// unpack. Shared by `vs` and `vs_skin` so a skinned mesh cannot shade
+/// differently from an unskinned one.
+fn build_vs(in: VsIn, pos: vec3<f32>, normal: vec3<f32>, tbase_in: u32, tsplat_in: f32) -> VsOut {
     let model = mat4x4<f32>(in.m0, in.m1, in.m2, in.m3);
     let nmat = mat3x3<f32>(in.n0.xyz, in.n1.xyz, in.n2.xyz);
     var out: VsOut;
-    let view_pos = model * vec4<f32>(in.pos, 1.0);
+    let view_pos = model * vec4<f32>(pos, 1.0);
     out.clip = g.view_proj * view_pos;
     out.uv = in.uv;
-    out.normal = normalize(nmat * in.normal);
+    out.normal = normalize(nmat * normal);
     out.color = in.color;
     out.view_pos = view_pos.xyz;
     out.emissive = in.emissive;
@@ -144,8 +222,8 @@ fn vs(in: VsIn) -> VsOut {
     // "world units per tile"). Terrain chunks bake at scale 1, so their
     // splat path (which shares lpos) is unchanged.
     let mscale = vec3<f32>(length(in.m0.xyz), length(in.m1.xyz), length(in.m2.xyz));
-    out.lpos = in.pos * mscale;
-    out.lnorm = in.normal;
+    out.lpos = pos * mscale;
+    out.lnorm = normal;
 
     // --- Vertex paint: unpack params.z, and let the packing DIE HERE. -------------
     // params.z arrives packed as `unlit_bit | (paint_base << 1)`. Two reasons the
@@ -180,10 +258,10 @@ fn vs(in: VsIn) -> VsOut {
     // Terrain chunk color rides the SAME varying from its own store (n0.w, no packing —
     // the lane is not shared with anything). An instance never has both bases, so the
     // order of these two only decides which wins in a case that cannot arise.
-    let tbase = u32(in.n0.w);
+    let tbase = tbase_in;
     let tidx = min(tbase + in.vid, arrayLength(&tpaint) - 1u);
     out.vcolor = select(vc, unpack4x8unorm(tpaint[tidx]), tbase != 0u);
-    out.tsplat = in.n2.w;
+    out.tsplat = tsplat_in;
     return out;
 }
 

@@ -196,6 +196,25 @@ frame grid — the classic hand-animated choppiness. Override per state (a snapp
 Both are plain RON — hand-editable, diff-able, and discovered anywhere under
 `assets/` by extension.
 
-**Not yet built:** GPU vertex skinning for weighted/deforming meshes (the import
-already captures joints/weights/inverse-binds; rigid per-node rigs like R6-style
-characters are fully supported today).
+## Skinning happens on the GPU
+
+A weighted mesh is deformed in the vertex shader. The bind pose is uploaded once,
+at import, along with each vertex's four joint slots and weights; every frame each
+character supplies only its **bone palette** — one matrix per joint — and draws
+the same shared buffer.
+
+What this changes for a game is the ceiling on how many animated characters can be
+on screen. The old path deformed every vertex of every character on the CPU and
+re-uploaded the result to a vertex buffer that had to be **private per character**,
+because two characters sharing one `.glb` would otherwise share one buffer and the
+last one posed would win for both. A mid-detail character — 8,000 vertices over 24
+joints — cost 0.114 ms of CPU per frame, so fifty of them spent a third of a 60 fps
+frame before anything drew. The same fifty now cost the CPU 24 matrix multiplies
+each, and because they share one buffer again they are **one draw call**.
+
+The CPU deform is still there, and still tested, as the fallback for a part the
+skinning store cannot take (it is bounded at ~8.3M skinned vertices per scene by
+the instance lane that addresses it) and for a part drawn by a custom `.flsl`
+material, whose pipeline has no skinned variant. The two paths are held to
+producing the same picture by `cargo run -p floptle-render --example skin_probe`,
+which renders one posed mesh both ways and fails if they disagree.

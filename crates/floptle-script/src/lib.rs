@@ -228,6 +228,7 @@ mod host;
 mod http_api;
 pub use http_api::open_in_browser;
 mod input_api;
+pub mod load_error;
 mod math_api;
 pub mod access_api;
 mod net_api;
@@ -439,6 +440,11 @@ pub struct ScriptHost {
     /// Live per-(entity, script) environments, for script handles. Registry
     /// keys — see the note on the `Shared` copy of this field.
     envs: Rc<RefCell<HashMap<(u32, String), RegistryKey>>>,
+    /// Script kinds that failed to LOAD — shared with the reference layer, which
+    /// reads it to tell a broken script apart from a missing export. See the
+    /// `Shared` copy (`floptle/0086`).
+    broken: Rc<RefCell<std::collections::HashSet<String>>>,
+    broken_read_warned: Rc<RefCell<std::collections::HashSet<(String, String)>>>,
     /// Mesh model paths scripts wrote this frame (entity index → new asset path), applied
     /// to the ECS `Matter::Mesh` in `run` and drained by the editor to re-import the GPU mesh.
     model_changes: Rc<RefCell<HashMap<u32, String>>>,
@@ -661,6 +667,16 @@ pub struct ScriptHost {
     /// handle's own key (`floptle/0085`) — one line per script per session, not
     /// one per instance.
     handle_key_warned: std::collections::HashSet<(String, String)>,
+    /// `(script kind, generation)` whose LOAD failure has already been put on the
+    /// Console. A broken script is re-reported into `errors` every frame (the
+    /// Scripting tab is a live list), but the Console line is once per version
+    /// of the file — otherwise one unloadable script buries every other message
+    /// in the feed at sixty lines a second (`floptle/0086`).
+    load_failure_reported: std::collections::HashSet<(String, u64)>,
+    /// `(script kind, generation)` already warned as *approaching* LuaJIT's
+    /// upvalue ceiling. Same once-per-version rule, and it clears on edit — so
+    /// the warning comes back the moment the file grows again.
+    upvalue_warned: std::collections::HashSet<(String, u64)>,
     /// Entities whose scripts are SKIPPED this session (a networked CLIENT
     /// doesn't run server-authoritative nodes' scripts — their state arrives
     /// in snapshots; docs/netcode-design.md §6). Set by the driver.
@@ -1143,6 +1159,17 @@ struct Shared {
     vfx_commands: Rc<RefCell<Vec<(u32, VfxCmd)>>>,
     /// `destroy(node)` / `node:destroy()` requests (entity indices).
     destroy_queue: Rc<RefCell<Vec<u32>>>,
+    /// Script kinds that FAILED TO LOAD this session. A broken script and a
+    /// script with no such export both read `nil` through a handle, and the two
+    /// want completely different fixes — so a read against a name in here says
+    /// which one it is, once per `(script, key)` (`floptle/0086`).
+    broken: Rc<RefCell<std::collections::HashSet<String>>>,
+    /// `(script kind, key)` combos already told they were reading from a broken
+    /// script, so a handle polled every frame is one Console line.
+    broken_read_warned: Rc<RefCell<std::collections::HashSet<(String, String)>>>,
+    /// The Console feed, shared with the host — a handle read is the one place
+    /// in the reference layer that has something to say.
+    logs: Rc<RefCell<Vec<ScriptLog>>>,
 }
 
 /// One queued two-way `params.X = ...` write: a number or a string.
@@ -3420,6 +3447,151 @@ end
         let logs = host.drain_logs();
         assert!(logs.iter().any(|l| l.level == LogLevel::Error), "expected an error log: {logs:?}");
         assert!(logs.iter().any(|l| l.source.as_ref().is_some_and(|(n, _)| n == "broken")), "error lacks source: {logs:?}");
+    }
+
+    /// A script that crosses LuaJIT's 60-upvalue ceiling must be told what
+    /// happened (`floptle/0086`).
+    ///
+    /// The raw message is `…:3669: function at line 2864 has more than 60
+    /// upvalues` — it names the END of the offending function rather than the
+    /// reference that tipped it over, never says a limit exists, and arrives
+    /// from the loader, so the script does not run at all. `vessel_controller`
+    /// hit this twice, a release apart, on mechanical edits.
+    #[test]
+    fn crossing_the_upvalue_ceiling_names_the_script_the_limit_and_the_fix() {
+        let dir = std::env::temp_dir().join(format!("floptle_upvalue_over_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        // 70 file-scope locals, and one function that closes over every one of
+        // them: exactly the shape one more `local` produces in a long script.
+        let mut src = String::new();
+        for i in 0..70 {
+            src.push_str(&format!("local v{i} = {i}\n"));
+        }
+        src.push_str("function update(node, dt)\n  local t = 0\n");
+        for i in 0..70 {
+            src.push_str(&format!("  t = t + v{i}\n"));
+        }
+        src.push_str("  node.y = t\nend\n");
+        write_script(&dir, "huge", &src);
+
+        let (mut world, _e) = world_with_script("huge");
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+
+        let errs = host.errors().to_vec();
+        let msg = errs.iter().find(|e| e.contains("huge")).unwrap_or_else(|| {
+            panic!("the load failure must be reported: {errs:?}")
+        });
+        assert!(msg.contains("huge.lua"), "names the script: {msg}");
+        assert!(msg.contains("60 upvalues"), "names the limit: {msg}");
+        assert!(msg.contains("LuaJIT"), "names whose limit it is: {msg}");
+        assert!(msg.contains("local s ="), "names the fix: {msg}");
+
+        // …and ONCE on the Console, not once per frame. A load failure fails
+        // every frame; sixty identical lines a second is how a Console feed
+        // stops being read.
+        let first = host.drain_logs();
+        assert_eq!(
+            first.iter().filter(|l| l.level == LogLevel::Error).count(),
+            1,
+            "one Console line for the load failure: {first:?}"
+        );
+        for _ in 0..5 {
+            host.run(&mut world, &dir, 0.1, 0.1);
+        }
+        let later = host.drain_logs();
+        assert!(
+            !later.iter().any(|l| l.level == LogLevel::Error),
+            "the same failure must not re-print every frame: {later:?}"
+        );
+        assert!(
+            !host.errors().is_empty(),
+            "…but the Scripting tab still lists it as currently broken"
+        );
+    }
+
+    /// One edit from the wall, the engine says so — because the count is
+    /// invisible from inside the editor, and crossing it costs the whole script.
+    #[test]
+    fn a_script_near_the_upvalue_ceiling_is_warned_before_it_crosses() {
+        let dir = std::env::temp_dir().join(format!("floptle_upvalue_near_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut src = String::new();
+        for i in 0..55 {
+            src.push_str(&format!("local v{i} = {i}\n"));
+        }
+        src.push_str("function update(node, dt)\n  local t = 0\n");
+        for i in 0..55 {
+            src.push_str(&format!("  t = t + v{i}\n"));
+        }
+        src.push_str("  node.y = t\nend\n");
+        write_script(&dir, "nearly", &src);
+
+        let (mut world, _e) = world_with_script("nearly");
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+
+        assert!(host.errors().is_empty(), "it still LOADS: {:?}", host.errors());
+        let logs = host.drain_logs();
+        let warn = logs
+            .iter()
+            .find(|l| l.level == LogLevel::Warn && l.msg.contains("upvalues"))
+            .unwrap_or_else(|| panic!("expected an upvalue-pressure warning: {logs:?}"));
+        assert!(warn.msg.contains("nearly.lua"), "{}", warn.msg);
+        assert!(warn.msg.contains("55 file-scope locals"), "names the count: {}", warn.msg);
+        assert!(warn.msg.contains("5 to go"), "names the headroom: {}", warn.msg);
+        assert!(warn.msg.contains("before the script stops loading"), "{}", warn.msg);
+
+        // Once per version of the file, not once a frame.
+        for _ in 0..5 {
+            host.run(&mut world, &dir, 0.1, 0.1);
+        }
+        assert!(
+            !host.drain_logs().iter().any(|l| l.msg.contains("upvalues")),
+            "the warning repeats every frame"
+        );
+    }
+
+    /// A broken script and a script with no such export both read `nil` through
+    /// a handle. Only one of them is a bug in the caller (`floptle/0086`).
+    #[test]
+    fn reading_from_a_script_that_failed_to_load_says_so() {
+        let dir = std::env::temp_dir().join(format!("floptle_broken_read_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "radar", "function update(node, dt) end\nthis is not lua\n");
+        write_script(
+            &dir,
+            "hud",
+            "function update(node, dt)\n  local h = findScript('radar')\n  if h then local _ = h.target end\nend\n",
+        );
+
+        let mut world = World::default();
+        for kind in ["radar", "hud"] {
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(e, Scripts(vec![floptle_core::ScriptInst {
+                kind: kind.into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]));
+        }
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        host.run(&mut world, &dir, 0.1, 0.1);
+
+        let logs = host.drain_logs();
+        let told = logs
+            .iter()
+            .find(|l| l.msg.contains("`radar` did not load"))
+            .unwrap_or_else(|| panic!("the reader was never told radar is broken: {logs:?}"));
+        assert!(told.msg.contains("target"), "names the key it could not answer: {}", told.msg);
+        assert!(
+            told.msg.contains("not a missing export"),
+            "the whole point is the distinction: {}",
+            told.msg
+        );
     }
 
     #[test]

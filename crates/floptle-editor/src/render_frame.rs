@@ -418,6 +418,12 @@ impl Editor {
             return;
         };
         let window = window.clone();
+        // One pose table per FRAME, not per pass (`floptle/0080`). A frame gathers
+        // the scene several times over — the Scene view, a docked Game view, every
+        // render target, the selection mask — and each of those passes reads pose
+        // indices handed out by an earlier gather. Resetting between them would
+        // leave the mask pointing at a table that had moved under it.
+        raster.begin_skin_frame();
 
         // ---- gather the scene from the World ----
         let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
@@ -996,6 +1002,9 @@ impl Editor {
         // the two halves are not separable from Lua anyway.
         let gather_t = floptle_core::profile::Span::new();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
+        // GPU-skinned parts (`floptle/0080`), gathered alongside the plain ones and
+        // drawn through the skinned pipelines in the same passes.
+        let mut skin_draws: Vec<floptle_render::SkinDraw> = Vec::new();
         // Custom-shader draws (a Material with a compiled `.flsl`): same
         // instance data, drawn through the shader's own pipeline + group(3).
         let mut flsl_draws: Vec<floptle_render::FlslDraw> = Vec::new();
@@ -1201,7 +1210,7 @@ impl Editor {
                         let obj_mats = self.world.get::<floptle_core::ObjectMaterials>(*e);
                         let pose = self.anim.poses.get(e).map(|v| v.as_slice());
                         let node_paint = paint_bases.get(e).map(|v| v.as_slice());
-                        push_mesh_instances(gpu, raster, asset, pose, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, flsl, &mut flsl_draws);
+                        push_mesh_instances(gpu, raster, asset, pose, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, &mut skin_draws, flsl, &mut flsl_draws);
                     }
                 }
                 Matter::MapMesh { id } => {
@@ -1215,7 +1224,7 @@ impl Editor {
                         let mp = mat.as_ref().map(material_params);
                         let obj_mats = self.world.get::<floptle_core::ObjectMaterials>(*e);
                         let node_paint = paint_bases.get(e).map(|v| v.as_slice());
-                        push_mesh_instances(gpu, raster, asset, None, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, flsl, &mut flsl_draws);
+                        push_mesh_instances(gpu, raster, asset, None, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, &mut skin_draws, flsl, &mut flsl_draws);
                     }
                 }
                 // group / terrain / camera / light / gravity / skybox / post render
@@ -1510,6 +1519,9 @@ impl Editor {
         // outline hugs only the selected SDF surfaces. All selected entities get
         // an outline, not just the primary.
         let mut mask_mesh: Vec<(MeshId, InstanceRaw)> = Vec::new();
+        // Selected GPU-skinned parts: the silhouette has to hug the POSE, so it
+        // goes through the same skinned pipeline the character shades with.
+        let mut mask_skins: Vec<floptle_render::SkinDraw> = Vec::new();
         let mut mask_blob: Option<RaymarchGlobals> = None;
         // The Game view plays like a build — no selection outline there.
         if !game_view {
@@ -1543,15 +1555,48 @@ impl Editor {
                                 let node_world =
                                     self.anim.poses.get(&e).unwrap_or(&rig.rest_world);
                                 for (i, &mid) in asset.parts.iter().enumerate() {
-                                    if matches!(rig.skins.get(i), Some(Some(_))) {
-                                        // A SKINNED part: cpu_skin_part already baked the pose
-                                        // into this ENTITY's variant buffer for the visible
-                                        // draw, which uses just `model`. Applying node_world
-                                        // here too would transform it TWICE — the offset
-                                        // outline Ty saw on the astronaut. Match the draw.
-                                        let vmid = self.skin_variants.get(e, i).unwrap_or(mid);
-                                        mask_mesh
-                                            .push((vmid, instance_of(model, [1.0, 1.0, 1.0])));
+                                    if let Some(Some(skin)) = rig.skins.get(i) {
+                                        // A SKINNED part draws from `model` alone —
+                                        // the pose is in the deform, not the matrix.
+                                        // Applying node_world here too would transform
+                                        // it TWICE, which is the offset outline Ty saw
+                                        // on the astronaut. Match the draw.
+                                        let raw = instance_of(model, [1.0, 1.0, 1.0]);
+                                        let base = rig.skin_bases.get(i).copied().unwrap_or(0);
+                                        if base != 0 {
+                                            let part_node =
+                                                rig.part_nodes.get(i).copied().unwrap_or(0);
+                                            let palette: Vec<Mat4> = skin
+                                                .joint_nodes
+                                                .iter()
+                                                .zip(&skin.inverse_bind)
+                                                .map(|(&jn, ib)| {
+                                                    node_world
+                                                        .get(jn)
+                                                        .copied()
+                                                        .unwrap_or(Mat4::IDENTITY)
+                                                        * *ib
+                                                })
+                                                .collect();
+                                            let fallback = node_world
+                                                .get(part_node)
+                                                .copied()
+                                                .unwrap_or(Mat4::IDENTITY);
+                                            let pose =
+                                                raster.push_skin_pose(base, fallback, &palette);
+                                            mask_skins.push(floptle_render::SkinDraw {
+                                                mesh: mid,
+                                                tex: None,
+                                                instance: raw,
+                                                pose,
+                                            });
+                                        } else {
+                                            // CPU fallback: the visible draw baked the
+                                            // pose into this entity's variant buffer.
+                                            let vmid =
+                                                self.skin_variants.get(e, i).unwrap_or(mid);
+                                            mask_mesh.push((vmid, raw));
+                                        }
                                     } else {
                                         let local = rig
                                             .part_nodes
@@ -3867,7 +3912,9 @@ impl Editor {
                     // runs) and caps the raymarch at the nearest mesh per pixel.
                     let depth_tex =
                         if self.project.retro { retro.depth_texture() } else { gpu.depth_texture() };
-                    if raster.depth_prepass_with(gpu, globals, &instances, &flsl_draws, depth_tex) {
+                    if raster.depth_prepass_with(
+                        gpu, globals, &instances, &flsl_draws, &skin_draws, depth_tex,
+                    ) {
                         raymarch.set_depth_prime(gpu, raster.prepass_view());
                     }
                     raymarch.draw_into_primed(gpu, color, depth, rm);
@@ -3877,8 +3924,8 @@ impl Editor {
                     Some(clear.map(|c| c as f64))
                 };
                 raster.draw_scene_with(
-                    gpu, color, depth, globals, &instances, &flsl_draws, raster_clear,
-                    Some(raymarch.field_bind()),
+                    gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,
+                    raster_clear, Some(raymarch.field_bind()),
                 );
                 // Script-drawn 3D lines (draw.line — the map's orbit conics).
                 if !self.script_lines.is_empty() {
@@ -4135,7 +4182,7 @@ impl Editor {
                 // frame res, so it stays crisp over the retro scene) then edge-detect
                 // it onto the frame. Works for meshes and the SDF blob alike.
                 let masked = if !mask_mesh.is_empty() {
-                    raster.draw_mask(gpu, outline.mask_view(), globals, &mask_mesh);
+                    raster.draw_mask(gpu, outline.mask_view(), globals, &mask_mesh, &mask_skins);
                     true
                 } else if let Some(brm) = mask_blob {
                     raymarch.draw_mask(gpu, outline.mask_view(), brm);
@@ -6844,6 +6891,9 @@ impl Editor {
             })
             .collect();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
+        // GPU-skinned parts (`floptle/0080`), gathered alongside the plain ones and
+        // drawn through the skinned pipelines in the same passes.
+        let mut skin_draws: Vec<floptle_render::SkinDraw> = Vec::new();
         // Custom `.flsl` materials draw offscreen too (bindings were refreshed
         // by ensure_flsl_materials before any gather this frame).
         let mut flsl_draws: Vec<floptle_render::FlslDraw> = Vec::new();
@@ -6925,7 +6975,8 @@ impl Editor {
                             gpu, raster, asset, pose, model, tex, mp.as_ref(), obj_mats,
                             &self.texture_registry, node_paint,
                             *ent, &mut self.skin_variants,
-                            &mut skin_scratch, &mut instances, flsl, &mut flsl_draws,
+                            &mut skin_scratch, &mut instances, &mut skin_draws, flsl,
+                            &mut flsl_draws,
                         );
                     }
                 }
@@ -6948,7 +6999,8 @@ impl Editor {
                             gpu, raster, asset, None, model, tex, mp.as_ref(), obj_mats,
                             &self.texture_registry, node_paint,
                             *ent, &mut self.skin_variants,
-                            &mut skin_scratch, &mut instances, flsl, &mut flsl_draws,
+                            &mut skin_scratch, &mut instances, &mut skin_draws, flsl,
+                            &mut flsl_draws,
                         );
                     }
                 }
@@ -7119,8 +7171,8 @@ impl Editor {
                 Some(clear.map(|c| c as f64))
             };
             raster.draw_scene_with(
-                gpu, color, depth, globals, &instances, &flsl_draws, raster_clear,
-                Some(raymarch.field_bind()),
+                gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,
+                raster_clear, Some(raymarch.field_bind()),
             );
             // Script-drawn 3D lines (draw.line — the map's orbit conics).
             if !self.script_lines.is_empty() {
@@ -7207,6 +7259,12 @@ fn push_mesh_instances(
     variants: &mut anim::SkinVariants,
     skin_scratch: &mut Vec<floptle_render::Vertex>,
     instances: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
+    // GPU-skinned parts land here instead of `instances` (`floptle/0080`): same
+    // mesh, same material, but drawn through the `vs_skin` pipelines with this
+    // draw's bone palette. Several characters of one model stay ONE draw call,
+    // which the CPU path could not manage — it had to give each entity a private
+    // vertex buffer to bake its pose into.
+    skins: &mut Vec<floptle_render::SkinDraw>,
     flsl: Option<floptle_render::FlslBindingId>,
     flsl_out: &mut Vec<floptle_render::FlslDraw>,
 ) {
@@ -7262,13 +7320,34 @@ fn push_mesh_instances(
         let part_node = rig.part_nodes.get(i).copied().unwrap_or(0);
         let (ptex, pmp) = part_look(asset, i);
         if let Some(Some(skin)) = rig.skins.get(i) {
-            // CPU skinning rewrites the part's VERTEX buffer every frame — into this
-            // ENTITY's private clone (paint lives in `vpaint`, keyed by vertex_index,
-            // so the re-upload can't stomp it; paint/texture lookups stay on `mid`).
-            let draw_mid = variants.variant_for(gpu, raster, entity, i, mid);
-            anim::cpu_skin_part(skin, part_node, node_world, skin_scratch);
-            raster.update_mesh_vertices(gpu, draw_mid, skin_scratch);
-            push(draw_mid, ptex, instance_of_mat(model, &painted(raster, mid, i, pmp)));
+            let raw = instance_of_mat(model, &painted(raster, mid, i, pmp));
+            let skin_base = rig.skin_bases.get(i).copied().unwrap_or(0);
+            // A custom `.flsl` material routes the part through its own pipeline,
+            // which has no skinned variant — those parts keep the CPU deform.
+            if skin_base != 0 && flsl.is_none() {
+                // GPU skinning: hand the pose over and draw the SHARED bind-pose
+                // buffer. `push_skin_pose` is the same arithmetic `cpu_skin_part`
+                // applies per vertex, done once per draw instead of once per vertex.
+                let palette: Vec<Mat4> = skin
+                    .joint_nodes
+                    .iter()
+                    .zip(&skin.inverse_bind)
+                    .map(|(&jn, ib)| node_world.get(jn).copied().unwrap_or(Mat4::IDENTITY) * *ib)
+                    .collect();
+                let fallback = node_world.get(part_node).copied().unwrap_or(Mat4::IDENTITY);
+                let pose = raster.push_skin_pose(skin_base, fallback, &palette);
+                skins.push(floptle_render::SkinDraw { mesh: mid, tex: ptex, instance: raw, pose });
+            } else {
+                // Fallback: the skinning store refused this part (it is bounded by
+                // the instance lane that addresses it), or a custom shader owns the
+                // draw. CPU-skin into this ENTITY's private clone, as before —
+                // paint lives in `vpaint`, keyed by vertex_index, so the re-upload
+                // can't stomp it, and paint/texture lookups stay on `mid`.
+                let draw_mid = variants.variant_for(gpu, raster, entity, i, mid);
+                anim::cpu_skin_part(skin, part_node, node_world, skin_scratch);
+                raster.update_mesh_vertices(gpu, draw_mid, skin_scratch);
+                push(draw_mid, ptex, raw);
+            }
         } else {
             let local = node_world.get(part_node).copied().unwrap_or(Mat4::IDENTITY);
             push(mid, ptex, instance_of_mat(model * local, &painted(raster, mid, i, pmp)));

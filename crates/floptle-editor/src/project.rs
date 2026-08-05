@@ -230,7 +230,11 @@ impl Editor {
                         raster.set_mesh_sampling(gpu, mid, s.to_sampling());
                     }
                 }
-                let rig = anim::rig_from_model(&model, &overrides);
+                let mut rig = anim::rig_from_model(&model, &overrides);
+                // Bind pose + per-vertex weights to the GPU once, here: from now on
+                // this model's characters are deformed in the vertex shader
+                // (`floptle/0080`).
+                anim::upload_skins(gpu, raster, &mut rig);
                 let skinned = model.parts.iter().filter(|p| p.skin.is_some()).count();
                 let verts: usize = model.parts.iter().map(|p| p.mesh.vertices.len()).sum();
                 self.mesh_registry.insert(

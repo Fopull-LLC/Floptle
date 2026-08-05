@@ -271,6 +271,69 @@ const INSTANCE_ATTRS: [wgpu::VertexAttribute; 13] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 192, shader_location: 15 },
 ];
 
+/// The eight core pipelines: the four passes (opaque / transparent / silhouette
+/// mask / depth prepass) in an unskinned and a GPU-skinned variant.
+struct CorePipelines {
+    pipeline: wgpu::RenderPipeline,
+    transparent_pipeline: wgpu::RenderPipeline,
+    mask_pipeline: wgpu::RenderPipeline,
+    prepass_pipeline: wgpu::RenderPipeline,
+    skin_pipeline: wgpu::RenderPipeline,
+    skin_transparent_pipeline: wgpu::RenderPipeline,
+    skin_mask_pipeline: wgpu::RenderPipeline,
+    skin_prepass_pipeline: wgpu::RenderPipeline,
+}
+
+/// Build the group(0) bind group over the frame globals, the two paint stores,
+/// the terrain palette and the three skinning stores. A free function so
+/// [`Raster::new`] can call it before a `Raster` exists;
+/// [`Raster::rebuild_globals_bind`] is what everything else uses.
+#[allow(clippy::too_many_arguments)]
+fn make_globals_bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    globals_buf: &wgpu::Buffer,
+    vpaint_buf: &wgpu::Buffer,
+    tpaint_buf: &wgpu::Buffer,
+    pal_view: &wgpu::TextureView,
+    pal_samp: &wgpu::Sampler,
+    pal_samp_nearest: &wgpu::Sampler,
+    skin_joints: &wgpu::Buffer,
+    skin_weights: &wgpu::Buffer,
+    skin_palette: &wgpu::Buffer,
+    skin_meta: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("raster-globals"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: vpaint_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: tpaint_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(pal_view) },
+            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(pal_samp) },
+            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(pal_samp_nearest) },
+            wgpu::BindGroupEntry { binding: 6, resource: skin_joints.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 7, resource: skin_weights.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 8, resource: skin_palette.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 9, resource: skin_meta.as_entire_binding() },
+        ],
+    })
+}
+
+/// One of the three group(0) skinning stores: a vertex-stage read-only storage
+/// buffer. Spelled once because the three differ only in their binding number.
+const SKIN_STORAGE_ENTRY: wgpu::BindGroupLayoutEntry = wgpu::BindGroupLayoutEntry {
+    binding: 6,
+    visibility: wgpu::ShaderStages::VERTEX,
+    ty: wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Storage { read_only: true },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    },
+    count: None,
+};
+
 const INSTANCE_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
     array_stride: std::mem::size_of::<InstanceRaw>() as u64,
     step_mode: wgpu::VertexStepMode::Instance,
@@ -342,6 +405,16 @@ pub struct Raster {
     mask_pipeline: wgpu::RenderPipeline,
     /// Depth-only prepass pipeline (see [`depth_prepass`](Self::depth_prepass)).
     prepass_pipeline: wgpu::RenderPipeline,
+    /// The same four pipelines through the `vs_skin` entry point, which deforms
+    /// the vertex by its bone palette before the shared shading tail
+    /// (`floptle/0080`). Four rather than one because the prepass must agree with
+    /// the color pass about where a skinned vertex ended up, or the character
+    /// depth-fails against its own prepass — and the outline must hug the POSE,
+    /// which was the whole reason the CPU path needed per-entity vertex buffers.
+    skin_pipeline: wgpu::RenderPipeline,
+    skin_transparent_pipeline: wgpu::RenderPipeline,
+    skin_mask_pipeline: wgpu::RenderPipeline,
+    skin_prepass_pipeline: wgpu::RenderPipeline,
     /// The prepass's own sampleable depth target (recreated on size change):
     /// bound by the raymarch as its per-pixel march cap, copied over the frame's
     /// depth buffer to prime early-z for the color pass.
@@ -375,6 +448,31 @@ pub struct Raster {
     tpaint_free: HashMap<u32, Vec<u32>>,
     /// Freed dynamic mesh slots (indices into `meshes`), re-used by `register_dynamic`.
     dyn_free: Vec<u32>,
+    /// GPU skinning (`floptle/0080`). Per-vertex joint slots and weights for every
+    /// registered skinned part, packed back to back and read as
+    /// `skin_joints[skin_base + vertex_index]`. Bump-allocated like `vpaint` and
+    /// never freed: a skin belongs to its mesh for the scene's life.
+    skin_joints_buf: wgpu::Buffer,
+    skin_weights_buf: wgpu::Buffer,
+    /// Length of both stores in VERTICES (they are parallel), including the
+    /// reserved slot 0 that makes `skin_base == 0` mean "not skinned".
+    skin_attr_len: u32,
+    /// This frame's bone palettes: for each skinned draw, its fallback matrix
+    /// followed by one `nodeWorld · inverseBind` per palette slot. Rebuilt every
+    /// frame from scratch — a pose is a frame's worth of data, not an asset's.
+    skin_palette_buf: wgpu::Buffer,
+    /// CPU staging for `skin_palette_buf`, uploaded once per frame at the start of
+    /// the first pass that draws.
+    skin_palette_cpu: Vec<[[f32; 4]; 4]>,
+    /// One entry per skinned draw this frame: `(skin_base, palette_base, 0, 0)`.
+    /// The instance's `n0.w` indexes it — one instance lane instead of two,
+    /// because there was no second lane to spend.
+    skin_meta_buf: wgpu::Buffer,
+    skin_meta_cpu: Vec<[u32; 4]>,
+    /// Whether `skin_palette_cpu` still needs uploading this frame. A frame draws
+    /// into several passes (prepass, color, mask, render targets) and the palette
+    /// must reach the GPU before the first of them, exactly once.
+    skin_palette_dirty: bool,
     /// The terrain texture palette (a `TERRAIN_SLOTS`-layer array), bound to group(0) so
     /// meshed terrain can triplanar-splat it exactly like the raymarched terrain did. Its
     /// own copy (not shared with the raymarch's) keeps the two passes decoupled; the editor
@@ -505,6 +603,26 @@ struct FlslBinding {
 /// also what the depth prepass alpha-tests) + the material's flsl binding.
 pub type FlslDraw = (MeshId, Option<TexId>, FlslBindingId, InstanceRaw);
 
+/// One GPU-skinned draw (`floptle/0080`): a mesh part whose vertices are deformed
+/// in the vertex shader by the pose in `pose`, rather than on the CPU and
+/// re-uploaded.
+///
+/// Skinned draws come in their own list rather than being detected from the
+/// instance data, because the one free instance lane (`n0.w`) means the same
+/// thing to two different readers — a terrain color base to `vs`, a skin table
+/// index to `vs_skin` — and "which pipeline is this" must not be a guess.
+#[derive(Clone, Copy)]
+pub struct SkinDraw {
+    pub mesh: MeshId,
+    /// A material texture that overrides the mesh's own, exactly as in the
+    /// unskinned instance list.
+    pub tex: Option<TexId>,
+    pub instance: InstanceRaw,
+    /// This draw's pose, from [`Raster::push_skin_pose`]. Several instances of
+    /// one character model each carry their own — same mesh, same draw call.
+    pub pose: u32,
+}
+
 impl Raster {
     pub fn new(gpu: &Gpu) -> Self {
         let device = &gpu.device;
@@ -581,6 +699,15 @@ impl Raster {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // Bindings 6/7/8: GPU skinning (`floptle/0080`) — per-vertex joint
+                // indices and weights, and the frame's bone palettes. Same shape and
+                // same vertex-only visibility as `vpaint`, and here for the same
+                // reason: one store indexed by a per-instance base keeps skinned
+                // characters as ordinary instanced draws.
+                SKIN_STORAGE_ENTRY,
+                wgpu::BindGroupLayoutEntry { binding: 7, ..SKIN_STORAGE_ENTRY },
+                wgpu::BindGroupLayoutEntry { binding: 8, ..SKIN_STORAGE_ENTRY },
+                wgpu::BindGroupLayoutEntry { binding: 9, ..SKIN_STORAGE_ENTRY },
             ],
         });
         // Group 1: the per-material base-color texture + its own sampler (so each
@@ -611,7 +738,7 @@ impl Raster {
         // atlas). The editor passes `Raymarch::field_bind`; standalone callers get
         // the empty fallback below (zeroed globals → every field branch skips).
         let field_layout = crate::raymarch::field_bind_layout(device);
-        let (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline) =
+        let core =
             Self::build_core_pipelines(gpu, &module, &globals_layout, &tex_layout, &field_layout);
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -669,7 +796,46 @@ impl Raster {
         let terrain_samp = repeat(wgpu::FilterMode::Linear);
         let terrain_samp_nearest = repeat(wgpu::FilterMode::Nearest);
 
-        let globals_bind = Self::make_globals_bind(
+        // The skinning stores start at their reserved slot 0 — `skin_base == 0`
+        // means "this instance is not skinned", so no real block starts there and
+        // the clamped index in `vs_skin` always has something in bounds to read.
+        // COPY_SRC as well: growth copies the live blocks across on the GPU rather
+        // than keeping a CPU mirror, as the terrain color store does.
+        let skin_attr_usage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC;
+        let skin_joints_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster-skin-joints"),
+            size: 16,
+            usage: skin_attr_usage,
+            mapped_at_creation: false,
+        });
+        let skin_weights_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster-skin-weights"),
+            size: 16,
+            usage: skin_attr_usage,
+            mapped_at_creation: false,
+        });
+        // One identity matrix, so an empty frame still has a legal palette.
+        let skin_palette_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster-skin-palette"),
+            size: 64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue.write_buffer(
+            &skin_palette_buf,
+            0,
+            bytemuck::cast_slice(&[Mat4::IDENTITY.to_cols_array_2d()]),
+        );
+        let skin_meta_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster-skin-meta"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let globals_bind = make_globals_bind(
             device,
             &globals_layout,
             &globals_buf,
@@ -678,6 +844,10 @@ impl Raster {
             &terrain_pal_view,
             &terrain_samp,
             &terrain_samp_nearest,
+            &skin_joints_buf,
+            &skin_weights_buf,
+            &skin_palette_buf,
+            &skin_meta_buf,
         );
 
         // 1×1 white default for meshes registered without a texture (the tint then
@@ -729,10 +899,14 @@ impl Raster {
         });
 
         Self {
-            pipeline,
-            transparent_pipeline,
-            mask_pipeline,
-            prepass_pipeline,
+            pipeline: core.pipeline,
+            transparent_pipeline: core.transparent_pipeline,
+            mask_pipeline: core.mask_pipeline,
+            prepass_pipeline: core.prepass_pipeline,
+            skin_pipeline: core.skin_pipeline,
+            skin_transparent_pipeline: core.skin_transparent_pipeline,
+            skin_mask_pipeline: core.skin_mask_pipeline,
+            skin_prepass_pipeline: core.skin_prepass_pipeline,
             prepass_tex: None,
             globals_bind,
             globals_buf,
@@ -742,6 +916,14 @@ impl Raster {
             tpaint_len: 1, // slot 0 is the reserved dummy
             tpaint_free: HashMap::new(),
             dyn_free: Vec::new(),
+            skin_joints_buf,
+            skin_weights_buf,
+            skin_attr_len: 1, // slot 0 is the reserved dummy
+            skin_palette_buf,
+            skin_palette_cpu: Vec::new(),
+            skin_meta_buf,
+            skin_meta_cpu: Vec::new(),
+            skin_palette_dirty: false,
             terrain_pal_view,
             _terrain_pal: terrain_pal,
             terrain_samp,
@@ -764,17 +946,24 @@ impl Raster {
     }
 
 
-    /// The four core pipelines (opaque / transparent / mask / depth-prepass)
-    /// from one module — extracted so a Field Shape splice
-    /// ([`set_custom_field`](Self::set_custom_field)) can rebuild them.
+    /// The core pipelines (opaque / transparent / mask / depth-prepass, each
+    /// unskinned and GPU-skinned) from one module — extracted so a Field Shape
+    /// splice ([`set_custom_field`](Self::set_custom_field)) can rebuild them.
     fn build_core_pipelines(
         gpu: &Gpu,
         module: &wgpu::ShaderModule,
         globals_layout: &wgpu::BindGroupLayout,
         tex_layout: &wgpu::BindGroupLayout,
         field_layout: &wgpu::BindGroupLayout,
-    ) -> (wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::RenderPipeline) {
+    ) -> CorePipelines {
         let device = &gpu.device;
+        // Built twice, once per vertex entry point: `vs` for ordinary geometry and
+        // `vs_skin` for GPU-skinned parts, which deform the vertex by their bone
+        // palette before the identical shading tail. The FOUR passes each need
+        // their own skinned variant, because a character has to prime depth,
+        // shade, blend and silhouette from the same posed vertices — a prepass
+        // that used the bind pose would depth-reject the pose that shades.
+        let build = |vs_entry: &'static str, tag: &str| {
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("raster"),
             bind_group_layouts: &[Some(globals_layout), Some(tex_layout), Some(field_layout)],
@@ -782,11 +971,11 @@ impl Raster {
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raster"),
+            label: Some(&format!("raster{tag}")),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module,
-                entry_point: Some("vs"),
+                entry_point: Some(vs_entry),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
             },
@@ -826,11 +1015,11 @@ impl Raster {
             immediate_size: 0,
         });
         let prepass_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raster-prepass"),
+            label: Some(&format!("raster-prepass{tag}")),
             layout: Some(&prepass_layout),
             vertex: wgpu::VertexState {
                 module,
-                entry_point: Some("vs"),
+                entry_point: Some(vs_entry),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
             },
@@ -858,11 +1047,11 @@ impl Raster {
         // aren't occluded by it. (No back-to-front sort yet, so overlapping transparent
         // surfaces are approximate — enough for the basic transparency this exposes.)
         let transparent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raster-transparent"),
+            label: Some(&format!("raster-transparent{tag}")),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module,
-                entry_point: Some("vs"),
+                entry_point: Some(vs_entry),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
             },
@@ -903,11 +1092,11 @@ impl Raster {
             immediate_size: 0,
         });
         let mask_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raster-mask"),
+            label: Some(&format!("raster-mask{tag}")),
             layout: Some(&mask_layout),
             vertex: wgpu::VertexState {
                 module,
-                entry_point: Some("vs"),
+                entry_point: Some(vs_entry),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[Vertex::LAYOUT, INSTANCE_LAYOUT],
             },
@@ -927,7 +1116,21 @@ impl Raster {
             multiview_mask: None,
             cache: None,
         });
-        (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline)
+            (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline)
+        };
+        let (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline) = build("vs", "");
+        let (skin_pipeline, skin_transparent_pipeline, skin_mask_pipeline, skin_prepass_pipeline) =
+            build("vs_skin", "-skin");
+        CorePipelines {
+            pipeline,
+            transparent_pipeline,
+            mask_pipeline,
+            prepass_pipeline,
+            skin_pipeline,
+            skin_transparent_pipeline,
+            skin_mask_pipeline,
+            skin_prepass_pipeline,
+        }
     }
 
     /// Register (or hot-swap) a compiled `.flsl` fragment shader: `chunk` is the
@@ -1089,18 +1292,21 @@ impl Raster {
             label: Some("raster"),
             source: wgpu::ShaderSource::Wgsl(raster_custom_source(code).into()),
         });
-        let (pipeline, transparent_pipeline, mask_pipeline, prepass_pipeline) =
-            Self::build_core_pipelines(
-                gpu,
-                &module,
-                &self.globals_layout,
-                &self.tex_layout,
-                &self.field_layout,
-            );
-        self.pipeline = pipeline;
-        self.transparent_pipeline = transparent_pipeline;
-        self.mask_pipeline = mask_pipeline;
-        self.prepass_pipeline = prepass_pipeline;
+        let core = Self::build_core_pipelines(
+            gpu,
+            &module,
+            &self.globals_layout,
+            &self.tex_layout,
+            &self.field_layout,
+        );
+        self.pipeline = core.pipeline;
+        self.transparent_pipeline = core.transparent_pipeline;
+        self.mask_pipeline = core.mask_pipeline;
+        self.prepass_pipeline = core.prepass_pipeline;
+        self.skin_pipeline = core.skin_pipeline;
+        self.skin_transparent_pipeline = core.skin_transparent_pipeline;
+        self.skin_mask_pipeline = core.skin_mask_pipeline;
+        self.skin_prepass_pipeline = core.skin_prepass_pipeline;
         // Rebuild every custom-shader pipeline against the new field module.
         for i in 0..self.flsl_shaders.len() {
             let (chunk, tex_slots, blend) = {
@@ -1401,32 +1607,29 @@ impl Raster {
         );
     }
 
-    /// Build the group(0) bind group over the frame globals + the paint store. Called
-    /// at startup and again whenever `vpaint_buf` is RE-CREATED (a bind group holds the
-    /// buffer it was built from, so growing the store invalidates it).
-    #[allow(clippy::too_many_arguments)]
-    fn make_globals_bind(
-        device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
-        globals_buf: &wgpu::Buffer,
-        vpaint_buf: &wgpu::Buffer,
-        tpaint_buf: &wgpu::Buffer,
-        pal_view: &wgpu::TextureView,
-        pal_samp: &wgpu::Sampler,
-        pal_samp_nearest: &wgpu::Sampler,
-    ) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raster-globals"),
-            layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: vpaint_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: tpaint_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(pal_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(pal_samp) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(pal_samp_nearest) },
-            ],
-        })
+    /// Rebuild the group(0) bind group from this Raster's CURRENT buffers.
+    ///
+    /// A bind group holds the buffers it was built from, so every store on
+    /// group(0) — the paint blocks, the terrain colors, the three skinning
+    /// stores — invalidates it by being re-created when it outgrows itself.
+    /// Every one of those growth paths calls this, which is why it takes no
+    /// arguments: forgetting one buffer in a nine-argument call is the kind of
+    /// mistake that renders as another mesh's colors.
+    fn rebuild_globals_bind(&mut self, device: &wgpu::Device) {
+        self.globals_bind = make_globals_bind(
+            device,
+            &self.globals_layout,
+            &self.globals_buf,
+            &self.vpaint_buf,
+            &self.tpaint_buf,
+            &self.terrain_pal_view,
+            &self.terrain_samp,
+            &self.terrain_samp_nearest,
+            &self.skin_joints_buf,
+            &self.skin_weights_buf,
+            &self.skin_palette_buf,
+            &self.skin_meta_buf,
+        );
     }
 
     /// Upload the terrain texture palette (already resized to 256² per layer, same order
@@ -1440,16 +1643,7 @@ impl Raster {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
         });
-        self.globals_bind = Self::make_globals_bind(
-            &gpu.device,
-            &self.globals_layout,
-            &self.globals_buf,
-            &self.vpaint_buf,
-            &self.tpaint_buf,
-            &self.terrain_pal_view,
-            &self.terrain_samp,
-            &self.terrain_samp_nearest,
-        );
+        self.rebuild_globals_bind(&gpu.device);
         self.terrain_nearest_mask = nearest_mask;
     }
 
@@ -1491,16 +1685,7 @@ impl Raster {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            self.globals_bind = Self::make_globals_bind(
-                &gpu.device,
-                &self.globals_layout,
-                &self.globals_buf,
-                &self.vpaint_buf,
-                &self.tpaint_buf,
-                &self.terrain_pal_view,
-                &self.terrain_samp,
-                &self.terrain_samp_nearest,
-            );
+            self.rebuild_globals_bind(&gpu.device);
             gpu.queue.write_buffer(&self.vpaint_buf, 0, bytemuck::cast_slice(&self.vpaint_cpu));
         } else {
             // Buffer still fits: push only the new block.
@@ -1573,6 +1758,181 @@ impl Raster {
         }
     }
 
+    // ---- GPU skinning (`floptle/0080`) ---------------------------------------------
+    //
+    // Three moving parts, on two different clocks:
+    //
+    //   * per ASSET, once: `register_skin` uploads a part's per-vertex joint slots
+    //     and weights. They belong to the bind pose and never change.
+    //   * per FRAME, per skinned draw: `push_skin_pose` appends that draw's bone
+    //     palette. A pose is a frame's worth of data, so the store is rebuilt from
+    //     scratch each frame rather than diffed.
+    //   * at draw time: `SkinDraw`s go through the `vs_skin` pipelines, which read
+    //     both stores through the draw's index in the meta table.
+    //
+    // What this replaces is not just the arithmetic. The CPU path had to give every
+    // ENTITY a private clone of its mesh's vertex buffer, because two characters
+    // sharing one `.glb` would otherwise share one buffer and the last one baked
+    // would win for both. Here the bind pose is read-only and the pose is per
+    // instance, so N characters of one model are one draw call again.
+
+    /// Upload one skinned part's per-vertex joint slots + weights and return its
+    /// base in the skinning stores (0 = nothing uploaded).
+    ///
+    /// Call once per part when the model is imported. `joints` and `weights` are
+    /// parallel to the part's vertex array, in the same order the index buffer
+    /// addresses — which is what makes `skin_base + vertex_index` correct.
+    pub fn register_skin(&mut self, gpu: &Gpu, joints: &[[u16; 4]], weights: &[[f32; 4]]) -> u32 {
+        let n = joints.len().min(weights.len());
+        if n == 0 {
+            return 0;
+        }
+        let base = self.skin_attr_len;
+        // The base rides `n0.w`, an f32 instance lane, which holds integers
+        // exactly only to 2^24. Past that the offset would silently decode wrong
+        // and read another mesh's weights — a character wearing another
+        // character's deformation. Refuse instead.
+        if base as u64 + n as u64 > (1 << 23) {
+            log::error!(
+                "skinning store full ({base} verts): this part falls back to the CPU skin. \
+                 The n0.w instance lane holds ~8.3M skinned vertices per scene."
+            );
+            return 0;
+        }
+        let j: Vec<[u32; 4]> =
+            joints[..n].iter().map(|v| [v[0] as u32, v[1] as u32, v[2] as u32, v[3] as u32]).collect();
+        self.skin_attr_len += n as u32;
+        let needed = self.skin_attr_len as u64 * 16;
+        // Grow both stores together — they are parallel, and one base indexes both.
+        if needed > self.skin_joints_buf.size() {
+            let cap = needed.next_power_of_two();
+            for (buf, label) in [
+                (&mut self.skin_joints_buf, "raster-skin-joints"),
+                (&mut self.skin_weights_buf, "raster-skin-weights"),
+            ] {
+                let grown = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(label),
+                    size: cap,
+                    usage: wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                });
+                let old = std::mem::replace(buf, grown);
+                let mut enc = gpu.device.create_command_encoder(&Default::default());
+                enc.copy_buffer_to_buffer(&old, 0, buf, 0, old.size());
+                gpu.queue.submit([enc.finish()]);
+            }
+            self.rebuild_globals_bind(&gpu.device);
+        }
+        gpu.queue.write_buffer(&self.skin_joints_buf, base as u64 * 16, bytemuck::cast_slice(&j));
+        gpu.queue.write_buffer(
+            &self.skin_weights_buf,
+            base as u64 * 16,
+            bytemuck::cast_slice(&weights[..n]),
+        );
+        base
+    }
+
+    /// Start a fresh frame's poses. Call once per frame, before gathering draws —
+    /// every pass of that frame (prepass, color, mask, render targets) then reads
+    /// the same table, which is what keeps a character's silhouette and its depth
+    /// agreeing with what shades.
+    pub fn begin_skin_frame(&mut self) {
+        self.skin_palette_cpu.clear();
+        self.skin_meta_cpu.clear();
+        self.skin_palette_dirty = true;
+    }
+
+    /// Append one draw's pose and return its index (what [`SkinDraw::pose`] wants).
+    ///
+    /// `fallback` is the part's own node matrix — what a vertex with no weights
+    /// deforms by, matching the importer's zero-weight pad. `palette` is one
+    /// `nodeWorld · inverseBind` per joint slot.
+    pub fn push_skin_pose(&mut self, skin_base: u32, fallback: Mat4, palette: &[Mat4]) -> u32 {
+        let idx = self.skin_meta_cpu.len() as u32;
+        let pbase = self.skin_palette_cpu.len() as u32;
+        self.skin_palette_cpu.push(fallback.to_cols_array_2d());
+        self.skin_palette_cpu.extend(palette.iter().map(|m| m.to_cols_array_2d()));
+        self.skin_meta_cpu.push([skin_base, pbase, 0, 0]);
+        self.skin_palette_dirty = true;
+        idx
+    }
+
+    /// Push this frame's poses to the GPU, at most once per frame. Called at the
+    /// top of every pass that draws, so whichever runs first pays for it.
+    fn upload_skin_frame(&mut self, gpu: &Gpu) {
+        if !self.skin_palette_dirty {
+            return;
+        }
+        self.skin_palette_dirty = false;
+        if self.skin_palette_cpu.is_empty() {
+            return;
+        }
+        let mut rebuild = false;
+        let want = (self.skin_palette_cpu.len() * 64) as u64;
+        if want > self.skin_palette_buf.size() {
+            self.skin_palette_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("raster-skin-palette"),
+                size: want.next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            rebuild = true;
+        }
+        let want_meta = (self.skin_meta_cpu.len() * 16) as u64;
+        if want_meta > self.skin_meta_buf.size() {
+            self.skin_meta_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("raster-skin-meta"),
+                size: want_meta.next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            rebuild = true;
+        }
+        if rebuild {
+            self.rebuild_globals_bind(&gpu.device);
+        }
+        gpu.queue.write_buffer(
+            &self.skin_palette_buf,
+            0,
+            bytemuck::cast_slice(&self.skin_palette_cpu),
+        );
+        gpu.queue.write_buffer(&self.skin_meta_buf, 0, bytemuck::cast_slice(&self.skin_meta_cpu));
+    }
+
+    /// A skinned draw's instance data with its pose index stamped into the lane
+    /// `vs_skin` reads it from — so no caller has to know which lane that is.
+    fn skin_instance(d: &SkinDraw) -> InstanceRaw {
+        let mut raw = d.instance;
+        raw.normal_mat[0][3] = d.pose as f32;
+        raw
+    }
+
+    /// Group the skinned draws `keep` accepts by (mesh, texture), appending their
+    /// instance data to `raws` — the same bucketing the unskinned lists get, so
+    /// twenty copies of one character are still one draw call.
+    fn bucket_skins(
+        &self,
+        skins: &[SkinDraw],
+        raws: &mut Vec<InstanceRaw>,
+        keep: impl Fn(&InstanceRaw) -> bool,
+    ) -> Vec<(usize, Option<u32>, u32, u32)> {
+        let groups = group_by_key(
+            skins
+                .iter()
+                .filter(|d| keep(&d.instance))
+                .map(|d| ((d.mesh.0 as usize, d.tex.map(|t| t.0)), Self::skin_instance(d))),
+        );
+        let mut out = Vec::with_capacity(groups.len());
+        for ((mesh_idx, tex_key), members) in groups {
+            let start = raws.len() as u32;
+            raws.extend_from_slice(&members);
+            out.push((mesh_idx, tex_key, start, members.len() as u32));
+        }
+        out
+    }
+
     /// The paint block a registered mesh owns, or 0 if it imported unpainted.
     /// Instances of the same mesh SHARE this base — one block, N instances, still
     /// one draw call.
@@ -1632,16 +1992,7 @@ impl Raster {
             enc.copy_buffer_to_buffer(&self.tpaint_buf, 0, &new_buf, 0, self.tpaint_buf.size());
             gpu.queue.submit([enc.finish()]);
             self.tpaint_buf = new_buf;
-            self.globals_bind = Self::make_globals_bind(
-                &gpu.device,
-                &self.globals_layout,
-                &self.globals_buf,
-                &self.vpaint_buf,
-                &self.tpaint_buf,
-                &self.terrain_pal_view,
-                &self.terrain_samp,
-                &self.terrain_samp_nearest,
-            );
+            self.rebuild_globals_bind(&gpu.device);
         }
         base
     }
@@ -1909,8 +2260,10 @@ impl Raster {
         mask: &wgpu::TextureView,
         globals: Globals,
         instances: &[(MeshId, InstanceRaw)],
+        skins: &[SkinDraw],
     ) {
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        self.upload_skin_frame(gpu);
 
         let mut raws: Vec<InstanceRaw> = Vec::with_capacity(instances.len());
         let mut buckets: Vec<(usize, u32, u32)> = Vec::new();
@@ -1921,6 +2274,10 @@ impl Raster {
             raws.extend_from_slice(&members);
             buckets.push((mesh_idx, start, members.len() as u32));
         }
+        // The silhouette must hug the POSE. Under the CPU path the outline had to
+        // reach for the entity's private baked buffer to manage it; here it is the
+        // same skinned pipeline the character shades with.
+        let skin_buckets = self.bucket_skins(skins, &mut raws, |_| true);
         self.ensure_instances(gpu, raws.len().max(1) as u32);
         if !raws.is_empty() {
             gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
@@ -1955,6 +2312,15 @@ impl Raster {
                 rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
             }
+            if !skin_buckets.is_empty() {
+                rp.set_pipeline(&self.skin_mask_pipeline);
+                for (mesh_idx, _, start, count) in skin_buckets {
+                    let mesh = &self.meshes[mesh_idx];
+                    rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                    rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+                }
+            }
         }
         gpu.queue.submit([encoder.finish()]);
     }
@@ -1978,7 +2344,7 @@ impl Raster {
         clear: Option<[f64; 4]>,
         field: Option<&wgpu::BindGroup>,
     ) {
-        self.draw_scene_with(gpu, color, depth, globals, instances, &[], clear, field);
+        self.draw_scene_with(gpu, color, depth, globals, instances, &[], &[], clear, field);
     }
 
     /// [`draw_scene`](Self::draw_scene) plus custom-shader draws: flsl
@@ -1994,10 +2360,12 @@ impl Raster {
         globals: Globals,
         instances: &[(MeshId, Option<TexId>, InstanceRaw)],
         flsl: &[FlslDraw],
+        skins: &[SkinDraw],
         clear: Option<[f64; 4]>,
         field: Option<&wgpu::BindGroup>,
     ) {
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        self.upload_skin_frame(gpu);
 
         // Clear when we own the frame; Load when a prior pass (raymarch) already
         // filled the color + depth targets, so the two compose in one depth buffer.
@@ -2075,6 +2443,10 @@ impl Raster {
         };
         let flsl_opaque = flsl_bucketize(true, &mut raws);
         let flsl_blended = flsl_bucketize(false, &mut raws);
+        // Skinned draws split opaque/blended on the same rule and draw in the same
+        // two phases — a translucent character is still a translucent character.
+        let skin_opaque = self.bucket_skins(skins, &mut raws, is_opaque);
+        let skin_blended = self.bucket_skins(skins, &mut raws, |r| !is_opaque(r));
 
         self.ensure_instances(gpu, raws.len() as u32);
         if !raws.is_empty() {
@@ -2139,10 +2511,18 @@ impl Raster {
                 };
             rp.set_pipeline(&self.pipeline);
             draw(&mut rp, &opaque_buckets);
+            if !skin_opaque.is_empty() {
+                rp.set_pipeline(&self.skin_pipeline);
+                draw(&mut rp, &skin_opaque);
+            }
             draw_flsl(&mut rp, &flsl_opaque);
             if !transparent_buckets.is_empty() {
                 rp.set_pipeline(&self.transparent_pipeline);
                 draw(&mut rp, &transparent_buckets);
+            }
+            if !skin_blended.is_empty() {
+                rp.set_pipeline(&self.skin_transparent_pipeline);
+                draw(&mut rp, &skin_blended);
             }
             draw_flsl(&mut rp, &flsl_blended);
         }
@@ -2174,7 +2554,7 @@ impl Raster {
         instances: &[(MeshId, Option<TexId>, InstanceRaw)],
         main_depth: &wgpu::Texture,
     ) -> bool {
-        self.depth_prepass_with(gpu, globals, instances, &[], main_depth)
+        self.depth_prepass_with(gpu, globals, instances, &[], &[], main_depth)
     }
 
     /// [`depth_prepass`](Self::depth_prepass) plus custom-shader draws:
@@ -2186,6 +2566,7 @@ impl Raster {
         globals: Globals,
         instances: &[(MeshId, Option<TexId>, InstanceRaw)],
         flsl: &[FlslDraw],
+        skins: &[SkinDraw],
         main_depth: &wgpu::Texture,
     ) -> bool {
         let size = main_depth.size();
@@ -2240,6 +2621,13 @@ impl Raster {
             raws.extend_from_slice(&members);
             buckets.push((mesh_idx, tex_key, start, members.len() as u32));
         }
+        // Skinned parts prime depth from the SAME posed vertices the color pass
+        // shades — `vs_skin` is `@invariant` through the shared tail, so the two
+        // agree bit for bit. Priming from the bind pose instead would depth-reject
+        // the pose, and a character would vanish behind its own T-stance.
+        let skin_buckets = self.bucket_skins(skins, &mut raws, |raw| {
+            is_terrain(raw) || raw.color[3] >= OPAQUE_CUTOFF
+        });
         self.ensure_instances(gpu, raws.len() as u32);
         if !raws.is_empty() {
             gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
@@ -2268,16 +2656,23 @@ impl Raster {
             rp.set_pipeline(&self.prepass_pipeline);
             rp.set_bind_group(0, &self.globals_bind, &[]);
             rp.set_vertex_buffer(1, self.instance_buf.slice(..));
-            for &(mesh_idx, tex_key, start, count) in &buckets {
-                let mesh = &self.meshes[mesh_idx];
-                let bind = match tex_key {
-                    Some(t) => &self.textures[t as usize].bind,
-                    None => &mesh.tex_bind,
-                };
-                rp.set_bind_group(1, bind, &[]);
-                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
-                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+            let draw = |rp: &mut wgpu::RenderPass<'_>, bs: &[(usize, Option<u32>, u32, u32)]| {
+                for &(mesh_idx, tex_key, start, count) in bs {
+                    let mesh = &self.meshes[mesh_idx];
+                    let bind = match tex_key {
+                        Some(t) => &self.textures[t as usize].bind,
+                        None => &mesh.tex_bind,
+                    };
+                    rp.set_bind_group(1, bind, &[]);
+                    rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                    rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+                }
+            };
+            draw(&mut rp, &buckets);
+            if !skin_buckets.is_empty() {
+                rp.set_pipeline(&self.skin_prepass_pipeline);
+                draw(&mut rp, &skin_buckets);
             }
         }
         // Prime the frame's depth buffer with the prepass result.

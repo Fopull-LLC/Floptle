@@ -54,6 +54,12 @@ pub struct RigAsset {
     /// the draw path CPU-deforms each frame; `None` for a rigid-parented part (drawn at
     /// its node matrix, R6-style). This is what makes a skinned character actually move.
     pub skins: Vec<Option<SkinnedPart>>,
+    /// Per part (parallel to `skins`): the part's base in the raster's GPU
+    /// skinning stores, or 0 if it has no skin — or if registration failed and
+    /// the part falls back to the CPU deform (`floptle/0080`). Filled by
+    /// [`upload_skins`] right after import, because that is where a `Raster` is
+    /// in hand and the bind pose is not going to change again.
+    pub skin_bases: Vec<u32>,
     /// Per SKELETON node (parallel to `skeleton.nodes`): `true` if the node renders
     /// geometry — an **object** / mesh sub-object (Sae's `Forearm`, a character's mesh
     /// part); `false` if it's a structural / skin-joint node — a **bone** of the rig
@@ -123,6 +129,28 @@ pub fn cpu_skin_part(
             uv: v.uv,
         });
     }
+}
+
+/// Hand every skinned part's per-vertex joints + weights to the GPU, filling
+/// [`RigAsset::skin_bases`] (`floptle/0080`).
+///
+/// Called once, at import. A part whose registration is refused (the store is
+/// bounded by the instance lane that addresses it) keeps a base of 0 and falls
+/// back to the CPU deform, which still works — it is just the thing this
+/// replaces.
+pub fn upload_skins(
+    gpu: &floptle_render::Gpu,
+    raster: &mut floptle_render::Raster,
+    rig: &mut RigAsset,
+) {
+    rig.skin_bases = rig
+        .skins
+        .iter()
+        .map(|s| match s {
+            Some(skin) => raster.register_skin(gpu, &skin.joints, &skin.weights),
+            None => 0,
+        })
+        .collect();
 }
 
 /// Per-entity vertex-buffer clones for CPU-SKINNED parts. The skinning bake
@@ -1538,7 +1566,7 @@ pub fn rig_from_model(
             clip.channels.sort_by_key(|c| c.node);
         }
     }
-    let skins = model
+    let skins: Vec<Option<SkinnedPart>> = model
         .parts
         .iter()
         .map(|p| {
@@ -1554,7 +1582,8 @@ pub fn rig_from_model(
             })
         })
         .collect();
-    RigAsset { skeleton, clips, part_nodes, rest_world, offset, node_is_object, skins }
+    let skin_bases = vec![0; skins.len()];
+    RigAsset { skeleton, clips, part_nodes, rest_world, offset, node_is_object, skins, skin_bases }
 }
 
 /// Re-parent nodes in `skel` per the overrides (child name → new parent name;
@@ -1768,6 +1797,91 @@ mod tests {
             per * 100.0,
         );
         assert!(!out.is_empty());
+    }
+
+    /// The AFTER number for `floptle/0080`, as a ratio rather than a duration.
+    ///
+    /// Moving the deform to the vertex shader does not make the CPU's share
+    /// *zero* — every skinned draw still builds a bone palette, one
+    /// `nodeWorld · inverseBind` per joint. What changes is what that work scales
+    /// with: **joints, not vertices**. The CPU path was 8,000 matrix blends and an
+    /// 8,000-vertex buffer re-upload per character per frame; this is 24 matrix
+    /// multiplies.
+    ///
+    /// A ratio, and both halves measured in the same run, because a duration on a
+    /// shared runner is a coin flip — the same rule the rest of the suite's perf
+    /// guards follow (`docs/HANDOFF.md`).
+    #[test]
+    fn gpu_skinning_leaves_the_cpu_a_fraction_of_the_work() {
+        let v = |i: usize| floptle_render::Vertex {
+            pos: [i as f32 * 0.01, (i % 7) as f32, (i % 13) as f32],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.0, 0.0],
+        };
+        // The same mid-detail character the before-number was taken against.
+        const VERTS: usize = 8_000;
+        const JOINTS: usize = 24;
+        let part = SkinnedPart {
+            base: (0..VERTS).map(v).collect(),
+            joints: (0..VERTS)
+                .map(|i| [(i % JOINTS) as u16, ((i + 1) % JOINTS) as u16, 0, 0])
+                .collect(),
+            weights: (0..VERTS).map(|_| [0.6, 0.4, 0.0, 0.0]).collect(),
+            joint_nodes: (0..JOINTS).collect(),
+            inverse_bind: (0..JOINTS).map(|_| Mat4::IDENTITY).collect(),
+        };
+        let pose: Vec<Mat4> = (0..JOINTS)
+            .map(|j| Mat4::from_translation(Vec3::new(0.0, j as f32 * 0.1, 0.0)))
+            .collect();
+
+        // What the GPU path asks of the CPU per character per frame: the palette.
+        // (This is the loop `push_mesh_instances` runs; it is spelled out rather
+        // than called so the measurement needs no GPU.)
+        let build_palette = || -> Vec<Mat4> {
+            part.joint_nodes
+                .iter()
+                .zip(&part.inverse_bind)
+                .map(|(&jn, ib)| pose.get(jn).copied().unwrap_or(Mat4::IDENTITY) * *ib)
+                .collect()
+        };
+
+        let mut scratch = Vec::new();
+        cpu_skin_part(&part, 0, &pose, &mut scratch); // warm
+        let _ = build_palette();
+
+        let best = |mut f: Box<dyn FnMut()>| {
+            let mut best = std::time::Duration::MAX;
+            for _ in 0..7 {
+                let t = std::time::Instant::now();
+                f();
+                best = best.min(t.elapsed());
+            }
+            best.as_secs_f64()
+        };
+        let cpu = best(Box::new(|| cpu_skin_part(&part, 0, &pose, &mut scratch)));
+        let gpu = best(Box::new(|| {
+            std::hint::black_box(build_palette());
+        }));
+
+        let ratio = gpu / cpu.max(f64::MIN_POSITIVE);
+        println!(
+            "skinning CPU work per character per frame: deform {:.3} ms -> palette {:.4} ms \
+             ({:.1}% — {:.0}x less)",
+            cpu * 1000.0,
+            gpu * 1000.0,
+            ratio * 100.0,
+            1.0 / ratio.max(f64::MIN_POSITIVE),
+        );
+        // Generous by an order of magnitude: the measured ratio is well under 1%.
+        // What this guards is the SHAPE — a change that made the palette scale with
+        // vertices again (or reintroduced the per-frame vertex-buffer upload) would
+        // blow through 10% long before it got near the old cost.
+        assert!(
+            ratio < 0.10,
+            "the GPU path's per-frame CPU work is {:.1}% of the CPU deform's — it should be \
+             a rounding error, so something has started scaling with VERTICES again",
+            ratio * 100.0
+        );
     }
 
     #[test]

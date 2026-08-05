@@ -3901,6 +3901,9 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     let script_mt = lua.create_table()?;
     {
         let envs = shared.envs.clone();
+        let broken = shared.broken.clone();
+        let broken_read_warned = shared.broken_read_warned.clone();
+        let logs = shared.logs.clone();
         let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
             let e: u32 = this.raw_get("__id")?;
             let name: String = this.raw_get("__script")?;
@@ -3939,7 +3942,26 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             }
             match env {
                 Some(env) => env.get::<Value>(key),
-                None => Ok(Value::Nil),
+                // No environment. Two very different things read `nil` here: a
+                // script that has no such export, and a script that FAILED TO
+                // LOAD and therefore has no exports at all. The second wants a
+                // completely different fix and used to be indistinguishable
+                // from the first at every call site (`floptle/0086`), so say
+                // which it is — once per `(script, key)`, because a handle
+                // polled in `update` would otherwise say it sixty times a
+                // second.
+                None => {
+                    if broken.borrow().contains(&name)
+                        && broken_read_warned.borrow_mut().insert((name.clone(), key.clone()))
+                    {
+                        logs.borrow_mut().push(crate::ScriptLog {
+                            level: crate::LogLevel::Warn,
+                            msg: crate::load_error::unavailable(&name, &key),
+                            source: None,
+                        });
+                    }
+                    Ok(Value::Nil)
+                }
             }
         })?;
         script_mt.set("__index", idx)?;

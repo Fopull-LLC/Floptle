@@ -104,12 +104,12 @@ fn main() {
     // The editor's frame order: prepass (instances + opaque flsl) primes the
     // main depth, then the color pass LOADS it (raster_clear = None) — except
     // here nothing raymarches in between, isolating the mesh seam.
-    raster.depth_prepass_with(&gpu, globals, &instances, &flsl, gpu.depth_texture());
+    raster.depth_prepass_with(&gpu, globals, &instances, &flsl, &[], gpu.depth_texture());
     // draw_scene_with clears color itself when given a clear; pass one for
     // color but keep the primed depth by clearing... the editor passes None —
     // mirror that, and pre-clear color separately.
     clear_color(&gpu, &color_view, [0.02, 0.02, 0.05, 1.0]);
-    raster.draw_scene_with(&gpu, &color_view, gpu.depth_view(), globals, &instances, &flsl, None, None);
+    raster.draw_scene_with(&gpu, &color_view, gpu.depth_view(), globals, &instances, &flsl, &[], None, None);
 
     save_png(&gpu, &color_tex, &out);
     println!("wrote {out} — a clean glowing-clouds floor = no prepass seam");

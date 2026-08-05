@@ -82,10 +82,10 @@ const RAW_INPUT_ADVICE: &[(&str, &str, &str)] = &[
     ("key", "d", "input.axis2(\"Move\")"),
 ];
 
-/// LuaJIT's hard limit (`LJ_MAX_UPVAL`). Not raisable without forking it.
-const UPVALUE_LIMIT: usize = 60;
-/// Where to start warning — far enough out to leave room to restructure.
-const UPVALUE_WARN: usize = 50;
+/// LuaJIT's hard limit (`LJ_MAX_UPVAL`) and where to start warning, from the
+/// engine's own scripting layer — the runtime warns on the same numbers when a
+/// scene loads a script nobody has open in the IDE (`floptle/0086`).
+use floptle_script::load_error::{file_scope_locals, UPVALUE_LIMIT, UPVALUE_WARN};
 
 /// Names a script may assign at file scope without declaring them: the lifecycle
 /// hooks the host calls, and the globals it publishes to other scripts by
@@ -223,8 +223,6 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
     // off. The same goes for a callback that ignores an argument it is handed.
     let mut param_decls: Vec<(String, usize)> = Vec::new();
     let mut published: Vec<String> = Vec::new();
-    // File-scope locals, for the upvalue count.
-    let mut file_locals = 0usize;
     let mut depth = 0i32;
     let mut bracket = 0i32;
     for (n, raw) in src.lines().enumerate() {
@@ -248,9 +246,6 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
             for name in names {
                 if name.chars().all(is_ident_char) && !name.is_empty() {
                     declared.push((name, n + 1));
-                    if depth == 0 {
-                        file_locals += 1;
-                    }
                 }
             }
         }
@@ -445,7 +440,10 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
     }
 
     // Pass 4: upvalue pressure. Every file-scope local is an upvalue of every
-    // function in the file; LuaJIT's ceiling is 60 per function.
+    // function in the file; LuaJIT's ceiling is 60 per function. The count is
+    // the engine's, so the squiggle here and the Console line at load can never
+    // disagree about how close a script is.
+    let file_locals = file_scope_locals(src);
     if file_locals >= UPVALUE_WARN {
         out.push(Lint {
             line: 1,

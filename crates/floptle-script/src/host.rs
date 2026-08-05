@@ -1725,6 +1725,9 @@ impl ScriptHost {
             anim_commands: Rc::new(RefCell::new(Vec::new())),
             vfx_info: Rc::new(RefCell::new(HashMap::new())),
             vfx_commands: Rc::new(RefCell::new(Vec::new())),
+            broken: Rc::new(RefCell::new(std::collections::HashSet::new())),
+            broken_read_warned: Rc::new(RefCell::new(std::collections::HashSet::new())),
+            logs: logs.clone(),
         };
         if let Err(e) = install_handle_api(&lua, &shared) {
             eprintln!("[lua] failed to install the node/script reference API: {e}");
@@ -1934,6 +1937,8 @@ impl ScriptHost {
             rich_sets: shared.rich_sets.clone(),
             scene: shared.scene.clone(),
             envs: shared.envs.clone(),
+            broken: shared.broken.clone(),
+            broken_read_warned: shared.broken_read_warned.clone(),
             model_changes: shared.model_changes.clone(),
             material_changes: shared.material_changes.clone(),
             visible_changes: shared.visible_changes.clone(),
@@ -2002,6 +2007,8 @@ impl ScriptHost {
             synced_warned: std::collections::HashSet::new(),
             param_warned: std::collections::HashSet::new(),
             handle_key_warned: std::collections::HashSet::new(),
+            load_failure_reported: std::collections::HashSet::new(),
+            upvalue_warned: std::collections::HashSet::new(),
             script_skip: std::collections::HashSet::new(),
             frame_skip: std::collections::HashSet::new(),
             driver_skip: std::collections::HashSet::new(),
@@ -4521,15 +4528,18 @@ impl ScriptHost {
         let key = (e.index(), name.to_string());
         let needs_build = self.instances.get(&key).is_none_or(|i| i.generation != generation);
         if needs_build {
-            // Don't recompile a known-broken generation every frame; re-emit it.
+            // Don't recompile a known-broken generation every frame; re-emit it
+            // to the Scripting tab, which is a live list of what is wrong right
+            // now. NOT to the Console — `fail` already said it once, and this
+            // path runs every frame for as long as the file stays broken.
             if let Some(err) = self.sources.get(name).and_then(|s| s.error.clone()) {
-                self.record_error(name, err);
+                self.errors.push(err);
                 return false;
             }
             let src = match std::fs::read_to_string(&path) {
                 Ok(s) => s,
                 Err(err) => {
-                    self.fail(name, format!("{name}: {err}"));
+                    self.fail_load(name, format!("{name}.lua could not be read: {err}"), generation);
                     return false;
                 }
             };
@@ -4540,6 +4550,13 @@ impl ScriptHost {
             *self.net.current.borrow_mut() = None;
             match built {
                 Ok(env) => {
+                    // It loaded, so it is no longer broken — and a script that
+                    // was fixed must stop being reported as broken by the
+                    // handles reading it.
+                    if self.broken.borrow_mut().remove(name) {
+                        self.broken_read_warned.borrow_mut().retain(|(k, _)| k != name);
+                    }
+                    self.warn_upvalue_pressure(name, generation, &src);
                     if let Some(old) = self.instances.remove(&key) {
                         let _ = self.lua.remove_registry_value(old.env);
                     }
@@ -4563,13 +4580,17 @@ impl ScriptHost {
                             );
                         }
                         Err(err) => {
-                            self.fail(name, format!("{name}: {err}"));
+                            self.fail_load(name, format!("{name}.lua did not load: {err}"), generation);
                             return false;
                         }
                     }
                 }
+                // LuaJIT's own words are terse and name the wrong line — the
+                // upvalue ceiling in particular. Say what happened in the
+                // engine's voice, naming the script and the limit
+                // (`floptle/0086`).
                 Err(err) => {
-                    self.fail(name, format!("{name}: {err}"));
+                    self.fail_load(name, crate::load_error::explain(name, &err.to_string()), generation);
                     return false;
                 }
             }
@@ -5098,11 +5119,74 @@ impl ScriptHost {
         Some(entry.generation)
     }
 
+    /// A script failed to LOAD. Three things have to happen, and they are not
+    /// the same thing (`floptle/0086`):
+    ///
+    /// * the message is cached on the source, so the next frame re-emits it
+    ///   instead of recompiling a file that cannot compile;
+    /// * the kind joins `broken`, so a handle reading it can say "this script
+    ///   did not load" rather than handing back the `nil` that a missing export
+    ///   also gives;
+    /// * and the Console gets it ONCE per version of the file. Failing at load
+    ///   means failing every frame, and sixty identical lines a second is how a
+    ///   Console stops being read at all.
+    fn fail_load(&mut self, name: &str, msg: String, generation: u64) {
+        if let Some(src) = self.sources.get_mut(name) {
+            src.error = Some(msg.clone());
+        }
+        self.broken.borrow_mut().insert(name.to_string());
+        self.errors.push(msg.clone());
+        if self.load_failure_reported.insert((name.to_string(), generation)) {
+            self.logs.borrow_mut().push(ScriptLog {
+                level: LogLevel::Error,
+                msg: msg.clone(),
+                source: Some((name.to_string(), error_line(&msg))),
+            });
+        }
+    }
+
+    /// A script failed while RUNNING — a hook raised. The script itself loaded,
+    /// so this is not [`fail_load`](Self::fail_load): nothing here touches
+    /// `broken`, and the Console wants every occurrence.
     fn fail(&mut self, name: &str, msg: String) {
         if let Some(src) = self.sources.get_mut(name) {
             src.error = Some(msg.clone());
         }
         self.record_error(name, msg);
+    }
+
+    /// Warn a script that is one edit from unloadable.
+    ///
+    /// The ceiling is invisible from inside the editor — there is no way to know
+    /// you are at 58 rather than 30 — and crossing it costs the whole script, at
+    /// load, with a message that names neither the limit nor the fix. So a
+    /// script that loads cleanly but sits within
+    /// [`UPVALUE_WARN`](crate::load_error::UPVALUE_WARN) of the wall says so,
+    /// once per version of the file.
+    ///
+    /// This runs where the editor's Lua lint does NOT: on the scripts a scene
+    /// actually runs, in a build as well as in the IDE, whether or not anyone
+    /// has the file open.
+    fn warn_upvalue_pressure(&mut self, name: &str, generation: u64, src: &str) {
+        use crate::load_error::{file_scope_locals, UPVALUE_LIMIT, UPVALUE_WARN};
+        let n = file_scope_locals(src);
+        if n < UPVALUE_WARN {
+            return;
+        }
+        if !self.upvalue_warned.insert((name.to_string(), generation)) {
+            return;
+        }
+        let left = UPVALUE_LIMIT.saturating_sub(n);
+        self.logs.borrow_mut().push(ScriptLog {
+            level: LogLevel::Warn,
+            msg: format!(
+                "{name}.lua declares {n} file-scope locals and LuaJIT allows {UPVALUE_LIMIT} \
+                 upvalues per function — {left} to go before the script stops loading at all. \
+                 Every file-scope `local` is an upvalue of every function below it, so hold \
+                 related state in ONE table (`local s = {{ … }}`) or split the long function."
+            ),
+            source: Some((name.to_string(), 1)),
+        });
     }
 }
 
