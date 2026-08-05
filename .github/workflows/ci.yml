@@ -85,7 +85,7 @@ jobs:
           run skin_prepass_probe  skin_prepass_probe  -- "$P/skin_prepass"
           run skin_probe          skin_probe          -- "$P/skin.png"
           run ortho_camera_probe  ortho_camera_probe  -- "$P"
-          run tilemap_pages_probe tilemap_pages_probe -- "$P/tilemap_pages.png"
+          run tilemap_pages_probe tilemap_pages_probe -- "$P"
 
       # On a failure the PNGs are the evidence — these probes exist because the
       # bugs they catch are visual, and a red X with no image to look at makes
