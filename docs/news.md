@@ -1,5 +1,20 @@
 ## Just shipped
 
+**v0.39.0 "Ask The Sky"** — a procedural sky can finally answer to your game.
+`setShaderParam` reaches a Skybox's uniforms, so a sky that catches fire during a
+cutscene runs on your story beat instead of on a timer; the post chain opened up
+the same way, so a cutscene can push a vignette without a second scene. Shaders
+got **`atan2`** and the rest of the inverse trig, which is what a radial wipe, a
+cooldown dial, a swirl or a skyline around the horizon all need and none of them
+could do. Two invisible ceilings became visible: **sixteen lights** reach the
+screen and the survivors are now chosen by what they contribute at the camera
+rather than by luck, so a torch stops going out for no reason — and **one-shot
+effects have a limit**, which matters because a per-frame spawn budget used to
+cost twice as much on a 144 Hz monitor. `perf.counts()` reports what each cap
+cut. Profiling can see particles and audio at all for the first time. And editing
+during Play now tells you it will be discarded, with a copy/paste that survives
+Stop so you can keep what you found.
+
 **v0.38.0 "Turn The Lights On"** — 2D lights. Put a PointLight in a scene whose
 camera is orthographic and it lights your tiles and sprites with a real falloff,
 leaving meshes alone; a surface with no light near it sits at ambient, so a dark
