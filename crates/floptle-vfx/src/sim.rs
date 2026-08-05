@@ -211,6 +211,12 @@ impl TrackParticles {
 /// Per-track live state inside an instance.
 struct TrackState {
     particles: TrackParticles,
+    /// Births this track ASKED for and could not have, because the pool was
+    /// full. Counted rather than merely returned from, because dropping
+    /// silently is how an effect comes out thinner than it was authored and
+    /// nothing says why (`floptle/0099`). Cleared by `reset`, like the
+    /// particles it is about.
+    dropped: u32,
     /// Fractional-emission accumulator, one per clip (resets when the playhead enters
     /// that clip). Per-clip so two overlapping rate clips on one track don't share — and
     /// so entering one clip never wipes a co-active clip's fractional carry.
@@ -265,6 +271,7 @@ impl EffectInstance {
                 particles: TrackParticles::with_capacity(ct.capacity as usize, ct.trail.is_some()),
                 acc: vec![0.0; ct.clips.len()],
                 emit_counter: 0,
+                dropped: 0,
             })
             .collect();
         Self {
@@ -319,12 +326,30 @@ impl EffectInstance {
             ts.particles.clear();
             ts.acc.iter_mut().for_each(|a| *a = 0.0);
             ts.emit_counter = 0;
+            ts.dropped = 0;
         }
     }
 
     /// Total live particles across all tracks.
     pub fn alive(&self) -> usize {
         self.tracks.iter().map(|ts| ts.particles.count).sum()
+    }
+
+    /// Live particles on one track.
+    pub fn track_alive(&self, track: usize) -> usize {
+        self.tracks.get(track).map(|ts| ts.particles.count).unwrap_or(0)
+    }
+
+    /// Births this track could not have because its pool was full, since the
+    /// last reset. Non-zero means the effect on screen is not the effect that
+    /// was authored.
+    pub fn track_dropped(&self, track: usize) -> u32 {
+        self.tracks.get(track).map(|ts| ts.dropped).unwrap_or(0)
+    }
+
+    /// Whether any track has been asked for more particles than it can hold.
+    pub fn any_dropped(&self) -> bool {
+        self.tracks.iter().any(|ts| ts.dropped > 0)
     }
 
     /// Live particles of one track (render collection reads the SoA directly).
@@ -611,7 +636,11 @@ fn spawn(
     intensity: f32,
 ) {
     if ts.particles.count as u32 >= ct.capacity {
-        return; // pool full — drop, never reallocate mid-play
+        // Pool full: drop, never reallocate mid-play. Recorded so the editor
+        // can say WHICH track was asked for more than it can hold, instead of
+        // the effect quietly coming out thinner than it was authored.
+        ts.dropped = ts.dropped.saturating_add(1);
+        return;
     }
     let counter = ts.emit_counter;
     ts.emit_counter = ts.emit_counter.wrapping_add(1);

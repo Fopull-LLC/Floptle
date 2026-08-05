@@ -985,3 +985,163 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// What an effect COSTS (`floptle/0099`)
+// ---------------------------------------------------------------------------
+
+/// How many particles an effect has alive over its own lifetime, and where it
+/// ran out of pool.
+///
+/// Every surface in the Particles tab showed what you AUTHORED and none showed
+/// what it does — which is the whole of "it's hard to tell how my change is
+/// going to affect it". The one quantity that varies over time is how many
+/// particles exist, and the timeline's axis is already time, so plotting it is
+/// the answer the tab was built for and never used.
+///
+/// The sim is deterministic given `(effect.seed, instance_seed, step sizes)`, so
+/// this profile is what the game will get and not an estimate. It is measured on
+/// its OWN instance rather than the live preview, which is scrubbable and can be
+/// mid-re-simulation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VfxProfile {
+    /// Total particles alive at each sample, from `t = 0` across `span`.
+    pub alive: Vec<u32>,
+    /// The same, per track.
+    pub per_track: Vec<Vec<u32>>,
+    /// The seconds the samples cover.
+    pub span: f32,
+    /// The most alive at any one moment, in total and per track.
+    pub peak: u32,
+    pub peak_per_track: Vec<u32>,
+    /// Pool size per track — what `peak_per_track` is measured against.
+    pub capacity: Vec<u32>,
+    /// Births each track could not have because its pool was full. Non-zero
+    /// means the effect on screen is not the effect that was authored.
+    pub dropped: Vec<u32>,
+}
+
+impl VfxProfile {
+    /// Whether any track was asked for more than it can hold.
+    pub fn over_capacity(&self) -> bool {
+        self.dropped.iter().any(|&d| d > 0)
+    }
+
+    /// Alive at a normalized position through the span, for drawing.
+    pub fn at(&self, u: f32) -> u32 {
+        if self.alive.is_empty() {
+            return 0;
+        }
+        let i = ((u.clamp(0.0, 1.0) * (self.alive.len() - 1) as f32).round() as usize)
+            .min(self.alive.len() - 1);
+        self.alive[i]
+    }
+}
+
+/// How many samples a profile takes across the span. Enough to draw a strip a
+/// few hundred pixels wide without aliasing a burst into nothing, and few enough
+/// that re-profiling on every edit is not felt.
+const PROFILE_SAMPLES: usize = 240;
+
+/// Simulate `effect` from zero over its lifetime (plus the tail a one-shot's
+/// last particles need) and record what it costs.
+pub fn profile_effect(effect: &ParticleEffect) -> VfxProfile {
+    let compiled = std::sync::Arc::new(effect.compile());
+    let n_tracks = compiled.tracks.len();
+    let capacity: Vec<u32> = compiled.tracks.iter().map(|t| t.capacity).collect();
+    // A one-shot keeps drawing after it stops emitting: its last particles live
+    // out the longest clip. Profiling only to `lifetime` would report a peak
+    // that is real and a tail that is missing.
+    let tail = compiled
+        .tracks
+        .iter()
+        .flat_map(|t| t.clips.iter().map(|c| c.lifetime()))
+        .fold(0.0f32, f32::max);
+    let span = (effect.lifetime + tail).max(0.05);
+    let mut inst = floptle_vfx::EffectInstance::new(compiled, 0);
+    let dt = span / PROFILE_SAMPLES as f32;
+
+    let mut alive = Vec::with_capacity(PROFILE_SAMPLES + 1);
+    let mut per_track = vec![Vec::with_capacity(PROFILE_SAMPLES + 1); n_tracks];
+    let mut peak_per_track = vec![0u32; n_tracks];
+    let mut peak = 0u32;
+    for _ in 0..=PROFILE_SAMPLES {
+        let total = inst.alive() as u32;
+        alive.push(total);
+        peak = peak.max(total);
+        for (i, row) in per_track.iter_mut().enumerate() {
+            let n = inst.track_alive(i) as u32;
+            row.push(n);
+            peak_per_track[i] = peak_per_track[i].max(n);
+        }
+        inst.advance(dt, VFX_GRAVITY);
+    }
+    let dropped = (0..n_tracks).map(|i| inst.track_dropped(i)).collect();
+    VfxProfile { alive, per_track, span, peak, peak_per_track, capacity, dropped }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    use floptle_vfx::{Clip, Emit, ParticleEffect, Track};
+
+    fn burst_effect(count: u32, max_alive: Option<u32>) -> ParticleEffect {
+        let mut t = Track { max_alive, ..Track::default() };
+        t.clips = vec![Clip {
+            start: 0.0,
+            end: 1.0,
+            lifetime_jitter: 0.0,
+            emit: Emit::Burst {
+                count,
+                count_jitter: 0.0,
+                pulses: 1,
+                interval: 0.1,
+                interval_jitter: 0.0,
+            },
+        }];
+        ParticleEffect { lifetime: 1.0, tracks: vec![t], ..ParticleEffect::default() }
+    }
+
+    /// The profile is measured, not estimated: a 40-particle burst peaks at 40.
+    #[test]
+    fn the_profile_counts_what_the_effect_actually_emits() {
+        let p = profile_effect(&burst_effect(40, None));
+        assert_eq!(p.peak, 40, "a 40 burst peaks at 40");
+        assert_eq!(p.peak_per_track, vec![40]);
+        assert!(!p.over_capacity(), "a pool sized from the clips is not over it");
+        assert!(p.span >= 1.0, "the span covers the tail, not only the lifetime");
+    }
+
+    /// Asking a track for more than its pool holds is REPORTED. It used to be
+    /// dropped in silence, which is how an effect comes out thinner than it was
+    /// authored with nothing to point at.
+    #[test]
+    fn asking_for_more_than_the_pool_holds_is_reported() {
+        let p = profile_effect(&burst_effect(500, Some(50)));
+        assert_eq!(p.capacity, vec![50]);
+        assert!(p.peak <= 50, "the pool is the ceiling, got {}", p.peak);
+        assert!(p.over_capacity(), "and going over it must be visible");
+        assert_eq!(p.dropped[0], 450, "every birth it could not have is counted");
+    }
+
+    /// The strip has something to draw across the whole span, and reading past
+    /// either end is clamped rather than panicking.
+    #[test]
+    fn the_density_can_be_sampled_anywhere() {
+        let p = profile_effect(&burst_effect(30, None));
+        assert!(!p.alive.is_empty());
+        assert_eq!(p.at(-1.0), p.alive[0]);
+        assert_eq!(p.at(2.0), *p.alive.last().unwrap());
+        assert!(p.alive.iter().any(|&n| n > 0), "a burst is visible somewhere in it");
+    }
+
+    /// An effect with no tracks profiles to nothing rather than dividing by zero
+    /// somewhere in the drawing.
+    #[test]
+    fn an_empty_effect_costs_nothing() {
+        let p = profile_effect(&ParticleEffect::default());
+        assert_eq!(p.peak, 0);
+        assert!(!p.over_capacity());
+        assert_eq!(p.at(0.5), 0);
+    }
+}

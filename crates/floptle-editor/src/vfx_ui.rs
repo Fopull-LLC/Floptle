@@ -51,6 +51,11 @@ pub(crate) struct VfxUiState {
     /// Bumped on every edit; the preview recompiles when it trails behind.
     doc_rev: u64,
     preview_rev: u64,
+    /// What the effect COSTS, re-measured whenever the doc changes
+    /// (`floptle/0099`). Cached against `doc_rev` because profiling
+    /// re-simulates the whole effect and an edit-per-frame would feel it.
+    pub profile: crate::vfx::VfxProfile,
+    profile_rev: u64,
     /// Preview transport. `playhead` runs in effect seconds (may exceed the
     /// lifetime while a one-shot's particle tails play out).
     pub playhead: f32,
@@ -109,6 +114,8 @@ impl Default for VfxUiState {
             dirty: false,
             doc_rev: 0,
             preview_rev: u64::MAX, // force first compile
+            profile: crate::vfx::VfxProfile::default(),
+            profile_rev: u64::MAX,
             playhead: 0.0,
             playing: true, // auto-play on open: see it live immediately
             sim_t: 0.0,
@@ -175,6 +182,10 @@ impl VfxUiState {
 const LABEL_W: f32 = 150.0;
 const ROW_H: f32 = 30.0;
 const RULER_H: f32 = 22.0;
+/// How much of the ruler the alive-count strip takes. Small on purpose: it is a
+/// shape to glance at, not a graph to read values off — the numbers are in the
+/// header, where a number belongs.
+const DENSITY_H: f32 = 9.0;
 /// Clip edge-trim hit zone (px).
 const EDGE_W: f32 = 6.0;
 const CLIP_FILL: Color32 = Color32::from_rgb(80, 130, 190);
@@ -193,6 +204,85 @@ const ZOOM_MAX: f32 = 4000.0;
 /// Vertical-zoom (row-height) bounds.
 const ROW_SCALE_MIN: f32 = 0.5;
 const ROW_SCALE_MAX: f32 = 4.0;
+
+/// What the effect costs, in the transport bar where it is always in view.
+///
+/// Nothing anywhere reported this. `Track::max_alive` and `CompiledTrack::
+/// capacity` both existed and neither reached a person, so raising a rate past
+/// the pool silently gave you fewer particles than you asked for — the engine's
+/// most-filed failure shape, in the tab where over-asking is easiest
+/// (`floptle/0099`).
+fn cost_readout(ui: &mut egui::Ui, st: &VfxUiState) {
+    let p = &st.profile;
+    let cap: u32 = p.capacity.iter().copied().sum();
+    ui.label(egui::RichText::new(format!("◈ {} peak", p.peak)).small())
+        .on_hover_text(format!(
+            "the most particles alive at once across the whole effect, measured by \
+             simulating it — pools total {cap}"
+        ));
+    if !p.over_capacity() {
+        return;
+    }
+    // Which track, and how much it lost. "Something is being dropped" is not
+    // actionable; "track 2 asked for 4,100 it could not have" is.
+    let worst = p
+        .dropped
+        .iter()
+        .enumerate()
+        .max_by_key(|&(_, d)| *d)
+        .map(|(i, &d)| (i, d))
+        .unwrap_or((0, 0));
+    let names: Vec<String> = p
+        .dropped
+        .iter()
+        .enumerate()
+        .filter(|&(_, d)| *d > 0)
+        .map(|(i, &d)| format!("track {i}: {d} dropped, pool {}", p.capacity.get(i).copied().unwrap_or(0)))
+        .collect();
+    ui.colored_label(
+        Color32::from_rgb(255, 200, 80),
+        format!("⚠ track {} is over its pool", worst.0),
+    )
+    .on_hover_text(format!(
+        "The effect on screen is not the effect you authored — these births were \
+         refused because the pool was full:\n{}\n\nRaise the track's max alive, \
+         or lower its rate or burst count.",
+        names.join("\n")
+    ));
+}
+
+/// The alive-particle count over the effect's own time, as a filled shape under
+/// the ruler (`floptle/0099`).
+///
+/// Scaled to the profile's own peak rather than to any capacity, because the
+/// question it answers is "what shape is my emission" — a burst spike, a swell,
+/// a flat stream — and normalising to a pool size would flatten every effect
+/// that does not fill its pool into a hairline.
+fn draw_density(painter: &egui::Painter, rect: Rect, profile: &crate::vfx::VfxProfile, dur: f32) {
+    if profile.alive.is_empty() || profile.peak == 0 || rect.width() < 2.0 || dur <= 0.0 {
+        return;
+    }
+    // The profile spans the effect's lifetime PLUS the tail its last particles
+    // live out; the ruler spans only the lifetime. Sample by seconds so the
+    // shape lands under the moment it belongs to.
+    let n = (rect.width() as usize).clamp(2, 512);
+    let mut pts = Vec::with_capacity(n + 2);
+    pts.push(Pos2::new(rect.left(), rect.bottom()));
+    for i in 0..n {
+        let f = i as f32 / (n - 1) as f32;
+        let secs = f * dur;
+        let v = profile.at(secs / profile.span.max(1e-4));
+        let h = v as f32 / profile.peak as f32;
+        pts.push(Pos2::new(rect.left() + f * rect.width(), rect.bottom() - h * rect.height()));
+    }
+    pts.push(Pos2::new(rect.right(), rect.bottom()));
+    painter.add(egui::Shape::convex_polygon(
+        pts.clone(),
+        ACCENT.gamma_multiply(0.18),
+        Stroke::NONE,
+    ));
+    painter.add(egui::Shape::line(pts[1..pts.len() - 1].to_vec(), Stroke::new(1.0, ACCENT.gamma_multiply(0.7))));
+}
 
 /// A lane extent as short as it can be and still be read at 8pt.
 fn lane_axis_label(v: f32) -> String {
@@ -594,6 +684,11 @@ impl EditorTabViewer<'_> {
         let emitter = anchor_for(self.world, &key)
             .map(|e| floptle_core::world_transform(self.world, e))
             .unwrap_or(floptle_core::transform::Transform::IDENTITY);
+        // Re-measure the cost on the same staleness signal the preview uses.
+        if st.profile_rev != st.doc_rev {
+            st.profile = crate::vfx::profile_effect(&crate::vfx::effect_from_doc(&doc));
+            st.profile_rev = st.doc_rev;
+        }
         let stale = st.preview_rev != st.doc_rev
             || self.vfx.preview.as_ref().is_none_or(|p| p.key != key);
         if stale {
@@ -725,6 +820,8 @@ fn transport_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, 
             VfxPlaybackDoc::OneShot => st.playhead,
         };
         ui.monospace(format!("{shown:>5.2}s / {:.2}s", doc.lifetime));
+        ui.separator();
+        cost_readout(ui, st);
         ui.separator();
 
         ui.label("lifetime");
@@ -956,6 +1053,7 @@ fn handle_timeline_wheel(ui: &egui::Ui, st: &mut VfxUiState, dur: f32) {
 }
 
 fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dirty: &mut bool) {
+    let profile = st.profile.clone();
     let dur = doc.lifetime.max(0.01);
     // Wheel navigation (zoom-X about cursor, Alt = zoom-Y, Ctrl/Shift+wheel = pan).
     handle_timeline_wheel(ui, st, dur);
@@ -1387,6 +1485,19 @@ fn canvas_ui(ui: &mut egui::Ui, st: &mut VfxUiState, doc: &mut VfxEffectDoc, dir
             dur,
             shown,
             px,
+        );
+        // What the effect DOES over time, under its ruler. The timeline's axis
+        // is already time and the one quantity that varies along it is how many
+        // particles exist — so a change to a rate or a lane reads as a change to
+        // the EFFECT here, not only as a change to a curve (`floptle/0099`).
+        draw_density(
+            &painter,
+            Rect::from_min_size(
+                Pos2::new(view.left, full.top() + RULER_H - DENSITY_H),
+                egui::vec2(dur * px, DENSITY_H),
+            ),
+            &profile,
+            dur,
         );
     });
     // Remember the offset so next frame's cursor-anchored zoom has an anchor.

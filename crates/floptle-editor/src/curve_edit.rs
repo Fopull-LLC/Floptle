@@ -304,6 +304,41 @@ pub(crate) fn curve_editor(
         }
     });
 
+    // Common shapes, one click. Every curve was dragged by hand from a straight
+    // line, which is where most of the authoring time in the tab actually went
+    // (`floptle/0099`). These rewrite the two ENDS' tangents and leave the
+    // values alone, so an ease is a shape applied to a curve you already have
+    // rather than a curve that replaces it.
+    ui.horizontal(|ui| {
+        ui.small("ease");
+        for (label, ease) in Ease::ALL {
+            if ui
+                .small_button(label)
+                .on_hover_text(ease.hint())
+                .clicked()
+            {
+                ease.apply(curve);
+                changed = true;
+            }
+        }
+        ui.separator();
+        if ui.small_button("⎘").on_hover_text("copy this curve's shape").clicked() {
+            ui.ctx().data_mut(|d| d.insert_temp(curve_clip_id(), curve.clone()));
+        }
+        let held: Option<VfxCurveDoc> = ui.ctx().data(|d| d.get_temp(curve_clip_id()));
+        if let Some(src) = held
+            && ui
+                .small_button("⎙")
+                .on_hover_text("paste that shape onto this curve, keeping its own scale")
+                .clicked()
+        {
+            paste_shape(curve, &src);
+            *sel_key = None;
+            *vrange = None;
+            changed = true;
+        }
+    });
+
     let width = ui.available_width().clamp(160.0, 280.0);
     let total_h = if kind == CurveKind::Color { GRAPH_H + GRAD_H + PAD } else { GRAPH_H };
     let (area, _) = ui.allocate_exact_size(Vec2::new(width, total_h), Sense::hover());
@@ -477,6 +512,130 @@ pub(crate) fn curve_editor(
         k.t = k.t.clamp(0.0, 1.0);
     }
     changed
+}
+
+/// Where a copied curve shape lives between two curve editors. egui temp state
+/// rather than a field, because it is a clipboard and not a setting.
+fn curve_clip_id() -> egui::Id {
+    egui::Id::new("vfx_curve_shape")
+}
+
+/// The standard easings, as tangent shapes applied to a curve's ends.
+///
+/// Deliberately not a curve GENERATOR: the values you authored are the ones you
+/// want, and an ease is how the curve gets between them. Applying one to a
+/// three-key curve eases every segment, which is what "ease this" means.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ease {
+    Linear,
+    In,
+    Out,
+    InOut,
+    Hold,
+}
+
+impl Ease {
+    pub(crate) const ALL: [(&'static str, Ease); 5] = [
+        ("lin", Ease::Linear),
+        ("in", Ease::In),
+        ("out", Ease::Out),
+        ("both", Ease::InOut),
+        ("hold", Ease::Hold),
+    ];
+
+    fn hint(self) -> &'static str {
+        match self {
+            Ease::Linear => "straight between the keys",
+            Ease::In => "starts slow, arrives at speed",
+            Ease::Out => "leaves at speed, settles",
+            Ease::InOut => "slow at both ends",
+            Ease::Hold => "no interpolation — steps at each key",
+        }
+    }
+
+    /// Rewrite every key's interpolation and tangents. Values are untouched.
+    fn apply(self, curve: &mut VfxCurveDoc) {
+        let n = curve.keys.len();
+        for i in 0..n {
+            let (first, last) = (i == 0, i + 1 == n);
+            let k = &mut curve.keys[i];
+            match self {
+                Ease::Linear => {
+                    k.interp = VfxInterpDoc::Linear;
+                    k.in_tan = 0.0;
+                    k.out_tan = 0.0;
+                }
+                Ease::Hold => {
+                    k.interp = VfxInterpDoc::Constant;
+                    k.in_tan = 0.0;
+                    k.out_tan = 0.0;
+                }
+                _ => {
+                    k.interp = VfxInterpDoc::Bezier;
+                    // A flat tangent is what "slow here" IS: the curve leaves or
+                    // arrives with zero slope. Which end goes flat is the whole
+                    // difference between the three.
+                    let flat_out = matches!(self, Ease::In | Ease::InOut) && !last;
+                    let flat_in = matches!(self, Ease::Out | Ease::InOut) && !first;
+                    k.out_tan = if flat_out { 0.0 } else { k.out_tan };
+                    k.in_tan = if flat_in { 0.0 } else { k.in_tan };
+                }
+            }
+        }
+    }
+}
+
+/// Give `dst` the SHAPE of `src` — its key times and interpolation — while
+/// keeping its own values' range.
+///
+/// Copying the values too would make this "replace this curve", which is not
+/// what reusing a shape means: a size curve and a speed curve can want the same
+/// ramp at completely different magnitudes.
+fn paste_shape(dst: &mut VfxCurveDoc, src: &VfxCurveDoc) {
+    if src.keys.is_empty() || dst.keys.is_empty() {
+        return;
+    }
+    let rt = curve_from_doc(src);
+    let chans = channels_of(&dst.keys[0].v).len();
+    // The destination's own range, so the shape lands at ITS magnitude.
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    for k in &dst.keys {
+        for &v in channels_of(&k.v).iter().take(chans) {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    // ...and the source's, to normalise its shape into 0..1 first.
+    let (slo, shi) = {
+        let (mut a, mut b) = (f32::MAX, f32::MIN);
+        for i in 0..=32 {
+            let c = rt.eval(i as f32 / 32.0);
+            a = a.min(c[0]);
+            b = b.max(c[0]);
+        }
+        (a, b)
+    };
+    if !lo.is_finite() || !hi.is_finite() || !slo.is_finite() {
+        return;
+    }
+    let sspan = (shi - slo).abs().max(1e-6);
+    let keys: Vec<VfxKeyDoc> = src
+        .keys
+        .iter()
+        .map(|k| {
+            let u = (channels_of(&k.v)[0] - slo) / sspan;
+            let v = lo + u * (hi - lo);
+            VfxKeyDoc {
+                t: k.t,
+                v: value_from_channels(&vec![v; chans.max(1)]),
+                interp: k.interp,
+                in_tan: k.in_tan,
+                out_tan: k.out_tan,
+            }
+        })
+        .collect();
+    dst.keys = keys;
+    dst.extrapolate = src.extrapolate;
 }
 
 /// A number as short as it can be and still be read at 9pt: `0`, `1.5`, `-0.25`.
@@ -676,5 +835,79 @@ mod tests {
         assert_eq!(axis_label(-0.25), "-0.25");
         assert_eq!(axis_label(1234.0), "1234");
         assert!(axis_label(0.125).len() <= 5);
+    }
+
+    // ---- floptle/0099: shapes without dragging ------------------------------
+
+    /// An ease is a shape applied to the curve you have — it must not move the
+    /// values you authored.
+    #[test]
+    fn an_ease_changes_the_shape_and_not_the_values() {
+        let mut c = curve(&[(0.0, 2.0), (0.5, 7.0), (1.0, 3.0)]);
+        let before: Vec<VfxValueDoc> = c.keys.iter().map(|k| k.v).collect();
+        Ease::InOut.apply(&mut c);
+        assert!(c.keys.iter().all(|k| k.interp == VfxInterpDoc::Bezier));
+        assert_eq!(c.keys.iter().map(|k| k.v).collect::<Vec<_>>(), before);
+        assert_eq!(c.keys.iter().map(|k| k.t).collect::<Vec<_>>(), vec![0.0, 0.5, 1.0]);
+    }
+
+    /// Which end goes flat is the whole difference between in, out and both.
+    #[test]
+    fn each_ease_flattens_the_end_it_names() {
+        let seed = || {
+            let mut c = curve(&[(0.0, 0.0), (1.0, 1.0)]);
+            for k in &mut c.keys {
+                k.in_tan = 5.0;
+                k.out_tan = 5.0;
+            }
+            c
+        };
+        let mut ein = seed();
+        Ease::In.apply(&mut ein);
+        assert_eq!(ein.keys[0].out_tan, 0.0, "slow leaving the first key");
+        assert_eq!(ein.keys[1].in_tan, 5.0, "and full speed arriving at the last");
+
+        let mut eout = seed();
+        Ease::Out.apply(&mut eout);
+        assert_eq!(eout.keys[0].out_tan, 5.0);
+        assert_eq!(eout.keys[1].in_tan, 0.0, "slow arriving at the last key");
+
+        let mut both = seed();
+        Ease::InOut.apply(&mut both);
+        assert_eq!((both.keys[0].out_tan, both.keys[1].in_tan), (0.0, 0.0));
+
+        let mut lin = seed();
+        Ease::Linear.apply(&mut lin);
+        assert!(lin.keys.iter().all(|k| k.interp == VfxInterpDoc::Linear && k.in_tan == 0.0));
+
+        let mut hold = seed();
+        Ease::Hold.apply(&mut hold);
+        assert!(hold.keys.iter().all(|k| k.interp == VfxInterpDoc::Constant));
+    }
+
+    /// A shape reused on another property keeps THAT property's magnitude — a
+    /// size curve and a speed curve can want the same ramp at wildly different
+    /// values, and copying the numbers across would be "replace", not "reuse".
+    #[test]
+    fn a_pasted_shape_keeps_the_destinations_own_range() {
+        let src = curve(&[(0.0, 0.0), (0.25, 1.0), (1.0, 0.0)]);
+        let mut dst = curve(&[(0.0, 10.0), (1.0, 50.0)]);
+        paste_shape(&mut dst, &src);
+        assert_eq!(dst.keys.len(), 3, "it takes the source's key TIMES");
+        assert_eq!(dst.keys.iter().map(|k| k.t).collect::<Vec<_>>(), vec![0.0, 0.25, 1.0]);
+        let vals: Vec<f32> = dst.keys.iter().map(|k| channels_of(&k.v)[0]).collect();
+        let (lo, hi) = (vals.iter().cloned().fold(f32::MAX, f32::min), vals.iter().cloned().fold(f32::MIN, f32::max));
+        assert!((lo - 10.0).abs() < 1e-3, "and the destination's own low, got {lo}");
+        assert!((hi - 50.0).abs() < 1e-3, "and its own high, got {hi}");
+    }
+
+    /// Nothing to paste from, or onto, does nothing rather than emptying a curve.
+    #[test]
+    fn pasting_an_empty_shape_does_nothing() {
+        let empty = VfxCurveDoc { keys: vec![], extrapolate: VfxExtrapolateDoc::Clamp };
+        let mut dst = curve(&[(0.0, 1.0), (1.0, 2.0)]);
+        let before = dst.clone();
+        paste_shape(&mut dst, &empty);
+        assert_eq!(dst.keys.len(), before.keys.len());
     }
 }
