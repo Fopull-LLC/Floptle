@@ -1022,6 +1022,39 @@ pub enum RichSet {
     /// Lua that declares them, not authored one-by-one into a scene and kept in
     /// sync by nothing.
     MatterSpriteBatch { size: f32 },
+    /// `node:setSorting{ layer =, order = }` — where a 2D node draws in the
+    /// stack (`floptle/0109`).
+    ///
+    /// Sorting layers shipped in v0.37.0 with no way for a script to touch
+    /// them, which makes the ordinary 2D moves impossible: a character stepping
+    /// behind a counter, a card lifting above the hand, a pickup that must draw
+    /// over the tiles it lands on.
+    MatterSorting { layer: Option<String>, order: Option<i32> },
+    /// `node:setLighting2D{ mode =, layers =, blocks = }` — the 2D lighting flag,
+    /// the layers a light reaches, and whether this node blocks light
+    /// (`floptle/0113`).
+    ///
+    /// One call rather than three because they are one feature and a node uses
+    /// one half of it: a LIGHT sets `mode` and `layers`, a RECEIVER sets `mode`
+    /// and `blocks`.
+    MatterLighting2D {
+        mode: Option<floptle_core::Lit2D>,
+        layers: Option<Vec<String>>,
+        blocks: Option<floptle_core::Cast2D>,
+    },
+    /// `node:setPointLight{ color =, intensity =, range = }` (`floptle/0116`).
+    ///
+    /// Until this a script could WRITE an existing light's fields but never make
+    /// one, so the only way to have dynamic light was to author N of them into
+    /// the scene and pool them — which is also how a game exhausted the
+    /// sixteen-slot budget with lights that were switched off. Every field is
+    /// optional and keeps what the node already had, so this is a create AND an
+    /// edit, like every other `set*` here.
+    MatterPointLight {
+        color: Option<[f32; 3]>,
+        intensity: Option<f32>,
+        range: Option<f32>,
+    },
     /// `tm:set(x, y, cell)` writes, batched per call site. Applied in order, so
     /// two writes to one square land the way the script wrote them.
     TileCells(Vec<(u32, u32, u32)>),
@@ -2902,6 +2935,71 @@ end
     /// the editor's autocomplete has told people to write since tilemaps
     /// shipped; before this it resolved to `nil`, which then also failed to
     /// convert.
+    /// `floptle/0117`: the mirror now REUSES a tilemap's buffer instead of
+    /// reallocating it every sync. The whole risk in that is staleness — a map
+    /// that changed must still read as changed, on the very next frame — so this
+    /// writes through the handle, steps frames, and reads back.
+    #[test]
+    fn a_reused_tilemap_mirror_still_sees_the_map_change() {
+        let dir = std::env::temp_dir().join(format!("floptle_tm_reuse_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "tick",
+            "\
+function start(node)
+  node:setTilemap{ cols = 4, rows = 4, tile = 1.0 }
+  frame = 0
+  stale = 0
+end
+function update(node, dt)
+  local tm = node:tilemap()
+  local got = tm:get(1, 1)
+  -- The very first update runs before setTilemap has been applied, so there is
+  -- nothing to read yet. From then on, what we read must be exactly what we
+  -- wrote last frame — a reused buffer that was not refreshed would hand back
+  -- an older number.
+  if frame > 0 and got ~= frame then stale = stale + 1 end
+  frame = frame + 1
+  tm:set(1, 1, frame)
+  tm:set(0, 0, stale)
+end
+",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "tick".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        for _ in 0..4 {
+            host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        }
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let Some(Matter::Tilemap { data, .. }) = world.get::<Matter>(e) else {
+            panic!("no tilemap")
+        };
+        assert_eq!(
+            floptle_core::tile_index(data[0]),
+            0,
+            "a frame read a stale grid — the reused buffer was not refreshed"
+        );
+        // Four runs, the first of which only creates the map: three writes land.
+        assert_eq!(
+            floptle_core::tile_index(data[5]),
+            4,
+            "the last write did not reach the ECS"
+        );
+    }
+
     #[test]
     fn punching_a_hole_in_a_wall_tilemap_runs_to_the_end_of_the_loop() {
         let dir = std::env::temp_dir().join(format!("floptle_empty_tile_{}", std::process::id()));
@@ -4787,6 +4885,190 @@ end
         assert_eq!(spec.shader_params.get("nose"), Some(&[0.1, 0.9, 0.2, 0.0]));
         let mat = world.get::<Material>(meshy).unwrap();
         assert_eq!(mat.shader_params.get("glow"), Some(&[2.5, 0.0, 0.0, 0.0]));
+    }
+
+    /// `floptle/0118`: the sky's uniforms are a THIRD place, and until this they
+    /// were the only shader in the engine a script could not talk to. A
+    /// procedural sky that can only be a function of `time` runs its story on a
+    /// clock — the reported case was a cutscene sky whose city was revealed in
+    /// the middle of whatever sentence the reader happened to be on.
+    #[test]
+    fn set_shader_param_reaches_the_sky() {
+        let dir = std::env::temp_dir().join("floptle_script_test_sky_param");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "story",
+            concat!(
+                "function update(node, dt)\n",
+                "  local sky = find(\"Skybox\")\n",
+                "  sky:setShaderParam(\"burn\", 0.75)\n",
+                "end\n",
+            ),
+        );
+        let mut world = World::default();
+        let sky = world.spawn();
+        world.insert(sky, Transform::IDENTITY);
+        world.insert(sky, floptle_core::Name("Skybox".into()));
+        world.insert(
+            sky,
+            Matter::Skybox {
+                color: [0.0; 3],
+                size: 1000.0,
+                texture: None,
+                tint: [1.0; 3],
+                shader: Some("shaders/ashfall.flsl".into()),
+                shader_params: Default::default(),
+            },
+        );
+        // A sky node that ALSO carries a material: the write must still go where
+        // the sky pipeline reads, not into the material nobody draws.
+        world.insert(sky, Material { shader: Some("shaders/x.flsl".into()), ..Default::default() });
+        let driver = world.spawn();
+        world.insert(driver, Transform::IDENTITY);
+        world.insert(
+            driver,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "story".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let Some(Matter::Skybox { shader_params, .. }) = world.get::<Matter>(sky) else {
+            panic!("the sky lost its matter")
+        };
+        assert_eq!(shader_params.get("burn"), Some(&[0.75, 0.0, 0.0, 0.0]));
+        assert!(
+            world.get::<Material>(sky).unwrap().shader_params.is_empty(),
+            "the write went to the material instead of the sky"
+        );
+    }
+
+    /// `floptle/0109` + `floptle/0113`: sorting layers and 2D lighting shipped
+    /// with no script access at all, which rules out the ordinary 2D moves — a
+    /// character stepping behind a counter, a torch that stops lighting the
+    /// background. A misspelled enum has to NAME the accepted set rather than
+    /// quietly meaning `auto` (`floptle/0072`).
+    #[test]
+    fn a_script_drives_sorting_and_2d_lighting() {
+        let dir = std::env::temp_dir().join("floptle_script_test_sort2d");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "stack",
+            concat!(
+                "function start(node)\n",
+                "  node:setSorting{ layer = \"Characters\", order = 3 }\n",
+                "  node:setLighting2D{ mode = \"2d\", blocks = \"on\" }\n",
+                "  local torch = find(\"Torch\")\n",
+                "  torch:setLighting2D{ mode = \"2d\", layers = { \"Characters\" } }\n",
+                "  ok, err = pcall(function() torch:setLighting2D{ mode = \"flat-ish\" } end)\n",
+                "end\n",
+            ),
+        );
+        let mut world = World::default();
+        let hero = world.spawn();
+        world.insert(hero, Transform::IDENTITY);
+        world.insert(
+            hero,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "stack".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let torch = world.spawn();
+        world.insert(torch, Transform::IDENTITY);
+        world.insert(torch, floptle_core::Name("Torch".into()));
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+
+        let s = world.get::<floptle_core::Sorting>(hero).expect("sorting was not set");
+        assert_eq!((s.layer.as_str(), s.order), ("Characters", 3));
+        let lit = world.get::<floptle_core::Lighting2D>(hero).expect("no Lighting2D");
+        assert_eq!(lit.mode, floptle_core::Lit2D::Yes);
+        assert!(lit.layers.is_empty(), "a receiver names no layers");
+        assert_eq!(
+            world.get::<floptle_core::Shadow2D>(hero).map(|c| c.0),
+            Some(floptle_core::Cast2D::Yes)
+        );
+        let torch_lit = world.get::<floptle_core::Lighting2D>(torch).expect("no Lighting2D");
+        assert_eq!(torch_lit.layers, vec!["Characters".to_string()]);
+        // …and the bad spelling raised rather than defaulting. `pcall` caught it,
+        // so the run itself is still clean — which is the point: the script
+        // author hears about the typo, the engine does not guess.
+        assert_eq!(
+            torch_lit.mode,
+            floptle_core::Lit2D::Yes,
+            "the refused write must not have changed anything"
+        );
+    }
+
+    /// `floptle/0118`, the other half: the post chain is typed knobs rather than
+    /// a shader's uniforms, so it comes through the component route. A cutscene
+    /// pushing a vignette is the reported want.
+    #[test]
+    fn script_drives_the_post_chain() {
+        let dir = std::env::temp_dir().join("floptle_script_test_post");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "cut",
+            concat!(
+                "function update(node, dt)\n",
+                "  local pp = find(\"Post\"):getcomponent(\"PostProcess\")\n",
+                // Bloom is OFF in this scene, so this branch must not be taken.
+                // If the field arrived as the number 0 instead of `false` it
+                // would be — 0 is truthy in Lua — and the assertion below is
+                // what catches that.
+                "  if pp.bloom then pp.bloomIntensity = 2.5 end\n",
+                "  pp.vignette = 1\n",
+                "  pp.vignetteStrength = 0.8\n",
+                "  pp.posterizeBands = -4\n",
+                "end\n",
+            ),
+        );
+        let mut world = World::default();
+        let post = world.spawn();
+        world.insert(post, Transform::IDENTITY);
+        world.insert(post, floptle_core::Name("Post".into()));
+        world.insert(post, Matter::default_post_process());
+        let driver = world.spawn();
+        world.insert(driver, Transform::IDENTITY);
+        world.insert(
+            driver,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "cut".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let Some(Matter::PostProcess {
+            bloom_intensity, vignette, vignette_strength, posterize_bands, ..
+        }) = world.get::<Matter>(post)
+        else {
+            panic!("the post node lost its matter")
+        };
+        assert_eq!(
+            *bloom_intensity, 0.7,
+            "bloom is off, so `if pp.bloom` must be false — 0 would have been truthy"
+        );
+        assert!(*vignette);
+        assert_eq!(*vignette_strength, 0.8);
+        assert_eq!(*posterize_bands, 0, "a negative band count must floor at off, not wrap");
     }
 
     #[test]

@@ -14,7 +14,7 @@ material — set them by dragging and clicking. Shaders are for *looks*; texture
 and their tiling are *data*.
 
 > **STATUS (2026-07-15): shipped, shaped by the code as it exists** (see
-> [`../shader-system-proposal.md`](../shader-system-proposal.md) §6 + §8). The
+> [`./shaders.md`](./shaders.md)). The
 > fixed-function `Material` component is permanent; `shader: Option<String>`
 > is an OPTIONAL `.flsl` reference on it, with `shader_params` /
 > `shader_textures` / per-slot `shader_tiling` maps. The **tiling block** is
@@ -184,7 +184,7 @@ reports poor UVs.
 ## 4. Built-in content (out of the box)
 
 Floptle ships defaults so a new project is *immediately buildable* — no blank
-canvas (these become real Fopull art by Phase 10, [ROADMAP](../ROADMAP.md),
+canvas (these become real Fopull art before release,
 replacing any OoT temps per [ADR-0010](../decisions/0010-temporary-assets.md)):
 
 - **Built-in shaders** (`.flsl`): `unlit`, `lit_textured` (basic directional +

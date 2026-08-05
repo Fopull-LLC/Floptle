@@ -154,6 +154,15 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
             out.set("chunks", c.chunks)?;
             out.set("props", c.props)?;
             out.set("particles", c.particles)?;
+            // The capped resources, and what each cap actually cut. A ceiling a
+            // game cannot see is one it discovers as "my seventeenth torch does
+            // nothing" (`floptle/0114`, `floptle/0116`), so the pair is the
+            // point: one number for the cost, one for what was refused.
+            out.set("effects", c.effects)?;
+            out.set("effectsDropped", c.effects_dropped)?;
+            out.set("lights", c.lights)?;
+            out.set("lightsDropped", c.lights_dropped)?;
+            out.set("voices", c.voices)?;
             Ok(out)
         })?,
     )?;

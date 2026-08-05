@@ -73,6 +73,11 @@ pub(crate) struct SplitLights {
     /// word `r / 32` set means the light reaches rank `r`. All-ones = every
     /// layer, which is what a light that named none does.
     pub two_d: LightSlots,
+    /// How many lights qualified but were ranked out of the sixteen, both sides
+    /// together. Reported through `perf.counts().lightsDropped`: a cap nobody
+    /// can see is the whole complaint in `floptle/0116`, and "my seventeenth
+    /// torch does nothing" is not a thing anybody should have to guess.
+    pub dropped: usize,
 }
 
 /// Split the scene's point lights by which lighting system owns them.
@@ -126,7 +131,8 @@ pub(crate) fn split_point_lights(
             mask: layer_mask(&lit, sorting_names),
         });
     }
-    SplitLights { three_d: fill(three), two_d: fill(two) }
+    let dropped = three.len().saturating_sub(16) + two.len().saturating_sub(16);
+    SplitLights { three_d: fill(three), two_d: fill(two), dropped }
 }
 
 /// One light that qualified, before the sixteen are chosen.

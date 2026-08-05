@@ -24,7 +24,7 @@ with the `gltf` crate, which gives direct buffer access for fast upload.
 
 - **Meshes** — positions, indices, **UVs** (set 0), **normals** (computed if absent),
   and **vertex colors** (`COLOR_0` → `MeshData.colors`, the vertex-paint store — see
-  [`../vertex-paint-proposal.md`](../vertex-paint-proposal.md)). Split per-primitive
+  [`./materials-and-textures.md`](./materials-and-textures.md)). Split per-primitive
   (per-material). *Tangents and UV sets beyond 0 are not imported yet.*
 - **PBR materials** — base color, metallic/roughness, normal, emissive,
   occlusion. These **seed** Floptle materials ([`./materials-and-textures.md`](./materials-and-textures.md))
@@ -167,7 +167,7 @@ MyGame/
 ```
 
 **Export** packs this project with **`floptle-runtime`** into a standalone build
-([ROADMAP](../ROADMAP.md) Phase 9): collect the dependency closure from the entry
+(see [export-builds.md](../export-builds.md)): collect the dependency closure from the entry
 scene, drop editor-only data, optionally pack assets into a single archive next to
 the runtime binary, and emit per-OS bundles (Linux/Windows/macOS).
 
@@ -182,7 +182,7 @@ Per [ADR-0010](../decisions/0010-temporary-assets.md): Ocarina of Time textures
 are **local-only placeholders** under `assets/textures/_oot_temp/`, which is
 **git-ignored**. They are never committed (keeps history clean for the future OSS
 release) and are **replaced with original Fopull art before any release**
-(a Phase-10 gate, [ROADMAP](../ROADMAP.md)). The engine must never hard-depend on
+(a gate before any release). The engine must never hard-depend on
 those files — built-in defaults ([`./materials-and-textures.md`](./materials-and-textures.md) §4)
 cover real content. A "drop test textures here" note lives in `assets/textures/README.md`.
 
@@ -220,7 +220,7 @@ We are lightweight — **not a content-management platform.**
   remote/team asset service.
 - **Full asset-bundle / streaming system** at launch — export packs the whole
   dependency closure; on-demand streaming and partial bundles are *future*
-  ([ROADMAP](../ROADMAP.md) "Later"), added if a game needs them.
+  (later work), added if a game needs them.
 
 If a pipeline feature serves big-studio asset logistics over a solo dev's
 drop-it-in-and-go loop, it waits.

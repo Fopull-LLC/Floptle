@@ -166,6 +166,44 @@ impl EditorTabViewer<'_> {
                 });
         }
 
+        // PLAY banner (`floptle/0110`). Persistent, not a toast: the whole
+        // failure is that a Play-time edit LOOKS like it worked — the gizmo
+        // moves, the Inspector shows the new number — and Stop throws it away
+        // with nothing ever said. `push_history` no-ops while playing, so the
+        // edit is not undoable and never marks the scene unsaved either.
+        //
+        // Deliberately NOT a refusal. Nudging a camera while watching a cutscene
+        // run is how you find the framing; taking that away would cost more than
+        // the trap does. What was missing is the readback, and the Inspector's
+        // "copy to the stopped scene" button beside it is what turns a value
+        // found during Play into one you keep.
+        //
+        // Top-CENTRE, and in both views: the Game tab is where somebody watching
+        // their game is actually looking, and the top-left corner of the Scene
+        // tab is already the tool palette.
+        if self.playing {
+            egui::Area::new(egui::Id::new(if game { "play_banner_game" } else { "play_banner" }))
+                .fixed_pos(egui::pos2(rect.center().x - 132.0, rect.top() + 8.0))
+                .order(egui::Order::Middle)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style())
+                        .fill(egui::Color32::from_rgb(60, 34, 34))
+                        .show(ui, |ui| {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 150, 140),
+                                "▶ PLAY — edits here are discarded on Stop",
+                            )
+                            .on_hover_text(
+                                "Stop reverts the whole world to the saved scene. Moving, \
+                                 re-parenting or re-arranging while playing is not undoable \
+                                 and does not mark the scene unsaved.\n\nFound a value you \
+                                 want to keep? The Inspector's transform rows have a copy \
+                                 button while playing.",
+                            );
+                        });
+                });
+        }
+
         // Overlay toolbar: tools (left) + resolution simulator (right). Editor view only.
         if !game {
             egui::Area::new(egui::Id::new("scene_toolbar"))

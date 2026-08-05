@@ -2247,6 +2247,11 @@ struct Editor {
     vfx: vfx::VfxSystem,
     /// Audio: the sound engine, clip cache, play-mode voices, mixer state.
     audio: audio::AudioSystem,
+    /// `(lights handed to the shader, lights ranked out of the sixteen)`, from
+    /// this frame's light split — recorded where the split already happens and
+    /// read a few hundred lines later where the frame's counts are assembled
+    /// (`floptle/0116`).
+    light_counts: (usize, usize),
     /// Mixer tab UI state (selected track/effect, meters).
     mixer_ui: mixer_ui::MixerUiState,
     /// Particles tab UI state (open effect, playhead, selections).

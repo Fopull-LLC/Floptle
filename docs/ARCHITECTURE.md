@@ -1,8 +1,10 @@
 # Floptle — Architecture
 
-> How the pieces fit. This is the map; the detailed designs live in
-> [`subsystems/`](subsystems/) and the *why* of each major choice lives in
-> [`decisions/`](decisions/).
+> How the pieces fit. This is the map; the detailed designs live in the
+> **subsystem** pages — [the renderer](subsystems/renderer.md),
+> [physics](subsystems/physics.md), [shaders](subsystems/shaders.md) and the
+> rest — and the *why* of each major choice lives in the **decision records**,
+> starting with [why Rust](decisions/0001-language-rust.md).
 
 ## 1. Layering
 

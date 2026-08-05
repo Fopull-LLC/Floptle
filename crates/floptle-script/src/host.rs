@@ -4237,17 +4237,28 @@ impl ScriptHost {
                 }
             }
             // `node:setShaderParam(name, ...)`: fold into the node's UI element
-            // (when it has a `stage ui` shader) or its Material's params. The
-            // per-frame shader drivers see the change and upload a uniform
-            // write — never a recompile.
+            // (when it has a `stage ui` shader), the sky, or its Material's
+            // params. The per-frame shader drivers see the change and upload a
+            // uniform write — never a recompile.
             for (eid, name, v) in self.shader_param_sets.borrow_mut().drain(..) {
                 let Some(&ent) = scene.ents.get(&eid) else { continue };
                 let on_ui = world
                     .get::<floptle_ui::ElementSpec>(ent)
                     .is_some_and(|s| !s.shader.is_empty());
+                let on_sky =
+                    matches!(world.get::<Matter>(ent), Some(Matter::Skybox { .. }));
                 if on_ui {
                     if let Some(spec) = world.get_mut::<floptle_ui::ElementSpec>(ent) {
                         spec.shader_params.insert(name, v);
+                    }
+                } else if on_sky {
+                    // Before the Material arm, not after: the sky pipeline reads
+                    // `Matter::Skybox.shader_params`, so that is where a write
+                    // has to land even on the unlikely sky node that also
+                    // carries a Material (`floptle/0118`).
+                    if let Some(Matter::Skybox { shader_params, .. }) = world.get_mut::<Matter>(ent)
+                    {
+                        shader_params.insert(name, v);
                     }
                 } else if let Some(mat) = world.get_mut::<floptle_core::Material>(ent) {
                     mat.shader_params.insert(name, v);
@@ -4371,7 +4382,11 @@ impl ScriptHost {
         s.ui_texts.clear();
         s.ui_styles.clear();
         s.ui_textures.clear();
-        s.tilemaps.clear();
+        // NOT cleared: the grids are reused when a map has not changed
+        // (`floptle/0117`). Entities that are gone, or that stopped being a
+        // tilemap, are dropped by the retain after the loop.
+        let mut live_tilemaps: std::collections::HashSet<u32> =
+            std::collections::HashSet::new();
         s.sprite_batches.clear();
         s.by_kind.clear();
         s.by_tag.clear();
@@ -4385,16 +4400,57 @@ impl ScriptHost {
                     s.models.insert(id, asset_path.clone());
                 }
                 Some(Matter::Tilemap { cols, rows, tile, data, tileset }) => {
-                    s.tilemaps.insert(
-                        id,
-                        crate::TilemapMirror {
-                            cols: *cols,
-                            rows: *rows,
-                            tile: *tile,
-                            data: data.clone(),
-                            tileset: tileset.clone(),
-                        },
-                    );
+                    live_tilemaps.insert(id);
+                    // `floptle/0117`: the grid used to be `data.clone()`d here,
+                    // unconditionally, twice a frame — a heap allocation and a
+                    // memcpy of the whole map whether or not any script ever
+                    // looked at it. A 200×200 map is 160 KB a frame of pure
+                    // churn, and a level made of several is worse.
+                    //
+                    // Reuse the buffer when the map has not changed, which is
+                    // nearly always: a comparison reads the same bytes a copy
+                    // would but allocates nothing, frees nothing, and stops at
+                    // the first square that differs.
+                    //
+                    // Deliberately NOT "clone only for maps a script asked
+                    // about": the mirror is built BEFORE the scripts run, so the
+                    // first `node:tilemap()` of a session would read a grid that
+                    // was not there yet. A quiet wrong answer costs more than
+                    // this comparison does.
+                    match s.tilemaps.get_mut(&id) {
+                        Some(m) if m.data == *data => {
+                            m.cols = *cols;
+                            m.rows = *rows;
+                            m.tile = *tile;
+                            if m.tileset != *tileset {
+                                m.tileset.clone_from(tileset);
+                            }
+                        }
+                        Some(m) => {
+                            m.cols = *cols;
+                            m.rows = *rows;
+                            m.tile = *tile;
+                            // `clone_from` reuses the existing allocation when
+                            // it is big enough — a repaint of the same-sized map
+                            // is then a memcpy with no allocator traffic at all.
+                            m.data.clone_from(data);
+                            if m.tileset != *tileset {
+                                m.tileset.clone_from(tileset);
+                            }
+                        }
+                        None => {
+                            s.tilemaps.insert(
+                                id,
+                                crate::TilemapMirror {
+                                    cols: *cols,
+                                    rows: *rows,
+                                    tile: *tile,
+                                    data: data.clone(),
+                                    tileset: tileset.clone(),
+                                },
+                            );
+                        }
+                    }
                 }
                 Some(Matter::SpriteBatch { .. }) => {
                     s.sprite_batches.insert(id);
@@ -4460,6 +4516,9 @@ impl ScriptHost {
                 s.scripts.insert(id, sc.0.iter().map(|i| i.kind.clone()).collect());
             }
         }
+        // A node that was despawned, or whose Matter became something else, must
+        // not leave a grid behind for a later node to be handed by id reuse.
+        s.tilemaps.retain(|id, _| live_tilemaps.contains(id));
     }
 
     /// Write transforms that a node handle modified on OTHER nodes back to the ECS.

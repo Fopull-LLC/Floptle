@@ -8,8 +8,8 @@ right on the model. The **🖼 Image** tab deletes that round trip, because the
 engine is the only program that can show you the texture on the thing it is for,
 lit the way it will be lit, while you are still holding the brush.
 
-Design rationale and the decisions behind it:
-[image-editor-proposal.md](image-editor-proposal.md).
+The design rationale and the decisions behind it live with the working
+material in the repo, alongside this guide.
 
 ---
 

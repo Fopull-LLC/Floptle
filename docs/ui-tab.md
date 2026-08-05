@@ -4,8 +4,8 @@ Where flat screens get built.
 
 This covers the UI authoring canvas. For the element vocabulary — gradients,
 9-slice, text effects — see the Inspector's **UI Element** section; for styles
-and tokens see [ui-styles.md](ui-styles.md); for the design rationale see
-[ui-system-2-proposal.md](ui-system-2-proposal.md).
+and tokens see [ui-styles.md](ui-styles.md); for a scene that exercises the
+whole vocabulary, [ui-demo.md](ui-demo.md).
 
 **The tab is optional and imposes nothing.** Every edit it makes is an ordinary
 component change you could have typed into the `.ron` by hand. It ships no

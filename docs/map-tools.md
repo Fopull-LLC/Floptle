@@ -200,6 +200,5 @@ empty, and **refuses to save map geometry** for the session — a transient IO
 error must never be able to replace a level with placeholder cubes and then
 persist them.
 
-See also: [the design proposal](map-tools-proposal.md),
-[materials & textures](subsystems/materials-and-textures.md),
-[the vertex-paint design](vertex-paint-proposal.md).
+See also: [materials & textures](subsystems/materials-and-textures.md), which
+is also where vertex paint is documented.

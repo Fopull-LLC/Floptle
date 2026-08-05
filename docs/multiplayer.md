@@ -2,8 +2,9 @@
 
 This is the **build-something** guide. It goes from a single-player scene to two
 machines playing together, then to shipping. For *why* any of it works the way it
-does, see [netcode-design.md](netcode-design.md) and
-[rollback-netcode-design.md](rollback-netcode-design.md); for the full API
+does, the reasoning is recorded in the decision records —
+[networking and cloud](decisions/0022-networking-and-cloud.md) and
+[rollback netcode](decisions/0025-rollback-netcode.md). For the full API
 reference, [scripting.md §16–16b](scripting.md).
 
 Everything here is one netcode with three replication modes. You pick the mode
@@ -442,7 +443,6 @@ failures the field can't produce.
 |---|---|
 | [scripting.md §16](scripting.md) | `net.*`, `synced`, `onRpc`, `net.rewind` — the full API |
 | [scripting.md §16b](scripting.md) | `snapshot`/`restore`, `net.random`, the rollback rules |
-| [netcode-design.md](netcode-design.md) | the design: replication, prediction, interest, lag comp |
-| [rollback-netcode-design.md](rollback-netcode-design.md) | the rollback design: input delay, the ring, checksums, the referee |
-| [rollback-p7-fofighter-checklist.md](rollback-p7-fofighter-checklist.md) | the two-machine acceptance run |
+| [decisions/0022](decisions/0022-networking-and-cloud.md) | why open netcode with a self-hostable relay |
+| [decisions/0025](decisions/0025-rollback-netcode.md) | why rollback, and what it costs |
 | [export-builds.md](export-builds.md) | shipping a build that hosts and joins |

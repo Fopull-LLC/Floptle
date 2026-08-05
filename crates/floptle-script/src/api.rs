@@ -238,6 +238,10 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
             | ("UiLayer", "enabled" | "worldSpace")
             | ("Camera", "active")
             | (
+                "PostProcess",
+                "enabled" | "bloom" | "vignette" | "posterizeDither"
+            )
+            | (
                 "RigidBody",
                 "gravity"
                     | "kinematic"
@@ -286,6 +290,42 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("cell".to_string(), m.cell as f64),
                 ("sheetCols".to_string(), m.sheet_cols as f64),
                 ("sheetRows".to_string(), m.sheet_rows as f64),
+            ]),
+        );
+    }
+    // The post chain (`floptle/0118`). A mandatory scene node, so a script that
+    // wants to dim the bloom for a cutscene finds it with `find` and writes
+    // here. `ao` is deliberately absent: it picks HOW occlusion is computed, and
+    // switching that mid-scene is a look change nobody asked a number for.
+    if let Some(Matter::PostProcess {
+        enabled,
+        bloom,
+        bloom_threshold,
+        bloom_intensity,
+        vignette,
+        vignette_strength,
+        vignette_radius,
+        ao_strength,
+        ao_radius,
+        posterize_bands,
+        posterize_dither,
+        ..
+    }) = world.get::<Matter>(e)
+    {
+        out.insert(
+            "PostProcess".to_string(),
+            HashMap::from([
+                ("enabled".to_string(), f64::from(*enabled)),
+                ("bloom".to_string(), f64::from(*bloom)),
+                ("bloomThreshold".to_string(), *bloom_threshold as f64),
+                ("bloomIntensity".to_string(), *bloom_intensity as f64),
+                ("vignette".to_string(), f64::from(*vignette)),
+                ("vignetteStrength".to_string(), *vignette_strength as f64),
+                ("vignetteRadius".to_string(), *vignette_radius as f64),
+                ("aoStrength".to_string(), *ao_strength as f64),
+                ("aoRadius".to_string(), *ao_radius as f64),
+                ("posterizeBands".to_string(), *posterize_bands as f64),
+                ("posterizeDither".to_string(), f64::from(*posterize_dither)),
             ]),
         );
     }
@@ -764,6 +804,44 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 }
             }
         }
+        // The post chain, so a cutscene can push a vignette or dim the bloom
+        // (`floptle/0118`). Unlike the sky these are typed knobs rather than a
+        // shader's uniforms, so they come through the component route.
+        "PostProcess" => {
+            if let Some(Matter::PostProcess {
+                enabled,
+                bloom,
+                bloom_threshold,
+                bloom_intensity,
+                vignette,
+                vignette_strength,
+                vignette_radius,
+                ao_strength,
+                ao_radius,
+                posterize_bands,
+                posterize_dither,
+                ..
+            }) = world.get_mut::<Matter>(ent)
+            {
+                let v = val as f32;
+                match field {
+                    "enabled" => *enabled = val != 0.0,
+                    "bloom" => *bloom = val != 0.0,
+                    "bloomThreshold" => *bloom_threshold = v.max(0.0),
+                    "bloomIntensity" => *bloom_intensity = v.max(0.0),
+                    "vignette" => *vignette = val != 0.0,
+                    "vignetteStrength" => *vignette_strength = v.clamp(0.0, 1.0),
+                    "vignetteRadius" => *vignette_radius = v.max(0.0),
+                    "aoStrength" => *ao_strength = v.clamp(0.0, 1.0),
+                    "aoRadius" => *ao_radius = v.max(0.0),
+                    // 0 and 1 both mean off, and the field is a count, so a
+                    // negative from Lua must not wrap into a huge one.
+                    "posterizeBands" => *posterize_bands = val.max(0.0) as u32,
+                    "posterizeDither" => *posterize_dither = val != 0.0,
+                    _ => {}
+                }
+            }
+        }
         "AudioSource" => {
             if let Some(src) = world.get_mut::<floptle_audio::AudioSource>(ent) {
                 let p = &mut src.params;
@@ -1087,6 +1165,73 @@ pub(crate) fn apply_rich_sets(
             RichSet::MatterSpriteBatch { size } => {
                 world.insert(e, Matter::SpriteBatch { size: size.max(1e-4) });
             }
+            // `floptle/0109`. Absent = the default layer at order 0, which is
+            // also how the component is stored: a node back at the default
+            // carries no Sorting at all, so its scene mentions none.
+            RichSet::MatterSorting { layer, order } => {
+                let cur = world.get::<floptle_core::Sorting>(e).cloned().unwrap_or_default();
+                let next = floptle_core::Sorting {
+                    layer: layer.unwrap_or(cur.layer),
+                    order: order.unwrap_or(cur.order),
+                };
+                if next.order == 0
+                    && (next.layer.is_empty()
+                        || next.layer == floptle_core::DEFAULT_SORTING_LAYER)
+                {
+                    world.remove::<floptle_core::Sorting>(e);
+                } else {
+                    world.insert(e, next);
+                }
+            }
+            // `floptle/0113`. Same rule: `auto` with no layer list IS the
+            // default, so a node put back to it stops carrying the component and
+            // its scene stops mentioning 2D lighting.
+            RichSet::MatterLighting2D { mode, layers, blocks } => {
+                if mode.is_some() || layers.is_some() {
+                    let cur =
+                        world.get::<floptle_core::Lighting2D>(e).cloned().unwrap_or_default();
+                    let next = floptle_core::Lighting2D {
+                        mode: mode.unwrap_or(cur.mode),
+                        layers: layers.unwrap_or(cur.layers),
+                    };
+                    if next == floptle_core::Lighting2D::default() {
+                        world.remove::<floptle_core::Lighting2D>(e);
+                    } else {
+                        world.insert(e, next);
+                    }
+                }
+                if let Some(c) = blocks {
+                    if c == floptle_core::Cast2D::Auto {
+                        world.remove::<floptle_core::Shadow2D>(e);
+                    } else {
+                        world.insert(e, floptle_core::Shadow2D(c));
+                    }
+                }
+            }
+            // `floptle/0116`. Omitted fields keep what the node had, so this is
+            // both "make a light" and "retune this one"; a node that was not a
+            // light yet starts from the same defaults the editor's Add gives.
+            RichSet::MatterPointLight { color, intensity, range } => {
+                let (mut c, mut i, mut r) = match world.get::<Matter>(e) {
+                    Some(Matter::PointLight { color, intensity, range }) => {
+                        (*color, *intensity, *range)
+                    }
+                    _ => ([1.0, 1.0, 1.0], 1.0, 10.0),
+                };
+                if let Some(v) = color {
+                    c = v;
+                }
+                if let Some(v) = intensity {
+                    // Zero is meaningful and must survive: parking a pooled
+                    // light at zero is how a game frees its slot, and clamping
+                    // it up would defeat the fix that made that work.
+                    i = v.max(0.0);
+                }
+                if let Some(v) = range {
+                    r = v.max(0.0);
+                }
+                world.insert(e, Matter::PointLight { color: c, intensity: i, range: r });
+            }
             RichSet::TileCells(writes) => {
                 let Some(Matter::Tilemap { cols, rows, data, .. }) =
                     world.get_mut::<Matter>(e)
@@ -1229,6 +1374,15 @@ pub(crate) const CELESTIAL_KEYS: &[&str] = &[
 
 /// Every key `node:setTilemap{...}` reads (`floptle/0082`).
 pub(crate) const TILEMAP_KEYS: &[&str] = &["cols", "rows", "tile", "data", "tileset"];
+
+/// Every key `node:setSorting{...}` reads (`floptle/0082`).
+pub(crate) const SORTING_KEYS: &[&str] = &["layer", "order"];
+
+/// Every key `node:setLighting2D{...}` reads (`floptle/0082`).
+pub(crate) const LIGHTING_2D_KEYS: &[&str] = &["mode", "layers", "blocks"];
+
+/// Every key `node:setPointLight{...}` reads (`floptle/0082`).
+pub(crate) const POINT_LIGHT_KEYS: &[&str] = &["color", "intensity", "range"];
 
 /// Every key `node:setSpriteBatch{...}` reads (`floptle/0082`).
 pub(crate) const SPRITE_BATCH_KEYS: &[&str] = &["size"];
@@ -2977,6 +3131,114 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         ));
                     }
                     q.borrow_mut().push((e, crate::RichSet::MatterSpriteBatch { size }));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let q = q.clone();
+            // node:setSorting{ layer = "Terrain", order = 3 } — where this 2D
+            // node draws in the stack (`floptle/0109`). Sorting layers shipped
+            // with no script access at all, which rules out a character walking
+            // behind a counter.
+            methods.set(
+                "setSorting",
+                lua.create_function(move |_, (this, t): (Table, Table)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    crate::opts::check_keys(&t, SORTING_KEYS, "node:setSorting")?;
+                    q.borrow_mut().push((
+                        e,
+                        crate::RichSet::MatterSorting {
+                            layer: t.get::<Option<String>>("layer")?,
+                            order: t.get::<Option<i32>>("order")?,
+                        },
+                    ));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let q = q.clone();
+            // node:setLighting2D{ mode = "2d", layers = {"Terrain"}, blocks = "on" }
+            // (`floptle/0113`). A torch that flickers is a script writing an
+            // intensity; a torch that stops lighting the background is a script
+            // writing this.
+            methods.set(
+                "setLighting2D",
+                lua.create_function(move |_, (this, t): (Table, Table)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    crate::opts::check_keys(&t, LIGHTING_2D_KEYS, "node:setLighting2D")?;
+                    // Both enums answer through their own parsers, so a typo
+                    // names the accepted set instead of silently meaning `auto`
+                    // — the exact bug `floptle/0072` was filed for.
+                    let mode = match t.get::<Option<String>>("mode")? {
+                        None => None,
+                        Some(s) => Some(floptle_core::Lit2D::parse(&s).ok_or_else(|| {
+                            mlua::Error::runtime(format!(
+                                "setLighting2D{{ mode = }}: `{s}` is not one of {}",
+                                floptle_core::Lit2D::ACCEPTS.join(", ")
+                            ))
+                        })?),
+                    };
+                    let blocks = match t.get::<Option<String>>("blocks")? {
+                        None => None,
+                        Some(s) => Some(floptle_core::Cast2D::parse(&s).ok_or_else(|| {
+                            mlua::Error::runtime(format!(
+                                "setLighting2D{{ blocks = }}: `{s}` is not one of {}",
+                                floptle_core::Cast2D::ACCEPTS.join(", ")
+                            ))
+                        })?),
+                    };
+                    // An EMPTY list means every layer, and so does no list — but
+                    // `layers = {}` is somebody saying "reset this to all of
+                    // them", which is a different thing from not mentioning it.
+                    let layers = match t.get::<Option<Table>>("layers")? {
+                        None => None,
+                        Some(list) => Some(
+                            list.sequence_values::<String>().collect::<mlua::Result<Vec<_>>>()?,
+                        ),
+                    };
+                    q.borrow_mut()
+                        .push((e, crate::RichSet::MatterLighting2D { mode, layers, blocks }));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let q = q.clone();
+            // node:setPointLight{ color = {r,g,b}, intensity =, range = }
+            //
+            // The one Matter kind a script could edit but never create
+            // (`floptle/0116`). Every field is optional and keeps what the node
+            // had, so the same call makes a light and retunes one.
+            methods.set(
+                "setPointLight",
+                lua.create_function(move |_, (this, t): (Table, Option<Table>)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let (mut color, mut intensity, mut range) = (None, None, None);
+                    if let Some(t) = t {
+                        crate::opts::check_keys(&t, POINT_LIGHT_KEYS, "node:setPointLight")?;
+                        if let Some(c) = t.get::<Option<Table>>("color")? {
+                            let lane = |i: i64| -> mlua::Result<f32> {
+                                Ok(c.get::<Option<f32>>(i)?.unwrap_or(1.0))
+                            };
+                            color = Some([lane(1)?, lane(2)?, lane(3)?]);
+                        }
+                        intensity = t.get::<Option<f32>>("intensity")?;
+                        range = t.get::<Option<f32>>("range")?;
+                    }
+                    // A NaN would sort as neither greater nor less when the
+                    // sixteen are ranked, which is a light that flickers for a
+                    // reason nobody could ever find.
+                    for (name, v) in [("intensity", intensity), ("range", range)] {
+                        if v.is_some_and(|v| v.is_nan()) {
+                            return Err(mlua::Error::runtime(format!(
+                                "setPointLight{{ {name} = }}: not a number"
+                            )));
+                        }
+                    }
+                    q.borrow_mut()
+                        .push((e, crate::RichSet::MatterPointLight { color, intensity, range }));
                     Ok(())
                 })?,
             )?;

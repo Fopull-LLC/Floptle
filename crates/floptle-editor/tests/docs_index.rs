@@ -228,6 +228,88 @@ fn doc_links_resolve() {
     );
 }
 
+/// A **published** page may only link to another published page.
+///
+/// `floptle/0102`: 33 links across the docs site pointed at documents the site
+/// map holds back. The website renders those as plain text — dropping the link
+/// and keeping the words, which is the right call, because a 404 and a bounce
+/// into the repo mid-sentence are both worse. What it leaves is a reader being
+/// told to "see the roadmap" with no roadmap to see.
+///
+/// That is a bug in the docs, and it is one that regrows every time somebody
+/// links a proposal from a guide — which is a natural thing to do, because the
+/// proposal is usually where the reasoning is. So it gets a gate rather than a
+/// one-time sweep.
+///
+/// `doc_links_resolve` above is the other half: that one asks whether the file
+/// EXISTS, this one asks whether the reader can reach it.
+#[test]
+fn published_pages_only_link_to_published_pages() {
+    let root = repo().join("docs");
+    let map = std::fs::read_to_string(root.join("site-map.json")).expect("docs/site-map.json");
+    // The published set is every path-shaped string BEFORE the `internal`
+    // object; everything after it is held back. Path-shaped means no
+    // whitespace, which is what keeps the internal map's REASONS out — they
+    // routinely end in a filename ("a proposal; the shipped guide is
+    // animation.md") and reading those as pages would publish them by accident.
+    let split = map.find("\"internal\"").expect("site-map.json has an `internal` block");
+    let published: Vec<String> = map[..split]
+        .split('"')
+        .filter(|s| s.ends_with(".md") && !s.contains(char::is_whitespace))
+        .map(|s| s.to_owned())
+        .collect();
+    assert!(published.len() > 50, "only {} published pages parsed", published.len());
+
+    let mut unreachable: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for page in &published {
+        let body = std::fs::read_to_string(root.join(page)).unwrap_or_default();
+        let dir = std::path::Path::new(page)
+            .parent()
+            .unwrap_or(std::path::Path::new(""))
+            .to_string_lossy()
+            .into_owned();
+        for target in markdown_links(&body) {
+            if target.starts_with("http") || target.starts_with('#') || target.is_empty() {
+                continue;
+            }
+            let target = target.split('#').next().unwrap_or_default();
+            if target.is_empty() {
+                continue;
+            }
+            checked += 1;
+            // Normalise `../x` by hand: `Path::join` keeps the `..` component,
+            // and the published set is spelled without one.
+            let mut parts: Vec<&str> = Vec::new();
+            for c in dir.split('/').chain(target.split('/')) {
+                match c {
+                    "" | "." => {}
+                    ".." => {
+                        parts.pop();
+                    }
+                    other => parts.push(other),
+                }
+            }
+            let rel = parts.join("/");
+            if !published.contains(&rel) {
+                unreachable.push(format!("{page} → {target}"));
+            }
+        }
+    }
+    assert!(checked > 100, "only {checked} local links found — the parser is broken");
+    unreachable.sort();
+    assert!(
+        unreachable.is_empty(),
+        "{} link(s) on PUBLISHED pages point at documents the site map holds back, so \
+         the reader is promised something they cannot reach:\n  {}\n\nEither publish the \
+         target in docs/site-map.json, point at the shipped guide instead (the `internal` \
+         block names one for most of them), or rewrite the sentence so it does not \
+         promise a document.",
+        unreachable.len(),
+        unreachable.join("\n  ")
+    );
+}
+
 /// The `(target)` of every `[text](target)` in a Markdown body.
 ///
 /// Deliberately skips fenced code blocks — a snippet demonstrating link syntax

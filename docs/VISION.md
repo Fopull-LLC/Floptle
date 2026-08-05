@@ -160,5 +160,5 @@ Floptle becomes a (free, open-source, donation-supported) Fopull LLC product whe
 
 ---
 
-*See [`ROADMAP.md`](ROADMAP.md) for how we get there in phases, and
-[`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit.*
+*See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit, and the
+release notes for what has actually landed.*

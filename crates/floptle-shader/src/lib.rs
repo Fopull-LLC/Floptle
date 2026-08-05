@@ -232,6 +232,59 @@ shader gauge {
         assert_eq!(parse(&printed).unwrap().stage, Some(Stage::Ui));
     }
 
+    /// `floptle/0119`: the inverse trig, so a shader can READ an angle and not
+    /// only produce one. Without `atan2` nothing could work in polar coordinates
+    /// — no radial wipe, no cooldown dial, no swirl, no skyline laid out around
+    /// a horizon — and the reported workaround was a diamond angle whose spacing
+    /// is not proportional to the real one.
+    #[test]
+    fn a_shader_can_read_an_angle() {
+        const DIAL: &str = r#"
+shader dial {
+  stage ui
+  uniform fill: float = 0.25 range(0, 1)
+
+  let p = uv * 2 - 1
+  // The whole point: a coordinate that runs once around, evenly.
+  let az = atan2(p.y, p.x) / 6.2831853 + 0.5
+  // …and wrapping it at something other than 1, which `fract` cannot do.
+  let spokes = mod(az * 12, 1)
+  let tilt = acos(clamp(p.y, -1, 1)) + asin(clamp(p.x, -1, 1)) + atan(p.x)
+  let falloff = exp2(-length(p) * 4) + log2(length(p) + 1)
+  output color = vec4(vec3(step(az, fill) * spokes * falloff + tilt * 0), 1.0)
+}
+"#;
+        let compiled = compile_ui(DIAL).expect("a polar shader compiles");
+        let prelude = format!("{}{}", transpile::UI_TEST_PRELUDE, transpile::UI_FIELD_SHIM);
+        transpile::validate(&prelude, &compiled.chunk)
+            .unwrap_or_else(|e| panic!("naga rejects: {} in:\n{}", e.message, compiled.chunk));
+        assert!(compiled.chunk.contains("atan2("), "atan2 did not reach the WGSL");
+        // `mod` is FLOORED, not WGSL's `%` — `%` truncates toward zero and so
+        // returns a negative remainder for negative x, which is half of every
+        // angle atan2 hands back.
+        assert!(compiled.chunk.contains("flsl_mod1("), "mod must use the floored support fn");
+        assert!(
+            stdlib::SUPPORT_WGSL.contains("fn flsl_mod1"),
+            "the support fn the emitter names must exist"
+        );
+        // …and `mod` is a call, not a keyword the lexer swallows.
+        assert!(parse(DIAL).is_ok(), "the parser must accept `mod` as a name");
+    }
+
+    /// Every arity of `mod` the generic signature admits has a support function
+    /// behind it. `FnByLanes` picks the name from the resolved type, so a
+    /// missing one is a WGSL compile error in somebody's shader rather than
+    /// anything Rust would catch.
+    #[test]
+    fn mod_has_a_support_fn_at_every_width() {
+        for lanes in 1..=4 {
+            assert!(
+                stdlib::SUPPORT_WGSL.contains(&format!("fn flsl_mod{lanes}(")),
+                "no flsl_mod{lanes}"
+            );
+        }
+    }
+
     /// A Ui-stage shader can sample the ELEMENT'S OWN image via `baseTexture`
     /// (bound at group(1) like a material texture) — both with an explicit uv and
     /// with the default rect UV — and the result validates against the UI seam.

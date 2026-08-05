@@ -46,6 +46,16 @@ pub struct AudioSystem {
 }
 
 impl AudioSystem {
+    /// Voices this frame is mixing: every `AudioSource` node playing, plus every
+    /// script one-shot still running (`floptle/0115`).
+    ///
+    /// The preview voice is deliberately excluded — it only exists outside Play,
+    /// and a number a game reads to check its own budget should not count the
+    /// editor auditioning a file.
+    pub fn live_voices(&self) -> usize {
+        self.source_voices.len() + self.sounds.len()
+    }
+
     /// The engine handle, opening the output device on first use. `None` on
     /// machines with no audio output — every caller degrades to silence.
     pub fn engine(&mut self) -> Option<&mut AudioEngine> {

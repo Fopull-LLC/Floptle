@@ -1257,6 +1257,8 @@ impl EditorTabViewer<'_> {
         }
         let cmd = &mut *self.cmd;
         let world = &mut *self.world;
+        // Read before `self` is split up below (`floptle/0110`).
+        let playing = self.playing;
         let bone_names = self.bone_names;
         // Snapshot the selected object/bone before `world` reborrows `self` — the
         // Objects & Rig lists highlight it and route clicks through `cmd.select_bone`.
@@ -2323,6 +2325,29 @@ impl EditorTabViewer<'_> {
 
                 // ===== Transform (always present) =====
                 ui.separator();
+                // `floptle/0110`: Stop reverts the world, so a transform typed
+                // here while playing is thrown away — `push_history` no-ops
+                // during Play, which also means it is not undoable and never
+                // marks the scene unsaved. Nothing used to say so.
+                //
+                // The way out already existed and was simply never pointed at:
+                // the header's … menu copies the transform, and the component
+                // clipboard survives Stop — so "nudge it while watching, then
+                // keep the value" is Copy values → Stop → Paste values. Saying
+                // that here is worth more than a warning would be, because it
+                // ends with the user keeping their work.
+                if playing {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 150, 140),
+                        "▶ discarded on Stop — … Copy values, Stop, then Paste to keep it",
+                    )
+                    .on_hover_text(
+                        "Play reverts the whole world when you Stop. The … menu on \
+                         this header copies the Transform to the component clipboard, \
+                         which survives Stop — paste it onto the same node afterwards \
+                         and it is a real, undoable, saveable edit.",
+                    );
+                }
                 {
                     let (copy, paste, _) = component_header(
                         ui,

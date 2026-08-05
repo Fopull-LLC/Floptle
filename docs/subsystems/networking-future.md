@@ -3,13 +3,13 @@
 > **Forward-looking design, not a launch requirement.** `floptle-net` is a
 > boundary stub today; this doc records the target so the engine keeps the right
 > seams. See [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §10, the deterministic sim
-> in [`./physics.md`](./physics.md), and [`../ROADMAP.md`](../ROADMAP.md) "Later".
+> in [`./physics.md`](./physics.md).
 >
 > **⚠ Scope update (2026-07-04):** the **technical foundation below stands** (roles,
 > replication, the `Transport` trait, authoritative dedicated servers), but the
 > "*your server, your infra — not a platform*" stance in §7 has been **superseded by
 > [ADR-0022 — Networking & Floptle Cloud](../decisions/0022-networking-and-cloud.md)**
-> and the [networking proposal](../networking-proposal.md). Self-hosting stays
+> and [`../multiplayer.md`](../multiplayer.md), the shipped guide. Self-hosting stays
 > first-class *and* Fopull now offers an optional managed service (relay,
 > matchmaking, dedicated hosting) as an open-source-friendly way to fund the engine.
 > Read §7's "out of scope: matchmaking / hosted backend" as **no longer current.**
@@ -129,7 +129,7 @@ No commitment now — only the trait seam exists.
 
 ## 5. The server build & deployment
 
-A **server build** is the headless path through `floptle-runtime` ([ROADMAP](../ROADMAP.md)
+A **server build** is the headless path through `floptle-runtime` (
 Phase 9 export): no window, no renderer, no editor — just the deterministic sim,
 scripts, physics, and the net layer in `NetRole::Server`. The developer **defines
 the server's behavior** (which scenes, rules, tick rate, max peers) in
@@ -163,7 +163,7 @@ Sequenced even further out:
 
 ## 7. Scope & sequencing
 
-This is **after** the single-player engine is solid ([ROADMAP](../ROADMAP.md)
+This is **after** the single-player engine is solid (
 "Later"). Until then, `floptle-net` ships as a **boundary stub** that holds the
 seam — gameplay compiles and runs single-player exactly as if networking didn't
 exist, and the deterministic, serializable foundation quietly keeps the door open.

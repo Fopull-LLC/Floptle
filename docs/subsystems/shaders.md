@@ -9,9 +9,8 @@
 > [`./renderer.md`](./renderer.md), and materials in
 > [`./materials-and-textures.md`](./materials-and-textures.md).
 
-> **STATUS (2026-07-15): text core SHIPPED — phases 1–4 of
-> [`../shader-system-proposal.md`](../shader-system-proposal.md)** (which
-> supersedes this pre-spec's integration details). What's live:
+> **STATUS (2026-07-15): text core SHIPPED — phases 1–4 of the shader plan**,
+> which supersedes this pre-spec's integration details. What's live:
 > `floptle-shader` (IR arena + checker, round-trippable `.flsl` parse/print,
 > WGSL transpile, naga validation with `.flsl` line mapping, stdlib v1);
 > **Fragment stage** — `Material.shader` names a `.flsl`, one pipeline per
@@ -205,7 +204,49 @@ Start small (the ADR-0007 subset), grow over time. Categories, with examples:
   options** (repeat/clamp/flip/count) so "drag on and tile" needs no shader edit;
   see [`./materials-and-textures.md`](./materials-and-textures.md).
 
-### 4.1 Hooks into the raymarch pass
+### 4.1 Angles, and working in polar coordinates
+
+`atan2(y, x)` gives the angle of a vector over the **full** circle, in radians
+from -π to π. It is the coordinate you want for anything that goes *around*
+something: a radial wipe, a cooldown dial, a radar sweep, a swirl, a skyline
+laid out around the horizon, hand-rolled equirectangular sampling.
+
+```flsl
+let p = uv * 2 - 1
+let az = atan2(p.y, p.x) / 6.2831853 + 0.5   // 0..1, once around
+let sweep = step(az, fill)                    // a cooldown dial
+```
+
+`atan`, `asin` and `acos` are there too. `atan` covers only half the circle —
+reach for `atan2` unless you know you want that.
+
+**`mod(x, y)` wraps at any period**, where `fract` only ever wraps at 1. It is
+*floored*, so a negative `x` wraps to a positive result — which matters because
+half the angles `atan2` hands back are negative, and that is precisely when you
+want to wrap one.
+
+`exp2` and `log2` round out the set.
+
+### 4.2 What space a `color` uniform is in
+
+`uniform tint: color = #0B0A16` becomes `(0.043, 0.039, 0.086)` — **the raw hex
+bytes over 255, with no sRGB decode.** The frame buffer is sRGB, so the encode
+happens on the way *out*, and 0.043 leaves the shader as roughly 0.22 on screen.
+
+The practical consequence: **dark colours render lighter than the swatch you
+picked.** A very dark violet paints as a mid grey-brown, around five times
+lighter than it looks in the Inspector. The fix in a shader is to square the
+value (or scale it down by hand), and the numbers in the `.flsl` will not match
+the hex you started from.
+
+This is not specific to shaders — it is what every colour in the engine does,
+including a Material's and a UI element's, so a shader's `#0B0A16` and a
+material's `#0B0A16` agree with each other. Making them all correct is a
+colour-management change across the whole engine, not a shader one, and it would
+shift the look of every project that exists; it is on the list, deliberately not
+done quietly.
+
+### 4.3 Hooks into the raymarch pass
 
 A `Raymarch` output node packages an `Sdf` graph as the `map()` function the
 renderer marches, plus optional shade/normal hooks. This is how a shader authored

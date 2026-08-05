@@ -16,7 +16,7 @@ each group, and meant to be searched.
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 24
 - [node — transform & body fields](#node--transform--body-fields) — 36
-- [node — methods & handles](#node--methods--handles) — 18
+- [node — methods & handles](#node--methods--handles) — 21
 - [vectors, directions & easing](#vectors-directions--easing) — 47
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
@@ -419,6 +419,10 @@ node:setCamera{fovY=1.0, active=true, target="minimap", width=256, height=256, h
 
 node:setCelestial{mu=…, bodyRadius=…, soi=0, parent="Sun", a=…, e=…, i=…, m0=…, atmoColor={r,g,b}, atmoHeight=…, atmoDensity=…, clouds=…, luminosity=…, starColor={r,g,b}, occluderRadius=…} — set (creating if absent) the node's CelestialBody. camelCase fields; colors take {r,g,b}. occluderRadius = occlusion culling: the solid-core radius geometry never pierces — terrain chunks fully behind it skip their draw calls (keep it below the deepest cave/dig; 0 = off).
 
+### `node:setLighting2D`
+
+node:setLighting2D{mode="2d", layers={"Terrain","Characters"}, blocks="on"} — 2D lighting, from a script. `mode` is auto/2d/3d and says whether this node is on the 2D lighting path at all; auto decides from the scene and is never re-decided once you say otherwise. On a LIGHT, `layers` is the sorting layers it reaches — empty or absent means all of them, which is how you keep a torch off the background. On a RECEIVER, `blocks` is auto/on/off for whether it occludes light. A bad spelling names the accepted set rather than silently meaning auto.
+
 ### `node:setMaterial`
 
 node:setMaterial{color={r,g,b}, emissive={r,g,b}, emissiveStrength=…, unlit=true, texture="…", alpha=…, …} — set (creating if absent) the node's Material. texture also takes a live render target: "rt:<name>".
@@ -427,6 +431,10 @@ node:setMaterial{color={r,g,b}, emissive={r,g,b}, emissiveStrength=…, unlit=tr
 -- setup-time; use setShaderParam for per-frame values
 node:setMaterial{ unlit = true, emissive = {1, 0.45, 0.15}, emissiveStrength = 2.5 }
 ```
+
+### `node:setPointLight`
+
+node:setPointLight{color={1,0.8,0.5}, intensity=2, range=8} — make this node a POINT LIGHT, or retune one. Every field is optional and keeps what the node had. Sixteen lights reach the shader at once; past that the ones contributing most at the camera win, and a light at intensity=0 gives its slot back — which is how you pool them. perf.counts().lights and .lightsDropped say where you stand.
 
 ### `node:setPrimitive`
 
@@ -440,6 +448,10 @@ node:setShaderParam("glow", 2.5) / node:setShaderParam("nose", x, y, z) — driv
 -- a live uniform write: safe every tick, never recompiles
 node:setShaderParam("cell", math.floor(time * 8) % 16)
 ```
+
+### `node:setSorting`
+
+node:setSorting{layer="Terrain", order=3} — where this 2D node draws in the stack. `layer` is one of the project's sorting layers by name; `order` places it within that layer, higher being nearer the camera. Both optional and both keep what the node had. This is how a character steps behind a counter, or a picked-up card lifts above the hand.
 
 ### `node:setTerrain`
 
@@ -1987,11 +1999,11 @@ perf.accountedMs() — the buckets added up. Called 'accounted' and not 'total' 
 
 ### `perf.buckets`
 
-perf.buckets() → the bucket names, in frame order: scripts, physics, terrain, scatter, particles, animation, ui, render. Iterate this rather than keeping your own list, which could go stale.
+perf.buckets() → the bucket names, in frame order: scripts, physics, terrain, scatter, particles, audio, animation, ui, render. Iterate this rather than keeping your own list, which could go stale.
 
 ### `perf.counts`
 
-perf.counts() → { nodes=, culled=, instances=, draws=, chunks=, props=, particles= }. Readable even while collection is off, because counts are free to keep — and three of the four 'the engine is slow' reports this API exists for were answerable from one count alone (a scatter field asking for 117,000 props was one of them).
+perf.counts() → { nodes=, culled=, instances=, draws=, chunks=, props=, particles=, effects=, effectsDropped=, lights=, lightsDropped=, voices= }. Readable even while collection is off, because counts are free to keep — and three of the four 'the engine is slow' reports this API exists for were answerable from one count alone (a scatter field asking for 117,000 props was one of them). The *Dropped pair is what a ceiling refused this frame: nonzero means the engine is cutting your look, which you should hear from a number rather than from a screenshot.
 
 ### `perf.enable`
 
@@ -2260,7 +2272,7 @@ Sheet rows.
 
 ### `node:getcomponent`
 
-node:getcomponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z), PointLight (intensity, range, r/g/b), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace). e.g. node:getcomponent("RigidBody").friction = 0.02 for ice.
+node:getcomponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z), PointLight (intensity, range, r/g/b), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace), PostProcess (enabled, bloom, bloomThreshold, bloomIntensity, vignette, vignetteStrength, vignetteRadius, aoStrength, aoRadius, posterizeBands, posterizeDither — a cutscene pushing a vignette). e.g. node:getcomponent("RigidBody").friction = 0.02 for ice.
 
 ```lua
 local rb = node:getcomponent("RigidBody")

@@ -8,7 +8,9 @@ radio-group tab strip, toggle chips, a slider, a scroll view with a scrollbar,
 a list built by a repeater, drag & drop, tooltips, and a panel whose entire
 contents are described in Lua and built from a table.
 
-![the demo](ui-demo.png)
+*(The screenshot lives beside this page in the repo as `ui-demo.png`; the docs
+site carries text only. Run the probe below to regenerate it, or just open the
+demo scene — it is the same thing, live.)*
 
 ## What to try
 

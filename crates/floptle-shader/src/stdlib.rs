@@ -94,8 +94,21 @@ pub static OPS: &[OpSpec] = &[
     OpSpec { name: "sin", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("sin"), doc: "Sine (radians).", category: "math" },
     OpSpec { name: "cos", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("cos"), doc: "Cosine (radians).", category: "math" },
     OpSpec { name: "tan", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("tan"), doc: "Tangent (radians).", category: "math" },
+    // The inverses (`floptle/0119`). Without them a shader could produce an
+    // angle and never read one, which rules out every polar effect there is:
+    // radial wipes, cooldown dials, swirls, anything laid out around a horizon.
+    // `atan2` is the one that matters; the rest are free while the door is open.
+    OpSpec { name: "atan2", inputs: &[req("y", G), req("x", G)], output: G, stages: ANY, emit: Emit::Fn("atan2"), doc: "Angle of the vector (x, y), in radians, over the full circle (-π..π).", category: "math" },
+    OpSpec { name: "atan", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("atan"), doc: "Arc tangent (radians). Half the circle only — for a full sweep use atan2.", category: "math" },
+    OpSpec { name: "asin", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("asin"), doc: "Arc sine (radians). x outside [-1, 1] is undefined.", category: "math" },
+    OpSpec { name: "acos", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("acos"), doc: "Arc cosine (radians). x outside [-1, 1] is undefined.", category: "math" },
     OpSpec { name: "exp", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("exp"), doc: "e^x.", category: "math" },
     OpSpec { name: "log", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("log"), doc: "Natural log.", category: "math" },
+    OpSpec { name: "exp2", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("exp2"), doc: "2^x.", category: "math" },
+    OpSpec { name: "log2", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("log2"), doc: "Base-2 log.", category: "math" },
+    // `fract` only ever wraps at 1 and `%` is not in the lexer, so wrapping at
+    // anything else had no spelling at all.
+    OpSpec { name: "mod", inputs: &[req("x", G), req("y", G)], output: G, stages: ANY, emit: Emit::FnByLanes("flsl_mod"), doc: "x wrapped into [0, y). Like fract but at any period, and correct for negative x.", category: "math" },
     OpSpec { name: "pow", inputs: &[req("x", G), req("y", G)], output: G, stages: ANY, emit: Emit::Fn("pow"), doc: "x^y.", category: "math" },
     OpSpec { name: "min", inputs: &[req("a", G), req("b", G)], output: G, stages: ANY, emit: Emit::Fn("min"), doc: "Per-component minimum.", category: "math" },
     OpSpec { name: "max", inputs: &[req("a", G), req("b", G)], output: G, stages: ANY, emit: Emit::Fn("max"), doc: "Per-component maximum.", category: "math" },
@@ -194,6 +207,15 @@ pub const PALETTE_NAMES: &[&str] = &["sunset", "bruise", "neon", "ocean", "ember
 /// pass module the generated code is concatenated onto.
 pub const SUPPORT_WGSL: &str = r#"
 // ---- floptle-shader stdlib support (generated modules only) ----------------
+
+// Floored modulo (`floptle/0119`). NOT WGSL's `%`, which truncates toward zero
+// and so returns a NEGATIVE remainder for negative x — the wrong half of the
+// answer for every wrapping use there is. An angle from `atan2` is negative for
+// half the circle, which is exactly when you reach for this.
+fn flsl_mod1(x: f32, y: f32) -> f32 { return x - y * floor(x / y); }
+fn flsl_mod2(x: vec2<f32>, y: vec2<f32>) -> vec2<f32> { return x - y * floor(x / y); }
+fn flsl_mod3(x: vec3<f32>, y: vec3<f32>) -> vec3<f32> { return x - y * floor(x / y); }
+fn flsl_mod4(x: vec4<f32>, y: vec4<f32>) -> vec4<f32> { return x - y * floor(x / y); }
 
 // Integer-lattice hashes (PCG-style bit mixing). The old float hashes
 // (`fract(p * 456.21)`…) silently quantized once the product outgrew f32

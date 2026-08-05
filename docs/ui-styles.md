@@ -4,8 +4,8 @@ How to stop typing colours onto elements one at a time.
 
 This covers the style system (`assets/ui/*.uistyle.ron`) and the token system
 (`assets/ui/*.tokens.ron`). For the element vocabulary itself — shapes,
-gradients, 9-slice, text effects — see the Inspector's UI Element section; for
-the design rationale see [ui-system-2-proposal.md](ui-system-2-proposal.md).
+gradients, 9-slice, text effects — see the Inspector's UI Element section, and
+[ui-tab.md](ui-tab.md) for the authoring canvas.
 
 **The engine ships no styles, no tokens, and no theme.** Everything here is
 opt-in and lives in your project. A project with no `.uistyle.ron` behaves

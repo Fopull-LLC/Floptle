@@ -988,7 +988,27 @@ impl Editor {
         let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
         let sun = crate::shading::sun_vec(&self.world, &light_node, cam.world_position);
         let li = light_node.intensity;
-        let (pl_count, pl_pos, pl_col) = collect_point_lights(&self.world, cam.world_position);
+        // Whether `Auto` reads as 2D in this scene, asked once rather than per node.
+        let flat_camera = self.world.query::<Matter>().any(|(ce, m)| {
+            matches!(m, Matter::Camera { active: true, ortho: true, .. })
+                && !floptle_core::is_disabled(&self.world, ce)
+        });
+        // One split serves both: the 3D slots the raster globals want, and the
+        // count of what the sixteen-slot cap refused (`floptle/0116`). Asked here
+        // rather than beside the counts below so the scene's lights are walked
+        // once a frame instead of twice.
+        let lights_split = crate::shading::split_point_lights(
+            &self.world,
+            cam.world_position,
+            &self.project.sorting_order(),
+            flat_camera,
+        );
+        let (pl_count, pl_pos, pl_col) = {
+            let (n, pos, col, _) = lights_split.three_d;
+            ([n as f32, 0.0, 0.0, 0.0], pos, col)
+        };
+        self.light_counts =
+            (lights_split.three_d.0 + lights_split.two_d.0, lights_split.dropped);
         // Sun shadows (Lighting node knobs) + the collider-proxy occluders that let
         // raster meshes cast — both ride the raymarch globals, which the raster pass
         // reads too through the shared field bind group.
@@ -1056,11 +1076,6 @@ impl Editor {
         // Every node's sorting-layer Z, resolved before the draw loop borrows
         // `raster` mutably. Empty for a scene that uses no sorting layers, which
         // is every scene until one opts in.
-        // Whether `Auto` reads as 2D in this scene, asked once rather than per node.
-        let flat_camera = self.world.query::<Matter>().any(|(ce, m)| {
-            matches!(m, Matter::Camera { active: true, ortho: true, .. })
-                && !floptle_core::is_disabled(&self.world, ce)
-        });
         let sort_z: std::collections::HashMap<Entity, f64> = self
             .world
             .query::<floptle_core::Sorting>()
@@ -1474,6 +1489,13 @@ impl Editor {
             let chunks: usize =
                 self.terrain_render.values().map(|r| r.slots.len()).sum();
             let particles = self.vfx.live_particles();
+            // `floptle/0114` and `floptle/0116`: how many one-shots and lights
+            // are live, and how many of each a ceiling refused. A cap nobody can
+            // see is the thing both cards are actually about — `effects` is what
+            // it costs, `effectsDropped` is what it cut.
+            let (effects, effects_dropped) = self.vfx.detached_counts();
+            let (lights, lights_dropped) = self.light_counts;
+            let voices = self.audio.live_voices();
             let mut prof = profile.borrow_mut();
             prof.set_counts(floptle_core::profile::Counts {
                 nodes: ents.len(),
@@ -1483,6 +1505,11 @@ impl Editor {
                 chunks,
                 props: scatter_props,
                 particles,
+                effects,
+                effects_dropped,
+                lights,
+                lights_dropped,
+                voices,
             });
             prof.record(floptle_core::profile::Bucket::Render, gather_t.ms());
         }
@@ -5491,6 +5518,12 @@ impl Editor {
             // Particles tick last: emitter node transforms are final for the frame
             // (scripts → animation → physics → attachments → particles). Apply any
             // play/stop/restart a script queued this frame first, so it lands now.
+            // `floptle/0115`: everything from here to the end of `advance` is the
+            // particles bucket. It had no producer at all, so `perf.ms("particles")`
+            // answered a confident 0.0 while collection was ON — which reads as
+            // "particles are free", the one answer a profiler must never give by
+            // accident.
+            let vfx_t = floptle_core::profile::Span::new();
             let vfx_cmds = self.script_host.take_vfx_commands();
             self.vfx.apply_script_commands(&self.world, vfx_cmds);
             // Fire-and-forget one-shots a script requested this frame (spawnEffect).
@@ -5506,8 +5539,10 @@ impl Editor {
                 origin: s.world.origin,
             });
             self.vfx.advance(&self.world, sdt, vfx_grav);
+            self.profile_record(floptle_core::profile::Bucket::Particles, vfx_t.ms());
             // Audio: apply queued Lua commands, then tick voices against the
             // final node transforms (same ordering rationale as particles).
+            let audio_t = floptle_core::profile::Span::new();
             let audio_cmds = self.script_host.take_audio_commands();
             let root = self.project_root.clone();
             if !audio_cmds.is_empty() {
@@ -5549,6 +5584,9 @@ impl Editor {
                 self.world.despawn(e);
                 self.selection.retain(|s| *s != e);
             }
+            // `floptle/0115`: audio had no bucket at all, so a game whose mixer
+            // was the expensive thing could profile every frame and never see it.
+            self.profile_record(floptle_core::profile::Bucket::Audio, audio_t.ms());
         } else if !self.script_errors.is_empty() {
             self.script_errors.clear();
         }

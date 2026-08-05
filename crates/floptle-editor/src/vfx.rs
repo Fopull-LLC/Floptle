@@ -82,7 +82,10 @@ pub struct DetachedEffect {
 }
 
 /// Everything particles the editor owns. One field on `Editor`.
-#[derive(Default)]
+///
+/// `Default` is written out rather than derived: `max_detached` deriving to 0
+/// would silently refuse every one-shot in the engine, and a ceiling whose
+/// default is "none allowed" is a worse bug than the missing ceiling was.
 pub struct VfxSystem {
     /// `*.vfx.ron` effect assets: (key, doc + compiled), sorted by key.
     pub effects: Vec<(String, VfxAsset)>,
@@ -90,12 +93,47 @@ pub struct VfxSystem {
     /// spawned from (an asset swap mid-play rebuilds the instance).
     pub instances: HashMap<Entity, (String, EffectInstance)>,
     /// Fire-and-forget one-shots from `spawnEffect(...)` — ticked + reaped each frame.
-    pub detached: Vec<DetachedEffect>,
+    ///
+    /// A deque rather than a `Vec` so reaching [`Self::max_detached`] can drop the
+    /// OLDEST in O(1). A `Vec::remove(0)` would memmove the whole pool on every
+    /// over-budget spawn, which is precisely the frame that could least afford it.
+    pub detached: std::collections::VecDeque<DetachedEffect>,
+    /// The ceiling on live one-shots (`floptle/0114`).
+    ///
+    /// `spawnEffect` had none, so the live particle count was `spawn rate ×
+    /// lifetime × particles per effect` — entirely the caller's to decide, with
+    /// no way to ask what it currently costs. The reported case is the shape
+    /// that makes this dangerous rather than merely unbounded: a per-FRAME spawn
+    /// budget fires 60·N/s on one machine and 144·N/s on another, so the same
+    /// game costs 2.4× more on a better monitor and the engine absorbs it
+    /// silently until the frame time moves.
+    ///
+    /// 256 because the reported workload sat at ~265 and that was already a
+    /// visible problem. Public, so a game that genuinely wants more says so.
+    pub max_detached: usize,
+    /// One-shots refused this frame because the pool was full. Reported through
+    /// `perf.counts().effectsDropped` — a cap that silently eats the look is the
+    /// failure shape this engine keeps paying for.
+    detached_dropped: usize,
     /// Monotonic spawn counter — the detached seed ordinal, so repeats at a fixed
     /// point don't march in lockstep (the live pool length would collide as it reaps).
     detached_seq: u32,
     /// The Particles tab's edit-mode preview (drawn only outside Play).
     pub preview: Option<VfxPreview>,
+}
+
+impl Default for VfxSystem {
+    fn default() -> Self {
+        Self {
+            effects: Vec::new(),
+            instances: HashMap::new(),
+            detached: std::collections::VecDeque::new(),
+            max_detached: 256,
+            detached_dropped: 0,
+            detached_seq: 0,
+            preview: None,
+        }
+    }
 }
 
 impl VfxSystem {
@@ -215,8 +253,24 @@ impl VfxSystem {
             let seed = self.detached_seq.wrapping_add(
                 bits(pos.x) ^ bits(pos.y).rotate_left(11) ^ bits(pos.z).rotate_left(22),
             );
-            self.detached.push(DetachedEffect { inst: EffectInstance::new(fx, seed), pos, vel });
+            // The ceiling (`floptle/0114`). Drop the OLDEST rather than refuse
+            // the newest: the effect just asked for is the one the player is
+            // looking at — the impact they caused, the shot they fired — and the
+            // one at the front of the queue is already most of the way through
+            // fading out. Refusing the new one would make a busy fight look
+            // frozen while stale puffs finished.
+            while self.detached.len() >= self.max_detached.max(1) {
+                self.detached.pop_front();
+                self.detached_dropped = self.detached_dropped.saturating_add(1);
+            }
+            self.detached.push_back(DetachedEffect { inst: EffectInstance::new(fx, seed), pos, vel });
         }
+    }
+
+    /// Live one-shot effects, and how many have been dropped at the ceiling
+    /// since the counter was last taken (`floptle/0114`).
+    pub fn detached_counts(&mut self) -> (usize, usize) {
+        (self.detached.len(), std::mem::take(&mut self.detached_dropped))
     }
 
     /// Spawn instances for every `play_on_start` particle system in the scene.

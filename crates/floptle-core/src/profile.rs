@@ -57,6 +57,8 @@ pub enum Bucket {
     Scatter,
     /// Particle simulation and the batches it produces.
     Particles,
+    /// The audio mixer: voice updates, spatialisation and the effect chain.
+    Audio,
     /// Skeletal animation: clip sampling, blending, pose composition, skinning.
     Animation,
     /// Game UI: layout solve, hit-testing, the element draw list.
@@ -69,12 +71,13 @@ pub enum Bucket {
 impl Bucket {
     /// Every bucket, in the order a readout should list them — roughly the order
     /// of a frame.
-    pub const ALL: [Bucket; 8] = [
+    pub const ALL: [Bucket; 9] = [
         Bucket::Scripts,
         Bucket::Physics,
         Bucket::Terrain,
         Bucket::Scatter,
         Bucket::Particles,
+        Bucket::Audio,
         Bucket::Animation,
         Bucket::Ui,
         Bucket::Render,
@@ -91,6 +94,7 @@ impl Bucket {
             Bucket::Terrain => "terrain",
             Bucket::Scatter => "scatter",
             Bucket::Particles => "particles",
+            Bucket::Audio => "audio",
             Bucket::Animation => "animation",
             Bucket::Ui => "ui",
             Bucket::Render => "render",
@@ -174,6 +178,21 @@ pub struct Counts {
     pub props: usize,
     /// Live particles across every effect.
     pub particles: usize,
+    /// Live one-shot particle effects — `spawnEffect` instances that have not
+    /// finished. `particles` above is what they cost; this is how many asked
+    /// (`floptle/0114`).
+    pub effects: usize,
+    /// …and how many a frame refused because the ceiling was already reached.
+    /// Nonzero means the look is being cut, so it cannot be a number nobody can
+    /// see.
+    pub effects_dropped: usize,
+    /// Placeable lights the shader was given, of the sixteen slots it has.
+    pub lights: usize,
+    /// …and how many were ranked out because more than sixteen qualified. A cap
+    /// that says so is a good cap (`floptle/0116`).
+    pub lights_dropped: usize,
+    /// Audio voices mixing.
+    pub voices: usize,
 }
 
 /// A frame's cost, per bucket and per script.

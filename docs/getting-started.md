@@ -5,7 +5,9 @@ first-person. It ties together the editor, terrain, physics, and scripting. For 
 full reference on each piece see [scripting.md](./scripting.md) and
 [physics.md](./physics.md).
 
-> **Would rather build a whole small game?** [tutorials/](tutorials/README.md) walks
+> **Would rather build a whole small game?** The tutorials —
+> [first steps](tutorials/first-steps.md), a [3D platformer](tutorials/platformer.md),
+> a [top-down RPG](tutorials/topdown.md), [Flappy](tutorials/flappy.md) — walk
 > you through a 3D platformer, a top-down RPG or Flappy from an empty project — and
 > the editor's **🎓 Learn** tab has the same steps, ticking each one off as your
 > project comes to match it. Start there if you are new to game engines; this page
@@ -19,6 +21,20 @@ full reference on each piece see [scripting.md](./scripting.md) and
   input runs. Press **F1** to Play / Stop, **F2** to pause.
 - **Hierarchy / Inspector / Assets / Scripting** dock panels.
 - Top-right of the viewport: a **◈ Gizmos** toggle hides every overlay for a clean view.
+
+> **Stop reverts the world. Edits made during Play are not saved.**
+>
+> Play runs your game on a copy: moving a node, re-parenting one, or typing a
+> number into the Inspector while playing all work, and all vanish the moment you
+> Stop. They are not undoable and they never mark the scene unsaved, so Ctrl+S
+> has nothing to write. A red **▶ PLAY** banner sits across the top of the
+> viewport for the whole session as the reminder.
+>
+> That is on purpose — nudging a camera while watching a cutscene run is how you
+> find the framing. To **keep** a value you found that way: open the **…** menu
+> on the Inspector's Transform header, pick **Copy values**, Stop, then **Paste
+> values** back onto the same node. The component clipboard survives Stop, so it
+> lands as a real edit you can undo and save.
 
 ## 2. Sculpt some ground
 

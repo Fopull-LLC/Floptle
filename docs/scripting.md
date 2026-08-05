@@ -2385,7 +2385,8 @@ the decision you make is made against your opponent's exact state *this frame*.
 `Rollback (every peer)` and every machine simulates that node, every tick, from
 the session's per-tick inputs. Nothing about a hit ever crosses the wire — only
 inputs do — so hit resolution, hitstop and meter agree because the *simulation*
-agrees. Full design: [`rollback-netcode-design.md`](rollback-netcode-design.md).
+agrees. Why it works this way:
+[the rollback decision record](decisions/0025-rollback-netcode.md).
 
 ### The contract: two hooks
 
