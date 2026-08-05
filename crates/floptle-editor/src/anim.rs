@@ -1709,6 +1709,67 @@ mod tests {
     /// CPU skinning: at the bind pose the deform is the identity (no garble), and moving
     /// a bone translates the vertices weighted to it while others stay put — a two-joint
     /// blend interpolates. This is the math that makes a vertex-skinned mesh (Ty) animate.
+    /// The CPU skinning cost, at a stated character count — the "before" number
+    /// for moving this to the GPU (`floptle/0080`).
+    ///
+    /// Ignored by default because it is a measurement, not a guard: it prints a
+    /// duration, and a duration on a shared runner is a coin flip. Run it when
+    /// you are about to change this:
+    ///
+    /// ```text
+    /// cargo test -p floptle-editor --bin floptle cpu_skinning_cost -- --ignored --nocapture
+    /// ```
+    ///
+    /// What it does NOT measure is the other half of the cost: every skinned
+    /// entity's deformed vertices are re-uploaded to its own vertex buffer every
+    /// frame, which is bandwidth rather than arithmetic. A GPU path removes both,
+    /// and the upload is the half that scales with vertex count rather than with
+    /// core count.
+    #[test]
+    #[ignore = "a measurement, not a guard — see the doc comment"]
+    fn cpu_skinning_cost_per_character() {
+        let v = |i: usize| floptle_render::Vertex {
+            pos: [i as f32 * 0.01, (i % 7) as f32, (i % 13) as f32],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.0, 0.0],
+        };
+        // A mid-detail game character: ~8k vertices over a 24-joint skeleton.
+        const VERTS: usize = 8_000;
+        const JOINTS: usize = 24;
+        let part = SkinnedPart {
+            base: (0..VERTS).map(v).collect(),
+            joints: (0..VERTS)
+                .map(|i| [(i % JOINTS) as u16, ((i + 1) % JOINTS) as u16, 0, 0])
+                .collect(),
+            weights: (0..VERTS).map(|_| [0.6, 0.4, 0.0, 0.0]).collect(),
+            joint_nodes: (0..JOINTS).collect(),
+            inverse_bind: (0..JOINTS).map(|_| Mat4::IDENTITY).collect(),
+        };
+        let pose: Vec<Mat4> = (0..JOINTS)
+            .map(|j| Mat4::from_translation(Vec3::new(0.0, j as f32 * 0.1, 0.0)))
+            .collect();
+        let mut out = Vec::new();
+        cpu_skin_part(&part, 0, &pose, &mut out); // warm
+        let mut best = std::time::Duration::MAX;
+        for _ in 0..7 {
+            let t = std::time::Instant::now();
+            cpu_skin_part(&part, 0, &pose, &mut out);
+            best = best.min(t.elapsed());
+        }
+        let per = best.as_secs_f64() * 1000.0;
+        println!(
+            "CPU skinning: {VERTS} verts / {JOINTS} joints = {per:.3} ms per character per frame\n\
+             \t 10 characters = {:.2} ms/frame\n\
+             \t 50 characters = {:.2} ms/frame  (a 16.6 ms frame is {:.0}% gone)\n\
+             \t100 characters = {:.2} ms/frame",
+            per * 10.0,
+            per * 50.0,
+            per * 50.0 / 16.6 * 100.0,
+            per * 100.0,
+        );
+        assert!(!out.is_empty());
+    }
+
     #[test]
     fn cpu_skin_bind_is_identity_and_bones_deform() {
         let v = |p: [f32; 3]| floptle_render::Vertex { pos: p, normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0] };
