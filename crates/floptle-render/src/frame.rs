@@ -20,6 +20,23 @@ pub enum Projection {
     Orthographic { height: f32, near: f32, far: f32 },
 }
 
+/// Half the depth range an orthographic camera spans, in world units: its box
+/// runs from `-ORTHO_DEPTH` to `+ORTHO_DEPTH` about the eye.
+///
+/// **An orthographic near plane belongs BEHIND the camera.** The projection does
+/// not divide by `w`, so a negative near is ordinary rather than degenerate —
+/// and it is what a flat game needs, because a flat game puts its art on one
+/// plane and its camera on that plane. A near plane in front of the eye slices
+/// that layer away entirely, which reads as "my tilemap does not render" in
+/// whichever view happens not to be pulled back.
+///
+/// Symmetric about the eye, so two views of the same scene cannot disagree about
+/// what is in it. 10,000 each way is far more room than a flat game uses and
+/// still leaves a 24-bit depth buffer about a millimetre of resolution; deriving
+/// the range from a perspective camera's `far` (300 km) would spend all of that
+/// precision on emptiness.
+pub const ORTHO_DEPTH: f32 = 10_000.0;
+
 impl Projection {
     pub fn matrix(&self, aspect: f32) -> Mat4 {
         match *self {
@@ -40,9 +57,20 @@ impl Projection {
     /// copies of `if ortho { … } else { … }` is how a game ends up orthographic
     /// in Play and perspective in a build — or, worse, orthographic on the
     /// screen and perspective in the minimap, where nobody thinks to look.
+    ///
+    /// `near` and `far` are the **perspective** planes, and the orthographic
+    /// case deliberately ignores them for [`ORTHO_DEPTH`]. Centralising the
+    /// `if ortho` was not enough on its own: every caller still passed the same
+    /// `0.05` near plane, which is correct for perspective and clips a flat
+    /// game's whole world away. A depth range that has one right answer should
+    /// not be asked of four callers.
     pub fn of_camera(fov_y: f32, ortho: bool, ortho_height: f32, near: f32, far: f32) -> Projection {
         if ortho {
-            Projection::Orthographic { height: ortho_height.max(1e-3), near, far }
+            Projection::Orthographic {
+                height: ortho_height.max(1e-3),
+                near: -ORTHO_DEPTH,
+                far: ORTHO_DEPTH,
+            }
         } else {
             Projection::Perspective { fov_y, near, far }
         }
@@ -126,5 +154,64 @@ mod tests {
         );
         let v = cam.view_matrix();
         assert_eq!(v.w_axis.truncate(), glam::Vec3::ZERO);
+    }
+
+    /// Whether a point in camera-relative render space survives clipping — the
+    /// question "does this draw", asked of the matrix rather than of a screenshot.
+    fn visible(p: Projection, at: glam::Vec3) -> bool {
+        let cam = RenderCamera::new(DVec3::ZERO, Quat::IDENTITY, p);
+        let c = cam.view_proj(16.0 / 9.0) * glam::Vec4::new(at.x, at.y, at.z, 1.0);
+        // wgpu clip volume: -w <= x,y <= w and 0 <= z <= w.
+        c.w > 0.0
+            && c.x.abs() <= c.w
+            && c.y.abs() <= c.w
+            && (0.0..=c.w).contains(&c.z)
+    }
+
+    /// The bug this constant exists for: a flat game puts its art on one plane
+    /// and its camera on that plane, and a near plane in front of the eye throws
+    /// the whole world away. Fails on a `near` of 0.05.
+    #[test]
+    fn an_orthographic_camera_sees_what_is_level_with_it() {
+        // Exactly the shape of a 2D scene: an ortho camera at the origin and a
+        // tilemap in the XY plane at the origin.
+        let p = Projection::of_camera(1.05, true, 9.5, 0.05, 300_000.0);
+        // What the gameplay camera used to build, kept so this stays a
+        // regression test and not a description of the current code.
+        let was = Projection::Orthographic { height: 9.5, near: 0.05, far: 300_000.0 };
+        assert!(!visible(was, glam::Vec3::ZERO), "the bug: the map was clipped by its own camera");
+        assert!(visible(p, glam::Vec3::ZERO), "the plane the camera sits in must be in frame");
+        assert!(visible(p, glam::Vec3::new(2.0, -3.0, 0.0)), "and so must the rest of it");
+        // Still bounded: the box has to end somewhere in both directions.
+        assert!(!visible(p, glam::Vec3::new(0.0, 0.0, -ORTHO_DEPTH * 2.0)));
+        assert!(!visible(p, glam::Vec3::new(0.0, 0.0, ORTHO_DEPTH * 2.0)));
+        // And it is still a box, not a cone: the frame is the same height at
+        // every depth, which is the whole reason to pick orthographic.
+        assert!(visible(p, glam::Vec3::new(0.0, 4.0, -500.0)));
+        assert!(!visible(p, glam::Vec3::new(0.0, 6.0, -500.0)));
+    }
+
+    /// A perspective camera keeps its near plane in FRONT of the eye — moving it
+    /// behind would wreck depth precision for every 3D game.
+    #[test]
+    fn a_perspective_camera_keeps_its_near_plane_where_it_was() {
+        let p = Projection::of_camera(1.05, false, 9.5, 0.05, 300_000.0);
+        match p {
+            Projection::Perspective { near, far, .. } => {
+                assert_eq!((near, far), (0.05, 300_000.0));
+            }
+            Projection::Orthographic { .. } => panic!("not orthographic"),
+        }
+        assert!(!visible(p, glam::Vec3::ZERO), "nothing sits at a perspective eye");
+        assert!(visible(p, glam::Vec3::new(0.0, 0.0, -10.0)));
+    }
+
+    /// The editor's own camera and a `Matter::Camera` node must land on the same
+    /// projection, or the Scene view and the Game view show different scenes.
+    #[test]
+    fn the_scene_view_and_a_camera_node_agree_about_depth() {
+        let node = Projection::of_camera(1.05, true, 9.5, 0.05, 300_000.0);
+        let editor = Projection::Orthographic { height: 9.5, near: -ORTHO_DEPTH, far: ORTHO_DEPTH };
+        assert_eq!(node.matrix(1.6), editor.matrix(1.6));
     }
 }

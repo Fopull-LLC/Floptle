@@ -256,10 +256,13 @@ impl FlyCamera {
     pub fn render_camera(&self) -> RenderCamera {
         // An orthographic view needs its near plane BEHIND the camera: the box
         // has no apex, so things level with the camera are in frame, and a near
-        // plane at +0.1 would slice the layer you are working on in half. Half
-        // the depth range each way keeps the whole box symmetric about the eye.
+        // plane at +0.1 would slice the layer you are working on in half. The
+        // range comes from `ORTHO_DEPTH` rather than a literal here, because a
+        // gameplay camera has to reach exactly the same answer — a Scene view
+        // and a Game view that disagree about what is in the scene is the whole
+        // bug this constant exists to prevent.
         let proj = match self.ortho {
-            Some(height) => Projection::Orthographic { height, near: -10_000.0, far: 10_000.0 },
+            Some(height) => Projection::of_camera(0.0, true, height, 0.0, 0.0),
             None => Projection::Perspective { fov_y: 60f32.to_radians(), near: 0.1, far: 2000.0 },
         };
         RenderCamera::new(self.position, self.rotation(), proj)
