@@ -160,7 +160,11 @@ fn decode_mask(bytes: &[u8]) -> Option<Mask> {
 pub fn encode(img: &Image) -> Vec<u8> {
     let mut o = Vec::new();
     o.extend_from_slice(MAGIC);
-    put_u16(&mut o, VERSION);
+    // Write the OLDEST layout that can carry this document. A file that uses
+    // nothing new stays readable by an older build, so adding a field costs
+    // forward compatibility only for the documents that actually use it.
+    let version = if img.sheet.is_some() { V_SHEET } else { MIN_VERSION };
+    put_u16(&mut o, version);
     put_u32(&mut o, img.w);
     put_u32(&mut o, img.h);
     o.push(match img.mode {
@@ -228,11 +232,10 @@ pub fn encode(img: &Image) -> Vec<u8> {
     }
     // v2: the sheet cell grid, appended AFTER the layers so a v1 file's bytes
     // are unchanged up to here and the old reader's offsets all still hold.
-    // `0, 0` means "not a sheet" — one spelling, so a half-written pair cannot
-    // mean something.
-    let (sc, sr) = img.sheet.unwrap_or((0, 0));
-    put_u32(&mut o, sc);
-    put_u32(&mut o, sr);
+    if let Some((sc, sr)) = img.sheet {
+        put_u32(&mut o, sc);
+        put_u32(&mut o, sr);
+    }
     o
 }
 
@@ -333,6 +336,7 @@ pub fn decode(bytes: &[u8]) -> Option<Image> {
     } else {
         None
     };
+
     Some(Image {
         sheet,
         w,
@@ -574,6 +578,23 @@ mod tests {
         assert_eq!(back.sheet, None, "it had no cell grid, and none is invented");
         assert_eq!((back.w, back.h), (img.w, img.h));
         assert_eq!(back.layers.len(), img.layers.len());
+    }
+
+    /// A document that uses nothing new is WRITTEN in the older layout, so it
+    /// still opens in the build before this one. Adding a field should cost
+    /// forward compatibility only for the files that use it.
+    #[test]
+    fn a_document_with_no_cell_grid_is_written_in_the_older_layout() {
+        let plain = sample_doc();
+        assert_eq!(plain.sheet, None);
+        let bytes = encode(&plain);
+        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 1, "no new field, no new version");
+        assert_eq!(decode(&bytes).unwrap().sheet, None);
+
+        let mut sheeted = sample_doc();
+        sheeted.sheet = Some((4, 4));
+        let bytes = encode(&sheeted);
+        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), VERSION, "it uses the field");
     }
 
     /// And a version this build has never heard of is still refused outright,

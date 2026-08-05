@@ -1,5 +1,31 @@
 ## Just shipped
 
+**v0.36.0 "In Plain Sight"** — a flat 2D scene built the obvious way now draws in
+the Game view. An orthographic camera sitting in the plane of its own art was
+clipping everything at its own depth, so the map showed in the Scene view and the
+Game view was empty with nothing said; both views take that depth from the same
+place now and cannot disagree again. A tile layer can be cut from more than one
+image, so a level made of a ground sheet, a props sheet and a decoration sheet is
+ONE layer that still autotiles, merges collision and fills across the joins
+instead of three that stop at them — and adding art to one sheet never renumbers a
+square you placed from another. Per-tile collision and autotiling were built all
+along and simply invisible: the panels that need a tileset returned before drawing
+their own headings, so a layer without one showed no collision section and no
+autotile section at all. Both are always there now, and say what they are waiting
+for. In the image editor the brush outlines the texels it is about to change
+rather than a circle it is not — a one-pixel pencil finally shows one pixel — a
+tileset's cell grid can be drawn over the canvas and is saved with the image, so
+laying out a sheet stops being a job of counting texels, and the checker, pixel
+grid and cell grid are all yours to colour from a new View menu. Dragging inside a
+selection moves it, Ctrl+J duplicates it without touching the clipboard, and a
+transform in flight takes typed numbers. Particle curves say where zero is BEFORE
+you cross it, mark the value that means no change, label their extents and stop
+rescaling themselves after every edit; the tab reports what an effect actually
+costs and draws its particle count along the timeline; and a track asked for more
+particles than it can hold now says so instead of quietly making fewer. Curves get
+ease in, ease out and hold in one click, and a curve's shape can be reused on
+another property at that property's own scale.
+
 **v0.35.0 "A Crowd Of Them"** — animated characters got a lot cheaper. Reshaping a
 skinned model used to happen on the processor, one vertex at a time, every frame:
 a character of average detail cost about a third of a millisecond, so fifty of
