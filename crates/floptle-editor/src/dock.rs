@@ -162,7 +162,11 @@ pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
     ]);
     let surface = dock.main_surface_mut();
     let [central, _] =
-        surface.split_left(NodeIndex::root(), 0.19, vec![EditorTab::Hierarchy, EditorTab::Map]);
+        surface.split_left(
+            NodeIndex::root(),
+            0.19,
+            vec![EditorTab::Hierarchy, EditorTab::Map, EditorTab::Tiles],
+        );
     let [central, _] = surface.split_right(
         central,
         0.78,
