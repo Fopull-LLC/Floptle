@@ -39,7 +39,66 @@ use crate::viz::{CameraGizmo, EmitterViz, ForceViz, box_lines, camera_frustum_li
 use crate::export::EXPORT_TARGETS;
 use crate::{Editor, EditorCmd, EditorTabViewer, FOCUS_SECS, MeshAsset, ProjectAction, Snapshot, anim, anim_ui, grab_cursor, scene_hit};
 
+/// A node's sorting-layer rank if it takes part in 2D lighting, else `None`.
+///
+/// A free function over the two fields it needs, not an `&self` method: the
+/// render fns hold `self.gpu` mutably for their whole body, so nothing inside
+/// them can borrow all of `self`. Asked by BOTH gathers, so the Scene view and
+/// the Game view cannot disagree about which surfaces are lit — the failure this
+/// renderer has already paid for three times.
+fn lit_2d_rank(
+    world: &floptle_core::World,
+    project: &floptle_scene::ProjectConfigDoc,
+    e: Entity,
+    flat_camera: bool,
+) -> Option<u32> {
+    let mode =
+        world.get::<floptle_core::Lighting2D>(e).map(|l| l.mode).unwrap_or_default();
+    let facts = floptle_core::Lit2DFacts { emits: false, flat_matter: true, flat_camera };
+    let (is_2d, _) = floptle_core::resolve_2d(mode, facts);
+    is_2d.then(|| {
+        world
+            .get::<floptle_core::Sorting>(e)
+            .map(|sg| project.sorting_rank(&sg.layer))
+            .unwrap_or(0)
+    })
+}
+
+/// This frame's 2D lights, in the shape the accumulation shader reads.
+///
+/// The ambient is the scene's own — a flat surface with no 2D light near it then
+/// composites to exactly what the raster pass already drew, so switching 2D
+/// lighting on in a scene with no lights placed changes nothing. Compositing to
+/// black there would read as the feature having broken the game.
+fn light2d_uniform(
+    world: &floptle_core::World,
+    project: &floptle_scene::ProjectConfigDoc,
+    cam_world: floptle_core::math::DVec3,
+    view_proj: floptle_core::math::Mat4,
+    flat_camera: bool,
+) -> floptle_render::Light2dUniform {
+    let names = project.sorting_order();
+    let (n, pos, color, mask) =
+        crate::shading::split_point_lights(world, cam_world, &names, flat_camera).two_d;
+    let ambient = if n == 0 {
+        [1.0, 1.0, 1.0, 0.0]
+    } else {
+        let a = world.query::<floptle_core::Light>().next().map(|(_, l)| l.ambient);
+        let a = a.unwrap_or([0.12, 0.12, 0.16]);
+        [a[0], a[1], a[2], 0.0]
+    };
+    floptle_render::Light2dUniform {
+        count: [n as f32, 0.0, 0.0, 0.0],
+        ambient,
+        inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+        pos,
+        color,
+        mask: mask.map(|m| [m, 0, 0, 0]),
+    }
+}
+
 impl Editor {
+
     /// Re-take the 🎓 Learn tab's project snapshot, at most a few times a second
     /// and only while the tab is on top of its dock leaf.
     ///
@@ -991,12 +1050,26 @@ impl Editor {
         // Every node's sorting-layer Z, resolved before the draw loop borrows
         // `raster` mutably. Empty for a scene that uses no sorting layers, which
         // is every scene until one opts in.
+        // Whether `Auto` reads as 2D in this scene, asked once rather than per node.
+        let flat_camera = self.world.query::<Matter>().any(|(ce, m)| {
+            matches!(m, Matter::Camera { active: true, ortho: true, .. })
+                && !floptle_core::is_disabled(&self.world, ce)
+        });
         let sort_z: std::collections::HashMap<Entity, f64> = self
             .world
             .query::<floptle_core::Sorting>()
             .map(|(e, s)| {
                 (e, floptle_core::sorting_offset(self.project.sorting_rank(&s.layer), s.order) as f64)
             })
+            .collect();
+        // Which flat nodes take part in 2D lighting, and at which sorting rank —
+        // resolved here for the same reason `sort_z` is: the draw loop below
+        // borrows `raster` mutably and cannot call an `&self` helper.
+        let lit2d: std::collections::HashMap<Entity, u32> = self
+            .world
+            .query::<Matter>()
+            .filter(|(_, m)| matches!(m, Matter::Tilemap { .. } | Matter::SpriteBatch { .. }))
+            .filter_map(|(e, _)| lit_2d_rank(&self.world, &self.project, e, flat_camera).map(|r| (e, r)))
             .collect();
         let paint_bases: std::collections::HashMap<Entity, Vec<u32>> = self
             .world
@@ -1012,6 +1085,11 @@ impl Editor {
         // the two halves are not separable from Lua anyway.
         let gather_t = floptle_core::profile::Span::new();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
+        // The 2D lighting G-buffer's draw list, built in THIS loop from the very
+        // instances the raster pass gets (`Light2dInstance::from_raster`). That
+        // is the whole mitigation for deferred's second draw path: there is no
+        // second walk of the world to keep in step.
+        let mut flat2d: Vec<(MeshId, Option<TexId>, floptle_render::Light2dInstance)> = Vec::new();
         // GPU-skinned parts (`floptle/0080`), gathered alongside the plain ones and
         // drawn through the skinned pipelines in the same passes.
         let mut skin_draws: Vec<floptle_render::SkinDraw> = Vec::new();
@@ -1195,6 +1273,13 @@ impl Editor {
                         &mut draws,
                     );
                     for draw in draws {
+                        if let Some(&rank) = lit2d.get(e) {
+                            flat2d.push((
+                                draw.0,
+                                draw.1,
+                                floptle_render::Light2dInstance::from_raster(&draw.2, rank),
+                            ));
+                        }
                         match flsl {
                             Some(b) => flsl_draws.push((draw.0, draw.1, b, draw.2)),
                             None => instances.push(draw),
@@ -1213,6 +1298,13 @@ impl Editor {
                             &self.world, *e, *size, model, mat.as_ref(), texel, &mut raws,
                         );
                         for raw in raws {
+                            if let Some(&rank) = lit2d.get(e) {
+                                flat2d.push((
+                                    mesh,
+                                    tex,
+                                    floptle_render::Light2dInstance::from_raster(&raw, rank),
+                                ));
+                            }
                             match flsl {
                                 Some(b) => flsl_draws.push((mesh, tex, b, raw)),
                                 None => instances.push((mesh, tex, raw)),
@@ -3961,6 +4053,28 @@ impl Editor {
                 raster.draw_scene_with(
                     gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,
                     raster_clear, Some(raymarch.field_bind()),
+                );
+                // 2D lighting composites over the scene the raster pass just
+                // drew, so a lit tilemap replaces its own unlit pixels. Runs on
+                // BOTH draw paths — see `lit_2d_rank`.
+                raster.light2d_pass(
+                    gpu,
+                    color,
+                    depth,
+                    {
+                        let d = if self.project.retro {
+                            retro.depth_texture()
+                        } else {
+                            gpu.depth_texture()
+                        }
+                        .size();
+                        (d.width.max(1), d.height.max(1))
+                    },
+                    view_proj.to_cols_array_2d(),
+                    &light2d_uniform(
+                        &self.world, &self.project, cam.world_position, view_proj, flat_camera,
+                    ),
+                    &flat2d,
                 );
                 // Script-drawn 3D lines (draw.line — the map's orbit conics).
                 if !self.script_lines.is_empty() {
@@ -6933,6 +7047,10 @@ impl Editor {
         elapsed: f32,
         cull_mask: u32,
         skip_tex: Option<TexId>,
+        // The target's pixel size. Explicit because only a VIEW is passed and a
+        // view cannot be asked how big it is — and the 2D lighting G-buffer has
+        // to match the frame exactly or the composite lands stretched.
+        size: (u32, u32),
     ) {
         let view_proj = cam.view_proj(aspect);
         // Layer names resolve to bits only when a mask actually culls.
@@ -6986,12 +7104,26 @@ impl Editor {
         // Every node's sorting-layer Z, resolved before the draw loop borrows
         // `raster` mutably. Empty for a scene that uses no sorting layers, which
         // is every scene until one opts in.
+        // Whether `Auto` reads as 2D in this scene, asked once rather than per node.
+        let flat_camera = self.world.query::<Matter>().any(|(ce, m)| {
+            matches!(m, Matter::Camera { active: true, ortho: true, .. })
+                && !floptle_core::is_disabled(&self.world, ce)
+        });
         let sort_z: std::collections::HashMap<Entity, f64> = self
             .world
             .query::<floptle_core::Sorting>()
             .map(|(e, s)| {
                 (e, floptle_core::sorting_offset(self.project.sorting_rank(&s.layer), s.order) as f64)
             })
+            .collect();
+        // Which flat nodes take part in 2D lighting, and at which sorting rank —
+        // resolved here for the same reason `sort_z` is: the draw loop below
+        // borrows `raster` mutably and cannot call an `&self` helper.
+        let lit2d: std::collections::HashMap<Entity, u32> = self
+            .world
+            .query::<Matter>()
+            .filter(|(_, m)| matches!(m, Matter::Tilemap { .. } | Matter::SpriteBatch { .. }))
+            .filter_map(|(e, _)| lit_2d_rank(&self.world, &self.project, e, flat_camera).map(|r| (e, r)))
             .collect();
         let paint_bases: std::collections::HashMap<Entity, Vec<u32>> = self
             .world
@@ -7002,6 +7134,11 @@ impl Editor {
             })
             .collect();
         let mut instances: Vec<(MeshId, Option<TexId>, InstanceRaw)> = Vec::new();
+        // The 2D lighting G-buffer's draw list, built in THIS loop from the very
+        // instances the raster pass gets (`Light2dInstance::from_raster`). That
+        // is the whole mitigation for deferred's second draw path: there is no
+        // second walk of the world to keep in step.
+        let mut flat2d: Vec<(MeshId, Option<TexId>, floptle_render::Light2dInstance)> = Vec::new();
         // GPU-skinned parts (`floptle/0080`), gathered alongside the plain ones and
         // drawn through the skinned pipelines in the same passes.
         let mut skin_draws: Vec<floptle_render::SkinDraw> = Vec::new();
@@ -7139,6 +7276,13 @@ impl Editor {
                         &mut draws,
                     );
                     for draw in draws {
+                        if let Some(&rank) = lit2d.get(ent) {
+                            flat2d.push((
+                                draw.0,
+                                draw.1,
+                                floptle_render::Light2dInstance::from_raster(&draw.2, rank),
+                            ));
+                        }
                         match flsl {
                             Some(b) => flsl_draws.push((draw.0, draw.1, b, draw.2)),
                             None => instances.push(draw),
@@ -7160,6 +7304,13 @@ impl Editor {
                             &self.world, *ent, *size, model, mat.as_ref(), texel, &mut raws,
                         );
                         for raw in raws {
+                            if let Some(&rank) = lit2d.get(ent) {
+                                flat2d.push((
+                                    mesh,
+                                    tex,
+                                    floptle_render::Light2dInstance::from_raster(&raw, rank),
+                                ));
+                            }
                             match flsl {
                                 Some(b) => flsl_draws.push((mesh, tex, b, raw)),
                                 None => instances.push((mesh, tex, raw)),
@@ -7352,6 +7503,17 @@ impl Editor {
             raster.draw_scene_with(
                 gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,
                 raster_clear, Some(raymarch.field_bind()),
+            );
+            raster.light2d_pass(
+                gpu,
+                color,
+                depth,
+                (size.0.max(1), size.1.max(1)),
+                view_proj.to_cols_array_2d(),
+                &light2d_uniform(
+                    &self.world, &self.project, cam.world_position, view_proj, flat_camera,
+                ),
+                &flat2d,
             );
             // Script-drawn 3D lines (draw.line — the map's orbit conics).
             if !self.script_lines.is_empty() {

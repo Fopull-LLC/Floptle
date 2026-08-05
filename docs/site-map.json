@@ -135,7 +135,7 @@
     "news.md": "reaches the site through the releases manifest's `news`, not as a docs page",
     "releases/STYLE.md": "how release notes are written — a rule for us, not a doc for a player",
     "releases/": "every version's notes already reach the site through the releases manifest, which carries them in full; re-publishing them as docs pages would be the same text at a second URL",
-    "2d-lighting-proposal.md": "a proposal for unshipped work",
+    "2d-lighting-proposal.md": "a design doc whose later steps are unshipped",
     "animation-system-proposal.md": "a proposal; the shipped guide is animation.md",
     "galaxy-streaming-proposal.md": "a proposal for unshipped work",
     "hub-proposal.md": "a proposal; the shipped guide is updating-the-hub.md",

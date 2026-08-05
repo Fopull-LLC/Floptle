@@ -290,7 +290,7 @@ impl Editor {
         else {
             return;
         };
-        self.render_world_into(&cv, &dv, &cam, 16.0 / 9.0, elapsed, mask, None);
+        self.render_world_into(&cv, &dv, &cam, 16.0 / 9.0, elapsed, mask, None, (320, 180));
     }
 
     /// A1 render targets: every camera with a non-empty `target` name renders
@@ -378,6 +378,7 @@ impl Editor {
                 elapsed,
                 r.mask,
                 Some(tex),
+                (r.w, r.h),
             );
             self.render_target_last.insert(r.name, elapsed);
         }
@@ -540,7 +541,7 @@ impl Editor {
             Some(cv.clone())
         };
         let Some(scene_target) = scene_target else { return };
-        self.render_world_into(&scene_target, &depth, &cam, aspect, elapsed, cull_mask, None);
+        self.render_world_into(&scene_target, &depth, &cam, aspect, elapsed, cull_mask, None, (cw, ch));
         // World canvases: real geometry, so they draw into the scene target with
         // its depth, before post. `include_screen: false` — this tab shows a
         // BUILD, so screen-space layers belong in the flat overlay below, not

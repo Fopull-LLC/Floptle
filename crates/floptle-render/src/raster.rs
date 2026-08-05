@@ -486,6 +486,9 @@ pub struct Raster {
     /// Per-slot nearest bitmask, carried into every frame's `Globals.terrain_mask.x`.
     terrain_nearest_mask: u32,
     tex_layout: wgpu::BindGroupLayout,
+    /// The 2D lighting pass — its own pipelines and G-buffer. Idle in a scene
+    /// with nothing flat in it.
+    light2d: crate::light2d::Light2d,
     /// Fallback group(2) for callers without a raymarch pass: zeroed field
     /// globals (no volumes/blobs, shadows + AO off) → the field branches skip.
     empty_field_bind: wgpu::BindGroup,
@@ -929,6 +932,7 @@ impl Raster {
             terrain_samp,
             terrain_samp_nearest,
             terrain_nearest_mask: 0,
+            light2d: crate::light2d::Light2d::new(gpu, &tex_layout, gpu.surface_format()),
             tex_layout,
             empty_field_bind,
             samplers: HashMap::new(),
@@ -2573,6 +2577,127 @@ impl Raster {
     /// [`depth_prepass`](Self::depth_prepass) plus custom-shader draws:
     /// opaque-phase flsl instances prime depth too (their group(1) base texture
     /// drives the same conservative alpha discard).
+    /// **2D lighting** (`docs/2d-lighting-proposal.md`, step 2): fill the flat
+    /// G-buffer and composite the lit result over `color`.
+    ///
+    /// `flat` is the *same* `(mesh, texture)` pairing the main gather produced —
+    /// the caller builds it in the same loop, so there is no second walk of the
+    /// world to keep in step. This is the whole mitigation for deferred's second
+    /// draw path; see the module docs of [`crate::light2d`].
+    ///
+    /// A no-op when nothing is flat or no light reaches it, so a 3D scene pays
+    /// one branch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn light2d_pass(
+        &mut self,
+        gpu: &Gpu,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        size: (u32, u32),
+        view_proj: [[f32; 4]; 4],
+        lights: &crate::light2d::Light2dUniform,
+        flat: &[(MeshId, Option<TexId>, crate::light2d::Light2dInstance)],
+    ) {
+        if flat.is_empty() {
+            return;
+        }
+        // Bucket by (mesh, texture) exactly as the colour pass does, and pack the
+        // instances contiguously so each bucket is one draw over a slice.
+        let groups = group_by_key(
+            flat.iter().map(|(id, tex, inst)| ((id.0 as usize, tex.map(|t| t.0)), *inst)),
+        );
+        let mut raws: Vec<crate::light2d::Light2dInstance> = Vec::with_capacity(flat.len());
+        let mut buckets: Vec<(usize, Option<u32>, u32, u32)> = Vec::new();
+        for ((mesh_idx, tex_key), members) in groups {
+            let start = raws.len() as u32;
+            raws.extend_from_slice(&members);
+            buckets.push((mesh_idx, tex_key, start, members.len() as u32));
+        }
+        self.light2d.begin(gpu, size.0, size.1, view_proj, lights, &raws);
+        let Some((albedo, surface, gdepth)) = self.light2d.views() else { return };
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("light2d") });
+        {
+            fn attach(view: &wgpu::TextureView) -> Option<wgpu::RenderPassColorAttachment<'_>> {
+                Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })
+            }
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("light2d-fill"),
+                color_attachments: &[attach(albedo), attach(surface)],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: gdepth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.light2d.fill_pipeline);
+            rp.set_bind_group(0, &self.light2d.fill_bind, &[]);
+            rp.set_vertex_buffer(1, self.light2d.instance_slice());
+            for (mesh_idx, tex_key, start, count) in buckets {
+                let mesh = &self.meshes[mesh_idx];
+                // The material texture when one overrides, else the mesh's own —
+                // the same choice, spelled the same way, as the colour pass.
+                let bind = tex_key
+                    .and_then(|t| self.textures.get(t as usize))
+                    .map(|t| &t.bind)
+                    .unwrap_or(&mesh.tex_bind);
+                rp.set_bind_group(1, bind, &[]);
+                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+            }
+        }
+        {
+            let Some(read) = self.light2d.read_bind() else { return };
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("light2d-accumulate"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    // Load: the scene is already there and the composite only
+                    // replaces the pixels a flat surface covers.
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.light2d.light_pipeline);
+            rp.set_bind_group(0, &self.light2d.lights_bind, &[]);
+            rp.set_bind_group(1, read, &[]);
+            rp.draw(0..3, 0..1);
+        }
+        gpu.queue.submit([encoder.finish()]);
+    }
+
     pub fn depth_prepass_with(
         &mut self,
         gpu: &Gpu,

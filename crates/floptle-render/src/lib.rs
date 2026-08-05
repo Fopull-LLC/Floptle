@@ -26,6 +26,7 @@ pub mod device;
 pub mod frame;
 pub mod graph;
 pub mod grid;
+pub mod light2d;
 pub mod lines;
 pub mod mesh;
 pub mod outline;
@@ -42,6 +43,7 @@ pub use cull::Frustum;
 pub use device::Gpu;
 pub use frame::{Projection, RenderCamera};
 pub use grid::Grid;
+pub use light2d::{Light2d, Light2dInstance, Light2dUniform};
 pub use lines::{LineVertex, Lines};
 pub use tris::{TriVertex, Tris};
 pub use mesh::{
