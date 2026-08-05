@@ -1615,7 +1615,14 @@ impl EditorTabViewer<'_> {
                                 ui.horizontal(|ui| {
                                     ui.label("tileset");
                                     if tileset.is_empty() {
-                                        ui.small("none — these tiles collide with nothing");
+                                        // Named as the two FEATURES somebody would
+                                        // go looking for, and coloured, because
+                                        // this was reported twice as the engine
+                                        // not having either of them.
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(255, 200, 80),
+                                            "none",
+                                        );
                                     } else {
                                         ui.small(
                                             floptle_tiles::tileset_name(tileset).unwrap_or(tileset),
@@ -1625,6 +1632,14 @@ impl EditorTabViewer<'_> {
                                         cmd.focus_tiles = true;
                                     }
                                 });
+                                if tileset.is_empty() {
+                                    ui.small(
+                                        "Without one, these tiles collide with nothing and \
+                                         cannot autotile — both are per-tile facts and live \
+                                         in a tileset. Make one in ◫ Tiles; it takes its \
+                                         sheet from this node's Material.",
+                                    );
+                                }
                                 ui.small(
                                     "the sheet comes from this node's Material (texture + \
                                      sheet cols/rows). Paint it in the ◫ Tiles tab, or fill \

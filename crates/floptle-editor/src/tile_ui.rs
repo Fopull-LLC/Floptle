@@ -24,6 +24,15 @@
 //! That second one is what makes the autotile presets safe to offer. A preset has
 //! to guess somebody's sheet layout, and a wrong guess otherwise reads as bad art
 //! — with the diagram you can see which tiles disagree and fix one in a click.
+//!
+//! ## Every section is always here
+//!
+//! The sections that need a tileset used to return before drawing so much as
+//! their own heading, so a layer without one showed a panel with no TILE and no
+//! AUTOTILE in it at all. That is indistinguishable from an engine that has
+//! neither, and it was reported as exactly that. A section that cannot act now
+//! says what it would do and what it is waiting for; the panel's shape does not
+//! change under you (`floptle/0093`).
 
 use egui::{Color32, RichText};
 use floptle_core::{Entity, Matter, TileXform};
@@ -123,6 +132,31 @@ fn labelled(ui: &mut egui::Ui, label: &str, body: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
         ui.add_sized([LABEL_W, BTN_H], egui::Label::new(RichText::new(label).small()));
         body(ui);
+    });
+}
+
+/// The line that stands in for a whole section when the layer has no tileset.
+///
+/// The sections BELOW the tileset used to vanish entirely without one — no TILE
+/// heading, no AUTOTILE heading, nothing. Which is indistinguishable from an
+/// engine that does not have per-tile collision or autotiling, and is exactly
+/// what one was reported as: "there isn't a way to build the collision shape for
+/// each tile", "I'm still not seeing any auto tiling settings". Both were built.
+///
+/// So the panel's shape is now constant, and a section that cannot act says what
+/// it would do and what it is waiting for. `what` is the one-sentence version of
+/// the feature, in the words somebody would go looking for it under.
+fn needs_tileset(ui: &mut egui::Ui, what: &str, cmds: &mut Vec<TileCmd>) {
+    ui.small(what);
+    ui.horizontal(|ui| {
+        ui.colored_label(ACCENT, "⚠ needs a tileset");
+        if ui
+            .small_button("+ New tileset")
+            .on_hover_text("for this layer's own sheet, sized from its material")
+            .clicked()
+        {
+            cmds.push(TileCmd::NewTilesetForLayer);
+        }
     });
 }
 
@@ -387,18 +421,42 @@ impl TileCtx<'_> {
                  that a tile you thought was solid is not",
             );
         });
+        // An overlay that draws nothing reads as "nothing here is solid", which
+        // is true and useless. Say which of the two it is. Read from the LAYER
+        // rather than `tools.editing` — this section runs before the one that
+        // derives it, so `editing` here is a frame behind.
+        if self.tools.show_collision && self.layer_tileset().is_empty() {
+            ui.colored_label(ACCENT, "⚠ nothing to draw — this layer has no tileset");
+        }
     }
 
     // ---- TILESET ------------------------------------------------------------
 
+    /// The active layer's tileset path, straight from the node. Empty when the
+    /// layer has none — the authority `tools.editing` is derived from.
+    fn layer_tileset(&self) -> String {
+        match self.tools.layer.and_then(|e| self.world.get::<Matter>(e)) {
+            Some(Matter::Tilemap { tileset, .. }) => tileset.clone(),
+            _ => String::new(),
+        }
+    }
+
     fn tileset_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "TILESET");
-        let Some(e) = self.tools.layer else { return };
+        // `editing` is what every section below points at, and it used to be set
+        // and never cleared — so selecting a layer with no tileset left the TILE
+        // and AUTOTILE editors quietly writing to the PREVIOUS layer's tileset.
+        // It is derived from the layer, so derive it here, every frame, both ways.
+        let Some(e) = self.tools.layer else {
+            self.tools.editing = None;
+            return;
+        };
         let current = match self.world.get::<Matter>(e) {
             Some(Matter::Tilemap { tileset, .. }) => tileset.clone(),
             _ => String::new(),
         };
         if current.is_empty() {
+            self.tools.editing = None;
             ui.small(
                 "This layer has no tileset, so its tiles collide with nothing and cannot \
                  autotile. One tileset per spritesheet, shared by every layer cut from it.",
@@ -422,6 +480,7 @@ impl TileCtx<'_> {
         }
 
         if self.store.load_failed.contains(&current) {
+            self.tools.editing = None;
             ui.colored_label(
                 Color32::from_rgb(255, 120, 110),
                 format!("⚠ {} could not be read", short(&current)),
@@ -433,6 +492,7 @@ impl TileCtx<'_> {
             return;
         }
         let Some(set) = self.store.get(&current) else {
+            self.tools.editing = None;
             ui.colored_label(ACCENT, format!("⚠ {} is missing", short(&current)));
             ui.small("The layer names a tileset this project does not have.");
             if ui.button("Detach").clicked() {
@@ -614,13 +674,25 @@ impl TileCtx<'_> {
     // ---- TILE ---------------------------------------------------------------
 
     fn tile_section(&mut self, ui: &mut egui::Ui) {
-        let Some(path) = self.tools.editing.clone() else { return };
-        let Some(cell) = self.tools.inspect_cell else { return };
+        section(ui, "TILE");
+        let Some(path) = self.tools.editing.clone() else {
+            needs_tileset(
+                ui,
+                "What one tile IS: whether it is solid and what shape it collides as, what \
+                 it is tagged, whether it animates. Set once per tile, and every square \
+                 using it — in every scene, including the ones already painted — follows.",
+                self.cmds,
+            );
+            return;
+        };
         let Some(set) = self.store.get(&path).cloned() else { return };
+        let Some(cell) = self.tools.inspect_cell else {
+            ui.small("Click a tile in the palette above to set what it is.");
+            return;
+        };
         if cell >= set.cells() {
             return;
         }
-        section(ui, "TILE");
         ui.label(RichText::new(format!("tile {cell}")).strong());
 
         // Collision. Four chips and, for Custom, four numbers.
@@ -784,9 +856,18 @@ impl TileCtx<'_> {
     // ---- AUTOTILE -----------------------------------------------------------
 
     fn autotile_section(&mut self, ui: &mut egui::Ui) {
-        let Some(path) = self.tools.editing.clone() else { return };
-        let Some(set) = self.store.get(&path).cloned() else { return };
         section(ui, "AUTOTILE");
+        let Some(path) = self.tools.editing.clone() else {
+            needs_tileset(
+                ui,
+                "A group of tiles that pick themselves by what is next to them — mark a run \
+                 of tiles as a group, hand it a preset, and painting draws its own corners \
+                 and edges.",
+                self.cmds,
+            );
+            return;
+        };
+        let Some(set) = self.store.get(&path).cloned() else { return };
         ui.small(
             "A group of tiles that pick themselves by what is next to them. Mark a run of \
              tiles as a group, hand it the preset, and painting draws corners and edges.",
@@ -1372,5 +1453,108 @@ mod tests {
         let same = cmds.clone();
         assert_eq!(cmds, same);
         assert_ne!(TileCmd::AddLayer, TileCmd::RetileAll);
+    }
+
+    // ---- floptle/0093: the sections that used to vanish ----------------------
+
+    /// Drive the panel headlessly and return every word it drew, so "does this
+    /// section exist" is a question the gate can answer.
+    fn panel_text(world: &floptle_core::World, tools: &mut TileTools, store: &mut TileStore) -> String {
+        let ctx = egui::Context::default();
+        let root = std::path::PathBuf::from(".");
+        let mut cmds = Vec::new();
+        let out = ctx.run_ui(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                TileCtx {
+                    store: &mut *store,
+                    tools: &mut *tools,
+                    world,
+                    project_root: &root,
+                    cmds: &mut cmds,
+                    playing: false,
+                }
+                .ui(ui);
+            });
+        });
+        fn walk(s: &egui::Shape, out: &mut String) {
+            match s {
+                egui::Shape::Text(t) => {
+                    out.push_str(t.galley.text());
+                    out.push('\n');
+                }
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut text = String::new();
+        for cs in &out.shapes {
+            walk(&cs.shape, &mut text);
+        }
+        text
+    }
+
+    fn layer_world(tileset: &str) -> (floptle_core::World, Entity) {
+        let mut world = floptle_core::World::default();
+        let e = world.spawn();
+        world.insert(e, floptle_core::Name("layer".into()));
+        world.insert(
+            e,
+            Matter::Tilemap {
+                cols: 4,
+                rows: 4,
+                tile: 1.0,
+                data: vec![floptle_core::EMPTY_TILE; 16],
+                tileset: tileset.to_string(),
+            },
+        );
+        (world, e)
+    }
+
+    /// Per-tile collision and autotiling were both built and both INVISIBLE
+    /// without a tileset — the sections returned before drawing their own
+    /// heading, so the panel looked like an engine that has neither. Reported
+    /// exactly that way, twice.
+    #[test]
+    fn collision_and_autotiling_are_visible_before_there_is_a_tileset() {
+        let (world, e) = layer_world("");
+        let mut tools = TileTools { layer: Some(e), ..Default::default() };
+        let mut store = TileStore::default();
+        let text = panel_text(&world, &mut tools, &mut store);
+        assert!(text.contains("TILE\n"), "the per-tile section must name itself:\n{text}");
+        assert!(text.contains("AUTOTILE"), "the autotile section must name itself:\n{text}");
+        assert!(
+            text.contains("needs a tileset"),
+            "and each must say what it is waiting for:\n{text}"
+        );
+    }
+
+    /// `tools.editing` was set and never cleared, so selecting a layer with no
+    /// tileset left the TILE and AUTOTILE editors pointed at the PREVIOUS
+    /// layer's — every edit landing on a tileset the layer does not name.
+    #[test]
+    fn a_layer_with_no_tileset_stops_editing_the_last_ones() {
+        let path = floptle_tiles::tileset_path("bricks");
+        let (mut world, with) = layer_world(&path);
+        let without = world.spawn();
+        world.insert(without, floptle_core::Name("bare".into()));
+        world.insert(
+            without,
+            Matter::Tilemap {
+                cols: 4,
+                rows: 4,
+                tile: 1.0,
+                data: vec![floptle_core::EMPTY_TILE; 16],
+                tileset: String::new(),
+            },
+        );
+        let mut store = TileStore::default();
+        store.sets.insert(path.clone(), TileSet::default());
+        let mut tools = TileTools { layer: Some(with), ..Default::default() };
+        panel_text(&world, &mut tools, &mut store);
+        assert_eq!(tools.editing.as_deref(), Some(path.as_str()));
+
+        tools.layer = Some(without);
+        panel_text(&world, &mut tools, &mut store);
+        assert_eq!(tools.editing, None, "a bare layer must not inherit the last one's tileset");
     }
 }
