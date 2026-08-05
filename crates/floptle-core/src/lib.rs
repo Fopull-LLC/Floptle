@@ -46,13 +46,16 @@ pub use ecs::{Entity, World};
 pub use layers::Layers;
 pub use material::{Material, ObjectMaterials, Tiling};
 pub use matter::{
-    is_disabled, is_persistent, world_transform, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, CastShadow,
-    CelestialBody, Collidable, Disabled, GravityMode, Layer, Light, Made, Matter, MeshCollider, Name,
+    is_disabled, is_persistent, world_transform, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, Cast2D,
+    CastShadow,
+    CelestialBody, Collidable, Disabled, GravityMode, Layer, Light, Lighting2D, Lit2D, Lit2DFacts, Made, Matter,
+    MeshCollider, Name,
     Parent,
-    ParticleSystem, Persistent, RepeatIndex, RigidBody, SceneTag, Shape, Sorting, Spin, Sprite, Sprites, Tags,
+    ParticleSystem, Persistent, RepeatIndex, RigidBody, SceneTag, Shadow2D, Shape, Sorting, Spin, Sprite, Sprites,
+    Tags,
     TerrainGen, TexturePaint, Trigger, VertexPaint, WaterKind,
     Visible, DEFAULT_SORTING_LAYER, EMPTY_TILE, SORT_LAYER_STEP, SORT_ORDER_STEP,
-    sorting_offset,
+    infers_2d, resolve_2d, resolve_shadow_2d, sorting_offset,
 };
 pub use net::{NetId, Replicated, ReplicationMode};
 pub use tile::{

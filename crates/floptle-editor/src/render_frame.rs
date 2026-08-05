@@ -6152,6 +6152,25 @@ impl Editor {
                 self.world.insert(e, floptle_core::Sorting { layer, order });
             }
         }
+        if let Some((e, lit)) = cmd.set_lighting_2d {
+            self.record();
+            // Auto with no layer list IS the absence of the component, exactly
+            // as with sorting above — so a node put back to the default stops
+            // carrying one and its scene stops mentioning 2D lighting.
+            if lit == floptle_core::Lighting2D::default() {
+                self.world.remove::<floptle_core::Lighting2D>(e);
+            } else {
+                self.world.insert(e, lit);
+            }
+        }
+        if let Some((e, cast)) = cmd.set_shadow_2d {
+            self.record();
+            if cast == floptle_core::Cast2D::Auto {
+                self.world.remove::<floptle_core::Shadow2D>(e);
+            } else {
+                self.world.insert(e, floptle_core::Shadow2D(cast));
+            }
+        }
         if let Some((e, layer)) = cmd.set_layer {
             self.record();
             if layer == floptle_core::layers::DEFAULT_LAYER {

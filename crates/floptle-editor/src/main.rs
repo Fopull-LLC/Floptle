@@ -274,6 +274,11 @@ struct EditorCmd {
     /// A node's sorting layer + order: what draws in front of what, for a flat
     /// scene. `(entity, layer name, order)`.
     set_sorting: Option<(Entity, String, i32)>,
+    /// A node's 2D lighting: the three-valued flag, and — for a light — which
+    /// sorting layers it reaches.
+    set_lighting_2d: Option<(Entity, floptle_core::Lighting2D)>,
+    /// Whether a node blocks 2D light.
+    set_shadow_2d: Option<(Entity, floptle_core::Cast2D)>,
     /// A project layer was renamed in Project Settings: (old, new). The open
     /// scene's nodes follow the rename (per keystroke, so they stay in sync).
     rename_layer: Option<(String, String)>,

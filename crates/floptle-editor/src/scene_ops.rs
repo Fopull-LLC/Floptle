@@ -156,6 +156,13 @@ impl Editor {
             .world
             .get::<floptle_core::Sorting>(e)
             .map(|s| (s.layer.clone(), s.order));
+        // …and so does its 2D lighting, for the same reason: a duplicated torch
+        // that forgot which layers it lit would light the whole scene.
+        let lit = self.world.get::<floptle_core::Lighting2D>(e);
+        let lit_2d = lit.map(|l| l.mode.name().to_string());
+        let light_layers = lit.map(|l| l.layers.clone()).unwrap_or_default();
+        let shadow_2d =
+            self.world.get::<floptle_core::Shadow2D>(e).map(|s| s.0.name().to_string());
         Some(NodeDoc {
             id: None,
             parent_id: None,
@@ -187,6 +194,9 @@ impl Editor {
             layer,
             tags,
             sorting,
+            lit_2d,
+            light_layers,
+            shadow_2d,
         })
     }
 
@@ -340,6 +350,9 @@ impl Editor {
             layer: None,
             tags: Vec::new(),
             sorting: None,
+            lit_2d: None,
+            light_layers: Vec::new(),
+            shadow_2d: None,
         };
         let e = self.spawn_node(&node);
         self.select_single(e);
@@ -395,6 +408,9 @@ impl Editor {
                 layer: None,
                 tags: Vec::new(),
                 sorting: None,
+                lit_2d: None,
+                light_layers: Vec::new(),
+                shadow_2d: None,
             };
             let e = self.spawn_node(&node);
             self.select_single(e);

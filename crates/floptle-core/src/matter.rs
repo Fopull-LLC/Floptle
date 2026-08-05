@@ -69,6 +69,213 @@ pub fn sorting_offset(rank: u32, order: i32) -> f32 {
     rank as f32 * SORT_LAYER_STEP + order as f32 * SORT_ORDER_STEP
 }
 
+/// Three-valued opt-in for the 2D lighting path: nobody has said, yes, or no.
+///
+/// **Three values and not a bool**, because a bool cannot tell "nobody has said"
+/// from "somebody said false". An inference that wrote into a bool would
+/// overwrite a deliberate `false` the moment the scene changed shape — a light
+/// you had explicitly made 3D quietly becoming 2D again because somebody added
+/// an orthographic camera. `Auto` is a distinct state that the engine answers
+/// and never writes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Lit2D {
+    /// Let the engine decide. See [`infers_2d`].
+    #[default]
+    Auto,
+    /// This is 2D, whatever the scene looks like.
+    Yes,
+    /// This is 3D, whatever the scene looks like.
+    No,
+}
+
+impl Lit2D {
+    pub const ALL: [Lit2D; 3] = [Lit2D::Auto, Lit2D::Yes, Lit2D::No];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Lit2D::Auto => "auto",
+            Lit2D::Yes => "2d",
+            Lit2D::No => "3d",
+        }
+    }
+
+    /// Every spelling accepted from Lua / a `.ron`, and the list an error
+    /// message prints. One list, one parser (`floptle/0082`).
+    pub const ACCEPTS: &'static [&'static str] = &["auto", "2d", "3d"];
+
+    pub fn parse(s: &str) -> Option<Lit2D> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" | "" => Some(Lit2D::Auto),
+            "2d" | "yes" | "flat" => Some(Lit2D::Yes),
+            "3d" | "no" => Some(Lit2D::No),
+            _ => None,
+        }
+    }
+}
+
+/// What the 2D lighting inference is allowed to look at.
+///
+/// A struct rather than loose arguments so the answer is a pure function of a
+/// stated set of facts, and so a test can pose a scene without building one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Lit2DFacts {
+    /// This node emits light (a `PointLight`, or the scene's key light).
+    pub emits: bool,
+    /// This node's `Matter` is one of the flat kinds — a tilemap or a sprite
+    /// batch.
+    pub flat_matter: bool,
+    /// The scene's active camera is orthographic.
+    pub flat_camera: bool,
+}
+
+/// Whether `Auto` means 2D for a node, and the one-line reason.
+///
+/// The reason is returned, not just the verdict, because the whole design rests
+/// on trusting this: an inference you cannot see is one you cannot trust, and
+/// the Inspector prints exactly this string beside `Auto`.
+///
+/// The two rules, and why they are the two:
+///
+/// * **A light is 2D when the active camera is orthographic.** A 3D scene does
+///   not have an orthographic active camera, so this cannot flip a 3D scene's
+///   lights by accident — which is the failure that matters. A technical or
+///   isometric shot that *is* orthographic and wants 3D lighting says so once.
+/// * **A receiver is 2D when it is a tilemap or a sprite batch.** Those kinds
+///   exist for flat games. A mesh in a 2D scene stays 3D-lit unless it is told
+///   otherwise, which is what makes mixing the two deliberate rather than
+///   something you discover.
+///
+/// Deliberately NOT part of it: how near the node is to the camera plane, and
+/// whether the project has named sorting layers. Both are true of scenes that
+/// want nothing to do with 2D lighting, and an inference that is *usually*
+/// right is worse than none — it fails in the scenes least able to explain it.
+pub fn infers_2d(facts: Lit2DFacts) -> (bool, &'static str) {
+    if facts.emits {
+        return if facts.flat_camera {
+            (true, "the active camera is orthographic")
+        } else {
+            (false, "the active camera is perspective")
+        };
+    }
+    if facts.flat_matter {
+        (true, "a tilemap and a sprite batch are flat")
+    } else {
+        (false, "only tilemaps and sprite batches are lit flat by default")
+    }
+}
+
+/// Whether a node takes part in 2D lighting, and why.
+///
+/// `Yes`/`No` answer for themselves and the inference is not consulted at all,
+/// so a scene reshaping around a node cannot change what an author stated.
+pub fn resolve_2d(mode: Lit2D, facts: Lit2DFacts) -> (bool, &'static str) {
+    match mode {
+        Lit2D::Yes => (true, "set to 2D"),
+        Lit2D::No => (false, "set to 3D"),
+        Lit2D::Auto => infers_2d(facts),
+    }
+}
+
+/// A node's place in the 2D lighting system: whether it is on that path, and —
+/// for a light — which sorting layers it reaches.
+///
+/// Absent means [`Lit2D::Auto`] with no layer restriction, so a scene that has
+/// never heard of this component behaves exactly as it did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Lighting2D {
+    pub mode: Lit2D,
+    /// **Lights only.** The sorting layers this light reaches, by name. Empty —
+    /// the default — means every layer.
+    ///
+    /// This is how a 2D artist thinks about a light: *this torch lights Terrain
+    /// and Characters, not Background*, and the background staying flat while a
+    /// torch passes over it is the single most common thing a 2D lighting system
+    /// is asked for. It reuses the sorting layers a 2D scene already names, so
+    /// there is no second list to keep in step.
+    ///
+    /// It is **not** the collision layer mask. A background that collides with
+    /// nothing and a player that does sort — and light — independently of that.
+    pub layers: Vec<String>,
+}
+
+impl Lighting2D {
+    /// Whether a light with this component reaches a receiver in `layer`.
+    ///
+    /// An empty list reaches everything, which is what a light dropped into a
+    /// scene should do — a new light that lit nothing until you filled in a list
+    /// would read as a broken light.
+    pub fn reaches(&self, layer: &str) -> bool {
+        if self.layers.is_empty() {
+            return true;
+        }
+        let layer = if layer.trim().is_empty() { DEFAULT_SORTING_LAYER } else { layer };
+        self.layers.iter().any(|l| {
+            let l = if l.trim().is_empty() { DEFAULT_SORTING_LAYER } else { l.as_str() };
+            l == layer
+        })
+    }
+}
+
+/// Whether a 2D node blocks light, three-valued for the same reason as
+/// [`Lit2D`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Cast2D {
+    /// Let the engine decide: a tilemap casts from the colliders its tileset
+    /// already declares, and nothing else casts.
+    #[default]
+    Auto,
+    Yes,
+    No,
+}
+
+impl Cast2D {
+    pub const ALL: [Cast2D; 3] = [Cast2D::Auto, Cast2D::Yes, Cast2D::No];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Cast2D::Auto => "auto",
+            Cast2D::Yes => "on",
+            Cast2D::No => "off",
+        }
+    }
+
+    pub const ACCEPTS: &'static [&'static str] = &["auto", "on", "off"];
+
+    pub fn parse(s: &str) -> Option<Cast2D> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" | "" => Some(Cast2D::Auto),
+            "on" | "yes" | "true" => Some(Cast2D::Yes),
+            "off" | "no" | "false" => Some(Cast2D::No),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a node blocks 2D light. Absent = [`Cast2D::Auto`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Shadow2D(pub Cast2D);
+
+/// Whether a node casts a 2D shadow, and why.
+///
+/// Under `Auto` a **tilemap casts exactly where it is solid** — the colliders
+/// its tileset already declares. A wall marked solid occludes light with no
+/// second authoring step, and a level's collision *is* its light occlusion, so
+/// the two can never drift apart. That is the same argument that made per-tile
+/// collision a property of the tileset rather than of the map.
+///
+/// `collidable` is whether the node's collision is actually switched on, so a
+/// tilemap with its Collidable switch off does not cast from colliders the sim
+/// is not using either.
+pub fn resolve_shadow_2d(cast: Cast2D, flat_matter: bool, collidable: bool) -> (bool, &'static str) {
+    match cast {
+        Cast2D::Yes => (true, "set to cast"),
+        Cast2D::No => (false, "set not to cast"),
+        Cast2D::Auto if flat_matter && collidable => (true, "casts where it is solid"),
+        Cast2D::Auto if flat_matter => (false, "not collidable, so nothing to cast from"),
+        Cast2D::Auto => (false, "only tilemaps cast by default"),
+    }
+}
+
 /// Free-form string **tags** on a node — mark it `"enemy"`, `"checkpoint"`,
 /// `"breakable"` and find/compare cheaply from scripts (`node:hasTag`,
 /// `findTagged`). A node holds any number of tags (no single-tag straitjacket);
@@ -1212,5 +1419,135 @@ mod sorting_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod lighting_2d_tests {
+    use super::*;
+
+    fn light(flat_camera: bool) -> Lit2DFacts {
+        Lit2DFacts { emits: true, flat_matter: false, flat_camera }
+    }
+    fn tilemap(flat_camera: bool) -> Lit2DFacts {
+        Lit2DFacts { emits: false, flat_matter: true, flat_camera }
+    }
+    fn mesh(flat_camera: bool) -> Lit2DFacts {
+        Lit2DFacts { emits: false, flat_matter: false, flat_camera }
+    }
+
+    /// The requirement Ty stated: *"if I'm developing a 3D scene I shouldn't be
+    /// worried about accidentally setting something as 2D because of an
+    /// incorrect engine inference."* Nothing in an ordinary 3D scene infers 2D.
+    #[test]
+    fn nothing_in_a_perspective_scene_is_inferred_2d() {
+        for facts in [light(false), mesh(false)] {
+            assert!(!infers_2d(facts).0, "{facts:?} was inferred 2D in a 3D scene");
+        }
+    }
+
+    /// …and the same in reverse: a flat scene does not drag a mesh onto the 2D
+    /// path. Mixing the two is deliberate, never discovered.
+    #[test]
+    fn a_mesh_stays_3d_even_in_a_flat_scene() {
+        assert!(!infers_2d(mesh(true)).0);
+        assert!(infers_2d(light(true)).0, "the light in that scene IS 2D");
+        assert!(infers_2d(tilemap(true)).0);
+        assert!(infers_2d(tilemap(false)).0, "a tilemap is flat whatever the camera is");
+    }
+
+    /// A stated flag is never re-decided. This is the whole reason the mode has
+    /// three values instead of two: a scene that changes shape around a node
+    /// must not change what the author said about it.
+    #[test]
+    fn saying_so_beats_every_inference_in_both_directions() {
+        for facts in [light(true), light(false), tilemap(true), mesh(false)] {
+            assert!(resolve_2d(Lit2D::Yes, facts).0, "{facts:?} refused an explicit 2D");
+            assert!(!resolve_2d(Lit2D::No, facts).0, "{facts:?} refused an explicit 3D");
+            assert_eq!(resolve_2d(Lit2D::Auto, facts).0, infers_2d(facts).0);
+        }
+    }
+
+    /// Every answer carries a reason, because the Inspector prints it and the
+    /// design rests on the inference being inspectable rather than merely
+    /// correct.
+    #[test]
+    fn every_answer_says_why() {
+        for mode in Lit2D::ALL {
+            for facts in [light(true), light(false), tilemap(true), mesh(true)] {
+                let (_, why) = resolve_2d(mode, facts);
+                assert!(!why.is_empty(), "{mode:?} on {facts:?} decided silently");
+            }
+        }
+    }
+
+    /// A light with no layer list reaches everything — a new light that lit
+    /// nothing until a list was filled in would read as a broken light.
+    #[test]
+    fn a_light_that_names_no_layers_reaches_all_of_them() {
+        let all = Lighting2D::default();
+        for layer in ["", DEFAULT_SORTING_LAYER, "Background", "Characters"] {
+            assert!(all.reaches(layer), "{layer:?}");
+        }
+    }
+
+    /// Naming layers restricts it to those, and the empty name IS the default
+    /// layer — a node that never picked one and a node that picked "Default"
+    /// are the same node, so a light must not tell them apart.
+    #[test]
+    fn naming_layers_restricts_a_light_to_them() {
+        let torch = Lighting2D {
+            mode: Lit2D::Auto,
+            layers: vec!["Terrain".into(), DEFAULT_SORTING_LAYER.into()],
+        };
+        assert!(torch.reaches("Terrain"));
+        assert!(torch.reaches(DEFAULT_SORTING_LAYER));
+        assert!(torch.reaches(""), "the unset layer is the default layer");
+        assert!(!torch.reaches("Background"), "the background must stay flat");
+    }
+
+    /// Under `Auto` a tilemap casts from the collision it already has, so a
+    /// level's collision IS its light occlusion and the two cannot drift.
+    #[test]
+    fn a_solid_tilemap_casts_without_a_second_authoring_step() {
+        assert!(resolve_shadow_2d(Cast2D::Auto, true, true).0);
+        assert!(!resolve_shadow_2d(Cast2D::Auto, true, false).0, "not collidable, nothing to cast");
+        assert!(!resolve_shadow_2d(Cast2D::Auto, false, true).0, "a sprite does not cast by default");
+        // …and anything can be made to cast, or stopped, in one tick.
+        assert!(resolve_shadow_2d(Cast2D::Yes, false, false).0);
+        assert!(!resolve_shadow_2d(Cast2D::No, true, true).0);
+        for cast in Cast2D::ALL {
+            assert!(!resolve_shadow_2d(cast, true, true).1.is_empty());
+        }
+    }
+
+    /// An enum parser and the list of values it accepts have to be the same
+    /// code, or the error message names spellings that do not work
+    /// (`floptle/0082`).
+    #[test]
+    fn every_accepted_spelling_parses_and_every_value_round_trips() {
+        for s in Lit2D::ACCEPTS {
+            assert!(Lit2D::parse(s).is_some(), "Lit2D rejects its own {s:?}");
+        }
+        for v in Lit2D::ALL {
+            assert_eq!(Lit2D::parse(v.name()), Some(v));
+        }
+        assert_eq!(Lit2D::parse("nonsense"), None);
+        for s in Cast2D::ACCEPTS {
+            assert!(Cast2D::parse(s).is_some(), "Cast2D rejects its own {s:?}");
+        }
+        for v in Cast2D::ALL {
+            assert_eq!(Cast2D::parse(v.name()), Some(v));
+        }
+        assert_eq!(Cast2D::parse("nonsense"), None);
+    }
+
+    /// The default of every piece is "nothing has changed": a scene that has
+    /// never heard of 2D lighting behaves exactly as it did.
+    #[test]
+    fn the_default_of_everything_is_what_a_scene_already_had() {
+        assert_eq!(Lighting2D::default().mode, Lit2D::Auto);
+        assert!(Lighting2D::default().layers.is_empty());
+        assert_eq!(Shadow2D::default().0, Cast2D::Auto);
     }
 }

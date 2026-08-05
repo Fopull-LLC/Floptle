@@ -1532,6 +1532,7 @@ impl EditorTabViewer<'_> {
                         }
                     });
                 }
+                lighting_2d_row(ui, world, e, self.sorting_names, cmd);
                 ui.horizontal_wrapped(|ui| {
                     ui.label("tags");
                     let mut remove: Option<String> = None;
@@ -3782,6 +3783,145 @@ impl EditorTabViewer<'_> {
     }
 }
 
+/// What the 2D lighting inference is allowed to look at, read off the live
+/// scene. See [`floptle_core::infers_2d`] for why it is only these three.
+fn lit_2d_facts(world: &floptle_core::World, e: floptle_core::Entity) -> floptle_core::Lit2DFacts {
+    let matter = world.get::<Matter>(e);
+    floptle_core::Lit2DFacts {
+        // The scene's key light is a `Light` component; a placeable one is a
+        // `PointLight` node. Both emit, so both get the flag.
+        emits: matches!(matter, Some(Matter::PointLight { .. }))
+            || world.get::<floptle_core::Light>(e).is_some(),
+        flat_matter: matches!(
+            matter,
+            Some(Matter::Tilemap { .. }) | Some(Matter::SpriteBatch { .. })
+        ),
+        flat_camera: world.query::<Matter>().any(|(ce, m)| {
+            matches!(m, Matter::Camera { active: true, ortho: true, .. })
+                && !floptle_core::is_disabled(world, ce)
+        }),
+    }
+}
+
+/// The 2D lighting row: the three-valued flag, what `Auto` decided and why, the
+/// layers a light reaches, and whether the node blocks light.
+///
+/// Shown only for a node 2D lighting can mean something to — a light, a flat
+/// kind of matter, or anything already carrying the flag. A `Lit2D` dropdown on
+/// every mesh in a 3D scene would be four controls of pure noise.
+fn lighting_2d_row(
+    ui: &mut egui::Ui,
+    world: &floptle_core::World,
+    e: floptle_core::Entity,
+    sorting_names: &[String],
+    cmd: &mut crate::EditorCmd,
+) {
+    let facts = lit_2d_facts(world, e);
+    let cur = world.get::<floptle_core::Lighting2D>(e).cloned().unwrap_or_default();
+    let stated = world.get::<floptle_core::Lighting2D>(e).is_some()
+        || world.get::<floptle_core::Shadow2D>(e).is_some();
+    if !facts.emits && !facts.flat_matter && !stated {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.label("2D light");
+        egui::ComboBox::from_id_salt("node_lit_2d")
+            .selected_text(cur.mode.name())
+            .show_ui(ui, |ui| {
+                for m in floptle_core::Lit2D::ALL {
+                    if ui.selectable_label(cur.mode == m, m.name()).clicked() && m != cur.mode {
+                        cmd.set_lighting_2d =
+                            Some((e, floptle_core::Lighting2D { mode: m, ..cur.clone() }));
+                    }
+                }
+            })
+            .response
+            .on_hover_text(
+                "whether this is lit by the 2D system. auto decides from the scene; \
+                 2d and 3d are never re-decided.",
+            );
+        // What auto DECIDED, not just that it is deciding. An inference you
+        // cannot see is one you cannot trust, and this whole design rests on
+        // trusting it.
+        let (is2d, why) = floptle_core::resolve_2d(cur.mode, facts);
+        if cur.mode == floptle_core::Lit2D::Auto {
+            ui.small(format!("→ {} — {why}", if is2d { "2D" } else { "3D" }));
+        }
+    });
+    // Which layers a light reaches. Lights only: the field means nothing on a
+    // receiver, and a control that changes nothing is a lie about what the
+    // rules are.
+    if facts.emits {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("lights layers");
+            let mut next = cur.layers.clone();
+            let mut changed = false;
+            for n in sorting_names {
+                // Empty = every layer, so an untouched light shows every box
+                // ticked — which is what it does.
+                let mut on = cur.layers.is_empty() || cur.layers.contains(n);
+                if ui.checkbox(&mut on, n).changed() {
+                    changed = true;
+                    if cur.layers.is_empty() {
+                        // Turning one off is the first real choice: start from
+                        // "all of them" so the tick that was cleared is the only
+                        // one missing, rather than the only one present.
+                        next = sorting_names.to_vec();
+                    }
+                    if on {
+                        if !next.contains(n) {
+                            next.push(n.clone());
+                        }
+                    } else {
+                        next.retain(|x| x != n);
+                    }
+                }
+            }
+            if changed {
+                // Back to every layer is back to the default, which stores
+                // nothing — so a light that reaches everything says so by
+                // saying nothing.
+                if next.len() == sorting_names.len() {
+                    next.clear();
+                }
+                cmd.set_lighting_2d =
+                    Some((e, floptle_core::Lighting2D { mode: cur.mode, layers: next }));
+            }
+        });
+        if cur.layers.is_empty() {
+            ui.small("every layer").on_hover_text(
+                "a light that named no layers reaches all of them — untick one to \
+                 keep it off, e.g. a background that should stay flat",
+            );
+        }
+    } else {
+        let cast = world.get::<floptle_core::Shadow2D>(e).map(|s| s.0).unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label("blocks light");
+            egui::ComboBox::from_id_salt("node_shadow_2d")
+                .selected_text(cast.name())
+                .show_ui(ui, |ui| {
+                    for c in floptle_core::Cast2D::ALL {
+                        if ui.selectable_label(cast == c, c.name()).clicked() && c != cast {
+                            cmd.set_shadow_2d = Some((e, c));
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "auto: a tilemap casts from the collision it already has, so a \
+                     level's collision IS its light occlusion. on makes anything cast.",
+                );
+            let collidable = world.get::<floptle_core::Collidable>(e).is_some();
+            let (casts, why) =
+                floptle_core::resolve_shadow_2d(cast, facts.flat_matter, collidable);
+            if cast == floptle_core::Cast2D::Auto {
+                ui.small(format!("→ {} — {why}", if casts { "casts" } else { "no" }));
+            }
+        });
+    }
+}
+
 /// Whether a node carries the named component (mirrors the script-side
 /// `getcomponent` names) — the candidate filter for `componentref` pickers.
 fn node_has_component(
@@ -3973,5 +4113,130 @@ mod tests {
         assert!(!plain.is_sheet());
         assert!(!painted.contains("sprite cell"), "a plain texture must not offer cells:\n{painted}");
         assert!(painted.contains("tiling"), "the tiling rows must come back:\n{painted}");
+    }
+
+    // ---- 2D lighting -------------------------------------------------------
+
+    /// Draw the 2D lighting row for one node and hand back what it painted,
+    /// plus whatever it asked the editor to change.
+    fn run_lighting_2d(
+        world: &floptle_core::World,
+        e: floptle_core::Entity,
+        layers: &[String],
+    ) -> (String, crate::EditorCmd) {
+        let ctx = crate::icons::test_context();
+        let mut cmd = crate::EditorCmd::default();
+        let mut painted = String::new();
+        for _ in 0..2 {
+            cmd = crate::EditorCmd::default();
+            let out = ctx.run_ui(crate::icons::test_input(), |ui| {
+                lighting_2d_row(ui, world, e, layers, &mut cmd);
+            });
+            painted = painted_text(&out);
+        }
+        (painted, cmd)
+    }
+
+    fn scene_with(matter: Matter, ortho_camera: bool) -> (floptle_core::World, floptle_core::Entity) {
+        let mut world = floptle_core::World::default();
+        let cam = world.spawn();
+        world.insert(
+            cam,
+            Matter::Camera {
+                fov_y: 60.0,
+                active: true,
+                target: String::new(),
+                cull_mask: !0,
+                target_w: 0,
+                target_h: 0,
+                target_hz: 0.0,
+                ortho: ortho_camera,
+                ortho_height: 10.0,
+            },
+        );
+        let e = world.spawn();
+        world.insert(e, matter);
+        (world, e)
+    }
+
+    fn tilemap() -> Matter {
+        Matter::Tilemap {
+            cols: 2,
+            rows: 2,
+            tile: 1.0,
+            data: vec![floptle_core::EMPTY_TILE; 4],
+            tileset: String::new(),
+        }
+    }
+
+    /// `Auto` must say what it DECIDED, not merely that it is deciding. The
+    /// whole 2D-vs-3D design rests on the inference being inspectable: an
+    /// inference you cannot see is one you cannot trust.
+    #[test]
+    fn auto_shows_what_it_inferred_and_why() {
+        let layers = vec!["Default".to_string(), "Background".to_string()];
+
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0 }, true);
+        let (painted, _) = run_lighting_2d(&world, e, &layers);
+        assert!(painted.contains("2D light"), "no row at all:\n{painted}");
+        assert!(painted.contains("auto"), "the flag is not shown:\n{painted}");
+        assert!(painted.contains("→ 2D"), "auto did not say what it decided:\n{painted}");
+        assert!(painted.contains("orthographic"), "…nor why:\n{painted}");
+
+        // The same light in a 3D scene decides the other way, and says so.
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0 }, false);
+        let (painted, _) = run_lighting_2d(&world, e, &layers);
+        assert!(painted.contains("→ 3D"), "a light in a perspective scene must read 3D:\n{painted}");
+    }
+
+    /// A 3D scene must not grow four controls of noise on every mesh.
+    #[test]
+    fn an_ordinary_mesh_gets_no_2d_lighting_row_at_all() {
+        let (world, e) = scene_with(Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0; 3] }, false);
+        let (painted, _) = run_lighting_2d(&world, e, &["Default".to_string()]);
+        assert!(painted.trim().is_empty(), "a plain cube drew a 2D lighting row:\n{painted}");
+    }
+
+    /// The layer list is a LIGHT's control. On a receiver it would mean nothing,
+    /// and a control that changes nothing is a lie about what the rules are.
+    #[test]
+    fn only_a_light_is_asked_which_layers_it_reaches() {
+        let layers = vec!["Default".to_string(), "Background".to_string()];
+        let (world, e) = scene_with(tilemap(), true);
+        let (painted, _) = run_lighting_2d(&world, e, &layers);
+        assert!(painted.contains("2D light"), "a tilemap IS a 2D receiver:\n{painted}");
+        assert!(!painted.contains("lights layers"), "a receiver was offered a light's control:\n{painted}");
+        assert!(painted.contains("blocks light"), "…and was not asked whether it occludes:\n{painted}");
+        // Not collidable yet, and auto says exactly that rather than "no".
+        assert!(painted.contains("nothing to cast from"), "the reason is missing:\n{painted}");
+
+        // Switch its collision on and it casts, with no second authoring step —
+        // a level's collision IS its light occlusion.
+        let mut world = world;
+        world.insert(e, floptle_core::Collidable);
+        let (painted, _) = run_lighting_2d(&world, e, &layers);
+        assert!(painted.contains("→ casts"), "a solid tilemap must cast:\n{painted}");
+        assert!(painted.contains("casts where it is solid"), "{painted}");
+    }
+
+    /// Unticking one layer must leave a light reaching all the OTHERS, not only
+    /// the one that was already ticked. An untouched light shows every box on
+    /// because it reaches everything; the first click has to preserve that.
+    #[test]
+    fn unticking_a_layer_keeps_the_rest() {
+        let layers = vec!["Default".to_string(), "Terrain".to_string(), "Background".to_string()];
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0 }, true);
+        let (painted, _) = run_lighting_2d(&world, e, &layers);
+        assert!(painted.contains("every layer"), "an untouched light must say it reaches all:\n{painted}");
+
+        // Simulate the click the panel would make on "Background".
+        let cur = floptle_core::Lighting2D::default();
+        let mut next = layers.clone();
+        assert!(cur.layers.is_empty());
+        next.retain(|x| x != "Background");
+        let after = floptle_core::Lighting2D { mode: cur.mode, layers: next };
+        assert!(after.reaches("Default"));
+        assert!(after.reaches("Terrain"));
+        assert!(!after.reaches("Background"));
     }
 }

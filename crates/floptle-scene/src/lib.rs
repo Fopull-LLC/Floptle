@@ -186,6 +186,20 @@ pub struct NodeDoc {
     /// use it. See [`floptle_core::Sorting`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sorting: Option<(String, i32)>,
+    /// Whether this node is on the 2D lighting path: `"auto"`, `"2d"` or
+    /// `"3d"`. `None` = `auto`, which is every node that has not opted in, so
+    /// this writes nothing to a scene that does not use 2D lighting.
+    /// See [`floptle_core::Lit2D`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lit_2d: Option<String>,
+    /// **Lights only.** The sorting layers this light reaches, by name. Empty —
+    /// the default — means every layer. See [`floptle_core::Lighting2D`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub light_layers: Vec<String>,
+    /// Whether this node blocks 2D light: `"auto"`, `"on"` or `"off"`.
+    /// `None` = `auto`. See [`floptle_core::Cast2D`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow_2d: Option<String>,
 }
 
 /// Serializable replication settings, mirroring [`floptle_core::Replicated`].
@@ -2027,6 +2041,25 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if !node.tags.is_empty() {
         world.insert(e, floptle_core::Tags(node.tags.clone()));
     }
+    // An unknown spelling falls back to `Auto` rather than refusing the node:
+    // a scene from a newer engine should still open, with the light behaving as
+    // an unconfigured one rather than the whole file failing to load.
+    if node.lit_2d.is_some() || !node.light_layers.is_empty() {
+        world.insert(
+            e,
+            floptle_core::Lighting2D {
+                mode: node
+                    .lit_2d
+                    .as_deref()
+                    .and_then(floptle_core::Lit2D::parse)
+                    .unwrap_or_default(),
+                layers: node.light_layers.clone(),
+            },
+        );
+    }
+    if let Some(c) = node.shadow_2d.as_deref().and_then(floptle_core::Cast2D::parse) {
+        world.insert(e, floptle_core::Shadow2D(c));
+    }
     if let Some((layer, order)) = &node.sorting {
         world.insert(e, floptle_core::Sorting { layer: layer.clone(), order: *order });
     }
@@ -2249,6 +2282,20 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             (name != floptle_core::DEFAULT_SORTING_LAYER || s.order != 0)
                 .then(|| (name.to_string(), s.order))
         });
+        // Same rule as `sorting` above: `Auto` with no layer list IS the
+        // default, so a scene that has never touched 2D lighting is written
+        // byte for byte as it always was.
+        let lit = world.get::<floptle_core::Lighting2D>(e);
+        let lit_2d = lit
+            .map(|l| l.mode)
+            .filter(|m| *m != floptle_core::Lit2D::Auto)
+            .map(|m| m.name().to_string());
+        let light_layers = lit.map(|l| l.layers.clone()).unwrap_or_default();
+        let shadow_2d = world
+            .get::<floptle_core::Shadow2D>(e)
+            .map(|s| s.0)
+            .filter(|c| *c != floptle_core::Cast2D::Auto)
+            .map(|c| c.name().to_string());
         nodes.push(NodeDoc {
             id,
             parent_id,
@@ -2280,6 +2327,9 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             layer,
             tags,
             sorting,
+            lit_2d,
+            light_layers,
+            shadow_2d,
         });
     }
     let lighting =
@@ -2585,6 +2635,9 @@ mod tests {
                     layer: Some("Enemies".into()), // exercise the layer round-trip
                     tags: vec!["enemy".into(), "boss".into()],
                     sorting: None, // exercise the tags round-trip
+                    lit_2d: Some("2d".into()), // exercise the 2D-lighting round-trips
+                    light_layers: vec!["Terrain".into(), "Characters".into()],
+                    shadow_2d: Some("on".into()),
                 },
                 NodeDoc {
                     id: None,
@@ -2620,6 +2673,9 @@ mod tests {
                     layer: None,
                     tags: Vec::new(),
                     sorting: None,
+                    lit_2d: None,
+                    light_layers: Vec::new(),
+                    shadow_2d: None,
                 },
                 NodeDoc {
                     id: None,
@@ -2652,6 +2708,9 @@ mod tests {
                     layer: None,
                     tags: Vec::new(),
                     sorting: None,
+                    lit_2d: None,
+                    light_layers: Vec::new(),
+                    shadow_2d: None,
                 },
                 NodeDoc {
                     id: None,
@@ -2684,6 +2743,9 @@ mod tests {
                     layer: None,
                     tags: Vec::new(),
                     sorting: None,
+                    lit_2d: None,
+                    light_layers: Vec::new(),
+                    shadow_2d: None,
                 },
             ],
         }
