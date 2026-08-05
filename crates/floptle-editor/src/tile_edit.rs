@@ -203,6 +203,15 @@ pub(crate) struct TileTools {
     /// Retile after every stroke. On by default when a group is armed, because a
     /// group you have to remember to retile is a group that looks broken.
     pub(crate) auto_retile: bool,
+    /// The autotile rule being filled: `(group, neighbourhood mask)`.
+    ///
+    /// While this is armed, clicking a tile in the palette does not pick a brush
+    /// — it says "*this* is the tile for that neighbourhood" and moves to the
+    /// next unfilled one. That is the whole of the interactive setup: the rules
+    /// used to be assigned in bulk, in cell order, from a multi-selection, which
+    /// works only for a sheet already laid out in the preset's order and gives
+    /// no clue what went where when it isn't.
+    pub(crate) fill_mask: Option<(u16, u8)>,
     /// The rectangle the Select tool has, `(x0, y0, x1, y1)` inclusive.
     pub(crate) selection: Option<(i32, i32, i32, i32)>,
     /// The clipboard: a stamp lifted by Copy.
@@ -241,6 +250,7 @@ impl Default for TileTools {
             page: 0,
             group: None,
             auto_retile: true,
+            fill_mask: None,
             selection: None,
             clipboard: None,
             show_grid: true,

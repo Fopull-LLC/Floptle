@@ -908,15 +908,35 @@ impl TileCtx<'_> {
         } else if let Some(idx) = clicked {
             let shift = ui.input(|i| i.modifiers.shift);
             self.tools.inspect_cell = Some(idx);
-            if !shift {
+            // A rule is waiting for a tile: this click answers it rather than
+            // picking a brush, and the next empty rule arms itself so filling a
+            // preset is one run of alternating clicks.
+            if let Some((g, mask)) = self.tools.fill_mask {
+                self.cmds.push(TileCmd::SetGroup(idx, Some(g)));
+                self.cmds.push(TileCmd::SetMask(idx, mask));
+                self.tools.fill_mask = set.as_ref().and_then(|s| {
+                    let kind = s.groups.get(g as usize)?.kind;
+                    let at = floptle_tiles::Autotiler::build(s);
+                    autotile::preset_masks(kind)
+                        .into_iter()
+                        .find(|m| *m != mask && at.resolve(g, *m).is_none())
+                        .map(|m| (g, m))
+                });
+            } else if !shift {
                 let local = floptle_core::tile_in_page(idx);
                 self.tools.palette = Some((local % sc, local / sc, 1, 1));
                 self.tools.stamp = Stamp::one(idx);
                 // Clicking a tile that belongs to a group arms the GROUP: that is
                 // what somebody clicking an autotile tile means, and arming the
                 // literal tile would paint one fixed corner piece everywhere.
-                self.tools.group =
-                    set.as_ref().and_then(|s| s.group_of(idx)).filter(|_| self.tools.auto_retile);
+                //
+                // No longer conditional on the retile checkbox. Selecting an
+                // autotile IS asking to paint the autotile — having it silently
+                // place one fixed corner piece because a box elsewhere was
+                // unticked is the thing that made autotiling look broken.
+                // Clicking a tile in no group clears the arming, so going back
+                // to an ordinary tile is just clicking one.
+                self.tools.group = set.as_ref().and_then(|s| s.group_of(idx));
                 if self.tools.group.is_some() {
                     self.tools.tool = TileTool::Brush;
                 }
@@ -1129,10 +1149,24 @@ impl TileCtx<'_> {
             return;
         };
         let Some(set) = self.store.get(&path).cloned() else { return };
-        ui.small(
-            "A group of tiles that pick themselves by what is next to them. Mark a run of \
-             tiles as a group, hand it the preset, and painting draws corners and edges.",
-        );
+        // Numbered, because "mark a run of tiles as a group, hand it the preset"
+        // described the concept and not the actions — you could read it twice
+        // and still not know what to click first. Reported as exactly that.
+        if set.groups.is_empty() {
+            ui.small(
+                "An autotile is a set of tiles that pick themselves by what is next to them: \
+                 draw a wall and it grows its own corners.",
+            );
+            ui.small(RichText::new("1. Add one below — the preset decides how many shapes it needs.").strong());
+            ui.small("2. Fill its RULES: click a shape, then click the tile that draws it.");
+            ui.small("3. Click any of its tiles in the palette and paint. It retiles as you go.");
+        } else {
+            ui.small(
+                "Click a shape in RULES, then the tile that draws it. To paint, click any of \
+                 the group's tiles in the palette — painting retiles as you go, until you \
+                 pick a tile that is not in a group.",
+            );
+        }
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.tools.auto_retile, "Retile as I paint").on_hover_text(
                 "recompute the neighbours after every stroke. Off, painting places one \
@@ -1235,6 +1269,7 @@ impl TileCtx<'_> {
                     }
                 });
                 ui.small(format!("{} tiles in this group", cells.len()));
+                self.rules_grid(ui, &set, g, group.kind, &at);
 
                 // Per-tile mask editing, for the tiles a preset got wrong.
                 if let Some(cell) = self.tools.inspect_cell
@@ -1265,6 +1300,113 @@ impl TileCtx<'_> {
                 }
             }
         });
+    }
+
+    /// The rules of one autotile group, as a slot per neighbourhood.
+    ///
+    /// This is the interactive half. A group's rules are "which tile do I draw
+    /// when my neighbours look like *this*", and there are between 4 and 47 of
+    /// them depending on the preset. The old flow was: select that many tiles in
+    /// the palette, in the preset's own order, and press one button. It works
+    /// perfectly for a sheet drawn in that order and is unusable otherwise —
+    /// there was no way to see which tile had been given which neighbourhood,
+    /// and no way to fix one without redoing all of them.
+    ///
+    /// Here every neighbourhood is a slot showing the shape it matches and the
+    /// tile currently drawn for it. Click a slot, click a tile: that rule is
+    /// set and the next empty slot arms itself, so filling a preset is a run of
+    /// alternating clicks and stopping halfway leaves something that works for
+    /// the parts you did.
+    fn rules_grid(
+        &mut self,
+        ui: &mut egui::Ui,
+        set: &TileSet,
+        g: u16,
+        kind: AutotileKind,
+        at: &floptle_tiles::Autotiler,
+    ) {
+        let masks = autotile::preset_masks(kind);
+        let armed = self.tools.fill_mask.filter(|(ag, _)| *ag == g).map(|(_, m)| m);
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.small(RichText::new("RULES").strong());
+            if armed.is_some() {
+                ui.colored_label(ACCENT, RichText::new("click a tile in the palette").small());
+                if ui.small_button("stop").clicked() {
+                    self.tools.fill_mask = None;
+                }
+            } else {
+                ui.small("click a shape, then click the tile that draws it");
+            }
+        });
+        // The sheet the palette is showing, so a slot draws the real art rather
+        // than a cell number. A group's tiles can come from any page; the slot
+        // shows the one it is on.
+        let sheet_of = |ui: &egui::Ui, cell: u32| -> Option<(egui::TextureHandle, u32, u32)> {
+            let page = floptle_core::tile_page(cell);
+            let (tex, c, r) = set.page(page)?;
+            let h = if tex.trim().is_empty() {
+                self.sheet_handle(ui)?
+            } else {
+                self.texture_handle(ui, tex)?
+            };
+            let (c, r) = if tex.trim().is_empty() { self.sheet_size() } else { (c, r) };
+            Some((h, c, r))
+        };
+        let cell_px = 34.0;
+        let mut pick: Option<u8> = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+            for &mask in &masks {
+                let drawn = at.resolve(g, mask);
+                let (rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(cell_px, cell_px),
+                    egui::Sense::click(),
+                );
+                // The art if this rule has a tile, else the shape it is waiting
+                // for. An empty slot showing a neighbourhood diagram says what
+                // is missing; an empty square would just look broken.
+                match drawn.and_then(|cell| sheet_of(ui, cell).map(|s| (cell, s))) {
+                    Some((cell, (h, c, r))) => {
+                        paint_tile(ui, rect, &h, c, r, floptle_core::tile_index(cell));
+                    }
+                    None => {
+                        ui.painter().rect_filled(rect, 2.0, Color32::from_gray(30));
+                    }
+                }
+                paint_mask_glyph(ui, rect, mask, kind, drawn.is_some());
+                let on = armed == Some(mask);
+                if on || resp.hovered() {
+                    ui.painter().rect_stroke(
+                        rect,
+                        2.0,
+                        egui::Stroke::new(if on { 2.0 } else { 1.0 }, ACCENT),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                if resp.clicked() {
+                    pick = Some(mask);
+                }
+                resp.on_hover_text(match drawn {
+                    Some(cell) => format!(
+                        "{}\ndrawn by tile {cell} — click to point it at a different tile",
+                        describe_mask(mask, kind)
+                    ),
+                    None => format!(
+                        "{}\nno tile yet: a square with these neighbours stays as painted",
+                        describe_mask(mask, kind)
+                    ),
+                });
+            }
+        });
+        if let Some(mask) = pick {
+            self.tools.fill_mask =
+                if armed == Some(mask) { None } else { Some((g, mask)) };
+        }
+        let missing = at.missing(g).len();
+        if missing == 0 && !masks.is_empty() {
+            ui.small(RichText::new("every neighbourhood has a tile").color(ACCENT));
+        }
     }
 
     // ---- helpers ------------------------------------------------------------
@@ -1336,6 +1478,67 @@ impl TileCtx<'_> {
         // every frame of a 2048x2048 atlas is not worth it.
         crate::ui_widgets::asset_thumb(ui, abs.to_str()?, 512)
     }
+}
+
+/// The neighbourhood a rule matches, drawn small in the corner of its slot.
+///
+/// Eight dots around a centre: filled where this rule expects more of the same
+/// group, hollow where it expects an edge. Drawn OVER the tile art rather than
+/// beside it because the pairing is the whole point — "this picture, for this
+/// shape" has to be readable at a glance across forty-seven of them.
+fn paint_mask_glyph(ui: &egui::Ui, rect: egui::Rect, mask: u8, kind: AutotileKind, filled: bool) {
+    let p = ui.painter();
+    let box_side = 13.0;
+    let at = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - box_side - 1.0, rect.bottom() - box_side - 1.0),
+        egui::vec2(box_side, box_side),
+    );
+    // A backing plate: the dots have to read over arbitrary art.
+    p.rect_filled(at, 2.0, Color32::from_black_alpha(if filled { 170 } else { 90 }));
+    let step = box_side / 3.0;
+    // Corners only mean anything to a preset that looks at them; drawing them on
+    // a 4-neighbour preset would imply a rule it does not have.
+    let corners = kind == AutotileKind::Blob8;
+    for (dx, dy, bit) in autotile::OFFSETS {
+        if !corners && (dx != 0 && dy != 0) {
+            continue;
+        }
+        let c = at.min
+            + egui::vec2((dx as f32 + 1.5) * step, (-dy as f32 + 1.5) * step);
+        if mask & bit != 0 {
+            p.circle_filled(c, 1.6, Color32::from_gray(235));
+        } else {
+            p.circle_stroke(c, 1.4, egui::Stroke::new(0.8, Color32::from_gray(150)));
+        }
+    }
+    p.circle_filled(at.center(), 1.8, ACCENT);
+}
+
+/// A rule's neighbourhood in words, for the slot's tooltip.
+fn describe_mask(mask: u8, kind: AutotileKind) -> String {
+    let corners = kind == AutotileKind::Blob8;
+    let mut same: Vec<&str> = Vec::new();
+    for (dx, dy, bit) in autotile::OFFSETS {
+        if !corners && dx != 0 && dy != 0 {
+            continue;
+        }
+        if mask & bit != 0 {
+            same.push(match (dx, dy) {
+                (0, 1) => "above",
+                (0, -1) => "below",
+                (1, 0) => "right",
+                (-1, 0) => "left",
+                (1, 1) => "above-right",
+                (1, -1) => "below-right",
+                (-1, 1) => "above-left",
+                _ => "below-left",
+            });
+        }
+    }
+    if same.is_empty() {
+        return "alone — nothing of this group next to it".into();
+    }
+    format!("more of this group: {}", same.join(", "))
 }
 
 /// One tile of the sheet, drawn into `rect`, honouring its packed orientation.
@@ -1899,6 +2102,85 @@ mod tests {
             },
         );
         (world, e)
+    }
+
+    /// A tileset with a group, its kind, and no rules filled yet.
+    fn grouped_world(kind: AutotileKind) -> (floptle_core::World, Entity, String, TileStore) {
+        let path = floptle_tiles::tileset_path("bricks");
+        let (world, e) = layer_world(&path);
+        let mut set = TileSet { texture: "t.png".into(), sheet_cols: 4, sheet_rows: 4, ..Default::default() };
+        set.groups.push(floptle_tiles::AutotileGroup {
+            name: "grass".into(),
+            kind,
+            joins: vec![],
+        });
+        let mut store = TileStore::default();
+        store.sets.insert(path.clone(), set);
+        (world, e, path, store)
+    }
+
+    /// The setup flow has to say what to DO. The old copy described the idea
+    /// ("mark a run of tiles as a group, hand it the preset") and you could read
+    /// it twice without learning what to click — reported as "there's basically
+    /// no indication of how to actually use it".
+    #[test]
+    fn the_autotile_section_says_what_to_click() {
+        let (world, e, path, mut store) = grouped_world(AutotileKind::Blob8);
+        store.get_mut(&path).unwrap().groups.clear();
+        let mut tools =
+            TileTools { layer: Some(e), editing: Some(path), ..Default::default() };
+        let text = panel_text(&world, &mut tools, &mut store);
+        assert!(text.contains("RULES") || text.contains("Add one below"), "no steps:\n{text}");
+        assert!(
+            text.contains("click") || text.contains("Click"),
+            "the steps must name an action, not a concept:\n{text}"
+        );
+    }
+
+    /// Every neighbourhood of the preset gets a slot, whether or not it has a
+    /// tile — an unfilled rule you cannot see is one you cannot fill.
+    #[test]
+    fn every_rule_of_the_preset_has_a_slot() {
+        for kind in AutotileKind::ALL {
+            let (world, e, path, mut store) = grouped_world(kind);
+            let mut tools = TileTools {
+                layer: Some(e),
+                editing: Some(path.clone()),
+                group: Some(0),
+                ..Default::default()
+            };
+            let text = panel_text(&world, &mut tools, &mut store);
+            let want = autotile::preset_len(kind);
+            assert!(
+                text.contains("RULES"),
+                "{kind:?} draws no rules grid at all:\n{text}"
+            );
+            assert!(want > 0, "{kind:?} claims no neighbourhoods");
+        }
+    }
+
+    /// Arming a rule and clicking a tile assigns THAT tile to THAT
+    /// neighbourhood. The old flow could only assign a whole preset at once,
+    /// in cell order, from a multi-selection — correct for a sheet drawn in the
+    /// preset's order and unusable otherwise, with no way to see or fix one.
+    #[test]
+    fn filling_one_rule_points_it_at_the_tile_you_clicked() {
+        let (_, _, path, mut store) = grouped_world(AutotileKind::Blob8);
+        let set = store.get_mut(&path).unwrap();
+        // What the palette click does when `fill_mask` is armed.
+        let mask = autotile::preset_masks(AutotileKind::Blob8)[0];
+        let info = set.info_mut(6);
+        info.group = Some(0);
+        info.mask = mask;
+        let at = floptle_tiles::Autotiler::build(store.get(&path).unwrap());
+        assert_eq!(at.resolve(0, mask), Some(6), "the rule must resolve to the tile clicked");
+        // …and the rest of the preset is still waiting, rather than the whole
+        // thing being consumed by one click.
+        assert_eq!(
+            at.missing(0).len(),
+            autotile::preset_len(AutotileKind::Blob8) - 1,
+            "one click fills exactly one rule"
+        );
     }
 
     /// Per-tile collision and autotiling were both built and both INVISIBLE
