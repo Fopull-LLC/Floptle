@@ -662,10 +662,42 @@ mod tests {
         assert!(checked > 20, "seam test didn't examine enough shared vertices ({checked})");
     }
 
-    /// Realistic sculpted terrain, real budget. The paint-brush freeze taught us that
-    /// perf tests on synthetic shapes pass while real content hangs (T7).
+    /// Realistic sculpted terrain, and the guard is a RATIO rather than a duration.
+    ///
+    /// The paint-brush freeze taught us that perf tests on synthetic shapes pass while
+    /// real content hangs (T7), so the field is a slab with 24 real brush strokes on it.
+    ///
+    /// ## Why this is not an absolute millisecond bound any more
+    ///
+    /// It was, and it flaked: 7.23 ms against a 6 ms bound on a CI runner, while the
+    /// same commit passed in a run that was not sharing the machine. The old comment
+    /// said "a timing assert that flips with the scheduler is worse than no assert" —
+    /// which was right, and the bound was simply not high enough to make it true. Any
+    /// bound high enough to survive a loaded shared runner is also high enough to let a
+    /// 3× regression through.
+    ///
+    /// So the measurement is a ratio of two timings taken in the SAME run, which makes
+    /// runner speed cancel exactly.
+    ///
+    /// ## What the two timings are
+    ///
+    /// Meshing a chunk is a fixed voxel SCAN (visit every voxel to find the surface)
+    /// plus per-VERTEX gradient work. Measuring both separates them:
+    ///
+    /// * an **empty** chunk — full voxel count, zero vertices — is the scan alone;
+    /// * the **busiest** chunk is the scan plus every vertex.
+    ///
+    /// So `(busiest − empty) / empty` is the gradient's cost expressed in units of the
+    /// scan's, and it is dimensionless. Measured ~0.28 here (0.47 ms of gradient over a
+    /// 1.69 ms scan, 3,178 triangles ⇒ ~0.15 µs/tri).
+    ///
+    /// The regression this exists to catch is per-voxel HashMap lookups in the gradient,
+    /// which measured 11 ms for a chunk — the same ratio would be ~5.5, twenty times the
+    /// healthy figure. A bound of 2.0 sits with 7× headroom above healthy and still trips
+    /// that by 2.7×, and no amount of scheduler noise moves it, because noise scales both
+    /// timings together.
     #[test]
-    fn remesh_of_a_sculpted_chunk_is_under_a_millisecond() {
+    fn the_gradient_costs_a_fraction_of_the_voxel_scan_it_rides_on() {
         let mut f = ChunkField::new(1.5);
         f.fill_slab(Vec3::new(-60.0, -20.0, -60.0), Vec3::new(60.0, 20.0, 60.0), 0.0, [0.4, 0.6, 0.3]);
         for i in 0..24 {
@@ -680,38 +712,55 @@ mod tests {
         }
         let coords = f.chunk_coords();
         assert!(!coords.is_empty());
-        // Time the busiest chunk — the average would flatter us.
-        let busiest = coords
-            .iter()
-            .max_by_key(|c| mesh_chunk(&f, **c, 1, false).tri_count())
-            .copied()
-            .unwrap();
-        let t0 = std::time::Instant::now();
+
+        let tris_of = |c: [i32; 3]| mesh_chunk(&f, c, 1, false).tri_count();
+        // The busiest chunk, not the average — the average would flatter us.
+        let busiest = coords.iter().copied().max_by_key(|c| tris_of(*c)).unwrap();
+        // …and an EMPTY one: same voxel count, no vertices. A sculpted slab always has
+        // chunks entirely above or below the surface; if it somehow did not, there is
+        // nothing to subtract and the ratio would be meaningless, so say so.
+        let empty = coords.iter().copied().find(|c| tris_of(*c) == 0);
+        let Some(empty) = empty else {
+            panic!("no empty chunk to measure the bare voxel scan against — the field \
+                    changed shape and this test needs a new baseline");
+        };
+        let busy_tris = tris_of(busiest);
+        assert!(busy_tris > 500, "the busiest chunk has only {busy_tris} triangles to time");
+
+        // Interleave the two timings so a runner that slows down partway through
+        // affects both, rather than whichever happened to run during the slow patch.
         let reps = 20;
+        let mut t_empty = 0.0f64;
+        let mut t_busy = 0.0f64;
         for _ in 0..reps {
+            let a = std::time::Instant::now();
+            std::hint::black_box(mesh_chunk(&f, empty, 1, false));
+            t_empty += a.elapsed().as_secs_f64();
+            let b = std::time::Instant::now();
             std::hint::black_box(mesh_chunk(&f, busiest, 1, false));
+            t_busy += b.elapsed().as_secs_f64();
         }
-        let ms = t0.elapsed().as_secs_f32() * 1000.0 / reps as f32;
-        println!("busiest chunk remesh: {ms:.3} ms ({} tris)", mesh_chunk(&f, busiest, 1, false).tri_count());
-        // The 1 ms budget is specified for RELEASE (opt-level 3), which is what ships and
-        // what a player's sculpt hitch is measured against — there it lands at ~0.6 ms.
-        // The workspace dev profile is opt-level 1, so it runs ~3× slower; assert a
-        // proportionate bound there rather than skip, because the regression this guards
-        // against (per-voxel HashMap lookups in the gradient — measured at 11 ms/chunk)
-        // trips BOTH bounds by a mile.
-        // What this bound is FOR: catching order-of-magnitude regressions, not
-        // certifying a number. The real figure is ~1.0 ms release for this chunk
-        // (~6900 tris ⇒ ~0.15 µs/tri, comfortably inside the plan's 1 ms budget); but
-        // `cargo test` runs this alongside 27 other tests, and under that contention it
-        // measures ~1.3 ms. A timing assert that flips with the scheduler is worse than
-        // no assert, so the bound is set where scheduling noise cannot reach it while
-        // the regression it guards — per-voxel HashMap lookups in the gradient, measured
-        // at 11 ms — still trips it by 5×. Dev is opt-level 1 (release is 3): ~3× slower.
-        let budget = if cfg!(debug_assertions) { 6.0 } else { 2.0 };
+        let (scan_ms, busy_ms) = (t_empty * 1000.0 / reps as f64, t_busy * 1000.0 / reps as f64);
+        let gradient_ms = (busy_ms - scan_ms).max(0.0);
+        let ratio = gradient_ms / scan_ms.max(1e-9);
+        println!(
+            "voxel scan {scan_ms:.3} ms · busiest chunk {busy_ms:.3} ms ({busy_tris} tris) \
+             ⇒ gradient {gradient_ms:.3} ms = {ratio:.2}× the scan ({:.3} µs/tri)",
+            gradient_ms * 1000.0 / busy_tris as f64
+        );
         assert!(
-            ms < budget,
-            "chunk remesh took {ms:.2} ms — budget {budget:.0} ms for this profile \
-             (sculpting must feel instant; the pre-gather version was 11 ms)"
+            ratio < 2.0,
+            "the gradient now costs {ratio:.2}× the voxel scan it rides on (healthy is \
+             ~0.3×) — that is the shape of a per-VOXEL lookup where a per-vertex one \
+             belongs, which measured 11 ms/chunk the last time it happened"
+        );
+        // A second, deliberately enormous absolute bound. The ratio cannot catch a
+        // regression that slows the scan and the gradient equally; nothing in this
+        // subsystem should ever take a tenth of a second for one chunk on any machine.
+        assert!(
+            busy_ms < 100.0,
+            "one chunk took {busy_ms:.1} ms — something has gone wrong at a scale the \
+             ratio cannot see"
         );
     }
 
