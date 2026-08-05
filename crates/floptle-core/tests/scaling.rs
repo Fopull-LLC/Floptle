@@ -277,23 +277,45 @@ fn n_sphere_queries_over_n_bodies_stay_linear() {
     assert_linearish("spatial::Grid, n queries over n items", ratio);
 }
 
-/// …and the same work done the way it was done before is quadratic, so the guard
-/// above is measuring a real change and not a tautology.
+/// …and the honest scan it replaces is measured in the SAME run, so "linear" is
+/// falsifiable.
 ///
-/// Without this, "the index is linear" is unfalsifiable: any cheap-enough loop
-/// looks linear at these sizes. This is the before-number, in the same harness.
+/// Without a before-number, any cheap-enough loop looks linear at these sizes.
+/// The two measurements are compared against each other rather than against an
+/// absolute ceiling, for the same reason every guard here asserts a ratio:
+/// whatever a loaded shared runner does to one number it does to the other.
 #[test]
-fn the_scan_the_index_replaces_really_is_quadratic() {
+fn the_scan_the_index_replaces_grows_far_worse_than_it_does() {
     use floptle_core::math::Vec3;
+    use floptle_core::spatial::Grid;
 
-    let ratio = growth(2_000, |n| {
+    fn lattice(n: usize) -> Vec<(Vec3, f32)> {
         let side = (n as f32).cbrt().ceil() as usize;
-        let items: Vec<(Vec3, f32)> = (0..n)
+        (0..n)
             .map(|i| {
                 let (x, y, z) = (i % side, (i / side) % side, i / (side * side));
                 (Vec3::new(x as f32 * 3.0, y as f32 * 3.0, z as f32 * 3.0), 0.5)
             })
-            .collect();
+            .collect()
+    }
+
+    // The index: build, then one query per item.
+    let indexed = growth(2_000, |n| {
+        let items = lattice(n);
+        let mut grid = Grid::default();
+        grid.rebuild(items.iter().copied());
+        let mut cand = Vec::new();
+        let mut total = 0usize;
+        for (c, _) in &items {
+            cand.clear();
+            grid.sphere(*c, 2.0, &mut cand);
+            total += cand.len();
+        }
+        std::hint::black_box(total);
+    });
+    // The scan: the same question, asked of everything.
+    let scanned = growth(2_000, |n| {
+        let items = lattice(n);
         let mut total = 0usize;
         for (c, _) in &items {
             for (o, r) in &items {
@@ -305,9 +327,9 @@ fn the_scan_the_index_replaces_really_is_quadratic() {
         std::hint::black_box(total);
     });
     assert!(
-        ratio > 8.0,
-        "the full scan measured {ratio:.1}x for 4x the bodies. It is supposed to be \
-         ~16x — if it is not, this harness is not measuring what the guard above \
-         claims to improve."
+        scanned > indexed * 2.0,
+        "4x the bodies cost the index {indexed:.1}x and the full scan {scanned:.1}x. \
+         The scan is supposed to grow ~16x against the index's ~4x — if the two move \
+         together, this harness is not measuring the change it claims to."
     );
 }
