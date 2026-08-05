@@ -23,14 +23,33 @@ use floptle_render::{InstanceRaw, MaterialParams, MeshId, TexId, instance_of_mat
 
 use crate::Editor;
 
+/// One page's uploaded geometry: the squares of a grid that come from ONE
+/// sheet, welded into one mesh, plus the sheet they sample.
+pub(crate) struct TilePageGpu {
+    pub(crate) mesh: MeshId,
+    /// Which page of the tileset this draws — 0 is the layer's own sheet.
+    pub(crate) page: u32,
+    /// The image, project-relative. Resolved to a `TexId` at gather time so a
+    /// texture that finishes loading later is picked up without a rebuild.
+    pub(crate) texture: Option<String>,
+    /// Whether the mesh holds any triangles. An all-empty page uploads nothing
+    /// and drawing it would be a wasted call.
+    empty: bool,
+}
+
 /// A tilemap's uploaded geometry, and the signature of the grid it was built
 /// from — so a map that hasn't changed isn't rebuilt sixty times a second.
+///
+/// One mesh **per page**. The seam argument that makes a tilemap one mesh is
+/// about GEOMETRY — neighbouring quads sharing a bit-identical edge coordinate
+/// — and splitting the draw by which sheet a square samples does not touch it:
+/// the coordinates are still computed once, by the same expression, in the same
+/// builder. What a split costs is one draw call per sheet the layer actually
+/// uses, which is bounded by how many sheets a level has and not by how many
+/// tiles (`floptle/0092`).
 pub(crate) struct TileGpu {
-    pub(crate) mesh: MeshId,
+    pub(crate) pages: Vec<TilePageGpu>,
     sig: u64,
-    /// Whether the mesh currently holds any triangles (an all-empty grid
-    /// uploads nothing, and drawing it would be a wasted draw call).
-    empty: bool,
 }
 
 /// A cheap change signature for a tilemap plus the sheet it is cut from.
@@ -47,10 +66,15 @@ fn signature(
     sheet: (u32, u32),
     texel: [f32; 2],
     anim_step: u32,
+    // Every page's image and cut. A page added, removed, re-pointed or re-cut
+    // makes the built meshes stale even though every square is identical —
+    // exactly the way the sheet dimensions already do.
+    pages: &[(String, u32, u32)],
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (cols, rows, sheet).hash(&mut h);
+    pages.hash(&mut h);
     tile.to_bits().hash(&mut h);
     texel[0].to_bits().hash(&mut h);
     texel[1].to_bits().hash(&mut h);
@@ -74,10 +98,9 @@ fn animate(data: &[u32], set: &floptle_tiles::TileSet, t: f32) -> Option<Vec<u32
     if !set.animated() {
         return None;
     }
-    let cells = set.cells();
     let mut out: Option<Vec<u32>> = None;
     for (i, &packed) in data.iter().enumerate() {
-        if floptle_core::tile_is_empty(packed, cells) {
+        if set.is_empty_square(packed) {
             continue;
         }
         let cell = floptle_core::tile_index(packed);
@@ -142,7 +165,9 @@ impl Editor {
             if let Some(t) = self.tilemaps.remove(&e)
                 && let Some(raster) = self.raster.as_mut()
             {
-                raster.free_dynamic(t.mesh);
+                for p in t.pages {
+                    raster.free_dynamic(p.mesh);
+                }
             }
         }
         if live.is_empty() {
@@ -172,7 +197,19 @@ impl Editor {
 
             let set = (!tileset.is_empty()).then(|| self.tiles.get(&tileset)).flatten();
             let step = set.map(|s| anim_step(s, now)).unwrap_or(0);
-            let sig = signature(cols, rows, tile, &data, (sc, sr), texel, step);
+            // Page 0 is the layer's own material sheet whatever the tileset
+            // says, so an unpaged project is byte-for-byte what it always was;
+            // pages 1.. come from the tileset and each brings its own image.
+            let mut pages: Vec<(String, u32, u32)> =
+                vec![(mat.texture.clone().unwrap_or_default(), sc, sr)];
+            if let Some(s) = set {
+                for (p, tex, c, r) in s.pages_iter() {
+                    if p > 0 {
+                        pages.push((tex.to_string(), c, r));
+                    }
+                }
+            }
+            let sig = signature(cols, rows, tile, &data, (sc, sr), texel, step, &pages);
             if self.tilemaps.get(&e).is_some_and(|t| t.sig == sig) {
                 continue;
             }
@@ -183,44 +220,110 @@ impl Editor {
             // artist happened to hit Ctrl-S on.
             let animated = set.and_then(|s| animate(&data, s, now));
             let draw = animated.as_deref().unwrap_or(&data);
-            let mesh_data =
-                floptle_render::mesh::tilemap(cols, rows, tile, sc, sr, texel, draw);
-            let empty = mesh_data.indices.is_empty();
-            let (nv, ni) = (mesh_data.vertices.len() as u32, mesh_data.indices.len() as u32);
 
-            // Reuse the slot when the new geometry still fits, else re-register
-            // at the new size — the same pattern the map meshes and terrain use.
-            let mesh = match self.tilemaps.get(&e) {
-                Some(t) if raster.replace_dynamic(gpu, t.mesh, &mesh_data) => t.mesh,
-                Some(t) => {
-                    raster.free_dynamic(t.mesh);
-                    let fresh = raster.register_dynamic(gpu, nv.max(4), ni.max(6), false);
-                    raster.replace_dynamic(gpu, fresh, &mesh_data);
-                    fresh
-                }
-                None => {
-                    let fresh = raster.register_dynamic(gpu, nv.max(4), ni.max(6), false);
-                    raster.replace_dynamic(gpu, fresh, &mesh_data);
-                    fresh
-                }
-            };
-            self.tilemaps.insert(e, TileGpu { mesh, sig, empty });
+            // The slots this entity already owns, to be reused page by page and
+            // whatever is left over handed back.
+            let mut spare: Vec<MeshId> =
+                self.tilemaps.remove(&e).map(|t| t.pages.into_iter().map(|p| p.mesh).collect()).unwrap_or_default();
+            let mut built: Vec<TilePageGpu> = Vec::with_capacity(pages.len());
+            for (pi, (tex_path, pc, pr)) in pages.iter().enumerate() {
+                let page = pi as u32;
+                let Some(page_data) = page_squares(draw, page, pc * pr) else {
+                    continue; // nothing on this page — no mesh, no draw call
+                };
+                // Each page's inset is measured in ITS OWN texels; page 0 keeps
+                // the material's, which is the number the unpaged path used.
+                let ptexel = if page == 0 {
+                    texel
+                } else {
+                    self.texture_registry
+                        .get(tex_path.as_str())
+                        .copied()
+                        .and_then(|id| raster.texture_size(id))
+                        .map(|[w, h]| [1.0 / w.max(1.0), 1.0 / h.max(1.0)])
+                        .unwrap_or([0.0, 0.0])
+                };
+                let mesh_data =
+                    floptle_render::mesh::tilemap(cols, rows, tile, *pc, *pr, ptexel, &page_data);
+                let empty = mesh_data.indices.is_empty();
+                let (nv, ni) = (mesh_data.vertices.len() as u32, mesh_data.indices.len() as u32);
+                // Reuse a slot when the new geometry still fits, else
+                // re-register at the new size — the pattern map meshes and
+                // terrain use.
+                let mesh = match spare.pop() {
+                    Some(m) if raster.replace_dynamic(gpu, m, &mesh_data) => m,
+                    Some(m) => {
+                        raster.free_dynamic(m);
+                        let fresh = raster.register_dynamic(gpu, nv.max(4), ni.max(6), false);
+                        raster.replace_dynamic(gpu, fresh, &mesh_data);
+                        fresh
+                    }
+                    None => {
+                        let fresh = raster.register_dynamic(gpu, nv.max(4), ni.max(6), false);
+                        raster.replace_dynamic(gpu, fresh, &mesh_data);
+                        fresh
+                    }
+                };
+                built.push(TilePageGpu {
+                    mesh,
+                    page,
+                    texture: (!tex_path.is_empty()).then(|| tex_path.clone()),
+                    empty,
+                });
+            }
+            for m in spare {
+                raster.free_dynamic(m);
+            }
+            self.tilemaps.insert(e, TileGpu { pages: built, sig });
         }
     }
 }
 
-/// The draw call for a tilemap node, if its geometry is built and non-empty.
-pub(crate) fn tilemap_draw(
+/// The squares of `data` that live on `page`, remapped to that page's OWN cell
+/// numbering so the ordinary mesh builder can be handed them unchanged. `None`
+/// when the page has nothing on it.
+///
+/// Everything not on this page becomes a hole, which is exactly right: the page
+/// draws its own squares and the pages beside it draw theirs, into the same
+/// grid, at the same coordinates.
+fn page_squares(data: &[u32], page: u32, page_cells: u32) -> Option<Vec<u32>> {
+    let mut any = false;
+    let out: Vec<u32> = data
+        .iter()
+        .map(|&packed| {
+            if packed == floptle_core::EMPTY_TILE {
+                return floptle_core::EMPTY_TILE;
+            }
+            let cell = floptle_core::tile_index(packed);
+            if floptle_core::tile_page(cell) != page {
+                return floptle_core::EMPTY_TILE;
+            }
+            let local = floptle_core::tile_in_page(cell);
+            if local >= page_cells {
+                return floptle_core::EMPTY_TILE; // a cell this page does not have
+            }
+            any = true;
+            floptle_core::tile_pack(local, floptle_core::tile_xform(packed))
+        })
+        .collect();
+    any.then_some(out)
+}
+
+/// The draw calls for a tilemap node — one per page that has squares on it.
+///
+/// `tex` is the node material's texture, which is page 0's; later pages name
+/// their own and are resolved here, so a sheet that finishes loading after the
+/// mesh was built is picked up without a rebuild.
+pub(crate) fn tilemap_draws(
     tilemaps: &HashMap<Entity, TileGpu>,
+    textures: &HashMap<String, TexId>,
     e: Entity,
     model: floptle_core::math::Mat4,
     mat: Option<&Material>,
     tex: Option<TexId>,
-) -> Option<(MeshId, Option<TexId>, InstanceRaw)> {
-    let t = tilemaps.get(&e)?;
-    if t.empty {
-        return None;
-    }
+    out: &mut Vec<(MeshId, Option<TexId>, InstanceRaw)>,
+) {
+    let Some(t) = tilemaps.get(&e) else { return };
     let mut mp = mat.map(crate::shading::material_params).unwrap_or_else(|| {
         MaterialParams::flat([1.0, 1.0, 1.0])
     });
@@ -230,7 +333,18 @@ pub(crate) fn tilemap_draw(
     mp.tile_mode = 0;
     mp.tile = [0.0; 4];
     mp.tile_rotation = 0.0;
-    Some((t.mesh, tex, instance_of_mat(model, &mp)))
+    let raw = instance_of_mat(model, &mp);
+    for p in &t.pages {
+        if p.empty {
+            continue;
+        }
+        let page_tex = match (p.page, p.texture.as_deref()) {
+            (0, _) => tex,
+            (_, Some(path)) => textures.get(path).copied(),
+            (_, None) => None,
+        };
+        out.push((p.mesh, page_tex, raw));
+    }
 }
 
 /// One instance per sprite in a batch node.
@@ -381,5 +495,55 @@ mod tests {
         assert!((w - 3.0).abs() < 1e-4, "a 3x node makes its 1-unit sprites 3 units, got {w}");
         let centre = Mat4::from_cols_array_2d(&out[0].model) * Vec4::W;
         assert!((centre.x - 10.0).abs() < 1e-4, "and it is where the node is, got {}", centre.x);
+    }
+
+    // ---- floptle/0092: one grid, several sheets ----------------------------
+
+    use floptle_core::{tile_cell_of, tile_pack, EMPTY_TILE};
+
+    /// Each page draws its OWN squares and leaves the rest as holes, so the
+    /// pages composite into one grid at one set of coordinates.
+    #[test]
+    fn a_page_takes_its_own_squares_and_holes_the_rest() {
+        let data = vec![
+            tile_cell_of(0, 3),
+            tile_cell_of(1, 0),
+            EMPTY_TILE,
+            tile_cell_of(0, 1),
+        ];
+        let p0 = page_squares(&data, 0, 16).expect("page 0 has squares");
+        assert_eq!(p0, vec![3, EMPTY_TILE, EMPTY_TILE, 1], "page 0's own numbering");
+        let p1 = page_squares(&data, 1, 16).expect("page 1 has squares");
+        assert_eq!(p1, vec![EMPTY_TILE, 0, EMPTY_TILE, EMPTY_TILE]);
+        assert!(page_squares(&data, 2, 16).is_none(), "an unused page builds no mesh");
+    }
+
+    /// A square's orientation belongs to the square, not to the sheet it came
+    /// from — it must survive being split onto its page.
+    #[test]
+    fn a_pages_squares_keep_their_orientation() {
+        let xf = floptle_core::TileXform::new(3, true);
+        let data = vec![tile_pack(tile_cell_of(2, 7), xf)];
+        let out = page_squares(&data, 2, 16).expect("page 2 has a square");
+        assert_eq!(floptle_core::tile_index(out[0]), 7, "renumbered into its page");
+        assert_eq!(floptle_core::tile_xform(out[0]), xf, "and still turned the same way");
+    }
+
+    /// A cell past what its page actually holds is a hole, not a sliver of
+    /// whatever the UV maths landed on.
+    #[test]
+    fn a_cell_the_page_does_not_have_is_a_hole() {
+        let data = vec![tile_cell_of(1, 5), tile_cell_of(1, 99)];
+        let out = page_squares(&data, 1, 6).expect("one of the two is real");
+        assert_eq!(out, vec![5, EMPTY_TILE]);
+    }
+
+    /// A grid written before pages existed is entirely page 0 and splits to
+    /// itself — the unpaged path must be byte-for-byte what it always was.
+    #[test]
+    fn a_grid_from_before_pages_is_unchanged_by_the_split() {
+        let data: Vec<u32> = (0..16).collect();
+        let out = page_squares(&data, 0, 16).expect("all page 0");
+        assert_eq!(out, data);
     }
 }

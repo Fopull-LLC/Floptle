@@ -31,7 +31,7 @@
 //! node's own transform places them and a rotated or scaled tilemap collides
 //! where it draws with no second opinion about where its middle is.
 
-use floptle_core::{tile_index, tile_is_empty, tile_point_drawn, tile_xform};
+use floptle_core::{tile_index, tile_point_drawn, tile_xform};
 
 use crate::tileset::TileSet;
 
@@ -62,14 +62,7 @@ impl TileBox {
 /// `cells` is the SHEET's `cols * rows` — needed because a cell index past the
 /// end of the sheet is an empty square, and an empty square is never solid
 /// however the tileset feels about the index it holds.
-pub fn collision_boxes(
-    cols: u32,
-    rows: u32,
-    tile: f32,
-    cells: u32,
-    data: &[u32],
-    set: &TileSet,
-) -> Vec<TileBox> {
+pub fn collision_boxes(cols: u32, rows: u32, tile: f32, data: &[u32], set: &TileSet) -> Vec<TileBox> {
     if cols == 0 || rows == 0 || tile <= 0.0 {
         return Vec::new();
     }
@@ -96,7 +89,7 @@ pub fn collision_boxes(
         for col in 0..cols {
             let i = (row * cols + col) as usize;
             let Some(&packed) = data.get(i) else { continue };
-            if tile_is_empty(packed, cells) {
+            if set.is_empty_square(packed) {
                 continue;
             }
             let coll = set.collision(tile_index(packed));
@@ -176,9 +169,9 @@ pub fn collision_boxes(
 
 /// How many squares are solid at all — the denominator of the "42 boxes for
 /// 10,000 squares" report.
-pub fn solid_count(cells: u32, data: &[u32], set: &TileSet) -> usize {
+pub fn solid_count(data: &[u32], set: &TileSet) -> usize {
     data.iter()
-        .filter(|&&p| !tile_is_empty(p, cells) && set.collision(tile_index(p)).is_solid())
+        .filter(|&&p| !set.is_empty_square(p) && set.collision(tile_index(p)).is_solid())
         .count()
 }
 
@@ -198,9 +191,9 @@ mod tests {
     #[test]
     fn an_empty_grid_has_no_colliders() {
         let set = solid_set();
-        assert!(collision_boxes(4, 4, 1.0, 16, &[EMPTY_TILE; 16], &set).is_empty());
+        assert!(collision_boxes(4, 4, 1.0, &[EMPTY_TILE; 16], &set).is_empty());
         // …and neither does a grid of tiles the tileset says nothing about.
-        assert!(collision_boxes(4, 4, 1.0, 16, &[3; 16], &set).is_empty());
+        assert!(collision_boxes(4, 4, 1.0, &[3; 16], &set).is_empty());
     }
 
     /// The headline: a solid rectangle is ONE box, not one per square. This is
@@ -210,7 +203,7 @@ mod tests {
         let set = solid_set();
         for (cols, rows) in [(1u32, 1u32), (4, 1), (1, 5), (10, 10), (32, 18)] {
             let data = vec![0u32; (cols * rows) as usize];
-            let boxes = collision_boxes(cols, rows, 1.0, 16, &data, &set);
+            let boxes = collision_boxes(cols, rows, 1.0, &data, &set);
             assert_eq!(boxes.len(), 1, "{cols}x{rows} solid should merge to one box");
             let b = boxes[0];
             assert!((b.hx - cols as f32 * 0.5).abs() < 1e-5, "{cols}x{rows} width");
@@ -224,9 +217,9 @@ mod tests {
     fn ten_thousand_solid_squares_cost_one_collider() {
         let set = solid_set();
         let data = vec![0u32; 100 * 100];
-        let boxes = collision_boxes(100, 100, 1.0, 16, &data, &set);
+        let boxes = collision_boxes(100, 100, 1.0, &data, &set);
         assert_eq!(boxes.len(), 1);
-        assert_eq!(solid_count(16, &data, &set), 10_000);
+        assert_eq!(solid_count(&data, &set), 10_000);
     }
 
     #[test]
@@ -245,7 +238,7 @@ mod tests {
             data[(y * cols + x) as usize] = 0;
         }
         let tile = 2.0f32;
-        let boxes = collision_boxes(cols, rows, tile, 16, &data, &set);
+        let boxes = collision_boxes(cols, rows, tile, &data, &set);
 
         // Total area matches the solid count exactly — no overlap, no gap.
         let area: f32 = boxes.iter().map(|b| b.hx * 2.0 * b.hy * 2.0).sum();
@@ -281,21 +274,21 @@ mod tests {
         set.info_mut(1).collision = TileCollision::Half(TileSide::Bottom);
 
         // Unrotated: the bottom half of a single 2-unit tile centred on origin.
-        let b = collision_boxes(1, 1, 2.0, 16, &[1], &set);
+        let b = collision_boxes(1, 1, 2.0, &[1], &set);
         assert_eq!(b.len(), 1);
         assert!((b[0].cy - -0.5).abs() < 1e-5, "bottom half sits below centre, got {}", b[0].cy);
         assert!((b[0].hx - 1.0).abs() < 1e-5 && (b[0].hy - 0.5).abs() < 1e-5);
 
         // A quarter-turn clockwise moves the bottom to the LEFT.
         let turned = tile_pack(1, TileXform::new(1, false));
-        let b = collision_boxes(1, 1, 2.0, 16, &[turned], &set);
+        let b = collision_boxes(1, 1, 2.0, &[turned], &set);
         assert_eq!(b.len(), 1);
         assert!((b[0].cx - -0.5).abs() < 1e-5, "expected the left half, got cx {}", b[0].cx);
         assert!((b[0].hx - 0.5).abs() < 1e-5 && (b[0].hy - 1.0).abs() < 1e-5);
 
         // A half-turn moves it to the top.
         let turned = tile_pack(1, TileXform::new(2, false));
-        let b = collision_boxes(1, 1, 2.0, 16, &[turned], &set);
+        let b = collision_boxes(1, 1, 2.0, &[turned], &set);
         assert!((b[0].cy - 0.5).abs() < 1e-5, "expected the top half, got cy {}", b[0].cy);
     }
 
@@ -306,7 +299,7 @@ mod tests {
         let mut set = TileSet { sheet_cols: 4, sheet_rows: 4, ..Default::default() };
         set.info_mut(2).collision = TileCollision::Custom { x: 0.0, y: 0.0, w: 0.25, h: 0.5 };
         for xf in TileXform::ALL {
-            let b = collision_boxes(1, 1, 1.0, 16, &[tile_pack(2, xf)], &set);
+            let b = collision_boxes(1, 1, 1.0, &[tile_pack(2, xf)], &set);
             assert_eq!(b.len(), 1, "{xf:?}");
             let bx = b[0];
             let area = bx.hx * 2.0 * bx.hy * 2.0;
@@ -323,7 +316,7 @@ mod tests {
         let mut set = solid_set();
         set.info_mut(1).collision = TileCollision::Half(TileSide::Top);
         // Three full, then a half.
-        let boxes = collision_boxes(4, 1, 1.0, 16, &[0, 0, 0, 1], &set);
+        let boxes = collision_boxes(4, 1, 1.0, &[0, 0, 0, 1], &set);
         assert_eq!(boxes.len(), 2, "one merged run plus the half");
         let merged = boxes.iter().find(|b| b.hy > 0.4).expect("the full run");
         assert!((merged.hx - 1.5).abs() < 1e-5, "three tiles wide, got {}", merged.hx);
@@ -332,11 +325,11 @@ mod tests {
     #[test]
     fn a_degenerate_grid_is_no_colliders_rather_than_a_panic() {
         let set = solid_set();
-        assert!(collision_boxes(0, 4, 1.0, 16, &[0; 4], &set).is_empty());
-        assert!(collision_boxes(4, 0, 1.0, 16, &[0; 4], &set).is_empty());
-        assert!(collision_boxes(4, 4, 0.0, 16, &[0; 16], &set).is_empty());
+        assert!(collision_boxes(0, 4, 1.0, &[0; 4], &set).is_empty());
+        assert!(collision_boxes(4, 0, 1.0, &[0; 4], &set).is_empty());
+        assert!(collision_boxes(4, 4, 0.0, &[0; 16], &set).is_empty());
         // Short data is a partial grid, not an out-of-bounds read.
-        let boxes = collision_boxes(4, 4, 1.0, 16, &[0, 0], &set);
+        let boxes = collision_boxes(4, 4, 1.0, &[0, 0], &set);
         assert_eq!(boxes.len(), 1);
         assert!((boxes[0].hx - 1.0).abs() < 1e-5, "two squares wide");
     }
@@ -353,7 +346,7 @@ mod tests {
         let set = solid_set();
         // An 8x1 floor of solid tiles, 1 unit each. In local space the row sits
         // between y = -0.5 and y = +0.5, centred on the node.
-        let boxes = collision_boxes(8, 1, 1.0, 16, &[0u32; 8], &set);
+        let boxes = collision_boxes(8, 1, 1.0, &[0u32; 8], &set);
         assert_eq!(boxes.len(), 1, "the floor merged");
         let b = boxes[0];
         // The top surface of the merged box, in local space.
@@ -377,7 +370,7 @@ mod tests {
         let data: Vec<u32> = (0..cols * rows)
             .map(|i| if (i / cols + i % cols) % 2 == 0 { 0 } else { EMPTY_TILE })
             .collect();
-        let boxes = collision_boxes(cols, rows, 1.0, 16, &data, &set);
+        let boxes = collision_boxes(cols, rows, 1.0, &data, &set);
         assert_eq!(boxes.len(), 32, "no two diagonal squares share an edge");
         for b in &boxes {
             assert!((b.hx - 0.5).abs() < 1e-5 && (b.hy - 0.5).abs() < 1e-5);

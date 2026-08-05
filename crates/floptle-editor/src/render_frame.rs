@@ -1169,9 +1169,18 @@ impl Editor {
                 // with its own cell and tint.
                 Matter::Tilemap { .. } => {
                     let model = t.render_matrix(cam.world_position);
-                    if let Some(draw) =
-                        crate::sprite2d::tilemap_draw(&self.tilemaps, *e, model, mat.as_ref(), tex)
-                    {
+                    // One draw per sheet the layer actually uses (`floptle/0092`).
+                    let mut draws = Vec::new();
+                    crate::sprite2d::tilemap_draws(
+                        &self.tilemaps,
+                        &self.texture_registry,
+                        *e,
+                        model,
+                        mat.as_ref(),
+                        tex,
+                        &mut draws,
+                    );
+                    for draw in draws {
                         match flsl {
                             Some(b) => flsl_draws.push((draw.0, draw.1, b, draw.2)),
                             None => instances.push(draw),
@@ -1540,7 +1549,11 @@ impl Editor {
                     Matter::Tilemap { .. } => {
                         if let Some(tm) = self.tilemaps.get(&e) {
                             let model = t.render_matrix(cam.world_position);
-                            mask_mesh.push((tm.mesh, instance_of(model, [1.0, 1.0, 1.0])));
+                            // The outline hugs every page, or a layer cut from
+                            // two sheets would only outline half of itself.
+                            for p in &tm.pages {
+                                mask_mesh.push((p.mesh, instance_of(model, [1.0, 1.0, 1.0])));
+                            }
                         }
                     }
                     // A batch's sprites are this frame's, so outlining them

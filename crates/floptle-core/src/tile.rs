@@ -194,6 +194,55 @@ pub fn tile_is_empty(packed: u32, cells: u32) -> bool {
     packed == crate::EMPTY_TILE || tile_index(packed) >= cells
 }
 
+// --- pages: more than one image behind one grid (`floptle/0092`) ------------
+
+/// How many low bits of the cell index address a cell WITHIN one sheet. The
+/// bits above it are the sheet — the "page" — the cell lives on.
+///
+/// ## Why a fixed stride rather than packing the pages end to end
+///
+/// The alternative is `base(p) = sum of the cells of pages 0..p`, which wastes
+/// nothing and renumbers everything: add art to page 0 and every cell on every
+/// later page means a different tile, so a level saved yesterday draws garbage.
+/// A level is the expensive artifact here and the index space is free —
+/// 536 million cells is more sheet than any project — so the stride is fixed and
+/// a page's numbering is nailed down the moment it exists.
+///
+/// 65,536 cells is a 256x256 sheet, which is past what a GPU will hold as one
+/// texture; 8,192 pages is past what anybody will draw.
+pub const TILE_PAGE_BITS: u32 = 16;
+
+/// Cells addressable on one page.
+pub const TILE_PAGE_STRIDE: u32 = 1 << TILE_PAGE_BITS;
+
+/// How many pages the cell index has room for.
+pub const TILE_MAX_PAGES: u32 = (TILE_CELL_MASK + 1) >> TILE_PAGE_BITS;
+
+/// Which sheet a cell index lives on. Page 0 is the first sheet, and every
+/// index written before pages existed is on it — which is what makes this
+/// change invisible to a scene saved earlier.
+pub fn tile_page(cell: u32) -> u32 {
+    (cell & TILE_CELL_MASK) >> TILE_PAGE_BITS
+}
+
+/// Where a cell sits within its own page, row-major from the top-left, exactly
+/// as a single-sheet cell index always has.
+pub fn tile_in_page(cell: u32) -> u32 {
+    cell & (TILE_PAGE_STRIDE - 1)
+}
+
+/// The cell index of the `index`-th cell of `page`.
+///
+/// Out of range in either argument gives [`crate::EMPTY_TILE`] rather than
+/// wrapping into a different page — a wrong tile drawn confidently is worse
+/// than a hole.
+pub fn tile_cell_of(page: u32, index: u32) -> u32 {
+    if page >= TILE_MAX_PAGES || index >= TILE_PAGE_STRIDE {
+        return crate::EMPTY_TILE;
+    }
+    page * TILE_PAGE_STRIDE + index
+}
+
 /// Which corner of the tile's ART a given corner of the drawn quad samples,
 /// under `xf`.
 ///

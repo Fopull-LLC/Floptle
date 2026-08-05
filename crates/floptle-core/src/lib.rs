@@ -55,9 +55,10 @@ pub use matter::{
 };
 pub use net::{NetId, Replicated, ReplicationMode};
 pub use tile::{
-    tile_corner, tile_corner_drawn, tile_index, tile_is_empty, tile_pack, tile_point_drawn,
-    tile_reoriented, tile_xform, TileXform, TILE_CELL_MASK, TILE_FLIP_X, TILE_ROT_SHIFT,
-    TILE_XFORM_MASK,
+    tile_cell_of, tile_corner, tile_corner_drawn, tile_in_page, tile_index, tile_is_empty,
+    tile_pack, tile_page, tile_point_drawn, tile_reoriented, tile_xform, TileXform,
+    TILE_CELL_MASK, TILE_FLIP_X, TILE_MAX_PAGES, TILE_PAGE_BITS, TILE_PAGE_STRIDE,
+    TILE_ROT_SHIFT, TILE_XFORM_MASK,
 };
 pub use script::{ScriptInst, Scripts};
 pub use origin::FloatingOrigin;

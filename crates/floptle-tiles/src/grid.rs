@@ -383,12 +383,19 @@ impl Stamp {
     /// A rectangle of the sheet, as the palette's rubber-band selection produces:
     /// cells `(px, py)` .. `(px + w, py + h)` of a `sheet_cols`-wide sheet.
     pub fn from_sheet(sheet_cols: u32, px: u32, py: u32, w: u32, h: u32) -> Self {
+        Self::from_page(0, sheet_cols, px, py, w, h)
+    }
+
+    /// The same rectangle, of a named PAGE of a multi-sheet tileset
+    /// (`floptle/0092`). Page 0 is the first sheet, so `from_sheet` is this with
+    /// the page every pre-paging index already had.
+    pub fn from_page(page: u32, sheet_cols: u32, px: u32, py: u32, w: u32, h: u32) -> Self {
         let sheet_cols = sheet_cols.max(1);
         let (w, h) = (w.max(1), h.max(1));
         let mut data = Vec::with_capacity((w * h) as usize);
         for dy in 0..h {
             for dx in 0..w {
-                data.push((py + dy) * sheet_cols + px + dx);
+                data.push(floptle_core::tile_cell_of(page, (py + dy) * sheet_cols + px + dx));
             }
         }
         Self { cols: w, rows: h, data }

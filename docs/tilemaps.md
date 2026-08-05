@@ -119,6 +119,31 @@ sheet.
 
 Press *New tileset* in the ◫ Tiles tab and it is made for the layer's own sheet.
 
+### More than one sheet on one layer
+
+A tileset can carry several images. **◫ Tiles ▸ TILESET ▸ SHEETS ▸ + sheet**
+adds one; give it an image and its cols/rows, and the palette grows a tab per
+sheet. Everything you place from any tab lands on the **same layer**.
+
+That matters more than it sounds. Splitting a level across three tilemap nodes —
+one per sheet — is not a workaround, it changes what the level is: a wall on one
+node is not a neighbour of a wall on another, so nothing autotiles across the
+join, the collision merge stops at it and leaves a seam, and every grid tool
+(bucket, rectangle, stamp, retile) stops there too. One layer, several sheets,
+and all of that keeps working across the whole map.
+
+Drawing costs one call per sheet the layer actually uses — bounded by how many
+images a level has, not by how many tiles.
+
+**Adding art never renumbers what you already placed.** Each sheet owns a fixed
+block of the cell index, so growing sheet 0 from 4×4 to 16×16 leaves every square
+placed from sheet 1 meaning exactly what it did. Removing a sheet is offered only
+for the last one, for the same reason.
+
+A project that has never added a sheet is unaffected in every particular: there
+is one implicit sheet, it is the layer's own material, and every index ever
+written is on it.
+
 **Why a tileset and not per-square data.** Solidity is a property of the ART. A
 brick is solid everywhere a brick appears. Recording it per square means the
 answer is stored hundreds of times, a level built before you decided bricks were

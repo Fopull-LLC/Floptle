@@ -272,10 +272,28 @@ pub struct TileSet {
     pub texture: String,
     pub sheet_cols: u32,
     pub sheet_rows: u32,
+    /// The sheets AFTER the first. `texture`/`sheet_cols`/`sheet_rows` above are
+    /// page 0; these are pages 1, 2, … in order (`floptle/0092`).
+    ///
+    /// Kept as a tail rather than folding page 0 into the list so a tileset
+    /// written before pages existed loads with no migration and means exactly
+    /// what it did — which is the same reason the first sheet keeps its own
+    /// fields rather than being moved.
+    #[serde(default)]
+    pub pages: Vec<TilePage>,
     /// Sparse per-tile data, keyed by cell index. Only tiles that carry
     /// something are present.
     pub tiles: BTreeMap<u32, TileInfo>,
     pub groups: Vec<AutotileGroup>,
+}
+
+/// One sheet behind a tileset: an image and the uniform grid it is cut into.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TilePage {
+    /// The image, project-relative.
+    pub texture: String,
+    pub cols: u32,
+    pub rows: u32,
 }
 
 impl Default for TileSet {
@@ -285,6 +303,7 @@ impl Default for TileSet {
             texture: String::new(),
             sheet_cols: 1,
             sheet_rows: 1,
+            pages: Vec::new(),
             tiles: BTreeMap::new(),
             groups: Vec::new(),
         }
@@ -292,9 +311,60 @@ impl Default for TileSet {
 }
 
 impl TileSet {
-    /// How many cells the sheet has.
+    /// How many cells the FIRST sheet has.
+    ///
+    /// Page 0's count, not the tileset's total — the total is not a meaningful
+    /// number under paging (the index space between two pages is a gap, not a
+    /// run of cells), and every caller that wants "does this cell exist" wants
+    /// [`Self::has_cell`] instead.
     pub fn cells(&self) -> u32 {
         self.sheet_cols.max(1) * self.sheet_rows.max(1)
+    }
+
+    /// How many sheets this tileset draws from. Always at least one.
+    pub fn page_count(&self) -> u32 {
+        1 + self.pages.len() as u32
+    }
+
+    /// A page's image and grid: `(texture, cols, rows)`.
+    pub fn page(&self, page: u32) -> Option<(&str, u32, u32)> {
+        if page == 0 {
+            return Some((self.texture.as_str(), self.sheet_cols.max(1), self.sheet_rows.max(1)));
+        }
+        self.pages
+            .get(page as usize - 1)
+            .map(|p| (p.texture.as_str(), p.cols.max(1), p.rows.max(1)))
+    }
+
+    /// How many cells a page holds. `0` for a page this tileset does not have.
+    pub fn page_cells(&self, page: u32) -> u32 {
+        self.page(page).map(|(_, c, r)| c * r).unwrap_or(0)
+    }
+
+    /// Whether this tileset actually has the cell a square names.
+    ///
+    /// The paged replacement for `index < cells()`. Under paging that
+    /// comparison is wrong in both directions: a page-1 cell is a large number
+    /// and would read as past the end, while the gap between a page's real
+    /// cells and its stride boundary would read as present and draw a sliver of
+    /// whatever the UV maths landed on.
+    pub fn has_cell(&self, cell: u32) -> bool {
+        floptle_core::tile_in_page(cell) < self.page_cells(floptle_core::tile_page(cell))
+    }
+
+    /// Whether a packed square draws nothing: empty, or naming a cell no page of
+    /// this tileset has. The one emptiness test for a tilemap that has a
+    /// tileset — see [`Self::has_cell`].
+    pub fn is_empty_square(&self, packed: u32) -> bool {
+        packed == floptle_core::EMPTY_TILE || !self.has_cell(floptle_core::tile_index(packed))
+    }
+
+    /// Every page, with its cell range, in draw order.
+    pub fn pages_iter(&self) -> impl Iterator<Item = (u32, &str, u32, u32)> + '_ {
+        (0..self.page_count()).filter_map(move |p| {
+            let (tex, c, r) = self.page(p)?;
+            Some((p, tex, c, r))
+        })
     }
 
     pub fn info(&self, cell: u32) -> Option<&TileInfo> {
@@ -520,5 +590,102 @@ mod tests {
         assert_eq!(set.tiles.len(), 3);
         set.prune();
         assert_eq!(set.tiles.keys().copied().collect::<Vec<_>>(), vec![1, 3]);
+    }
+
+    // ---- floptle/0092: more than one sheet behind one grid -------------------
+
+    fn paged() -> TileSet {
+        TileSet {
+            texture: "ground.png".into(),
+            sheet_cols: 4,
+            sheet_rows: 4,
+            pages: vec![
+                TilePage { texture: "props.png".into(), cols: 2, rows: 3 },
+                TilePage { texture: "deco.png".into(), cols: 8, rows: 8 },
+            ],
+            ..TileSet::default()
+        }
+    }
+
+    /// The whole point of a fixed stride: adding art to page 0 must not change
+    /// what any cell on a later page means, or a level saved yesterday draws
+    /// garbage today.
+    #[test]
+    fn adding_art_to_one_sheet_renumbers_nothing_on_another() {
+        let before = paged();
+        let cell = floptle_core::tile_cell_of(1, 3);
+        assert!(before.has_cell(cell));
+
+        let mut after = before.clone();
+        after.sheet_cols = 16; // the artist grew the first sheet
+        after.sheet_rows = 16;
+        assert_eq!(floptle_core::tile_page(cell), 1, "still page 1");
+        assert_eq!(floptle_core::tile_in_page(cell), 3, "still the same cell of it");
+        assert!(after.has_cell(cell));
+    }
+
+    /// A tileset written before pages existed means exactly what it did, and
+    /// every index in it is page 0.
+    #[test]
+    fn a_tileset_from_before_pages_is_one_page() {
+        let old: TileSet = ron::from_str(
+            r#"(name: "old", texture: "t.png", sheet_cols: 4, sheet_rows: 4, tiles: {}, groups: [])"#,
+        )
+        .expect("an older tileset must still load");
+        assert_eq!(old.page_count(), 1);
+        assert_eq!(old.cells(), 16);
+        assert!(old.pages.is_empty());
+        for cell in 0..16 {
+            assert!(old.has_cell(cell), "cell {cell} of the only sheet");
+            assert_eq!(floptle_core::tile_page(cell), 0);
+        }
+        assert!(!old.has_cell(16), "and nothing past its end");
+    }
+
+    /// Emptiness is per PAGE. `index < cells()` is wrong in both directions
+    /// under paging: a page-1 cell is a large number that would read as past the
+    /// end, and the gap above a page's real cells would read as present.
+    #[test]
+    fn a_square_is_empty_when_no_page_has_its_cell() {
+        let set = paged();
+        assert!(set.has_cell(floptle_core::tile_cell_of(0, 15)));
+        assert!(!set.has_cell(floptle_core::tile_cell_of(0, 16)));
+        assert!(set.has_cell(floptle_core::tile_cell_of(1, 5)), "2x3 = 6 cells");
+        assert!(!set.has_cell(floptle_core::tile_cell_of(1, 6)));
+        assert!(set.has_cell(floptle_core::tile_cell_of(2, 63)));
+        assert!(!set.has_cell(floptle_core::tile_cell_of(3, 0)), "there is no page 3");
+
+        // ...and the packed-square test agrees, including for a rotated tile.
+        let turned = floptle_core::tile_pack(
+            floptle_core::tile_cell_of(1, 5),
+            floptle_core::TileXform::new(2, true),
+        );
+        assert!(!set.is_empty_square(turned), "an orientation is not an emptiness");
+        assert!(set.is_empty_square(floptle_core::EMPTY_TILE));
+        assert!(set.is_empty_square(floptle_core::tile_cell_of(1, 6)));
+    }
+
+    /// Per-tile data is keyed by the global cell index, so it works the same on
+    /// every page and two pages cannot collide over one entry.
+    #[test]
+    fn per_tile_data_works_on_every_page() {
+        let mut set = paged();
+        let a = floptle_core::tile_cell_of(0, 2);
+        let b = floptle_core::tile_cell_of(2, 2);
+        set.info_mut(a).collision = TileCollision::Full;
+        set.info_mut(b).collision = TileCollision::Half(TileSide::Top);
+        assert_eq!(set.collision(a), TileCollision::Full);
+        assert_eq!(set.collision(b), TileCollision::Half(TileSide::Top));
+        assert_eq!(set.collision(floptle_core::tile_cell_of(1, 2)), TileCollision::None);
+    }
+
+    /// The pages round-trip through the file, and a set with none writes what it
+    /// always wrote.
+    #[test]
+    fn pages_round_trip_through_the_file() {
+        let set = paged();
+        let back: TileSet = ron::from_str(&ron::to_string(&set).unwrap()).unwrap();
+        assert_eq!(back.pages, set.pages);
+        assert_eq!(back.page(2).map(|(t, c, r)| (t.to_string(), c, r)), Some(("deco.png".into(), 8, 8)));
     }
 }

@@ -1566,8 +1566,7 @@ fn new_tilemap_handle(
             let s = ssl.borrow();
             let Some(p) = packed_at(&s, e, x, y) else { return Ok(false) };
             let Some(set) = tileset_of(&s, e) else { return Ok(false) };
-            let cells = set.cells();
-            if floptle_core::tile_is_empty(p, cells) {
+            if set.is_empty_square(p) {
                 return Ok(false);
             }
             Ok(set.collision(floptle_core::tile_index(p)).is_solid())
@@ -1585,7 +1584,7 @@ fn new_tilemap_handle(
             let (Some(p), Some(set)) = (packed_at(&s, e, x, y), tileset_of(&s, e)) else {
                 return Ok(out);
             };
-            if floptle_core::tile_is_empty(p, set.cells()) {
+            if set.is_empty_square(p) {
                 return Ok(out);
             }
             for (i, tag) in set.tags(floptle_core::tile_index(p)).iter().enumerate() {
@@ -1606,7 +1605,7 @@ fn new_tilemap_handle(
             let (Some(p), Some(set)) = (packed_at(&s, e, x, y), tileset_of(&s, e)) else {
                 return Ok(false);
             };
-            if floptle_core::tile_is_empty(p, set.cells()) {
+            if set.is_empty_square(p) {
                 return Ok(false);
             }
             Ok(set.tags(floptle_core::tile_index(p)).contains(&tag))

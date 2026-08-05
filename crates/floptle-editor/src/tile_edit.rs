@@ -191,6 +191,12 @@ pub(crate) struct TileTools {
     pub(crate) xform: TileXform,
     /// The palette's rubber-band selection, as `(px, py, w, h)` in sheet cells.
     pub(crate) palette: Option<(u32, u32, u32, u32)>,
+    /// Which SHEET of the tileset the palette is showing (`floptle/0092`).
+    ///
+    /// 0 is the layer's own material sheet — which is every project that has
+    /// never added a page, so this defaulting to 0 is the whole of the backward
+    /// compatibility on the editing side.
+    pub(crate) page: u32,
     /// Paint an autotile GROUP rather than a literal tile: the tile placed is
     /// whichever of the group's tiles fits its neighbours.
     pub(crate) group: Option<u16>,
@@ -232,6 +238,7 @@ impl Default for TileTools {
             stamp: Stamp::one(0),
             xform: TileXform::NONE,
             palette: Some((0, 0, 1, 1)),
+            page: 0,
             group: None,
             auto_retile: true,
             selection: None,
@@ -298,7 +305,7 @@ pub(crate) fn add_tilemap_colliders(
         return 0; // art only — nothing here claims to be solid
     }
     let Some(set) = store.get(tileset) else { return 0 };
-    let boxes = floptle_tiles::collision_boxes(*cols, *rows, *tile, set.cells(), data, set);
+    let boxes = floptle_tiles::collision_boxes(*cols, *rows, *tile, data, set);
     let s = xf.scale;
     let depth = (*tile * 0.5 * s.z.abs().max(1e-3)).max(1e-3);
     for b in &boxes {
@@ -1056,7 +1063,7 @@ impl Editor {
             // The merged boxes — the SAME ones the sim gets, so what you see is
             // what a character walks on. Drawing per-tile outlines instead would
             // show a grid that does not exist in the physics world.
-            for b in floptle_tiles::collision_boxes(cols, rows, tile, set.cells(), data, set) {
+            for b in floptle_tiles::collision_boxes(cols, rows, tile, data, set) {
                 let pts: Vec<Vec2> = [
                     (b.cx - b.hx, b.cy - b.hy),
                     (b.cx + b.hx, b.cy - b.hy),

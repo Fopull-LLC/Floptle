@@ -71,6 +71,15 @@ pub(crate) enum TileCmd {
     NewTilesetForLayer,
     /// Point the active layer at this tileset path (empty = none).
     AttachTileset(String),
+    /// Add a sheet to the tileset being edited (`floptle/0092`).
+    AddPage,
+    /// Point a page at an image and a cut. Page 0 is the layer's material and
+    /// is not settable here.
+    SetPage(u32, String, u32, u32),
+    /// Drop the LAST page. Only the last, because removing one from the middle
+    /// would renumber nothing (the stride is fixed) but would leave every
+    /// square placed from it drawing a hole with no way back.
+    RemoveLastPage,
     /// Set one tile's collision.
     SetCollision(u32, TileCollision),
     /// Replace one tile's tag list.
@@ -133,6 +142,12 @@ fn labelled(ui: &mut egui::Ui, label: &str, body: impl FnOnce(&mut egui::Ui)) {
         ui.add_sized([LABEL_W, BTN_H], egui::Label::new(RichText::new(label).small()));
         body(ui);
     });
+}
+
+/// A page's tab label: its image's file stem, or `page N` when it has none.
+fn short_texture(tex: &str, page: u32) -> String {
+    let stem = tex.rsplit(['/', '\\']).next().unwrap_or("").split('.').next().unwrap_or("");
+    if stem.is_empty() { format!("page {page}") } else { stem.to_string() }
 }
 
 /// The line that stands in for a whole section when the layer has no tileset.
@@ -530,8 +545,64 @@ impl TileCtx<'_> {
                  the wrong art. Fix whichever is wrong — neither is guessed at.",
             );
         }
+        let set = set.clone();
+        self.pages_ui(ui, &set);
         if ui.small_button("Detach tileset").clicked() {
             self.cmds.push(TileCmd::AttachTileset(String::new()));
+        }
+    }
+
+    /// The tileset's extra sheets (`floptle/0092`).
+    ///
+    /// A level built out of a ground sheet, a props sheet and a decoration sheet
+    /// used to need three tilemap NODES, and that is not a workaround — a wall on
+    /// one node is not a neighbour of a wall on another, so nothing autotiles
+    /// across the join, the collision merge stops at it, and every grid tool
+    /// stops there too. Pages put them on one layer.
+    fn pages_ui(&mut self, ui: &mut egui::Ui, set: &TileSet) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.small(RichText::new("SHEETS").strong());
+            ui.small(format!("{}", set.page_count()));
+            if set.page_count() < floptle_core::TILE_MAX_PAGES
+                && ui
+                    .small_button("+ sheet")
+                    .on_hover_text(
+                        "another image on THIS layer — one grid, so it still autotiles and \
+                         merges collision across the join",
+                    )
+                    .clicked()
+            {
+                self.cmds.push(TileCmd::AddPage);
+            }
+            if set.page_count() > 1
+                && ui
+                    .small_button("− last")
+                    .on_hover_text("only the last, so no square already placed loses its tile")
+                    .clicked()
+            {
+                self.cmds.push(TileCmd::RemoveLastPage);
+            }
+        });
+        for (p, tex, c, r) in set.pages_iter().collect::<Vec<_>>() {
+            if p == 0 {
+                ui.small(format!("0 — this layer's material, {c}×{r}"));
+                continue;
+            }
+            let (mut path, mut cols, mut rows) = (tex.to_string(), c, r);
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.small(format!("{p}"));
+                changed |= ui
+                    .add(egui::TextEdit::singleline(&mut path).desired_width(120.0).hint_text("textures/…png"))
+                    .on_hover_text("project-relative image for this sheet")
+                    .lost_focus();
+                changed |= ui.add(egui::DragValue::new(&mut cols).range(1..=256).prefix("c")).changed();
+                changed |= ui.add(egui::DragValue::new(&mut rows).range(1..=256).prefix("r")).changed();
+            });
+            if changed {
+                self.cmds.push(TileCmd::SetPage(p, path, cols, rows));
+            }
         }
     }
 
@@ -539,24 +610,65 @@ impl TileCtx<'_> {
 
     fn palette_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "PALETTE");
-        let (sc, sr) = self.sheet_size();
-        let Some(sheet) = self.sheet_handle(ui) else {
-            ui.small(
-                "This layer's material has no texture yet — give it a spritesheet in the \
-                 Inspector and set its sheetCols / sheetRows.",
-            );
+        let set = self.tools.editing.clone().and_then(|p| self.store.get(&p)).cloned();
+        // Which sheet of the tileset we are picking from. A tileset with pages
+        // draws a row of tabs; without one there is a single implicit page and
+        // nothing extra on screen (`floptle/0092`).
+        let page_count = set.as_ref().map(|s| s.page_count()).unwrap_or(1);
+        if self.tools.page >= page_count {
+            self.tools.page = 0;
+        }
+        if page_count > 1 {
+            ui.horizontal_wrapped(|ui| {
+                for (p, tex, ..) in set.as_ref().map(|s| s.pages_iter().collect::<Vec<_>>()).unwrap_or_default() {
+                    let name = short_texture(tex, p);
+                    if ui
+                        .selectable_label(self.tools.page == p, name)
+                        .on_hover_text(if tex.is_empty() { "this page has no image".into() } else { tex.to_string() })
+                        .clicked()
+                    {
+                        self.tools.page = p;
+                    }
+                }
+            });
+        }
+        let page = self.tools.page;
+        // Page 0 is the LAYER'S material, unchanged; later pages are the
+        // tileset's own images.
+        let (sc, sr) = match (page, set.as_ref()) {
+            (0, _) => self.sheet_size(),
+            (_, Some(s)) => s.page(page).map(|(_, c, r)| (c, r)).unwrap_or((1, 1)),
+            (_, None) => (1, 1),
+        };
+        let handle = if page == 0 {
+            self.sheet_handle(ui)
+        } else {
+            set.as_ref()
+                .and_then(|s| s.page(page))
+                .filter(|(t, ..)| !t.is_empty())
+                .and_then(|(t, ..)| self.texture_handle(ui, t))
+        };
+        let Some(sheet) = handle else {
+            if page == 0 {
+                ui.small(
+                    "This layer's material has no texture yet — give it a spritesheet in the \
+                     Inspector and set its sheetCols / sheetRows.",
+                );
+            } else {
+                ui.small("This page has no image, or it could not be read.");
+            }
             return;
         };
         if sc * sr <= 1 {
-            ui.small(
+            ui.small(if page == 0 {
                 "The material's texture is not cut into a sheet. Set sheetCols / sheetRows \
-                 on the material and every cell becomes a tile.",
-            );
+                 on the material and every cell becomes a tile."
+            } else {
+                "This page's image is not cut into a sheet. Set its cols / rows above."
+            });
             return;
         }
         ui.small("Click a tile; drag for a multi-tile brush. Shift-click to inspect without arming.");
-
-        let set = self.tools.editing.clone().and_then(|p| self.store.get(&p)).cloned();
         let cell_px = (ui.available_width() / sc as f32).clamp(20.0, 44.0);
         let mut clicked: Option<u32> = None;
         let mut dragged: Option<(u32, u32, u32, u32)> = None;
@@ -570,12 +682,12 @@ impl TileCtx<'_> {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     for c in 0..sc {
-                        let idx = r * sc + c;
+                        let idx = floptle_core::tile_cell_of(page, r * sc + c);
                         let (rect, resp) = ui.allocate_exact_size(
                             egui::vec2(cell_px, cell_px),
                             egui::Sense::click_and_drag(),
                         );
-                        paint_tile(ui, rect, &sheet, sc, sr, idx);
+                        paint_tile(ui, rect, &sheet, sc, sr, r * sc + c);
 
                         // What the tileset knows, drawn over the art.
                         if let Some(set) = set.as_ref() {
@@ -640,8 +752,8 @@ impl TileCtx<'_> {
 
         if let Some(rect) = dragged {
             self.tools.palette = Some(rect);
-            self.tools.stamp = Stamp::from_sheet(sc, rect.0, rect.1, rect.2, rect.3);
-            self.tools.inspect_cell = Some(rect.1 * sc + rect.0);
+            self.tools.stamp = Stamp::from_page(page, sc, rect.0, rect.1, rect.2, rect.3);
+            self.tools.inspect_cell = Some(floptle_core::tile_cell_of(page, rect.1 * sc + rect.0));
             // A multi-square brush is a brush, not a group paint — a group resolves
             // per square and cannot honour a layout.
             self.tools.group = None;
@@ -649,7 +761,8 @@ impl TileCtx<'_> {
             let shift = ui.input(|i| i.modifiers.shift);
             self.tools.inspect_cell = Some(idx);
             if !shift {
-                self.tools.palette = Some((idx % sc, idx / sc, 1, 1));
+                let local = floptle_core::tile_in_page(idx);
+                self.tools.palette = Some((local % sc, local / sc, 1, 1));
                 self.tools.stamp = Stamp::one(idx);
                 // Clicking a tile that belongs to a group arms the GROUP: that is
                 // what somebody clicking an autotile tile means, and arming the
@@ -1017,6 +1130,13 @@ impl TileCtx<'_> {
             .unwrap_or((1, 1))
     }
 
+    /// An egui handle on any project-relative image — a tileset page's own
+    /// sheet, which is not the layer's material.
+    fn texture_handle(&self, ui: &egui::Ui, rel: &str) -> Option<egui::TextureHandle> {
+        let abs = crate::project::resolve_asset_path(self.project_root, rel);
+        crate::ui_widgets::asset_thumb(ui, abs.to_str()?, 512)
+    }
+
     /// An egui handle on the active layer's texture.
     fn sheet_handle(&self, ui: &egui::Ui) -> Option<egui::TextureHandle> {
         let e = self.tools.layer?;
@@ -1285,6 +1405,31 @@ impl crate::Editor {
                 let info = set.info_mut(cell);
                 info.frames = frames;
                 info.anim_fps = fps;
+            }
+            TileCmd::AddPage => {
+                if set.page_count() < floptle_core::TILE_MAX_PAGES {
+                    set.pages.push(floptle_tiles::TilePage {
+                        texture: String::new(),
+                        cols: 1,
+                        rows: 1,
+                    });
+                }
+            }
+            TileCmd::SetPage(p, texture, cols, rows) => {
+                if p > 0
+                    && let Some(page) = set.pages.get_mut(p as usize - 1)
+                {
+                    page.texture = texture;
+                    page.cols = cols.max(1);
+                    page.rows = rows.max(1);
+                }
+            }
+            TileCmd::RemoveLastPage => {
+                set.pages.pop();
+                // The palette may have been showing the page that just went.
+                if self.tile_tools.page >= set.page_count() {
+                    self.tile_tools.page = 0;
+                }
             }
             TileCmd::AddGroup(kind) => {
                 let n = set.groups.len() + 1;
