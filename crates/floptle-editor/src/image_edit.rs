@@ -248,6 +248,18 @@ pub(crate) struct XformSession {
     lift: bool,
 }
 
+impl XformSession {
+    /// The lifted region's width in canvas pixels — the "before" of a scale, so
+    /// the numeric editor can offer an output size instead of only a factor.
+    pub(crate) fn source_w(&self) -> u32 {
+        self.rect.w
+    }
+
+    pub(crate) fn source_h(&self) -> u32 {
+        self.rect.h
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum XformGrab {
     /// Dragging the body: the canvas point grabbed, and the translate at grab.
@@ -1246,9 +1258,19 @@ impl ImageEditState {
                 self.drag = Some(Drag::Gradient { from: (x, y) });
             }
             ImgTool::SelectRect | ImgTool::SelectEllipse => {
+                // Dragging INSIDE a live selection moves it. Every editor does
+                // this, it is obviously what you were about to do, and needing a
+                // tool change first is most of why moving a bit of art felt like
+                // more work than the edit (`floptle/0095`).
+                if self.press_moves_selection(x, y) {
+                    return;
+                }
                 self.drag = Some(Drag::Box { from: (x, y) });
             }
             ImgTool::Lasso => {
+                if self.press_moves_selection(x, y) {
+                    return;
+                }
                 self.lasso.clear();
                 self.lasso.push((x, y));
                 self.drag = Some(Drag::Lasso);
@@ -1867,6 +1889,53 @@ impl ImageEditState {
     // --- free transform -----------------------------------------------------
 
     /// Lift the selection (or, with none, the active layer's painted content)
+    /// A press at `(x, y)` that lands inside the live selection: arm the
+    /// transform on it and grab it, so the drag that follows moves it.
+    ///
+    /// Returns whether the press was claimed. `false` means "there was nothing
+    /// under you" and the caller goes on to start a new marquee.
+    fn press_moves_selection(&mut self, x: f32, y: f32) -> bool {
+        let inside = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.selection.as_ref())
+            .is_some_and(|m| m.at(x.floor() as i32, y.floor() as i32) > 0.0);
+        if !inside || !self.begin_transform() {
+            return false;
+        }
+        // The transform is modal until committed, and the tool follows it —
+        // the same thing a paste already does, so the two arrive in the same
+        // state rather than two states that look alike.
+        self.tool = ImgTool::Transform;
+        self.grab_transform(x, y);
+        true
+    }
+
+    /// Duplicate the selection in place and float the copy, ready to be dragged.
+    ///
+    /// Not a copy-then-paste: that costs two actions and destroys whatever was
+    /// on the clipboard, so stamping the same bit of art repeatedly meant
+    /// re-copying it every time (`floptle/0095`). `lift: false` is the whole
+    /// difference from a move — the original stays where it is.
+    pub(crate) fn duplicate_selection(&mut self) -> bool {
+        if self.xform.is_some() {
+            self.commit_transform();
+        }
+        if !self.begin_transform() {
+            return false;
+        }
+        if let Some(sess) = self.xform.as_mut() {
+            sess.lift = false;
+            // Re-lay it from the untouched base, or the original stays lifted
+            // from the preview that ran when the session opened.
+            sess.base = self.doc.clone().unwrap_or_else(|| sess.base.clone());
+        }
+        self.tool = ImgTool::Transform;
+        self.apply_xform_preview();
+        self.toast("duplicated — drag to place, Enter to apply");
+        true
+    }
+
     /// into a transform session. Returns false when there's nothing to lift.
     pub(crate) fn begin_transform(&mut self) -> bool {
         if self.xform.is_some() {
@@ -2026,6 +2095,13 @@ impl ImageEditState {
     }
 
     /// Redraw the document from the snapshot with the current transform applied.
+    /// Re-lay the floating transform from its snapshot after `xf` changed by
+    /// some route other than a drag (the numeric editor). Same apply, so the
+    /// two cannot land differently.
+    pub(crate) fn reapply_transform(&mut self) {
+        self.apply_xform_preview();
+    }
+
     fn apply_xform_preview(&mut self) {
         let Some(sess) = self.xform.clone() else { return };
         self.doc = Some(sess.base.clone());
@@ -2839,6 +2915,13 @@ impl ImageEditState {
         self.thumbs.get(i).and_then(|t| t.as_ref())
     }
 
+    /// The live selection's bounding box in canvas pixels, for the status bar.
+    /// `None` when nothing is selected.
+    pub(crate) fn selection_bounds(&self) -> Option<Rect> {
+        let b = self.doc.as_ref()?.selection.as_ref()?.selected_bounds();
+        (!b.is_empty()).then_some(b)
+    }
+
     /// Whether an onion skin is currently drawn (for the tests + the status bar).
     pub(crate) fn onion_active(&self) -> bool {
         self.onion && self.doc.as_ref().is_some_and(|d| d.frames > 1)
@@ -3608,5 +3691,101 @@ mod tests {
     fn rect_between_is_inclusive_of_the_dragged_pixels() {
         let r = rect_between((2.0, 3.0), (6.0, 9.0));
         assert_eq!(r, Rect::from_points(2, 3, 5, 8));
+    }
+
+    // ---- floptle/0095: the short paths ------------------------------------
+
+    /// Dragging inside a live selection moves it, with no tool change first.
+    #[test]
+    fn a_drag_inside_the_selection_moves_it() {
+        let mut st = ImageEditState::default();
+        let mut doc = Image::new(32, 32, Mode::Pixel);
+        doc.layers[0].grid_mut(0).unwrap().edit_rect(Rect::new(4, 4, 8, 8), |_, _, p| {
+            *p = [200, 40, 40, 255]
+        });
+        doc.selection = Some(floptle_image::select::rect_mask(32, 32, Rect::new(4, 4, 8, 8)));
+        st.doc = Some(doc);
+        st.tool = ImgTool::SelectRect;
+
+        st.begin_drag(6.0, 6.0, false, false);
+        assert!(st.xform.is_some(), "a press inside the selection arms the transform");
+        assert_eq!(st.tool, ImgTool::Transform, "and the transform owns the drag");
+
+        // A press OUTSIDE it still starts a new marquee.
+        st.cancel_transform();
+        st.tool = ImgTool::SelectRect;
+        st.begin_drag(25.0, 25.0, false, false);
+        assert!(st.xform.is_none(), "outside the selection is a new marquee, not a move");
+    }
+
+    /// Duplicating floats a copy and leaves the original where it is — a move
+    /// lifts, a duplicate does not.
+    #[test]
+    fn duplicating_a_selection_leaves_the_original_alone() {
+        let mut st = ImageEditState::default();
+        let mut doc = Image::new(32, 32, Mode::Pixel);
+        doc.layers[0].grid_mut(0).unwrap().edit_rect(Rect::new(4, 4, 6, 6), |_, _, p| {
+            *p = [200, 40, 40, 255]
+        });
+        doc.selection = Some(floptle_image::select::rect_mask(32, 32, Rect::new(4, 4, 6, 6)));
+        st.doc = Some(doc);
+
+        assert!(st.duplicate_selection(), "there is something to duplicate");
+        let sess = st.xform.as_ref().expect("a session is floating");
+        assert!(!sess.lift, "a duplicate does not lift its source");
+
+        let g = st.doc.as_ref().unwrap().layers[0].grid(0).unwrap();
+        assert_eq!(g.get(6, 6), [200, 40, 40, 255], "the original is still there");
+    }
+
+    /// Nothing selected and nothing painted: there is nothing to duplicate, and
+    /// it says so rather than floating an empty session.
+    #[test]
+    fn duplicating_nothing_does_nothing() {
+        let mut st = ImageEditState::default();
+        st.doc = Some(Image::new(16, 16, Mode::Pixel));
+        assert!(!st.duplicate_selection());
+        assert!(st.xform.is_none());
+    }
+
+    /// The status bar can report the selection's box, so a region can be
+    /// checked without counting pixels on screen.
+    #[test]
+    fn the_selection_reports_its_own_box() {
+        let mut st = ImageEditState::default();
+        let mut doc = Image::new(64, 64, Mode::Pixel);
+        doc.selection = Some(floptle_image::select::rect_mask(64, 64, Rect::new(5, 9, 12, 3)));
+        st.doc = Some(doc);
+        let b = st.selection_bounds().expect("a live selection has a box");
+        assert_eq!((b.x, b.y, b.w, b.h), (5, 9, 12, 3));
+
+        st.doc.as_mut().unwrap().selection = None;
+        assert!(st.selection_bounds().is_none());
+    }
+
+    /// A typed scale lands exactly: 8 wide at x2 is 16 wide, not 15 or 17.
+    #[test]
+    fn a_typed_scale_lands_on_the_number_asked_for() {
+        let mut st = ImageEditState::default();
+        let mut doc = Image::new(48, 48, Mode::Pixel);
+        doc.layers[0].grid_mut(0).unwrap().edit_rect(Rect::new(8, 8, 8, 8), |_, _, p| {
+            *p = [200, 40, 40, 255]
+        });
+        doc.selection = Some(floptle_image::select::rect_mask(48, 48, Rect::new(8, 8, 8, 8)));
+        st.doc = Some(doc);
+        assert!(st.begin_transform());
+        let sess = st.xform.as_ref().unwrap();
+        assert_eq!((sess.source_w(), sess.source_h()), (8, 8));
+
+        st.xform.as_mut().unwrap().xf.scale = (2.0, 2.0);
+        st.reapply_transform();
+        st.commit_transform();
+
+        // The 8x8 block, doubled about its own centre, spans 4..20.
+        let g = st.doc.as_ref().unwrap().layers[0].grid(0).unwrap();
+        assert_eq!(g.get(5, 5)[3], 255, "the doubled block reaches its new corner");
+        assert_eq!(g.get(18, 18)[3], 255, "and its far one");
+        assert_eq!(g.get(2, 2)[3], 0, "and no further");
+        assert_eq!(g.get(21, 21)[3], 0);
     }
 }

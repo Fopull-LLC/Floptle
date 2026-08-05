@@ -111,6 +111,28 @@ and a hard one is never given a halo it does not have.
 Very large brushes and very low zooms fall back to a plain circle: at that size
 there is nothing to learn from the exact texels.
 
+### Moving a bit of art
+
+The short paths, so an edit costs about as many actions as it is worth:
+
+| Do | Gets |
+|---|---|
+| Drag **inside** a live selection | Moves it. No tool change first |
+| `Ctrl+J` | Duplicates the selection in place and floats the copy, ready to drag. Does **not** touch the clipboard, so a repeated stamp does not mean re-copying |
+| `Ctrl+T` | Free transform of the selection (or, with none, everything painted on the layer) |
+| Arrow keys | Nudge by one; `Shift` for ten |
+| `Enter` / `Esc` | Apply / cancel |
+
+While a transform is floating, a bar above the canvas gives it **numbers**:
+output size in pixels as well as a scale factor, `1:1` / `2x` / `half`, rotation
+in degrees, and the offset. In Pixel mode the resample is nearest, so an exact
+2× lands on whole texels rather than coming out soft.
+
+All of it is still one undo, and Cancel is still exact.
+
+The status bar shows the selection's origin and size in pixels, so a region can
+be checked without counting anything.
+
 ### View ▸ the overlays
 
 Everything drawn over your art is yours to set, because whether an overlay is

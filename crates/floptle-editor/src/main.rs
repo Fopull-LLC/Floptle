@@ -2992,6 +2992,12 @@ impl ApplicationHandler for Editor {
                                             self.image.tool = crate::image_edit::ImgTool::Transform;
                                             self.image.begin_transform();
                                         }
+                                        // Duplicate the selection in place, the
+                                        // universal binding for it, and one that
+                                        // does NOT go through the clipboard.
+                                        KeyCode::KeyJ if in_image => {
+                                            self.image.duplicate_selection();
+                                        }
                                         KeyCode::KeyZ if !in_graph => self.undo(),
                                         KeyCode::KeyY if !in_graph => self.redo(),
                                         KeyCode::KeyS => self.save_all(),

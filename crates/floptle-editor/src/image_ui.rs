@@ -78,6 +78,7 @@ impl ImageCtx<'_> {
         self.image_side_panel(ui);
         egui::CentralPanel::default().show(ui, |ui| {
             self.image_status_bar(ui);
+            self.image_transform_bar(ui);
             let _ = self.st.canvas_ui(ui);
         });
         self.image_new_dialog(ui);
@@ -1641,6 +1642,72 @@ impl ImageCtx<'_> {
 
     // --- status bar ----------------------------------------------------------
 
+    /// The numeric half of a free transform, shown only while one is in flight.
+    ///
+    /// Scale and rotation were drag-only, and "make this 16x16 block exactly
+    /// 32x32" is a typed number in pixel art, not a drag you squint at
+    /// (`floptle/0095`). The numbers write `xf` and re-apply from the same
+    /// snapshot a drag does, so there is one apply and not two — and the whole
+    /// thing still collapses to one undo.
+    fn image_transform_bar(&mut self, ui: &mut egui::Ui) {
+        let Some((sw, sh, mut xf)) =
+            self.st.xform.as_ref().map(|s| (s.source_w(), s.source_h(), s.xf))
+        else {
+            return;
+        };
+        let mut deg = xf.rotate.to_degrees();
+        let (mut changed, mut apply, mut cancel) = (false, false, false);
+        egui::Panel::top("image-xform").show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("transform").small().strong());
+                ui.separator();
+                // Offered as OUTPUT PIXELS as well as a factor, because the
+                // number in your head is "32 wide", not "twice".
+                ui.small("size");
+                let (mut px, mut py) = (sw as f32 * xf.scale.0, sh as f32 * xf.scale.1);
+                let w = ui.add(egui::DragValue::new(&mut px).speed(0.5).suffix(" px"));
+                let h = ui.add(egui::DragValue::new(&mut py).speed(0.5).suffix(" px"));
+                if w.changed() || h.changed() {
+                    xf.scale = (px / sw.max(1) as f32, py / sh.max(1) as f32);
+                    changed = true;
+                }
+                for (label, f) in [("1:1", 1.0f32), ("2x", 2.0), ("half", 0.5)] {
+                    if ui.small_button(label).clicked() {
+                        xf.scale = (f, f);
+                        changed = true;
+                    }
+                }
+                ui.separator();
+                ui.small("turn");
+                if ui.add(egui::DragValue::new(&mut deg).speed(0.5).suffix("°")).changed() {
+                    xf.rotate = deg.to_radians();
+                    changed = true;
+                }
+                ui.separator();
+                ui.small("move");
+                changed |= ui
+                    .add(egui::DragValue::new(&mut xf.translate.0).speed(0.5).prefix("x "))
+                    .changed();
+                changed |= ui
+                    .add(egui::DragValue::new(&mut xf.translate.1).speed(0.5).prefix("y "))
+                    .changed();
+                ui.separator();
+                apply = ui.button("Apply").on_hover_text("Enter").clicked();
+                cancel = ui.button("Cancel").on_hover_text("Esc").clicked();
+            });
+        });
+        if apply {
+            self.st.commit_transform();
+        } else if cancel {
+            self.st.cancel_transform();
+        } else if changed {
+            if let Some(sess) = self.st.xform.as_mut() {
+                sess.xf = xf;
+            }
+            self.st.reapply_transform();
+        }
+    }
+
     fn image_status_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("image-status").show(ui, |ui| {
             let Some((dw, dh, mb)) = self.st.doc.as_ref().map(|d| {
@@ -1659,9 +1726,18 @@ impl ImageCtx<'_> {
                 if let Some((x, y)) = self.st.cursor {
                     ui.label(RichText::new(format!("{}, {}", x.floor() as i32, y.floor() as i32)).small().weak());
                 }
-                if self.st.has_selection() {
+                // The selection's origin and size, in pixels. It used to say
+                // only "selection active", which is how you end up counting
+                // pixels on screen to check a region is square
+                // (`floptle/0095`).
+                if let Some(b) = self.st.selection_bounds() {
                     ui.separator();
-                    ui.label(RichText::new("selection active").small().weak());
+                    ui.label(
+                        RichText::new(format!("sel {},{} {}×{}", b.x, b.y, b.w, b.h))
+                            .small()
+                            .weak(),
+                    )
+                    .on_hover_text("the live selection's origin and size");
                 }
                 if self.st.onion_active() {
                     ui.separator();
@@ -1794,6 +1870,8 @@ impl ImageCtx<'_> {
             ("A / P", "reshape / pen (vector)"),
             ("T", "text"),
             ("Ctrl+T", "free transform"),
+            ("Ctrl+J", "duplicate the selection in place"),
+            ("drag inside a selection", "move it"),
             ("X", "swap primary / secondary colour"),
             ("[ / ]", "brush smaller / bigger (Ctrl+wheel too)"),
             ("Ctrl+Z / Ctrl+Y", "undo / redo — this tab's own history"),
