@@ -1,5 +1,22 @@
 ## Just shipped
 
+**v0.38.0 "Turn The Lights On"** — 2D lights. Put a PointLight in a scene whose
+camera is orthographic and it lights your tiles and sprites with a real falloff,
+leaving meshes alone; a surface with no light near it sits at ambient, so a dark
+room is dark and a torch carves a warm circle out of it. Each light lists the
+**sorting layers** it reaches, so a torch can pass over a background without
+lighting it — the one thing every 2D game wants. Every node carries a three-way
+**2D light** setting (`auto`, `2d`, `3d`); only `auto` is decided for you, and it
+shows you what it decided and why. Normal maps, shadows and height are not in
+this one.
+
+Also: an autotile **shape can hold as many tiles as you like** — variants, picked
+by where the square is, so a field of grass varies and varies the same way every
+time you open it — and **one tile can draw as many shapes as you like**. Assigning
+a tile to a second shape used to silently move it off the first. A shape with
+alternates is marked ×N, and *Assign preset* reads a whole multiple of its length
+as pass after pass.
+
 **v0.37.1 "Where You Left It"** — a scene in a folder now saves back to the file
 it was opened from. It didn't: the editor kept only the file's NAME and rebuilt
 the path from that, so `scenes/cutscenes/Opening.ron` was loaded and
