@@ -271,6 +271,9 @@ struct EditorCmd {
     /// Put a node on a named collision/query layer ("Default" removes the
     /// component). Rebuilds the sim mid-play so static colliders re-layer.
     set_layer: Option<(Entity, String)>,
+    /// A node's sorting layer + order: what draws in front of what, for a flat
+    /// scene. `(entity, layer name, order)`.
+    set_sorting: Option<(Entity, String, i32)>,
     /// A project layer was renamed in Project Settings: (old, new). The open
     /// scene's nodes follow the rename (per keystroke, so they stay in sync).
     rename_layer: Option<(String, String)>,
@@ -684,6 +687,10 @@ struct EditorTabViewer<'a> {
     add_component_filter: &'a mut String,
     /// The project's layer names ("Default" first) — the Inspector's layer picker.
     layer_names: &'a [String],
+    /// The project's sorting layers, back to front — what the node's sorting
+    /// dropdown offers. Separate list from `layer_names`: collision layers
+    /// answer "does this hit that", these answer "which draws in front".
+    sorting_names: &'a [String],
     /// The Inspector's "add tag" text field buffer.
     tag_edit: &'a mut String,
     /// See `Editor::hier_scrolled` — scroll-to-selection bookkeeping.

@@ -180,6 +180,12 @@ pub struct NodeDoc {
     /// See [`floptle_core::Tags`]; only tagged nodes serialize this.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// What draws in front of what: the sorting layer's NAME and the order
+    /// within it. `None` = the Default layer at order 0, which is every node
+    /// that has not opted in — so this writes nothing to a scene that does not
+    /// use it. See [`floptle_core::Sorting`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sorting: Option<(String, i32)>,
 }
 
 /// Serializable replication settings, mirroring [`floptle_core::Replicated`].
@@ -1366,6 +1372,16 @@ pub struct ProjectConfigDoc {
     /// Pairs naming a since-removed layer are ignored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub no_collide: Vec<(String, String)>,
+    /// The project's **sorting layers**, back to front, by name. "Default" is
+    /// implicit and always first; it need not be listed.
+    ///
+    /// Separate from `layers` on purpose: collision layers answer "does this hit
+    /// that" and sorting layers answer "which draws in front". A scene routinely
+    /// wants a Background that collides with nothing and a Player that does,
+    /// while both sort independently of either fact — folding them together
+    /// would mean every new sort order invents a physics layer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sorting_layers: Vec<String>,
     /// The project-wide audio mixer graph (tracks, effects, routing). Edited
     /// in the Mixer tab; every scene plays through it.
     #[serde(default)]
@@ -1418,6 +1434,7 @@ impl ProjectConfigDoc {
             engine_version: None,
             layers: Vec::new(),
             no_collide: Vec::new(),
+            sorting_layers: Vec::new(),
             mixer: floptle_audio::MixerDesc::default(),
             bloom: false,
             bloom_threshold: default_bloom_threshold(),
@@ -1452,6 +1469,30 @@ impl ProjectConfigDoc {
     /// runtime table physics and scripts filter with (Default pinned at bit 0).
     pub fn build_layers(&self) -> floptle_core::Layers {
         floptle_core::Layers::resolve(self.layers.clone(), &self.no_collide)
+    }
+
+    /// The sorting layers back to front, with "Default" pinned first and blanks
+    /// and duplicates dropped — the same normalisation collision layers get, for
+    /// the same reason: the list is user-edited text.
+    pub fn sorting_order(&self) -> Vec<String> {
+        let mut names = self.sorting_layers.clone();
+        names.retain(|n| !n.trim().is_empty() && n != floptle_core::DEFAULT_SORTING_LAYER);
+        names.insert(0, floptle_core::DEFAULT_SORTING_LAYER.to_string());
+        let mut seen = std::collections::HashSet::new();
+        names.retain(|n| seen.insert(n.clone()));
+        names
+    }
+
+    /// Where a sorting layer NAME sits, back to front.
+    ///
+    /// An unknown name ranks last rather than at 0. A layer deleted from the
+    /// project while scenes still name it should leave those nodes drawing in
+    /// FRONT, where they are visible and obviously wrong, rather than silently
+    /// sinking them behind the background where the bug is a mystery.
+    pub fn sorting_rank(&self, layer: &str) -> u32 {
+        let order = self.sorting_order();
+        let name = if layer.trim().is_empty() { floptle_core::DEFAULT_SORTING_LAYER } else { layer };
+        order.iter().position(|n| n == name).unwrap_or(order.len()) as u32
     }
 }
 
@@ -1986,6 +2027,9 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if !node.tags.is_empty() {
         world.insert(e, floptle_core::Tags(node.tags.clone()));
     }
+    if let Some((layer, order)) = &node.sorting {
+        world.insert(e, floptle_core::Sorting { layer: layer.clone(), order: *order });
+    }
     e
 }
 
@@ -2193,6 +2237,18 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             .map(|l| l.0.clone())
             .filter(|l| l != floptle_core::layers::DEFAULT_LAYER);
         let tags = world.get::<floptle_core::Tags>(e).map(|t| t.0.clone()).unwrap_or_default();
+        // Default-at-0 never serializes: a node's absence of sorting IS the
+        // default, exactly as with `layer` above, so a scene that does not use
+        // sorting layers is written byte for byte as it always was.
+        let sorting = world.get::<floptle_core::Sorting>(e).and_then(|s| {
+            let name = if s.layer.trim().is_empty() {
+                floptle_core::DEFAULT_SORTING_LAYER
+            } else {
+                s.layer.as_str()
+            };
+            (name != floptle_core::DEFAULT_SORTING_LAYER || s.order != 0)
+                .then(|| (name.to_string(), s.order))
+        });
         nodes.push(NodeDoc {
             id,
             parent_id,
@@ -2223,6 +2279,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             audio,
             layer,
             tags,
+            sorting,
         });
     }
     let lighting =
@@ -2526,7 +2583,8 @@ mod tests {
                         play_on_start: false, // exercise the non-default round-trip
                     }),
                     layer: Some("Enemies".into()), // exercise the layer round-trip
-                    tags: vec!["enemy".into(), "boss".into()], // exercise the tags round-trip
+                    tags: vec!["enemy".into(), "boss".into()],
+                    sorting: None, // exercise the tags round-trip
                 },
                 NodeDoc {
                     id: None,
@@ -2561,6 +2619,7 @@ mod tests {
                     audio: None,
                     layer: None,
                     tags: Vec::new(),
+                    sorting: None,
                 },
                 NodeDoc {
                     id: None,
@@ -2592,6 +2651,7 @@ mod tests {
                     audio: None,
                     layer: None,
                     tags: Vec::new(),
+                    sorting: None,
                 },
                 NodeDoc {
                     id: None,
@@ -2623,6 +2683,7 @@ mod tests {
                     audio: None,
                     layer: None,
                     tags: Vec::new(),
+                    sorting: None,
                 },
             ],
         }

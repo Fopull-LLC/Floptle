@@ -49,9 +49,10 @@ pub use matter::{
     is_disabled, is_persistent, world_transform, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, CastShadow,
     CelestialBody, Collidable, Disabled, GravityMode, Layer, Light, Made, Matter, MeshCollider, Name,
     Parent,
-    ParticleSystem, Persistent, RepeatIndex, RigidBody, SceneTag, Shape, Spin, Sprite, Sprites, Tags,
+    ParticleSystem, Persistent, RepeatIndex, RigidBody, SceneTag, Shape, Sorting, Spin, Sprite, Sprites, Tags,
     TerrainGen, TexturePaint, Trigger, VertexPaint, WaterKind,
-    Visible, EMPTY_TILE,
+    Visible, DEFAULT_SORTING_LAYER, EMPTY_TILE, SORT_LAYER_STEP, SORT_ORDER_STEP,
+    sorting_offset,
 };
 pub use net::{NetId, Replicated, ReplicationMode};
 pub use tile::{

@@ -988,6 +988,16 @@ impl Editor {
             crate::terrain_edit::terrain_nearest_mask(&self.terrain_textures, &self.texture_settings, &self.project_root);
         // Per-node vertex-paint bases, resolved BEFORE the draw loop (which borrows
         // `raster` mutably, so it can't call &self helpers). Empty for unpainted scenes.
+        // Every node's sorting-layer Z, resolved before the draw loop borrows
+        // `raster` mutably. Empty for a scene that uses no sorting layers, which
+        // is every scene until one opts in.
+        let sort_z: std::collections::HashMap<Entity, f64> = self
+            .world
+            .query::<floptle_core::Sorting>()
+            .map(|(e, s)| {
+                (e, floptle_core::sorting_offset(self.project.sorting_rank(&s.layer), s.order) as f64)
+            })
+            .collect();
         let paint_bases: std::collections::HashMap<Entity, Vec<u32>> = self
             .world
             .query::<floptle_core::VertexPaint>()
@@ -1065,7 +1075,11 @@ impl Editor {
                 continue;
             }
             // World transform (composes any parent chain) — a parent carries children.
-            let t = floptle_core::world_transform(&self.world, *e);
+            let mut t = floptle_core::world_transform(&self.world, *e);
+            // A sorting layer is a Z nudge on the DRAWN transform, so ordering a
+            // flat scene never moves anything the physics or a script can see.
+            // Resolved before the loop (`raster` is borrowed mutably in here).
+            t.translation.z += sort_z.get(e).copied().unwrap_or(0.0);
             // Off screen? Skip the whole node — the material lookups, the matrix,
             // every arm below (`floptle/0075`). Answers false for anything whose
             // extent the scene does not know, and for the Blob, which is an SDF
@@ -1871,6 +1885,7 @@ impl Editor {
         let component_clip = &self.component_clip;
         let add_component_filter = &mut self.add_component_filter;
         let layer_names = project.build_layers().names;
+        let sorting_names = project.sorting_order();
         let tag_edit = &mut self.tag_edit;
         let hier_scrolled = &mut self.hier_scrolled;
         let show_material_editor = &mut self.show_material_editor;
@@ -2925,6 +2940,7 @@ impl Editor {
                 component_clip,
                 add_component_filter,
                 layer_names: &layer_names,
+                sorting_names: &sorting_names,
                 tag_edit,
                 hier_scrolled,
                 show_material_editor,
@@ -6125,6 +6141,17 @@ impl Editor {
             }
             self.rebuild_sim(); // the sensor flag bakes into the static collider
         }
+        if let Some((e, layer, order)) = cmd.set_sorting {
+            self.record();
+            // Default-at-0 is the absence of the component, so a node put back
+            // to the default stops carrying one and its scene stops mentioning
+            // sorting at all.
+            if layer == floptle_core::DEFAULT_SORTING_LAYER && order == 0 {
+                self.world.remove::<floptle_core::Sorting>(e);
+            } else {
+                self.world.insert(e, floptle_core::Sorting { layer, order });
+            }
+        }
         if let Some((e, layer)) = cmd.set_layer {
             self.record();
             if layer == floptle_core::layers::DEFAULT_LAYER {
@@ -6878,6 +6905,8 @@ impl Editor {
     /// texture from resolution — a target camera must not sample its OWN
     /// render target mid-pass (wgpu forbids attachment+sampled in one pass).
     #[allow(clippy::too_many_arguments)]
+
+
     pub(crate) fn render_world_into(
         &mut self,
         color: &wgpu::TextureView,
@@ -6937,6 +6966,16 @@ impl Editor {
         // Per-node paint, resolved BEFORE the draw loop (which borrows `raster`
         // mutably, so it can't call &self helpers). This path renders the world too, so
         // painted props must look identical here. Empty for unpainted scenes.
+        // Every node's sorting-layer Z, resolved before the draw loop borrows
+        // `raster` mutably. Empty for a scene that uses no sorting layers, which
+        // is every scene until one opts in.
+        let sort_z: std::collections::HashMap<Entity, f64> = self
+            .world
+            .query::<floptle_core::Sorting>()
+            .map(|(e, s)| {
+                (e, floptle_core::sorting_offset(self.project.sorting_rank(&s.layer), s.order) as f64)
+            })
+            .collect();
         let paint_bases: std::collections::HashMap<Entity, Vec<u32>> = self
             .world
             .query::<floptle_core::VertexPaint>()
@@ -6969,7 +7008,11 @@ impl Editor {
             {
                 continue;
             }
-            let t = floptle_core::world_transform(&self.world, *ent);
+            let mut t = floptle_core::world_transform(&self.world, *ent);
+            // …and the same nudge here, or the Game view would sort differently
+            // from the Scene view — the drift this file has already had three
+            // times over.
+            t.translation.z += sort_z.get(ent).copied().unwrap_or(0.0);
             // …and the same cull the screen uses (`floptle/0075`), against THIS
             // camera's frustum. An offscreen target that culled differently from
             // the window would be a mirror showing a different room.

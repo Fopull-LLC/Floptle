@@ -1571,6 +1571,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         audio: None,
         layer: None,
         tags: Vec::new(),
+        sorting: None,
     }
 }
 

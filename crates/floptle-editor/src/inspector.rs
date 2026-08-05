@@ -1483,6 +1483,55 @@ impl EditorTabViewer<'_> {
                             .on_hover_text("define it in Project Settings → Layers, or pick another");
                     }
                 });
+                // What draws in front of what, for a flat scene. Only offered
+                // once the project has named a second sorting layer: a dropdown
+                // with one entry beside a number teaches nothing, and a 3D scene
+                // has no use for either.
+                if self.sorting_names.len() > 1 || world.get::<floptle_core::Sorting>(e).is_some() {
+                    ui.horizontal(|ui| {
+                        ui.label("sorting");
+                        let cur = world
+                            .get::<floptle_core::Sorting>(e)
+                            .cloned()
+                            .unwrap_or_default();
+                        let name = if cur.layer.trim().is_empty() {
+                            floptle_core::DEFAULT_SORTING_LAYER.to_string()
+                        } else {
+                            cur.layer.clone()
+                        };
+                        let known = self.sorting_names.contains(&name);
+                        egui::ComboBox::from_id_salt("node_sorting")
+                            .selected_text(if known { name.clone() } else { format!("⚠ {name}") })
+                            .show_ui(ui, |ui| {
+                                for n in self.sorting_names {
+                                    if ui.selectable_label(*n == name, n).clicked() && *n != name {
+                                        cmd.set_sorting = Some((e, n.clone(), cur.order));
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "which sorting layer this draws in — later layers draw in \
+                                 front. Project Settings names them.",
+                            );
+                        let mut order = cur.order;
+                        if ui
+                            .add(egui::DragValue::new(&mut order).speed(1).prefix("order "))
+                            .on_hover_text("within the layer: higher draws in front")
+                            .changed()
+                        {
+                            cmd.set_sorting = Some((e, name.clone(), order));
+                        }
+                        if !known {
+                            ui.small("not in Project Settings — draws in front")
+                                .on_hover_text(
+                                    "A layer that no longer exists sorts LAST, so the node is \
+                                     visible and obviously wrong rather than hidden behind \
+                                     the background.",
+                                );
+                        }
+                    });
+                }
                 ui.horizontal_wrapped(|ui| {
                     ui.label("tags");
                     let mut remove: Option<String> = None;

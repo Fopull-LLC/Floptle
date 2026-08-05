@@ -149,6 +149,13 @@ impl Editor {
         let layer = self.world.get::<floptle_core::Layer>(e).map(|l| l.0.clone());
         let tags = self.world.get::<floptle_core::Tags>(e).map(|t| t.0.clone()).unwrap_or_default();
         let terrain_gen = self.world.get::<floptle_core::TerrainGen>(e).map(|g| g.0.clone());
+        // Copy/duplicate carries the sorting layer: a duplicated sprite that
+        // silently returned to Default would draw behind the thing it was copied
+        // from, which reads as the copy having failed.
+        let sorting = self
+            .world
+            .get::<floptle_core::Sorting>(e)
+            .map(|s| (s.layer.clone(), s.order));
         Some(NodeDoc {
             id: None,
             parent_id: None,
@@ -179,6 +186,7 @@ impl Editor {
             audio,
             layer,
             tags,
+            sorting,
         })
     }
 
@@ -331,6 +339,7 @@ impl Editor {
             audio: None,
             layer: None,
             tags: Vec::new(),
+            sorting: None,
         };
         let e = self.spawn_node(&node);
         self.select_single(e);
@@ -385,6 +394,7 @@ impl Editor {
                 audio: None,
                 layer: None,
                 tags: Vec::new(),
+                sorting: None,
             };
             let e = self.spawn_node(&node);
             self.select_single(e);

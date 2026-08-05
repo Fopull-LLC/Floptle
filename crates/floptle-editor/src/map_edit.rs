@@ -2983,6 +2983,7 @@ mod tests {
             audio: None,
             layer: None,
             tags: Vec::new(),
+            sorting: None,
         }
     }
 

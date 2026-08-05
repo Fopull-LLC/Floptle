@@ -523,6 +523,64 @@ impl<'a> SettingsCtx<'a> {
         );
         ui.add_space(8.0);
 
+        // Sorting layers live here too, and are deliberately a SEPARATE list.
+        // A 2D scene routinely wants a Background that collides with nothing and
+        // a Player that does, both sorting independently of either fact; sharing
+        // one list would mean every new draw order invents a physics layer.
+        ui.collapsing("Sorting layers (2D draw order)", |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Back to front: the last one draws in front of everything above it. A \
+                     node picks one in the Inspector, with an order inside it. \"Default\" \
+                     always exists and is first.",
+                )
+                .weak()
+                .small(),
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.set_min_height(22.0);
+                ui.add_sized([200.0, 20.0], egui::Label::new(egui::RichText::new("Default").weak()));
+                ui.small("always first");
+            });
+            let mut drop: Option<usize> = None;
+            let n = project.sorting_layers.len();
+            for i in 0..n {
+                ui.horizontal(|ui| {
+                    ui.set_min_height(22.0);
+                    ui.add_sized([200.0, 20.0], egui::TextEdit::singleline(&mut project.sorting_layers[i]));
+                    // Reordering is the whole point of the list, so it is two
+                    // buttons rather than a drag nobody discovers.
+                    if ui.add_enabled(i > 0, egui::Button::new("▲")).on_hover_text("further back").clicked() {
+                        drop = Some(usize::MAX - i); // encode a swap-up
+                    }
+                    if ui.add_enabled(i + 1 < n, egui::Button::new("▼")).on_hover_text("further front").clicked() {
+                        drop = Some(usize::MAX / 2 - i); // encode a swap-down
+                    }
+                    if ui.button("✖").on_hover_text("remove — nodes naming it draw in FRONT until repointed").clicked() {
+                        drop = Some(i);
+                    }
+                });
+            }
+            if let Some(code) = drop {
+                if code >= usize::MAX / 2 + 1 {
+                    let i = usize::MAX - code;
+                    project.sorting_layers.swap(i, i - 1);
+                } else if code >= usize::MAX / 4 {
+                    let i = usize::MAX / 2 - code;
+                    project.sorting_layers.swap(i, i + 1);
+                } else {
+                    project.sorting_layers.remove(code);
+                }
+                out.save_project = true;
+            }
+            if ui.button("✚ Add sorting layer").clicked() {
+                project.sorting_layers.push(format!("Layer {}", project.sorting_layers.len() + 1));
+                out.save_project = true;
+            }
+        });
+        ui.add_space(8.0);
+
         let mut remove_idx: Option<usize> = None;
         for i in 0..project.layers.len() {
             ui.horizontal(|ui| {

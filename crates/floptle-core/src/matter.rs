@@ -18,6 +18,57 @@ pub struct Name(pub String);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layer(pub String);
 
+/// What draws in front of what, for a flat scene.
+///
+/// A 2D game in Floptle is a 3D scene that refuses the third axis, so ordering
+/// is depth — and hand-nudging Z is how it had to be done: the floor at
+/// `z = 0.001`, the player at `0.002`, and a hundred numbers nobody can read as
+/// an intention. Reorder two things and you edit both. Add a layer between them
+/// and you edit everything above.
+///
+/// So: **a named sorting layer, plus an order within it.** Named for the same
+/// reason [`Layer`] is (see [`crate::layers`]) — reordering the project's list
+/// can never silently re-sort a scene, which an index can. `order` breaks ties
+/// inside one layer: higher draws in front, and negatives are fine.
+///
+/// A node with no `Sorting` is on `"Default"` at order 0, so nothing about an
+/// existing scene changes until something opts in. This is resolved to a small
+/// Z offset **on the draw matrix only** — the node's transform, its physics and
+/// what a script reads are all untouched, because "what draws on top" is not
+/// supposed to move anything.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Sorting {
+    /// The project sorting layer's NAME. Empty = the default layer.
+    pub layer: String,
+    /// Position within the layer. Higher is nearer the camera.
+    pub order: i32,
+}
+
+/// The default sorting layer, which always exists and cannot be removed.
+pub const DEFAULT_SORTING_LAYER: &str = "Default";
+
+/// Z given to one step of sorting layer, and to one step of `order`.
+///
+/// Both are exact powers of two, so a rank-and-order pair converts to a float
+/// with no rounding at all and two different pairs can never collapse onto the
+/// same Z through accumulated error — which would put the tie back exactly where
+/// this exists to remove it. The layer step is 64 orders wide, and `order` is
+/// clamped into that so a big order can never climb into the next layer up: a
+/// sorting layer that leaks is worse than no sorting layer, because it is only
+/// visible in the one scene that happens to trip it.
+pub const SORT_LAYER_STEP: f32 = 1.0 / 64.0;
+pub const SORT_ORDER_STEP: f32 = 1.0 / 4096.0;
+
+/// The Z offset for a resolved `(layer rank, order)`.
+///
+/// Rank 0 order 0 is exactly 0.0, so a scene where nothing opts in is drawn at
+/// precisely the Z it always was.
+pub fn sorting_offset(rank: u32, order: i32) -> f32 {
+    let span = (SORT_LAYER_STEP / SORT_ORDER_STEP) as i32; // orders per layer
+    let order = order.clamp(-span / 2, span / 2 - 1);
+    rank as f32 * SORT_LAYER_STEP + order as f32 * SORT_ORDER_STEP
+}
+
 /// Free-form string **tags** on a node — mark it `"enemy"`, `"checkpoint"`,
 /// `"breakable"` and find/compare cheaply from scripts (`node:hasTag`,
 /// `findTagged`). A node holds any number of tags (no single-tag straitjacket);
@@ -1104,5 +1155,62 @@ mod tests {
         assert!((wt.translation - DVec3::new(0.0, 0.0, -1.0)).length() < 1e-5, "{:?}", wt.translation);
         // and the child inherits the parent's orientation.
         assert!((wt.rotation * Vec3::Z - (Quat::from_rotation_y(std::f32::consts::FRAC_PI_2) * Vec3::Z)).length() < 1e-5);
+    }
+}
+
+#[cfg(test)]
+mod sorting_tests {
+    use super::*;
+
+    /// A scene that never opts in must draw at exactly the Z it always did —
+    /// not nearly. A default that offsets by a hair would move every existing
+    /// 2D scene by an amount too small to see and big enough to flip a tie.
+    #[test]
+    fn the_default_layer_at_order_zero_is_no_offset_at_all() {
+        assert_eq!(sorting_offset(0, 0), 0.0);
+        assert_eq!(Sorting::default().order, 0);
+        assert!(Sorting::default().layer.is_empty());
+    }
+
+    /// Later layers draw in front, and order breaks ties inside a layer.
+    #[test]
+    fn a_later_layer_is_in_front_and_order_breaks_the_tie() {
+        assert!(sorting_offset(1, 0) > sorting_offset(0, 0));
+        assert!(sorting_offset(0, 1) > sorting_offset(0, 0));
+        assert!(sorting_offset(0, 0) > sorting_offset(0, -1));
+    }
+
+    /// A big order must never climb into the next layer. A sorting layer that
+    /// leaks is worse than none: it is correct until one scene trips it, and
+    /// then it is a mystery.
+    #[test]
+    fn order_cannot_climb_out_of_its_layer() {
+        for order in [i32::MAX, 100_000, 4096, 64, i32::MIN, -100_000] {
+            let here = sorting_offset(3, order);
+            assert!(
+                here < sorting_offset(4, i32::MIN),
+                "order {order} in layer 3 reached layer 4"
+            );
+            assert!(
+                here > sorting_offset(2, i32::MAX),
+                "order {order} in layer 3 fell into layer 2"
+            );
+        }
+    }
+
+    /// Two different (layer, order) pairs must never land on the same Z, or the
+    /// tie is back exactly where this exists to remove it. Exact powers of two
+    /// are what makes this hold rather than nearly hold.
+    #[test]
+    fn no_two_positions_collapse_onto_one_depth() {
+        let mut seen = std::collections::HashSet::new();
+        for rank in 0..8u32 {
+            for order in -32..32i32 {
+                assert!(
+                    seen.insert(sorting_offset(rank, order).to_bits()),
+                    "layer {rank} order {order} collides with something already placed"
+                );
+            }
+        }
     }
 }
