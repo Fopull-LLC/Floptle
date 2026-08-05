@@ -48,7 +48,7 @@ fn every_gather_on_the_main_path_also_runs_for_offscreen_views() {
     let missing: Vec<&str> = GATHERS
         .iter()
         .filter(|(call, _)| !off.contains(*call))
-        .map(|(call, what)| *what)
+        .map(|(_, what)| *what)
         .collect();
     assert!(
         missing.is_empty(),

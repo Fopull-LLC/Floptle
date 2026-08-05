@@ -6802,6 +6802,26 @@ impl Editor {
                 .flat_map(|(_, om)| om.0.values().filter_map(|m| m.texture.clone()))
                 .filter(|p| !self.texture_registry.contains_key(p)),
         );
+        // …and every sheet of every tileset a tilemap in this scene uses.
+        //
+        // Nothing else warms these. A tileset sheet reached the GPU only if some
+        // Material happened to name the same image, which is why a tileset had
+        // to be paired with a material to draw at all — and why the extra sheets
+        // added in v0.36.0 drew nothing unless a material pointed at them too.
+        // `tilemap_draws` resolves a page by path against this registry, so a
+        // path that never gets here is a page that silently renders as
+        // untextured.
+        let sheets: Vec<String> = self
+            .world
+            .query::<Matter>()
+            .filter_map(|(_, m)| match m {
+                Matter::Tilemap { tileset, .. } => self.tiles.get(tileset),
+                _ => None,
+            })
+            .flat_map(|s| s.pages_iter().map(|(_, t, ..)| t.to_string()).collect::<Vec<_>>())
+            .filter(|p| !p.trim().is_empty() && !self.texture_registry.contains_key(p))
+            .collect();
+        tex_paths.extend(sheets);
         for p in tex_paths {
             self.ensure_texture(&p);
         }

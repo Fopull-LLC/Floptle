@@ -265,10 +265,18 @@ impl Default for AutotileGroup {
 pub struct TileSet {
     /// Display name. The file name is the identity; this is what a panel shows.
     pub name: String,
-    /// The sheet this describes, project-relative. Informational: a tilemap
-    /// node's own Material is still the authority for what is drawn, and the
-    /// editor warns when the two disagree rather than silently overriding
-    /// either. (Guessing would mean a tileset could repaint a node's art.)
+    /// The sheet this describes, project-relative — and **the sheet a tilemap
+    /// using this tileset draws**.
+    ///
+    /// This was once informational, on the reasoning that letting a tileset
+    /// repaint a node's art would be worse than making the node's Material the
+    /// authority. What that cost was the feature: a tileset describing a sheet
+    /// it does not draw means every tilemap needs a Material carrying the same
+    /// image and the same cut, kept in agreement by hand, and a tileset on its
+    /// own renders nothing.
+    ///
+    /// Empty falls back to the node's Material, which is every tileset written
+    /// before this — so nothing is repainted that did not ask to be.
     pub texture: String,
     pub sheet_cols: u32,
     pub sheet_rows: u32,

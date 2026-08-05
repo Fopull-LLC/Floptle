@@ -352,6 +352,28 @@ fn tex_thumb(ui: &egui::Ui, path: &str) -> Option<egui::TextureHandle> {
     asset_thumb(ui, path, 48)
 }
 
+/// An image's true size in pixels, decoded once and then cached in egui memory
+/// for the session.
+///
+/// Separate from [`asset_thumb`] because a thumbnail is CAPPED — asking a
+/// 512-px thumbnail how big its sheet is answers 512, and a caller dividing that
+/// into a tile grid gets a plausible wrong number instead of an error. That is
+/// the whole reason this exists rather than `handle.size()`.
+///
+/// `None` on the first call for a path only if the file cannot be read; the
+/// decode is done eagerly because the answer is four bytes and callers are
+/// laying out a grid around it.
+pub(crate) fn asset_size(ui: &egui::Ui, path: &str) -> Option<(u32, u32)> {
+    let id = egui::Id::new(("asset-size", path));
+    if let Some(v) = ui.data(|d| d.get_temp::<(u32, u32)>(id)) {
+        return Some(v);
+    }
+    let img = floptle_assets::load_texture(Path::new(path))?;
+    let v = (img.width, img.height);
+    ui.data_mut(|d| d.insert_temp(id, v));
+    Some(v)
+}
+
 /// The **spritesheet cell picker**: a clickable grid of the sheet's cells (the
 /// current one ringed gold) plus a `cell` number field. Draws nothing and
 /// returns `false` when the grid is 1×1 — a texture is a sheet only if its asset

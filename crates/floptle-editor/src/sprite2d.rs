@@ -12,9 +12,12 @@
 //!   has a lane in the per-instance stream, so this costs no new vertex
 //!   attribute (the raster budget is full at 16/16) and no shader variant.
 //!
-//! Both take their texture and sheet grid from the node's ordinary Material, so
-//! a project does not learn a second way to say "this texture, chopped this
-//! way", and both reach a custom `.flsl` for free.
+//! A sprite batch takes its texture and sheet grid from the node's ordinary
+//! Material, so a project does not learn a second way to say "this texture,
+//! chopped this way". A **tilemap takes them from its tileset** — which is what
+//! a tileset is — and falls back to the Material only when the tileset names no
+//! sheet, which is every project written before it could. Both reach a custom
+//! `.flsl` for free.
 
 use std::collections::HashMap;
 
@@ -183,25 +186,49 @@ impl Editor {
         let now = self.started.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0);
         for (e, cols, rows, tile, data, tileset) in live {
             let mat = self.world.get::<Material>(e).cloned().unwrap_or_default();
-            let (sc, sr) = mat.sheet();
-            // The texel size is what the half-texel inset is measured in. An
-            // unloaded texture reports nothing, and the mesh is rebuilt when it
-            // arrives because the signature covers it.
-            let texel = mat
-                .texture
-                .as_deref()
-                .and_then(|p| self.texture_registry.get(p).copied())
+            let set = (!tileset.is_empty()).then(|| self.tiles.get(&tileset)).flatten();
+            let step = set.map(|s| anim_step(s, now)).unwrap_or(0);
+
+            // Page 0 comes from the TILESET, and the node's Material is the
+            // fallback for a layer whose tileset names no sheet of its own.
+            //
+            // It used to be the other way round — the material was the
+            // authority and the tileset's own `texture` was informational, on
+            // the reasoning that a tileset silently repainting a node's art
+            // would be worse. The cost of that turned out to be the whole
+            // feature: a tileset is *a sheet plus what its cells mean*, so
+            // making it describe a sheet it does not draw means every tilemap
+            // needs a Material carrying the same image and the same cols/rows,
+            // kept in agreement by hand, and a tileset alone renders nothing at
+            // all. Reported as "I still have to assign a texture to the
+            // material on the tileset for it to register as something I can
+            // use", which is precisely the bookkeeping.
+            //
+            // Nothing is silently repainted: a tileset that names no texture
+            // still defers to the material, which is every project written
+            // before this.
+            let (p0_tex, sc, sr) = match set {
+                Some(s) if !s.texture.trim().is_empty() => {
+                    (s.texture.clone(), s.sheet_cols.max(1), s.sheet_rows.max(1))
+                }
+                _ => {
+                    let (c, r) = mat.sheet();
+                    (mat.texture.clone().unwrap_or_default(), c, r)
+                }
+            };
+            // The texel size is what the half-texel inset is measured in, and it
+            // has to be measured on the sheet page 0 ACTUALLY draws. An unloaded
+            // texture reports nothing, and the mesh is rebuilt when it arrives
+            // because the signature covers it.
+            let texel = self
+                .texture_registry
+                .get(p0_tex.as_str())
+                .copied()
                 .and_then(|id| raster.texture_size(id))
                 .map(|[w, h]| [1.0 / w.max(1.0), 1.0 / h.max(1.0)])
                 .unwrap_or([0.0, 0.0]);
 
-            let set = (!tileset.is_empty()).then(|| self.tiles.get(&tileset)).flatten();
-            let step = set.map(|s| anim_step(s, now)).unwrap_or(0);
-            // Page 0 is the layer's own material sheet whatever the tileset
-            // says, so an unpaged project is byte-for-byte what it always was;
-            // pages 1.. come from the tileset and each brings its own image.
-            let mut pages: Vec<(String, u32, u32)> =
-                vec![(mat.texture.clone().unwrap_or_default(), sc, sr)];
+            let mut pages: Vec<(String, u32, u32)> = vec![(p0_tex, sc, sr)];
             if let Some(s) = set {
                 for (p, tex, c, r) in s.pages_iter() {
                     if p > 0 {
@@ -231,8 +258,8 @@ impl Editor {
                 let Some(page_data) = page_squares(draw, page, pc * pr) else {
                     continue; // nothing on this page — no mesh, no draw call
                 };
-                // Each page's inset is measured in ITS OWN texels; page 0 keeps
-                // the material's, which is the number the unpaged path used.
+                // Each page's inset is measured in ITS OWN texels; page 0's was
+                // measured above, on whichever sheet it resolved to.
                 let ptexel = if page == 0 {
                     texel
                 } else {
@@ -338,10 +365,14 @@ pub(crate) fn tilemap_draws(
         if p.empty {
             continue;
         }
-        let page_tex = match (p.page, p.texture.as_deref()) {
-            (0, _) => tex,
-            (_, Some(path)) => textures.get(path).copied(),
-            (_, None) => None,
+        // A page draws the sheet it names. Page 0 falls back to the node's
+        // Material when the tileset names none — a layer written before a
+        // tileset could carry its own art, and the one case where the material
+        // is still the authority.
+        let page_tex = match p.texture.as_deref() {
+            Some(path) => textures.get(path).copied().or(if p.page == 0 { tex } else { None }),
+            None if p.page == 0 => tex,
+            None => None,
         };
         out.push((p.mesh, page_tex, raw));
     }
@@ -444,6 +475,62 @@ mod tests {
         let h = crate::matter_catalog::PRIMITIVE_HALF;
         let (lo, hi) = (corner(-h, -h), corner(h, h));
         [(hi.x - lo.x).abs(), (hi.y - lo.y).abs()]
+    }
+
+    /// A tilemap's page draws the sheet the PAGE names, and page 0 falls back
+    /// to the node's material only when the tileset names none.
+    ///
+    /// This is what "I have to assign a texture to the material for the tileset
+    /// to register" was: page 0 ignored the tileset entirely and took the
+    /// material's texture whatever the tileset said, so a tileset alone drew
+    /// nothing and the tileset's own sheet was decoration.
+    #[test]
+    fn a_page_draws_the_sheet_it_names() {
+        let mut textures = HashMap::new();
+        textures.insert("tiles.png".to_string(), TexId(7));
+        textures.insert("props.png".to_string(), TexId(9));
+        let material_tex = Some(TexId(1));
+
+        let page = |page: u32, texture: Option<&str>| TilePageGpu {
+            mesh: MeshId(page),
+            page,
+            texture: texture.map(str::to_string),
+            empty: false,
+        };
+        let draw = |pages: Vec<TilePageGpu>| {
+            let mut world = World::default();
+            let e = world.spawn();
+            let mut tilemaps = HashMap::new();
+            tilemaps.insert(e, TileGpu { pages, sig: 0 });
+            let mut out = Vec::new();
+            tilemap_draws(
+                &tilemaps,
+                &textures,
+                e,
+                floptle_core::math::Mat4::IDENTITY,
+                None,
+                material_tex,
+                &mut out,
+            );
+            out.into_iter().map(|(_, t, _)| t).collect::<Vec<_>>()
+        };
+
+        // The tileset names its own sheet for page 0: that is what draws, and
+        // the material is not consulted.
+        assert_eq!(draw(vec![page(0, Some("tiles.png"))]), vec![Some(TexId(7))]);
+        // A later page brings its own image.
+        assert_eq!(
+            draw(vec![page(0, Some("tiles.png")), page(1, Some("props.png"))]),
+            vec![Some(TexId(7)), Some(TexId(9))]
+        );
+        // No sheet on page 0 — the material, which is every project written
+        // before a tileset could carry art.
+        assert_eq!(draw(vec![page(0, None)]), vec![material_tex]);
+        // A page naming an image that has not finished uploading falls back on
+        // page 0 and draws untextured on a later one, rather than borrowing
+        // page 0's art and looking like the wrong tile.
+        assert_eq!(draw(vec![page(0, Some("missing.png"))]), vec![material_tex]);
+        assert_eq!(draw(vec![page(0, None), page(1, Some("missing.png"))]), vec![material_tex, None]);
     }
 
     fn draw_one(size: f32, s: Sprite) -> InstanceRaw {

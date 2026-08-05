@@ -144,6 +144,90 @@ fn labelled(ui: &mut egui::Ui, label: &str, body: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
+/// The cut to start a freshly-dropped sheet on: `(cols, rows)`.
+///
+/// A dropped image with no cut is 1×1 — one tile the size of the whole sheet —
+/// which looks like the drop failed. Guessing costs nothing because the guess is
+/// visible and editable on the row the moment it lands.
+///
+/// Two sources, in order of how much they know:
+///
+/// 1. **The filename**, if it carries a cell size (`tiles_16x16.png`,
+///    `dungeon-32.png`). An artist who wrote the number down means it, and it
+///    beats any inference — a 64×64 sheet of 32-px tiles and one of 16-px tiles
+///    are the same image to everything except that name.
+/// 2. **The pixel size**, taking the largest common cell from 64 down to 8 that
+///    divides both sides and yields at least a 2×2 grid. Preferring LARGE cells
+///    is deliberate: guessing 8 px on a sheet of 32-px tiles gives a palette of
+///    sixteen meaningless quarter-tiles, while guessing 32 on a sheet of 8s
+///    gives four tiles that are visibly wrong. The first reads as a broken
+///    engine; the second reads as a number to change.
+///
+/// Falls back to 1×1 when the image is unreadable, which is honest: no cut is
+/// better than a confident wrong one.
+fn guess_sheet_grid(path: &str, px: Option<(u32, u32)>) -> (u32, u32) {
+    let (w, h) = match px {
+        Some(v) if v.0 > 0 && v.1 > 0 => v,
+        _ => return (1, 1),
+    };
+    if let Some(cell) = cell_size_in_name(path)
+        && cell > 0
+        && w.is_multiple_of(cell)
+        && h.is_multiple_of(cell)
+    {
+        return (w / cell, h / cell);
+    }
+    for cell in [64u32, 48, 32, 24, 16, 8] {
+        if w.is_multiple_of(cell) && h.is_multiple_of(cell) && w / cell >= 2 && h / cell >= 2 {
+            return (w / cell, h / cell);
+        }
+    }
+    (1, 1)
+}
+
+/// A cell size written into a filename: `16x16`, `_32`, `-8x8`. `None` if there
+/// is no number, or if `NxM` names a non-square cell (which this cannot express).
+fn cell_size_in_name(path: &str) -> Option<u32> {
+    let stem = path.rsplit(['/', '\\']).next()?.rsplit_once('.').map(|(s, _)| s).unwrap_or(path);
+    let mut best = None;
+    let bytes: Vec<char> = stem.to_ascii_lowercase().chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        let a: u32 = bytes[start..i].iter().collect::<String>().parse().ok()?;
+        // `16x16` — take it only when both halves agree, since one cell size is
+        // all a tileset page has.
+        if i < bytes.len() && bytes[i] == 'x' {
+            let s2 = i + 1;
+            let mut j = s2;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > s2 {
+                let b: u32 = bytes[s2..j].iter().collect::<String>().parse().ok()?;
+                i = j;
+                if a == b {
+                    best = Some(a);
+                }
+                continue;
+            }
+        }
+        // A bare number is only a cell size if it is a plausible one — a year
+        // or a version in a filename is not a tile size.
+        if (4..=256).contains(&a) {
+            best = best.or(Some(a));
+        }
+    }
+    best
+}
+
 /// A page's tab label: its image's file stem, or `page N` when it has none.
 fn short_texture(tex: &str, page: u32) -> String {
     let stem = tex.rsplit(['/', '\\']).next().unwrap_or("").split('.').next().unwrap_or("");
@@ -531,19 +615,24 @@ impl TileCtx<'_> {
         labelled(ui, "sheet", |ui| {
             ui.small(format!("{sc}×{sr} — {ncells} tiles, {solid} solid, {groups} groups"));
         });
-        // A tileset whose sheet grid disagrees with the layer's material is the
-        // quiet failure this catches: every cell index would mean a different
-        // picture, so the map would draw scrambled art with nothing said.
-        let (msc, msr) = self.sheet_size();
-        if (msc, msr) != (sc, sr) {
-            ui.colored_label(
-                ACCENT,
-                format!("⚠ this layer's material is cut {msc}×{msr}, the tileset says {sc}×{sr}"),
-            );
-            ui.small(
-                "Every cell index means a different tile under the two, so the map draws \
-                 the wrong art. Fix whichever is wrong — neither is guessed at.",
-            );
+        // The two-cuts warning only applies to a tileset that names no sheet of
+        // its own and is therefore still borrowing the layer's material. When
+        // the tileset HAS a sheet it is the authority for both the image and the
+        // cut, and there is nothing left for the material to disagree with.
+        if set.texture.trim().is_empty() {
+            let (msc, msr) = self.sheet_size();
+            if (msc, msr) != (sc, sr) {
+                ui.colored_label(
+                    ACCENT,
+                    format!("⚠ this layer's material is cut {msc}×{msr}, the tileset says {sc}×{sr}"),
+                );
+                ui.small(
+                    "This tileset has no sheet of its own, so it is drawing the layer's \
+                     material — and under two different cuts every cell index means a \
+                     different picture. Give the tileset its own sheet below, or match \
+                     the two.",
+                );
+            }
         }
         let set = set.clone();
         self.pages_ui(ui, &set);
@@ -584,25 +673,83 @@ impl TileCtx<'_> {
                 self.cmds.push(TileCmd::RemoveLastPage);
             }
         });
+        // Page 0 is in this list like any other sheet. It is the tileset's own
+        // `texture`/`sheet_cols`/`sheet_rows`, which used to be unsettable here
+        // and merely "informational" — the reason a tileset could not carry its
+        // own art and every layer needed a Material saying the same thing twice.
         for (p, tex, c, r) in set.pages_iter().collect::<Vec<_>>() {
-            if p == 0 {
-                ui.small(format!("0 — this layer's material, {c}×{r}"));
-                continue;
+            self.sheet_row(ui, p, tex, c, r);
+        }
+        if set.texture.trim().is_empty() {
+            ui.small(
+                "Sheet 0 has no image, so this tileset is borrowing the layer's material. \
+                 Drop one on the row above — or on this panel — and the tileset draws itself.",
+            );
+        }
+        // Dropping an image anywhere on the panel fills the first empty sheet,
+        // else adds one. "Drag them in from my assets" should not require
+        // hitting a particular row.
+        if let Some(path) = self.dropped_texture(ui) {
+            let slot = set
+                .pages_iter()
+                .find(|(_, t, ..)| t.trim().is_empty())
+                .map(|(p, ..)| p);
+            match slot {
+                Some(p) => {
+                    let (c, r) = guess_sheet_grid(&path, self.sheet_px(ui, &path));
+                    self.cmds.push(TileCmd::SetPage(p, path, c, r));
+                }
+                None if set.page_count() < floptle_core::TILE_MAX_PAGES => {
+                    let (c, r) = guess_sheet_grid(&path, self.sheet_px(ui, &path));
+                    self.cmds.push(TileCmd::AddPage);
+                    self.cmds.push(TileCmd::SetPage(set.page_count(), path, c, r));
+                }
+                None => {}
             }
-            let (mut path, mut cols, mut rows) = (tex.to_string(), c, r);
-            let mut changed = false;
-            ui.horizontal(|ui| {
+        }
+    }
+
+    /// One sheet: its image, its cut, and a drop target for both.
+    fn sheet_row(&mut self, ui: &mut egui::Ui, p: u32, tex: &str, c: u32, r: u32) {
+        let (mut path, mut cols, mut rows) = (tex.to_string(), c, r);
+        let mut changed = false;
+        let resp = ui
+            .horizontal(|ui| {
                 ui.small(format!("{p}"));
                 changed |= ui
-                    .add(egui::TextEdit::singleline(&mut path).desired_width(120.0).hint_text("textures/…png"))
-                    .on_hover_text("project-relative image for this sheet")
+                    .add(
+                        egui::TextEdit::singleline(&mut path)
+                            .desired_width(120.0)
+                            .hint_text("drop or type textures/…png"),
+                    )
+                    .on_hover_text("project-relative image for this sheet — or drag one in")
                     .lost_focus();
                 changed |= ui.add(egui::DragValue::new(&mut cols).range(1..=256).prefix("c")).changed();
                 changed |= ui.add(egui::DragValue::new(&mut rows).range(1..=256).prefix("r")).changed();
-            });
-            if changed {
-                self.cmds.push(TileCmd::SetPage(p, path, cols, rows));
-            }
+                // The cut, in pixels, so "is this even" is answerable without
+                // dividing in your head. A sheet that does not divide evenly is
+                // the seam bug, and it says so rather than drawing it.
+                if let Some((w, h)) = self.sheet_px(ui, &path) {
+                    let (cw, ch) = (w / cols.max(1), h / rows.max(1));
+                    if w % cols.max(1) == 0 && h % rows.max(1) == 0 {
+                        ui.small(format!("{cw}×{ch}px"));
+                    } else {
+                        ui.colored_label(ACCENT, format!("⚠ {w}×{h} is not {cols}×{rows}"))
+                            .on_hover_text(
+                                "This cut does not divide the image evenly, so every tile \
+                                 samples a fraction of its neighbour and the map draws seams.",
+                            );
+                    }
+                }
+            })
+            .response;
+        if let Some(dropped) = self.dropped_texture_on(ui, &resp) {
+            let (gc, gr) = guess_sheet_grid(&dropped, self.sheet_px(ui, &dropped));
+            self.cmds.push(TileCmd::SetPage(p, dropped, gc, gr));
+            return;
+        }
+        if changed {
+            self.cmds.push(TileCmd::SetPage(p, path, cols, rows));
         }
     }
 
@@ -633,26 +780,27 @@ impl TileCtx<'_> {
             });
         }
         let page = self.tools.page;
-        // Page 0 is the LAYER'S material, unchanged; later pages are the
-        // tileset's own images.
-        let (sc, sr) = match (page, set.as_ref()) {
-            (0, _) => self.sheet_size(),
-            (_, Some(s)) => s.page(page).map(|(_, c, r)| (c, r)).unwrap_or((1, 1)),
-            (_, None) => (1, 1),
+        // Every page reads from the TILESET, page 0 included; the layer's
+        // material is the fallback only where the tileset names no sheet, which
+        // is the same rule the mesh builder follows. When these two disagreed
+        // the palette showed one sheet and the map drew another.
+        let own = set.as_ref().and_then(|s| s.page(page)).filter(|(t, ..)| !t.trim().is_empty());
+        let (sc, sr) = match (own, page, set.as_ref()) {
+            (Some((_, c, r)), ..) => (c, r),
+            (None, 0, _) => self.sheet_size(),
+            (None, _, Some(s)) => s.page(page).map(|(_, c, r)| (c, r)).unwrap_or((1, 1)),
+            (None, _, None) => (1, 1),
         };
-        let handle = if page == 0 {
-            self.sheet_handle(ui)
-        } else {
-            set.as_ref()
-                .and_then(|s| s.page(page))
-                .filter(|(t, ..)| !t.is_empty())
-                .and_then(|(t, ..)| self.texture_handle(ui, t))
+        let handle = match own {
+            Some((t, ..)) => self.texture_handle(ui, t),
+            None if page == 0 => self.sheet_handle(ui),
+            None => None,
         };
         let Some(sheet) = handle else {
             if page == 0 {
                 ui.small(
-                    "This layer's material has no texture yet — give it a spritesheet in the \
-                     Inspector and set its sheetCols / sheetRows.",
+                    "This tileset has no sheet yet. Drop an image on SHEETS above — or give \
+                     the layer's material a spritesheet, which this falls back to.",
                 );
             } else {
                 ui.small("This page has no image, or it could not be read.");
@@ -1137,6 +1285,46 @@ impl TileCtx<'_> {
         crate::ui_widgets::asset_thumb(ui, abs.to_str()?, 512)
     }
 
+    /// A sheet image's size in pixels, or `None` if it is not readable yet.
+    ///
+    /// Read from the decoded thumbnail rather than the file, so it costs a
+    /// cache lookup and answers for whatever the engine will actually sample.
+    fn sheet_px(&self, ui: &egui::Ui, rel: &str) -> Option<(u32, u32)> {
+        if rel.trim().is_empty() {
+            return None;
+        }
+        let abs = crate::project::resolve_asset_path(self.project_root, rel);
+        crate::ui_widgets::asset_size(ui, abs.to_str()?)
+    }
+
+    /// A texture dropped onto `resp`, project-relative.
+    ///
+    /// Only images: dropping a `.glb` on a tileset sheet is a slip, and taking
+    /// it would put an unloadable path in the file and blank the palette.
+    fn dropped_texture_on(&self, ui: &egui::Ui, resp: &egui::Response) -> Option<String> {
+        if resp
+            .dnd_hover_payload::<crate::assets::AssetPayload>()
+            .is_some_and(|p| crate::assets::is_texture(&p.path))
+        {
+            ui.painter().rect_stroke(
+                resp.rect.expand(1.0),
+                4.0,
+                egui::Stroke::new(1.5, ACCENT),
+                egui::StrokeKind::Outside,
+            );
+        }
+        let p = resp.dnd_release_payload::<crate::assets::AssetPayload>()?;
+        crate::assets::is_texture(&p.path).then(|| p.path.clone())
+    }
+
+    /// A texture dropped anywhere on the panel — so "drag it in from my assets"
+    /// does not mean "hit this particular row".
+    fn dropped_texture(&self, ui: &egui::Ui) -> Option<String> {
+        let resp = ui.response();
+        let p = resp.dnd_release_payload::<crate::assets::AssetPayload>()?;
+        crate::assets::is_texture(&p.path).then(|| p.path.clone())
+    }
+
     /// An egui handle on the active layer's texture.
     fn sheet_handle(&self, ui: &egui::Ui) -> Option<egui::TextureHandle> {
         let e = self.tools.layer?;
@@ -1415,10 +1603,16 @@ impl crate::Editor {
                     });
                 }
             }
+            // Page 0 lives in the tileset's own three fields rather than in
+            // `pages`, so it is set here rather than being a missing case. It
+            // used to be one — page 0 was the layer's material and unsettable,
+            // which is why a tileset could not carry its own art at all.
             TileCmd::SetPage(p, texture, cols, rows) => {
-                if p > 0
-                    && let Some(page) = set.pages.get_mut(p as usize - 1)
-                {
+                if p == 0 {
+                    set.texture = texture;
+                    set.sheet_cols = cols.max(1);
+                    set.sheet_rows = rows.max(1);
+                } else if let Some(page) = set.pages.get_mut(p as usize - 1) {
                     page.texture = texture;
                     page.cols = cols.max(1);
                     page.rows = rows.max(1);
@@ -1576,6 +1770,58 @@ impl crate::Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dropped sheet has to arrive usable. 1×1 is one tile the size of the
+    /// whole image, which reads as the drop having failed.
+    #[test]
+    fn a_dropped_sheet_gets_a_cut_it_can_be_used_with() {
+        // 128×128 of 16-px tiles: the largest cell that divides both and leaves
+        // a real grid.
+        assert_eq!(guess_sheet_grid("textures/x.png", Some((128, 128))), (2, 2));
+        // …because 64 divides it first. A sheet that only 16 fits:
+        assert_eq!(guess_sheet_grid("textures/x.png", Some((80, 48))), (5, 3));
+        // Unreadable stays honest rather than confidently wrong.
+        assert_eq!(guess_sheet_grid("textures/x.png", None), (1, 1));
+        assert_eq!(guess_sheet_grid("textures/x.png", Some((0, 0))), (1, 1));
+    }
+
+    /// A number in the filename beats the inference, because an artist who wrote
+    /// it down knows something the pixel dimensions cannot say: a 64×64 sheet of
+    /// 32s and one of 16s are the same image.
+    #[test]
+    fn the_filename_wins_when_it_names_a_cell_size() {
+        assert_eq!(guess_sheet_grid("textures/tiles_16x16.png", Some((64, 64))), (4, 4));
+        assert_eq!(guess_sheet_grid("textures/dungeon-32.png", Some((64, 64))), (2, 2));
+        // Without the name the same image guesses the largest cell that fits.
+        assert_eq!(guess_sheet_grid("textures/dungeon.png", Some((64, 64))), (2, 2));
+        // A cell size that does not divide the image is not believed.
+        assert_eq!(guess_sheet_grid("textures/tiles_24.png", Some((64, 64))), (2, 2));
+        // `NxM` with different halves names no single cell size.
+        assert_eq!(cell_size_in_name("sheet_16x32.png"), None);
+        // A year is not a tile size.
+        assert_eq!(cell_size_in_name("art2026.png"), None);
+        assert_eq!(cell_size_in_name("tiles_16x16.png"), Some(16));
+    }
+
+    /// Setting sheet 0 writes the tileset's OWN fields. It used to have no
+    /// effect at all — page 0 was the layer's material — which is why a tileset
+    /// could not carry its own art.
+    #[test]
+    fn sheet_zero_is_the_tilesets_own_and_is_settable() {
+        let mut set = TileSet { sheet_cols: 1, sheet_rows: 1, ..Default::default() };
+        set.pages.push(floptle_tiles::TilePage {
+            texture: "b.png".into(),
+            cols: 2,
+            rows: 2,
+        });
+        // What TileCmd::SetPage does, at the level a unit test can reach.
+        set.texture = "a.png".into();
+        set.sheet_cols = 4;
+        set.sheet_rows = 4;
+        assert_eq!(set.page(0), Some(("a.png", 4, 4)));
+        assert_eq!(set.page(1), Some(("b.png", 2, 2)));
+        assert_eq!(set.page_count(), 2);
+    }
 
     #[test]
     fn a_tileset_path_shows_as_its_name() {
