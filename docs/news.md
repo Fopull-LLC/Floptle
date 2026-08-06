@@ -1,5 +1,23 @@
 ## Just shipped
 
+**v0.40.0 "As You Set It"** — the number you typed is the number that reaches the
+screen. A tilemap or sprite at **alpha 0.72 was drawing at 0.92** in every 2D
+project since v0.38, with no light placed and nothing switched on, because the 2D
+lighting pass composited your flat surfaces a second time; opacity is yours again
+at every value. **Your own font**, at last: `draw.text` takes one, and
+**Project Settings ▸ UI font** sets it for every string that names none — a game
+whose UI is a pixel font could not draw a single immediate-mode string in it
+before, and the symptom read as bad letter spacing rather than as the wrong
+typeface. **UI Layer ▸ text snap** keeps a pixel font on its own cell grid at
+window sizes where the layer scale is fractional, which is most of them. A script
+can now read and write the **2D base light**, so a brightness setting, a quality
+governor and a blackout are all possible — and the rest of the Lighting node came
+with it, for day cycles and weather. Three things that were right in the Scene
+view and missing everywhere else are fixed: **water draws in the game**, a
+**vertex-painted shape is painted in every view**, and **switching a node off now
+switches its light off**. And 2D lighting costs nothing until a light of yours can
+actually reach something — `perf.counts().flat2d` says how much it is costing.
+
 **v0.39.1 "Only Ever Brighter"** — placing your first 2D light no longer darkens
 the scene. The base brightness a flat surface got dropped from full to the 3D
 ambient the moment any 2D light existed, so one light took a level to about 12%
