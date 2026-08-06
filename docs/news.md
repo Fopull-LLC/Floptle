@@ -1,5 +1,23 @@
 ## Just shipped
 
+**v0.40.2 "Something In The Way"** — 2D light stops at walls. A light used to
+reach the floor, the counter, the shelf and the floor behind the shelf all by
+the same distance from the lamp, so what landed on screen was a disc of
+brightness with the room drawn on top of it. **blocks light** does what the
+Inspector has always said it would: under `auto` a tilemap casts exactly where
+it is solid, from the colliders its tileset already declares, so a level's
+collision *is* its light occlusion and the cover that stops a bullet is the
+cover that stops the light. Nothing is rebuilt when a light moves, and a scene
+with no casters pays what it always did. A light also has a shape now — **full
+out to** holds it at full brightness before the ramp starts, and **falloff** is
+that ramp's exponent — which is how a posterized game lands a whole light inside
+one band instead of drawing concentric rings. And the rings that were **the
+wrong colour** are fixed: posterize quantized each channel separately, so a mild
+warm white at `{1.0, 0.86, 0.62}` — a torch, a lamp, a fire, a muzzle flash —
+banded into olive and maroon rings nobody chose and produced no clean brightness
+step anywhere in its radius. **PostProcess ▸ step brightness, keep colour**
+steps once and carries the hue along; a grey pixel is identical either way.
+
 **v0.40.1 "Give It Back"** — Escape gives you your cursor back during Play, and
 this time it stays given. A first-person game takes the pointer, which is the
 point of one; getting it back was the problem, because Escape released it for a
