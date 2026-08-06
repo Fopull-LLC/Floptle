@@ -1,5 +1,14 @@
 ## Just shipped
 
+**v0.39.1 "Only Ever Brighter"** — placing your first 2D light no longer darkens
+the scene. The base brightness a flat surface got dropped from full to the 3D
+ambient the moment any 2D light existed, so one light took a level to about 12%
+and a tileset read as having vanished. The base is now its own **2D base light**
+on the Lighting node, defaulting to white — turn it down when you want a dark
+room, and a light can otherwise only add. Also: lit tilemaps no longer blink in
+and out as the camera moves, and the docs now say plainly that there is no 2D
+*directional* light.
+
 **v0.39.0 "Ask The Sky"** — a procedural sky can finally answer to your game.
 `setShaderParam` reaches a Skybox's uniforms, so a sky that catches fire during a
 cutscene runs on your story beat instead of on a timer; the post chain opened up
