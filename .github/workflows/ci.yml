@@ -87,6 +87,8 @@ jobs:
           run ortho_camera_probe  ortho_camera_probe  -- "$P"
           run tilemap_pages_probe tilemap_pages_probe -- "$P"
           run light2d_probe       light2d_probe       -- "$P"
+          run light2d_shadow_probe light2d_shadow_probe -- "$P"
+          run posterize_chroma_probe posterize_chroma_probe -- "$P"
           run sky_sweep_probe     sky_sweep_probe     -- "$P"
           run ui_text_snap_probe  ui_text_snap_probe  -- "$P"
 

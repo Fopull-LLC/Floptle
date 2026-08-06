@@ -2605,6 +2605,24 @@ impl Raster {
         if flat.is_empty() || lights.reach() == 0 {
             return;
         }
+        // Three facts about the FRAME rather than about a light, stamped here so
+        // that no caller can build a uniform that is missing them — the two
+        // gathers in the editor have drifted four times over exactly this shape
+        // of "remember to also set".
+        //
+        // The shadow budget is `0` unless something in this frame actually
+        // casts, which is what makes the whole feature free for a scene with no
+        // occluders: `occluded` returns on the first line and the march is never
+        // walked (`floptle/0125`).
+        let mut lights = *lights;
+        lights.view_proj = view_proj;
+        lights.viewport = [size.0.max(1) as f32, size.1.max(1) as f32, 0.0, 0.0];
+        lights.count[2] = if flat.iter().any(|(_, _, i)| i.casts()) {
+            crate::light2d::SHADOW_STEPS
+        } else {
+            0.0
+        };
+        let lights = &lights;
         // Bucket by (mesh, texture) exactly as the colour pass does, and pack the
         // instances contiguously so each bucket is one draw over a slice.
         let groups = group_by_key(

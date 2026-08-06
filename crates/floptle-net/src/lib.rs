@@ -309,6 +309,9 @@ mod tests {
             lit_2d: None,
             light_layers: Vec::new(),
             shadow_2d: None,
+            light_inner: None,
+            light_falloff: None,
+            light_shadows: None,
         };
         let arrow = server.spawn_doc(&mut sw, &node, Some(1));
         // Tick the empty-peers server a few times.

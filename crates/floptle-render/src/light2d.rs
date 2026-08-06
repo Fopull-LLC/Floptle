@@ -48,8 +48,8 @@ pub struct Light2dInstance {
     pub model: [[f32; 4]; 4],
     /// rgb tint × a opacity, multiplied into the sampled texture.
     pub tint: [f32; 4],
-    /// x = sorting-layer rank. y/z/w are spare and are where a normal-map slot
-    /// goes when step 3 lands.
+    /// x = sorting-layer rank, y = 1 when this surface blocks light. z/w are
+    /// spare and are where a normal-map slot goes when step 3 lands.
     pub meta: [f32; 4],
 }
 
@@ -76,19 +76,33 @@ impl Light2dInstance {
     /// **This is the mitigation, in one function.** The deferred pass does not
     /// re-derive a transform or re-decide a tint: it takes them from the very
     /// value handed to the colour pass, so the two cannot place a surface
-    /// differently. The only thing added is the sorting rank, which the raster
-    /// instance has nowhere to put.
-    pub fn from_raster(raw: &crate::raster::InstanceRaw, rank: u32) -> Self {
-        Self { model: raw.model, tint: raw.color, meta: [rank as f32, 0.0, 0.0, 0.0] }
+    /// differently. The only things added are the sorting rank and whether the
+    /// surface blocks light, neither of which the raster instance has anywhere
+    /// to put.
+    pub fn from_raster(raw: &crate::raster::InstanceRaw, rank: u32, casts: bool) -> Self {
+        Self {
+            model: raw.model,
+            tint: raw.color,
+            meta: [rank as f32, if casts { 1.0 } else { 0.0 }, 0.0, 0.0],
+        }
     }
 
+    /// Whether this surface blocks light — the flag the shadow march reads back
+    /// out of the G-buffer's alpha channel.
+    pub fn casts(&self) -> bool {
+        self.meta[1] > 0.5
+    }
 }
 
 /// The 2D lights reaching one frame, in the shape the accumulation shader reads.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Light2dUniform {
-    /// x = how many lights are live.
+    /// x = how many lights are live. z = how many steps the shadow march may
+    /// take, and `0` switches shadowing off for the whole frame — the gather
+    /// sets it only when something in the G-buffer actually casts, so a scene
+    /// with no casters pays exactly what it paid before shadows existed
+    /// (`floptle/0125`).
     pub count: [f32; 4],
     /// rgb = the flat ambient every 2D surface gets.
     ///
@@ -98,10 +112,25 @@ pub struct Light2dUniform {
     pub ambient: [f32; 4],
     /// Clip → camera-relative world, to put a G-buffer pixel back in the scene.
     pub inv_view_proj: [[f32; 4]; 4],
+    /// …and back again, to find where a light *is on screen*. The shadow march
+    /// walks the G-buffer in screen space, so it needs the light's pixel and not
+    /// only its world position.
+    pub view_proj: [[f32; 4]; 4],
+    /// xy = the viewport being drawn, in pixels. The G-buffer only ever grows
+    /// and one renderer serves several viewport sizes, so its dimensions are the
+    /// wrong answer for "how big is this frame" — and the march converts between
+    /// UV and texel with it.
+    pub viewport: [f32; 4],
     /// xyz = camera-relative position, w = range.
     pub pos: [[f32; 4]; 16],
     /// rgb = colour × intensity.
     pub color: [[f32; 4]; 16],
+    /// Per light: `[inner radius, exponent, casts-are-honoured, spare]`.
+    ///
+    /// `[0, 2, …]` is the curve every light had before `floptle/0126` — a ramp
+    /// that starts at the light and falls as `x²` — so the defaults leave every
+    /// existing scene where it was.
+    pub falloff: [[f32; 4]; 16],
     /// A bitmask over sorting-layer RANK, one `vec4` per light: bit `r` of word
     /// `r / 32` set means this light reaches rank `r`.
     ///
@@ -162,12 +191,26 @@ impl Default for Light2dUniform {
             // light looks exactly as it did rather than going dark.
             ambient: [1.0, 1.0, 1.0, 0.0],
             inv_view_proj: [[0.0; 4]; 4],
+            view_proj: [[0.0; 4]; 4],
+            viewport: [1.0, 1.0, 0.0, 0.0],
             pos: [[0.0; 4]; 16],
             color: [[0.0; 4]; 16],
+            // `[0, 2]` is the ramp every light had before it was authorable, so
+            // a caller that fills nothing here gets the old curve rather than a
+            // flat disc. `z = 0` leaves shadowing off until a gather asks.
+            falloff: [[0.0, 2.0, 0.0, 0.0]; 16],
             mask: [[0; 4]; 16],
         }
     }
 }
+
+/// How many samples the shadow march may take along one pixel-to-light segment.
+///
+/// A ceiling, not a target: the march stops the moment it hits something, and it
+/// only runs for pixels actually inside a light's radius. It is fixed rather
+/// than authorable because it trades against nothing a game can see — too few
+/// and a thin wall leaks light, too many and it costs for no visible gain.
+pub const SHADOW_STEPS: f32 = 28.0;
 
 /// The G-buffer's albedo format. Linear rather than the surface's sRGB format
 /// because the value written is a *material* colour the accumulation does
@@ -551,8 +594,21 @@ mod tests {
     fn the_light_uniform_is_std140_shaped() {
         assert_eq!(std::mem::align_of::<Light2dUniform>() % 4, 0);
         assert_eq!(std::mem::size_of::<Light2dUniform>() % 16, 0);
-        // count + ambient + a 4x4 matrix + three 16-element vec4 arrays.
-        assert_eq!(std::mem::size_of::<Light2dUniform>(), 16 + 16 + 64 + 16 * 16 * 3);
+        // count + ambient + viewport, two 4x4 matrices, four 16-element vec4
+        // arrays (pos, colour, falloff, mask).
+        assert_eq!(std::mem::size_of::<Light2dUniform>(), 16 * 3 + 64 * 2 + 16 * 16 * 4);
+    }
+
+    /// The defaults are "what a light did before any of this was authorable",
+    /// and that is the whole compatibility story for `floptle/0125` and `0126`:
+    /// a caller that fills only what it always filled gets the old picture.
+    #[test]
+    fn an_unfilled_light_keeps_the_curve_it_always_had() {
+        let u = Light2dUniform::default();
+        assert_eq!(u.falloff[0][0], 0.0, "the ramp starts at the light");
+        assert_eq!(u.falloff[0][1], 2.0, "…and falls as x², which is what it always did");
+        assert_eq!(u.falloff[0][2], 0.0, "and nothing casts until a gather says so");
+        assert_eq!(u.count[2], 0.0, "so the march is off");
     }
 
     /// A scene that turns 2D lighting on without placing a light must look

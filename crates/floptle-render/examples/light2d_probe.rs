@@ -57,7 +57,7 @@ fn main() {
     // at night, so 2D lighting has to be the thing that lights it.
     let mat = MaterialParams { unlit: true, ..MaterialParams::flat([1.0, 1.0, 1.0]) };
     let raw = instance_of_mat(Mat4::IDENTITY, &mat);
-    let flat = [(map, Some::<TexId>(tex), Light2dInstance::from_raster(&raw, MAP_RANK))];
+    let flat = [(map, Some::<TexId>(tex), Light2dInstance::from_raster(&raw, MAP_RANK, false))];
 
     let cam = RenderCamera::new(
         DVec3::new(0.0, 0.0, 10.0),
@@ -235,7 +235,7 @@ fn main() {
     let opaque = |raster: &mut Raster, lights: Option<&Light2dUniform>| {
         let m = MaterialParams { unlit: true, ..MaterialParams::flat([1.0, 1.0, 1.0]) };
         let raw = instance_of_mat(Mat4::IDENTITY, &m);
-        let flat = [(map, Some::<TexId>(tex), Light2dInstance::from_raster(&raw, MAP_RANK))];
+        let flat = [(map, Some::<TexId>(tex), Light2dInstance::from_raster(&raw, MAP_RANK, false))];
         let px = shot(&gpu, raster, S, view_proj, map, tex, &raw, &flat, lights);
         px[((S / 2) * S + S / 2) as usize]
     };
@@ -248,7 +248,7 @@ fn main() {
         // actually added.
         let m = MaterialParams { unlit: true, alpha: a, ..MaterialParams::flat([1.0, 1.0, 1.0]) };
         let raw = instance_of_mat(Mat4::IDENTITY, &m);
-        let flat = [(map, Some::<TexId>(tex), Light2dInstance::from_raster(&raw, MAP_RANK))];
+        let flat = [(map, Some::<TexId>(tex), Light2dInstance::from_raster(&raw, MAP_RANK, false))];
 
         let off = shot(&gpu, &mut raster, S, view_proj, map, tex, &raw, &flat, None);
         let idle_px = shot(&gpu, &mut raster, S, view_proj, map, tex, &raw, &flat, Some(&idle));

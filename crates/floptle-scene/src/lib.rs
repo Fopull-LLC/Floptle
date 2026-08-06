@@ -200,6 +200,17 @@ pub struct NodeDoc {
     /// `None` = `auto`. See [`floptle_core::Cast2D`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow_2d: Option<String>,
+    /// **Lights only.** Full brightness out to this radius before the ramp
+    /// starts. `None` = 0, which is every light written before `floptle/0126`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_inner: Option<f32>,
+    /// **Lights only.** The exponent of that ramp. `None` = 2, the curve every
+    /// light has always had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_falloff: Option<f32>,
+    /// **Lights only.** Whether casters stop this light. `None` = yes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_shadows: Option<bool>,
 }
 
 /// Serializable replication settings, mirroring [`floptle_core::Replicated`].
@@ -798,6 +809,8 @@ pub enum MatterDoc {
         posterize_bands: u32,
         #[serde(default)]
         posterize_dither: bool,
+        #[serde(default)]
+        posterize_chroma: bool,
     },
 }
 
@@ -1013,6 +1026,7 @@ impl From<&Matter> for MatterDoc {
                 ao_radius,
                 posterize_bands,
                 posterize_dither,
+                posterize_chroma,
             } => MatterDoc::PostProcess {
                 enabled: *enabled,
                 bloom: *bloom,
@@ -1026,6 +1040,7 @@ impl From<&Matter> for MatterDoc {
                 ao_radius: *ao_radius,
                 posterize_bands: *posterize_bands,
                 posterize_dither: *posterize_dither,
+                posterize_chroma: *posterize_chroma,
             },
         }
     }
@@ -1134,6 +1149,7 @@ impl MatterDoc {
                 ao_radius,
                 posterize_bands,
                 posterize_dither,
+                posterize_chroma,
             } => Matter::PostProcess {
                 enabled: *enabled,
                 bloom: *bloom,
@@ -1147,6 +1163,7 @@ impl MatterDoc {
                 ao_radius: *ao_radius,
                 posterize_bands: *posterize_bands,
                 posterize_dither: *posterize_dither,
+                posterize_chroma: *posterize_chroma,
             },
         }
     }
@@ -2075,7 +2092,13 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     // An unknown spelling falls back to `Auto` rather than refusing the node:
     // a scene from a newer engine should still open, with the light behaving as
     // an unconfigured one rather than the whole file failing to load.
-    if node.lit_2d.is_some() || !node.light_layers.is_empty() {
+    if node.lit_2d.is_some()
+        || !node.light_layers.is_empty()
+        || node.light_inner.is_some()
+        || node.light_falloff.is_some()
+        || node.light_shadows.is_some()
+    {
+        let d = floptle_core::Lighting2D::default();
         world.insert(
             e,
             floptle_core::Lighting2D {
@@ -2085,6 +2108,9 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
                     .and_then(floptle_core::Lit2D::parse)
                     .unwrap_or_default(),
                 layers: node.light_layers.clone(),
+                inner: node.light_inner.unwrap_or(d.inner),
+                falloff: node.light_falloff.unwrap_or(d.falloff),
+                shadows: node.light_shadows.unwrap_or(d.shadows),
             },
         );
     }
@@ -2322,6 +2348,12 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             .filter(|m| *m != floptle_core::Lit2D::Auto)
             .map(|m| m.name().to_string());
         let light_layers = lit.map(|l| l.layers.clone()).unwrap_or_default();
+        // …and the same rule again for the shaping knobs: only a value that
+        // differs from what every light has always done is written.
+        let d2 = floptle_core::Lighting2D::default();
+        let light_inner = lit.map(|l| l.inner).filter(|v| *v != d2.inner);
+        let light_falloff = lit.map(|l| l.falloff).filter(|v| *v != d2.falloff);
+        let light_shadows = lit.map(|l| l.shadows).filter(|v| *v != d2.shadows);
         let shadow_2d = world
             .get::<floptle_core::Shadow2D>(e)
             .map(|s| s.0)
@@ -2361,6 +2393,9 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             lit_2d,
             light_layers,
             shadow_2d,
+            light_inner,
+            light_falloff,
+            light_shadows,
         });
     }
     let lighting =
@@ -2669,6 +2704,9 @@ mod tests {
                     lit_2d: Some("2d".into()), // exercise the 2D-lighting round-trips
                     light_layers: vec!["Terrain".into(), "Characters".into()],
                     shadow_2d: Some("on".into()),
+                    light_inner: None,
+                    light_falloff: None,
+                    light_shadows: None,
                 },
                 NodeDoc {
                     id: None,
@@ -2707,6 +2745,9 @@ mod tests {
                     lit_2d: None,
                     light_layers: Vec::new(),
                     shadow_2d: None,
+                    light_inner: None,
+                    light_falloff: None,
+                    light_shadows: None,
                 },
                 NodeDoc {
                     id: None,
@@ -2742,6 +2783,9 @@ mod tests {
                     lit_2d: None,
                     light_layers: Vec::new(),
                     shadow_2d: None,
+                    light_inner: None,
+                    light_falloff: None,
+                    light_shadows: None,
                 },
                 NodeDoc {
                     id: None,
@@ -2777,6 +2821,9 @@ mod tests {
                     lit_2d: None,
                     light_layers: Vec::new(),
                     shadow_2d: None,
+                    light_inner: None,
+                    light_falloff: None,
+                    light_shadows: None,
                 },
             ],
         }
@@ -2788,6 +2835,49 @@ mod tests {
         let text = to_ron(&doc).unwrap();
         let back = from_ron(&text).unwrap();
         assert_eq!(doc, back);
+    }
+
+    /// A light's shaping survives a save and a load, and — the half that is
+    /// easier to get wrong — a light that has *not* been shaped writes nothing.
+    /// A default that serializes is a diff in every 2D scene anybody opens.
+    #[test]
+    fn a_shaped_light_round_trips_and_an_unshaped_one_writes_nothing() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, floptle_core::transform::Transform::IDENTITY);
+        world.insert(e, Matter::PointLight { color: [1.0, 0.86, 0.62], intensity: 3.0, range: 8.0 });
+        world.insert(
+            e,
+            floptle_core::Lighting2D {
+                mode: floptle_core::Lit2D::Yes,
+                inner: 6.4,
+                falloff: 3.5,
+                shadows: false,
+                ..Default::default()
+            },
+        );
+        let text = to_ron(&to_doc("lit", &world)).unwrap();
+        assert!(text.contains("light_inner"), "the inner radius did not reach the file: {text}");
+        let back = from_ron(&text).unwrap();
+        let mut w2 = World::new();
+        spawn_into(&back, &mut w2);
+        let got = w2
+            .query::<floptle_core::Lighting2D>()
+            .map(|(_, l)| l.clone())
+            .find(|l| l.mode == floptle_core::Lit2D::Yes)
+            .expect("the light's 2D component");
+        assert_eq!((got.inner, got.falloff, got.shadows), (6.4, 3.5, false));
+
+        // …and the light nobody shaped.
+        let mut plain = World::new();
+        let p = plain.spawn();
+        plain.insert(p, floptle_core::transform::Transform::IDENTITY);
+        plain.insert(p, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0 });
+        plain.insert(p, floptle_core::Lighting2D { mode: floptle_core::Lit2D::Yes, ..Default::default() });
+        let text = to_ron(&to_doc("plain", &plain)).unwrap();
+        for key in ["light_inner", "light_falloff", "light_shadows"] {
+            assert!(!text.contains(key), "an unshaped light wrote `{key}`: {text}");
+        }
     }
 
     #[test]
@@ -2879,6 +2969,7 @@ mod tests {
             ao_radius: 1.25,
             posterize_bands: 6,
             posterize_dither: true,
+            posterize_chroma: true,
         };
         world.insert(e, authored.clone());
 

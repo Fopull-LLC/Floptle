@@ -161,6 +161,11 @@ impl Editor {
         let lit = self.world.get::<floptle_core::Lighting2D>(e);
         let lit_2d = lit.map(|l| l.mode.name().to_string());
         let light_layers = lit.map(|l| l.layers.clone()).unwrap_or_default();
+        // …including its shaping. A duplicated torch that came back with the
+        // default falloff would be a different torch (`floptle/0126`).
+        let light_inner = lit.map(|l| l.inner);
+        let light_falloff = lit.map(|l| l.falloff);
+        let light_shadows = lit.map(|l| l.shadows);
         let shadow_2d =
             self.world.get::<floptle_core::Shadow2D>(e).map(|s| s.0.name().to_string());
         Some(NodeDoc {
@@ -197,6 +202,9 @@ impl Editor {
             lit_2d,
             light_layers,
             shadow_2d,
+            light_inner,
+            light_falloff,
+            light_shadows,
         })
     }
 
@@ -353,6 +361,9 @@ impl Editor {
             lit_2d: None,
             light_layers: Vec::new(),
             shadow_2d: None,
+            light_inner: None,
+            light_falloff: None,
+            light_shadows: None,
         };
         let e = self.spawn_node(&node);
         self.select_single(e);
@@ -411,6 +422,9 @@ impl Editor {
                 lit_2d: None,
                 light_layers: Vec::new(),
                 shadow_2d: None,
+                light_inner: None,
+                light_falloff: None,
+                light_shadows: None,
             };
             let e = self.spawn_node(&node);
             self.select_single(e);

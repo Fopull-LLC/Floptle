@@ -181,7 +181,7 @@ pub fn resolve_2d(mode: Lit2D, facts: Lit2DFacts) -> (bool, &'static str) {
 ///
 /// Absent means [`Lit2D::Auto`] with no layer restriction, so a scene that has
 /// never heard of this component behaves exactly as it did.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Lighting2D {
     pub mode: Lit2D,
     /// **Lights only.** The sorting layers this light reaches, by name. Empty —
@@ -196,6 +196,34 @@ pub struct Lighting2D {
     /// It is **not** the collision layer mask. A background that collides with
     /// nothing and a player that does sort — and light — independently of that.
     pub layers: Vec<String>,
+    /// **Lights only.** Full brightness out to this radius in world units, and
+    /// only then falling away to nothing at `range`. `0` — the default — starts
+    /// the ramp at the light itself, which is what every light did before.
+    ///
+    /// This is the knob a **posterized** game needs, and it is not a nicety.
+    /// Quantising a smooth radial ramp to N levels draws N concentric rings; the
+    /// way out is to shape the ramp so that the whole of it falls inside one
+    /// band, and you cannot do that when the ramp always spans the full radius.
+    /// An inner radius of `0.8 × range` puts the entire falloff in the outer
+    /// fifth (`floptle/0126`).
+    pub inner: f32,
+    /// **Lights only.** The exponent of that ramp. `2` — the default — is the
+    /// curve every light has always had; below 1 holds the brightness out and
+    /// drops it late, above 2 dives away from the core.
+    pub falloff: f32,
+    /// **Lights only.** Whether casters stop this light. On by default, because
+    /// a light that passes through walls reads as a decal rather than as light
+    /// (`floptle/0125`) — and because the per-node `blocks light` control, which
+    /// is what actually decides *what* casts, has always said it would.
+    pub shadows: bool,
+}
+
+impl Default for Lighting2D {
+    fn default() -> Self {
+        // Every one of these is "what a light did before this component
+        // existed". A scene that has never heard of it must be unchanged.
+        Self { mode: Lit2D::default(), layers: Vec::new(), inner: 0.0, falloff: 2.0, shadows: true }
+    }
 }
 
 impl Lighting2D {
@@ -213,6 +241,23 @@ impl Lighting2D {
             let l = if l.trim().is_empty() { DEFAULT_SORTING_LAYER } else { l.as_str() };
             l == layer
         })
+    }
+
+    /// This light's shaping, in the lane the 2D accumulation reads:
+    /// `[inner radius, exponent, casts-are-honoured, spare]`.
+    ///
+    /// Clamped here rather than in the shader so that one place decides what a
+    /// nonsense value means. An inner radius at or past the range would divide
+    /// by zero and light the whole disc flat; an exponent of zero would do the
+    /// same. Both are things a slider can reach and a script can type.
+    pub fn falloff_lane(&self, range: f32) -> [f32; 4] {
+        let r = range.max(1e-4);
+        [
+            self.inner.clamp(0.0, r * 0.999),
+            self.falloff.max(0.01),
+            if self.shadows { 1.0 } else { 0.0 },
+            0.0,
+        ]
     }
 }
 
@@ -1109,6 +1154,20 @@ pub enum Matter {
         posterize_bands: u32,
         /// Ordered-dither the posterize so smooth gradients don't hard-step.
         posterize_dither: bool,
+        /// Quantize **brightness** and carry the colour along, instead of
+        /// quantizing each channel on its own (`floptle/0126`).
+        ///
+        /// Per channel is a real look and stays the default, but it is not what
+        /// anybody expects from a *light*: a smooth radial ramp crosses each
+        /// channel's band boundary at a different radius, so a warm white lamp
+        /// draws concentric rings in colours nobody chose — olive where red and
+        /// green have stepped and blue has not, maroon where only red has.
+        /// Measured on a real game, a light at `{1.0, 0.86, 0.62}` produced
+        /// **no** clean brightness step anywhere in its radius, only hue rings.
+        ///
+        /// Preserving chroma cannot do that, because chroma is never quantized.
+        /// An exactly grey pixel takes the identical path it always did.
+        posterize_chroma: bool,
     },
 }
 
@@ -1228,6 +1287,9 @@ impl Matter {
             ao_radius: 0.5,
             posterize_bands: 0,
             posterize_dither: false,
+            // Today's look. Every project's posterize is built on per-channel
+            // stepping, so this is opt-in or it is a silent change of art.
+            posterize_chroma: false,
         }
     }
 }
@@ -1505,13 +1567,39 @@ mod lighting_2d_tests {
     }
 
     /// Naming layers restricts it to those, and the empty name IS the default
+    /// The shaping lane, and the two values in it that a slider or a script can
+    /// reach and that would break the shader if they arrived unclamped: an inner
+    /// radius at or past the range divides by zero and lights the whole disc
+    /// flat, and an exponent of zero does the same.
+    #[test]
+    fn a_lights_falloff_clamps_where_the_shader_would_divide_by_zero() {
+        let d = Lighting2D::default();
+        assert_eq!(d.falloff_lane(8.0), [0.0, 2.0, 1.0, 0.0], "the curve every light always had");
+
+        let past = Lighting2D { inner: 99.0, ..Default::default() };
+        assert!(past.falloff_lane(8.0)[0] < 8.0, "an inner radius past the range flattens the light");
+
+        let zero = Lighting2D { falloff: 0.0, ..Default::default() };
+        assert!(zero.falloff_lane(8.0)[1] > 0.0);
+
+        // Negative, from a script that subtracted too far.
+        let neg = Lighting2D { inner: -4.0, falloff: -1.0, ..Default::default() };
+        let lane = neg.falloff_lane(8.0);
+        assert_eq!(lane[0], 0.0);
+        assert!(lane[1] > 0.0);
+
+        // …and the shadow flag is the third lane, not a fourth field somewhere.
+        let off = Lighting2D { shadows: false, ..Default::default() };
+        assert_eq!(off.falloff_lane(8.0)[2], 0.0);
+    }
+
     /// layer — a node that never picked one and a node that picked "Default"
     /// are the same node, so a light must not tell them apart.
     #[test]
     fn naming_layers_restricts_a_light_to_them() {
         let torch = Lighting2D {
-            mode: Lit2D::Auto,
             layers: vec!["Terrain".into(), DEFAULT_SORTING_LAYER.into()],
+            ..Default::default()
         };
         assert!(torch.reaches("Terrain"));
         assert!(torch.reaches(DEFAULT_SORTING_LAYER));

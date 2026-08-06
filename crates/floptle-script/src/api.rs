@@ -239,7 +239,7 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
             | ("Camera", "active")
             | (
                 "PostProcess",
-                "enabled" | "bloom" | "vignette" | "posterizeDither"
+                "enabled" | "bloom" | "vignette" | "posterizeDither" | "posterizeChroma"
             )
             | (
                 "Light",
@@ -377,6 +377,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
         ao_radius,
         posterize_bands,
         posterize_dither,
+        posterize_chroma,
         ..
     }) = world.get::<Matter>(e)
     {
@@ -394,6 +395,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("aoRadius".to_string(), *ao_radius as f64),
                 ("posterizeBands".to_string(), *posterize_bands as f64),
                 ("posterizeDither".to_string(), f64::from(*posterize_dither)),
+                ("posterizeChroma".to_string(), f64::from(*posterize_chroma)),
             ]),
         );
     }
@@ -894,6 +896,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 ao_radius,
                 posterize_bands,
                 posterize_dither,
+                posterize_chroma,
                 ..
             }) = world.get_mut::<Matter>(ent)
             {
@@ -912,6 +915,9 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     // negative from Lua must not wrap into a huge one.
                     "posterizeBands" => *posterize_bands = val.max(0.0) as u32,
                     "posterizeDither" => *posterize_dither = val != 0.0,
+                    // `floptle/0126`: step BRIGHTNESS and keep the colour,
+                    // so a warm light does not band into hues nobody chose.
+                    "posterizeChroma" => *posterize_chroma = val != 0.0,
                     _ => {}
                 }
             }
@@ -1311,13 +1317,25 @@ pub(crate) fn apply_rich_sets(
             // `floptle/0113`. Same rule: `auto` with no layer list IS the
             // default, so a node put back to it stops carrying the component and
             // its scene stops mentioning 2D lighting.
-            RichSet::MatterLighting2D { mode, layers, blocks } => {
-                if mode.is_some() || layers.is_some() {
+            RichSet::MatterLighting2D { mode, layers, blocks, inner, falloff, shadows } => {
+                if mode.is_some()
+                    || layers.is_some()
+                    || inner.is_some()
+                    || falloff.is_some()
+                    || shadows.is_some()
+                {
                     let cur =
                         world.get::<floptle_core::Lighting2D>(e).cloned().unwrap_or_default();
                     let next = floptle_core::Lighting2D {
                         mode: mode.unwrap_or(cur.mode),
                         layers: layers.unwrap_or(cur.layers),
+                        // Clamped where a nonsense value can still be seen. An
+                        // inner radius past the range would flatten the light
+                        // into a disc and an exponent of zero would do the same;
+                        // both are one typo away.
+                        inner: inner.unwrap_or(cur.inner).max(0.0),
+                        falloff: falloff.unwrap_or(cur.falloff).max(0.01),
+                        shadows: shadows.unwrap_or(cur.shadows),
                     };
                     if next == floptle_core::Lighting2D::default() {
                         world.remove::<floptle_core::Lighting2D>(e);
@@ -1504,7 +1522,8 @@ pub(crate) const TILEMAP_KEYS: &[&str] = &["cols", "rows", "tile", "data", "tile
 pub(crate) const SORTING_KEYS: &[&str] = &["layer", "order"];
 
 /// Every key `node:setLighting2D{...}` reads (`floptle/0082`).
-pub(crate) const LIGHTING_2D_KEYS: &[&str] = &["mode", "layers", "blocks"];
+pub(crate) const LIGHTING_2D_KEYS: &[&str] =
+    &["mode", "layers", "blocks", "inner", "falloff", "shadows"];
 
 /// Every key `node:setPointLight{...}` reads (`floptle/0082`).
 pub(crate) const POINT_LIGHT_KEYS: &[&str] = &["color", "intensity", "range"];
@@ -3323,8 +3342,17 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                             list.sequence_values::<String>().collect::<mlua::Result<Vec<_>>>()?,
                         ),
                     };
-                    q.borrow_mut()
-                        .push((e, crate::RichSet::MatterLighting2D { mode, layers, blocks }));
+                    q.borrow_mut().push((
+                        e,
+                        crate::RichSet::MatterLighting2D {
+                            mode,
+                            layers,
+                            blocks,
+                            inner: t.get::<Option<f32>>("inner")?,
+                            falloff: t.get::<Option<f32>>("falloff")?,
+                            shadows: t.get::<Option<bool>>("shadows")?,
+                        },
+                    ));
                     Ok(())
                 })?,
             )?;

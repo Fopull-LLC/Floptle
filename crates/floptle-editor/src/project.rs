@@ -1629,6 +1629,9 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         lit_2d: None,
         light_layers: Vec::new(),
         shadow_2d: None,
+        light_inner: None,
+        light_falloff: None,
+        light_shadows: None,
     }
 }
 

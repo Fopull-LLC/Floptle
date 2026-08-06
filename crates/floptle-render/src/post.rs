@@ -34,6 +34,10 @@ pub struct PostSettings {
     pub posterize_bands: u32,
     /// Ordered-dither the posterize quantization so smooth ramps don't hard-step.
     pub posterize_dither: bool,
+    /// Quantize brightness and keep the chroma, rather than each channel on its
+    /// own — so a near-neutral light steps in brightness instead of banding into
+    /// hues nobody chose (`floptle/0126`). Off = today's per-channel look.
+    pub posterize_chroma: bool,
     /// Colour-vision filter: 0 = off, 1 = protanopia, 2 = deuteranopia,
     /// 3 = tritanopia (`floptle_core::access::ColorFilter::lane`). Runs in the
     /// terminal pass, before the scene's own looks (`floptle/0079`).
@@ -541,7 +545,9 @@ impl PostStack {
             // does not use (`floptle/0079`).
             let a = [
                 if s.simulate_deficiency { 1.0 } else { 0.0 },
-                0.0,
+                // …and the chroma rule rides the second dead lane, for the same
+                // reason: no uniform-layout change (`floptle/0126`).
+                if posterize_on && s.posterize_chroma { 1.0 } else { 0.0 },
                 if filter_on { s.color_filter as f32 } else { 0.0 },
                 if filter_on { s.color_filter_strength } else { 0.0 },
             ];

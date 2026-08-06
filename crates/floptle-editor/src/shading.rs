@@ -49,8 +49,15 @@ pub(crate) fn blob_mat_arrays(set: &[(DVec3, f32, MaterialParams)]) -> BlobMatAr
 }
 
 /// One side of the light split: how many, where, what colour, and — for the 2D
-/// side — which sorting layers each one reaches.
-pub(crate) type LightSlots = (usize, [[f32; 4]; 16], [[f32; 4]; 16], [[u32; 4]; 16]);
+/// side — which sorting layers each one reaches and how its falloff is shaped.
+///
+/// `(count, pos, colour, layer mask, falloff)`, where `falloff[i]` is
+/// `[inner radius, exponent, casts-are-honoured, spare]`.
+///
+/// The 3D side fills that lane and ignores it — one shape for both sides is
+/// what stops the two from drifting.
+pub(crate) type LightSlots =
+    (usize, [[f32; 4]; 16], [[f32; 4]; 16], [[u32; 4]; 16], [[f32; 4]; 16]);
 
 /// The scene's placeable lights, separated into the two systems that light with
 /// them.
@@ -127,6 +134,7 @@ pub(crate) fn split_point_lights(
             pos: [c.x, c.y, c.z, range.max(0.0001)],
             color: [color[0] * intensity, color[1] * intensity, color[2] * intensity, 0.0],
             mask: layer_mask(&lit, sorting_names),
+            falloff: lit.falloff_lane(*range),
         });
     }
     let dropped = three.len().saturating_sub(16) + two.len().saturating_sub(16);
@@ -143,6 +151,7 @@ struct Candidate {
     pos: [f32; 4],
     color: [f32; 4],
     mask: [u32; 4],
+    falloff: [f32; 4],
 }
 
 /// How much a light can matter to this frame: how bright it is, against how far
@@ -173,11 +182,13 @@ fn fill(mut lights: Vec<Candidate>) -> LightSlots {
         });
         lights.truncate(16);
     }
-    let mut out: LightSlots = (lights.len(), [[0.0; 4]; 16], [[0.0; 4]; 16], [[0; 4]; 16]);
+    let mut out: LightSlots =
+        (lights.len(), [[0.0; 4]; 16], [[0.0; 4]; 16], [[0; 4]; 16], [[0.0; 4]; 16]);
     for (i, l) in lights.iter().enumerate() {
         out.1[i] = l.pos;
         out.2[i] = l.color;
         out.3[i] = l.mask;
+        out.4[i] = l.falloff;
     }
     out
 }
@@ -638,6 +649,7 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
         ssao_radius: 0.5,
         posterize_bands: 0,
         posterize_dither: false,
+        posterize_chroma: false,
         color_filter: 0,
         color_filter_strength: 1.0,
         simulate_deficiency: false,
@@ -662,6 +674,7 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
             ao_radius,
             posterize_bands,
             posterize_dither,
+            posterize_chroma,
         } = m
         {
             if !enabled {
@@ -679,6 +692,7 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
                 ssao_radius: *ao_radius,
                 posterize_bands: *posterize_bands,
                 posterize_dither: *posterize_dither,
+                posterize_chroma: *posterize_chroma,
                 color_filter: 0,
                 color_filter_strength: 1.0,
                 simulate_deficiency: false,
@@ -754,7 +768,7 @@ mod light_split_tests {
     #[test]
     fn a_light_that_names_no_layers_arrives_reaching_all_of_them() {
         let mut world = World::default();
-        light_at(&mut world, 0.0, Some(Lighting2D { mode: Lit2D::Yes, layers: vec![] }));
+        light_at(&mut world, 0.0, Some(Lighting2D { mode: Lit2D::Yes, ..Default::default() }));
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
         assert_eq!(s.two_d.0, 1);
         assert_eq!(s.two_d.3[0], [!0u32; 4], "the mask must be all-ones, never zero");
@@ -772,6 +786,7 @@ mod light_split_tests {
             Some(Lighting2D {
                 mode: Lit2D::Yes,
                 layers: vec!["Characters".into(), "Gone".into()],
+                ..Default::default()
             }),
         );
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
@@ -788,7 +803,7 @@ mod light_split_tests {
         light_at(
             &mut world,
             0.0,
-            Some(Lighting2D { mode: Lit2D::Yes, layers: vec!["layer35".into()] }),
+            Some(Lighting2D { mode: Lit2D::Yes, layers: vec!["layer35".into()], ..Default::default() }),
         );
         let s = split_point_lights(&world, DVec3::ZERO, &names, false);
         assert_eq!(s.two_d.3[0], [0, 1 << 3, 0, 0], "rank 35 is bit 3 of word 1");

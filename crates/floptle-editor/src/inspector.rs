@@ -2232,6 +2232,7 @@ impl EditorTabViewer<'_> {
                                 ao_radius,
                                 posterize_bands,
                                 posterize_dither,
+                                posterize_chroma,
                             } => {
                                 use floptle_core::AoMode;
                                 ui.label("post processing");
@@ -2319,6 +2320,17 @@ impl EditorTabViewer<'_> {
                                         cmd.inspector_changed |= ui
                                             .checkbox(posterize_dither, "dither the bands")
                                             .on_hover_text("ordered dither so smooth gradients don't hard-step between levels")
+                                            .changed();
+                                        cmd.inspector_changed |= ui
+                                            .checkbox(posterize_chroma, "step brightness, keep colour")
+                                            .on_hover_text(
+                                                "off — the default — steps each colour channel on its own, which is a real \
+                                                 look and what every project built before now is made of. It is never what \
+                                                 a LIGHT wants: a warm white lamp's ramp crosses each channel's boundary at \
+                                                 a different radius, so it lands as concentric rings in colours nobody chose. \
+                                                 On, the step happens once to brightness and the colour rides along — a grey \
+                                                 pixel comes out identical either way.",
+                                            )
                                             .changed();
                                     });
                                 });
@@ -3932,7 +3944,7 @@ fn lighting_2d_row(
                     next.clear();
                 }
                 cmd.set_lighting_2d =
-                    Some((e, floptle_core::Lighting2D { mode: cur.mode, layers: next }));
+                    Some((e, floptle_core::Lighting2D { layers: next, ..cur.clone() }));
             }
         });
         if cur.layers.is_empty() {
@@ -3940,6 +3952,70 @@ fn lighting_2d_row(
                 "a light that named no layers reaches all of them — untick one to \
                  keep it off, e.g. a background that should stay flat",
             );
+        }
+        // The shape of the falloff (`floptle/0126`). A posterized game needs
+        // this: quantising a smooth radial ramp draws concentric rings, and the
+        // way out is to put the whole ramp inside one band.
+        let range = match world.get::<Matter>(e) {
+            Some(Matter::PointLight { range, .. }) => *range,
+            _ => 10.0,
+        };
+        let mut next = cur.clone();
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label("full out to");
+            let mut inner = cur.inner;
+            // Capped by the light's own range, because past it the whole disc
+            // is flat and the range slider stops meaning anything.
+            if ui
+                .add(egui::Slider::new(&mut inner, 0.0..=range.max(0.01)).suffix(" m"))
+                .on_hover_text(
+                    "full brightness out to here, and only then falling away to nothing at \
+                     the light's range. 0 starts the ramp at the light, which is what every \
+                     light did before. Push it near the range to land the whole falloff \
+                     inside one posterize band.",
+                )
+                .changed()
+            {
+                next.inner = inner;
+                changed = true;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("falloff");
+            let mut f = cur.falloff;
+            if ui
+                .add(egui::Slider::new(&mut f, 0.25..=6.0).logarithmic(true))
+                .on_hover_text(
+                    "the exponent of that ramp. 2 is the curve every light has always had; \
+                     below 1 holds the brightness out and drops it late, above 2 dives away \
+                     from the core.",
+                )
+                .changed()
+            {
+                next.falloff = f;
+                changed = true;
+            }
+            if cur.falloff != 2.0 && ui.small_button("reset").clicked() {
+                next.falloff = 2.0;
+                changed = true;
+            }
+        });
+        let mut sh = cur.shadows;
+        if ui
+            .checkbox(&mut sh, "casts stop this light")
+            .on_hover_text(
+                "off makes this light pass through everything, whatever the scene's \
+                 nodes say about blocking it — for a glow that is not meant to be a \
+                 light source, like a muzzle flash or a UI pulse",
+            )
+            .changed()
+        {
+            next.shadows = sh;
+            changed = true;
+        }
+        if changed {
+            cmd.set_lighting_2d = Some((e, next));
         }
     } else {
         let cast = world.get::<floptle_core::Shadow2D>(e).map(|s| s.0).unwrap_or_default();
@@ -4281,7 +4357,7 @@ mod tests {
         let mut next = layers.clone();
         assert!(cur.layers.is_empty());
         next.retain(|x| x != "Background");
-        let after = floptle_core::Lighting2D { mode: cur.mode, layers: next };
+        let after = floptle_core::Lighting2D { layers: next, ..cur.clone() };
         assert!(after.reaches("Default"));
         assert!(after.reaches("Terrain"));
         assert!(!after.reaches("Background"));

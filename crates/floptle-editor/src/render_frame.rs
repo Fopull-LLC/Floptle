@@ -190,7 +190,7 @@ fn lit_2d_ranks(
     project: &floptle_scene::ProjectConfigDoc,
     flat_camera: bool,
     reach: u64,
-) -> HashMap<Entity, u32> {
+) -> HashMap<Entity, (u32, bool)> {
     if reach == 0 {
         return HashMap::new();
     }
@@ -198,9 +198,24 @@ fn lit_2d_ranks(
         .query::<Matter>()
         .filter(|(_, m)| matches!(m, Matter::Tilemap { .. } | Matter::SpriteBatch { .. }))
         .filter_map(|(e, _)| {
-            lit_2d_rank(world, project, e, flat_camera, reach).map(|r| (e, r))
+            lit_2d_rank(world, project, e, flat_camera, reach).map(|r| (e, (r, casts_2d(world, e))))
         })
         .collect()
+}
+
+/// Whether this flat surface blocks 2D light (`floptle/0125`).
+///
+/// The three-valued answer the Inspector has been showing since the control
+/// existed, asked here for real. Under `auto` **a tilemap casts exactly where it
+/// is solid** — from the colliders its tileset already declares — so a level's
+/// collision *is* its light occlusion and the two can never drift apart. The
+/// cover that stops a bullet is the cover that stops the light, from one piece
+/// of data.
+fn casts_2d(world: &floptle_core::World, e: Entity) -> bool {
+    let cast = world.get::<floptle_core::Shadow2D>(e).map(|s| s.0).unwrap_or_default();
+    let flat_matter = matches!(world.get::<Matter>(e), Some(Matter::Tilemap { .. }));
+    let collidable = world.get::<floptle_core::Collidable>(e).is_some();
+    floptle_core::resolve_shadow_2d(cast, flat_matter, collidable).0
 }
 
 /// Takes the 2D half of a split that has ALREADY happened rather than asking for
@@ -212,7 +227,7 @@ fn light2d_uniform(
     two_d: &crate::shading::LightSlots,
     view_proj: floptle_core::math::Mat4,
 ) -> floptle_render::Light2dUniform {
-    let (n, pos, color, mask) = *two_d;
+    let (n, pos, color, mask, falloff) = *two_d;
     // The scene's **2D base light**, always — not the 3D ambient, and not a
     // special case for "no lights placed".
     //
@@ -233,9 +248,15 @@ fn light2d_uniform(
         count: [n as f32, 0.0, 0.0, 0.0],
         ambient,
         inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+        // `view_proj`, `viewport` and the shadow budget are stamped by
+        // `light2d_pass` from what it is actually drawing — they are facts about
+        // the frame rather than about the scene's lights, and putting them here
+        // would be one more thing for two gathers to forget differently.
         pos,
         color,
+        falloff,
         mask,
+        ..Default::default()
     }
 }
 
@@ -1162,7 +1183,7 @@ impl Editor {
             flat_camera,
         );
         let (pl_count, pl_pos, pl_col) = {
-            let (n, pos, col, _) = lights_split.three_d;
+            let (n, pos, col, _, _) = lights_split.three_d;
             ([n as f32, 0.0, 0.0, 0.0], pos, col)
         };
         self.light_counts =
@@ -1413,12 +1434,12 @@ impl Editor {
                         // difference (`floptle/0121`). The G-buffer instance is
                         // taken from the very same value, so the two cannot
                         // disagree about what is being corrected.
-                        if let Some(&rank) = lit2d.get(e) {
+                        if let Some(&(rank, casts)) = lit2d.get(e) {
                             draw.2.force_unlit();
                             flat2d.push((
                                 draw.0,
                                 draw.1,
-                                floptle_render::Light2dInstance::from_raster(&draw.2, rank),
+                                floptle_render::Light2dInstance::from_raster(&draw.2, rank, casts),
                             ));
                         }
                         match flsl {
@@ -1441,12 +1462,12 @@ impl Editor {
                         for mut raw in raws {
                             // …and the same for a sprite batch: unlit in the
                             // raster pass, corrected by the difference.
-                            if let Some(&rank) = lit2d.get(e) {
+                            if let Some(&(rank, casts)) = lit2d.get(e) {
                                 raw.force_unlit();
                                 flat2d.push((
                                     mesh,
                                     tex,
-                                    floptle_render::Light2dInstance::from_raster(&raw, rank),
+                                    floptle_render::Light2dInstance::from_raster(&raw, rank, casts),
                                 ));
                             }
                             match flsl {
@@ -7342,7 +7363,7 @@ impl Editor {
             flat_camera,
         );
         let (pl_count, pl_pos, pl_col) = {
-            let (n, pos, col, _) = off_split.three_d;
+            let (n, pos, col, _, _) = off_split.three_d;
             ([n as f32, 0.0, 0.0, 0.0], pos, col)
         };
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
@@ -7582,12 +7603,12 @@ impl Editor {
                         // difference (`floptle/0121`). The G-buffer instance is
                         // taken from the very same value, so the two cannot
                         // disagree about what is being corrected.
-                        if let Some(&rank) = lit2d.get(ent) {
+                        if let Some(&(rank, casts)) = lit2d.get(ent) {
                             draw.2.force_unlit();
                             flat2d.push((
                                 draw.0,
                                 draw.1,
-                                floptle_render::Light2dInstance::from_raster(&draw.2, rank),
+                                floptle_render::Light2dInstance::from_raster(&draw.2, rank, casts),
                             ));
                         }
                         match flsl {
@@ -7613,12 +7634,12 @@ impl Editor {
                         for mut raw in raws {
                             // …and the same for a sprite batch: unlit in the
                             // raster pass, corrected by the difference.
-                            if let Some(&rank) = lit2d.get(ent) {
+                            if let Some(&(rank, casts)) = lit2d.get(ent) {
                                 raw.force_unlit();
                                 flat2d.push((
                                     mesh,
                                     tex,
-                                    floptle_render::Light2dInstance::from_raster(&raw, rank),
+                                    floptle_render::Light2dInstance::from_raster(&raw, rank, casts),
                                 ));
                             }
                             match flsl {
@@ -8160,7 +8181,7 @@ mod lit_2d_tests {
         let e = world.spawn();
         world.insert(e, Matter::SpriteBatch { size: 1.0 });
         world.insert(e, Sorting { layer: layer.into(), order: 0 });
-        world.insert(e, Lighting2D { mode, layers: vec![] });
+        world.insert(e, Lighting2D { mode, ..Default::default() });
         e
     }
 
@@ -8179,7 +8200,7 @@ mod lit_2d_tests {
 
         let got = lit_2d_ranks(&world, &p, true, reach);
         assert_eq!(got.len(), 1, "a batch the light cannot reach was still filled");
-        assert_eq!(got.get(&ground).copied(), Some(p.sorting_rank("Ground")));
+        assert_eq!(got.get(&ground).copied(), Some((p.sorting_rank("Ground"), false)));
         assert!(!got.contains_key(&chars), "Characters is on no light's mask");
     }
 

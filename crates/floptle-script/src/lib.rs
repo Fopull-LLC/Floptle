@@ -1051,6 +1051,12 @@ pub enum RichSet {
         mode: Option<floptle_core::Lit2D>,
         layers: Option<Vec<String>>,
         blocks: Option<floptle_core::Cast2D>,
+        /// The shaping half (`floptle/0126`, `0125`): full brightness out to
+        /// `inner`, the exponent of the ramp after it, and whether casters stop
+        /// this light at all.
+        inner: Option<f32>,
+        falloff: Option<f32>,
+        shadows: Option<bool>,
     },
     /// `node:setPointLight{ color =, intensity =, range = }` (`floptle/0116`).
     ///

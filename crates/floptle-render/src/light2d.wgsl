@@ -115,15 +115,23 @@ fn fs_fill(in: FillOut) -> GBuffer {
     g.albedo = vec4<f32>(c.rgb, c.a);
     // r = rank, quantized to the 64 ranks a sorting layer can have (the layer
     // step is 1/64 — see `floptle_core::SORT_LAYER_STEP`). gb = the surface
-    // normal, flat until normal maps land: (0.5, 0.5) decodes to +Z.
-    g.surface = vec4<f32>(clamp(in.info.x, 0.0, 63.0) / 63.0, 0.5, 0.5, 1.0);
+    // normal, flat until normal maps land: (0.5, 0.5) decodes to +Z. a = does
+    // this surface block light, which is what the shadow march reads.
+    //
+    // It matters that this is written by the geometry and cleared to zero: the
+    // holes in a tilemap never reach here at all (the discard above), so "no
+    // surface" and "a surface that does not cast" are the same answer and
+    // neither stops a light.
+    g.surface = vec4<f32>(clamp(in.info.x, 0.0, 63.0) / 63.0, 0.5, 0.5, in.info.y);
     return g;
 }
 
 // ---- accumulation -----------------------------------------------------------
 
 struct Lights {
-    // x = how many lights, y = 1 when the pass should run at all.
+    // x = how many lights, y = 1 when the pass should run at all, z = how many
+    // steps the shadow march may take (0 = nothing in this frame casts, so the
+    // march never runs and the pass costs what it did before shadows existed).
     count: vec4<f32>,
     // rgb = the flat ambient every 2D surface gets. Without it an unlit scene
     // with no lights in it would come out black, which reads as the feature
@@ -131,10 +139,17 @@ struct Lights {
     ambient: vec4<f32>,
     // Clip → camera-relative world, to put a G-buffer pixel back in the scene.
     inv_view_proj: mat4x4<f32>,
+    // …and back, to find where a light IS on screen for the shadow march.
+    view_proj: mat4x4<f32>,
+    // xy = the viewport in pixels. Not the G-buffer's size — that only ever
+    // grows, and one renderer serves several viewports in a frame.
+    viewport: vec4<f32>,
     // xyz = camera-relative position, w = range.
     pos: array<vec4<f32>, 16>,
     // rgb = colour × intensity.
     color: array<vec4<f32>, 16>,
+    // x = inner radius, y = exponent, z = 1 when casters stop this light.
+    falloff: array<vec4<f32>, 16>,
     // A bitmask over sorting-layer RANK: bit r of word r/32 set = this light
     // reaches rank r. All four words are used, because a uniform array's stride
     // is 16 bytes whatever we put in it and one word would cover only 32 of the
@@ -181,6 +196,88 @@ struct Delta {
     depth: f32,
 };
 
+/// Does light `i` reach a surface on sorting rank `r`?
+///
+/// Split across the mask's four words: a rank of 40 is bit 8 of word 1, and
+/// shifting by 40 would be an out-of-range shift rather than a big number.
+fn reaches(i: u32, r: u32) -> bool {
+    return (L.mask[i][r >> 5u] & (1u << (r & 31u))) != 0u;
+}
+
+/// How bright light `i` is at distance `d` — the authorable ramp (`floptle/0126`).
+///
+/// Full brightness out to the inner radius, then falling to exactly zero at the
+/// range. A real edge and not an inverse-square tail that never quite ends and
+/// quietly costs every pixel on screen.
+///
+/// The `exp == 2` branch is not an optimization, it is the compatibility
+/// promise: `pow(x, 2.0)` and `x * x` are allowed to land a ULP apart, and every
+/// light written before this was authorable arrives here with an exponent of 2.
+fn falloff_at(i: u32, d: f32) -> f32 {
+    let range = max(L.pos[i].w, 1e-4);
+    let inner = clamp(L.falloff[i].x, 0.0, range * 0.999);
+    let x = clamp((range - d) / (range - inner), 0.0, 1.0);
+    let e = max(L.falloff[i].y, 0.01);
+    if (e == 2.0) {
+        return x * x;
+    }
+    return pow(x, e);
+}
+
+/// Is light `i` stopped by something between it and this pixel (`floptle/0125`)?
+///
+/// The G-buffer already holds every flat surface in the frame, and its `a`
+/// channel says which of them cast — so occlusion is a walk along the segment
+/// from this pixel to the light's own pixel, sampling that channel. **Nothing is
+/// built per light**, which is the property this had to have: every light in a
+/// game moves, and a design that re-baked geometry when one did would be
+/// unusable however fast it was standing still.
+///
+/// Three things it has to get right:
+///
+/// * **The layer mask applies to the occluder too.** A light that skips a
+///   background must not be *blocked* by it — that would be the worst of both,
+///   an unlit surface throwing a shadow.
+/// * **A caster does not shadow itself.** The march leaves the run of solid
+///   pixels it starts inside before it begins testing, so the face of a wall
+///   turned towards a light is lit and only what is behind it goes dark.
+/// * **It never marches past the light.** The segment ends there, so a caster
+///   on the far side of a lamp does not shade the near side.
+fn occluded(i: u32, origin_px: vec2<f32>, self_casts: bool) -> bool {
+    let steps = L.count.z;
+    if (steps < 1.0 || L.falloff[i].z < 0.5) {
+        return false;
+    }
+    // Where the light is on screen. `w <= 0` puts it behind the eye, which for
+    // a flat scene means there is no sensible segment to walk.
+    let lc = L.view_proj * vec4<f32>(L.pos[i].xyz, 1.0);
+    if (lc.w <= 0.0) {
+        return false;
+    }
+    let ndc = lc.xy / lc.w;
+    let light_px = vec2<f32>((ndc.x * 0.5 + 0.5) * L.viewport.x, (0.5 - ndc.y * 0.5) * L.viewport.y);
+    let seg = light_px - origin_px;
+    let n = i32(steps);
+    var left_self = !self_casts;
+    for (var s = 1; s <= n; s = s + 1) {
+        let p = vec2<i32>(origin_px + seg * (f32(s) / f32(n + 1)));
+        let g = textureLoad(g_surface, p, 0);
+        // `a` is 1 only where a surface that casts was written. Empty space —
+        // the holes a tilemap is mostly made of — never blocks anything,
+        // because `fs_fill` discards there rather than writing a clear pixel.
+        let solid = g.a > 0.5 && reaches(i, u32(round(g.r * 63.0)));
+        if (!left_self) {
+            // Still inside our own body. Everything up to leaving it is ours.
+            left_self = !solid;
+            continue;
+        }
+        if (solid) {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn shade(in: FullOut) -> Delta {
     let px = vec2<i32>(in.clip.xy);
     let alb = textureLoad(g_albedo, px, 0);
@@ -203,22 +300,27 @@ fn shade(in: FullOut) -> Delta {
 
     var acc = L.ambient.rgb;
     let n = min(u32(L.count.x), 16u);
+    let self_casts = surf.a > 0.5;
     for (var i = 0u; i < n; i = i + 1u) {
         // A light that does not reach this pixel's sorting layer contributes
         // nothing — this is how a torch passes over a background without
         // lighting it, which is the single most-asked-for thing in 2D lighting.
-        // Split across the mask's four words: a rank of 40 is bit 8 of word 1,
-        // and shifting by 40 would be an out-of-range shift, not a big number.
-        if ((L.mask[i][rank >> 5u] & (1u << (rank & 31u))) == 0u) {
+        if (!reaches(i, rank)) {
             continue;
         }
-        let lp = L.pos[i];
-        let d = distance(lp.xyz, world);
-        // Smooth to exactly zero at the range, so a light has a real edge rather
-        // than an inverse-square tail that never quite ends and quietly costs
-        // every pixel on screen.
-        let x = clamp(1.0 - d / max(lp.w, 1e-4), 0.0, 1.0);
-        acc = acc + L.color[i].rgb * (x * x);
+        let d = distance(L.pos[i].xyz, world);
+        let x = falloff_at(i, d);
+        // Out of range already: no contribution, and — the part that pays for
+        // shadows — nothing to march. Only pixels actually inside a light's
+        // radius ever walk the G-buffer, so the cost follows the lit area
+        // rather than the screen.
+        if (x <= 0.0) {
+            continue;
+        }
+        if (occluded(i, in.clip.xy, self_casts)) {
+            continue;
+        }
+        acc = acc + L.color[i].rgb * x;
     }
     // Premultiplied by the surface's own alpha, because that is exactly the
     // share of this pixel the raster pass gave it. The other `1 - a` is the

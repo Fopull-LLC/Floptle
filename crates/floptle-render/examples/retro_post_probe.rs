@@ -93,6 +93,7 @@ fn main() {
         ssao_radius: 0.9,
         posterize_bands: 6,
         posterize_dither: true,
+        posterize_chroma: false,
         color_filter: 0,
         color_filter_strength: 1.0,
         simulate_deficiency: false,

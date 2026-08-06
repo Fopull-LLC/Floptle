@@ -421,7 +421,7 @@ node:setCelestial{mu=…, bodyRadius=…, soi=0, parent="Sun", a=…, e=…, i=�
 
 ### `node:setLighting2D`
 
-node:setLighting2D{mode="2d", layers={"Terrain","Characters"}, blocks="on"} — 2D lighting, from a script. `mode` is auto/2d/3d and says whether this node is on the 2D lighting path at all; auto decides from the scene and is never re-decided once you say otherwise. On a LIGHT, `layers` is the sorting layers it reaches — empty or absent means all of them, which is how you keep a torch off the background. On a RECEIVER, `blocks` is auto/on/off for whether it occludes light. A bad spelling names the accepted set rather than silently meaning auto.
+node:setLighting2D{mode="2d", layers={"Terrain","Characters"}, blocks="on", inner=4, falloff=2, shadows=true} — 2D lighting, from a script. `mode` is auto/2d/3d and says whether this node is on the 2D lighting path at all; auto decides from the scene and is never re-decided once you say otherwise. On a LIGHT, `layers` is the sorting layers it reaches — empty or absent means all of them, which is how you keep a torch off the background. `inner` is full brightness out to that radius before the ramp starts (0 = the ramp starts at the light) and `falloff` is its exponent (2 = the curve every light has always had): together they let a posterized game land a whole light inside one band instead of drawing concentric rings. `shadows=false` makes this one light pass through everything, whatever the scene blocks. On a RECEIVER, `blocks` is auto/on/off for whether it occludes light — under auto a tilemap casts from the collision it already declares, so a level's collision IS its light occlusion. A bad spelling names the accepted set rather than silently meaning auto.
 
 ### `node:setMaterial`
 

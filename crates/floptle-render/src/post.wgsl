@@ -165,15 +165,38 @@ fn fs_finish(in: VsOut) -> @location(0) vec4<f32> {
     if (bands >= 2.0) {
         let scale = bands - 1.0;
         let g = pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2)); // linear → ~gamma
-        var q = g * scale;
+        var t = 0.5;                                               // nearest level (= round)
         if (p.b.w > 0.5) {
-            let t = bayer4(vec2<u32>(u32(in.pos.x), u32(in.pos.y)));
-            q = floor(q + vec3<f32>(t));
-        } else {
-            q = floor(q + vec3<f32>(0.5)); // nearest level (= round)
+            t = bayer4(vec2<u32>(u32(in.pos.x), u32(in.pos.y)));
         }
-        let gq = clamp(q / scale, vec3<f32>(0.0), vec3<f32>(1.0));
-        c = pow(gq, vec3<f32>(2.2)); // ~gamma → linear
+        // ---- brightness only, chroma carried along (`floptle/0126`) ----------
+        //
+        // Quantizing each channel on its own is a real look, and it is what a
+        // *surface* usually wants. It is never what a LIGHT wants: a smooth
+        // radial ramp crosses each channel's boundary at a different radius, so
+        // a warm white lamp lands as concentric rings in colours nobody chose.
+        // Here the step happens once, to luminance, and the pixel's own colour
+        // is scaled by the ratio — so chroma is never quantized and the failure
+        // cannot happen.
+        if (p.a.y > 0.5) {
+            let y = dot(g, vec3<f32>(0.2126, 0.7152, 0.0722));
+            let yq = clamp(floor(y * scale + t) / scale, 0.0, 1.0);
+            // An exactly grey pixel takes the identical path it always did.
+            // Not an optimization — it is the promise that switching this on
+            // cannot move art that was already neutral, which is most of a
+            // 1-bit tileset.
+            let mx = max(max(g.r, g.g), g.b);
+            let mn = min(min(g.r, g.g), g.b);
+            if (mx - mn < 1e-6) {
+                c = pow(vec3<f32>(yq), vec3<f32>(2.2));
+            } else {
+                let gq = clamp(g * (yq / max(y, 1e-5)), vec3<f32>(0.0), vec3<f32>(1.0));
+                c = pow(gq, vec3<f32>(2.2));
+            }
+        } else {
+            let gq = clamp(floor(g * scale + vec3<f32>(t)) / scale, vec3<f32>(0.0), vec3<f32>(1.0));
+            c = pow(gq, vec3<f32>(2.2)); // ~gamma → linear
+        }
     }
     return vec4<f32>(c, 1.0);
 }
