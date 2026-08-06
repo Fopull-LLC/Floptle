@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.40.2 "Something In The Way"** — 2D light stops at walls. A light used to
+**v0.40.3 "Something In The Way"** — 2D light stops at walls. A light used to
 reach the floor, the counter, the shelf and the floor behind the shelf all by
 the same distance from the lamp, so what landed on screen was a disc of
 brightness with the room drawn on top of it. **blocks light** does what the
