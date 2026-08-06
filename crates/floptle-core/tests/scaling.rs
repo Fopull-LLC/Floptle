@@ -32,24 +32,42 @@ use floptle_core::World;
 
 /// Time `f(n)` at `n` and `4n` and hand back the growth ratio.
 ///
-/// Repeats until each size has had a few milliseconds of work, so a fast
-/// machine doesn't measure the clock instead of the code — and takes the BEST
-/// of several runs rather than the mean, because scheduler noise only ever adds
-/// time. The fastest observed run is the closest thing to the real cost.
+/// Takes the BEST of several runs rather than the mean, because scheduler noise
+/// only ever adds time — the fastest observed run is the closest thing to the
+/// real cost.
+///
+/// ## The two sizes are INTERLEAVED, and that is load-bearing
+///
+/// This used to time all the `n` runs and then all the `4n` runs, and it made
+/// the file's own self-check fail on CI: a deliberately quadratic loop measured
+/// **7.4x** where it reads 15.7x on a quiet machine, which is under the 8x this
+/// harness needs to tell a scan-in-a-walk from linear work.
+///
+/// The cause is not noise, it is **CPU frequency**. The small runs all happen in
+/// the first few hundred microseconds of a cold core, at base clock; by the time
+/// the large runs start, the core has been busy for milliseconds and has
+/// boosted. Both sides are measured accurately and the ratio is still wrong,
+/// because the machine got faster in between — and taking the minimum does not
+/// help when every small run is equally cold.
+///
+/// Alternating them puts both sides in the same clock state, whatever that state
+/// is. That is also the whole premise of measuring a ratio: runner speed is
+/// supposed to cancel, and it only cancels if both sides see the same runner.
 fn growth(n: usize, mut f: impl FnMut(usize)) -> f64 {
-    fn best_of(size: usize, f: &mut impl FnMut(usize)) -> Duration {
-        let mut best = Duration::MAX;
-        for _ in 0..5 {
-            let t = Instant::now();
-            f(size);
-            best = best.min(t.elapsed());
-        }
-        best
-    }
-    // Warm caches and let any lazy init happen before the measured runs.
+    let mut time = |size: usize, f: &mut dyn FnMut(usize)| {
+        let t = Instant::now();
+        f(size);
+        t.elapsed()
+    };
+    // Warm caches, let any lazy init happen, and spin the core up — at BOTH
+    // sizes, so neither is the one that pays for the allocator's first call.
     f(n);
-    let small = best_of(n, &mut f);
-    let large = best_of(n * 4, &mut f);
+    f(n * 4);
+    let (mut small, mut large) = (Duration::MAX, Duration::MAX);
+    for _ in 0..5 {
+        small = small.min(time(n, &mut f));
+        large = large.min(time(n * 4, &mut f));
+    }
     // A run too short to time says nothing; treat it as perfectly linear rather
     // than dividing by a rounding error.
     if small.as_nanos() < 10_000 {
