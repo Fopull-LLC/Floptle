@@ -1,5 +1,19 @@
 ## Just shipped
 
+**v0.40.1 "Give It Back"** — Escape gives you your cursor back during Play, and
+this time it stays given. A first-person game takes the pointer, which is the
+point of one; getting it back was the problem, because Escape released it for a
+single frame and the game's next `update` took it straight back. Reaching the
+Inspector mid-play meant tabbing out of the whole application, and clicking back
+in handed the cursor straight over again. Now **Escape takes the pointer, a
+click on the Game view hands it over**, leaving the window takes it too, and the
+Game view says along its bottom edge which of you has it — a grabbed cursor is
+invisible, so the thing that tells you how to get it back can't be the cursor.
+While the editor holds it your game reads a **neutral mouse**, so tuning a value
+in mid-flight doesn't spin the view across to the Inspector or fire a weapon
+with every click on a slider. Its keyboard and gamepad are untouched; it's still
+playing.
+
 **v0.40.0 "As You Set It"** — the number you typed is the number that reaches the
 screen. A tilemap or sprite at **alpha 0.72 was drawing at 0.92** in every 2D
 project since v0.38, with no light placed and nothing switched on, because the 2D
