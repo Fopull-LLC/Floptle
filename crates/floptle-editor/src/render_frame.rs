@@ -80,19 +80,22 @@ fn light2d_uniform(
     let names = project.sorting_order();
     let (n, pos, color, mask) =
         crate::shading::split_point_lights(world, cam_world, &names, flat_camera).two_d;
-    let ambient = if n == 0 {
-        [1.0, 1.0, 1.0, 0.0]
-    } else {
-        // The scene's own key-light ambient, chosen exactly as the 3D path
-        // chooses it — first `Light` node, else the default — so the two agree
-        // about how dark "unlit" is.
-        let a = world
-            .query::<floptle_core::Light>()
-            .next()
-            .map(|(_, l)| l.ambient)
-            .unwrap_or(floptle_core::Light::default().ambient);
-        [a[0], a[1], a[2], 0.0]
-    };
+    // The scene's **2D base light**, always — not the 3D ambient, and not a
+    // special case for "no lights placed".
+    //
+    // It used to be white when no 2D light existed and the 3D ambient the moment
+    // one did, which put a cliff exactly where somebody places their first
+    // light: a whole level dropped to 12% brightness and the tilemap read as
+    // having vanished. That is how it was reported, and it is the wrong way
+    // round — **adding a light must only ever add light.** So the base is its
+    // own field, it defaults to white, and turning it down is the deliberate act
+    // that makes a dark room for a torch to carve a circle out of.
+    let a = world
+        .query::<floptle_core::Light>()
+        .next()
+        .map(|(_, l)| l.ambient_2d)
+        .unwrap_or(floptle_core::Light::default().ambient_2d);
+    let ambient = [a[0], a[1], a[2], 0.0];
     floptle_render::Light2dUniform {
         count: [n as f32, 0.0, 0.0, 0.0],
         ambient,

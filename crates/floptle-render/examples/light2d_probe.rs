@@ -174,6 +174,27 @@ fn main() {
         "the falloff moved when the frame shrank: {small_edge:.3} against {:.3}",
         edge[1]
     );
+    // ---- the reported bug: one light must not black out the scene ----------
+    //
+    // Reported as "I put a light in my scene with just a tileset and the tileset
+    // is no longer visible". The base used to be white while no 2D light existed
+    // and the 3D ambient the moment one did, so placing a FIRST light dropped a
+    // whole level to 12% brightness. Adding a light has to add light.
+    let mut only_light = lit;
+    only_light.ambient = [1.0, 1.0, 1.0, 0.0]; // the default 2D base
+    let px = shot(&gpu, &mut raster, S, view_proj, map, tex, &raw, &flat, Some(&only_light));
+    let corner = luma(&px, S, 6, S / 2);
+    let centre = luma(&px, S, S / 2, S / 2);
+    save_png(&px, S, &format!("{dir}/light2d_default_base.png"));
+    println!("default base: centre {centre:.3}, edge {corner:.3}");
+    assert!(
+        corner >= mid[0] - 0.02,
+        "placing a light DARKENED the far corner: {corner:.3} against {:.3} with no \
+         lighting at all. A first light must only ever add.",
+        mid[0]
+    );
+    assert!(centre > corner, "…and the light itself still has to show");
+
     println!("2D lighting OK");
 }
 

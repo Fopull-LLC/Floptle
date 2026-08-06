@@ -1185,6 +1185,11 @@ pub struct LightDoc {
     pub stars: bool,
     pub color: [f32; 3],
     pub ambient: [f32; 3],
+    /// The base light every 2D surface gets. WHITE by default, so a scene
+    /// written before 2D lighting existed — and a scene that never turns it
+    /// down — looks exactly as it always did.
+    #[serde(default = "white3", skip_serializing_if = "is_white3")]
+    pub ambient_2d: [f32; 3],
     #[serde(default = "one_f32")]
     pub intensity: f32,
     // Sun shadows (SDF field march). Pre-shadow scenes deserialize to the defaults.
@@ -1277,6 +1282,7 @@ impl From<&Light> for LightDoc {
             stars: l.stars,
             color: l.color,
             ambient: l.ambient,
+            ambient_2d: l.ambient_2d,
             intensity: l.intensity,
             shadows: l.shadows,
             shadow_softness: l.shadow_softness,
@@ -1308,6 +1314,7 @@ impl LightDoc {
             stars: self.stars,
             color: self.color,
             ambient: self.ambient,
+            ambient_2d: self.ambient_2d,
             intensity: self.intensity,
             shadows: self.shadows,
             shadow_softness: self.shadow_softness,
@@ -1705,9 +1712,16 @@ impl TilingDoc {
     }
 }
 
+/// Also the default 2D base light: adding a light to a 2D scene must only ever
+/// make it brighter, never black it out.
 fn white3() -> [f32; 3] {
     [1.0, 1.0, 1.0]
 }
+
+fn is_white3(c: &[f32; 3]) -> bool {
+    *c == [1.0, 1.0, 1.0]
+}
+
 fn one_f32() -> f32 {
     1.0
 }

@@ -1293,6 +1293,28 @@ impl EditorTabViewer<'_> {
                         ui.label("ambient");
                         cmd.inspector_changed |= ui.color_edit_button_rgb(&mut l.ambient).changed();
                     });
+                    // The 2D half, next to its 3D twin so the pair is obvious.
+                    // Without a row here the only way to find out that a flat
+                    // scene's base brightness is a field on the Lighting node
+                    // was to be told.
+                    ui.horizontal(|ui| {
+                        ui.label("2D base light");
+                        cmd.inspector_changed |=
+                            ui.color_edit_button_rgb(&mut l.ambient_2d).changed();
+                        ui.small(if l.ambient_2d == [1.0, 1.0, 1.0] {
+                            "full — 2D lights only add"
+                        } else {
+                            "turned down — 2D lights carve into it"
+                        });
+                    })
+                    .response
+                    .on_hover_text(
+                        "What every tilemap and sprite batch is lit by before any 2D light \
+                         reaches it. White means placing a light can only make things \
+                         brighter. Turn it down for a dark room a torch cuts a circle out \
+                         of.\n\nThis is the 2D one; `ambient` above is the 3D fill under \
+                         the key light.",
+                    );
                     cmd.inspector_changed |=
                         ui.add(egui::Slider::new(&mut l.intensity, 0.0..=8.0).text("intensity")).changed();
 

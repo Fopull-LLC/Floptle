@@ -36,7 +36,15 @@ struct FillIn {
 };
 
 struct FillOut {
-    @builtin(position) clip: vec4<f32>,
+    // `@invariant`, and it is not optional. The composite re-emits this pass's
+    // depth and depth-tests it against the depth the RASTER pass wrote for the
+    // very same triangles. Without invariance the two pipelines may contract or
+    // reassociate the same multiply differently, land a few ULPs apart, and
+    // then `LessEqual` flips between pass and fail as the camera moves — which
+    // reads as the tilemap blinking in and out. The raster pass marks its own
+    // clip position invariant for exactly this reason (`raster.wgsl`), and this
+    // pass has to make the same promise or the promise is worthless.
+    @invariant @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) tint: vec4<f32>,
     @location(2) info: vec4<f32>,

@@ -777,6 +777,18 @@ pub struct Light {
     pub stars: bool,
     pub color: [f32; 3],
     pub ambient: [f32; 3],
+    /// **The base light every 2D surface gets**, before any 2D light is added.
+    ///
+    /// Separate from `ambient` above, which is the 3D one, because the two want
+    /// opposite defaults. 3D ambient is a dim fill under a key light. This is
+    /// the whole light a flat scene has until you place one — so it defaults to
+    /// WHITE, and adding a light to a 2D scene can only ever make it brighter.
+    ///
+    /// Turning it down is how you get a dark room for a torch to carve a circle
+    /// out of. That has to be the deliberate act: a first light that blacked out
+    /// the level would read as the feature being broken, which is exactly how it
+    /// was reported.
+    pub ambient_2d: [f32; 3],
     /// Brightness multiplier on the key (directional) light color.
     pub intensity: f32,
     /// Sun shadows: the field is marched from each shaded point toward the light
@@ -839,6 +851,7 @@ impl Default for Light {
             stars: false,
             color: [1.0, 0.98, 0.92],
             ambient: [0.12, 0.12, 0.16],
+            ambient_2d: [1.0, 1.0, 1.0],
             intensity: 1.0,
             shadows: true,
             shadow_softness: 0.35,
