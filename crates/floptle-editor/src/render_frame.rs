@@ -32,7 +32,7 @@ use crate::dock::{EditorTab, default_dock, focus_scripting_tab};
 use crate::gizmo::{build_gizmo, Tool};
 use crate::hierarchy::{node_new_menu};
 use crate::prefs::{DEFAULT_PLAY_TINT, GridConfig, code_theme_path, engine_theme_path, open_external_editor, save_external_editor, save_grid, save_play_tint, save_prefer_external, save_theme_index};
-use crate::shading::{blob_default_material, blob_mat_arrays, collect_point_lights, collect_shadow_proxies, material_params, post_process_uniforms, shadow_uniforms, skybox_uniforms, vol_fog_uniforms};
+use crate::shading::{blob_default_material, blob_mat_arrays, collect_shadow_proxies, material_params, post_process_uniforms, shadow_uniforms, skybox_uniforms, vol_fog_uniforms};
 use crate::terrain_ui::{NewTerrainCfg, TerrainFill};
 use crate::theme::{CODE_THEMES, ENGINE_THEMES};
 use crate::viz::{CameraGizmo, EmitterViz, ForceViz, box_lines, camera_frustum_lines, cursor_ground, gravity_volume_lines, light_dir_lines, mesh_collider_wire_local, oriented_box_lines, particle_gizmo_lines, point_light_lines, project, rigidbody_lines, terrain_collider_wire};
@@ -46,22 +46,125 @@ use crate::{Editor, EditorCmd, EditorTabViewer, FOCUS_SECS, MeshAsset, ProjectAc
 /// them can borrow all of `self`. Asked by BOTH gathers, so the Scene view and
 /// the Game view cannot disagree about which surfaces are lit — the failure this
 /// renderer has already paid for three times.
+/// `reach` is [`floptle_render::Light2dUniform::reach`] — the ranks anything in
+/// this frame can actually change. A surface no live light reaches is not on the
+/// 2D path *this frame*, however its flag reads: the mask already decided it
+/// contributes nothing, and honouring that here rather than in `fs_light` is the
+/// difference between filtering a `u64` and instancing, uploading and
+/// rasterizing the whole flat scene a second time to throw it away
+/// (`floptle/0122`).
 fn lit_2d_rank(
     world: &floptle_core::World,
     project: &floptle_scene::ProjectConfigDoc,
     e: Entity,
     flat_camera: bool,
+    reach: u64,
 ) -> Option<u32> {
+    if reach == 0 {
+        return None;
+    }
     let mode =
         world.get::<floptle_core::Lighting2D>(e).map(|l| l.mode).unwrap_or_default();
     let facts = floptle_core::Lit2DFacts { emits: false, flat_matter: true, flat_camera };
     let (is_2d, _) = floptle_core::resolve_2d(mode, facts);
-    is_2d.then(|| {
-        world
-            .get::<floptle_core::Sorting>(e)
-            .map(|sg| project.sorting_rank(&sg.layer))
-            .unwrap_or(0)
-    })
+    is_2d
+        .then(|| {
+            world
+                .get::<floptle_core::Sorting>(e)
+                .map(|sg| project.sorting_rank(&sg.layer))
+                .unwrap_or(0)
+        })
+        .filter(|&r| r < 64 && reach & (1u64 << r) != 0)
+}
+
+/// The instance a `Matter::Primitive` draws, or `None` when its built-in shape
+/// is not registered.
+///
+/// A function for the same reason [`lit_2d_rank`] is one: both gathers ask it,
+/// so a cube cannot look one way in the Scene view and another in the Game
+/// view. It used to be written out twice, and the two copies had already drifted
+/// — the offscreen one never applied VERTEX PAINT, so a painted primitive was
+/// painted on screen and plain in every other view.
+///
+/// `node_paint` is this node's own paint block (`paint_bases`). Every primitive
+/// of a shape shares ONE MeshId, so the node's block is the only way two cubes
+/// can be painted differently; falling back to the mesh's block (0 for
+/// built-ins) is what an unpainted one gets. Brush paint modulates 2× (paint
+/// light); a glTF import stays ×1.
+fn primitive_draw(
+    shape: floptle_core::Shape,
+    color: [f32; 3],
+    mat: Option<&Material>,
+    model: Mat4,
+    mesh_ids: &[MeshId],
+    node_paint: Option<&[u32]>,
+    raster: Option<&floptle_render::Raster>,
+) -> Option<(MeshId, InstanceRaw)> {
+    let &mesh = mesh_ids.get(shape as usize)?;
+    let mut mp = mat.map(material_params).unwrap_or_else(|| MaterialParams::flat(color));
+    let brush = node_paint.and_then(|v| v.first().copied()).filter(|&b| b != 0);
+    mp.paint_modulate = brush.is_some();
+    mp.paint_base =
+        brush.unwrap_or_else(|| raster.map_or(0, |r| r.mesh_paint_base(mesh)));
+    Some((mesh, instance_of_mat(model, &mp)))
+}
+
+/// WATER (`floptle/0038`). The instance a `Matter::WaterVolume` draws: a
+/// translucent, specular surface sized to the volume the SOLVER uses, so what
+/// you see is what floats you — the sea and the buoyancy can't drift apart,
+/// which is exactly what happened while the ocean was a hand-placed sphere the
+/// game kept in step by hand.
+///
+/// A frozen sea drops the translucency and the shine: ice is a surface you stand
+/// on, and it should not look like something you could swim through.
+///
+/// Asked by BOTH gathers. It was inline in the Scene view's gather only, so an
+/// ocean was there while you edited and gone the moment you looked through the
+/// game's camera — the fourth time this file's two gathers have disagreed about
+/// whether something exists, and the reason this is a function.
+///
+/// `None` for any other matter, and for a shape that is not registered.
+fn water_draw(
+    matter: &Matter,
+    t: &Transform,
+    cam_world: DVec3,
+    mesh_ids: &[MeshId],
+    raster: Option<&floptle_render::Raster>,
+) -> Option<(MeshId, InstanceRaw)> {
+    use floptle_core::WaterKind;
+    let Matter::WaterVolume { kind, radius, half_extents, frozen, tint, .. } = matter else {
+        return None;
+    };
+    // The built-in sphere is r = 0.85 and the cube is half = 0.7; scale the
+    // node's own transform so the drawn surface lands exactly on the volume's
+    // extent.
+    let (shape, fit) = match kind {
+        WaterKind::Sea => {
+            (floptle_core::Shape::Sphere, floptle_core::math::Vec3::splat(radius / 0.85))
+        }
+        WaterKind::Pool => {
+            (floptle_core::Shape::Cube, floptle_core::math::Vec3::from(*half_extents) / 0.7)
+        }
+    };
+    let &mesh = mesh_ids.get(shape as usize)?;
+    let mut wt = *t;
+    wt.scale *= fit;
+    let model = wt.render_matrix(cam_world);
+    let mut mp = MaterialParams::flat(*tint);
+    if *frozen {
+        mp.alpha = 1.0;
+        mp.specular_strength = 0.15;
+        mp.shininess = 8.0;
+    } else {
+        mp.alpha = 0.55;
+        // Specular is what makes water read as water at a distance where no
+        // wave is more than a pixel.
+        mp.specular_strength = 0.9;
+        mp.shininess = 96.0;
+        mp.specular = [1.0, 1.0, 1.0];
+    }
+    mp.paint_base = raster.map_or(0, |r| r.mesh_paint_base(mesh));
+    Some((mesh, instance_of_mat(model, &mp)))
 }
 
 /// This frame's 2D lights, in the shape the accumulation shader reads.
@@ -70,16 +173,46 @@ fn lit_2d_rank(
 /// composites to exactly what the raster pass already drew, so switching 2D
 /// lighting on in a scene with no lights placed changes nothing. Compositing to
 /// black there would read as the feature having broken the game.
-fn light2d_uniform(
+/// Every flat node on the 2D lighting path this frame, and its sorting rank.
+///
+/// One function, called by BOTH gathers, because 0122 asks for exactly that:
+/// *the Scene-view and the Game-view gathers make the same decision, by
+/// construction.* It used to be the same nine lines written out twice, which is
+/// the shape this file has already paid for four times — see
+/// `tests/offscreen_draws_the_same_world.rs`.
+///
+/// Empty when nothing can be reached, and empty *without walking the world*:
+/// that is the "a scene with 2D lighting available but no light placed does zero
+/// 2D lighting work" property, and a bullet hell was building a 366-entry map
+/// twice a frame to reach it.
+fn lit_2d_ranks(
     world: &floptle_core::World,
     project: &floptle_scene::ProjectConfigDoc,
-    cam_world: floptle_core::math::DVec3,
-    view_proj: floptle_core::math::Mat4,
     flat_camera: bool,
+    reach: u64,
+) -> HashMap<Entity, u32> {
+    if reach == 0 {
+        return HashMap::new();
+    }
+    world
+        .query::<Matter>()
+        .filter(|(_, m)| matches!(m, Matter::Tilemap { .. } | Matter::SpriteBatch { .. }))
+        .filter_map(|(e, _)| {
+            lit_2d_rank(world, project, e, flat_camera, reach).map(|r| (e, r))
+        })
+        .collect()
+}
+
+/// Takes the 2D half of a split that has ALREADY happened rather than asking for
+/// one: both gathers need this before the draw loop (to know what a light can
+/// reach — `floptle/0122`) and again at the pass, and each was walking the
+/// scene's lights a second time to build the same value twice.
+fn light2d_uniform(
+    world: &floptle_core::World,
+    two_d: &crate::shading::LightSlots,
+    view_proj: floptle_core::math::Mat4,
 ) -> floptle_render::Light2dUniform {
-    let names = project.sorting_order();
-    let (n, pos, color, mask) =
-        crate::shading::split_point_lights(world, cam_world, &names, flat_camera).two_d;
+    let (n, pos, color, mask) = *two_d;
     // The scene's **2D base light**, always — not the 3D ambient, and not a
     // special case for "no lights placed".
     //
@@ -987,7 +1120,29 @@ impl Editor {
             )
         };
 
-        // Lighting comes from the scene's mandatory Lighting node (a Light component).
+        // Lighting comes from the scene's mandatory Lighting node (a Light
+        // component). `spawn_into` makes exactly one, and `spawn_additive`
+        // deliberately brings no second — so `next()` is *the* Lighting node
+        // rather than the first of several, and `find("Lighting")` from a script
+        // reaches the same one this reads (`floptle/0123`).
+        //
+        // If something made a second anyway, say so once: a script writing "the"
+        // 2D base light and this reading "the" 2D base light would then be
+        // whichever the ECS happened to yield first.
+        let lighting_nodes = self.world.query::<Light>().count();
+        if lighting_nodes > 1 && lighting_nodes != self.lighting_nodes_warned {
+            self.lighting_nodes_warned = lighting_nodes;
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "💡 {lighting_nodes} Lighting nodes in this scene — a scene has one \
+                     environment, and which of them lights it (and which one a script's \
+                     getcomponent(\"Light\") reaches) is whichever the ECS yields first. \
+                     Delete the spares."
+                ),
+                None,
+            );
+        }
         let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
         let sun = crate::shading::sun_vec(&self.world, &light_node, cam.world_position);
         let li = light_node.intensity;
@@ -1086,15 +1241,15 @@ impl Editor {
                 (e, floptle_core::sorting_offset(self.project.sorting_rank(&s.layer), s.order) as f64)
             })
             .collect();
+        // This frame's 2D lights, built ONCE. The pass below is handed this very
+        // value, so what the gather filtered by and what the shader accumulates
+        // cannot be two different answers.
+        let lights_2d = light2d_uniform(&self.world, &lights_split.two_d, view_proj);
+        let reach_2d = lights_2d.reach();
         // Which flat nodes take part in 2D lighting, and at which sorting rank —
         // resolved here for the same reason `sort_z` is: the draw loop below
         // borrows `raster` mutably and cannot call an `&self` helper.
-        let lit2d: std::collections::HashMap<Entity, u32> = self
-            .world
-            .query::<Matter>()
-            .filter(|(_, m)| matches!(m, Matter::Tilemap { .. } | Matter::SpriteBatch { .. }))
-            .filter_map(|(e, _)| lit_2d_rank(&self.world, &self.project, e, flat_camera).map(|r| (e, r)))
-            .collect();
+        let lit2d = lit_2d_ranks(&self.world, &self.project, flat_camera, reach_2d);
         let paint_bases: std::collections::HashMap<Entity, Vec<u32>> = self
             .world
             .query::<floptle_core::VertexPaint>()
@@ -1213,71 +1368,27 @@ impl Editor {
             let flsl = self.flsl_binds.get(e).map(|b| b.binding);
             match matter {
                 Matter::Primitive { shape, color } => {
-                    if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
-                        let model = t.render_matrix(cam.world_position);
-                        let mut mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat(*color));
-                        // Every primitive of a shape shares ONE MeshId, so the node's
-                        // own block is the only way two cubes can be painted
-                        // differently. Falls back to the mesh's block (0 for built-ins).
-                        // Brush paint modulates 2× (paint light); a glTF import stays ×1.
-                        let brush = paint_bases
-                            .get(e)
-                            .and_then(|v| v.first().copied())
-                            .filter(|&b| b != 0);
-                        mp.paint_modulate = brush.is_some();
-                        mp.paint_base = brush.unwrap_or_else(|| raster.mesh_paint_base(mesh));
-                        let raw = instance_of_mat(model, &mp);
+                    let model = t.render_matrix(cam.world_position);
+                    if let Some((mesh, raw)) = primitive_draw(
+                        *shape,
+                        *color,
+                        mat.as_ref(),
+                        model,
+                        &self.mesh_ids,
+                        paint_bases.get(e).map(|v| v.as_slice()),
+                        Some(raster),
+                    ) {
                         match flsl {
                             Some(b) => flsl_draws.push((mesh, tex, b, raw)),
                             None => instances.push((mesh, tex, raw)),
                         }
                     }
                 }
-                // WATER (`floptle/0038`). Drawn as a translucent, specular
-                // surface sized to the volume the SOLVER uses, so what you see
-                // is what floats you — the sea and the buoyancy can't drift
-                // apart, which is exactly what happened while the ocean was a
-                // hand-placed sphere the game kept in step by hand.
-                //
-                // A frozen sea drops the translucency and the shine: ice is a
-                // surface you stand on, and it should not look like something
-                // you could swim through.
-                Matter::WaterVolume {
-                    kind, radius, half_extents, frozen, tint, ..
-                } => {
-                    use floptle_core::WaterKind;
-                    let (shape, fit) = match kind {
-                        // The built-in sphere is r = 0.85 and the cube is
-                        // half = 0.7; scale the node's own transform so the
-                        // drawn surface lands exactly on the volume's extent.
-                        WaterKind::Sea => (
-                            floptle_core::Shape::Sphere,
-                            floptle_core::math::Vec3::splat(radius / 0.85),
-                        ),
-                        WaterKind::Pool => (
-                            floptle_core::Shape::Cube,
-                            floptle_core::math::Vec3::from(*half_extents) / 0.7,
-                        ),
-                    };
-                    if let Some(&mesh) = self.mesh_ids.get(shape as usize) {
-                        let mut wt = t;
-                        wt.scale *= fit;
-                        let model = wt.render_matrix(cam.world_position);
-                        let mut mp = MaterialParams::flat(*tint);
-                        if *frozen {
-                            mp.alpha = 1.0;
-                            mp.specular_strength = 0.15;
-                            mp.shininess = 8.0;
-                        } else {
-                            mp.alpha = 0.55;
-                            // Specular is what makes water read as water at a
-                            // distance where no wave is more than a pixel.
-                            mp.specular_strength = 0.9;
-                            mp.shininess = 96.0;
-                            mp.specular = [1.0, 1.0, 1.0];
-                        }
-                        mp.paint_base = raster.mesh_paint_base(mesh);
-                        instances.push((mesh, tex, instance_of_mat(model, &mp)));
+                Matter::WaterVolume { .. } => {
+                    if let Some((mesh, raw)) =
+                        water_draw(matter, &t, cam.world_position, &self.mesh_ids, Some(raster))
+                    {
+                        instances.push((mesh, tex, raw));
                     }
                 }
                 // The 2D layer (`floptle/0058`). A tilemap is one uploaded
@@ -1296,8 +1407,14 @@ impl Editor {
                         tex,
                         &mut draws,
                     );
-                    for draw in draws {
+                    for mut draw in draws {
+                        // On the 2D lighting path: the raster pass draws it
+                        // UNLIT, and the composite corrects that by the light's
+                        // difference (`floptle/0121`). The G-buffer instance is
+                        // taken from the very same value, so the two cannot
+                        // disagree about what is being corrected.
                         if let Some(&rank) = lit2d.get(e) {
+                            draw.2.force_unlit();
                             flat2d.push((
                                 draw.0,
                                 draw.1,
@@ -1321,8 +1438,11 @@ impl Editor {
                         crate::sprite2d::sprite_draws(
                             &self.world, *e, *size, model, mat.as_ref(), texel, &mut raws,
                         );
-                        for raw in raws {
+                        for mut raw in raws {
+                            // …and the same for a sprite batch: unlit in the
+                            // raster pass, corrected by the difference.
                             if let Some(&rank) = lit2d.get(e) {
+                                raw.force_unlit();
                                 flat2d.push((
                                     mesh,
                                     tex,
@@ -1513,6 +1633,9 @@ impl Editor {
                 lights,
                 lights_dropped,
                 voices,
+                // What the 2D lighting pass will actually rasterize a second
+                // time (`floptle/0122`) — 0 when no light can reach anything.
+                flat2d: flat2d.len(),
             });
             prof.record(floptle_core::profile::Bucket::Render, gather_t.ms());
         }
@@ -4107,9 +4230,7 @@ impl Editor {
                         (d.width.max(1), d.height.max(1))
                     },
                     view_proj.to_cols_array_2d(),
-                    &light2d_uniform(
-                        &self.world, &self.project, cam.world_position, view_proj, flat_camera,
-                    ),
+                    &lights_2d,
                     &flat2d,
                 );
                 // Script-drawn 3D lines (draw.line — the map's orbit conics).
@@ -7111,7 +7232,25 @@ impl Editor {
         let light_node = self.world.query::<Light>().next().map(|(_, l)| *l).unwrap_or_default();
         let sun = crate::shading::sun_vec(&self.world, &light_node, cam.world_position);
         let li = light_node.intensity;
-        let (pl_count, pl_pos, pl_col) = collect_point_lights(&self.world, cam.world_position);
+        // Whether `Auto` reads as 2D in this scene, asked once rather than per node.
+        let flat_camera = self.world.query::<Matter>().any(|(ce, m)| {
+            matches!(m, Matter::Camera { active: true, ortho: true, .. })
+                && !floptle_core::is_disabled(&self.world, ce)
+        });
+        // ONE split, both halves — the 3D slots the globals want and the 2D ones
+        // the gather filters by. This path used to walk the scene's lights twice
+        // (`collect_point_lights` here, and again to build the 2D uniform at the
+        // pass), which is half of what `floptle/0122` measured.
+        let off_split = crate::shading::split_point_lights(
+            &self.world,
+            cam.world_position,
+            &self.project.sorting_order(),
+            flat_camera,
+        );
+        let (pl_count, pl_pos, pl_col) = {
+            let (n, pos, col, _) = off_split.three_d;
+            ([n as f32, 0.0, 0.0, 0.0], pos, col)
+        };
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
         let (fog_color, fog_params) =
             crate::shading::fog_uniforms_at(&light_node, &self.world, cam.world_position);
@@ -7150,12 +7289,8 @@ impl Editor {
         // painted props must look identical here. Empty for unpainted scenes.
         // Every node's sorting-layer Z, resolved before the draw loop borrows
         // `raster` mutably. Empty for a scene that uses no sorting layers, which
-        // is every scene until one opts in.
-        // Whether `Auto` reads as 2D in this scene, asked once rather than per node.
-        let flat_camera = self.world.query::<Matter>().any(|(ce, m)| {
-            matches!(m, Matter::Camera { active: true, ortho: true, .. })
-                && !floptle_core::is_disabled(&self.world, ce)
-        });
+        // is every scene until one opts in. (`flat_camera` was asked above, with
+        // the light split that needs it.)
         let sort_z: std::collections::HashMap<Entity, f64> = self
             .world
             .query::<floptle_core::Sorting>()
@@ -7163,15 +7298,15 @@ impl Editor {
                 (e, floptle_core::sorting_offset(self.project.sorting_rank(&s.layer), s.order) as f64)
             })
             .collect();
+        // The same one value the pass is handed below, from the same split — and
+        // the same helper the Scene view uses, so this view cannot decide a
+        // different set of lit surfaces from that one (`floptle/0122`).
+        let lights_2d = light2d_uniform(&self.world, &off_split.two_d, view_proj);
+        let reach_2d = lights_2d.reach();
         // Which flat nodes take part in 2D lighting, and at which sorting rank —
         // resolved here for the same reason `sort_z` is: the draw loop below
         // borrows `raster` mutably and cannot call an `&self` helper.
-        let lit2d: std::collections::HashMap<Entity, u32> = self
-            .world
-            .query::<Matter>()
-            .filter(|(_, m)| matches!(m, Matter::Tilemap { .. } | Matter::SpriteBatch { .. }))
-            .filter_map(|(e, _)| lit_2d_rank(&self.world, &self.project, e, flat_camera).map(|r| (e, r)))
-            .collect();
+        let lit2d = lit_2d_ranks(&self.world, &self.project, flat_camera, reach_2d);
         let paint_bases: std::collections::HashMap<Entity, Vec<u32>> = self
             .world
             .query::<floptle_core::VertexPaint>()
@@ -7238,16 +7373,41 @@ impl Editor {
                 .filter(|id| Some(*id) != skip_tex);
             let flsl = self.flsl_binds.get(ent).map(|b| b.binding);
             match matter {
+                // Same helper as the main gather, vertex paint and all — this
+                // arm used to build its own instance and forgot the paint, so a
+                // painted cube was painted in the Scene view and plain in the
+                // Game view.
                 Matter::Primitive { shape, color } => {
-                    if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
-                        let model = t.render_matrix(cam.world_position);
-                        let mp =
-                            mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat(*color));
-                        let raw = instance_of_mat(model, &mp);
+                    let model = t.render_matrix(cam.world_position);
+                    if let Some((mesh, raw)) = primitive_draw(
+                        *shape,
+                        *color,
+                        mat.as_ref(),
+                        model,
+                        &self.mesh_ids,
+                        paint_bases.get(ent).map(|v| v.as_slice()),
+                        self.raster.as_ref(),
+                    ) {
                         match flsl {
                             Some(b) => flsl_draws.push((mesh, tex, b, raw)),
                             None => instances.push((mesh, tex, raw)),
                         }
+                    }
+                }
+                // …and water, which this arm claimed was drawn by the raymarch
+                // and is not: it is a raster instance, and only the Scene view's
+                // gather ever built one. An ocean was there while you edited the
+                // scene and gone the moment you looked through the game's own
+                // camera.
+                Matter::WaterVolume { .. } => {
+                    if let Some((mesh, raw)) = water_draw(
+                        matter,
+                        &t,
+                        cam.world_position,
+                        &self.mesh_ids,
+                        self.raster.as_ref(),
+                    ) {
+                        instances.push((mesh, tex, raw));
                     }
                 }
                 Matter::Blob { scale } => {
@@ -7322,8 +7482,14 @@ impl Editor {
                         tex,
                         &mut draws,
                     );
-                    for draw in draws {
+                    for mut draw in draws {
+                        // On the 2D lighting path: the raster pass draws it
+                        // UNLIT, and the composite corrects that by the light's
+                        // difference (`floptle/0121`). The G-buffer instance is
+                        // taken from the very same value, so the two cannot
+                        // disagree about what is being corrected.
                         if let Some(&rank) = lit2d.get(ent) {
+                            draw.2.force_unlit();
                             flat2d.push((
                                 draw.0,
                                 draw.1,
@@ -7350,8 +7516,11 @@ impl Editor {
                         crate::sprite2d::sprite_draws(
                             &self.world, *ent, *size, model, mat.as_ref(), texel, &mut raws,
                         );
-                        for raw in raws {
+                        for mut raw in raws {
+                            // …and the same for a sprite batch: unlit in the
+                            // raster pass, corrected by the difference.
                             if let Some(&rank) = lit2d.get(ent) {
+                                raw.force_unlit();
                                 flat2d.push((
                                     mesh,
                                     tex,
@@ -7375,7 +7544,7 @@ impl Editor {
                 // Everything below is drawn somewhere else in THIS function or
                 // is not drawable at all:
                 Matter::Terrain { .. } => {} // push_terrain_instances, further down
-                Matter::WaterVolume { .. } | Matter::FieldShape { .. } => {} // the raymarch pass
+                Matter::FieldShape { .. } => {} // the raymarch pass
                 Matter::Skybox { .. } => {}      // skybox_uniforms → the sky stage
                 Matter::PointLight { .. } => {}  // collect_point_lights, into globals
                 Matter::Camera { .. } => {}      // it is the eye, not a thing seen
@@ -7557,9 +7726,7 @@ impl Editor {
                 depth,
                 (size.0.max(1), size.1.max(1)),
                 view_proj.to_cols_array_2d(),
-                &light2d_uniform(
-                    &self.world, &self.project, cam.world_position, view_proj, flat_camera,
-                ),
+                &lights_2d,
                 &flat2d,
             );
             // Script-drawn 3D lines (draw.line — the map's orbit conics).
@@ -7880,4 +8047,78 @@ fn perf_readout(ui: &mut egui::Ui, s: &PerfSnapshot) {
     );
     ui.add_space(4.0);
     ui.small("All of this is readable from Lua as perf.* — assert a budget in a smoke test rather than waiting for a player to notice.");
+}
+
+#[cfg(test)]
+mod lit_2d_tests {
+    use super::*;
+    use floptle_core::{Lighting2D, Lit2D, Sorting, World};
+
+    /// The project's sorting layers, so a rank means something.
+    fn project() -> floptle_scene::ProjectConfigDoc {
+        floptle_scene::ProjectConfigDoc {
+            sorting_layers: vec!["Default".into(), "Ground".into(), "Characters".into()],
+            ..Default::default()
+        }
+    }
+
+    fn batch_on(world: &mut World, layer: &str, mode: Lit2D) -> Entity {
+        let e = world.spawn();
+        world.insert(e, Matter::SpriteBatch { size: 1.0 });
+        world.insert(e, Sorting { layer: layer.into(), order: 0 });
+        world.insert(e, Lighting2D { mode, layers: vec![] });
+        e
+    }
+
+    /// `floptle/0122`: a flat surface no live light can reach is not gathered at
+    /// all. The mask already said it contributes nothing — honouring that in
+    /// `fs_light` instead means instancing, uploading and rasterizing the whole
+    /// flat scene a second time to throw it away.
+    #[test]
+    fn a_surface_no_light_reaches_is_not_gathered() {
+        let mut world = World::default();
+        let ground = batch_on(&mut world, "Ground", Lit2D::Auto);
+        let chars = batch_on(&mut world, "Characters", Lit2D::Auto);
+        let p = project();
+        // One light, reaching rank 1 (Ground) only — the card's own repro.
+        let reach = 1u64 << p.sorting_rank("Ground");
+
+        let got = lit_2d_ranks(&world, &p, true, reach);
+        assert_eq!(got.len(), 1, "a batch the light cannot reach was still filled");
+        assert_eq!(got.get(&ground).copied(), Some(p.sorting_rank("Ground")));
+        assert!(!got.contains_key(&chars), "Characters is on no light's mask");
+    }
+
+    /// …and with nothing to reach, the world is not walked at all. This is the
+    /// "no light placed costs nothing" property, and it has to hold for a scene
+    /// full of flat matter — which is every 2D scene.
+    #[test]
+    fn no_light_placed_gathers_nothing() {
+        let mut world = World::default();
+        batch_on(&mut world, "Default", Lit2D::Auto);
+        batch_on(&mut world, "Ground", Lit2D::Yes);
+        assert!(lit_2d_ranks(&world, &project(), true, 0).is_empty());
+    }
+
+    /// An unrestricted light reaches every rank, so the filter correctly does
+    /// nothing — the ordinary case of somebody dropping one light into a scene
+    /// must not start dropping surfaces.
+    #[test]
+    fn an_unrestricted_light_still_lights_everything() {
+        let mut world = World::default();
+        batch_on(&mut world, "Default", Lit2D::Auto);
+        batch_on(&mut world, "Ground", Lit2D::Auto);
+        batch_on(&mut world, "Characters", Lit2D::Auto);
+        assert_eq!(lit_2d_ranks(&world, &project(), true, u64::MAX).len(), 3);
+    }
+
+    /// A node that says `3d` stays off the path however far a light reaches —
+    /// stating it is never re-decided, which is the whole contract of the flag,
+    /// and it is the workaround two games are currently standing on.
+    #[test]
+    fn a_node_that_said_3d_is_never_gathered() {
+        let mut world = World::default();
+        batch_on(&mut world, "Ground", Lit2D::No);
+        assert!(lit_2d_ranks(&world, &project(), true, u64::MAX).is_empty());
+    }
 }

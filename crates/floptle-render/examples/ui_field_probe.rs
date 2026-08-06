@@ -268,6 +268,7 @@ fn main() {
         // Only the row this case is about, so the six renders don't stack six
         // copies of the same six boxes.
         let mine = floptle_ui::DrawList {
+            text_snap: 0.0,
             quads: dl
                 .quads
                 .iter()

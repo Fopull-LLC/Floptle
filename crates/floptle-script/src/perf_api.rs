@@ -163,6 +163,11 @@ pub fn install(lua: &Lua, profile: &SharedProfile) -> mlua::Result<()> {
             out.set("lights", c.lights)?;
             out.set("lightsDropped", c.lights_dropped)?;
             out.set("voices", c.voices)?;
+            // What 2D lighting costs this frame: flat surfaces rasterized a
+            // second time into its G-buffer (`floptle/0122`). Zero when no light
+            // can reach them, which is the answer a 2D game most wants to be
+            // able to check.
+            out.set("flat2d", c.flat2d)?;
             Ok(out)
         })?,
     )?;

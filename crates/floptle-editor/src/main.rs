@@ -2252,6 +2252,16 @@ struct Editor {
     /// read a few hundred lines later where the frame's counts are assembled
     /// (`floptle/0116`).
     light_counts: (usize, usize),
+    /// How many Lighting nodes the last warning was about, so a scene with two
+    /// of them says so ONCE rather than sixty times a second (`floptle/0123`).
+    ///
+    /// The loader spawns exactly one and an additive load deliberately brings no
+    /// second, so more than one means a script or a hand-edited scene made it —
+    /// and then "the" ambient a script writes and "the" ambient the renderer
+    /// reads are whichever the ECS yielded first, which is precisely the
+    /// order-dependence `floptle/0116` just finished taking out of the light
+    /// list. Nothing is guessed on the game's behalf; it is told.
+    lighting_nodes_warned: usize,
     /// Mixer tab UI state (selected track/effect, meters).
     mixer_ui: mixer_ui::MixerUiState,
     /// Particles tab UI state (open effect, playhead, selections).

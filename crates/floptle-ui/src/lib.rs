@@ -1065,6 +1065,37 @@ pub struct UiLayer {
     /// no whole pixels left to snap to.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pixel_scale: bool,
+    /// Round every rasterized text size to a whole multiple of this many
+    /// **screen pixels**. `0` — the default — is off, and nothing changes.
+    ///
+    /// A pixel font's art is a grid. Fofighter's is 5×7 cells of a tenth of an
+    /// em, and it only *looks* like a pixel font when one of those cells lands
+    /// on a whole number of screen pixels. The engine already rasterizes at an
+    /// integer size, which is necessary and not sufficient: what reaches the
+    /// rasterizer is `text_size × layer scale`, and under `MatchHeight` that
+    /// scale is `viewport_h / design_height` — 1.7389 in a 1252 px window
+    /// against a 720 design height. A `text_size: 24` label then rasterizes at
+    /// 41.7 → 42 px, which is 4.2 pixels per cell, and every vertical stem in
+    /// the game straddles a pixel boundary by a different fraction and takes a
+    /// different amount of antialiasing.
+    ///
+    /// Reported as *"each character looks like it's just not positioned exactly
+    /// correctly"* — and **nothing is mispositioned**. The layout can be exact
+    /// integers and the text still reads as badly spaced, because the
+    /// distortion is INSIDE each glyph rather than between them. Everyone who
+    /// meets that symptom goes and audits the positioning code, which is
+    /// correct. It is worth knowing that is where the hour goes.
+    ///
+    /// There is no size an author can choose that fixes it, because the scale
+    /// is not theirs and is not constant — hence a knob on the layer. For a
+    /// ten-cell em, set it to `10`.
+    ///
+    /// The gentler half of the same problem: [`Self::pixel_scale`] snaps the
+    /// whole canvas to whole pixels, which fixes text and everything else but
+    /// letterboxes at non-integer multiples. This one only moves text, and only
+    /// ever by less than one cell.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub text_snap: f32,
     /// Screen overlay vs a quad in the 3D world. Screen-space by default so
     /// existing layers are unchanged.
     #[serde(default)]
@@ -1120,6 +1151,33 @@ fn default_reference_width() -> f32 {
 }
 fn default_match_wh() -> f32 {
     0.5
+}
+/// The whole pixel size a text run rasterizes at.
+///
+/// `size_px` is the run's design size already multiplied by the layer scale;
+/// `snap` is [`UiLayer::text_snap`], and `0` means "just round", which is what
+/// this has always done.
+///
+/// **Rounds to the nearest multiple, and never to zero.** Nearest rather than
+/// down because a pixel font is as wrong one cell small as one cell large and
+/// down would shrink every label at every size; never zero because a snap of 10
+/// on a 6 px label has to draw *something*, and one cell is the smallest thing
+/// that is still on the grid.
+///
+/// One function, and the renderer measures line breaks at the size this
+/// returns — a run measured at `size × scale` but drawn at a snapped `px` would
+/// wrap in places the glyphs do not, and ellipsize a line that fits.
+///
+/// The design-space layout solver still measures unsnapped, because it works in
+/// design units and has no window scale: an element sized to *fit* its text can
+/// therefore be up to half a cell out. Bounded, and the case a pixel HUD is
+/// least likely to hit — those size their panels, not their glyphs.
+pub fn text_px(size_px: f32, snap: f32) -> u32 {
+    let s = size_px.max(0.0);
+    if snap >= 1.0 {
+        return ((s / snap).round().max(1.0) * snap).round().max(1.0) as u32;
+    }
+    s.round().max(1.0) as u32
 }
 
 impl UiLayer {
@@ -1178,6 +1236,7 @@ impl Default for UiLayer {
             scale_mode: UiScaleMode::default(),
             match_wh: default_match_wh(),
             pixel_scale: false,
+            text_snap: 0.0,
             z: 0,
             enabled: true,
             space: UiSpace::Screen,
@@ -1715,6 +1774,24 @@ pub struct EditState {
 pub struct DrawList {
     pub quads: Vec<Quad>,
     pub texts: Vec<TextRun>,
+    /// The layer's [`UiLayer::text_snap`], carried with the list rather than
+    /// passed beside it — the renderer's `pack` is the one place that turns a
+    /// design size into a rasterized pixel size, and it is called from a dozen
+    /// places that do not all have a layer to hand. `0` is off.
+    pub text_snap: f32,
+}
+
+impl DrawList {
+    /// Tag this list with the layer it was built for, so the text in it
+    /// rasterizes on that layer's own grid (`floptle/0120`).
+    ///
+    /// A method rather than a field poke at each call site: it reads as part of
+    /// the expression that builds the list, which is harder to leave off than a
+    /// line underneath it.
+    pub fn for_layer(mut self, layer: &UiLayer) -> Self {
+        self.text_snap = layer.text_snap;
+        self
+    }
 }
 
 /// The implicit clips scroll views impose: every scroll element clips its own
@@ -3435,6 +3512,57 @@ mod tests {
         assert_eq!(pixel(true).scale_for([1280.0, 720.0]), 3.0);
         // Below 1x there are no whole pixels left to snap to, so leave it be.
         assert_eq!(pixel(true).scale_for([200.0, 120.0]), 0.5);
+    }
+
+    /// `floptle/0120`: a pixel font's cell only *looks* like a pixel when it
+    /// lands on a whole one, and `text size × layer scale` almost never does —
+    /// the scale belongs to the window, not the author, so there is no size an
+    /// author could pick that would fix it.
+    #[test]
+    fn text_snaps_to_the_fonts_own_grid() {
+        // The report, exactly: a 1252 px window against a 720 design height is
+        // a scale of 1.7389, so a `text_size: 24` label rasterizes at 41.7 px.
+        // For a ten-cell em that is 4.17 pixels per cell — every stem softened
+        // by a different fraction, and the same letter different in two words.
+        let scale = 1252.0 / 720.0;
+        let raw = 24.0 * scale;
+        assert_eq!(text_px(raw, 0.0), 42, "off: rounds, as it always has");
+        assert_eq!(text_px(raw, 10.0), 40, "on: a whole 4 pixels per cell");
+        assert_eq!(text_px(40.0, 10.0) % 10, 0);
+
+        // NEAREST, not down: a pixel font is as wrong one cell small as one
+        // cell large, and rounding down would shrink every label at every size.
+        assert_eq!(text_px(46.0, 10.0), 50);
+        assert_eq!(text_px(44.0, 10.0), 40);
+
+        // …but never to nothing. A snap of 10 on a tiny label still draws one
+        // cell, which is the smallest thing that is still on the grid.
+        assert_eq!(text_px(3.0, 10.0), 10);
+        assert_eq!(text_px(0.0, 10.0), 10);
+
+        // A snap below one pixel is meaningless, so it means off — including
+        // the 0 that every layer written before this has.
+        for snap in [0.0, 0.5, 0.999] {
+            assert_eq!(text_px(41.7, snap), 42, "snap {snap} should behave as off");
+        }
+        // And an already-exact size is untouched, so opting in cannot move text
+        // that was already on the grid.
+        assert_eq!(text_px(30.0, 10.0), 30);
+    }
+
+    /// Off by default and absent from a default layer's RON — an existing
+    /// project's text must rasterize at exactly the size it always did.
+    #[test]
+    fn text_snap_is_opt_in_and_does_not_appear_in_a_default_layer() {
+        assert_eq!(UiLayer::default().text_snap, 0.0);
+        let ron = ron::ser::to_string(&UiLayer::default()).unwrap();
+        assert!(!ron.contains("text_snap"), "a default layer wrote a text_snap: {ron}");
+        // …and a list built without a layer carries no snap either, so every
+        // caller that has no canvas (the probes, the design view's own chrome)
+        // is unchanged.
+        assert_eq!(DrawList::default().text_snap, 0.0);
+        let snapped = DrawList::default().for_layer(&UiLayer { text_snap: 10.0, ..Default::default() });
+        assert_eq!(snapped.text_snap, 10.0, "for_layer is what carries it to the renderer");
     }
 
     /// Off by default, and absent from a default layer's RON — an existing

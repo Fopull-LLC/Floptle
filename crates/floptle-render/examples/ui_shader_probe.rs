@@ -54,6 +54,7 @@ fn render_ui_shader(
     let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
     let list = DrawList {
+            text_snap: 0.0,
         quads: vec![Quad {
             rect: [20.0, 20.0, 400.0, 400.0],
             shader: Some((path.to_string(), 1)),
@@ -218,6 +219,7 @@ fn main() {
             ..Default::default()
         };
         let list = DrawList {
+            text_snap: 0.0,
             quads: vec![
                 q([0.0, 0.0, W as f32, H as f32], [0.5, 0.5, 0.5, 1.0], 0.0, 0.0), // gray bg
                 q([140.0, 150.0, 180.0, 160.0], [0.0, 0.0, 0.0, 0.85], 24.0, 24.0), // shadow

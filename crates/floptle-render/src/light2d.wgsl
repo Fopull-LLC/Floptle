@@ -8,12 +8,43 @@
 //      uniform because a light reaches a set of layers, and the accumulation
 //      below has to know which layer each pixel belongs to.
 //
-//   2. `vs_full` / `fs_light` reads it back once and adds every 2D light that
-//      reaches that pixel's layer, writing the result over the scene.
+//   2. `vs_full` / `fs_darken` + `fs_brighten` read it back and apply every 2D
+//      light that reaches that pixel's layer — as a **difference** against what
+//      the raster pass already drew, never as a redraw.
 //
 // Stage 2 re-emits the G-buffer's depth as `frag_depth`, so 3D geometry standing
 // in front of a flat surface still occludes it. Without that the composite would
 // paint lit tiles over anything drawn between them and the camera.
+//
+// ## Why a difference, and not `over` (`floptle/0121`)
+//
+// The composite used to write `albedo * light` over the frame at the surface's
+// own alpha. For an opaque surface that is exact. For a translucent one it is
+// the same sprite blended **twice**: the raster pass had already put
+// `C·a + B·(1-a)` there, and compositing `C·light` over that again lands at an
+// effective alpha of `1 - (1-a)²`. A sprite authored at 0.5 reached the screen
+// at 0.75 and one at 0.72 at 0.92 — silently, in every 2D project, with no light
+// placed and nothing switched on, and invisible in every place an author could
+// look: the source said 0.72, the Inspector said 0.72, the screen said 0.92.
+//
+// So this pass never contributes colour of its own. It adds
+//
+//     delta = C·a·(light - 1)
+//
+// which is exactly the difference between the frame that exists and the frame
+// that should. `a = 1` gives `C·light`, unchanged from before. `light = 1` gives
+// zero — the pass is an identity wherever no light reaches, whatever the
+// material was. And a translucent surface keeps the alpha its author typed.
+//
+// The delta is signed and a fixed-point target clamps a negative source to zero
+// before blending, so it goes out as two non-negative halves: `fs_darken`
+// through a `ReverseSubtract` pipeline and `fs_brighten` through an additive
+// one. Per channel, because a warm light darkens blue while it brightens red.
+//
+// This is also why `C` and `a` in the G-buffer must be exactly what the raster
+// pass drew — the gather forces every 2D-lit surface onto the raster pass's
+// UNLIT path so that they are (`render_frame.rs`). A surface shaded by the 3D
+// sun and then corrected by this delta would be corrected by the wrong amount.
 
 struct Fill {
     view_proj: mat4x4<f32>,
@@ -141,15 +172,23 @@ struct LitOut {
     @builtin(frag_depth) depth: f32,
 };
 
-@fragment
-fn fs_light(in: FullOut) -> LitOut {
+/// The signed correction this pixel needs, and the depth to emit with it.
+///
+/// `C·a·(light - 1)`: what the frame should hold, minus what the raster pass put
+/// there. Zero wherever no light reaches — see the header.
+struct Delta {
+    rgb: vec3<f32>,
+    depth: f32,
+};
+
+fn shade(in: FullOut) -> Delta {
     let px = vec2<i32>(in.clip.xy);
     let alb = textureLoad(g_albedo, px, 0);
-    var out: LitOut;
+    var out: Delta;
     if (alb.a < 0.004) {
         // No flat surface here. Depth 1.0 puts the fragment behind everything,
         // so the depth test rejects it and the scene underneath is untouched.
-        out.color = vec4<f32>(0.0);
+        out.rgb = vec3<f32>(0.0);
         out.depth = 1.0;
         return out;
     }
@@ -181,7 +220,33 @@ fn fs_light(in: FullOut) -> LitOut {
         let x = clamp(1.0 - d / max(lp.w, 1e-4), 0.0, 1.0);
         acc = acc + L.color[i].rgb * (x * x);
     }
-    out.color = vec4<f32>(alb.rgb * acc, alb.a);
+    // Premultiplied by the surface's own alpha, because that is exactly the
+    // share of this pixel the raster pass gave it. The other `1 - a` is the
+    // background, and this pass must not touch it.
+    out.rgb = alb.rgb * alb.a * (acc - vec3<f32>(1.0));
     out.depth = depth;
+    return out;
+}
+
+/// The negative half, through a `ReverseSubtract` pipeline (`dst - src`).
+///
+/// Never larger than what is there: `dst >= C·a` and the factor is at most 1, so
+/// the subtraction cannot underflow into a clamp.
+@fragment
+fn fs_darken(in: FullOut) -> LitOut {
+    let d = shade(in);
+    var out: LitOut;
+    out.color = vec4<f32>(max(-d.rgb, vec3<f32>(0.0)), 0.0);
+    out.depth = d.depth;
+    return out;
+}
+
+/// …and the positive half, through an additive one.
+@fragment
+fn fs_brighten(in: FullOut) -> LitOut {
+    let d = shade(in);
+    var out: LitOut;
+    out.color = vec4<f32>(max(d.rgb, vec3<f32>(0.0)), 0.0);
+    out.depth = d.depth;
     return out;
 }

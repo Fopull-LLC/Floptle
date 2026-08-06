@@ -48,17 +48,6 @@ pub(crate) fn blob_mat_arrays(set: &[(DVec3, f32, MaterialParams)]) -> BlobMatAr
     (tint, emissive, specular, params, rim)
 }
 
-/// Collect up to 16 placeable point lights from the world into the camera-relative
-/// uniform arrays (xyz pos + range; rgb = color×intensity) for the raster + raymarch
-/// passes. Returns (count_vec4, positions, colors).
-pub(crate) fn collect_point_lights(
-    world: &World,
-    cam_world: DVec3,
-) -> ([f32; 4], [[f32; 4]; 16], [[f32; 4]; 16]) {
-    let (n, pos, col, _) = split_point_lights(world, cam_world, &[], false).three_d;
-    ([n as f32, 0.0, 0.0, 0.0], pos, col)
-}
-
 /// One side of the light split: how many, where, what colour, and — for the 2D
 /// side — which sorting layers each one reaches.
 pub(crate) type LightSlots = (usize, [[f32; 4]; 16], [[f32; 4]; 16], [[u32; 4]; 16]);
@@ -116,6 +105,15 @@ pub(crate) fn split_point_lights(
         // parked light holding a slot would mean a pool exhausts the budget and
         // lights nothing (`floptle/0116`).
         if *intensity <= 0.0 || *range <= 0.0 {
+            continue;
+        }
+        // …and neither does a light on a node that is SWITCHED OFF, or under
+        // one that is. `Disabled` takes a node out of physics and stops its
+        // scripts, and a water volume beside this one already goes with it —
+        // a lamp prefab you disabled still lighting the room is the reading
+        // nobody expects. It costs a slot too, which is exactly the pool
+        // exhaustion `floptle/0116` is about.
+        if floptle_core::is_disabled(world, e) {
             continue;
         }
         let lit = world.get::<floptle_core::Lighting2D>(e).cloned().unwrap_or_default();
@@ -742,11 +740,9 @@ mod light_split_tests {
         let mut world = World::default();
         light_at(&mut world, 3.0, None);
         light_at(&mut world, -2.0, None);
-        let (count, pos, col) = collect_point_lights(&world, DVec3::new(1.0, 0.0, 0.0));
         let s = split_point_lights(&world, DVec3::new(1.0, 0.0, 0.0), &layers(), false);
-        assert_eq!(count[0] as usize, s.three_d.0);
-        assert_eq!(pos, s.three_d.1);
-        assert_eq!(col, s.three_d.2);
+        let (count, pos, col) = (s.three_d.0, s.three_d.1, s.three_d.2);
+        assert_eq!(count, 2, "both lights are 3D in a perspective scene");
         assert_eq!(pos[0], [2.0, 0.0, 0.0, 8.0], "camera-relative, range in w");
         assert_eq!(col[0], [2.0, 1.0, 0.5, 0.0], "colour times intensity");
     }
@@ -817,6 +813,30 @@ mod light_split_tests {
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
         assert_eq!(s.three_d.0, 1, "a parked light took a slot");
         assert_eq!(s.three_d.1[0][0], 2.0, "…and the wrong one survived");
+    }
+
+    /// A node you switched OFF is off. `Disabled` already takes a node out of
+    /// physics, stops its scripts and stops it drawing — a lamp prefab you
+    /// disabled that still lit the room is the one reading nobody expects, and
+    /// it spent a slot doing it.
+    ///
+    /// The subtree counts, because that is what `Disabled` means everywhere
+    /// else: disabling the lamp disables the bulb hanging off it.
+    #[test]
+    fn a_switched_off_node_does_not_light_the_scene() {
+        let mut world = World::default();
+        let off = light_at(&mut world, 0.0, None);
+        world.insert(off, floptle_core::Disabled);
+        // A child of a disabled node, which is how a prefab actually carries
+        // its light.
+        let child = light_at(&mut world, 1.0, None);
+        world.insert(child, floptle_core::Parent(off));
+        light_at(&mut world, 2.0, None); // the one still switched on
+
+        let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
+        assert_eq!(s.three_d.0, 1, "a disabled node's light still lit the scene");
+        assert_eq!(s.three_d.1[0][0], 2.0, "…and it was the wrong one that survived");
+        assert_eq!(s.dropped, 0, "nothing was dropped — they never qualified");
     }
 
     /// Which sixteen survive must depend on the lights and the camera, and on

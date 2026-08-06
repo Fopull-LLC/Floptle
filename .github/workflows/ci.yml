@@ -88,6 +88,7 @@ jobs:
           run tilemap_pages_probe tilemap_pages_probe -- "$P"
           run light2d_probe       light2d_probe       -- "$P"
           run sky_sweep_probe     sky_sweep_probe     -- "$P"
+          run ui_text_snap_probe  ui_text_snap_probe  -- "$P"
 
       # On a failure the PNGs are the evidence — these probes exist because the
       # bugs they catch are visual, and a red X with no image to look at makes

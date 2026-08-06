@@ -16,6 +16,18 @@
 //! in one gather and not the other. It is a source-level check because there is
 //! no way to ask a GPU-less test what a view drew.
 //!
+//! Then it happened a **fourth** time, and in the one way this test could not
+//! see: an arm that builds its instance INLINE rather than calling a helper.
+//! Water was gathered only by the Scene view — an ocean you could edit and could
+//! not play — and the offscreen `Primitive` arm had quietly stopped applying
+//! vertex paint, so a painted cube was painted on screen and plain in the Game
+//! view. Neither showed up here, because there was no shared call to miss.
+//!
+//! So the rule this file now enforces is the stronger one: **an arm that builds
+//! geometry does it in a function both gathers call.** That is what makes the
+//! check possible at all, and it is why `water_draw` and `primitive_draw` exist
+//! as functions rather than as two copies of the same twenty lines.
+//!
 //! If this fails after a refactor that genuinely moved the gather somewhere
 //! better, move the check with it — don't delete it.
 
@@ -24,10 +36,12 @@ const SRC: &str = include_str!("../src/render_frame.rs");
 /// The calls that put world geometry into a frame. Each must appear on both
 /// paths; a call that exists on only one is a kind of object some views cannot
 /// see.
-const GATHERS: [(&str, &str); 3] = [
+const GATHERS: [(&str, &str); 5] = [
     ("push_mesh_instances", "imported models, map meshes, skinned characters"),
     ("tilemap_draws", "tilemaps — the 2D level itself"),
     ("sprite_draws", "sprite batches"),
+    ("primitive_draw", "primitives, with their vertex paint"),
+    ("water_draw", "water volumes — seas and pools"),
 ];
 
 /// The body of `render_world_into`, from its signature to the end of the file.
@@ -42,12 +56,28 @@ fn offscreen() -> &'static str {
     &SRC[at..]
 }
 
+/// Everything before the offscreen gather: the main (Scene view) path, plus the
+/// helpers both paths share.
+fn main_path() -> &'static str {
+    let at = SRC.find("fn render_world_into").unwrap();
+    &SRC[..at]
+}
+
+/// Does `hay` **call** `name`, as opposed to merely declaring it?
+///
+/// The shared helpers are defined above the offscreen gather, so a plain
+/// `contains` would count `fn water_draw(` on the main path and report a call
+/// that is not there. Only occurrences that are not the `fn` item count.
+fn calls(hay: &str, name: &str) -> bool {
+    hay.match_indices(name).any(|(i, _)| !hay[..i].trim_end().ends_with("fn"))
+}
+
 #[test]
 fn every_gather_on_the_main_path_also_runs_for_offscreen_views() {
     let off = offscreen();
     let missing: Vec<&str> = GATHERS
         .iter()
-        .filter(|(call, _)| !off.contains(*call))
+        .filter(|(call, _)| !calls(off, call))
         .map(|(_, what)| *what)
         .collect();
     assert!(
@@ -77,11 +107,12 @@ fn the_two_gathers_are_actually_two() {
         SRC.len()
     );
     for (call, what) in GATHERS {
-        let before = &SRC[..SRC.find("fn render_world_into").unwrap()];
         assert!(
-            before.contains(call),
-            "{call} ({what}) is not on the main path either — this test is checking a \
-             call that no longer exists anywhere, which is a pass that means nothing"
+            calls(main_path(), call),
+            "{call} ({what}) is not called on the main path — either this test is checking \
+             a call that no longer exists anywhere (a pass that means nothing), or the \
+             SCENE view is the one now missing it, which is the same bug pointing the \
+             other way"
         );
     }
 }

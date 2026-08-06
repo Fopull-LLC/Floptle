@@ -87,7 +87,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field removeTag fun(self: Node, tag: string) Remove a tag (no-op when absent).
 ---@field height number Physics (capsule bodies): standing height - write a smaller value to crouch.
 ---@field text string|nil UI elements: the label's text (write to change it — numbers coerce, so `hp.text = 42` works).
----@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Live component handle (RigidBody / PointLight / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer / Material), nil if the node lacks it.
+---@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|LightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Live component handle (RigidBody / PointLight / Light / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer / Material), nil if the node lacks it.
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
 ---@field setShaderParam fun(self: Node, name: string, x: number, y?: number, z?: number, w?: number) Drive a `.flsl` uniform on this node every tick (a GPU uniform write, never a recompile): the node's Material shader, or its UI element's `stage ui` shader (instruments like the navball). Unset lanes are 0.
 ---@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, luminosity, starColor, occluderRadius (occlusion culling: radius of the solid core geometry never pierces — chunks fully behind it skip their draws; keep it BELOW the deepest cave/dig; 0 = off).
@@ -125,6 +125,49 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field r number Color red 0..1.
 ---@field g number Color green 0..1.
 ---@field b number Color blue 0..1.
+
+---The scene's LIGHTING NODE (`find(\"Lighting\"):getcomponent(\"Light\")`) — the one
+---environment a world has: the key light, the ambients, the shadows and the fog.
+---Conventionally bound to `env`, because `light` is the Point Light handle.
+---`ambient2dR/G/B` is where a 2D scene's brightness lives.
+---@class LightHandle
+---@field ambient2dR number The 2D BASE LIGHT, red 0..1 — the whole light a flat scene has before any 2D light is placed. White by default; turn it down for a dark room a torch can carve a circle out of, and read it back first so you can put it where it was.
+---@field ambient2dG number The 2D base light, green 0..1. See ambient2dR.
+---@field ambient2dB number The 2D base light, blue 0..1. See ambient2dR.
+---@field intensity number Brightness multiplier on the key (directional) light.
+---@field colorR number Key light colour red.
+---@field colorG number Key light colour green.
+---@field colorB number Key light colour blue.
+---@field directionX number Key light direction X — lerp the three for a day cycle.
+---@field directionY number Key light direction Y.
+---@field directionZ number Key light direction Z.
+---@field stars number Stars mode (1/0; assign true/false): luminous celestial bodies ARE the key lights.
+---@field ambientR number 3D ambient fill red 0..1 — the fill under the key light, deliberately a different value from ambient2dR.
+---@field ambientG number 3D ambient fill green 0..1.
+---@field ambientB number 3D ambient fill blue 0..1.
+---@field shadows number Sun shadows on (1/0; assign true/false). Every shadow field below only applies when this is on.
+---@field shadowSoftness number 0 = razor-hard edge … 1 = dreamy-soft penumbra.
+---@field shadowStrength number How dark full shadow gets, 0..1 (ambient still fills, so never pitch black).
+---@field shadowTintR number Shadows darken toward this colour instead of black — red.
+---@field shadowTintG number Shadow tint green.
+---@field shadowTintB number Shadow tint blue.
+---@field shadowQuantize number 0 = smooth penumbra; 2..8 = posterize it into that many bands (toon/retro).
+---@field shadowDither number Bayer-dither the penumbra (1/0) — the classic PS1 dithered shadow edge.
+---@field shadowDistance number Max world distance a shadow ray marches before giving up; far geometry stops casting past it.
+---@field fog number Depth fog on (1/0; assign true/false).
+---@field fogColorR number Fog colour red — match it to the horizon or a seam shows.
+---@field fogColorG number Fog colour green.
+---@field fogColorB number Fog colour blue.
+---@field fogStart number World distance where fog begins (fully clear nearer than this).
+---@field fogEnd number World distance where fog is full.
+---@field fogDither number Dither the fog gradient to hide 8-bit banding on long ramps (1/0).
+---@field fogDitherStrength number Dither amplitude 0..1.
+---@field fogVolumetric number Volumetric mode (1/0): march real fog media instead of a distance ramp, so hills poke out of ground mist. fogStart/fogEnd do not apply.
+---@field fogDensity number Volumetric: media density per world unit.
+---@field fogHeight number Volumetric: world height (y) of the fog layer's top.
+---@field fogFalloff number Volumetric: softness of the layer's top edge, world units.
+---@field fogNoise number Volumetric: how much drifting noise breaks up the media, 0..1.
+---@field fogNoiseScale number Volumetric: noise feature size, world units per repeat.
 
 ---A Camera's live properties (`node:getcomponent(\"Camera\")`).
 ---@class CameraHandle
@@ -172,6 +215,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field z number Draw order: lowest z first.
 ---@field designHeight number Design units that span the window height.
 ---@field worldSpace number 1 = a panel inside the 3D world at this node's transform; 0 = a screen overlay.
+---@field textSnap number Round every rasterized text size to a whole multiple of this many SCREEN PIXELS; 0 = off. For a pixel font whose art is a grid — a cell only looks like a pixel when it lands on a whole one.
 
 ---A Material's live SPRITESHEET frame (`node:getcomponent(\"Material\")`) — the
 ---mesh-side twin of a UI image's cell. Slice the texture into a grid in its

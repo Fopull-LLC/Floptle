@@ -193,6 +193,15 @@ pub struct Counts {
     pub lights_dropped: usize,
     /// Audio voices mixing.
     pub voices: usize,
+    /// Flat surfaces filled into the 2D lighting G-buffer — the second
+    /// rasterization a lit 2D scene pays for (`floptle/0122`).
+    ///
+    /// `0` in a scene with no 2D light placed, and `0` for every surface no live
+    /// light's layer mask can reach, so this reads as *what the 2D lighting is
+    /// costing you right now* rather than as how much flat matter you own. A
+    /// bullet hell was paying ~500 of these a frame against lights that could
+    /// reach none of them, and had no number to see it with.
+    pub flat2d: usize,
 }
 
 /// A frame's cost, per bucket and per script.

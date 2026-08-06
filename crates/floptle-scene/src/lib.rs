@@ -1403,6 +1403,22 @@ pub struct ProjectConfigDoc {
     /// would mean every new sort order invents a physics layer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sorting_layers: Vec<String>,
+    /// The project's **UI font**: a project-relative `.ttf`/`.otf` path used
+    /// wherever no font is named — `draw.text`, a `ui.make` label, an element
+    /// whose style sets none. Empty (the default) means the embedded Roboto.
+    ///
+    /// It exists because project fonts *append* to the renderer's font stack,
+    /// so slot 0 could never be the project's, so **every** string that did not
+    /// spell out a path came out in Roboto. For a game whose UI is a pixel font
+    /// that is all of them, and the symptom is not "wrong typeface" — it is
+    /// text that reads as badly spaced, because a layout built on a monospace
+    /// grid is being drawn with a proportional font: wide letters overlap their
+    /// neighbours and narrow ones leave holes (`floptle/0124`).
+    ///
+    /// Naming it here rather than at each call site is the point: it fixes the
+    /// code nobody is going to edit.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ui_font: String,
     /// The project-wide audio mixer graph (tracks, effects, routing). Edited
     /// in the Mixer tab; every scene plays through it.
     #[serde(default)]
@@ -1456,6 +1472,7 @@ impl ProjectConfigDoc {
             layers: Vec::new(),
             no_collide: Vec::new(),
             sorting_layers: Vec::new(),
+            ui_font: String::new(),
             mixer: floptle_audio::MixerDesc::default(),
             bloom: false,
             bloom_threshold: default_bloom_threshold(),

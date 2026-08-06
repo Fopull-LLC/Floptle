@@ -527,6 +527,44 @@ impl<'a> SettingsCtx<'a> {
         // A 2D scene routinely wants a Background that collides with nothing and
         // a Player that does, both sorting independently of either fact; sharing
         // one list would mean every new draw order invents a physics layer.
+        ui.collapsing("UI font", |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "The .ttf/.otf every string uses when nothing names a font — draw.text, \
+                     a ui.make label, an element whose style sets none. Project-relative \
+                     (fonts/Pixel.ttf). Leave it blank for the built-in font.",
+                )
+                .weak()
+                .small(),
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.set_min_height(22.0);
+                let resp = ui.add_sized(
+                    [280.0, 20.0],
+                    egui::TextEdit::singleline(&mut project.ui_font)
+                        .hint_text("fonts/YourFont.ttf"),
+                );
+                if resp.lost_focus() && resp.changed() {
+                    out.save_project = true;
+                }
+                if !project.ui_font.is_empty() && ui.button("✖").on_hover_text("back to the built-in font").clicked() {
+                    project.ui_font.clear();
+                    out.save_project = true;
+                }
+            });
+            ui.small(
+                egui::RichText::new(
+                    "If your UI is a pixel font, set this. Otherwise every string a script \
+                     draws comes out in the built-in one — which reads as bad letter \
+                     spacing rather than as the wrong typeface, because a layout built on \
+                     a monospace grid is being drawn proportionally.",
+                )
+                .weak(),
+            );
+        });
+        ui.add_space(8.0);
+
         ui.collapsing("Sorting layers (2D draw order)", |ui| {
             ui.label(
                 egui::RichText::new(

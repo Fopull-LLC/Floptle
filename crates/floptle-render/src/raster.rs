@@ -2598,7 +2598,11 @@ impl Raster {
         lights: &crate::light2d::Light2dUniform,
         flat: &[(MeshId, Option<TexId>, crate::light2d::Light2dInstance)],
     ) {
-        if flat.is_empty() {
+        // Nothing flat, or nothing that can change how it looks. The gather
+        // already filters by [`Light2dUniform::reach`] (`floptle/0122`), so this
+        // is the belt to that pair of braces — and the one place a caller
+        // building `flat` by hand still gets the guarantee.
+        if flat.is_empty() || lights.reach() == 0 {
             return;
         }
         // Bucket by (mesh, texture) exactly as the colour pass does, and pack the
@@ -2695,9 +2699,15 @@ impl Raster {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rp.set_pipeline(&self.light2d.light_pipeline);
             rp.set_bind_group(0, &self.light2d.lights_bind, &[]);
             rp.set_bind_group(1, read, &[]);
+            // The signed correction, in its two non-negative halves
+            // (`floptle/0121`). Same attachments, same bind groups, same
+            // fullscreen triangle — only the blend operation differs, so this is
+            // two draws rather than two passes.
+            rp.set_pipeline(&self.light2d.darken_pipeline);
+            rp.draw(0..3, 0..1);
+            rp.set_pipeline(&self.light2d.brighten_pipeline);
             rp.draw(0..3, 0..1);
         }
         gpu.queue.submit([encoder.finish()]);
@@ -2969,9 +2979,46 @@ pub fn instance_of_mat(model: Mat4, m: &MaterialParams) -> InstanceRaw {
     }
 }
 
+impl InstanceRaw {
+    /// Force this instance onto the UNLIT path, keeping whatever vertex-paint
+    /// base it already carries.
+    ///
+    /// For the 2D lighting composite (`floptle/0121`), which corrects the frame
+    /// by the *difference* between what the raster pass drew and what the 2D
+    /// lights say it should be. That subtraction is only right if the raster
+    /// pass drew `albedo × alpha` and nothing else — a surface the 3D sun had
+    /// also shaded would be corrected by the wrong amount, and in a dark scene
+    /// the correction would exceed what is there. So a surface on the 2D path
+    /// is unlit in 3D terms, which is what a 2D layer already was in every
+    /// place this engine describes one.
+    ///
+    /// `params.z` packs `unlit | (paint_base << 1)`; setting bit 0 leaves the
+    /// paint base where it is.
+    pub fn force_unlit(&mut self) {
+        self.params[2] = ((self.params[2] as u32) | 1) as f32;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::group_by_key;
+
+    /// `force_unlit` sets the unlit bit and nothing else — the same lane
+    /// carries the vertex-paint base, and clobbering it would silently unpaint
+    /// every 2D-lit surface that had paint on it.
+    #[test]
+    fn forcing_unlit_keeps_the_paint_base() {
+        let mut m = super::MaterialParams::flat([1.0, 1.0, 1.0]);
+        m.paint_base = 1234;
+        m.unlit = false;
+        let mut raw = super::instance_of_mat(glam::Mat4::IDENTITY, &m);
+        assert_eq!(raw.params[2] as u32, 1234 << 1, "unpacked: unlit off, base intact");
+        raw.force_unlit();
+        assert_eq!(raw.params[2] as u32, (1234 << 1) | 1, "unlit on, base still intact");
+        // …and it is idempotent, because both gathers may reach the same value.
+        raw.force_unlit();
+        assert_eq!(raw.params[2] as u32, (1234 << 1) | 1);
+    }
 
     /// The draw-list grouping contract: first-appearance bucket order (draw
     /// order determinism + transparent layering ride on it), members in input

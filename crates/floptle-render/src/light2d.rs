@@ -81,6 +81,7 @@ impl Light2dInstance {
     pub fn from_raster(raw: &crate::raster::InstanceRaw, rank: u32) -> Self {
         Self { model: raw.model, tint: raw.color, meta: [rank as f32, 0.0, 0.0, 0.0] }
     }
+
 }
 
 /// The 2D lights reaching one frame, in the shape the accumulation shader reads.
@@ -112,6 +113,47 @@ pub struct Light2dUniform {
     pub mask: [[u32; 4]; 16],
 }
 
+impl Light2dUniform {
+    /// Which sorting **ranks** anything in this frame can change the look of,
+    /// as a 64-bit set — the union of every live light's layer mask, and every
+    /// rank at once when the base light is not white (`floptle/0122`).
+    ///
+    /// This is the filter the gather applies before it builds a single
+    /// instance. `Lit2D::Auto` answers *true* for every tilemap and every
+    /// sprite batch, so without it the whole flat scene is instanced, bucketed,
+    /// uploaded and rasterized a second time each frame — and then discarded on
+    /// a bit test in `fs_light`. Reported from a bullet hell paying that for
+    /// **366 batches and ~500 sprites a frame against zero lights that could
+    /// reach any of them**.
+    ///
+    /// Two things it must get right, both of which are why it lives here beside
+    /// the uniform rather than in the gather:
+    ///
+    /// * **The base light is not a light.** It has no mask and it reaches
+    ///   everything, so a base that has been turned down means every rank — or
+    ///   a dimmed room would quietly stop being dim the moment you deleted the
+    ///   last torch.
+    /// * **A parked light holds no slot** and is already absent from `count`
+    ///   (`floptle/0116`), so it cannot put a rank back in the set. A pool of
+    ///   spares at `intensity = 0` is the shape that card blessed, and it must
+    ///   stay free.
+    ///
+    /// `0` therefore means the pass has nothing to do at all, which is the
+    /// "a scene with 2D lighting available but no light placed does zero 2D
+    /// lighting work" property — as a consequence rather than a special case.
+    pub fn reach(&self) -> u64 {
+        // Not white: the base alone changes every flat surface in the scene.
+        if self.ambient[..3] != [1.0, 1.0, 1.0] {
+            return u64::MAX;
+        }
+        let n = (self.count[0].max(0.0) as usize).min(16);
+        // Words 0 and 1 only — a sorting rank runs to 63 (`SORT_LAYER_STEP` is
+        // 1/64), and words 2 and 3 are the padding a uniform array's 16-byte
+        // stride pays for either way.
+        self.mask[..n].iter().fold(0u64, |acc, m| acc | m[0] as u64 | ((m[1] as u64) << 32))
+    }
+}
+
 impl Default for Light2dUniform {
     fn default() -> Self {
         Self {
@@ -127,11 +169,18 @@ impl Default for Light2dUniform {
     }
 }
 
-/// The G-buffer's albedo format. `Rgba8Unorm` rather than the surface's sRGB
-/// format because the value written is a *material* colour that the accumulation
-/// multiplies — going through an sRGB encode and decode between the two stages
-/// would darken every lit pixel by the gamma curve.
-const ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// The G-buffer's albedo format. Linear rather than the surface's sRGB format
+/// because the value written is a *material* colour the accumulation does
+/// arithmetic on — going through an sRGB encode and decode between the two
+/// stages would darken every lit pixel by the gamma curve.
+///
+/// **Half-float and not `Rgba8Unorm`**, since `floptle/0121` made the composite a
+/// *difference* rather than a redraw. Eight linear bits put a 0.004 floor under
+/// every value, which is nothing when you multiply by it and a visible step when
+/// you subtract it back out of a dark pixel — linear 8-bit has ~1/255 of its
+/// range between "black" and "the darkest thing you can see", and a dark room
+/// with a torch in it is the whole point of the feature.
+const ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// r = sorting rank / 63, gb = the surface normal (flat until step 3).
 const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -148,7 +197,12 @@ struct Targets {
 /// Pipelines and per-frame targets for the 2D lighting pass.
 pub struct Light2d {
     pub(crate) fill_pipeline: wgpu::RenderPipeline,
-    pub(crate) light_pipeline: wgpu::RenderPipeline,
+    /// The two halves of the signed correction (`floptle/0121`): `dst - src` for
+    /// where a light darkens, `dst + src` for where it brightens. Two pipelines
+    /// and not two passes — they share every attachment and bind group, so they
+    /// run back to back in one render pass.
+    pub(crate) darken_pipeline: wgpu::RenderPipeline,
+    pub(crate) brighten_pipeline: wgpu::RenderPipeline,
     fill_buf: wgpu::Buffer,
     pub(crate) fill_bind: wgpu::BindGroup,
     lights_buf: wgpu::Buffer,
@@ -281,44 +335,70 @@ impl Light2d {
             bind_group_layouts: &[Some(&lights_layout), Some(&read_layout)],
             immediate_size: 0,
         });
-        let light_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("light2d-accumulate"),
-            layout: Some(&light_pl),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_full"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_light"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    // Alpha-blended so a partly transparent sprite composites over
-                    // whatever the main pass drew behind it, rather than replacing
-                    // it with a half-black pixel.
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::COLOR,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Gpu::DEPTH_FORMAT,
-                // The composite must not WRITE depth: it re-emits the flat
-                // surface's own depth only so that anything already in front of
-                // it wins. Writing would re-prime depth the main pass has
-                // already settled.
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        // The two halves of `floptle/0121`'s signed delta. Identical but for the
+        // entry point and the blend OPERATION — both take the source as-is
+        // (`One`/`One`), one subtracting it from the frame and one adding it.
+        //
+        // Not one pipeline with a signed source: a fixed-point colour target
+        // clamps the source to `[0, 1]` *before* blending, so a negative delta
+        // would arrive as zero and a dark room would never get dark.
+        let accumulate = |label: &str, entry: &str, op: wgpu::BlendOperation| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&light_pl),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_full"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(entry),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: color_format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: op,
+                            },
+                            // Never touched — `write_mask` is COLOR — but a
+                            // component is required, so keep the frame's own.
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::COLOR,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: Gpu::DEPTH_FORMAT,
+                    // The composite must not WRITE depth: it re-emits the flat
+                    // surface's own depth only so that anything already in front
+                    // of it wins. Writing would re-prime depth the main pass has
+                    // already settled.
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let darken_pipeline = accumulate(
+            "light2d-darken",
+            "fs_darken",
+            wgpu::BlendOperation::ReverseSubtract,
+        );
+        let brighten_pipeline =
+            accumulate("light2d-brighten", "fs_brighten", wgpu::BlendOperation::Add);
 
         let fill_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("light2d-fill"),
@@ -351,7 +431,8 @@ impl Light2d {
 
         Self {
             fill_pipeline,
-            light_pipeline,
+            darken_pipeline,
+            brighten_pipeline,
             fill_buf,
             fill_bind,
             lights_buf,
@@ -482,6 +563,48 @@ mod tests {
         let u = Light2dUniform::default();
         assert_eq!(u.count[0], 0.0);
         assert_eq!(u.ambient[..3], [1.0, 1.0, 1.0]);
+    }
+
+    /// `floptle/0122`: what the pass can reach decides what is gathered for it,
+    /// so an empty reach has to mean *nothing at all*, and a base light that has
+    /// been turned down has to mean *everything*.
+    #[test]
+    fn reach_is_the_union_of_the_masks_and_the_base_is_not_a_light() {
+        let u = Light2dUniform::default();
+        assert_eq!(u.reach(), 0, "no lights and a white base reaches nothing — and costs nothing");
+
+        // Two lights, two layers. Only the ranks they name are in the set.
+        let mut two = Light2dUniform { count: [2.0, 0.0, 0.0, 0.0], ..Default::default() };
+        two.mask[0] = [1 << 2, 0, 0, 0];
+        two.mask[1] = [1 << 5, 0, 0, 0];
+        assert_eq!(two.reach(), (1 << 2) | (1 << 5));
+        // …and a rank past the 32nd lives in word 1, which is exactly the half
+        // that would go missing if this only read `m[0]`.
+        two.mask[1] = [0, 1 << 8, 0, 0];
+        assert_eq!(two.reach(), (1 << 2) | (1u64 << 40));
+
+        // A light beyond `count` is a parked spare and holds nothing open
+        // (`floptle/0116`) — a pool at intensity 0 must stay free.
+        let mut parked = Light2dUniform { count: [1.0, 0.0, 0.0, 0.0], ..Default::default() };
+        parked.mask[0] = [1 << 3, 0, 0, 0];
+        parked.mask[1] = [u32::MAX, u32::MAX, 0, 0];
+        assert_eq!(parked.reach(), 1 << 3, "a parked light put its layers back in the set");
+
+        // A base turned down for a dark room changes every flat surface there
+        // is, with or without a light to carve it.
+        let dim = Light2dUniform { ambient: [0.4, 0.4, 0.45, 0.0], ..Default::default() };
+        assert_eq!(dim.reach(), u64::MAX, "a dimmed room stopped being dim with no lights in it");
+    }
+
+    /// A light that names no layers reaches all of them (`Lighting2D::reaches`),
+    /// which arrives here as an all-ones mask — so this optimization correctly
+    /// does nothing for the ordinary light somebody just dropped into a scene.
+    /// Worth its own test so nobody later "fixes" the empty case into zero.
+    #[test]
+    fn an_unrestricted_light_reaches_everything() {
+        let mut u = Light2dUniform { count: [1.0, 0.0, 0.0, 0.0], ..Default::default() };
+        u.mask[0] = [u32::MAX, u32::MAX, u32::MAX, u32::MAX];
+        assert_eq!(u.reach(), u64::MAX);
     }
 
     /// The instance attributes have to continue where the mesh's own stop, or

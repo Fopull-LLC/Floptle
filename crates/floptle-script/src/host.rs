@@ -1562,10 +1562,20 @@ impl ScriptHost {
                 // and x is that edge.
                 {
                     let q = draw_texts.clone();
-                    type TextArgs =
-                        (f32, f32, String, Option<f32>, Option<f32>, Option<f32>, Option<f32>, Option<f32>, Option<String>);
+                    type TextArgs = (
+                        f32,
+                        f32,
+                        String,
+                        Option<f32>,
+                        Option<f32>,
+                        Option<f32>,
+                        Option<f32>,
+                        Option<f32>,
+                        Option<String>,
+                        Option<String>,
+                    );
                     if let Ok(f) = lua.create_function(
-                        move |_, (x, y, s, size, r, g, b, a, align): TextArgs| {
+                        move |_, (x, y, s, size, r, g, b, a, align, font): TextArgs| {
                             q.borrow_mut().push(crate::DrawText {
                                 pos: [x, y],
                                 text: s,
@@ -1581,6 +1591,10 @@ impl ScriptHost {
                                     Some("right") => 2,
                                     _ => 0,
                                 },
+                                // Absent = the project's UI font, which is the
+                                // answer a game wants often enough that naming
+                                // it here should be the exception (`floptle/0124`).
+                                font: font.unwrap_or_default(),
                             });
                             Ok(())
                         },

@@ -93,6 +93,16 @@ pub struct DrawText {
     /// `0` left (x is the left edge), `1` centre, `2` right — the alignment
     /// that makes a right-hand HUD column line up without measuring anything.
     pub align: u8,
+    /// Project-relative `.ttf`/`.otf` path, or empty for the project's own UI
+    /// font (`floptle/0124`).
+    ///
+    /// Empty used to mean the embedded Roboto and nothing else, because project
+    /// fonts append to the font stack and slot 0 was never theirs. A game whose
+    /// UI is a pixel font could not draw one immediate-mode string in it — and
+    /// the symptom is not "wrong typeface", it is text that reads as badly
+    /// spaced, because a layout built on a monospace grid is being handed a
+    /// proportional font.
+    pub font: String,
 }
 
 /// One world-space FILLED triangle a script queued via `draw.tri` / `draw.cone`

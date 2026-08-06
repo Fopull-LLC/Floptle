@@ -961,7 +961,7 @@ impl Editor {
             let mut placed = floptle_ui::solve(&roots, design_vp, &measure);
             floptle_ui::place_scrollbars(&roots, &mut placed, &self.ui_layer_scrollbars(&roots));
             let masks = self.ui_layer_masks(&roots);
-            let dl = floptle_ui::draw_list(&roots, &placed, &masks);
+            let dl = floptle_ui::draw_list(&roots, &placed, &masks).for_layer(&layer);
             (placed, dl)
         };
         for q in &dl.quads {

@@ -195,6 +195,116 @@ fn main() {
     );
     assert!(centre > corner, "…and the light itself still has to show");
 
+    // ---- an authored alpha is the alpha that reaches the screen ------------
+    //
+    // `floptle/0121`. The composite used to write `albedo × light` OVER the
+    // frame at the surface's own alpha — but the raster pass had already blended
+    // that same sprite in, so a translucent one arrived twice and landed at an
+    // effective `1 - (1-a)²`. 0.5 drew at 0.75; 0.72 drew at 0.92. In every 2D
+    // project, with no light placed, invisible everywhere an author could look.
+    //
+    // It composites a DIFFERENCE now — `C·a·(light - 1)` — so this checks both
+    // ends of that claim at four alphas:
+    //
+    //   * no light placed, white base  ⇒ identical to the render with 2D
+    //     lighting switched off entirely;
+    //   * a light on it                ⇒ the analytic `C·light` over `B` at the
+    //     alpha the author actually typed.
+    let alphas = [0.25f32, 0.5, 0.75, 1.0];
+    // A base that is not white, so "no lights" is not the only case where the
+    // pass has something to do. This one both darkens and brightens per channel,
+    // which is why the delta goes out as two halves.
+    let mut warm = Light2dUniform {
+        count: [1.0, 0.0, 0.0, 0.0],
+        ambient: [0.35, 0.35, 0.4, 0.0],
+        inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+        ..Default::default()
+    };
+    warm.pos[0] = [0.0, 0.0, 0.0, 7.0];
+    warm.color[0] = [1.1, 0.8, 0.4, 0.0];
+    warm.mask[0] = [1 << MAP_RANK, 0, 0, 0];
+    let idle = Light2dUniform {
+        inv_view_proj: view_proj.inverse().to_cols_array_2d(),
+        ..Default::default()
+    };
+
+    // The engine's own opaque renders give the two colours the law needs — `C`
+    // as it draws it, and `C·light` as it lights it — so the check below is
+    // about COMPOSITING and does not re-derive the lighting maths a second time
+    // and grade the shader against the probe's opinion of it.
+    let opaque = |raster: &mut Raster, lights: Option<&Light2dUniform>| {
+        let m = MaterialParams { unlit: true, ..MaterialParams::flat([1.0, 1.0, 1.0]) };
+        let raw = instance_of_mat(Mat4::IDENTITY, &m);
+        let flat = [(map, Some::<TexId>(tex), Light2dInstance::from_raster(&raw, MAP_RANK))];
+        let px = shot(&gpu, raster, S, view_proj, map, tex, &raw, &flat, lights);
+        px[((S / 2) * S + S / 2) as usize]
+    };
+    let c_off = opaque(&mut raster, None);
+    let c_lit = opaque(&mut raster, Some(&warm));
+
+    for a in alphas {
+        // Unlit, as every surface on the 2D path is — the gather forces it, so
+        // that the difference the composite subtracts is the one the raster pass
+        // actually added.
+        let m = MaterialParams { unlit: true, alpha: a, ..MaterialParams::flat([1.0, 1.0, 1.0]) };
+        let raw = instance_of_mat(Mat4::IDENTITY, &m);
+        let flat = [(map, Some::<TexId>(tex), Light2dInstance::from_raster(&raw, MAP_RANK))];
+
+        let off = shot(&gpu, &mut raster, S, view_proj, map, tex, &raw, &flat, None);
+        let idle_px = shot(&gpu, &mut raster, S, view_proj, map, tex, &raw, &flat, Some(&idle));
+        let lit_px = shot(&gpu, &mut raster, S, view_proj, map, tex, &raw, &flat, Some(&warm));
+        let at = |p: &Vec<[u8; 4]>| p[((S / 2) * S + S / 2) as usize];
+        let (o, i, l) = (at(&off), at(&idle_px), at(&lit_px));
+        save_png(&lit_px, S, &format!("{dir}/light2d_alpha_{:02}_lit.png", (a * 100.0) as u32));
+        println!(
+            "alpha {a:.2}: off {:?}  idle {:?}  lit {:?}  (want lit {:?})",
+            &o[..3],
+            &i[..3],
+            &l[..3],
+            &over(c_lit, a)[..3]
+        );
+
+        // 0. The compositing law this probe grades against has to be the one the
+        //    frame actually obeys, or every assertion below is measuring the
+        //    probe. The render with no 2D lighting at all is pure raster
+        //    blending, so it is the control: if `over` cannot predict THAT, the
+        //    colour space is wrong and the rest means nothing.
+        for (c, &got) in o.iter().enumerate().take(3) {
+            let want = over(c_off, a)[c];
+            assert!(
+                (got as i32 - want as i32).abs() <= 2,
+                "the probe's own compositing law is wrong: raster-only channel {c} at alpha \
+                 {a} is {got} where the law says {want}"
+            );
+        }
+
+        // 1. No light placed and a white base changes nothing, at every alpha.
+        //    This is the claim the module opens with, and it used to hold only
+        //    for a = 1.
+        for c in 0..3 {
+            assert!(
+                (i[c] as i32 - o[c] as i32).abs() <= 1,
+                "alpha {a}: the idle pass moved channel {c} from {} to {} — a scene that has \
+                 placed no lights must be untouched, whatever its sprites' opacity",
+                o[c],
+                i[c]
+            );
+        }
+
+        // 2. With a light on it, the surface composites at ITS OWN alpha with
+        //    its lit colour: `C·light` over `B` at `a`, not at `1-(1-a)²`.
+        for (c, &got) in l.iter().enumerate().take(3) {
+            let want = over(c_lit, a)[c];
+            assert!(
+                (got as i32 - want as i32).abs() <= 3,
+                "alpha {a}: channel {c} lit to {got} where `C·light` over the background at \
+                 the AUTHORED alpha is {want}. A sprite that reaches the screen at an opacity \
+                 its author did not type is a readability budget nobody can spend — that is \
+                 the whole of `floptle/0121`."
+            );
+        }
+    }
+
     println!("2D lighting OK");
 }
 
@@ -244,6 +354,34 @@ fn shot(
         raster.light2d_pass(gpu, &view, &dview, (s, s), view_proj.to_cols_array_2d(), l, flat);
     }
     readback(gpu, &color, s)
+}
+
+/// The clear colour every shot is drawn over — the `B` in `C over B`. Linear,
+/// because a wgpu clear value always is.
+const BG: [f32; 3] = [0.02, 0.02, 0.04];
+
+/// `c` composited over the background at alpha `a`, in the frame's own colour
+/// space.
+///
+/// Blending happens in LINEAR space even on an sRGB target (the hardware decodes
+/// the destination, blends, re-encodes), so the mix has to be done there too —
+/// doing it on the stored bytes would predict a different number and quietly
+/// grade the renderer against the wrong law.
+fn over(c: [u8; 4], a: f32) -> [u8; 4] {
+    let mut out = [255u8; 4];
+    for i in 0..3 {
+        let lin = a * srgb_to_linear(c[i] as f32 / 255.0) + (1.0 - a) * BG[i];
+        out[i] = (linear_to_srgb(lin) * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+    out
+}
+
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }
 
 /// Perceptual-ish brightness of one pixel, 0..1.

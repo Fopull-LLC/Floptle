@@ -353,12 +353,21 @@ impl Editor {
     /// Pre-register every font any UI text references (before the immutable
     /// renderer borrow the measure callback needs).
     pub(crate) fn ensure_ui_fonts(&mut self) {
+        // The project's own font first (`floptle/0124`) — it is what an EMPTY
+        // font name resolves to, so it has to be registered before anything
+        // measures with one, which is most things.
+        let project_font = self.project.ui_font.clone();
+        self.ensure_ui_font(&project_font);
+        if let Some(uir) = self.ui_render.as_mut() {
+            uir.set_default_font(&project_font);
+        }
         let fonts: Vec<String> = self
             .world
             .query::<ElementSpec>()
             .filter_map(|(_, s)| s.text.as_ref())
             .map(|t| t.font.clone())
             .filter(|f| !f.is_empty())
+            .chain(self.script_texts.iter().map(|t| t.font.clone()).filter(|f| !f.is_empty()))
             .collect();
         for f in fonts {
             self.ensure_ui_font(&f);
@@ -644,7 +653,7 @@ impl Editor {
             let mut placed = floptle_ui::solve(roots, design_vp, &measure);
             floptle_ui::place_scrollbars(roots, &mut placed, &layer_scrollbars(&self.world, &ents, roots));
             let masks = layer_masks(&self.world, &ents, roots);
-            let dl = floptle_ui::draw_list_with(roots, &placed, &masks, self.ui_edit);
+            let dl = floptle_ui::draw_list_with(roots, &placed, &masks, self.ui_edit).for_layer(layer);
             for q in &dl.quads {
                 if !q.texture.is_empty() {
                     textures.push(q.texture.clone());
@@ -660,9 +669,14 @@ impl Editor {
             .script_texts
             .iter()
             .map(|t| {
+                // The font the script named, or the PROJECT's (`floptle/0124`)
+                // — measured with the very same one it is drawn in, or a
+                // centred run would be centred against Roboto's widths and land
+                // somewhere else entirely.
                 let spec = floptle_ui::TextSpec {
                     text: t.text.clone(),
                     size: t.size,
+                    font: t.font.clone(),
                     ..Default::default()
                 };
                 let [w, h] = uir.measure_spec(&spec);
@@ -676,6 +690,7 @@ impl Editor {
                     text: t.text.clone(),
                     size: t.size,
                     color: t.color,
+                    font: t.font.clone(),
                     ..Default::default()
                 }
             })
@@ -778,7 +793,7 @@ impl Editor {
             let mut placed = floptle_ui::solve(roots, design_vp, &measure);
             floptle_ui::place_scrollbars(roots, &mut placed, &layer_scrollbars(&self.world, &ents, roots));
             let masks = layer_masks(&self.world, &ents, roots);
-            let dl = floptle_ui::draw_list_with(roots, &placed, &masks, self.ui_edit);
+            let dl = floptle_ui::draw_list_with(roots, &placed, &masks, self.ui_edit).for_layer(layer);
             for q in &dl.quads {
                 if !q.texture.is_empty() {
                     textures.push(q.texture.clone());
@@ -1769,6 +1784,30 @@ impl Editor {
                          For pixel art: a fractional scale resamples the font off its own \
                          grid, so the same HUD reads crisp at one window size and mushy at \
                          another. The leftover becomes margin, so nothing moves off its edge.",
+                    )
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("text snap");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut layer.text_snap)
+                            .range(0.0..=64.0)
+                            .speed(1.0)
+                            .custom_formatter(|v, _| {
+                                if v < 1.0 { "off".into() } else { format!("{v:.0} px") }
+                            }),
+                    )
+                    .on_hover_text(
+                        "round every rasterized text size to a whole multiple of this many \
+                         SCREEN PIXELS. For a pixel font whose art is a grid: a cell only \
+                         looks like a pixel when it lands on a whole one, and `text size × \
+                         layer scale` almost never does — 24 design units at a 1.7389 scale \
+                         is 41.7 px, so a ten-cell em is 4.17 pixels per cell and every stem \
+                         is softened by a different fraction. Set it to the cells in an em \
+                         (10 for a tenth-of-an-em grid). Nothing is mispositioned when this \
+                         is off; the distortion is inside each glyph, which is why it reads \
+                         as bad spacing.",
                     )
                     .changed();
             });

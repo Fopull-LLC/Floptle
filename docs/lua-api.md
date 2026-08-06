@@ -24,7 +24,7 @@ each group, and meant to be searched.
 - [drawing — draw.*](#drawing--draw) — 13
 - [the web — http.*, json.*](#the-web--http-json) — 9
 - [the player's account — account.*](#the-players-account--account) — 13
-- [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 70
+- [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
 - [networking — net.*, synced](#networking--net-synced) — 31
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 14
@@ -39,7 +39,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
-- [components — getcomponent](#components--getcomponent) — 27
+- [components — getcomponent](#components--getcomponent) — 65
 - [animation — node:animator](#animation--nodeanimator) — 16
 - [particles — effects from script](#particles--effects-from-script) — 10
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 27
@@ -1072,7 +1072,7 @@ draw.sphere(cx,cy,cz, radius, r,g,b [,a]) — three rings, i.e. a wireframe ball
 
 ### `draw.text`
 
-draw.text(x, y, s, size, r,g,b [, a] [, align]) — a string on the SCREEN, in the pixels input.mouse() reports, without building a UI tree: a damage number, a frame-time readout, the count under a selection box. The engine measures and lays out the glyphs with the same font stack ui.make uses. align is "left" (default) | "center" | "right", and x is that edge. Immediate mode: re-draw it every frame you want it.
+draw.text(x, y, s, size, r,g,b [, a] [, align] [, font]) — a string on the SCREEN, in the pixels input.mouse() reports, without building a UI tree: a damage number, a frame-time readout, the count under a selection box. The engine measures and lays out the glyphs with the same font stack ui.make uses — and measures with the SAME font it draws, so a centred run lands where you asked. align is "left" (default) | "center" | "right", and x is that edge. font is a project-relative .ttf/.otf; leave it out and you get the project's UI font (Project Settings ▸ UI font), which is where to set it once rather than at forty call sites. Immediate mode: re-draw it every frame you want it.
 
 ```lua
 -- a HUD with no UI tree; align says which edge x is
@@ -1373,6 +1373,10 @@ Design units that span the window height.
 ### `layer.enabled`
 
 Master switch (1/0; assign true/false) — an off layer draws nothing.
+
+### `layer.textSnap`
+
+Round every rasterized text size to a whole multiple of this many SCREEN PIXELS; 0 = off. For a pixel font, whose art is a grid: a cell only looks like a pixel when it lands on a whole one, and `text size x layer scale` almost never does — so every stem is softened by a different fraction and the text reads as badly spaced even though nothing is mispositioned. Set it to the number of cells in an em.
 
 ### `layer.worldSpace`
 
@@ -2237,6 +2241,158 @@ The play-mode view camera (1/0) — assign true to switch to it.
 ### `cam.fovY`
 
 Vertical field of view, radians.
+
+### `env.ambient2d`
+
+find("Lighting"):getcomponent("Light") — the scene's Lighting node, read and written like any other component. THIS IS WHERE A 2D SCENE'S BRIGHTNESS LIVES: ambient2dR/G/B is the 2D base light, the whole light a flat scene has before a single 2D light is placed, so turning it down is how you get a dark room for a torch to carve a circle out of — and reading it back first is how you put it where it was. Also colorR/G/B + intensity + directionX/Y/Z (a day cycle), ambientR/G/B (the 3D fill, deliberately a different value), shadows/shadowSoftness/shadowStrength/shadowTintR/G/B/shadowQuantize/shadowDither/shadowDistance, and the whole fog set: fog, fogColorR/G/B, fogStart, fogEnd, fogDensity, fogHeight, fogFalloff, fogNoise, fogNoiseScale, fogVolumetric, fogDither, fogDitherStrength. Every scene has exactly one Lighting node and the loader makes it, so find("Lighting") always finds it. Writes land the same frame.
+
+### `env.ambient2dB`
+
+The 2D base light, blue 0..1. See ambient2dR.
+
+### `env.ambient2dG`
+
+The 2D base light, green 0..1. See ambient2dR.
+
+### `env.ambient2dR`
+
+The 2D BASE LIGHT, red 0..1 — the whole light a flat scene has before any 2D light is placed. White by default; turn it down for a dark room a torch can carve a circle out of, and read it back first so you can put it where it was.
+
+### `env.ambientB`
+
+3D ambient fill blue 0..1.
+
+### `env.ambientG`
+
+3D ambient fill green 0..1.
+
+### `env.ambientR`
+
+3D ambient fill red 0..1 — the fill under the key light, deliberately a different value from ambient2dR.
+
+### `env.colorB`
+
+Key light colour blue.
+
+### `env.colorG`
+
+Key light colour green.
+
+### `env.colorR`
+
+Key light colour red.
+
+### `env.directionX`
+
+Key light direction X — lerp the three for a day cycle.
+
+### `env.directionY`
+
+Key light direction Y.
+
+### `env.directionZ`
+
+Key light direction Z.
+
+### `env.fog`
+
+Depth fog on (1/0; assign true/false).
+
+### `env.fogColorB`
+
+Fog colour blue.
+
+### `env.fogColorG`
+
+Fog colour green.
+
+### `env.fogColorR`
+
+Fog colour red — match it to the horizon or a seam shows.
+
+### `env.fogDensity`
+
+Volumetric: media density per world unit.
+
+### `env.fogDither`
+
+Dither the fog gradient to hide 8-bit banding on long ramps (1/0).
+
+### `env.fogDitherStrength`
+
+Dither amplitude 0..1.
+
+### `env.fogEnd`
+
+World distance where fog is full.
+
+### `env.fogFalloff`
+
+Volumetric: softness of the layer's top edge, world units.
+
+### `env.fogHeight`
+
+Volumetric: world height (y) of the fog layer's top.
+
+### `env.fogNoise`
+
+Volumetric: how much drifting noise breaks up the media, 0..1.
+
+### `env.fogNoiseScale`
+
+Volumetric: noise feature size, world units per repeat.
+
+### `env.fogStart`
+
+World distance where fog begins (fully clear nearer than this).
+
+### `env.fogVolumetric`
+
+Volumetric mode (1/0): march real fog media instead of a distance ramp, so hills poke out of ground mist. fogStart/fogEnd do not apply.
+
+### `env.intensity`
+
+Brightness multiplier on the key (directional) light.
+
+### `env.shadowDistance`
+
+Max world distance a shadow ray marches before giving up; far geometry stops casting past it.
+
+### `env.shadowDither`
+
+Bayer-dither the penumbra (1/0) — the classic PS1 dithered shadow edge.
+
+### `env.shadowQuantize`
+
+0 = smooth penumbra; 2..8 = posterize it into that many bands (toon/retro).
+
+### `env.shadowSoftness`
+
+0 = razor-hard edge … 1 = dreamy-soft penumbra.
+
+### `env.shadowStrength`
+
+How dark full shadow gets, 0..1 (ambient still fills, so never pitch black).
+
+### `env.shadowTintB`
+
+Shadow tint blue.
+
+### `env.shadowTintG`
+
+Shadow tint green.
+
+### `env.shadowTintR`
+
+Shadows darken toward this colour instead of black — red.
+
+### `env.shadows`
+
+Sun shadows on (1/0; assign true/false). Every shadow field below only applies when this is on.
+
+### `env.stars`
+
+Stars mode (1/0; assign true/false): luminous celestial bodies ARE the key lights.
 
 ### `light.b`
 

@@ -90,6 +90,7 @@ fn main() {
     {
         let px = p.render(
             &DrawList {
+            text_snap: 0.0,
                 quads: vec![
                     bg(),
                     Quad {
@@ -155,6 +156,7 @@ fn main() {
     {
         let px = p.render(
             &DrawList {
+            text_snap: 0.0,
                 quads: vec![
                     bg(),
                     Quad {
@@ -198,6 +200,7 @@ fn main() {
     {
         let px = p.render(
             &DrawList {
+            text_snap: 0.0,
                 quads: vec![
                     bg(),
                     // Glow behind a small bright chip.
@@ -271,6 +274,7 @@ fn main() {
     {
         let px = p.render(
             &DrawList {
+            text_snap: 0.0,
                 quads: vec![
                     bg(),
                     Quad {
@@ -302,6 +306,7 @@ fn main() {
     {
         let px = p.render(
             &DrawList {
+            text_snap: 0.0,
                 quads: vec![
                     // A bright background is the case plain text can't survive.
                     Quad {
@@ -451,6 +456,7 @@ fn main() {
             ..Default::default()
         };
         let list = DrawList {
+            text_snap: 0.0,
             quads: vec![
                 bg(),
                 sliced([30.0, 30.0, 260.0, 120.0]),  // wide

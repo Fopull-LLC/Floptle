@@ -1129,6 +1129,32 @@ mod tests {
         assert_eq!(r.0, [8.0, 8.0, 0.0, 0.0]);
     }
 
+    /// `floptle/0124`: `ui.make` CAN name a font — reported as though it could
+    /// not, and worth a test rather than a correction, because a property is
+    /// only useful if it survives the rebuild a reconcile puts a node through.
+    #[test]
+    fn a_made_label_can_name_its_own_font() {
+        assert!(known_prop("font"));
+        let mut node = MadeNode {
+            kind: Kind::Text,
+            props: vec![
+                ("text".to_string(), PropVal::Str("hi".into())),
+                ("font".to_string(), PropVal::Str("fonts/Pixel.ttf".into())),
+            ],
+            ..Default::default()
+        };
+        node.props.sort_by(|a, b| a.0.cmp(&b.0));
+        let built = node.build();
+        let t = built.text.as_ref().expect("a text slot");
+        assert_eq!(t.font, "fonts/Pixel.ttf");
+        assert_eq!(t.text, "hi");
+        // …and it survives the rebuild path, which is the one a live tree takes.
+        assert_eq!(node.rebuild(&built).text.unwrap().font, "fonts/Pixel.ttf");
+        // An empty font is not "no font" — it is *the project's* font now,
+        // which is what every label that never says otherwise gets.
+        assert_eq!(prop("text", PropVal::Str("hi".into())).build().text.unwrap().font, "");
+    }
+
     #[test]
     fn an_unknown_property_is_refused_rather_than_ignored() {
         assert!(!known_prop("colour"));

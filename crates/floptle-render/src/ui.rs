@@ -409,6 +409,10 @@ pub struct Ui {
     fonts: Vec<fontdue::Font>,
     /// Asset path → index into `fonts` (None = failed to parse, use fallback).
     font_ids: HashMap<String, Option<usize>>,
+    /// What an EMPTY font name resolves to — the project's font when it names
+    /// one, else 0 (`floptle/0124`). Project fonts append to the stack, so
+    /// without this every unnamed string is the embedded Roboto forever.
+    default_font: usize,
     /// Every glyph currently resident in the atlas, with the frame it was last
     /// drawn on — the staleness `maintain` evicts by.
     glyphs: HashMap<(usize, char, u32), GlyphEntry>,
@@ -856,6 +860,7 @@ impl Ui {
             atlas_bind,
             fonts: vec![font],
             font_ids: HashMap::new(),
+            default_font: 0,
             glyphs: HashMap::new(),
             packer: ShelfPacker::new(ATLAS_START),
             atlas_size: ATLAS_START,
@@ -1180,12 +1185,37 @@ impl Ui {
         self.font_ids.contains_key(path)
     }
 
-    /// The font index for an asset path (0 = fallback for empty/unknown/failed).
+    /// Point the empty font name at the **project's** font instead of the
+    /// embedded Roboto (`floptle/0124`).
+    ///
+    /// Project fonts *append* to the stack, so slot 0 could never be the
+    /// project's — which meant every string that did not name a font by hand
+    /// came out in Roboto. That is most of them: `draw.text` had no font
+    /// argument at all, so a whole game's dialogue was drawn in a proportional
+    /// font while its layout assumed the monospace grid of its own. Letters
+    /// overlapped where they were wide and left holes where they were narrow.
+    ///
+    /// Pass an empty path (or one that failed to parse) to go back to Roboto.
+    pub fn set_default_font(&mut self, path: &str) {
+        self.default_font = if path.is_empty() {
+            0
+        } else {
+            self.font_ids.get(path).copied().flatten().unwrap_or(0)
+        };
+    }
+
+    /// The asset path currently standing in for the empty font name, if any.
+    pub fn default_font(&self) -> usize {
+        self.default_font
+    }
+
+    /// The font index for an asset path.
+    ///
+    /// An empty name means *the project's font* — see [`Self::set_default_font`]
+    /// — falling back to the embedded one when a project has named none. An
+    /// unknown or unparseable path also falls back rather than drawing nothing.
     pub fn font_id(&self, path: &str) -> usize {
-        if path.is_empty() {
-            return 0;
-        }
-        self.font_ids.get(path).copied().flatten().unwrap_or(0)
+        resolve_font(&self.font_ids, self.default_font, path)
     }
 
     /// Measure a single-line run in the same units as `size` (the layout
@@ -1561,7 +1591,12 @@ impl Ui {
             } else {
                 t.size
             };
-            let px = (size * scale).round().max(1.0) as u32;
+            // Rasterize on the layer's own grid when it asked for one
+            // (`floptle/0120`): a pixel font's cells only look like pixels when
+            // a cell is a whole number of screen pixels, and `size * scale` is
+            // almost never that because the scale is the window's, not the
+            // author's.
+            let px = floptle_ui::text_px(size * scale, list.text_snap);
             let track_px = t.tracking * scale;
             // One place decides line breaks. The layout solver measures with
             // the same helper, so a `Fit` element can never disagree with what
@@ -1570,9 +1605,19 @@ impl Ui {
             // rasterizes glyphs (`&mut self`), so the measuring closure — which
             // borrows `self` immutably — has to be finished with by then.
             let (lines, widths): (Vec<String>, Vec<f32>) = {
+                // Measured at the size the glyphs will actually be rasterized
+                // at when the layer snaps (`floptle/0120`) — a run measured at
+                // `size * scale` and drawn at a snapped `px` would wrap in
+                // places the glyphs do not, and ellipsize a line that fits.
+                // Off, it is `size * scale` to the last bit, so no existing
+                // project's text re-wraps.
                 let advance = |s: &str| {
-                    self.measure_font(fid, s, size)[0] * scale
-                        + track_px * s.chars().count() as f32
+                    let w = if list.text_snap >= 1.0 {
+                        self.measure_font(fid, s, px as f32)[0]
+                    } else {
+                        self.measure_font(fid, s, size)[0] * scale
+                    };
+                    w + track_px * s.chars().count() as f32
                 };
                 let mut lines = if t.wrap {
                     floptle_ui::text::wrap_lines(&t.text, rect_px[2], &advance)
@@ -2005,9 +2050,51 @@ fn write_notdef(queue: &wgpu::Queue, atlas: &wgpu::Texture) {
     );
 }
 
+/// Which font a name resolves to (`floptle/0124`).
+///
+/// A free function so it can be tested without a GPU, and because the rule is
+/// worth stating in one place: **empty means the project's font**, and anything
+/// unknown or unparseable falls back to the same one rather than drawing
+/// nothing. `default` is 0 — the embedded Roboto — until a project names one.
+fn resolve_font(ids: &HashMap<String, Option<usize>>, default: usize, path: &str) -> usize {
+    if path.is_empty() {
+        return default;
+    }
+    ids.get(path).copied().flatten().unwrap_or(default)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `floptle/0124`: an unnamed font is the PROJECT's, not the embedded one.
+    ///
+    /// Project fonts append to the stack, so slot 0 could never be theirs — and
+    /// `draw.text` had no font argument at all, so a game whose UI is a pixel
+    /// font drew its whole dialogue in Roboto. On a layout built for a monospace
+    /// grid that reads as letters overlapping and gapping, not as a typeface.
+    #[test]
+    fn an_unnamed_font_is_the_projects_own() {
+        let mut ids = HashMap::new();
+        ids.insert("fonts/Pixel.ttf".to_string(), Some(1usize));
+        ids.insert("fonts/Broken.ttf".to_string(), None); // parsed badly
+
+        // No project font: everything unnamed is the embedded fallback, exactly
+        // as it always was.
+        assert_eq!(resolve_font(&ids, 0, ""), 0);
+        assert_eq!(resolve_font(&ids, 0, "fonts/Pixel.ttf"), 1);
+
+        // With one: the empty name follows it, and so does anything the project
+        // named but could not load — a broken path should look like the rest of
+        // your UI, not like the one thing that isn't.
+        assert_eq!(resolve_font(&ids, 1, ""), 1);
+        assert_eq!(resolve_font(&ids, 1, "fonts/Broken.ttf"), 1);
+        assert_eq!(resolve_font(&ids, 1, "fonts/NeverRegistered.ttf"), 1);
+        // …and naming one explicitly still wins over the project default.
+        assert_eq!(resolve_font(&ids, 1, "fonts/Pixel.ttf"), 1);
+        ids.insert("fonts/Other.ttf".to_string(), Some(2));
+        assert_eq!(resolve_font(&ids, 1, "fonts/Other.ttf"), 2);
+    }
 
     /// The bug this file's atlas work exists for: the old packer was one
     /// forward cursor, so every glyph landed in a row as tall as the tallest

@@ -1293,13 +1293,13 @@ draw.rect(x, y, w, h, r, g, b [, a] [, radius])        -- filled
 draw.rectOutline(x, y, w, h, r, g, b [, a] [, px])     -- hollow, `px` thick
 draw.circle(x, y, radius, r, g, b [, a])               -- x,y is the CENTRE
 draw.circleOutline(x, y, radius, r, g, b [, a] [, px])
-draw.text(x, y, s, size, r, g, b [, a] [, align])      -- align: "left"|"center"|"right"
+draw.text(x, y, s, size, r, g, b [, a] [, align] [, font])
 ```
 
 `draw.text` is measured and laid out by the engine with the same font stack
 `ui.make` uses, so a damage number, a frame-time readout or a count under a
-selection box needs no UI tree and no idea how wide an `m` is. `align` says
-which edge `x` is:
+selection box needs no UI tree and no idea how wide an `m` is. `align` is
+`"left"` (default) | `"center"` | `"right"`, and says which edge `x` is:
 
 ```lua
 -- a HUD in three lines
@@ -1307,6 +1307,26 @@ draw.text(24, 24, "HP " .. hp, 22, 1, 0.4, 0.4)
 draw.circle(40, 80, 12, 0.3, 1, 0.5, 0.8)
 draw.text(w - 24, 24, string.format("%.1f fps", 1 / dt), 18, 1, 1, 1, 0.7, "right")
 ```
+
+#### Which font it uses
+
+Leave `font` out and you get **the project's UI font** — Project Settings ▸ **UI
+font**, a project-relative `.ttf`/`.otf`. That is the setting to reach for: it
+also covers every `ui.make` label and every element whose style names no font,
+so a pixel-art game says its font once instead of at forty call sites.
+
+```lua
+-- one line, in the project's font
+draw.text(24, 24, "HP " .. hp, 22, 1, 0.4, 0.4)
+-- …and one that insists on a different one
+draw.text(24, 60, "CHAPTER I", 30, 1, 1, 1, 1, "left", "fonts/Display.otf")
+```
+
+Set neither and you get the engine's built-in font, which is proportional. If
+your layout assumes a **monospace grid** — a character at a time at a fixed
+advance, which is how most typewriter dialogue is built — that mismatch does not
+read as "wrong typeface". It reads as bad letter spacing: wide letters overlap
+their neighbours and narrow ones leave holes, differently in every word.
 
 They draw over the scene *and* over the HUD, in the Game view and in a build.
 This is the whole of an RTS marquee — the two corners you dragged between:

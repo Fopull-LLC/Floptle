@@ -242,6 +242,15 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
                 "enabled" | "bloom" | "vignette" | "posterizeDither"
             )
             | (
+                "Light",
+                "stars"
+                    | "shadows"
+                    | "shadowDither"
+                    | "fog"
+                    | "fogDither"
+                    | "fogVolumetric"
+            )
+            | (
                 "RigidBody",
                 "gravity"
                     | "kinematic"
@@ -277,6 +286,65 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
         out.insert(
             "ParticleSystem".to_string(),
             HashMap::from([("play_on_start".to_string(), if ps.play_on_start { 1.0 } else { 0.0 })]),
+        );
+    }
+    // The Lighting node (`floptle/0123`). `ambient2d*` is the one that had no
+    // route at all and is the reason this arm exists: it is **the whole light a
+    // flat scene has** until a torch is placed, so turning it down is how a 2D
+    // game gets a dark room — and until now that was a decision you made once in
+    // the scene file and could never read back, animate, or undo.
+    //
+    // Which cost, concretely, a quality governor that parks every light at
+    // `intensity = 0` on a weak machine and had nowhere to put the base back to
+    // white; a brightness setting, which is the single most common request a
+    // game with atmospheric lighting gets; and a blackout, or a lights-back-on
+    // beat, which is one lerp on a value the renderer already reads per frame.
+    //
+    // The rest of `Light`'s numeric surface comes along because the arm is being
+    // written anyway and each of them is a day cycle or a weather system
+    // somebody would otherwise reach for a second time.
+    if let Some(l) = world.get::<floptle_core::Light>(e) {
+        out.insert(
+            "Light".to_string(),
+            HashMap::from([
+                ("directionX".to_string(), l.direction[0] as f64),
+                ("directionY".to_string(), l.direction[1] as f64),
+                ("directionZ".to_string(), l.direction[2] as f64),
+                ("stars".to_string(), f64::from(l.stars)),
+                ("colorR".to_string(), l.color[0] as f64),
+                ("colorG".to_string(), l.color[1] as f64),
+                ("colorB".to_string(), l.color[2] as f64),
+                ("intensity".to_string(), l.intensity as f64),
+                ("ambientR".to_string(), l.ambient[0] as f64),
+                ("ambientG".to_string(), l.ambient[1] as f64),
+                ("ambientB".to_string(), l.ambient[2] as f64),
+                ("ambient2dR".to_string(), l.ambient_2d[0] as f64),
+                ("ambient2dG".to_string(), l.ambient_2d[1] as f64),
+                ("ambient2dB".to_string(), l.ambient_2d[2] as f64),
+                ("shadows".to_string(), f64::from(l.shadows)),
+                ("shadowSoftness".to_string(), l.shadow_softness as f64),
+                ("shadowStrength".to_string(), l.shadow_strength as f64),
+                ("shadowTintR".to_string(), l.shadow_tint[0] as f64),
+                ("shadowTintG".to_string(), l.shadow_tint[1] as f64),
+                ("shadowTintB".to_string(), l.shadow_tint[2] as f64),
+                ("shadowQuantize".to_string(), l.shadow_quantize as f64),
+                ("shadowDither".to_string(), f64::from(l.shadow_dither)),
+                ("shadowDistance".to_string(), l.shadow_distance as f64),
+                ("fog".to_string(), f64::from(l.fog)),
+                ("fogColorR".to_string(), l.fog_color[0] as f64),
+                ("fogColorG".to_string(), l.fog_color[1] as f64),
+                ("fogColorB".to_string(), l.fog_color[2] as f64),
+                ("fogStart".to_string(), l.fog_start as f64),
+                ("fogEnd".to_string(), l.fog_end as f64),
+                ("fogDither".to_string(), f64::from(l.fog_dither)),
+                ("fogDitherStrength".to_string(), l.fog_dither_strength as f64),
+                ("fogVolumetric".to_string(), f64::from(l.fog_volumetric)),
+                ("fogDensity".to_string(), l.fog_density as f64),
+                ("fogHeight".to_string(), l.fog_height as f64),
+                ("fogFalloff".to_string(), l.fog_falloff as f64),
+                ("fogNoise".to_string(), l.fog_noise as f64),
+                ("fogNoiseScale".to_string(), l.fog_noise_scale as f64),
+            ]),
         );
     }
     // A material's SPRITESHEET frame — the mesh-side twin of a UI image's
@@ -488,6 +556,9 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("designHeight".to_string(), l.design_height as f64),
                 // 0 = Screen overlay, 1 = World-space panel.
                 ("worldSpace".to_string(), if l.is_world() { 1.0 } else { 0.0 }),
+                // Whole screen pixels every rasterized text size rounds to,
+                // for a pixel font whose art is a grid (`floptle/0120`). 0 = off.
+                ("textSnap".to_string(), l.text_snap as f64),
             ]),
         );
     }
@@ -760,6 +831,9 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "enabled" => l.enabled = val != 0.0,
                     "z" => l.z = val as i32,
                     "designHeight" => l.design_height = (val as f32).max(1.0),
+                    // A settings screen that offers a pixel-perfect mode writes
+                    // this; 0 turns it off (`floptle/0120`).
+                    "textSnap" => l.text_snap = (val as f32).clamp(0.0, 64.0),
                     "worldSpace" => {
                         l.space = if val != 0.0 {
                             floptle_ui::UiSpace::World
@@ -838,6 +912,57 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     // negative from Lua must not wrap into a huge one.
                     "posterizeBands" => *posterize_bands = val.max(0.0) as u32,
                     "posterizeDither" => *posterize_dither = val != 0.0,
+                    _ => {}
+                }
+            }
+        }
+        // The Lighting node (`floptle/0123`). Clamped where a value has a range
+        // and left alone where it does not: a colour channel above 1 is a
+        // legitimate over-bright, and `ambient2d*` above 1 is how you blow a
+        // flat scene out on purpose.
+        "Light" => {
+            if let Some(l) = world.get_mut::<floptle_core::Light>(ent) {
+                let v = val as f32;
+                match field {
+                    "directionX" => l.direction[0] = v,
+                    "directionY" => l.direction[1] = v,
+                    "directionZ" => l.direction[2] = v,
+                    "stars" => l.stars = val != 0.0,
+                    "colorR" => l.color[0] = v.max(0.0),
+                    "colorG" => l.color[1] = v.max(0.0),
+                    "colorB" => l.color[2] = v.max(0.0),
+                    "intensity" => l.intensity = v.max(0.0),
+                    "ambientR" => l.ambient[0] = v.max(0.0),
+                    "ambientG" => l.ambient[1] = v.max(0.0),
+                    "ambientB" => l.ambient[2] = v.max(0.0),
+                    "ambient2dR" => l.ambient_2d[0] = v.max(0.0),
+                    "ambient2dG" => l.ambient_2d[1] = v.max(0.0),
+                    "ambient2dB" => l.ambient_2d[2] = v.max(0.0),
+                    "shadows" => l.shadows = val != 0.0,
+                    "shadowSoftness" => l.shadow_softness = v.clamp(0.0, 1.0),
+                    "shadowStrength" => l.shadow_strength = v.clamp(0.0, 1.0),
+                    "shadowTintR" => l.shadow_tint[0] = v.clamp(0.0, 1.0),
+                    "shadowTintG" => l.shadow_tint[1] = v.clamp(0.0, 1.0),
+                    "shadowTintB" => l.shadow_tint[2] = v.clamp(0.0, 1.0),
+                    // A count, so a negative from Lua must not wrap into a huge
+                    // one — the same care `posterizeBands` takes above.
+                    "shadowQuantize" => l.shadow_quantize = val.max(0.0) as u32,
+                    "shadowDither" => l.shadow_dither = val != 0.0,
+                    "shadowDistance" => l.shadow_distance = v.max(0.0),
+                    "fog" => l.fog = val != 0.0,
+                    "fogColorR" => l.fog_color[0] = v.max(0.0),
+                    "fogColorG" => l.fog_color[1] = v.max(0.0),
+                    "fogColorB" => l.fog_color[2] = v.max(0.0),
+                    "fogStart" => l.fog_start = v.max(0.0),
+                    "fogEnd" => l.fog_end = v.max(0.0),
+                    "fogDither" => l.fog_dither = val != 0.0,
+                    "fogDitherStrength" => l.fog_dither_strength = v.clamp(0.0, 1.0),
+                    "fogVolumetric" => l.fog_volumetric = val != 0.0,
+                    "fogDensity" => l.fog_density = v.max(0.0),
+                    "fogHeight" => l.fog_height = v,
+                    "fogFalloff" => l.fog_falloff = v.max(0.0),
+                    "fogNoise" => l.fog_noise = v.clamp(0.0, 1.0),
+                    "fogNoiseScale" => l.fog_noise_scale = v.max(0.001),
                     _ => {}
                 }
             }
@@ -4377,6 +4502,75 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
 mod tests {
     use super::*;
     use floptle_core::Material;
+
+    /// `floptle/0123`: the 2D base light is a value a script can read, write,
+    /// and — the half that is easy to leave out — read back *first* so it can
+    /// restore what it dimmed.
+    ///
+    /// The case that made it a card is a quality governor: it parks every light
+    /// at `intensity = 0` on a weak machine, which with a base at 0.4 leaves a
+    /// permanently dark room and nothing left to light it. Putting the base back
+    /// is one line, and there was nowhere to write it.
+    #[test]
+    fn the_2d_base_light_reads_back_and_writes_through() {
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, floptle_core::Light { ambient_2d: [0.4, 0.38, 0.5], ..Default::default() });
+
+        // Read: the scene's authored value, not a constant the script had to know.
+        let mirror = mirror_components(&world, e);
+        let light = mirror.get("Light").expect("the Lighting node mirrors a Light");
+        assert_eq!(light.get("ambient2dR").copied(), Some(0.4f32 as f64));
+        assert_eq!(light.get("ambient2dG").copied(), Some(0.38f32 as f64));
+        assert_eq!(light.get("ambient2dB").copied(), Some(0.5f32 as f64));
+        let authored = [light["ambient2dR"], light["ambient2dG"], light["ambient2dB"]];
+
+        // Write: the governor's "put the room back".
+        for (f, v) in [("ambient2dR", 1.0), ("ambient2dG", 1.0), ("ambient2dB", 1.0)] {
+            apply_component_field(&mut world, e, "Light", f, v);
+        }
+        assert_eq!(world.get::<floptle_core::Light>(e).unwrap().ambient_2d, [1.0, 1.0, 1.0]);
+
+        // …and back to what the scene said, from the value it read first.
+        for (f, v) in [("ambient2dR", authored[0]), ("ambient2dG", authored[1]), ("ambient2dB", authored[2])] {
+            apply_component_field(&mut world, e, "Light", f, v);
+        }
+        assert_eq!(world.get::<floptle_core::Light>(e).unwrap().ambient_2d, [0.4, 0.38, 0.5]);
+    }
+
+    /// The rest of the node came along in the same arm, so it has to actually
+    /// work — a day cycle writes `direction*`, a weather system writes the fog
+    /// set, and a boolean has to survive the round trip through an `f64`.
+    #[test]
+    fn the_lighting_nodes_other_fields_write_through_too() {
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, floptle_core::Light::default());
+        for (f, v) in [
+            ("directionY", -1.0),
+            ("intensity", 2.5),
+            ("fog", 1.0),
+            ("fogEnd", 900.0),
+            ("shadowQuantize", 4.0),
+        ] {
+            apply_component_field(&mut world, e, "Light", f, v);
+        }
+        let l = world.get::<floptle_core::Light>(e).unwrap();
+        assert_eq!(l.direction[1], -1.0);
+        assert_eq!(l.intensity, 2.5);
+        assert!(l.fog);
+        assert_eq!(l.fog_end, 900.0);
+        assert_eq!(l.shadow_quantize, 4);
+        // A bool reads back as 1/0 and is declared a bool, so the handle's
+        // `= true` / `= false` spelling works rather than storing 1.0.
+        assert_eq!(mirror_components(&world, e)["Light"]["fog"], 1.0);
+        assert!(is_bool_field("Light", "fog"));
+        assert!(!is_bool_field("Light", "fogEnd"));
+
+        // A count must not wrap when a script hands it a negative.
+        apply_component_field(&mut world, e, "Light", "shadowQuantize", -3.0);
+        assert_eq!(world.get::<floptle_core::Light>(e).unwrap().shadow_quantize, 0);
+    }
 
     /// `-1` means empty, and so does every other negative, and so does `nil`
     /// (`floptle/0083`).
