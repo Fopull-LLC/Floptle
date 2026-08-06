@@ -561,6 +561,31 @@ interactive (`draw.*`, a shader, your own hit-testing).
 > did not release it either, because that is a separate lock owner. Its own
 > menus were unclickable for the rest of the session.
 
+### Escape always wins
+
+While a game holds the cursor, **Escape gives it back to you** and the game
+can't take it again until you click into the Game view. The Game view says so
+along its bottom edge, in both directions — a grabbed cursor is invisible, so
+the one thing that says how to get it back can't be the cursor.
+
+That matters because a first-person camera calls `setMouseLocked(true)` from
+`update`, on every single frame, which is the correct way to write one. Escape
+does not fight that call: your game keeps asking, the editor keeps saying no,
+and the moment you click back into the view your camera has the mouse again
+with nothing to re-establish. Leaving the window does the same thing, so
+alt-tabbing away and back lands you on a usable pointer rather than a grabbed
+one.
+
+While the editor is holding it, your game reads a **neutral mouse** — no
+motion, no buttons, no wheel, and no action bound to any of them. Its keyboard
+and gamepad are untouched, because it's still playing. So you can tune a value
+in the Inspector mid-flight without the view spinning to follow the pointer and
+without every click on a slider also firing your weapon.
+
+> Before **0.40.1** Escape cleared the lock for exactly one frame and the next
+> `update` took it straight back, so a first-person game in the editor had a
+> cursor you could only recover by alt-tabbing out of the whole application.
+
 Key names are **the same names the action map's key picker shows** (Project
 Settings ⏵ Input) — one list, so a key you can bind is a key you can poll:
 

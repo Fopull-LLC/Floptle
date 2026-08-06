@@ -150,6 +150,27 @@ impl Editor {
         }
     }
 
+    /// The devices as the GAME may read them this frame.
+    ///
+    /// Identical to `raw_input` except while the editor is holding the pointer
+    /// (Escape during play): then the mouse — buttons, motion, wheel — is the
+    /// editor's, and the action layer has to agree with the raw `input` API
+    /// about that. If it didn't, a `LookEnable` bound to the right button would
+    /// still turn the camera while you dragged an Inspector slider with it.
+    ///
+    /// Keyboard and gamepad are untouched: the game is still playing.
+    fn raw_input_for_game(&self) -> floptle_input::RawInput {
+        let mut raw = self.raw_input.clone();
+        if self.cursor_freed {
+            raw.mouse_buttons = Default::default();
+            raw.mouse_delta = (0.0, 0.0);
+            raw.scroll = (0.0, 0.0);
+            raw.pressed.retain(|s| !matches!(s, floptle_input::Source::Mouse(_)));
+            raw.released.retain(|s| !matches!(s, floptle_input::Source::Mouse(_)));
+        }
+        raw
+    }
+
     /// Resolve the FRAME domain (what `update` reads).
     ///
     /// Unfocused game view resolves neutral for the same reason raw keys do:
@@ -158,7 +179,7 @@ impl Editor {
     pub(crate) fn resolve_frame_actions(&mut self, dt: f32, game_focused: bool) {
         let sys = self.script_host.input_system().clone();
         if game_focused {
-            let raw = self.raw_input.clone();
+            let raw = self.raw_input_for_game();
             sys.borrow_mut().resolve_frame(&raw, dt);
         } else {
             sys.borrow_mut().resolve_frame(&floptle_input::RawInput::default(), dt);
@@ -169,7 +190,8 @@ impl Editor {
     /// history. Consumes the banked edges, so call exactly once per tick.
     pub(crate) fn resolve_tick_actions(&mut self, dt: f32, game_focused: bool) {
         let sys = self.script_host.input_system().clone();
-        let mut raw = if game_focused { self.raw_input.clone() } else { floptle_input::RawInput::default() };
+        let mut raw =
+            if game_focused { self.raw_input_for_game() } else { floptle_input::RawInput::default() };
         // Even when the view isn't focused the banked edges must be DRAINED, or
         // a press made while editing would fire the moment play regains focus.
         raw.pressed = std::mem::take(&mut self.tick_input_edges.0);
@@ -177,6 +199,11 @@ impl Editor {
         if !game_focused {
             raw.pressed.clear();
             raw.released.clear();
+        } else if self.cursor_freed {
+            // Same rule as the frame domain, applied AFTER the drain so the
+            // edges are still consumed rather than piling up for later.
+            raw.pressed.retain(|s| !matches!(s, floptle_input::Source::Mouse(_)));
+            raw.released.retain(|s| !matches!(s, floptle_input::Source::Mouse(_)));
         }
         sys.borrow_mut().resolve_tick(&raw, dt);
     }
@@ -450,6 +477,38 @@ fn input_map_mtime(root: &std::path::Path) -> Option<std::time::SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Freeing the cursor has to reach the ACTION layer too, not just the raw
+    /// `input` API. `LookEnable` is bound to the right mouse button in the
+    /// starter map, so a camera would otherwise keep turning for the whole
+    /// journey across to the Inspector — and every click on a slider would also
+    /// be a click in the game.
+    ///
+    /// The keyboard is deliberately untouched: the game is still playing.
+    #[test]
+    fn freeing_the_cursor_takes_the_mouse_out_of_the_action_layer() {
+        let mut raw = floptle_input::RawInput { mouse_delta: (12.0, -4.0), ..Default::default() };
+        raw.mouse_buttons[floptle_input::MouseButton::Right.index()] = true;
+        raw.scroll = (0.0, 3.0);
+        raw.keys.insert(floptle_input::Key::KeyW);
+        raw.pressed.insert(Source::Mouse(floptle_input::MouseButton::Left));
+        raw.pressed.insert(Source::Key(floptle_input::Key::KeyW));
+
+        let held = Editor { raw_input: raw.clone(), ..Default::default() };
+        assert_eq!(held.raw_input_for_game().mouse_delta, (12.0, -4.0), "the game has the mouse");
+
+        let freed = Editor { raw_input: raw, cursor_freed: true, ..Default::default() };
+        let got = freed.raw_input_for_game();
+        assert_eq!(got.mouse_delta, (0.0, 0.0));
+        assert_eq!(got.scroll, (0.0, 0.0));
+        assert_eq!(got.mouse_buttons, [false; 5]);
+        assert!(!got.pressed.contains(&Source::Mouse(floptle_input::MouseButton::Left)));
+        assert!(
+            got.pressed.contains(&Source::Key(floptle_input::Key::KeyW)),
+            "the keyboard is still the game's — only the pointer moved"
+        );
+        assert!(got.keys.contains(&floptle_input::Key::KeyW));
+    }
 
     #[test]
     fn action_keys_agree_with_the_raw_key_names() {

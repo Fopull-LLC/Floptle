@@ -757,6 +757,8 @@ impl Editor {
                 self.cursor_lock_soft = crate::grab_cursor(window, false);
             }
         }
+        // The override belongs to the scene that earned it, same as the locks.
+        self.cursor_freed = false;
         if self.net_server.is_some() {
             // Re-run the host's per-scene session setup against the new world:
             // slot ownership, script filters, fresh NetIds, a clean lag-comp

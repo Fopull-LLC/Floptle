@@ -893,6 +893,11 @@ impl Editor {
     /// Pointer position + viewport (physical px, game-view space) for game-UI
     /// interaction. `None` when the cursor is hidden/locked (FPS look, game
     /// trap) or outside the game viewport.
+    ///
+    /// The game's WISH is the test, not the live grab: while the editor is
+    /// holding the pointer (`cursor_freed`) a game that still wants it locked
+    /// gets no pointer either, so the click that hands the cursor back doesn't
+    /// also press whatever it happened to land on.
     fn ui_pointer(&self) -> Option<([f32; 2], [f32; 2])> {
         if self.script_mouse_lock || self.game_trap {
             return None;
@@ -921,6 +926,57 @@ impl Editor {
         Some((p, size))
     }
 
+    /// Whether the GAME actually holds the OS cursor right now — its standing
+    /// `setMouseLocked` wish, minus any editor override.
+    ///
+    /// `script_mouse_lock` on its own answers "what does the game want", which
+    /// is a different question and the wrong one for anything that touches the
+    /// pointer. Every such site goes through here so the two can't disagree.
+    pub(crate) fn game_holds_cursor(&self) -> bool {
+        self.script_mouse_lock && !self.cursor_freed
+    }
+
+    /// Should a left click over the Game view hand the pointer back to the
+    /// game? `ui_interactive` is whether the game has something clickable of
+    /// its own under (or wanting) the pointer.
+    ///
+    /// A game that is ASKING for the lock gets it back whatever it has on
+    /// screen. Gating that on its UI the way the click-to-play trap is gated
+    /// would strand the cursor outright: while a game holds the lock its own
+    /// elements don't take the pointer either (see `ui_pointer`), so a HUD with
+    /// a button on it would be neither clickable nor a way back in.
+    pub(crate) fn click_hands_pointer_back(&self, ui_interactive: bool) -> bool {
+        self.playing && self.cursor_freed && (self.script_mouse_lock || !ui_interactive)
+    }
+
+    /// Take the pointer back from a running game (Escape), or hand it over
+    /// (a click into the Game view). Returns whether anything changed.
+    ///
+    /// The game's `setMouseLocked` wish is *remembered* across this, never
+    /// cleared: a game that locks once in `start` would otherwise lose its
+    /// free-look for the rest of the session the first time you tweaked a
+    /// value, and a game that locks every frame would take the cursor straight
+    /// back — which is the bug this exists to fix.
+    pub(crate) fn set_cursor_freed(&mut self, freed: bool) -> bool {
+        if self.cursor_freed == freed {
+            return false;
+        }
+        self.cursor_freed = freed;
+        if freed {
+            // The click-to-play trap is the editor's own lock owner; taking the
+            // pointer back has to let go of that one too, or nothing moves.
+            self.game_trap = false;
+        }
+        let want = self.game_holds_cursor() || self.game_trap;
+        if let Some(window) = self.window.as_ref() {
+            self.cursor_lock_soft = crate::grab_cursor(window, want);
+        }
+        if want {
+            self.cursor = None;
+        }
+        true
+    }
+
     /// Hand a trapped Game cursor back when the game puts something clickable
     /// on screen. Returns whether the trap was released.
     ///
@@ -937,7 +993,7 @@ impl Editor {
         // …but not the OS grab if a script is holding the mouse itself:
         // `game_trap` and `setMouseLocked` are separate owners, and free-look
         // must survive a HUD button appearing.
-        if !self.script_mouse_lock
+        if !self.game_holds_cursor()
             && let Some(window) = self.window.as_ref()
         {
             self.cursor_lock_soft = crate::grab_cursor(window, false);
@@ -3186,6 +3242,81 @@ mod tests {
         assert!(ed.release_trap_for_ui());
         assert!(ed.script_mouse_lock, "setMouseLocked(true) still holds");
         assert!(ed.cursor_lock_soft, "so the OS grab stays");
+    }
+
+    /// The reported bug, as a state machine. A first-person camera calls
+    /// `setMouseLocked(true)` from `update` — every frame, forever — so the old
+    /// answer of "Escape clears the flag" lasted exactly one frame.
+    ///
+    /// What has to be true instead: after Escape the game's wish is still on
+    /// the books, and applying it is a no-op until the pointer is handed back.
+    #[test]
+    fn escape_outlasts_a_camera_that_re_locks_every_frame() {
+        let mut ed = Editor {
+            playing: true,
+            script_mouse_lock: true,
+            game_trap: true,
+            ..Default::default()
+        };
+        assert!(ed.game_holds_cursor());
+
+        assert!(ed.set_cursor_freed(true), "Escape takes the pointer");
+        assert!(!ed.game_holds_cursor(), "…so the game does not have it");
+        assert!(!ed.game_trap, "and the editor's own lock owner let go too");
+        assert!(ed.script_mouse_lock, "but the game never stopped asking");
+
+        // Ten more frames of `update` saying "lock it". Each one is the branch
+        // in render_frame that only acts when the wish CHANGES — which it
+        // doesn't, so nothing takes the cursor back.
+        for _ in 0..10 {
+            let want = true;
+            if want != ed.script_mouse_lock {
+                ed.script_mouse_lock = want;
+            }
+            assert!(!ed.game_holds_cursor(), "the re-lock must not land while freed");
+        }
+
+        assert!(ed.set_cursor_freed(false), "clicking the game hands it over");
+        assert!(ed.game_holds_cursor(), "…and the standing wish applies itself");
+    }
+
+    /// The one way back in must not be closable by the game. A locked game's
+    /// own elements never take the pointer, so if a HUD button also blocked the
+    /// click that hands the cursor over, the cursor would be stuck with the
+    /// editor for the rest of the session — the original bug, wearing the
+    /// opposite mask.
+    #[test]
+    fn a_huds_buttons_do_not_block_the_way_back_into_a_locked_game() {
+        let ed =
+            Editor { playing: true, script_mouse_lock: true, cursor_freed: true, ..Default::default() };
+        assert!(ed.click_hands_pointer_back(false));
+        assert!(ed.click_hands_pointer_back(true), "the game is asking: let it have the pointer");
+
+        // With no lock asked for, a click on the game's own menu is a click on
+        // the menu — the same rule the click-to-play trap has always used.
+        let menu = Editor { playing: true, cursor_freed: true, ..Default::default() };
+        assert!(menu.click_hands_pointer_back(false));
+        assert!(!menu.click_hands_pointer_back(true));
+
+        // And nothing to hand back when the editor isn't holding it.
+        let normal = Editor { playing: true, script_mouse_lock: true, ..Default::default() };
+        assert!(!normal.click_hands_pointer_back(false));
+    }
+
+    /// The game giving the pointer up of its own accord ends the override —
+    /// otherwise a menu opened two minutes after an Escape would be dead.
+    #[test]
+    fn a_game_that_unlocks_ends_the_editors_override() {
+        let mut ed =
+            Editor { playing: true, script_mouse_lock: true, cursor_freed: true, ..Default::default() };
+        // `setMouseLocked(false)` — the same shape as render_frame's apply.
+        let want = false;
+        if !want {
+            ed.cursor_freed = false;
+        }
+        ed.script_mouse_lock = want;
+        assert!(!ed.cursor_freed);
+        assert!(!ed.game_holds_cursor());
     }
 
     /// Stopped means stopped: the trap is released elsewhere (and the pointer

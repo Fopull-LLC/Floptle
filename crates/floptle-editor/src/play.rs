@@ -666,6 +666,11 @@ impl Editor {
                     self.cursor_lock_soft = grab_cursor(window, false);
                 }
             }
+            // …and the editor's own override goes with them. It only ever means
+            // "a running game wants this and is not getting it"; there is no
+            // running game now, and leaving it set would swallow the next
+            // session's first legitimate lock.
+            self.cursor_freed = false;
             // A mid-play `scene.load(...)` renamed the scene for the session —
             // the restored world is the PRE-PLAY scene, so its name must come
             // back BEFORE `restore()` runs: restore's `adopt_terrain()` loads

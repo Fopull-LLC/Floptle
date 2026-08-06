@@ -2040,9 +2040,19 @@ struct Editor {
     /// prediction can record + ship exactly what the scripts saw.
     last_tick_input: floptle_script::InputSnapshot,
     /// A script asked (via `input.lockMouse()`) to hold the cursor grabbed + hidden for
-    /// free-look. While set, the RMB-release handler won't release the grab, and Stop
-    /// releases it. Reset when play ends.
+    /// free-look. This is the game's STANDING WISH, not the state of the OS grab — see
+    /// `cursor_freed`, which defers it. Reset when play ends.
     script_mouse_lock: bool,
+    /// The editor has taken the pointer back from a running game (Escape). The
+    /// game's `script_mouse_lock` wish is remembered but NOT applied, so the
+    /// cursor stays yours until you click back into the Game view.
+    ///
+    /// Without this, Escape was useless against the game that needs it most: a
+    /// first-person camera calls `setMouseLocked(true)` from `update`, every
+    /// frame, so the grab it released came straight back on the next one. The
+    /// only way out was to defocus the whole window at the OS level, which is
+    /// what people were actually doing.
+    cursor_freed: bool,
     /// The active cursor grab is only a CONFINE (X11 has no OS-level lock): the
     /// cursor can still wander inside the window, so we re-center it every frame.
     cursor_lock_soft: bool,
@@ -2752,6 +2762,15 @@ impl ApplicationHandler for Editor {
                 }
                 self.reset_action_state();
                 self.input = Default::default();
+                // Leaving the window is the OTHER way people ask for their
+                // cursor back — and the one they found on their own, because
+                // the compositor drops a pointer grab on focus loss whether the
+                // app agrees or not. Honour it: come back to a usable pointer,
+                // and give it to the game again with a click, rather than
+                // re-grabbing the instant the window lights up.
+                if self.playing && (self.game_trap || self.script_mouse_lock) {
+                    self.set_cursor_freed(true);
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
@@ -2897,15 +2916,19 @@ impl ApplicationHandler for Editor {
                                     // Back out of a pending cut / a draw gesture,
                                     // then disarm the knife or the shape, before
                                     // anything else claims Escape.
-                                } else if self.game_trap || self.script_mouse_lock {
+                                } else if self.game_trap || self.game_holds_cursor() {
                                     // Free BOTH lock owners — a script that holds the
                                     // mouse (setMouseLocked) must not survive Escape,
                                     // or the cursor stays gone with no way back.
-                                    self.game_trap = false;
-                                    self.script_mouse_lock = false;
-                                    if let Some(window) = self.window.as_ref() {
-                                        self.cursor_lock_soft = grab_cursor(window, false);
-                                    }
+                                    //
+                                    // And it has to STAY free. Clearing the script's
+                                    // flag was not enough: a first-person camera calls
+                                    // setMouseLocked(true) every frame from `update`,
+                                    // so the grab came back on the very next one and
+                                    // Escape looked like it did nothing at all. The
+                                    // editor now holds the pointer until you click
+                                    // back into the Game view.
+                                    self.set_cursor_freed(true);
                                 } else if self.player_mode {
                                     // nothing else to cancel in a build
                                 } else if self.anim_ui.drag_from.is_some() {
@@ -3106,16 +3129,22 @@ impl ApplicationHandler for Editor {
                     // pointer IS the gameplay — trapping it froze the menu dead.
                     // Scripts still grab for free-look via input.setMouseLocked.
                     let ui_interactive = self.ui_hover.is_some() || self.ui_pointer_wanted;
-                    if self.playing
-                        && !self.game_trap
-                        && !ui_interactive
-                        && self.cursor_over_game()
-                    {
-                        self.game_trap = true;
-                        if let Some(window) = self.window.as_ref() {
-                            self.cursor_lock_soft = grab_cursor(window, true);
+                    if self.playing && self.cursor_over_game() {
+                        // Clicking back into the Game view is how you hand the
+                        // pointer over after Escape took it — the same gesture
+                        // that focuses a game in any other window, and the
+                        // counterpart to Escape being what takes it away.
+                        //
+                        if self.click_hands_pointer_back(ui_interactive) {
+                            self.set_cursor_freed(false);
                         }
-                        self.cursor = None;
+                        if !self.game_trap && !self.cursor_freed && !ui_interactive {
+                            self.game_trap = true;
+                            if let Some(window) = self.window.as_ref() {
+                                self.cursor_lock_soft = grab_cursor(window, true);
+                            }
+                            self.cursor = None;
+                        }
                     }
                     // Clicking anywhere outside a text field ends text editing —
                     // a click into the viewport (which egui never sees) included.
@@ -3354,7 +3383,7 @@ impl ApplicationHandler for Editor {
                     self.cursor = None;
                 } else if !pressed && self.panning {
                     self.panning = false;
-                    if !self.script_mouse_lock && !self.input.looking && !self.game_trap
+                    if !self.game_holds_cursor() && !self.input.looking && !self.game_trap
                         && let Some(window) = self.window.as_ref()
                     {
                         self.cursor_lock_soft = grab_cursor(window, false);
@@ -3398,7 +3427,7 @@ impl ApplicationHandler for Editor {
                     self.input.looking = false;
                     // Don't release the grab if a script is holding the mouse locked, the
                     // Game view has it trapped, or an MMB pan is still dragging.
-                    if !self.script_mouse_lock && !self.game_trap && !self.panning
+                    if !self.game_holds_cursor() && !self.game_trap && !self.panning
                         && let Some(window) = self.window.as_ref() {
                             self.cursor_lock_soft = grab_cursor(window, false);
                         }

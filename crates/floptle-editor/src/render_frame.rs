@@ -2118,6 +2118,11 @@ impl Editor {
         let assets_grid_dir = &mut self.assets_grid_dir;
         let project_root = self.project_root.as_path();
         let playing = self.playing;
+        // Who owns the pointer this frame, for the Game-view hint. Read as plain
+        // fields (not through `game_holds_cursor`) because the closure below only
+        // ever holds disjoint field borrows and a `&self` method would collide.
+        let cursor_held_by_game = self.game_trap || (self.script_mouse_lock && !self.cursor_freed);
+        let cursor_held_by_editor = self.cursor_freed && self.script_mouse_lock;
         let paused = self.paused;
         let game_tick_no = self.game_tick_no;
         let has_active_camera =
@@ -4126,6 +4131,41 @@ impl Editor {
                 }
             }
 
+            // ---- who has the pointer ------------------------------------------
+            // A grabbed cursor is invisible by definition, so the ONE thing that
+            // says how to get it back cannot itself be the cursor. Without this
+            // the way out (Escape) was findable only by reading the source, and
+            // what people did instead was alt-tab out of the whole application
+            // to reach the Inspector.
+            //
+            // Only while playing, only over the Game view, and only when the
+            // pointer is actually contested — a game that never grabs never
+            // sees it.
+            if playing
+                && (cursor_held_by_game || cursor_held_by_editor)
+                && let Some(r) = *game_rect
+            {
+                let (msg, fg) = if cursor_held_by_editor {
+                    ("Click the game to give the mouse back", egui::Color32::from_rgb(150, 210, 255))
+                } else {
+                    ("Esc — free the mouse", egui::Color32::from_rgb(215, 220, 230))
+                };
+                egui::Area::new(egui::Id::new("pointer_owner_hint"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(egui::pos2(r.center().x, r.max.y - 34.0))
+                    .pivot(egui::Align2::CENTER_CENTER)
+                    // Purely a label: it must never eat the click that hands
+                    // the pointer back, which lands in this very corner.
+                    .interactable(false)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_black_alpha(150))
+                            .corner_radius(9.0)
+                            .inner_margin(egui::Margin::symmetric(10, 5))
+                            .show(ui, |ui| ui.colored_label(fg, msg));
+                    });
+            }
+
             // (Terrain tools live in the dockable Terrain tab now; the gizmo paints
             // inside the Scene tab, clipped to its rect.)
         });
@@ -4140,15 +4180,22 @@ impl Editor {
         // the hover icon changes — un-hiding a cursor the game grabbed. Re-assert
         // the hide while any lock is held so the pointer can't flicker back.
         // A script lock only hides the cursor while it's actually OVER the game
-        // view: the grab is Confined (one OS window), so the pointer can reach
+        // view: where the grab is only a Confine (X11), the pointer can reach
         // the Inspector mid-play — it must be visible there to tweak values.
-        // (inlined cursor_over_game — this scope holds a mutable gpu borrow)
+        // Where the grab is a real Lock it cannot travel at all, which is what
+        // Escape (`cursor_freed`) is for.
+        // (cursor_over_game and game_holds_cursor are inlined as plain field
+        // reads — this scope holds a mutable gpu borrow, so a `&self` method
+        // here would borrow the whole editor)
         let over_game = scene_hit(&egui.ctx, self.cursor, self.game_rect);
-        if self.game_trap || (self.script_mouse_lock && over_game) {
+        let game_has_it = self.script_mouse_lock && !self.cursor_freed;
+        if self.game_trap || (game_has_it && over_game) {
             window.set_cursor_visible(false);
         } else if self.script_mouse_lock {
-            // Off the game view with the lock still held: force the show —
-            // egui only un-hides on an icon CHANGE, which may never fire.
+            // Off the game view with the lock still wanted — or held back by
+            // Escape — force the show. egui only un-hides on an icon CHANGE,
+            // which may never fire, and a cursor you freed but cannot see is
+            // the same bug as one you never freed.
             window.set_cursor_visible(true);
         }
         if self.project.retro_height != old_retro_h
@@ -5070,6 +5117,13 @@ impl Editor {
             // Game view is focused. In the Scene view you're editing, not playing, so the
             // game gets neutral input (the character stops moving) even though physics
             // keeps simulating.
+            // …and while the EDITOR is holding the pointer (Escape, with the
+            // game still asking for it), the mouse half of that input is the
+            // editor's. Freeing the cursor would otherwise be half a fix: the
+            // camera script keeps reading raw motion, so the view spins the
+            // whole way over to the Inspector and every click on it also
+            // reaches the game. Keys keep flowing — the game is still playing.
+            let mouse_is_the_editors = self.cursor_freed;
             let frame_input = if game_focused {
                 floptle_script::InputSnapshot {
                     keys_down: self.input_keys.clone(),
@@ -5078,10 +5132,22 @@ impl Editor {
                     // Whatever a focused text field did not eat.
                     typed: self.input_typed.clone(),
                     mouse: self.cursor.map(|c| (c.x, c.y)).unwrap_or((0.0, 0.0)),
-                    mouse_delta: self.input_mouse_delta,
-                    scroll: self.input_scroll,
-                    buttons_down: self.input_buttons,
-                    buttons_pressed: self.input_buttons_pressed,
+                    mouse_delta: if mouse_is_the_editors {
+                        (0.0, 0.0)
+                    } else {
+                        self.input_mouse_delta
+                    },
+                    scroll: if mouse_is_the_editors { 0.0 } else { self.input_scroll },
+                    buttons_down: if mouse_is_the_editors {
+                        [false; 3]
+                    } else {
+                        self.input_buttons
+                    },
+                    buttons_pressed: if mouse_is_the_editors {
+                        [false; 3]
+                    } else {
+                        self.input_buttons_pressed
+                    },
                     aim,
                 }
             } else {
@@ -5147,9 +5213,23 @@ impl Editor {
                 // call entirely in the case that matters, because a game opening
                 // a menu never locked the mouse in the first place.
                 let freed_trap = !want && std::mem::take(&mut self.game_trap);
+                // …and it ends any editor override, because there is nothing
+                // left to override: the game and the editor now agree that the
+                // pointer is loose, and a game that opens its own menu two
+                // minutes after you pressed Escape must get its clicks.
+                if !want {
+                    self.cursor_freed = false;
+                }
                 if want != self.script_mouse_lock {
                     self.script_mouse_lock = want;
-                    if let Some(window) = self.window.as_ref() {
+                    // While the editor is holding the pointer, the game's wish
+                    // is RECORDED and not applied — it lands the moment you
+                    // click back into the Game view. This is the whole reason
+                    // Escape works against a camera script that re-locks every
+                    // frame: the re-lock is a no-op until you say so.
+                    if !self.cursor_freed
+                        && let Some(window) = self.window.as_ref()
+                    {
                         self.cursor_lock_soft = grab_cursor(window, want);
                     }
                 } else if freed_trap
@@ -5340,16 +5420,24 @@ impl Editor {
                     // Game view isn't focused — but still consumed, so stale edges
                     // don't fire on refocus.
                     let snap = if game_focused {
+                        // The accumulators are DRAINED either way — while the
+                        // editor holds the pointer the mouse half is dropped
+                        // rather than banked, so nothing fires in a burst the
+                        // moment you hand the cursor back.
+                        let (dx, dy) = std::mem::take(&mut self.tick_mouse_delta);
+                        let wheel = std::mem::take(&mut self.tick_scroll);
+                        let pressed = std::mem::take(&mut self.tick_buttons_pressed);
+                        let mine = self.cursor_freed;
                         floptle_script::InputSnapshot {
                             keys_down: self.input_keys.clone(),
                             keys_pressed: std::mem::take(&mut self.tick_keys_pressed),
                             keys_released: std::mem::take(&mut self.tick_keys_released),
                             typed: std::mem::take(&mut self.tick_typed),
                             mouse: self.cursor.map(|c| (c.x, c.y)).unwrap_or((0.0, 0.0)),
-                            mouse_delta: std::mem::take(&mut self.tick_mouse_delta),
-                            scroll: std::mem::take(&mut self.tick_scroll),
-                            buttons_down: self.input_buttons,
-                            buttons_pressed: std::mem::take(&mut self.tick_buttons_pressed),
+                            mouse_delta: if mine { (0.0, 0.0) } else { (dx, dy) },
+                            scroll: if mine { 0.0 } else { wheel },
+                            buttons_down: if mine { [false; 3] } else { self.input_buttons },
+                            buttons_pressed: if mine { [false; 3] } else { pressed },
                             aim,
                         }
                     } else {
@@ -5830,7 +5918,7 @@ impl Editor {
         // the deltas. A trapped Game cursor re-centers to the GAME rect (not the
         // window) so a Confined pointer stays inside the viewport it's playing in.
         if self.cursor_lock_soft
-            && (self.script_mouse_lock || self.input.looking || self.panning || self.game_trap)
+            && (self.game_holds_cursor() || self.input.looking || self.panning || self.game_trap)
             && let Some(window) = self.window.as_ref()
         {
             let sz = window.inner_size();
@@ -5852,6 +5940,12 @@ impl Editor {
             if let Some(window) = self.window.as_ref() {
                 self.cursor_lock_soft = grab_cursor(window, false);
             }
+        }
+        // Same safety for the editor's pointer override: it only means anything
+        // against a running game, and a stale one would eat the first lock the
+        // next session asks for.
+        if self.cursor_freed && !self.playing {
+            self.cursor_freed = false;
         }
         // Drain any script logs/errors into the Console (consecutive dups merge).
         for l in self.script_host.drain_logs() {
