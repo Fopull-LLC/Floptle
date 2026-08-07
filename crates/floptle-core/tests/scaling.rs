@@ -54,7 +54,9 @@ use floptle_core::World;
 /// is. That is also the whole premise of measuring a ratio: runner speed is
 /// supposed to cancel, and it only cancels if both sides see the same runner.
 fn growth(n: usize, mut f: impl FnMut(usize)) -> f64 {
-    let mut time = |size: usize, f: &mut dyn FnMut(usize)| {
+    // Takes the work as a parameter rather than capturing it, so this binding
+    // needs no `mut` of its own — the caller's `f` is what gets borrowed.
+    let time = |size: usize, f: &mut dyn FnMut(usize)| {
         let t = Instant::now();
         f(size);
         t.elapsed()
