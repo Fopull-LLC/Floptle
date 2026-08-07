@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.41.0 "Draw The Ramp"** — tile collision you draw by hand, including
+**v0.41.1 "Draw The Ramp"** — tile collision you draw by hand, including
 **slopes**. Pick **shape** under TILE and draw the collider onto the tile: click
 an edge to add a point, drag to move, right-click to remove, four 45° ramps on a
 button. Points snap to the art's own pixel grid, which is what makes a slope
