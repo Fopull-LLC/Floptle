@@ -1,5 +1,23 @@
 ## Just shipped
 
+**v0.41.0 "Draw The Ramp"** — tile collision you draw by hand, including
+**slopes**. Pick **shape** under TILE and draw the collider onto the tile: click
+an edge to add a point, drag to move, right-click to remove, four 45° ramps on a
+button. Points snap to the art's own pixel grid, which is what makes a slope
+built from several tiles actually meet instead of catching a character on every
+boundary — and it collides as the shape you drew, not the box around it, concave
+outlines included. Everything under TILE now applies to **every selected tile**:
+drag a box, or ctrl-click tiles that are not next to each other, and set the
+collision once. The autotile picker got two fixes — its 3×3 neighbourhood diagram
+was **upside down**, so a tile answering "more of this group above me" was drawn
+and described as *below*, and every shape is now **named** (*"waiting for: the
+top-left corner"*). Switching between placing a tile and painting an autotile is
+a **brush** row at the top of the palette rather than a side effect of which tile
+you clicked. And a rigidbody has a **2D** switch: it keeps its depth, never
+drifts out of the layer, still spins the one way a flat object spins — and
+collides with the same world a 3D body does, because there is no separate 2D
+physics engine to be missing features.
+
 **v0.40.5 "Shine On"** — 2D light is smooth now, whatever else your scene is set
 to. Posterize quantizes your **palette**: the set of values your art is allowed
 to be. A light is not one of those values — it is a multiplier on whatever value
