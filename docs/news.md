@@ -1,5 +1,22 @@
 ## Just shipped
 
+**v0.40.5 "Shine On"** — 2D light is smooth now, whatever else your scene is set
+to. Posterize quantizes your **palette**: the set of values your art is allowed
+to be. A light is not one of those values — it is a multiplier on whatever value
+your art is — and while the quantize was the last thing to touch the frame, the
+two were the same setting. That left no configuration that was right: hard
+concentric rings, or a stipple that reads as a dither pattern, or no palette at
+all. The quantize now runs over your art, before any light reaches it, so your
+tiles land on their bands and your lights ride on top. A torch is a soft pool
+again and a dark room gets darker smoothly. Nothing to switch on. The same rule
+fixes the **vignette**, which is a smooth radial darkening and was arriving as
+rings in the corners for exactly the reason a light was — everything
+light-shaped, including bloom and ambient occlusion, is downstream of the
+quantize now. And **dither the bands** is finally just what it sounds like: a way
+to hold a gradient your palette can't. It does nothing to lighting. If you turned
+it on to smooth your lights, or squashed a light's falloff into one band to stop
+it ringing, you can undo both.
+
 **v0.40.4 "Something In The Way"** — 2D light stops at walls. A light used to
 reach the floor, the counter, the shelf and the floor behind the shelf all by
 the same distance from the lamp, so what landed on screen was a disc of
