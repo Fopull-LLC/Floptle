@@ -820,6 +820,50 @@ mod tests {
         assert!((t.y - 7.0).abs() < 1e-3, "locked Y should stay at 7, got {}", t.y);
     }
 
+    /// **The 2D switch.** A body ticked 2D keeps its authored depth however hard
+    /// it is shoved out of the layer, and still falls and moves in the plane.
+    ///
+    /// Written as "shove it in Z and watch nothing happen" rather than as
+    /// "assert the flags", because the flags being right is not the claim — the
+    /// claim is that a platformer character cannot leave its layer.
+    #[test]
+    fn a_2d_body_cannot_be_pushed_out_of_its_plane() {
+        let mut ecs = World::default();
+        let e = ecs.spawn();
+        ecs.insert(e, Transform::from_translation(DVec3::new(0.0, 6.0, 2.5)));
+        ecs.insert(e, RigidBody { radius: 0.5, two_d: true, ..Default::default() });
+
+        let mut sim =
+            Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
+        sim.world.bodies[0].vel = Vec3::new(1.0, 0.0, 40.0); // a hard shove along Z
+        for _ in 0..60 {
+            sim.advance(&mut ecs, 1.0 / 60.0, None);
+        }
+        let t = ecs.get::<Transform>(e).unwrap().translation;
+        assert!((t.z - 2.5).abs() < 1e-3, "2D body left its plane: z = {}", t.z);
+        // …and it is still a physics object rather than a frozen one.
+        assert!(t.y < 5.0, "2D body did not fall: y = {}", t.y);
+        assert!(t.x > 0.1, "2D body did not move in its own plane: x = {}", t.x);
+    }
+
+    /// 2D ADDS freezes; it never releases one the author set. Unticking it must
+    /// not quietly hand back an axis somebody locked on purpose.
+    #[test]
+    fn the_2d_switch_composes_with_hand_set_locks() {
+        let rb = RigidBody {
+            lock_pos: [true, false, false],
+            lock_rot: [false, false, true],
+            two_d: true,
+            ..Default::default()
+        };
+        assert_eq!(rb.locks_pos(), [true, false, true], "X was locked by hand, Z by 2D");
+        assert_eq!(rb.locks_rot(), [true, true, true], "2D holds X and Y, the author held Z");
+        // Off again, and the hand-set ones are exactly as they were.
+        let plain = RigidBody { two_d: false, ..rb };
+        assert_eq!(plain.locks_pos(), [true, false, false]);
+        assert_eq!(plain.locks_rot(), [false, false, true]);
+    }
+
     #[test]
     fn lock_toggled_mid_play_freezes_in_place() {
         // A lock toggled DURING play (Inspector toggle or a script's `rig.lock_x =

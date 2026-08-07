@@ -232,8 +232,18 @@ pub(crate) struct TileTools {
     pub(crate) show_collision: bool,
     /// Which tileset the tab is editing (a path into [`TileStore`]).
     pub(crate) editing: Option<String>,
-    /// The palette tile whose properties the tab is showing.
-    pub(crate) inspect_cell: Option<u32>,
+    /// The palette tiles whose properties the tab is EDITING.
+    ///
+    /// A set rather than one cell, because "these forty tiles are all solid" and
+    /// "these six are the same slope" are the two things setting up a sheet
+    /// actually consists of, and doing them one tile at a time is where the
+    /// afternoon goes. Every control in the TILE section writes to all of it.
+    ///
+    /// Driven by the palette: a click selects one, a drag selects the band,
+    /// ctrl-click adds or removes one so the set does not have to be a
+    /// rectangle. Kept sorted so the primary tile — the one a shape is drawn on
+    /// — is stable rather than whichever the hash landed on first.
+    pub(crate) inspect: BTreeSet<u32>,
 
     // ---- live gesture -----------------------------------------------------
     /// Where a drag or stroke began, in tile coordinates.
@@ -266,7 +276,7 @@ impl Default for TileTools {
             show_grid: true,
             show_collision: false,
             editing: None,
-            inspect_cell: None,
+            inspect: BTreeSet::new(),
             from: None,
             last: None,
             touched: false,
@@ -276,6 +286,22 @@ impl Default for TileTools {
 }
 
 impl TileTools {
+    /// The tile a single-tile control acts on: the lowest of the edit selection.
+    ///
+    /// Lowest rather than "the last one clicked" so that re-opening the tab, or
+    /// re-selecting the same rectangle, lands on the same tile — a shape editor
+    /// whose canvas moved when you were not looking is worse than one that
+    /// sometimes picks a tile you did not mean.
+    pub(crate) fn primary(&self) -> Option<u32> {
+        self.inspect.iter().copied().next()
+    }
+
+    /// Select exactly `cell` — what an ordinary click does.
+    pub(crate) fn inspect_one(&mut self, cell: u32) {
+        self.inspect.clear();
+        self.inspect.insert(cell);
+    }
+
     /// The stamp as it would actually be placed: the palette selection, turned by
     /// the current orientation.
     ///
@@ -325,10 +351,10 @@ pub(crate) fn add_tilemap_colliders(
         return 0; // art only — nothing here claims to be solid
     }
     let Some(set) = store.get(tileset) else { return 0 };
-    let boxes = floptle_tiles::collision_boxes(*cols, *rows, *tile, data, set);
+    let shapes = floptle_tiles::collision_shapes(*cols, *rows, *tile, data, set);
     let s = xf.scale;
     let depth = (*tile * 0.5 * s.z.abs().max(1e-3)).max(1e-3);
-    for b in &boxes {
+    for b in &shapes.boxes {
         // Each box's centre is in the node's LOCAL frame, so it goes through the
         // node's rotation and scale exactly like the mesh does: a rotated or
         // scaled tilemap collides where it draws.
@@ -340,7 +366,30 @@ pub(crate) fn add_tilemap_colliders(
             layer,
         );
     }
-    boxes.len()
+    // Hand-drawn outlines — the slopes. Each goes in as an extruded polygon, so
+    // a ramp is a ramp in the sim and not the box around it. Anchored at its own
+    // centroid-free bounding centre for the same reason the boxes are: the
+    // points are baked relative to a point the node's transform places, so the
+    // f64 residuals stay small however far out the level sits (ADR-0015).
+    for p in &shapes.polys {
+        let mid = p.pts.iter().fold([0.0f32, 0.0], |a, q| [a[0] + q[0], a[1] + q[1]]);
+        let n = p.pts.len() as f32;
+        let (mx, my) = (mid[0] / n * s.x, mid[1] / n * s.y);
+        let pts: Vec<floptle_core::math::Vec2> = p
+            .pts
+            .iter()
+            .map(|q| floptle_core::math::Vec2::new(q[0] * s.x - mx, q[1] * s.y - my))
+            .collect();
+        let local = Vec3::new(mx, my, 0.0);
+        sim.add_static_poly(
+            xf.translation + (xf.rotation * local).as_dvec3(),
+            &pts,
+            depth,
+            xf.rotation,
+            layer,
+        );
+    }
+    shapes.len()
 }
 
 /// Where a project keeps its tilesets.
@@ -617,7 +666,7 @@ impl Editor {
                     self.tile_tools.stamp = Stamp::one(floptle_core::tile_index(p));
                     self.tile_tools.xform = floptle_core::tile_xform(p);
                     self.tile_tools.palette = None;
-                    self.tile_tools.inspect_cell = Some(floptle_core::tile_index(p));
+                    self.tile_tools.inspect_one(floptle_core::tile_index(p));
                 }
                 self.tile_tools.down = false;
                 true
@@ -1083,7 +1132,7 @@ impl Editor {
             // The merged boxes — the SAME ones the sim gets, so what you see is
             // what a character walks on. Drawing per-tile outlines instead would
             // show a grid that does not exist in the physics world.
-            for b in floptle_tiles::collision_boxes(cols, rows, tile, data, set) {
+            for b in floptle_tiles::collision_shapes(cols, rows, tile, data, set).boxes {
                 let pts: Vec<Vec2> = [
                     (b.cx - b.hx, b.cy - b.hy),
                     (b.cx + b.hx, b.cy - b.hy),

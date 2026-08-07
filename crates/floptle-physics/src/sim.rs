@@ -10,7 +10,9 @@ use floptle_field::ChunkField;
 use crate::body::{Body, BodyShape};
 use crate::compound::{Compound, CompoundShape, ShapeGeom};
 use crate::gravity::GravityField;
-use crate::shapes::{BoxShape, CapsuleShape, ChunkTerrain, SphereShape, TriMeshCollider};
+use crate::shapes::{
+    BoxShape, CapsuleShape, ChunkTerrain, PolyPrismShape, SphereShape, TriMeshCollider,
+};
 use crate::world::{BodyHull, PhysicsWorld, RayHit};
 
 /// Drives a [`PhysicsWorld`] from the ECS each Play (Slice 3 bridge): builds bodies
@@ -274,7 +276,7 @@ impl Sim {
             map.push(BodyLink {
                 entity: e,
                 body: world.add_body(b),
-                lock_rot: rb.lock_rot,
+                lock_rot: rb.locks_rot(),
                 rot0,
                 align_up: rb.align_up,
                 height_set: None,
@@ -450,7 +452,7 @@ impl Sim {
         b.friction = rb.friction;
         b.use_gravity = rb.gravity;
         b.mass = rb.mass.max(1e-4);
-        b.lock_pos = rb.lock_pos;
+        b.lock_pos = rb.locks_pos();
         b.layer = layers.index_for(ecs, e);
         b.kinematic = rb.mode == floptle_core::BodyMode::Kinematic;
         // A Trigger on a rigidbody node makes the BODY a sensor: it never
@@ -562,7 +564,7 @@ impl Sim {
         self.map.push(BodyLink {
             entity: e,
             body: bi,
-            lock_rot: rb.lock_rot,
+            lock_rot: rb.locks_rot(),
             rot0,
             align_up: rb.align_up,
             height_set: None,
@@ -628,6 +630,33 @@ impl Sim {
         self.world.add_collider_tagged(
             center,
             Box::new(BoxShape::new(Vec3::ZERO, half, rot)),
+            tag.layer,
+            Some(tag.eid),
+            tag.sensor,
+        );
+    }
+
+    /// Register a static extruded-polygon collider — a tile's hand-drawn
+    /// outline, which is how a **slope** reaches the sim as real geometry rather
+    /// than as the box around it ([`PolyPrismShape`]).
+    ///
+    /// `pts` are in the polygon's own XY plane, relative to `center`, and are
+    /// extruded `half_z` each way along its local Z. Anything with fewer than
+    /// three points registers nothing: a two-point outline is a line, and a line
+    /// you can stand on from one side and fall through from the other is worse
+    /// than no collider.
+    pub fn add_static_poly(
+        &mut self,
+        center: DVec3,
+        pts: &[floptle_core::math::Vec2],
+        half_z: f32,
+        rot: Quat,
+        tag: StaticTag,
+    ) {
+        let Some(shape) = PolyPrismShape::new(Vec3::ZERO, pts, half_z, rot) else { return };
+        self.world.add_collider_tagged(
+            center,
+            Box::new(shape),
             tag.layer,
             Some(tag.eid),
             tag.sensor,
@@ -1648,13 +1677,13 @@ impl Sim {
             let (ent, bidx) = (self.map[i].entity, self.map[i].body);
             if let Some(rb) = ecs.get::<RigidBody>(ent) {
                 let newly_rot_locked =
-                    (0..3).any(|a| rb.lock_rot[a] && !self.map[i].lock_rot[a]);
+                    (0..3).any(|a| rb.locks_rot()[a] && !self.map[i].lock_rot[a]);
                 if newly_rot_locked && let Some(t) = ecs.get::<Transform>(ent) {
                     // Locked axes were held at rot0 anyway, so a full re-capture keeps
                     // them while adopting the current angle on the newly-locked ones.
                     self.map[i].rot0 = t.rotation;
                 }
-                self.map[i].lock_rot = rb.lock_rot;
+                self.map[i].lock_rot = rb.locks_rot();
                 self.map[i].align_up = rb.align_up;
                 let height_set = self.map[i].height_set;
                 // Live layer switches: `node.layer = "Ghost"` (or an Inspector
@@ -1688,14 +1717,14 @@ impl Sim {
                     b.pos = p;
                 }
                 for a in 0..3 {
-                    if rb.lock_pos[a] && !b.lock_pos[a] {
+                    if rb.locks_pos()[a] && !b.lock_pos[a] {
                         crate::body::set_axis(&mut b.home, a, crate::body::axis(b.pos, a));
                     }
                 }
                 b.restitution = rb.restitution;
                 b.friction = rb.friction;
                 b.use_gravity = rb.gravity;
-                b.lock_pos = rb.lock_pos;
+                b.lock_pos = rb.locks_pos();
                 b.radius = rb.radius.max(0.01);
                 b.shape = match rb.kind {
                     BodyKind::Sphere => BodyShape::Sphere,

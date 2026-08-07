@@ -609,6 +609,26 @@ pub struct RigidBody {
     pub lock_pos: [bool; 3],
     /// Freeze the entity's rotation about each axis (keeps a body upright during play).
     pub lock_rot: [bool; 3],
+    /// **2D**: keep this body in the XY plane. One switch instead of four.
+    ///
+    /// It freezes Z translation and rotation about X and Y, which is exactly and
+    /// only what "this is a 2D object" means to a solver — the body keeps its
+    /// authored depth, can never drift out of the layer, and can still spin the
+    /// one way a 2D object spins. Gravity, collision and every query are
+    /// unchanged; a 2D body collides with the same world a 3D one does, which is
+    /// what makes a tilemap's colliders work for it without a second physics
+    /// engine.
+    ///
+    /// It composes with [`Self::lock_pos`] / [`Self::lock_rot`] rather than
+    /// replacing them — see [`Self::locks_pos`]. Ticking it can only ever ADD a
+    /// freeze, so a body that was already locking something keeps doing it, and
+    /// unticking it cannot silently release an axis the author locked by hand.
+    ///
+    /// This is deliberately not a `BodyMode`: the modes are about whether the
+    /// solver simulates a body at all, and a 2D body is fully simulated. Making
+    /// it a mode would have meant no 2D kinematic platforms and no 2D static
+    /// props, which is most of a platformer.
+    pub two_d: bool,
     /// Rotate the NODE so its local +Y tracks the body's up (−gravity) — characters
     /// walking a radial-gravity planet stand on it visually, and their children
     /// (cameras, held items) inherit the tilt. Smoothed; visual-only (the physics
@@ -659,11 +679,37 @@ impl Default for RigidBody {
             gravity: true,
             lock_pos: [false; 3],
             lock_rot: [false; 3],
+            two_d: false,
             align_up: false,
             mass: 1.0,
             assembly: false,
             pushbox_only: false,
         }
+    }
+}
+
+impl RigidBody {
+    /// The translation freezes the solver actually runs with.
+    ///
+    /// A derived answer rather than a field the editor writes, because the two
+    /// inputs — the hand-set axes and the 2D switch — are both authored state
+    /// and either one can change without the other. Baking their union into
+    /// `lock_pos` on the way in would mean unticking 2D released a Z lock the
+    /// author had set themselves, and the author would have no way to tell which
+    /// of the two put it there.
+    pub fn locks_pos(&self) -> [bool; 3] {
+        let z = self.lock_pos[2] || self.two_d;
+        [self.lock_pos[0], self.lock_pos[1], z]
+    }
+
+    /// …and the rotation freezes. 2D adds X and Y, leaving the one spin a flat
+    /// object has.
+    pub fn locks_rot(&self) -> [bool; 3] {
+        [
+            self.lock_rot[0] || self.two_d,
+            self.lock_rot[1] || self.two_d,
+            self.lock_rot[2],
+        ]
     }
 }
 

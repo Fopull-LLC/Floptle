@@ -165,20 +165,37 @@ also draws what it knows, over the art:
 
 ### Collision
 
-Four cases per tile: **none**, **full**, **half** (top / bottom / left / right),
-or a hand-set **rect** in the unit tile.
+Five cases per tile: **none**, **full**, **half** (top / bottom / left / right),
+a hand-set **rect** in the unit tile, or a **shape** you draw yourself.
 
 The half is named in the tile's own art, so it **turns with the tile**: the bottom
 half of a tile rotated a quarter-turn clockwise is its *left* half. (That is why
 the side is stored rather than a `y = 0.5` — "the top half" survives a rotation
 and a number does not.)
 
-Select several tiles in the palette and press **All solid** to mark them in one
-go, which is what makes a 256-tile sheet a minute's work.
+#### Editing several tiles at once
 
-There are deliberately no slopes. Static colliders in this engine are boxes,
-spheres, capsules and meshes; offering a slope would mean drawing one and having
-it behave as its bounding box, which is worse than not offering it.
+Everything under **TILE** applies to every selected tile. Drag a box in the
+palette, or **ctrl-click** to pick out tiles that are not next to each other, and
+set the collision once. A selection whose tiles do not currently agree says so
+rather than showing you one of them.
+
+Tiles being edited get a blue ring and a corner tick; the tile the **brush** will
+place keeps the orange one. They are the same after an ordinary click and stop
+being the same the moment you ctrl-click a second tile.
+
+#### Slopes
+
+Pick **shape** and draw the collider on the tile: click an edge to add a point,
+drag one to move it, right-click to remove it. The four 45° ramps are one button
+each. Points **snap to the art's own pixel grid**, which is the part that matters
+— a slope is built from several tiles whose diagonals have to meet, and a ramp
+ending a third of a pixel above where the next one begins is a character
+catching on every tile boundary for a reason nothing on screen shows.
+
+It collides as the shape you drew, not as the box around it. Concave outlines are
+fine. A drawn shape turns and mirrors with its square like every other collider,
+so one ramp tile serves all four diagonals.
 
 ### Colliders are merged
 
@@ -197,7 +214,10 @@ Tick **Collision** in the tab to draw the merged boxes over the map. They are th
 same boxes the sim gets, so what you see is what a character walks on.
 
 The layer needs the **Collidable** switch on (Inspector ⏵ Collider), like any
-other static geometry, and it uses the node's own physics **layer**.
+other static geometry, and it uses the node's own physics **layer**. A tilemap
+with solid tiles that is *not* Collidable warns in the console when you press
+Play, naming the node — a level you painted solid and cannot stand on looks
+exactly like a physics bug, and this is the one thing that tells you it is not.
 
 ### Tags
 
@@ -440,7 +460,6 @@ Written down because "it does not exist" beats "it exists and does nothing":
   stack. Delete the file to start over.
 * **Chunked / infinite maps.** A tilemap is `cols × rows`; a very large world is
   several tilemap nodes.
-* **Slope collision.** See §4.
 * **One-way platforms.** The physics layer has no one-way contact filter, so this
   would have to be built there first.
 * **Importing `.tmx` / `.ldtk`.** No importer yet.

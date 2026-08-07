@@ -39,7 +39,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
-- [components — getcomponent](#components--getcomponent) — 65
+- [components — getcomponent](#components--getcomponent) — 66
 - [animation — node:animator](#animation--nodeanimator) — 16
 - [particles — effects from script](#particles--effects-from-script) — 10
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 27
@@ -2428,7 +2428,7 @@ Sheet rows.
 
 ### `node:getcomponent`
 
-node:getcomponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z), PointLight (intensity, range, r/g/b), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace), PostProcess (enabled, bloom, bloomThreshold, bloomIntensity, vignette, vignetteStrength, vignetteRadius, aoStrength, aoRadius, posterizeBands, posterizeDither — a cutscene pushing a vignette). e.g. node:getcomponent("RigidBody").friction = 0.02 for ice.
+node:getcomponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z, two_d — 2D mode), PointLight (intensity, range, r/g/b), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace), PostProcess (enabled, bloom, bloomThreshold, bloomIntensity, vignette, vignetteStrength, vignetteRadius, aoStrength, aoRadius, posterizeBands, posterizeDither — a cutscene pushing a vignette). e.g. node:getcomponent("RigidBody").friction = 0.02 for ice.
 
 ```lua
 local rb = node:getcomponent("RigidBody")
@@ -2498,6 +2498,10 @@ Bounciness 0..1 (0 = no bounce).
 ### `rb.shape`
 
 Body shape: 0 = sphere, 1 = capsule, 2 = box.
+
+### `rb.two_d`
+
+2D (1/0): keep the body in the XY plane — it keeps its depth, never drifts out of the layer, and still spins the one way a flat object spins. Collides with the same world a 3D body does.
 
 ## animation — node:animator
 

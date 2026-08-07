@@ -43,10 +43,11 @@ pub mod grid;
 pub mod tileset;
 
 pub use autotile::{canonical, preset_len, preset_masks, Autotiler};
-pub use collide::{collision_boxes, solid_count, TileBox};
+pub use collide::{collision_shapes, solid_count, TileBox, TileColliders, TilePoly};
 pub use grid::{tile_mask, tile_masks, Stamp, TileGrid};
 pub use tileset::{
-    AutotileGroup, AutotileKind, AutotileRule, TileCollision, TileInfo, TilePage, TileSet, TileSide,
+    AutotileGroup, AutotileKind, AutotileRule, TileCollision, TileInfo, TilePage, TileSet, TileShape,
+    TileSide,
 };
 
 /// The folder a project keeps its tilesets in, relative to the project root.

@@ -621,6 +621,7 @@ const COMPONENT_FIELDS: &[(&str, &str, &str)] = &[
     ("RigidBody", "lock_rot_x", "Freeze rotation about X (keeps a body upright)."),
     ("RigidBody", "lock_rot_y", "Freeze rotation about Y."),
     ("RigidBody", "lock_rot_z", "Freeze rotation about Z."),
+    ("RigidBody", "two_d", "2D: keep the body in the XY plane (1/0). Adds to the freezes."),
     ("PointLight", "intensity", "Brightness multiplier."),
     ("PointLight", "range", "Reach in world units."),
     ("PointLight", "r", "Color red 0..1."),
@@ -3845,7 +3846,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "node:getchild", insert: "node:getchild(", doc: "node:getchild(\"Gun\") — the first child with that name (a node handle), or nil." },
     ApiEntry { label: "node:find", insert: "node:find(", doc: "node:find(\"Muzzle\") — the first descendant (any depth) with that name, or nil." },
     ApiEntry { label: "node:getscript", insert: "node:getscript(", doc: "node:getscript(\"health\") — a script handle for that script on this node, or nil. Read/write its state, call its methods, reach .node / .params." },
-    ApiEntry { label: "node:getcomponent", insert: "node:getcomponent(", doc: "node:getcomponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z), PointLight (intensity, range, r/g/b), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace), PostProcess (enabled, bloom, bloomThreshold, bloomIntensity, vignette, vignetteStrength, vignetteRadius, aoStrength, aoRadius, posterizeBands, posterizeDither — a cutscene pushing a vignette). e.g. node:getcomponent(\"RigidBody\").friction = 0.02 for ice." },
+    ApiEntry { label: "node:getcomponent", insert: "node:getcomponent(", doc: "node:getcomponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z, two_d — 2D mode), PointLight (intensity, range, r/g/b), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace), PostProcess (enabled, bloom, bloomThreshold, bloomIntensity, vignette, vignetteStrength, vignetteRadius, aoStrength, aoRadius, posterizeBands, posterizeDither — a cutscene pushing a vignette). e.g. node:getcomponent(\"RigidBody\").friction = 0.02 for ice." },
     ApiEntry { label: "node:animator", insert: "node:animator()", doc: "node:animator() — the animation handle for this node's Animation Controller (or a rigged model's embedded clips). Setters: :play/:restart/:crossfade/:stop/:setSpeed/:setLayerWeight/:seek. Getters: :state/:time/:finished/:isPlaying/:clips/:layers." },
     ApiEntry { label: "anim:play", insert: ":play(", doc: "anim:play(\"Run\" [, fade [, layer]]) — transition to a state. The controller supplies the crossfade (default fade, per-arrow overrides, and a state's ⇥ fade-in override which beats everything — 0 = instant); pass `fade` to override the first two. Safe to call every frame — re-playing the current state is a no-op." },
     ApiEntry { label: "anim:restart", insert: ":restart(", doc: "anim:restart(\"Attack\" [, fade [, layer]]) — like play, but re-enters even if that state is already playing (re-trigger a one-shot)." },
@@ -4180,6 +4181,7 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "rb.lock_rot_x", insert: "rb.lock_rot_x", doc: "Freeze rotation about X (1/0)." },
     ApiEntry { label: "rb.lock_rot_y", insert: "rb.lock_rot_y", doc: "Freeze rotation about Y (1/0)." },
     ApiEntry { label: "rb.lock_rot_z", insert: "rb.lock_rot_z", doc: "Freeze rotation about Z (1/0)." },
+    ApiEntry { label: "rb.two_d", insert: "rb.two_d", doc: "2D (1/0): keep the body in the XY plane — it keeps its depth, never drifts out of the layer, and still spins the one way a flat object spins. Collides with the same world a 3D body does." },
     ApiEntry { label: "rb.lock_x", insert: "rb.lock_x", doc: "Freeze world X translation (1/0)." },
     ApiEntry { label: "rb.lock_y", insert: "rb.lock_y", doc: "Freeze world Y translation (1/0)." },
     ApiEntry { label: "rb.lock_z", insert: "rb.lock_z", doc: "Freeze world Z translation (1/0)." },
@@ -4451,6 +4453,7 @@ tunables every step — no reset, no teleport.
   • rb.half_x / half_y / half_z box half-extents
   • rb.lock_x / lock_y / lock_z freeze world-axis translation (2.5D: lock_z)
   • rb.lock_rot_x / _y / _z     freeze rotation about an axis (stay upright)
+  • rb.two_d                    2D: keep the body in the XY plane (one switch)
 
   local l = node:getcomponent(\"PointLight\")
   • l.intensity / l.range       brightness / reach

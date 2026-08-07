@@ -35,11 +35,36 @@ Inspector ▸ **◆ Rigidbody** turns a node into a dynamic body. Properties:
 | **bounce** | Restitution (0 = no bounce) |
 | **friction** | 0 = ice, 1 = no sliding |
 | **affected by gravity** | Off = floats (still collides; a script can still move it) |
+| **2D** | Keep the body in the XY plane — see below |
 | **freeze pos x/y/z** | Lock world-axis translation (e.g. freeze Z for 2.5D) |
 | **freeze rot x/y/z** | Keep the body from tipping on an axis |
 
 Drive a body from a script via its velocity (`node.vx/vy/vz`) rather than setting its
 position — setting position fights the solver. See [scripting.md](./scripting.md#4-node--the-physics-body).
+
+### 2D bodies
+
+Tick **2D** and the body stays in the XY plane: it keeps the depth you gave it,
+can never be pushed out of the layer, and still spins the one way a flat object
+spins. That is the whole of what "this is a 2D object" means to a solver, and it
+is one switch instead of working out that it means *freeze pos z, freeze rot x,
+freeze rot y*.
+
+Everything else is unchanged, and that is the point — **a 2D body collides with
+the same world a 3D one does.** A tilemap's colliders, a slope you drew on a
+tile, a Collidable cube, terrain: all of it works, because there is no separate
+2D physics engine to be missing features. Gravity, raycasts, touch events and
+layers all behave exactly as they do in 3D.
+
+It **adds** to the freeze boxes below rather than replacing them, so ticking it
+can only ever lock more, and unticking it cannot silently release an axis you
+locked by hand. The axes it holds show as ticked and disabled.
+
+From a script: `node:getcomponent("RigidBody").two_d = 1`.
+
+> If your 2D player falls through the level, check the **tilemap** node has
+> **Collidable** on. Pressing Play warns in the console, by name, for any tilemap
+> that has solid tiles and cannot collide.
 
 ## 3. Gravity
 

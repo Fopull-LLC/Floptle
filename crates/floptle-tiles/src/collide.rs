@@ -22,7 +22,16 @@
 //! Only [`TileCollision::Full`] squares merge. A half or a custom rect is its own
 //! box: they are rare (ledges, pipes), and merging rects of unequal height needs
 //! a real polygon union, which would trade a lot of subtlety for a handful of
-//! boxes.
+//! boxes. A hand-drawn outline never merges either — a slope's whole point is
+//! that its surface is not the square's edge.
+//!
+//! ## Two kinds of collider come out
+//!
+//! [`collision_shapes`] answers boxes AND outlines, in one struct, because a
+//! caller that only asked for boxes would silently walk through every slope in
+//! the level. There is deliberately no "just the boxes" entry point for the same
+//! reason: the way to get half the colliders should not be to call the shorter
+//! function.
 //!
 //! ## The output frame
 //!
@@ -33,7 +42,7 @@
 
 use floptle_core::{tile_index, tile_point_drawn, tile_xform};
 
-use crate::tileset::TileSet;
+use crate::tileset::{TileSet, TileShape};
 
 /// One collider, in the tilemap's local space: centre and half-extents in the
 /// XY plane. Z is left to the caller — a 2D collider needs *some* depth to be a
@@ -57,14 +66,48 @@ impl TileBox {
     }
 }
 
+/// One hand-drawn collider, in the tilemap's local space: the outline's points
+/// in the XY plane, in order. Z depth is the caller's, exactly as for
+/// [`TileBox`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct TilePoly {
+    pub pts: Vec<[f32; 2]>,
+}
+
+/// Everything a tilemap collides as.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TileColliders {
+    /// Whole-square solids, merged, plus the rect-shaped partials.
+    pub boxes: Vec<TileBox>,
+    /// Hand-drawn outlines — one per square that has one, never merged.
+    pub polys: Vec<TilePoly>,
+}
+
+impl TileColliders {
+    pub fn len(&self) -> usize {
+        self.boxes.len() + self.polys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.boxes.is_empty() && self.polys.is_empty()
+    }
+}
+
 /// The collider set for a tilemap grid.
 ///
 /// `cells` is the SHEET's `cols * rows` — needed because a cell index past the
 /// end of the sheet is an empty square, and an empty square is never solid
 /// however the tileset feels about the index it holds.
-pub fn collision_boxes(cols: u32, rows: u32, tile: f32, data: &[u32], set: &TileSet) -> Vec<TileBox> {
+pub fn collision_shapes(
+    cols: u32,
+    rows: u32,
+    tile: f32,
+    data: &[u32],
+    set: &TileSet,
+) -> TileColliders {
+    let mut polys: Vec<TilePoly> = Vec::new();
     if cols == 0 || rows == 0 || tile <= 0.0 {
-        return Vec::new();
+        return TileColliders::default();
     }
     let (w, h) = (cols as f32 * tile * 0.5, rows as f32 * tile * 0.5);
     // The local-space rect of a sub-rect `(rx, ry, rw, rh)` of the tile at
@@ -97,17 +140,44 @@ pub fn collision_boxes(cols: u32, rows: u32, tile: f32, data: &[u32], set: &Tile
                 full[i] = true;
                 continue;
             }
-            let Some((rx, ry, rw, rh)) = coll.rect() else { continue };
-            // A partial collider turns with its square. The orientation maps the
-            // unit square onto itself, so the rect's two opposite corners are
-            // enough — and because the eight orientations are symmetries, the
-            // result is exactly axis-aligned rather than a bounding box of one.
             let xf = tile_xform(packed);
-            let (ax, ay) = tile_point_drawn(rx, ry, xf);
-            let (bx, by) = tile_point_drawn(rx + rw, ry + rh, xf);
-            let (lo_x, hi_x) = (ax.min(bx), ax.max(bx));
-            let (lo_y, hi_y) = (ay.min(by), ay.max(by));
-            partial.push(place(col, row, lo_x, lo_y, hi_x - lo_x, hi_y - lo_y));
+            match coll.shape() {
+                TileShape::None => {}
+                TileShape::Rect(rx, ry, rw, rh) => {
+                    // A partial collider turns with its square. The orientation
+                    // maps the unit square onto itself, so the rect's two
+                    // opposite corners are enough — and because the eight
+                    // orientations are symmetries, the result is exactly
+                    // axis-aligned rather than a bounding box of one.
+                    let (ax, ay) = tile_point_drawn(rx, ry, xf);
+                    let (bx, by) = tile_point_drawn(rx + rw, ry + rh, xf);
+                    let (lo_x, hi_x) = (ax.min(bx), ax.max(bx));
+                    let (lo_y, hi_y) = (ay.min(by), ay.max(by));
+                    partial.push(place(col, row, lo_x, lo_y, hi_x - lo_x, hi_y - lo_y));
+                }
+                TileShape::Poly(pts) => {
+                    // Every point through the SAME orientation map the rect
+                    // corners use, so a flipped slope faces the other way rather
+                    // than staying put — which is how one drawn ramp serves all
+                    // four diagonals.
+                    let x0 = col as f32 * tile - w;
+                    let y0 = h - (row + 1) as f32 * tile;
+                    let mut out: Vec<[f32; 2]> = pts
+                        .iter()
+                        .map(|p| {
+                            let (px, py) = tile_point_drawn(p[0], p[1], xf);
+                            [x0 + px * tile, y0 + py * tile]
+                        })
+                        .collect();
+                    // A mirror reverses winding. The distance field does not
+                    // care, but a consistent order keeps the debug overlay and
+                    // any future area test from disagreeing about inside.
+                    if crate::tileset::polygon_area(&out) < 0.0 {
+                        out.reverse();
+                    }
+                    polys.push(TilePoly { pts: out });
+                }
+            }
         }
     }
 
@@ -164,7 +234,7 @@ pub fn collision_boxes(cols: u32, rows: u32, tile: f32, data: &[u32], set: &Tile
         }
     }
     out.extend(partial);
-    out
+    TileColliders { boxes: out, polys }
 }
 
 /// How many squares are solid at all — the denominator of the "42 boxes for
@@ -181,6 +251,13 @@ mod tests {
     use floptle_core::{tile_pack, TileXform, EMPTY_TILE};
 
     use crate::tileset::{TileCollision, TileSide};
+
+    /// The boxes only. Most of this file's tests are about the merge, and one
+    /// that had to write `.boxes` in forty places would read as a test of the
+    /// punctuation. The outline cases say `collision_shapes` explicitly.
+    fn collision_boxes(cols: u32, rows: u32, tile: f32, data: &[u32], set: &TileSet) -> Vec<TileBox> {
+        collision_shapes(cols, rows, tile, data, set).boxes
+    }
 
     fn solid_set() -> TileSet {
         let mut set = TileSet { sheet_cols: 4, sheet_rows: 4, ..Default::default() };

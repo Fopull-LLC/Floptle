@@ -1,9 +1,9 @@
 //! Collision shapes: the [`CollisionShape`] trait (a queryable signed
 //! distance + normal) and its implementors — analytic primitives (plane,
-//! sphere, box, capsule), the baked SDF terrain, and the triangle-mesh
-//! collider with its spatial hash.
+//! sphere, box, capsule, extruded polygon), the baked SDF terrain, and the
+//! triangle-mesh collider with its spatial hash.
 
-use floptle_core::math::{Quat, Vec3};
+use floptle_core::math::{Quat, Vec2, Vec3};
 
 /// Anything physics can query: a signed distance field with a surface normal.
 /// Distance is **positive outside** the solid (in air) and **negative inside**.
@@ -91,6 +91,115 @@ impl CollisionShape for SphereShape {
     }
     fn normal(&self, p: Vec3) -> Vec3 {
         (p - self.center).try_normalize().unwrap_or(Vec3::Y)
+    }
+}
+
+/// A polygon extruded along its local Z — the collider a tile with a hand-drawn
+/// outline becomes, and the shape a **slope** actually is.
+///
+/// ## Why this can exist here at all
+///
+/// A rigid-body engine built on convex hulls would have to decompose a drawn
+/// outline into convex pieces before it could collide with it, and a concave one
+/// would either be rejected or silently become its hull — a ramp with a notch
+/// filling itself in. This collision core is signed-distance-first, so an
+/// extruded polygon is *exact geometry* rather than an approximation of one:
+/// the 2D field below is the true distance to the outline for concave shapes as
+/// much as convex, and extruding it is the standard slab combination. There is
+/// nothing to decompose and nothing to approximate, which is why tile collision
+/// could be given a real polygon case and not a bounding box wearing one.
+///
+/// Points are in the shape's own XY plane, in order, and the winding does not
+/// matter — the sign comes from a crossing count, not from the area.
+pub struct PolyPrismShape {
+    /// The outline, in the prism's local XY. At least three points.
+    pts: Vec<Vec2>,
+    center: Vec3,
+    inv_rot: Quat,
+    /// Half the extrusion depth along local Z.
+    half_z: f32,
+    /// Exact bounding radius about `center`, for the broadphase.
+    bound: f32,
+}
+
+impl PolyPrismShape {
+    /// `pts` are local to `center` (already relative), `rot` orients the prism,
+    /// `half_z` is half its depth. Returns `None` for anything that is not a
+    /// polygon — two points is a line, and a line collider would be a shape you
+    /// could stand on from one side and fall through from the other.
+    pub fn new(center: Vec3, pts: &[Vec2], half_z: f32, rot: Quat) -> Option<Self> {
+        if pts.len() < 3 {
+            return None;
+        }
+        let half_z = half_z.abs().max(1e-4);
+        let bound = pts
+            .iter()
+            .map(|p| (p.length().powi(2) + half_z * half_z).sqrt())
+            .fold(0.0f32, f32::max);
+        (bound > 1e-4).then(|| Self {
+            pts: pts.to_vec(),
+            center,
+            inv_rot: rot.inverse(),
+            half_z,
+            bound,
+        })
+    }
+
+    /// Signed distance from `p` to the outline in 2D: negative inside.
+    ///
+    /// Distance is the nearest point on any edge — exact for concave outlines,
+    /// where a max-of-half-planes (the convex shortcut) would report a point
+    /// outside a notch as being inside it. The sign is an upward crossing count,
+    /// which is independent of winding.
+    fn plane_sdf(&self, q: Vec2) -> f32 {
+        let mut d2 = f32::MAX;
+        let mut inside = false;
+        let n = self.pts.len();
+        for i in 0..n {
+            let a = self.pts[i];
+            let b = self.pts[(i + 1) % n];
+            let e = b - a;
+            let w = q - a;
+            let t = (w.dot(e) / e.dot(e).max(1e-12)).clamp(0.0, 1.0);
+            d2 = d2.min((w - e * t).length_squared());
+            // Crossing test: does the horizontal ray from `q` cross this edge?
+            if (a.y > q.y) != (b.y > q.y) && q.x < a.x + (q.y - a.y) / (b.y - a.y) * e.x {
+                inside = !inside;
+            }
+        }
+        let d = d2.max(0.0).sqrt();
+        if inside { -d } else { d }
+    }
+}
+
+impl CollisionShape for PolyPrismShape {
+    fn bounds(&self) -> Option<(Vec3, f32)> {
+        Some((self.center, self.bound))
+    }
+
+    fn distance(&self, p: Vec3) -> f32 {
+        let l = self.inv_rot * (p - self.center);
+        let d = self.plane_sdf(Vec2::new(l.x, l.y));
+        let dz = l.z.abs() - self.half_z;
+        // The standard extrusion: the outside part is the length of the positive
+        // components, the inside part is the larger (less negative) of the two.
+        let outside = Vec2::new(d.max(0.0), dz.max(0.0)).length();
+        outside + d.max(dz).min(0.0)
+    }
+
+    fn normal(&self, p: Vec3) -> Vec3 {
+        // Finite-difference, exactly as `BoxShape` does — robust on a face, an
+        // edge or a corner, and the field is well-conditioned everywhere except
+        // the medial axis deep inside.
+        let e = 0.005;
+        let d = self.distance(p);
+        Vec3::new(
+            self.distance(p + Vec3::X * e) - d,
+            self.distance(p + Vec3::Y * e) - d,
+            self.distance(p + Vec3::Z * e) - d,
+        )
+        .try_normalize()
+        .unwrap_or(Vec3::Y)
     }
 }
 
@@ -365,3 +474,125 @@ impl CollisionShape for TriMeshCollider {
         }
     }
 }
+
+#[cfg(test)]
+mod poly_tests {
+    use super::*;
+
+    /// The right triangle a 45° slope tile is: the hypotenuse runs from the
+    /// bottom-left to the top-right, so the space ABOVE it is empty.
+    fn ramp() -> PolyPrismShape {
+        let pts = [Vec2::new(-0.5, -0.5), Vec2::new(0.5, -0.5), Vec2::new(0.5, 0.5)];
+        PolyPrismShape::new(Vec3::ZERO, &pts, 0.5, Quat::IDENTITY).expect("a triangle is a polygon")
+    }
+
+    /// The whole point of the shape existing. A bounding box would report the
+    /// top-left corner as solid, and a character would stand on thin air at the
+    /// top of every ramp — which is exactly the failure that kept polygon tile
+    /// collision out of the tileset until there was a real shape for it.
+    #[test]
+    fn a_ramp_is_empty_above_its_slope_and_solid_below() {
+        let r = ramp();
+        assert!(r.distance(Vec3::new(-0.3, 0.3, 0.0)) > 0.0, "the empty corner reads solid");
+        assert!(r.distance(Vec3::new(0.3, -0.3, 0.0)) < 0.0, "the filled corner reads empty");
+        // …and the bounding box would have said otherwise about the first one.
+        let bx = BoxShape::new(Vec3::ZERO, Vec3::new(0.5, 0.5, 0.5), Quat::IDENTITY);
+        assert!(bx.distance(Vec3::new(-0.3, 0.3, 0.0)) < 0.0, "the control is not a control");
+    }
+
+    /// The surface a character actually runs up. On the hypotenuse the normal
+    /// points up and to the left at 45°, which is what turns horizontal input
+    /// into a climb instead of a wall.
+    #[test]
+    fn the_slope_face_has_the_slopes_normal() {
+        let n = ramp().normal(Vec3::new(0.0, 0.02, 0.0));
+        assert!(n.z.abs() < 0.05, "a face normal picked up depth: {n:?}");
+        let d = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((n.x + d).abs() < 0.05 && (n.y - d).abs() < 0.05, "not 45°: {n:?}");
+    }
+
+    /// Distance is the true distance to the outline, so a point out in the empty
+    /// corner is as far away as the geometry says — a max-of-half-planes
+    /// shortcut would under-report it and inflate the shape.
+    #[test]
+    fn distance_outside_is_the_real_distance_to_the_edge() {
+        let d = ramp().distance(Vec3::new(-0.5, 0.5, 0.0));
+        // The corner (-0.5, 0.5) is √2/2 from the hypotenuse through the origin.
+        let want = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((d - want).abs() < 0.02, "expected ~{want}, got {d}");
+    }
+
+    /// Concave outlines are allowed and are not quietly filled in. An L needs
+    /// the inside of its corner to stay empty; a convex hull would close it.
+    #[test]
+    fn a_concave_outline_keeps_its_notch() {
+        let l = [
+            Vec2::new(-0.5, -0.5),
+            Vec2::new(0.5, -0.5),
+            Vec2::new(0.5, 0.0),
+            Vec2::new(0.0, 0.0),
+            Vec2::new(0.0, 0.5),
+            Vec2::new(-0.5, 0.5),
+        ];
+        let s = PolyPrismShape::new(Vec3::ZERO, &l, 0.5, Quat::IDENTITY).unwrap();
+        assert!(s.distance(Vec3::new(0.25, 0.25, 0.0)) > 0.0, "the notch filled itself in");
+        assert!(s.distance(Vec3::new(-0.25, 0.25, 0.0)) < 0.0, "the arm is not solid");
+        assert!(s.distance(Vec3::new(0.25, -0.25, 0.0)) < 0.0, "the foot is not solid");
+    }
+
+    /// The extrusion is a slab, not an infinite prism: past the depth it is air,
+    /// which is what keeps a 2D layer's colliders out of the layer in front.
+    #[test]
+    fn the_prism_ends_at_its_depth() {
+        let r = ramp();
+        assert!(r.distance(Vec3::new(0.3, -0.3, 0.0)) < 0.0);
+        assert!(r.distance(Vec3::new(0.3, -0.3, 0.9)) > 0.0, "solid beyond the extrusion");
+    }
+
+    /// Winding is not the author's problem. The editor writes points in whatever
+    /// order they were clicked, and a reversed outline must not be inside-out.
+    #[test]
+    fn winding_does_not_decide_what_is_inside() {
+        let fwd = ramp();
+        let pts = [Vec2::new(0.5, 0.5), Vec2::new(0.5, -0.5), Vec2::new(-0.5, -0.5)];
+        let rev = PolyPrismShape::new(Vec3::ZERO, &pts, 0.5, Quat::IDENTITY).unwrap();
+        for p in [Vec3::new(0.3, -0.3, 0.0), Vec3::new(-0.3, 0.3, 0.0), Vec3::new(0.0, 0.0, 0.2)] {
+            assert!(
+                (fwd.distance(p) - rev.distance(p)).abs() < 1e-5,
+                "reversing the points changed the shape at {p:?}"
+            );
+        }
+    }
+
+    /// Not-a-polygon is not a collider. A line you can stand on from one side
+    /// and fall through from the other is worse than nothing there.
+    #[test]
+    fn fewer_than_three_points_is_not_a_shape() {
+        assert!(PolyPrismShape::new(Vec3::ZERO, &[], 0.5, Quat::IDENTITY).is_none());
+        assert!(
+            PolyPrismShape::new(
+                Vec3::ZERO,
+                &[Vec2::ZERO, Vec2::new(1.0, 0.0)],
+                0.5,
+                Quat::IDENTITY
+            )
+            .is_none()
+        );
+    }
+
+    /// The broadphase drops anything outside this radius, so a bound that was
+    /// too small would silently lose contacts (`floptle/0076`).
+    #[test]
+    fn the_bound_contains_every_corner() {
+        let r = ramp();
+        let (c, rad) = r.bounds().expect("a polygon knows its extent");
+        for p in [
+            Vec3::new(-0.5, -0.5, 0.5),
+            Vec3::new(0.5, -0.5, -0.5),
+            Vec3::new(0.5, 0.5, 0.5),
+        ] {
+            assert!((p - c).length() <= rad + 1e-5, "{p:?} is outside the bound {rad}");
+        }
+    }
+}
+

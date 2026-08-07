@@ -179,6 +179,48 @@ impl Editor {
             .unwrap_or(DVec3::ZERO)
     }
 
+    /// Every tilemap whose tileset marks tiles solid but whose node is not
+    /// `Collidable`, named.
+    ///
+    /// This is the one shape of failure a 2D game hits first and cannot debug:
+    /// the level is drawn, the tiles are ticked solid in the ▦ Tiles tab, the
+    /// player falls through it, and everything an author can look at says it
+    /// should be standing. The tileset is right and the node is missing a
+    /// component nothing pointed at.
+    ///
+    /// A warning rather than a silent fix. Making a solid tileset imply
+    /// `Collidable` would turn on collision in every project that ever painted
+    /// one, including levels built to be walked through.
+    pub(crate) fn solid_tilemaps_that_cannot_collide(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (e, m) in self.world.query::<Matter>() {
+            let Matter::Tilemap { data, tileset, .. } = m else { continue };
+            if tileset.is_empty() || floptle_core::is_disabled(&self.world, e) {
+                continue;
+            }
+            // A RigidBody makes its own collider, so a tilemap carrying one is
+            // not missing anything.
+            if self.world.get::<floptle_core::Collidable>(e).is_some()
+                || self.world.get::<floptle_core::RigidBody>(e).is_some()
+            {
+                continue;
+            }
+            let Some(set) = self.tiles.get(tileset) else { continue };
+            let solid = floptle_tiles::solid_count(data, set);
+            if solid > 0 {
+                out.push(format!(
+                    "Tilemap “{}” has {solid} solid squares but is not Collidable — nothing \
+                     will collide with it. Tick Collidable on the node.",
+                    self.world
+                        .get::<floptle_core::Name>(e)
+                        .map(|n| n.0.clone())
+                        .unwrap_or_else(|| format!("node {}", e.index()))
+                ));
+            }
+        }
+        out
+    }
+
     pub(crate) fn add_static_colliders(&self, sim: &mut floptle_physics::Sim) {
         // Union of Collidable + legacy MeshCollider entities (dedup; a node flagged both
         // is added once). A node with a RigidBody is a *dynamic* body (Sim::build made it
@@ -354,6 +396,11 @@ impl Editor {
         // Add static colliders (any node flagged "Collidable", plus legacy mesh
         // colliders) so a character can walk on / bump into them, not just terrain.
         self.add_static_colliders(&mut sim);
+        // …and say so, loudly, if a level was painted solid and left unable to
+        // collide. See `solid_tilemaps_that_cannot_collide`.
+        for warning in self.solid_tilemaps_that_cannot_collide() {
+            self.console.push(floptle_script::LogLevel::Warn, warning, None);
+        }
         // Water is a static field like gravity, sampled per step (`floptle/0038`).
         sim.world.water = Self::build_water_field(&self.world, origin);
         self.script_host.set_layers(sim.layers().clone());

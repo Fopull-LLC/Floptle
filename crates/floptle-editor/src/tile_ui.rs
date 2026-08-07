@@ -777,6 +777,45 @@ impl TileCtx<'_> {
         // Which sheet of the tileset we are picking from. A tileset with pages
         // draws a row of tabs; without one there is a single implicit page and
         // nothing extra on screen (`floptle/0092`).
+        // What the brush places, as one row you can see and change without
+        // knowing the rule that used to govern it: clicking a tile that happened
+        // to belong to a group armed the group, clicking one that did not
+        // disarmed it, and nothing on screen said which of those had happened.
+        // Switching between "place this exact tile" and "paint this autotile" is
+        // a thing you do constantly while building a level, so it is a switch.
+        if let Some(s) = set.as_ref()
+            && !s.groups.is_empty()
+        {
+            labelled(ui, "brush", |ui| {
+                if ui
+                    .add_sized([CHIP_W * 0.7, BTN_H], egui::Button::new("Tile").selected(self.tools.group.is_none()))
+                    .on_hover_text("place the tile you click in the palette, exactly as it is")
+                    .clicked()
+                {
+                    self.tools.group = None;
+                }
+                for (i, group) in s.groups.iter().enumerate() {
+                    let gi = i as u16;
+                    let on = self.tools.group == Some(gi);
+                    let name = if group.name.is_empty() {
+                        format!("group {i}")
+                    } else {
+                        group.name.clone()
+                    };
+                    if ui
+                        .add_sized([CHIP_W * 0.9, BTN_H], egui::Button::new(format!("▦ {name}")).selected(on))
+                        .on_hover_text(
+                            "paint this autotile: every square works out which of the \
+                             group's tiles fits its neighbours",
+                        )
+                        .clicked()
+                    {
+                        self.tools.group = Some(gi);
+                        self.tools.tool = TileTool::Brush;
+                    }
+                }
+            });
+        }
         let page_count = set.as_ref().map(|s| s.page_count()).unwrap_or(1);
         if self.tools.page >= page_count {
             self.tools.page = 0;
@@ -832,7 +871,11 @@ impl TileCtx<'_> {
             });
             return;
         }
-        ui.small("Click a tile; drag for a multi-tile brush. Shift-click to inspect without arming.");
+        ui.small(
+            "Click a tile; drag for a multi-tile brush. Ctrl-click to add tiles to the \
+             selection — everything under TILE then applies to all of them at once. \
+             Shift-click inspects without arming the brush.",
+        );
         let cell_px = (ui.available_width() / sc as f32).clamp(20.0, 44.0);
         let mut clicked: Option<u32> = None;
         let mut dragged: Option<(u32, u32, u32, u32)> = None;
@@ -858,14 +901,21 @@ impl TileCtx<'_> {
                             draw_tile_overlays(ui, rect, set, idx, cell_px);
                         }
 
-                        let in_sel = self
-                            .tools
-                            .palette
-                            .is_some_and(|(px, py, w, h)| {
-                                c >= px && c < px + w && r >= py && r < py + h
-                            });
-                        let ring = if in_sel {
+                        // Two different things are highlighted here and they are
+                        // not the same thing: what the BRUSH will place, and
+                        // what the TILE section is editing. They agree after an
+                        // ordinary click and stop agreeing the moment you
+                        // ctrl-click a second tile, so drawing one ring for both
+                        // would make a bulk edit look like it was about to be
+                        // painted.
+                        let armed = self.tools.palette.is_some_and(|(px, py, w, h)| {
+                            c >= px && c < px + w && r >= py && r < py + h
+                        });
+                        let editing = self.tools.inspect.contains(&idx);
+                        let ring = if armed {
                             ACCENT
+                        } else if editing {
+                            Color32::from_rgb(120, 190, 255)
                         } else if resp.hovered() {
                             Color32::from_gray(210)
                         } else {
@@ -874,9 +924,20 @@ impl TileCtx<'_> {
                         ui.painter().rect_stroke(
                             rect,
                             0.0,
-                            egui::Stroke::new(if in_sel { 2.0 } else { 1.0 }, ring),
+                            egui::Stroke::new(if armed || editing { 2.0 } else { 1.0 }, ring),
                             egui::StrokeKind::Inside,
                         );
+                        // An edited tile that is NOT armed gets a corner tick as
+                        // well as its ring, so the two states are still apart for
+                        // anyone who cannot separate the colours.
+                        if editing && !armed {
+                            let p = rect.left_top() + egui::vec2(2.0, 2.0);
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(p, egui::vec2(4.0, 4.0)),
+                                0.0,
+                                Color32::from_rgb(120, 190, 255),
+                            );
+                        }
 
                         if resp.drag_started() {
                             band = Some((c, r));
@@ -917,17 +978,39 @@ impl TileCtx<'_> {
         if let Some(rect) = dragged {
             self.tools.palette = Some(rect);
             self.tools.stamp = Stamp::from_page(page, sc, rect.0, rect.1, rect.2, rect.3);
-            self.tools.inspect_cell = Some(floptle_core::tile_cell_of(page, rect.1 * sc + rect.0));
+            // The band is the edit selection too: dragging out sixteen tiles and
+            // ticking "solid" once is the whole reason for the gesture.
+            self.tools.inspect.clear();
+            for dy in 0..rect.3 {
+                for dx in 0..rect.2 {
+                    self.tools
+                        .inspect
+                        .insert(floptle_core::tile_cell_of(page, (rect.1 + dy) * sc + rect.0 + dx));
+                }
+            }
             // A multi-square brush is a brush, not a group paint — a group resolves
             // per square and cannot honour a layout.
             self.tools.group = None;
         } else if let Some(idx) = clicked {
-            let shift = ui.input(|i| i.modifiers.shift);
-            self.tools.inspect_cell = Some(idx);
+            let (shift, add) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+            if add {
+                // Ctrl-click builds a selection that need not be a rectangle —
+                // the six slope tiles scattered around a sheet. It deliberately
+                // does NOT touch the brush: you are editing, not arming.
+                if !self.tools.inspect.remove(&idx) {
+                    self.tools.inspect.insert(idx);
+                }
+            } else {
+                self.tools.inspect_one(idx);
+            }
             // A rule is waiting for a tile: this click answers it rather than
             // picking a brush, and the next empty rule arms itself so filling a
-            // preset is one run of alternating clicks.
-            if let Some((g, mask)) = self.tools.fill_mask {
+            // preset is one run of alternating clicks. Ctrl-click is a selection
+            // gesture and never answers a rule — otherwise building a bulk
+            // selection while a preset is half-filled would scatter tiles into
+            // rules nobody was looking at.
+            if add {
+            } else if let Some((g, mask)) = self.tools.fill_mask {
                 let had_one = set
                     .as_ref()
                     .and_then(|s| s.groups.get(g as usize))
@@ -991,50 +1074,91 @@ impl TileCtx<'_> {
             return;
         };
         let Some(set) = self.store.get(&path).cloned() else { return };
-        let Some(cell) = self.tools.inspect_cell else {
-            ui.small("Click a tile in the palette above to set what it is.");
+        // Every control below writes to the WHOLE selection. One tile is the
+        // ordinary case and reads exactly as it did; more than one is what makes
+        // setting up a sheet a minute's work instead of an afternoon's.
+        let cells: Vec<u32> =
+            self.tools.inspect.iter().copied().filter(|c| *c < set.cells()).collect();
+        let Some(cell) = cells.first().copied() else {
+            ui.small(
+                "Click a tile in the palette above to set what it is. Ctrl-click more to edit \
+                 several at once.",
+            );
             return;
         };
-        if cell >= set.cells() {
-            return;
+        if cells.len() == 1 {
+            ui.label(RichText::new(format!("tile {cell}")).strong());
+        } else {
+            ui.label(
+                RichText::new(format!("{} tiles — every change below applies to all", cells.len()))
+                    .strong()
+                    .color(Color32::from_rgb(120, 190, 255)),
+            );
         }
-        ui.label(RichText::new(format!("tile {cell}")).strong());
 
-        // Collision. Four chips and, for Custom, four numbers.
-        let coll = set.collision(cell);
+        // Collision. The chips act on the selection, and a selection that does
+        // not agree says so rather than showing whichever tile happened to be
+        // first — an editor that displays one tile's value and writes to forty
+        // is how a sheet ends up quietly wrong.
+        let coll = set.collision(cell).clone();
+        let mixed = cells.iter().any(|c| set.collision(*c) != &coll);
+        let sel = |want: bool| want && !mixed;
         labelled(ui, "collides", |ui| {
-            for (label, want) in [
-                ("none", TileCollision::None),
-                ("full", TileCollision::Full),
-            ] {
+            for (label, want) in [("none", TileCollision::None), ("full", TileCollision::Full)] {
+                let on = sel(coll == want);
                 if ui
-                    .add_sized([CHIP_W * 0.7, BTN_H], egui::Button::new(label).selected(coll == want))
+                    .add_sized([CHIP_W * 0.55, BTN_H], egui::Button::new(label).selected(on))
                     .clicked()
                 {
-                    self.cmds.push(TileCmd::SetCollision(cell, want));
+                    self.cmds.push(TileCmd::BulkCollision(cells.clone(), want));
                 }
             }
             let is_half = matches!(coll, TileCollision::Half(_));
             if ui
-                .add_sized([CHIP_W * 0.7, BTN_H], egui::Button::new("half").selected(is_half))
+                .add_sized([CHIP_W * 0.55, BTN_H], egui::Button::new("half").selected(sel(is_half)))
                 .clicked()
                 && !is_half
             {
-                self.cmds
-                    .push(TileCmd::SetCollision(cell, TileCollision::Half(TileSide::Bottom)));
+                self.cmds.push(TileCmd::BulkCollision(
+                    cells.clone(),
+                    TileCollision::Half(TileSide::Bottom),
+                ));
             }
             let is_rect = matches!(coll, TileCollision::Custom { .. });
             if ui
-                .add_sized([CHIP_W * 0.7, BTN_H], egui::Button::new("rect").selected(is_rect))
+                .add_sized([CHIP_W * 0.55, BTN_H], egui::Button::new("rect").selected(sel(is_rect)))
                 .clicked()
                 && !is_rect
             {
-                self.cmds.push(TileCmd::SetCollision(
-                    cell,
+                self.cmds.push(TileCmd::BulkCollision(
+                    cells.clone(),
                     TileCollision::Custom { x: 0.0, y: 0.0, w: 1.0, h: 0.5 },
                 ));
             }
+            let is_poly = matches!(coll, TileCollision::Poly(_));
+            if ui
+                .add_sized([CHIP_W * 0.55, BTN_H], egui::Button::new("shape").selected(sel(is_poly)))
+                .on_hover_text(
+                    "draw the collider yourself, point by point, snapped to the art's pixels — \
+                     what a SLOPE is. It collides as the shape you drew, not as the box \
+                     around it.",
+                )
+                .clicked()
+                && !is_poly
+            {
+                // Start from the bottom-left triangle rather than from nothing:
+                // a blank canvas with no points on it gives no clue that
+                // clicking adds one, and the commonest shape anybody wants here
+                // is a 45° ramp.
+                self.cmds.push(TileCmd::BulkCollision(
+                    cells.clone(),
+                    TileCollision::Poly(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]),
+                ));
+            }
         });
+        if mixed {
+            ui.small("These tiles do not all collide the same way — pick one above to set them all.");
+        }
         if let TileCollision::Half(side) = coll {
             labelled(ui, "which half", |ui| {
                 for s in TileSide::ALL {
@@ -1046,7 +1170,8 @@ impl TileCtx<'_> {
                         .on_hover_text("named in the tile's own art — it turns with the tile")
                         .clicked()
                     {
-                        self.cmds.push(TileCmd::SetCollision(cell, TileCollision::Half(s)));
+                        self.cmds
+                            .push(TileCmd::BulkCollision(cells.clone(), TileCollision::Half(s)));
                     }
                 }
             });
@@ -1065,34 +1190,14 @@ impl TileCtx<'_> {
             });
             ui.small("in the tile, from its BOTTOM-LEFT. 0–1, so it scales with the tile size.");
             if changed {
-                self.cmds.push(TileCmd::SetCollision(cell, TileCollision::Custom { x, y, w, h }));
+                self.cmds.push(TileCmd::BulkCollision(
+                    cells.clone(),
+                    TileCollision::Custom { x, y, w, h },
+                ));
             }
         }
-
-        // The bulk path — the thing that makes a 256-tile sheet's collision a
-        // minute's work rather than an afternoon's.
-        if let Some((px, py, w, h)) = self.tools.palette
-            && w * h > 1
-        {
-            let cells: Vec<u32> = (0..h)
-                .flat_map(|dy| (0..w).map(move |dx| (py + dy, px + dx)))
-                .map(|(r, c)| r * set.sheet_cols.max(1) + c)
-                .collect();
-            labelled(ui, "selection", |ui| {
-                if ui
-                    .add_sized([CHIP_W, BTN_H], egui::Button::new("All solid"))
-                    .on_hover_text(format!("mark all {} selected tiles solid", cells.len()))
-                    .clicked()
-                {
-                    self.cmds.push(TileCmd::BulkCollision(cells.clone(), TileCollision::Full));
-                }
-                if ui
-                    .add_sized([CHIP_W, BTN_H], egui::Button::new("None solid"))
-                    .clicked()
-                {
-                    self.cmds.push(TileCmd::BulkCollision(cells.clone(), TileCollision::None));
-                }
-            });
+        if let TileCollision::Poly(pts) = &coll {
+            self.shape_editor(ui, &set, cell, &cells, pts);
         }
 
         // Tags — free strings the game reads with `tm:hasTag`.
@@ -1155,6 +1260,228 @@ impl TileCtx<'_> {
         ui.data_mut(|d| d.insert_temp(fid, ftext));
         if !info.frames.is_empty() && info.anim_fps <= 0.0 {
             ui.colored_label(ACCENT, "⚠ frames listed but the rate is 0 — it will not animate");
+        }
+    }
+
+    /// Draw a tile's collider by hand: click to add a point, drag one to move
+    /// it, right-click to remove it. Every point snaps to the ART'S OWN PIXEL
+    /// GRID.
+    ///
+    /// The snapping is the part that matters and it is not a nicety. A slope is
+    /// built out of several tiles whose diagonals have to *meet*: if one tile's
+    /// ramp ends a third of a pixel above where the next one's begins, a
+    /// character running up it catches on every tile boundary, and the cause is
+    /// invisible because the art lines up perfectly. Snapping to the pixel grid
+    /// makes "the corner of that pixel" a thing you can hit exactly, every time,
+    /// which is how a tile artist already thinks about the sheet.
+    fn shape_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        set: &TileSet,
+        cell: u32,
+        cells: &[u32],
+        pts: &[[f32; 2]],
+    ) {
+        let page = floptle_core::tile_page(cell);
+        let local = floptle_core::tile_in_page(cell);
+        let (sc, sr) = set
+            .page(page)
+            .filter(|(t, ..)| !t.trim().is_empty())
+            .map(|(_, c, r)| (c, r))
+            .unwrap_or_else(|| self.sheet_size());
+        let sheet_rel = set.page(page).map(|(t, ..)| t.to_string()).unwrap_or_default();
+        let handle = if sheet_rel.trim().is_empty() {
+            self.sheet_handle(ui)
+        } else {
+            self.texture_handle(ui, &sheet_rel)
+        };
+        // How many art pixels one tile is across. That IS the snap. Falling back
+        // to 16 rather than to "no snapping" is deliberate: an unsnapped shape
+        // editor is the tool this replaces.
+        let px_per_tile = self
+            .sheet_px(ui, &sheet_rel)
+            .or_else(|| self.sheet_px(ui, &self.layer_tileset()))
+            .map(|(w, _)| (w / sc.max(1)).max(1))
+            .unwrap_or(16);
+
+        let side = 176.0f32.min(ui.available_width() - 8.0);
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click_and_drag());
+        if let Some(sheet) = handle.as_ref() {
+            paint_tile(ui, rect, sheet, sc, sr, local);
+        } else {
+            ui.painter().rect_filled(rect, 0.0, Color32::from_gray(30));
+        }
+
+        // Unit-tile (x right, y UP from the bottom-left) ↔ screen.
+        let to_screen = |p: [f32; 2]| {
+            egui::pos2(rect.left() + p[0] * rect.width(), rect.bottom() - p[1] * rect.height())
+        };
+        let to_unit = |s: egui::Pos2| {
+            [
+                ((s.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
+                ((rect.bottom() - s.y) / rect.height()).clamp(0.0, 1.0),
+            ]
+        };
+        let snap = |p: [f32; 2]| {
+            let n = px_per_tile as f32;
+            [(p[0] * n).round() / n, (p[1] * n).round() / n]
+        };
+
+        // The pixel grid, so "snapped to pixels" is something you can SEE rather
+        // than something the tooltip claims. Drawn only when the cells are big
+        // enough to read as a grid instead of as a grey wash.
+        let step = rect.width() / px_per_tile as f32;
+        if step >= 4.0 {
+            for i in 1..px_per_tile {
+                let t = i as f32 * step;
+                let g = Color32::from_black_alpha(40);
+                ui.painter().line_segment(
+                    [egui::pos2(rect.left() + t, rect.top()), egui::pos2(rect.left() + t, rect.bottom())],
+                    egui::Stroke::new(1.0, g),
+                );
+                ui.painter().line_segment(
+                    [egui::pos2(rect.left(), rect.top() + t), egui::pos2(rect.right(), rect.top() + t)],
+                    egui::Stroke::new(1.0, g),
+                );
+            }
+        }
+
+        let mut next: Vec<[f32; 2]> = pts.to_vec();
+        let mut changed = false;
+        let drag_id = ui.id().with(("tile_shape_drag", cell));
+        let mut held: Option<usize> = ui.data(|d| d.get_temp(drag_id));
+
+        // Which point the pointer is over — the hit test is in SCREEN space, so
+        // it stays a comfortable target whatever the tile's pixel density is.
+        let hover_pt = resp.hover_pos().and_then(|m| {
+            next.iter()
+                .enumerate()
+                .map(|(i, p)| (i, to_screen(*p).distance(m)))
+                .filter(|(_, d)| *d <= 9.0)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        });
+
+        if resp.drag_started() {
+            held = hover_pt;
+        }
+        if let (true, Some(i), Some(m)) = (resp.dragged(), held, resp.hover_pos()) {
+            if i < next.len() {
+                next[i] = snap(to_unit(m));
+                changed = true;
+            }
+        }
+        if resp.drag_stopped() {
+            held = None;
+        }
+        if resp.clicked() && held.is_none() {
+            if let Some(m) = resp.interact_pointer_pos() {
+                // Clicking an existing point does nothing (you meant to drag it);
+                // clicking anywhere else inserts a point into the nearest EDGE,
+                // so a shape grows where you pointed instead of always at the end
+                // of the list — which is what makes adding a step to a slope one
+                // click rather than a rebuild.
+                if hover_pt.is_none() {
+                    let p = snap(to_unit(m));
+                    let at = insertion_edge(&next, p, &to_screen, m);
+                    next.insert(at, p);
+                    changed = true;
+                }
+            }
+        }
+        if resp.secondary_clicked()
+            && let Some(i) = hover_pt
+            && next.len() > 3
+        {
+            next.remove(i);
+            changed = true;
+        }
+        ui.data_mut(|d| {
+            if let Some(i) = held {
+                d.insert_temp(drag_id, i);
+            } else {
+                d.remove_temp::<usize>(drag_id);
+            }
+        });
+
+        // The outline, filled, over the art it collides for.
+        if next.len() >= 2 {
+            let poly: Vec<egui::Pos2> = next.iter().map(|p| to_screen(*p)).collect();
+            if next.len() >= 3 {
+                ui.painter().add(egui::Shape::convex_polygon(
+                    poly.clone(),
+                    Color32::from_rgba_unmultiplied(90, 190, 255, 60),
+                    egui::Stroke::NONE,
+                ));
+            }
+            for i in 0..poly.len() {
+                ui.painter().line_segment(
+                    [poly[i], poly[(i + 1) % poly.len()]],
+                    egui::Stroke::new(2.0, Color32::from_rgb(120, 200, 255)),
+                );
+            }
+            for (i, p) in poly.iter().enumerate() {
+                let on = hover_pt == Some(i) || held == Some(i);
+                ui.painter().circle_filled(
+                    *p,
+                    if on { 5.0 } else { 3.5 },
+                    if on { ACCENT } else { Color32::WHITE },
+                );
+            }
+        }
+        ui.painter().rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(1.0, Color32::from_gray(90)),
+            egui::StrokeKind::Inside,
+        );
+
+        ui.small(format!(
+            "Click an edge to add a point · drag to move · right-click to remove. Snapping to \
+             {px_per_tile}×{px_per_tile} pixels."
+        ));
+        // The four ramps, because a platformer wants those and nothing else four
+        // times out of five, and clicking three corners to get one is a chore
+        // rather than a design decision.
+        labelled(ui, "ramps", |ui| {
+            for (glyph, shape, tip) in RAMPS {
+                if ui
+                    .add_sized([BTN_H * 1.4, BTN_H], egui::Button::new(*glyph))
+                    .on_hover_text(*tip)
+                    .clicked()
+                {
+                    next = shape.to_vec();
+                    changed = true;
+                }
+            }
+        });
+        labelled(ui, "shape", |ui| {
+            if ui
+                .add_sized([CHIP_W * 0.8, BTN_H], egui::Button::new("Square"))
+                .on_hover_text("back to the whole tile — a starting point to cut corners off")
+                .clicked()
+            {
+                next = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+                changed = true;
+            }
+            if ui
+                .add_sized([CHIP_W * 0.8, BTN_H], egui::Button::new("Flip ⇔"))
+                .on_hover_text("mirror the shape left-to-right")
+                .clicked()
+            {
+                for p in next.iter_mut() {
+                    p[0] = 1.0 - p[0];
+                }
+                next.reverse();
+                changed = true;
+            }
+        });
+        if next.len() < 3 {
+            ui.colored_label(ACCENT, "⚠ fewer than three points is not a shape — it collides with nothing");
+        }
+        if changed {
+            self.cmds.push(TileCmd::BulkCollision(cells.to_vec(), TileCollision::Poly(next)));
         }
     }
 
@@ -1305,7 +1632,7 @@ impl TileCtx<'_> {
                 // editor it replaces — that editor could only move a tile from
                 // one shape to another, which is what made duplicates
                 // impossible in the first place.
-                if let Some(cell) = self.tools.inspect_cell {
+                if let Some(cell) = self.tools.primary() {
                     let here: Vec<u8> = floptle_tiles::tile_masks(&set, cell)
                         .into_iter()
                         .filter(|(og, _)| *og == g)
@@ -1414,6 +1741,19 @@ impl TileCtx<'_> {
                 ui.small("click a shape, then click the tile that draws it");
             }
         });
+        // Which piece of the shape the armed slot is waiting for, spelled out.
+        // The 3×3 diagram on each slot is exact and still has to be translated
+        // in your head every time; the sentence is the one an artist already
+        // has while drawing the sheet, and it is what turns "which of my tiles
+        // goes here" into a question with an obvious answer.
+        if let Some(m) = armed {
+            ui.label(
+                RichText::new(format!("waiting for: the {}", mask_shape_name(m, kind)))
+                    .color(ACCENT)
+                    .strong(),
+            );
+            ui.small(describe_mask(m, kind));
+        }
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.tools.fill_advance, "next shape after the first tile")
                 .on_hover_text(
@@ -1652,6 +1992,45 @@ impl TileCtx<'_> {
 /// group, hollow where it expects an edge. Drawn OVER the tile art rather than
 /// beside it because the pairing is the whole point — "this picture, for this
 /// shape" has to be readable at a glance across forty-seven of them.
+/// The four 45° ramps, as unit-tile outlines from the BOTTOM-LEFT. The glyph is
+/// the shape: ◣ is filled at the bottom-left, which is what its points say.
+const RAMPS: &[(&str, &[[f32; 2]], &str)] = &[
+    ("◣", &[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], "ramp up to the left"),
+    ("◢", &[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]], "ramp up to the right"),
+    ("◤", &[[0.0, 0.0], [1.0, 1.0], [0.0, 1.0]], "ceiling ramp, high on the left"),
+    ("◥", &[[1.0, 0.0], [1.0, 1.0], [0.0, 1.0]], "ceiling ramp, high on the right"),
+];
+
+/// Which edge a new point belongs on: the one it is nearest to in SCREEN space.
+///
+/// Appending to the end instead would put every new point after the last one
+/// authored, so adding a step halfway along a slope would fold the outline over
+/// itself — the shape would still be a shape, and it would be the wrong one.
+fn insertion_edge(
+    pts: &[[f32; 2]],
+    p: [f32; 2],
+    to_screen: &impl Fn([f32; 2]) -> egui::Pos2,
+    at: egui::Pos2,
+) -> usize {
+    if pts.len() < 2 {
+        return pts.len();
+    }
+    let _ = p;
+    let mut best = (f32::MAX, pts.len());
+    for i in 0..pts.len() {
+        let a = to_screen(pts[i]);
+        let b = to_screen(pts[(i + 1) % pts.len()]);
+        let ab = b - a;
+        let t = (at - a).dot(ab) / ab.length_sq().max(1e-6);
+        let q = a + ab * t.clamp(0.0, 1.0);
+        let d = q.distance(at);
+        if d < best.0 {
+            best = (d, i + 1);
+        }
+    }
+    best.1
+}
+
 fn paint_mask_glyph(ui: &egui::Ui, rect: egui::Rect, mask: u8, kind: AutotileKind, filled: bool) {
     let p = ui.painter();
     let box_side = 13.0;
@@ -1669,8 +2048,16 @@ fn paint_mask_glyph(ui: &egui::Ui, rect: egui::Rect, mask: u8, kind: AutotileKin
         if !corners && (dx != 0 && dy != 0) {
             continue;
         }
-        let c = at.min
-            + egui::vec2((dx as f32 + 1.5) * step, (-dy as f32 + 1.5) * step);
+        // `dy` is in ROW space — `-1` is NORTH, which is UP the screen — and
+        // egui's +y is DOWN, so the two agree and the row index is used as-is.
+        //
+        // It used to be negated, which drew the whole diagram upside down: the
+        // dot for "there is more of this group ABOVE me" appeared below the
+        // centre. Every tile in a sheet then looked like it answered the
+        // vertically mirrored neighbourhood, so picking tiles by the picture
+        // built an autotile set that was upside down and looked, in a level,
+        // like the art was wrong. `the_diagram_puts_north_at_the_top` pins it.
+        let c = at.min + egui::vec2((dx as f32 + 1.5) * step, (dy as f32 + 1.5) * step);
         if mask & bit != 0 {
             p.circle_filled(c, 1.6, Color32::from_gray(235));
         } else {
@@ -1681,6 +2068,55 @@ fn paint_mask_glyph(ui: &egui::Ui, rect: egui::Rect, mask: u8, kind: AutotileKin
 }
 
 /// A rule's neighbourhood in words, for the slot's tooltip.
+/// What a neighbourhood mask means, in the words somebody drawing a tileset
+/// already uses: **which piece of the shape this tile is**.
+///
+/// This is the thing the 3×3 diagram cannot say on its own. A picture of "my
+/// stuff is below me and to the right" is correct and still needs translating
+/// every single time; "top-left corner" is the sentence an artist has in their
+/// head while drawing the sheet, and it is the one that tells you which of your
+/// tiles to click.
+///
+/// The direction reads INVERTED on purpose and it is the whole trick: a tile
+/// with neighbours below and to the right is the piece at the TOP-LEFT of the
+/// shape, because the shape continues away from it in both those directions.
+pub(crate) fn mask_shape_name(mask: u8, kind: AutotileKind) -> &'static str {
+    use autotile::{E, EDGES, N, NE, NW, S, SE, SW, W};
+    let e = mask & EDGES;
+    let base = match e {
+        0 => "single block",
+        x if x == N => "bottom end",
+        x if x == S => "top end",
+        x if x == E => "left end",
+        x if x == W => "right end",
+        x if x == (N | S) => "vertical middle",
+        x if x == (E | W) => "horizontal middle",
+        x if x == (S | E) => "top-left corner",
+        x if x == (S | W) => "top-right corner",
+        x if x == (N | E) => "bottom-left corner",
+        x if x == (N | W) => "bottom-right corner",
+        x if x == (E | S | W) => "top edge",
+        x if x == (E | N | W) => "bottom edge",
+        x if x == (N | S | E) => "left edge",
+        x if x == (N | S | W) => "right edge",
+        _ => "middle",
+    };
+    if kind == AutotileKind::Edge4 || e != EDGES {
+        return base;
+    }
+    // Surrounded on all four edges, so the only thing left to say is which
+    // DIAGONAL is missing — the inside corner of an L-bend, the piece a 47-tile
+    // sheet has and a 16-tile one does not.
+    match (mask & (NE | SE | SW | NW)) ^ (NE | SE | SW | NW) {
+        0 => "middle, fully surrounded",
+        x if x == SE => "inner corner, notch at top-right",
+        x if x == SW => "inner corner, notch at top-left",
+        x if x == NE => "inner corner, notch at bottom-right",
+        x if x == NW => "inner corner, notch at bottom-left",
+        _ => "middle, with inner corners",
+    }
+}
+
 fn describe_mask(mask: u8, kind: AutotileKind) -> String {
     let corners = kind == AutotileKind::Blob8;
     let mut same: Vec<&str> = Vec::new();
@@ -1689,22 +2125,27 @@ fn describe_mask(mask: u8, kind: AutotileKind) -> String {
             continue;
         }
         if mask & bit != 0 {
+            // `dy` is in ROW space: -1 is north, which is ABOVE on screen. These
+            // were the other way round, so the panel said "below" while the tile
+            // answered "above" — an author following the words drew a sheet that
+            // was upside down and could not see why.
             same.push(match (dx, dy) {
-                (0, 1) => "above",
-                (0, -1) => "below",
+                (0, -1) => "above",
+                (0, 1) => "below",
                 (1, 0) => "right",
                 (-1, 0) => "left",
-                (1, 1) => "above-right",
-                (1, -1) => "below-right",
-                (-1, 1) => "above-left",
+                (1, -1) => "above-right",
+                (1, 1) => "below-right",
+                (-1, -1) => "above-left",
                 _ => "below-left",
             });
         }
     }
+    let shape = mask_shape_name(mask, kind);
     if same.is_empty() {
-        return "alone — nothing of this group next to it".into();
+        return format!("{shape} — nothing of this group next to it");
     }
-    format!("more of this group: {}", same.join(", "))
+    format!("{shape} — more of this group: {}", same.join(", "))
 }
 
 /// One tile of the sheet, drawn into `rect`, honouring its packed orientation.
@@ -1767,19 +2208,45 @@ fn draw_tile_overlays(ui: &egui::Ui, rect: egui::Rect, set: &TileSet, cell: u32,
     // The collider, in the shape it actually is. A tick would say "solid"; this
     // says "solid HERE", which is the part that is easy to get wrong and
     // impossible to notice.
-    if let Some((x, y, w, h)) = set.collision(cell).rect() {
-        // Tile space is +Y up; egui is +Y down.
-        let r = egui::Rect::from_min_size(
-            egui::pos2(rect.left() + x * rect.width(), rect.top() + (1.0 - y - h) * rect.height()),
-            egui::vec2(w * rect.width(), h * rect.height()),
-        );
-        ui.painter().rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(255, 90, 90, 70));
-        ui.painter().rect_stroke(
-            r,
-            0.0,
-            egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 120, 120, 190)),
-            egui::StrokeKind::Inside,
-        );
+    match set.collision(cell).shape() {
+        floptle_tiles::TileShape::None => {}
+        floptle_tiles::TileShape::Poly(pts) => {
+            // The outline, filled — the same picture the shape editor draws, so
+            // a slope reads as a slope at palette size instead of as "solid".
+            let poly: Vec<egui::Pos2> = pts
+                .iter()
+                .map(|p| {
+                    egui::pos2(
+                        rect.left() + p[0] * rect.width(),
+                        rect.bottom() - p[1] * rect.height(),
+                    )
+                })
+                .collect();
+            if poly.len() >= 3 {
+                ui.painter().add(egui::Shape::convex_polygon(
+                    poly,
+                    Color32::from_rgba_unmultiplied(90, 190, 255, 70),
+                    egui::Stroke::new(1.0, Color32::from_rgb(120, 200, 255)),
+                ));
+            }
+        }
+        floptle_tiles::TileShape::Rect(x, y, w, h) => {
+            // Tile space is +Y up; egui is +Y down.
+            let r = egui::Rect::from_min_size(
+                egui::pos2(
+                    rect.left() + x * rect.width(),
+                    rect.top() + (1.0 - y - h) * rect.height(),
+                ),
+                egui::vec2(w * rect.width(), h * rect.height()),
+            );
+            ui.painter().rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(255, 90, 90, 70));
+            ui.painter().rect_stroke(
+                r,
+                0.0,
+                egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 120, 120, 190)),
+                egui::StrokeKind::Inside,
+            );
+        }
     }
     // The neighbourhood diagram — three by three dots in the corner. A tile can
     // answer several shapes now, so this draws the first and says how many more.
@@ -1986,7 +2453,7 @@ impl crate::Editor {
             }
             TileCmd::BulkCollision(cells, c) => {
                 for cell in cells {
-                    set.info_mut(cell).collision = c;
+                    set.info_mut(cell).collision = c.clone();
                 }
             }
             TileCmd::ApplyPreset(g) => {
@@ -2415,6 +2882,56 @@ mod tests {
             text.contains("needs a tileset"),
             "and each must say what it is waiting for:\n{text}"
         );
+    }
+
+    /// **North is up.** The panel's words for a neighbourhood have to agree with
+    /// the mask the engine resolves, and they did not: `OFFSETS` measures `dy`
+    /// in ROW space, where `-1` is north — up the screen — and both the sentence
+    /// and the 3×3 diagram negated it. So a tile that answers "there is more of
+    /// this group ABOVE me" was labelled *below*, and drawn with its dot below
+    /// the centre.
+    ///
+    /// The cost of that is not a wrong word. An author picking tiles by what the
+    /// panel showed built a sheet answering the vertically mirrored
+    /// neighbourhood of the one they meant, which in a level reads as the art
+    /// being wrong rather than the table — exactly the "plausible wrongness" the
+    /// autotile module's own header warns a bad preset produces.
+    #[test]
+    fn the_panel_says_north_is_above() {
+        use floptle_tiles::autotile::{E, N, S, W};
+        let d = |m: u8| describe_mask(m, AutotileKind::Edge4);
+        assert!(d(N).contains("above"), "north read as: {}", d(N));
+        assert!(d(S).contains("below"), "south read as: {}", d(S));
+        assert!(d(E).contains("right"), "east read as: {}", d(E));
+        assert!(d(W).contains("left"), "west read as: {}", d(W));
+        // And the corners, on the preset that has them.
+        let b = |m: u8| describe_mask(m, AutotileKind::Blob8);
+        assert!(b(floptle_tiles::autotile::NE).contains("above-right"));
+        assert!(b(floptle_tiles::autotile::SW).contains("below-left"));
+    }
+
+    /// The shape names are the other half of the fix, and they have to be the
+    /// INVERSE of the neighbour directions: a tile whose group continues below
+    /// and to the right is the piece at the TOP-LEFT of the shape. Getting this
+    /// backwards would be the same bug wearing a different hat.
+    #[test]
+    fn a_tile_is_named_for_where_it_sits_not_where_its_neighbours_are() {
+        use floptle_tiles::autotile::{E, N, S, W};
+        let n = |m: u8| mask_shape_name(m, AutotileKind::Edge4);
+        assert_eq!(n(S | E), "top-left corner", "stuff below and right = the top-left piece");
+        assert_eq!(n(N | W), "bottom-right corner");
+        assert_eq!(n(E | S | W), "top edge");
+        assert_eq!(n(N | E | W), "bottom edge");
+        assert_eq!(n(N | S | E | W), "middle");
+        assert_eq!(n(0), "single block");
+        assert_eq!(n(E), "left end", "stuff only to the right = the left end of a run");
+        // Every shape in both presets gets a name — a slot labelled with an
+        // empty string is a slot nobody can pick a tile for.
+        for kind in AutotileKind::ALL {
+            for m in floptle_tiles::preset_masks(kind) {
+                assert!(!mask_shape_name(m, kind).is_empty(), "{kind:?} {m:#010b} has no name");
+            }
+        }
     }
 
     /// `tools.editing` was set and never cleared, so selecting a layer with no

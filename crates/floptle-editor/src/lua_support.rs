@@ -117,6 +117,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field lock_rot_x number Freeze rotation about X (1/0).
 ---@field lock_rot_y number Freeze rotation about Y (1/0).
 ---@field lock_rot_z number Freeze rotation about Z (1/0).
+---@field two_d number 2D: keep the body in the XY plane (1/0).
 
 ---A Point Light's live tunables.
 ---@class PointLightHandle

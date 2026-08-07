@@ -261,6 +261,7 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
                     | "lock_rot_x"
                     | "lock_rot_y"
                     | "lock_rot_z"
+                    | "two_d"
             )
     )
 }
@@ -600,6 +601,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("lock_rot_x".to_string(), b(rb.lock_rot[0])),
                 ("lock_rot_y".to_string(), b(rb.lock_rot[1])),
                 ("lock_rot_z".to_string(), b(rb.lock_rot[2])),
+                ("two_d".to_string(), b(rb.two_d)),
             ]),
         );
     }
@@ -621,6 +623,7 @@ pub(crate) const LEGACY_SNAKE_FIELDS: &[&str] = &[
     "lock_rot_x",
     "lock_rot_y",
     "lock_rot_z",
+    "two_d",
 ];
 
 /// camelCase → snake_case, for the handful of component fields that predate the
@@ -1045,6 +1048,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "lock_rot_x" => rb.lock_rot[0] = val != 0.0,
                     "lock_rot_y" => rb.lock_rot[1] = val != 0.0,
                     "lock_rot_z" => rb.lock_rot[2] = val != 0.0,
+                    "two_d" => rb.two_d = val != 0.0,
                     _ => {}
                 }
             }

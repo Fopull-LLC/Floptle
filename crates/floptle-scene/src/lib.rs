@@ -344,6 +344,9 @@ pub struct RigidBodyDoc {
     pub gravity: bool,
     #[serde(default)]
     pub lock_pos: [bool; 3],
+    /// 2D: keep the body in the XY plane (`RigidBody::two_d`).
+    #[serde(default)]
+    pub two_d: bool,
     #[serde(default)]
     pub lock_rot: [bool; 3],
     /// Tilt the node so local +Y tracks −gravity (radial-planet characters).
@@ -436,6 +439,7 @@ impl RigidBodyDoc {
             gravity: self.gravity,
             lock_pos: self.lock_pos,
             lock_rot: self.lock_rot,
+            two_d: self.two_d,
             align_up: self.align_up,
             mass: self.mass,
             assembly: self.assembly,
@@ -455,6 +459,7 @@ impl RigidBodyDoc {
             gravity: rb.gravity,
             lock_pos: rb.lock_pos,
             lock_rot: rb.lock_rot,
+            two_d: rb.two_d,
             align_up: rb.align_up,
             mass: rb.mass,
             assembly: rb.assembly,
@@ -2604,6 +2609,7 @@ mod tests {
                         gravity: false, // exercise the gravity-flag round-trip
                         lock_pos: [false, false, true],
                         lock_rot: [true, false, true],
+                        two_d: true,
                         align_up: true, // exercise the align-to-gravity round-trip
                         mass: 3.5,      // exercise the assembly-field round-trips
                         assembly: true,
@@ -2919,6 +2925,7 @@ mod tests {
         assert!(rb.capsule && rb.radius == 0.6 && rb.height == 2.4);
         assert_eq!(rb.lock_pos, [false, false, true]);
         assert_eq!(rb.lock_rot, [true, false, true]);
+        assert!(rb.two_d, "the 2D switch has to survive a save and a load like every other field");
         assert!(rb.align_up, "align-to-gravity flag lost in the round-trip");
         let cb = cube.celestial.as_ref().expect("celestial body lost in round-trip");
         assert_eq!(cb.parent, "Sun");

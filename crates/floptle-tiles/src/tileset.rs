@@ -86,14 +86,34 @@ impl TileSide {
     }
 }
 
+/// The collider a tile actually contributes, in the unit tile from the
+/// BOTTOM-LEFT and before the square's own orientation is applied.
+///
+/// Every caller goes through [`TileCollision::shape`] rather than asking for a
+/// rect, and that is deliberate: while there was a `rect()` accessor, a case it
+/// could not express would have answered `None` — "this tile is not solid" —
+/// and a slope you drew would have been walked through. An enum the compiler
+/// makes you match on cannot fail that way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TileShape<'a> {
+    /// Walk through it.
+    None,
+    /// An axis-aligned rect `(x, y, w, h)`.
+    Rect(f32, f32, f32, f32),
+    /// A hand-drawn outline, in authoring order.
+    Poly(&'a [[f32; 2]]),
+}
+
 /// What a tile collides as.
 ///
-/// Deliberately four cases and not a polygon editor. A slope needs real polygon
-/// collision, and this engine's static colliders are boxes, spheres, capsules
-/// and meshes — offering a slope here would mean drawing one and having it
-/// behave as its bounding box, which is worse than not offering it. When
-/// polygon tile collision lands, it lands as a fifth case.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// Four rect-shaped cases and a hand-drawn one. The rect cases came first
+/// because this engine's static colliders were boxes, spheres, capsules and
+/// meshes, and a slope that behaved as its bounding box would have been worse
+/// than no slope at all. [`Poly`](TileCollision::Poly) is that fifth case, and
+/// it is a real collider rather than a bounding box: the collision core is
+/// signed-distance-first, so an extruded polygon is exact geometry there
+/// (`floptle_physics::PolyPrismShape`) and not an approximation of one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum TileCollision {
     /// Walk through it. The default, so a fresh tileset collides with nothing
     /// and a level is not accidentally solid everywhere.
@@ -110,46 +130,84 @@ pub enum TileCollision {
     /// A hand-set rect in the unit tile, from the BOTTOM-LEFT. For a ledge, a
     /// pipe, a fence post — the cases where the art is not half of anything.
     Custom { x: f32, y: f32, w: f32, h: f32 },
+    /// A hand-drawn outline in the unit tile, from the BOTTOM-LEFT, in
+    /// authoring order. Three points or more; fewer is not a shape and is
+    /// treated as no collider rather than as a degenerate one.
+    ///
+    /// This is what a **slope** is. The editor snaps each point to the sheet's
+    /// pixel grid, so the diagonal you draw meets the next tile's diagonal
+    /// exactly instead of a subpixel away — which is the difference between a
+    /// ramp a character runs up and one it catches on every tile boundary.
+    ///
+    /// Concave is allowed. The distance field below is exact for either, so
+    /// there is no reason to make an author think about it.
+    Poly(Vec<[f32; 2]>),
 }
 
 impl TileCollision {
-    pub fn is_solid(self) -> bool {
-        !matches!(self, TileCollision::None)
+    pub fn is_solid(&self) -> bool {
+        !matches!(self.shape(), TileShape::None)
     }
 
     /// Whether this is the mergeable whole-square case.
-    pub fn is_full(self) -> bool {
+    pub fn is_full(&self) -> bool {
         matches!(self, TileCollision::Full)
     }
 
-    /// The collider as a rect in the unit tile from the BOTTOM-LEFT, before the
-    /// square's own orientation is applied. `None` for a non-collider.
+    /// The collider this tile contributes.
     ///
-    /// A `Custom` rect is clamped into the tile: a negative size or a rect that
-    /// hangs outside would put a collider where no art is, and a tile whose
-    /// collider is somewhere else entirely is the kind of bug that gets blamed
-    /// on the physics engine.
-    pub fn rect(self) -> Option<(f32, f32, f32, f32)> {
+    /// A `Custom` rect is clamped into the tile and a `Poly` needs three points:
+    /// a collider outside the art, or a shape that is not one, is the kind of
+    /// bug that gets blamed on the physics engine.
+    pub fn shape(&self) -> TileShape<'_> {
         match self {
-            TileCollision::None => None,
-            TileCollision::Full => Some((0.0, 0.0, 1.0, 1.0)),
-            TileCollision::Half(side) => Some(side.rect()),
+            TileCollision::None => TileShape::None,
+            TileCollision::Full => TileShape::Rect(0.0, 0.0, 1.0, 1.0),
+            TileCollision::Half(side) => {
+                let (x, y, w, h) = side.rect();
+                TileShape::Rect(x, y, w, h)
+            }
             TileCollision::Custom { x, y, w, h } => {
                 let (x, y) = (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
                 let (w, h) = (w.clamp(0.0, 1.0 - x), h.clamp(0.0, 1.0 - y));
-                (w > 1e-4 && h > 1e-4).then_some((x, y, w, h))
+                if w > 1e-4 && h > 1e-4 {
+                    TileShape::Rect(x, y, w, h)
+                } else {
+                    TileShape::None
+                }
+            }
+            TileCollision::Poly(pts) => {
+                if pts.len() >= 3 && polygon_area(pts).abs() > 1e-6 {
+                    TileShape::Poly(pts)
+                } else {
+                    TileShape::None
+                }
             }
         }
     }
 
-    pub fn label(self) -> String {
+    pub fn label(&self) -> String {
         match self {
             TileCollision::None => "none".into(),
             TileCollision::Full => "full".into(),
             TileCollision::Half(s) => format!("half {}", s.name()),
             TileCollision::Custom { x, y, w, h } => format!("rect {x:.2},{y:.2} {w:.2}x{h:.2}"),
+            TileCollision::Poly(p) => format!("shape, {} points", p.len()),
         }
     }
+}
+
+/// Twice the signed area of a polygon — the shoelace sum. Zero means the points
+/// are collinear or doubled back on themselves, which is a line and not a
+/// collider.
+pub fn polygon_area(pts: &[[f32; 2]]) -> f32 {
+    let mut a = 0.0;
+    for i in 0..pts.len() {
+        let p = pts[i];
+        let q = pts[(i + 1) % pts.len()];
+        a += p[0] * q[1] - q[0] * p[1];
+    }
+    a * 0.5
 }
 
 fn is_zero(m: &u8) -> bool {
@@ -511,8 +569,11 @@ impl TileSet {
         self.tiles.entry(cell).or_default()
     }
 
-    pub fn collision(&self, cell: u32) -> TileCollision {
-        self.tiles.get(&cell).map(|t| t.collision).unwrap_or_default()
+    /// Borrowed rather than returned by value: a hand-drawn outline carries its
+    /// points, and the collider builder asks this once per square of a level.
+    pub fn collision(&self, cell: u32) -> &TileCollision {
+        static NONE: TileCollision = TileCollision::None;
+        self.tiles.get(&cell).map(|t| &t.collision).unwrap_or(&NONE)
     }
 
     pub fn tags(&self, cell: u32) -> &[String] {
@@ -649,7 +710,7 @@ mod tests {
     fn a_fresh_tileset_collides_with_nothing() {
         let set = TileSet::default();
         for cell in 0..16 {
-            assert_eq!(set.collision(cell), TileCollision::None, "cell {cell}");
+            assert_eq!(*set.collision(cell), TileCollision::None, "cell {cell}");
         }
     }
 
@@ -658,18 +719,18 @@ mod tests {
         // Hanging off the right edge: the width is cut, not the position moved —
         // a collider that slid left would be under the wrong art.
         let c = TileCollision::Custom { x: 0.75, y: 0.0, w: 0.9, h: 1.0 };
-        assert_eq!(c.rect(), Some((0.75, 0.0, 0.25, 1.0)));
+        assert_eq!(c.shape(), TileShape::Rect(0.75, 0.0, 0.25, 1.0));
         // Degenerate rects are not colliders at all.
-        assert_eq!(TileCollision::Custom { x: 0.5, y: 0.5, w: 0.0, h: 0.5 }.rect(), None);
-        assert_eq!(TileCollision::Custom { x: 0.0, y: 0.0, w: -1.0, h: 1.0 }.rect(), None);
+        assert_eq!(TileCollision::Custom { x: 0.5, y: 0.5, w: 0.0, h: 0.5 }.shape(), TileShape::None);
+        assert_eq!(TileCollision::Custom { x: 0.0, y: 0.0, w: -1.0, h: 1.0 }.shape(), TileShape::None);
     }
 
     #[test]
     fn the_four_halves_are_the_halves_they_say() {
-        assert_eq!(TileCollision::Half(TileSide::Bottom).rect(), Some((0.0, 0.0, 1.0, 0.5)));
-        assert_eq!(TileCollision::Half(TileSide::Top).rect(), Some((0.0, 0.5, 1.0, 0.5)));
-        assert_eq!(TileCollision::Half(TileSide::Left).rect(), Some((0.0, 0.0, 0.5, 1.0)));
-        assert_eq!(TileCollision::Half(TileSide::Right).rect(), Some((0.5, 0.0, 0.5, 1.0)));
+        assert_eq!(TileCollision::Half(TileSide::Bottom).shape(), TileShape::Rect(0.0, 0.0, 1.0, 0.5));
+        assert_eq!(TileCollision::Half(TileSide::Top).shape(), TileShape::Rect(0.0, 0.5, 1.0, 0.5));
+        assert_eq!(TileCollision::Half(TileSide::Left).shape(), TileShape::Rect(0.0, 0.0, 0.5, 1.0));
+        assert_eq!(TileCollision::Half(TileSide::Right).shape(), TileShape::Rect(0.5, 0.0, 0.5, 1.0));
     }
 
     #[test]
@@ -708,7 +769,7 @@ mod tests {
         // …and so does a tile entry missing the newer per-tile fields.
         let old = r#"TileSet(name: "o", tiles: {2: TileInfo(collision: Full)})"#;
         let set = TileSet::from_ron(old).expect("a partial tile entry must load");
-        assert_eq!(set.collision(2), TileCollision::Full);
+        assert_eq!(*set.collision(2), TileCollision::Full);
         assert!(set.tags(2).is_empty());
     }
 
@@ -800,7 +861,7 @@ mod tests {
         assert_eq!(set.groups[0].tiles_for(5), &[2]);
         assert_eq!(set.group_cells(0), vec![0, 1, 2]);
         // Everything that was NOT autotile data is untouched.
-        assert_eq!(set.collision(0), TileCollision::Full);
+        assert_eq!(*set.collision(0), TileCollision::Full);
         assert_eq!(set.tags(9), ["ice"]);
 
         // The legacy fields are cleared, so the file it saves back is in the new
@@ -951,9 +1012,9 @@ mod tests {
         let b = floptle_core::tile_cell_of(2, 2);
         set.info_mut(a).collision = TileCollision::Full;
         set.info_mut(b).collision = TileCollision::Half(TileSide::Top);
-        assert_eq!(set.collision(a), TileCollision::Full);
-        assert_eq!(set.collision(b), TileCollision::Half(TileSide::Top));
-        assert_eq!(set.collision(floptle_core::tile_cell_of(1, 2)), TileCollision::None);
+        assert_eq!(*set.collision(a), TileCollision::Full);
+        assert_eq!(*set.collision(b), TileCollision::Half(TileSide::Top));
+        assert_eq!(*set.collision(floptle_core::tile_cell_of(1, 2)), TileCollision::None);
     }
 
     /// The pages round-trip through the file, and a set with none writes what it

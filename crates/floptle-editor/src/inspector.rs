@@ -2859,16 +2859,57 @@ impl EditorTabViewer<'_> {
                                     .checkbox(&mut rb.gravity, "affected by gravity")
                                     .on_hover_text("off = floats (still collides; a script can still move it)")
                                     .changed();
+                                // 2D first, and above the axis toggles, because
+                                // it is the answer to the question the axis
+                                // toggles make you ask. Working out that a 2D
+                                // object means "freeze pos z, freeze rot x and
+                                // y" is a thing you should have to do once, in
+                                // the engine, not once per node.
+                                cmd.inspector_changed |= ui
+                                    .checkbox(&mut rb.two_d, "2D — keep it in the XY plane")
+                                    .on_hover_text(
+                                        "One switch for a 2D game: the body keeps its depth, \
+                                         never drifts out of the layer, and still spins the \
+                                         one way a flat object spins. It collides with the \
+                                         same world a 3D body does — a tilemap's colliders, \
+                                         a slope you drew, anything Collidable. Adds to the \
+                                         freezes below rather than replacing them.",
+                                    )
+                                    .changed();
+                                let two_d = rb.two_d;
                                 ui.horizontal(|ui| {
                                     ui.label("freeze pos");
                                     for (i, ax) in ["x", "y", "z"].iter().enumerate() {
-                                        cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_pos[i], *ax).changed();
+                                        // Z is held by 2D: show it on and say so
+                                        // rather than letting the box look
+                                        // unticked while the solver freezes it.
+                                        let forced = two_d && i == 2;
+                                        let mut v = rb.lock_pos[i] || forced;
+                                        let r = ui.add_enabled(!forced, egui::Button::new(*ax).selected(v));
+                                        if r.clicked() && !forced {
+                                            v = !v;
+                                            rb.lock_pos[i] = v;
+                                            cmd.inspector_changed = true;
+                                        }
+                                        if forced {
+                                            r.on_hover_text("held by 2D");
+                                        }
                                     }
                                 });
                                 ui.horizontal(|ui| {
                                     ui.label("freeze rot");
                                     for (i, ax) in ["x", "y", "z"].iter().enumerate() {
-                                        cmd.inspector_changed |= ui.toggle_value(&mut rb.lock_rot[i], *ax).changed();
+                                        let forced = two_d && i < 2;
+                                        let mut v = rb.lock_rot[i] || forced;
+                                        let r = ui.add_enabled(!forced, egui::Button::new(*ax).selected(v));
+                                        if r.clicked() && !forced {
+                                            v = !v;
+                                            rb.lock_rot[i] = v;
+                                            cmd.inspector_changed = true;
+                                        }
+                                        if forced {
+                                            r.on_hover_text("held by 2D");
+                                        }
                                     }
                                 });
                                 cmd.inspector_changed |= ui
