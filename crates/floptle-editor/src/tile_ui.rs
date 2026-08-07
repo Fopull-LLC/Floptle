@@ -80,8 +80,6 @@ pub(crate) enum TileCmd {
     /// would renumber nothing (the stride is fixed) but would leave every
     /// square placed from it drawing a hole with no way back.
     RemoveLastPage,
-    /// Set one tile's collision.
-    SetCollision(u32, TileCollision),
     /// Replace one tile's tag list.
     SetTags(u32, Vec<String>),
     /// Add a tile to one of a group's rules: `(group, neighbourhood, cell)`.
@@ -1366,29 +1364,29 @@ impl TileCtx<'_> {
         if resp.drag_started() {
             held = hover_pt;
         }
-        if let (true, Some(i), Some(m)) = (resp.dragged(), held, resp.hover_pos()) {
-            if i < next.len() {
-                next[i] = snap(to_unit(m));
-                changed = true;
-            }
+        if let (true, Some(i), Some(m)) = (resp.dragged(), held, resp.hover_pos())
+            && i < next.len()
+        {
+            next[i] = snap(to_unit(m));
+            changed = true;
         }
         if resp.drag_stopped() {
             held = None;
         }
-        if resp.clicked() && held.is_none() {
-            if let Some(m) = resp.interact_pointer_pos() {
-                // Clicking an existing point does nothing (you meant to drag it);
-                // clicking anywhere else inserts a point into the nearest EDGE,
-                // so a shape grows where you pointed instead of always at the end
-                // of the list — which is what makes adding a step to a slope one
-                // click rather than a rebuild.
-                if hover_pt.is_none() {
-                    let p = snap(to_unit(m));
-                    let at = insertion_edge(&next, p, &to_screen, m);
-                    next.insert(at, p);
-                    changed = true;
-                }
-            }
+        // Clicking an existing point does nothing (you meant to drag it);
+        // clicking anywhere else inserts a point into the nearest EDGE, so a
+        // shape grows where you pointed instead of always at the end of the list
+        // — which is what makes adding a step to a slope one click rather than a
+        // rebuild.
+        if resp.clicked()
+            && held.is_none()
+            && hover_pt.is_none()
+            && let Some(m) = resp.interact_pointer_pos()
+        {
+            let p = snap(to_unit(m));
+            let at = insertion_edge(&next, p, &to_screen, m);
+            next.insert(at, p);
+            changed = true;
         }
         if resp.secondary_clicked()
             && let Some(i) = hover_pt
@@ -2374,7 +2372,6 @@ impl crate::Editor {
         }
         let Some(set) = self.tiles.get_mut(&path) else { return };
         match cmd {
-            TileCmd::SetCollision(cell, c) => set.info_mut(cell).collision = c,
             TileCmd::SetTags(cell, tags) => set.info_mut(cell).tags = tags,
             TileCmd::AddToRule(g, mask, cell) => {
                 if let Some(group) = set.groups.get_mut(g as usize) {
@@ -2653,7 +2650,7 @@ mod tests {
         let cmds = vec![
             TileCmd::AddLayer,
             TileCmd::Resize(4, 4, 0, 0),
-            TileCmd::SetCollision(3, TileCollision::Half(TileSide::Top)),
+            TileCmd::BulkCollision(vec![3], TileCollision::Half(TileSide::Top)),
             TileCmd::AddGroup(AutotileKind::Blob8),
             TileCmd::SetAnim(2, vec![3, 4], 8.0),
         ];
