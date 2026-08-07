@@ -2295,11 +2295,18 @@ impl EditorTabViewer<'_> {
                                             .add(egui::Slider::new(vignette_radius, 0.3..=1.0).text("radius"))
                                             .changed();
                                     }
-                                    // Posterize — crush the final image to a limited palette.
+                                    // Posterize — crush the ART to a limited palette. It runs
+                                    // before the 2D light rather than at the end of the frame
+                                    // (`floptle/0127`), which is why the tooltip says palette.
                                     ui.separator();
                                     ui.horizontal(|ui| {
                                         ui.label("Posterize")
-                                            .on_hover_text("reduce the final color to a fixed number of levels per channel — a limited-palette / banded retro look");
+                                            .on_hover_text(
+                                                "reduce your ART to a fixed number of levels per channel — a \
+                                                 limited-palette / banded retro look. It quantises the palette \
+                                                 only: 2D lights, the vignette, bloom and ambient occlusion are \
+                                                 applied on top and stay smooth.",
+                                            );
                                         let plabel = match *posterize_bands {
                                             0 | 1 => "off".to_string(),
                                             n => format!("{n} levels"),
@@ -2319,15 +2326,19 @@ impl EditorTabViewer<'_> {
                                     ui.add_enabled_ui(*posterize_bands >= 2, |ui| {
                                         cmd.inspector_changed |= ui
                                             .checkbox(posterize_dither, "dither the bands")
-                                            .on_hover_text("ordered dither so smooth gradients don't hard-step between levels")
+                                            .on_hover_text(
+                                                "ordered dither, so a gradient in your ART stipples between two \
+                                                 levels instead of hard-stepping — a painted sky, a soft-edged \
+                                                 sprite. It has no effect on lighting.",
+                                            )
                                             .changed();
                                         cmd.inspector_changed |= ui
                                             .checkbox(posterize_chroma, "step brightness, keep colour")
                                             .on_hover_text(
                                                 "off — the default — steps each colour channel on its own, which is a real \
-                                                 look and what every project built before now is made of. It is never what \
-                                                 a LIGHT wants: a warm white lamp's ramp crosses each channel's boundary at \
-                                                 a different radius, so it lands as concentric rings in colours nobody chose. \
+                                                 look and what every project built before now is made of. It is often not \
+                                                 what warm ART wants: a sunset or a torch-lit wall crosses each channel's \
+                                                 boundary at a different value, so it steps through colours nobody chose. \
                                                  On, the step happens once to brightness and the colour rides along — a grey \
                                                  pixel comes out identical either way.",
                                             )
@@ -3953,9 +3964,10 @@ fn lighting_2d_row(
                  keep it off, e.g. a background that should stay flat",
             );
         }
-        // The shape of the falloff (`floptle/0126`). A posterized game needs
-        // this: quantising a smooth radial ramp draws concentric rings, and the
-        // way out is to put the whole ramp inside one band.
+        // The shape of the falloff (`floptle/0126`). An art control: a hard pool
+        // with a defined edge, or a soft glow that reaches. It was ALSO sold as
+        // the way to dodge posterize banding, and that is withdrawn — the light
+        // is never quantised now (`floptle/0127`).
         let range = match world.get::<Matter>(e) {
             Some(Matter::PointLight { range, .. }) => *range,
             _ => 10.0,
@@ -3972,8 +3984,8 @@ fn lighting_2d_row(
                 .on_hover_text(
                     "full brightness out to here, and only then falling away to nothing at \
                      the light's range. 0 starts the ramp at the light, which is what every \
-                     light did before. Push it near the range to land the whole falloff \
-                     inside one posterize band.",
+                     light did before. Push it near the range for a bright disc that ends, \
+                     rather than a glow that fades the whole way.",
                 )
                 .changed()
             {

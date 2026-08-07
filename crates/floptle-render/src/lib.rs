@@ -30,6 +30,7 @@ pub mod light2d;
 pub mod lines;
 pub mod mesh;
 pub mod outline;
+pub mod palette;
 pub mod particles;
 pub mod post;
 pub mod raster;
@@ -51,6 +52,7 @@ pub use mesh::{
     MeshId, TextureData, Vertex,
 };
 pub use outline::Outline;
+pub use palette::{Palette, PaletteQuantize};
 pub use particles::{ParticleBatch, ParticleBlend, ParticleGlobals, ParticleInstance, Particles};
 pub use post::{PostSettings, PostStack, SsaoFrame};
 pub use ui::{Ui, UiBatch, UiBindingId, UiInstance, UiPlane, UiShaderId, UiTex};

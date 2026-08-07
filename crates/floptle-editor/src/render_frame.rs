@@ -4281,6 +4281,22 @@ impl Editor {
                     gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,
                     raster_clear, Some(raymarch.field_bind()),
                 );
+                let composited = {
+                    let d = if self.project.retro {
+                        retro.depth_texture()
+                    } else {
+                        gpu.depth_texture()
+                    }
+                    .size();
+                    (d.width.max(1), d.height.max(1))
+                };
+                // Posterize, HERE — over the art the raster and raymarch passes
+                // just drew and before a light touches it. The palette is what
+                // the setting quantizes; the light is a multiplier on top of it
+                // (`floptle/0127`).
+                if let Some(q) = post_settings.palette() {
+                    raster.quantize_palette(gpu, color, composited, q);
+                }
                 // 2D lighting composites over the scene the raster pass just
                 // drew, so a lit tilemap replaces its own unlit pixels. Runs on
                 // BOTH draw paths — see `lit_2d_rank`.
@@ -4288,15 +4304,7 @@ impl Editor {
                     gpu,
                     color,
                     depth,
-                    {
-                        let d = if self.project.retro {
-                            retro.depth_texture()
-                        } else {
-                            gpu.depth_texture()
-                        }
-                        .size();
-                        (d.width.max(1), d.height.max(1))
-                    },
+                    composited,
                     view_proj.to_cols_array_2d(),
                     &lights_2d,
                     &flat2d,
@@ -7338,6 +7346,12 @@ impl Editor {
         let view_proj = cam.view_proj(aspect);
         // Layer names resolve to bits only when a mask actually culls.
         let layer_table = (cull_mask != u32::MAX).then(|| self.project.build_layers());
+        // Read from the scene's own PostProcess node rather than taken as an
+        // argument: every caller of this path — the Game view, a render target, a
+        // thumbnail — is showing the same scene, and posterize is that scene's
+        // palette. A parameter would be one more thing three call sites have to
+        // remember to pass the same way.
+        let palette = crate::shading::post_process_uniforms(&self.world).0.palette();
 
         // Sky-shader uniforms (Inspector knobs over `.flsl` defaults), resolved before any
         // GPU borrow — the offscreen / Game render reuses the same values as the editor view.
@@ -7835,6 +7849,13 @@ impl Editor {
                 gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,
                 raster_clear, Some(raymarch.field_bind()),
             );
+            // The palette quantize, before the light — the same order the surface
+            // path uses, and it has to be the same or a docked Game view would
+            // posterize its lighting while the Scene view did not (`floptle/0127`,
+            // and the two gathers have drifted over exactly this shape before).
+            if let Some(q) = palette {
+                raster.quantize_palette(gpu, color, (size.0.max(1), size.1.max(1)), q);
+            }
             raster.light2d_pass(
                 gpu,
                 color,

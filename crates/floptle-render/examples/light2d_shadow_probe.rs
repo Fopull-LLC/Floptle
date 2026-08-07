@@ -182,17 +182,23 @@ fn main() {
     // ---- falloff shaping (`floptle/0126`) ----------------------------------
     //
     // The far column is six units from the light against a range of twelve, so
-    // the default ramp has it at a quarter brightness — halfway down the curve,
-    // which is exactly where a posterized frame draws a band edge. An inner
-    // radius moves the whole ramp out past it.
+    // the default ramp has it at a quarter brightness. `inner` and the exponent
+    // are how an author *shapes* a light — a hard pool of light with a defined
+    // edge, or a soft one that reaches further.
+    //
+    // They were also, briefly, the recommended way to dodge posterize banding:
+    // squash the whole falloff inside one band and it cannot draw rings. That
+    // recommendation is withdrawn (`floptle/0127`) — it replaced N soft rings
+    // with one hard disc edge, and the edge survived turning posterize off,
+    // which is how you know a workaround was never the fix. The knobs stay
+    // because shaping a light is a real thing to want.
     let flat_ramp = take("falloff_flat", &mut raster, Some((false, MAP_RANK)),
                          &base(RANGE * 0.9, 2.0));
     let steep = take("falloff_steep", &mut raster, Some((false, MAP_RANK)), &base(0.0, 5.0));
     assert!(
         flat_ramp.1 > off.1 + 0.1,
         "an inner radius did not flatten the core: {:.3} against the default ramp's {:.3}. \
-         Without this a game cannot land a light's whole falloff inside one posterize band, \
-         which is the only way to stop it drawing concentric rings.",
+         A light whose falloff cannot be shaped is one shape of light.",
         flat_ramp.1,
         off.1
     );

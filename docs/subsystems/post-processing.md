@@ -55,15 +55,38 @@ Both modes share `ao_strength` (how dark) and `ao_radius` (reach in meters).
 ## Render plumbing (for the next effect you add)
 
 The `PostStack` chain: scene renders into `input_view()`, then
-**SSAO ⊗ → bloom → vignette → out**, each a one-triangle pass ping-ponging
-between full-res targets (`scene`/`ping`/`pong`). SSAO needs an [`SsaoFrame`]
-(depth view + projection) — depth textures now carry `TEXTURE_BINDING`.
-The split Game viewport runs its own `PostStack` so the node applies there
-too; the editor gathers the node once per frame (`post_process_uniforms`).
+**SSAO ⊗ → bloom → colour filter → vignette → out**, each a one-triangle pass
+ping-ponging between full-res targets (`scene`/`ping`/`pong`). SSAO needs an
+[`SsaoFrame`] (depth view + projection) — depth textures now carry
+`TEXTURE_BINDING`. The split Game viewport runs its own `PostStack` so the node
+applies there too; the editor gathers the node once per frame
+(`post_process_uniforms`).
+
+**Posterize is not in that chain**, and where it sits is load-bearing rather
+than incidental (`floptle/0127`). It is its own pass — `Raster::quantize_palette`,
+[`crate::palette`] — run by the caller after the raster and raymarch passes and
+immediately *before* `light2d_pass`. Posterize quantizes the **palette**, the
+set of values the art is allowed to be; a light is a multiplier on the palette
+rather than a member of it. Quantizing the finished frame made them one setting,
+and then no configuration was right: hard rings, a stipple, or no palette at all.
+
+The rule that falls out, and the one to keep when you add an effect:
+**quantize the palette; everything light-shaped comes after.** SSAO, bloom and
+the vignette are all downstream of the quantize now, which is why a vignette is
+a smooth darkening rather than rings in the corners — it was banding for exactly
+the reason a light was.
+
+`PostSettings::any()` still counts posterize even though the chain no longer
+applies it. That is deliberate: it forces the scene into a post target, and the
+palette pass has to be able to *read* the frame it quantizes. A swapchain
+texture cannot be sampled.
 
 Adding an effect = a `fs_*` entry in `post.wgsl` + a pipeline + a
 `PostSettings` field + sliders in the node's Inspector arm. Headless probes:
-`ssao_probe`, `sdf_ao_probe`, `post_probe` (bloom/vignette).
+`ssao_probe`, `sdf_ao_probe`, `post_probe` (bloom/vignette),
+`posterize_chroma_probe` (the quantizer keeps a warm ramp's hue),
+`light2d_smooth_probe` (a light adds no step the art does not already have,
+dithered and undithered).
 
 ## Not yet
 

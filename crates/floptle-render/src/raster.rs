@@ -489,6 +489,10 @@ pub struct Raster {
     /// The 2D lighting pass — its own pipelines and G-buffer. Idle in a scene
     /// with nothing flat in it.
     light2d: crate::light2d::Light2d,
+    /// The palette (posterize) pass. It lives next to the 2D light because it
+    /// has to run immediately BEFORE it — that ordering is the whole feature
+    /// (`floptle/0127`), and a caller that has one to hand has the other.
+    palette: crate::palette::Palette,
     /// Fallback group(2) for callers without a raymarch pass: zeroed field
     /// globals (no volumes/blobs, shadows + AO off) → the field branches skip.
     empty_field_bind: wgpu::BindGroup,
@@ -933,6 +937,7 @@ impl Raster {
             terrain_samp_nearest,
             terrain_nearest_mask: 0,
             light2d: crate::light2d::Light2d::new(gpu, &tex_layout, gpu.surface_format()),
+            palette: crate::palette::Palette::new(gpu, gpu.surface_format()),
             tex_layout,
             empty_field_bind,
             samplers: HashMap::new(),
@@ -2574,9 +2579,28 @@ impl Raster {
         self.depth_prepass_with(gpu, globals, instances, &[], &[], main_depth)
     }
 
-    /// [`depth_prepass`](Self::depth_prepass) plus custom-shader draws:
-    /// opaque-phase flsl instances prime depth too (their group(1) base texture
-    /// drives the same conservative alpha discard).
+    /// **The palette pass** (`floptle/0127`): quantize `color` in place to the
+    /// scene's posterize settings.
+    ///
+    /// Run it after the raster and raymarch passes and immediately BEFORE
+    /// [`light2d_pass`](Self::light2d_pass). Posterize quantizes the palette —
+    /// the set of values the art is allowed to be — and a light is a multiplier
+    /// on the palette, not a member of it. Quantizing the finished frame instead
+    /// makes them one setting, and then no configuration is right: hard rings,
+    /// or a stipple, or no palette at all. See [`crate::palette`].
+    ///
+    /// `q` comes from [`crate::PostSettings::palette`], which is `None` when the
+    /// setting is off — so there is no "did I remember the `bands >= 2` check".
+    pub fn quantize_palette(
+        &mut self,
+        gpu: &Gpu,
+        color: &wgpu::TextureView,
+        size: (u32, u32),
+        q: crate::palette::PaletteQuantize,
+    ) {
+        self.palette.quantize(gpu, color, size, q);
+    }
+
     /// **2D lighting** (`docs/2d-lighting-proposal.md`, step 2): fill the flat
     /// G-buffer and composite the lit result over `color`.
     ///
@@ -2587,6 +2611,10 @@ impl Raster {
     ///
     /// A no-op when nothing is flat or no light reaches it, so a 3D scene pays
     /// one branch.
+    ///
+    /// **Call [`quantize_palette`](Self::quantize_palette) first** when the scene
+    /// posterizes. The light is added on top of the quantized palette, never
+    /// quantized with it — see [`crate::palette`].
     #[allow(clippy::too_many_arguments)]
     pub fn light2d_pass(
         &mut self,

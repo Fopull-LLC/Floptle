@@ -36,12 +36,17 @@ const SRC: &str = include_str!("../src/render_frame.rs");
 /// The calls that put world geometry into a frame. Each must appear on both
 /// paths; a call that exists on only one is a kind of object some views cannot
 /// see.
-const GATHERS: [(&str, &str); 5] = [
+const GATHERS: [(&str, &str); 6] = [
     ("push_mesh_instances", "imported models, map meshes, skinned characters"),
     ("tilemap_draws", "tilemaps — the 2D level itself"),
     ("sprite_draws", "sprite batches"),
     ("primitive_draw", "primitives, with their vertex paint"),
     ("water_draw", "water volumes — seas and pools"),
+    // Not geometry, but the same failure: the palette quantize has to run in
+    // the same place relative to the 2D light composite on both paths, or a
+    // Game view posterizes its lighting while the Scene view does not
+    // (`floptle/0127`).
+    ("quantize_palette", "the palette quantize, before the 2D light"),
 ];
 
 /// The body of `render_world_into`, from its signature to the end of the file.

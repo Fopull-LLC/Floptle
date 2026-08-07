@@ -28,15 +28,20 @@ pub struct PostSettings {
     pub ssao_strength: f32,
     /// Occlusion reach in world units.
     pub ssao_radius: f32,
-    /// Posterize: quantize the final color to this many levels per channel (a limited
-    /// palette / banded look). 0 or 1 = off; 2.. = enabled. Applied in the terminal
-    /// pass at the composited (retro) resolution, before the upscale.
+    /// Posterize: quantize the **palette** to this many levels per channel (a
+    /// limited-palette / banded look). 0 or 1 = off; 2.. = enabled.
+    ///
+    /// Not part of this chain. It runs as its own pass over the art, at the
+    /// composited (retro) resolution and before the 2D light composite — see
+    /// [`crate::palette`] and [`Self::palette`]. Everything in the chain below is
+    /// downstream of it and is deliberately left smooth.
     pub posterize_bands: u32,
-    /// Ordered-dither the posterize quantization so smooth ramps don't hard-step.
+    /// Ordered-dither the posterize quantization so a smooth ramp in the *art*
+    /// stipples rather than hard-stepping. It has no bearing on lighting.
     pub posterize_dither: bool,
     /// Quantize brightness and keep the chroma, rather than each channel on its
-    /// own — so a near-neutral light steps in brightness instead of banding into
-    /// hues nobody chose (`floptle/0126`). Off = today's per-channel look.
+    /// own — so a warm tint steps in brightness instead of stepping through hues
+    /// nobody chose (`floptle/0126`). Off = the per-channel look.
     pub posterize_chroma: bool,
     /// Colour-vision filter: 0 = off, 1 = protanopia, 2 = deuteranopia,
     /// 3 = tritanopia (`floptle_core::access::ColorFilter::lane`). Runs in the
@@ -51,6 +56,12 @@ pub struct PostSettings {
 
 impl PostSettings {
     /// True if any effect is enabled (else the stack is a no-op passthrough).
+    ///
+    /// Posterize counts even though the chain no longer applies it, and that is
+    /// load-bearing: it is what makes the caller render the scene into a post
+    /// target instead of straight at the swapchain, and the palette pass has to
+    /// be able to READ the frame it quantizes. A swapchain texture cannot be
+    /// sampled.
     pub fn any(&self) -> bool {
         self.bloom
             || self.vignette
@@ -63,6 +74,20 @@ impl PostSettings {
     /// the identity, and the chain must not pay for a pass that changes nothing.)
     pub fn color_filter_on(&self) -> bool {
         self.color_filter > 0 && self.color_filter_strength > 0.0
+    }
+
+    /// The palette quantize this scene asks for, or `None` when posterize is off.
+    ///
+    /// One place answers "is posterize on", so a caller cannot half-remember the
+    /// `bands >= 2` rule — and the type it hands back is the only way to ask
+    /// [`crate::Palette::quantize`] to do anything, so an off setting cannot
+    /// reach the pass at all.
+    pub fn palette(&self) -> Option<crate::palette::PaletteQuantize> {
+        (self.posterize_bands >= 2).then_some(crate::palette::PaletteQuantize {
+            bands: self.posterize_bands,
+            dither: self.posterize_dither,
+            chroma: self.posterize_chroma,
+        })
     }
 }
 
@@ -130,7 +155,7 @@ pub struct PostStack {
     bright_pipeline: wgpu::RenderPipeline,
     blur_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline, // additive blend
-    finish_pipeline: wgpu::RenderPipeline,     // terminal vignette + posterize
+    finish_pipeline: wgpu::RenderPipeline,     // terminal colour filter + vignette
     ssao_pipeline: wgpu::RenderPipeline,       // ssao.wgsl → half-res R8
     ao_blur_pipeline: wgpu::RenderPipeline,    // fs_blur onto the R8 targets
     ssao_apply_pipeline: wgpu::RenderPipeline, // scene × AO
@@ -462,9 +487,12 @@ impl PostStack {
     /// settings ask for SSAO but no frame inputs are given, the effect is skipped.
     pub fn run(&self, gpu: &Gpu, s: &PostSettings, ssao: Option<&SsaoFrame>, out: &wgpu::TextureView) {
         let ssao_on = s.ssao && ssao.is_some();
-        let posterize_on = s.posterize_bands >= 2;
         let filter_on = s.color_filter_on();
-        if !(ssao_on || s.bloom || s.vignette || posterize_on || filter_on) {
+        // Posterize is deliberately absent: it ran before the 2D light composite,
+        // upstream of everything here (`floptle/0127`). A scene whose only post
+        // setting is posterize therefore takes the passthrough below — the frame
+        // it hands us is already quantized.
+        if !(ssao_on || s.bloom || s.vignette || filter_on) {
             self.write_params(gpu, PostParams { a: [0.0; 4], b: [0.0; 4] });
             self.pass(gpu, &self.copy_pipeline, &self.scene.bind, out, wgpu::LoadOp::Clear(BLACK));
             return;
@@ -531,23 +559,20 @@ impl PostStack {
             cur = dst;
         }
 
-        // Terminal pass: vignette and/or posterize (one shader, no-op at identity
-        // params). Reuses the dead blur_dir lanes b.zw for posterize (bands, dither),
-        // so no uniform-layout change. Otherwise a straight passthrough copy to `out`.
-        if s.vignette || posterize_on || filter_on {
+        // Terminal pass: the colour-vision filter and/or the vignette (one shader,
+        // no-op at identity params). Otherwise a straight passthrough copy to `out`.
+        if s.vignette || filter_on {
             let b = [
                 if s.vignette { s.vignette_strength } else { 0.0 },
                 if s.vignette { s.vignette_radius } else { 1.0 },
-                if posterize_on { s.posterize_bands as f32 } else { 0.0 },
-                if posterize_on && s.posterize_dither { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
             ];
             // The colour-vision filter rides the bloom lanes, which this pass
             // does not use (`floptle/0079`).
             let a = [
                 if s.simulate_deficiency { 1.0 } else { 0.0 },
-                // …and the chroma rule rides the second dead lane, for the same
-                // reason: no uniform-layout change (`floptle/0126`).
-                if posterize_on && s.posterize_chroma { 1.0 } else { 0.0 },
+                0.0,
                 if filter_on { s.color_filter as f32 } else { 0.0 },
                 if filter_on { s.color_filter_strength } else { 0.0 },
             ];

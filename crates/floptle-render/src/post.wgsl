@@ -12,7 +12,6 @@
 struct P {
     a: vec4<f32>, // xy = texel (1/size of src), z = bloom_threshold, w = bloom_intensity
     b: vec4<f32>, // x = vignette_strength, y = vignette_radius, zw = blur_dir (texels)
-                  //   OR, in the terminal fs_finish pass: z = posterize bands, w = dither
                   // a in fs_finish: x = simulate deficiency, z = colour filter mode,
                   //   w = filter strength (floptle/0079)
 };
@@ -82,12 +81,6 @@ fn fs_ssao_apply(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(c * ao, 1.0);
 }
 
-// Bayer 4×4 ordered-dither threshold in (0,1) (standalone copy — see field.wgsl).
-fn bayer4(pix: vec2<u32>) -> f32 {
-    var m = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
-    return (f32(m[(pix.y % 4u) * 4u + (pix.x % 4u)]) + 0.5) / 16.0;
-}
-
 // Colour-vision filter (`floptle/0079`). `mode`: 1 = protanopia, 2 = deuteranopia,
 // 3 = tritanopia; 0 returns the colour untouched. `simulate` shows the deficiency
 // (for the developer) instead of correcting for it (for the player).
@@ -142,11 +135,18 @@ fn color_vision(c_lin: vec3<f32>, mode: f32, simulate: f32, strength: f32) -> ve
     return pow(mixed, vec3<f32>(2.2));
 }
 
-// Terminal color pass: vignette (radial darken) then optional posterize (quantize
-// each channel to a limited palette / band count). Both are no-ops at their
-// identity params (strength 0 / bands < 2), so this one pass serves vignette-only,
-// posterize-only, or both. Runs last, at the scene's composited (retro) resolution
-// and BEFORE the upscale, so the banding lands on the same chunky pixel grid.
+// Terminal color pass: the colour-vision filter, then the vignette (radial
+// darken). Both are no-ops at their identity params (mode 0 / strength 0), so
+// the one pass serves either or both. Runs last, at the scene's composited
+// (retro) resolution and BEFORE the upscale.
+//
+// **Posterize is not here.** It used to be, and that was the bug (`floptle/0127`):
+// quantizing the finished frame quantizes the light along with the palette, and a
+// light is a multiplier on the palette rather than a value in it. It now runs as
+// its own pass over the art, before the 2D light composite — see `palette.wgsl`.
+// The vignette is downstream of that quantize for the same reason, and it is the
+// corroboration that the rule is the right one: a vignette is a smooth radial
+// darkening, and it was banding for exactly the reason a light was.
 @fragment
 fn fs_finish(in: VsOut) -> @location(0) vec4<f32> {
     var c = textureSample(tex, samp, in.uv).rgb;
@@ -159,44 +159,5 @@ fn fs_finish(in: VsOut) -> @location(0) vec4<f32> {
     let d = distance(in.uv, vec2<f32>(0.5)) * 1.41421356; // 0 center .. ~1 corner
     let vg = smoothstep(1.0, p.b.y, d);                   // 1 inside radius → 0 at corners
     c = c * mix(1.0 - p.b.x, 1.0, vg);
-    // Posterize: quantize to `bands` levels per channel in ~gamma space (perceptually
-    // even steps), with optional ordered dither so smooth ramps don't hard-step.
-    let bands = p.b.z;
-    if (bands >= 2.0) {
-        let scale = bands - 1.0;
-        let g = pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2)); // linear → ~gamma
-        var t = 0.5;                                               // nearest level (= round)
-        if (p.b.w > 0.5) {
-            t = bayer4(vec2<u32>(u32(in.pos.x), u32(in.pos.y)));
-        }
-        // ---- brightness only, chroma carried along (`floptle/0126`) ----------
-        //
-        // Quantizing each channel on its own is a real look, and it is what a
-        // *surface* usually wants. It is never what a LIGHT wants: a smooth
-        // radial ramp crosses each channel's boundary at a different radius, so
-        // a warm white lamp lands as concentric rings in colours nobody chose.
-        // Here the step happens once, to luminance, and the pixel's own colour
-        // is scaled by the ratio — so chroma is never quantized and the failure
-        // cannot happen.
-        if (p.a.y > 0.5) {
-            let y = dot(g, vec3<f32>(0.2126, 0.7152, 0.0722));
-            let yq = clamp(floor(y * scale + t) / scale, 0.0, 1.0);
-            // An exactly grey pixel takes the identical path it always did.
-            // Not an optimization — it is the promise that switching this on
-            // cannot move art that was already neutral, which is most of a
-            // 1-bit tileset.
-            let mx = max(max(g.r, g.g), g.b);
-            let mn = min(min(g.r, g.g), g.b);
-            if (mx - mn < 1e-6) {
-                c = pow(vec3<f32>(yq), vec3<f32>(2.2));
-            } else {
-                let gq = clamp(g * (yq / max(y, 1e-5)), vec3<f32>(0.0), vec3<f32>(1.0));
-                c = pow(gq, vec3<f32>(2.2));
-            }
-        } else {
-            let gq = clamp(floor(g * scale + vec3<f32>(t)) / scale, vec3<f32>(0.0), vec3<f32>(1.0));
-            c = pow(gq, vec3<f32>(2.2)); // ~gamma → linear
-        }
-    }
     return vec4<f32>(c, 1.0);
 }
