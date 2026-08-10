@@ -15,6 +15,7 @@ members = [
     "crates/floptle-map",      # editable polygon-mesh kernel (map-building suite)
     "crates/floptle-tiles",    # tilemap kernel: tilesets, autotile rules, grid tools, collision merge
     "crates/floptle-rules",    # Lawset/Realm meta-spine + field-interaction graph
+    "crates/floptle-gi",       # baked global illumination: irradiance probe grid + SH bake math
     "crates/floptle-render",   # wgpu render graph, materials, the signature SDF/raymarch look
     "crates/floptle-shader",   # shader IR: graph <-> text, transpile to WGSL via naga
     "crates/floptle-vfx",      # timeline-based particle system + runtime
@@ -39,7 +40,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.41.1"
+version = "0.49.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"     # dual, Rust-ecosystem norm — docs/decisions/0009-license.md
 authors = ["Ty Johnston <tplordtp3@gmail.com>"]

@@ -1,5 +1,28 @@
 ## Just shipped
 
+**v0.49.0 "All At Once"** — everything since 0.41.1, in one release. Materials
+have a **Physical** shading model with roughness, metallic and four surface maps,
+so metal behaves like metal. The scene is rendered in real light all the way
+through and only turned into a picture at the end, which brings a **tonemap**, a
+full **colour grade**, **depth of field** with a node to follow and polygonal
+bokeh, a **lens** (aberration, distortion, sharpen, denoise, grain), and
+**screen shaders** — your own full-screen passes, in order, each one getting the
+finished frame plus its depth and normals. Drop a **Light Probes** volume and
+press Bake and light coming off a red wall lands red on the floor beside it.
+**Fog is lit by the scene**: the sun behind a bank lights it, a lamp carried into
+it glows, and a shadow crossing it stays a shadow — which is where beams through
+a window come from. A light can be a **shape** — point, sphere, rect, disk or
+tube — so a four-metre window lights a wall evenly instead of leaving a hot spot
+at its centre. **Contact shadows** put the small dark line back under a foot, in
+a seam, behind a bolt, from what is actually on screen rather than from a
+capsule. And new in this one: **motion blur** on the camera, **multi-select
+editing** (change roughness once for twelve crates and only roughness travels),
+**clickable bones** in the Scene view, and **friction that works** — a ramp now
+holds a body while `tan(its angle) ≤ friction` and lets go above it, instead of
+everything creeping downhill forever. Two things change on their own: physics
+friction, and volumetric fog arriving lit. Everything else is off until you turn
+it on.
+
 **v0.41.1 "Draw The Ramp"** — tile collision you draw by hand, including
 **slopes**. Pick **shape** under TILE and draw the collider onto the tile: click
 an edge to add a point, drag to move, right-click to remove, four 45° ramps on a
