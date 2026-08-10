@@ -1369,6 +1369,8 @@ pub(crate) fn apply_rich_sets(
                             m.rim_strength = num(v).map(|n| n as f32).unwrap_or(m.rim_strength)
                         }
                         "unlit" => m.unlit = num(v).map(|n| n != 0.0).unwrap_or(m.unlit),
+                        // `fog = false` exempts the surface from the scene's fog.
+                        "fog" => m.fog = num(v).map(|n| n != 0.0).unwrap_or(m.fog),
                         "ambient" => m.ambient = num(v).map(|n| n as f32).unwrap_or(m.ambient),
                         "alpha" => m.alpha = num(v).map(|n| n as f32).unwrap_or(m.alpha),
                         "texture" => {
@@ -1448,6 +1450,12 @@ pub(crate) fn apply_rich_sets(
                         "ditherAlpha" => {
                             m.retro.dither_alpha =
                                 num(v).map(|n| n != 0.0).unwrap_or(m.retro.dither_alpha)
+                        }
+                        // …and the opt-out from the PROJECT'S artefacts, so a
+                        // script that spawns a viewmodel can hold it steady in a
+                        // world the project has wobbling.
+                        "retroExempt" => {
+                            m.retro.exempt = num(v).map(|n| n != 0.0).unwrap_or(m.retro.exempt)
                         }
                         _ => {}
                     }
@@ -1800,10 +1808,10 @@ pub(crate) const CAMERA_KEYS: &[&str] = &[
 /// so a key that is accepted is a key that does something.
 pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "color", "emissive", "emissiveStrength", "specular", "shininess", "specularStrength", "rim",
-    "rimStrength", "unlit", "ambient", "alpha", "texture", "cell", "sheetCols", "sheetRows",
+    "rimStrength", "unlit", "fog", "ambient", "alpha", "texture", "cell", "sheetCols", "sheetRows",
     "normalMap", "normalStrength", "roughnessMap", "roughness", "metallicMap", "metallic",
     "occlusionMap", "occlusionStrength", "shading", "jitter", "affineUv", "vertexLit",
-    "ditherAlpha",
+    "ditherAlpha", "retroExempt",
 ];
 
 /// Every key `node:setCelestial{...}` reads (`floptle/0082`).

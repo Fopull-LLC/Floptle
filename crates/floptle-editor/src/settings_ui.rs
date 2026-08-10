@@ -494,6 +494,109 @@ impl<'a> SettingsCtx<'a> {
                 },
             );
         });
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Era artefacts").strong());
+        ui.label(
+            egui::RichText::new(
+                "The hardware limits of the PS1/N64 era, asked for once for the whole project \
+                 instead of on every material. A material can still dial in its own, or opt out \
+                 of all of this in its Retro artefacts section. Surfaces only — SDF matter and \
+                 terrain are raymarched and have no vertices to snap.",
+            )
+            .weak()
+            .small(),
+        );
+        // Named strengths first, the number second. The number alone is a bad
+        // control here: it counts grid steps, so BIGGER is subtler, and the
+        // value that reads as authentic depends on the project's own pixel
+        // resolution rather than on taste. Anyone reaching for "make my game
+        // look like that" and dragging a 0–512 slider lands somewhere far too
+        // coarse on the first try.
+        let presets = project.retro_jitter_presets();
+        row(
+            ui,
+            "Vertex jitter",
+            Some("snap every surface's vertices to a screen grid — the era's integer vertex \
+                  coordinates. These are measured against THIS project's pixel resolution, so \
+                  they mean the same thing whatever you render at.\n\nThe wobble is MOTION: a \
+                  still camera on a still object lands in the same cell every frame and holds \
+                  perfectly still, which is exactly what the hardware did. Move something to \
+                  see it."),
+            |ui| {
+                ui.horizontal(|ui| {
+                    for (name, steps, what) in presets {
+                        // Float comparison is exact on purpose: these ARE the
+                        // values the buttons write, so a highlighted button
+                        // means the setting is that preset and not near it.
+                        let on = project.retro_jitter == steps;
+                        if ui
+                            .selectable_label(on, name)
+                            .on_hover_text(if steps > 0.0 {
+                                format!("{what}\n\n(grid steps: {steps:.0})")
+                            } else {
+                                what.to_string()
+                            })
+                            .clicked()
+                            && !on
+                        {
+                            project.retro_jitter = steps;
+                            out.save_project = true;
+                        }
+                    }
+                });
+            },
+        );
+        if project.retro_jitter > 0.0 {
+            row(
+                ui,
+                "…grid steps",
+                Some("the same setting as a number, for anything between the presets. HIGHER is \
+                      finer and subtler; lower is coarser. Changing the pixel rows above moves \
+                      what each preset means, but never touches a number you set here."),
+                |ui| {
+                    out.save_project |= ui
+                        .add_sized(
+                            [220.0, 20.0],
+                            egui::Slider::new(&mut project.retro_jitter, 20.0..=512.0)
+                                .step_by(1.0),
+                        )
+                        .changed();
+                },
+            );
+        }
+        row(
+            ui,
+            "Affine textures",
+            Some("skip the perspective divide when interpolating UVs — the era's warping, \
+                  swimming textures on big surfaces near the camera"),
+            |ui| {
+                out.save_project |=
+                    ui.checkbox(&mut project.retro_affine_uv, "warp near the camera").changed();
+            },
+        );
+        row(
+            ui,
+            "Vertex lighting",
+            Some("light per vertex and interpolate, instead of per pixel — the faceted Gouraud \
+                  look. Normal maps are ignored while this is on."),
+            |ui| {
+                out.save_project |=
+                    ui.checkbox(&mut project.retro_vertex_lit, "Gouraud shading").changed();
+            },
+        );
+        row(
+            ui,
+            "Screen-door alpha",
+            Some("draw partial opacity as a dither of opaque pixels instead of blending — the \
+                  era's transparency, which needs no sorting"),
+            |ui| {
+                out.save_project |= ui
+                    .checkbox(&mut project.retro_dither_alpha, "dither instead of blend")
+                    .changed();
+            },
+        );
+
+        ui.add_space(8.0);
         row(ui, "Matter", Some("the SDF raymarched geometry pass"), |ui| {
             out.save_project |= ui.checkbox(&mut project.matter, "SDF matter").changed();
         });

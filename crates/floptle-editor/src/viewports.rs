@@ -256,6 +256,17 @@ impl Editor {
         if let (Some(gpu), Some(raster), Some(preview)) =
             (self.gpu.as_ref(), self.raster.as_mut(), self.preview.as_ref())
         {
+            // …and none of the project's era artefacts, for the same reason the
+            // vignette is left out: this is a picture OF a material, not a
+            // picture of the game. A screen-grid snap sized for the game view
+            // would mangle a thumbnail this small, and the frame would then be
+            // showing an artefact of the preview rather than the surface.
+            //
+            // Said explicitly rather than left to run order. The turntable is
+            // drawn before the frame sets the project's defaults, so it would
+            // happen to inherit LAST frame's — right today by accident, and
+            // wrong the moment anything moves.
+            raster.set_retro_defaults(floptle_core::Retro::default());
             raster.draw_scene(
                 gpu,
                 preview.scene_view(),

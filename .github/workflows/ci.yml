@@ -103,6 +103,8 @@ jobs:
           run area_light_probe    area_light_probe    -- "$P"
           run contact_shadow_probe contact_shadow_probe -- "$P"
           run motion_probe        motion_probe        -- "$P"
+          run retro_fog_probe     retro_fog_probe     -- "$P"
+          run ui_world_probe      ui_world_probe
 
       # On a failure the PNGs are the evidence — these probes exist because the
       # bugs they catch are visual, and a red X with no image to look at makes

@@ -110,6 +110,7 @@ field_diff!(Material {
     rim,
     rim_strength,
     unlit,
+    fog,
     ambient,
     alpha,
     normal_map,

@@ -1869,6 +1869,33 @@ pub struct ProjectConfigDoc {
     /// stretching is what every existing project is drawn against.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retro_integer_scale: bool,
+
+    // --- The era's ARTEFACTS, project-wide (v0.51). --------------------------
+    // The four knobs that were only ever per-material. A game whose whole look
+    // is of that era had to set them on every material it owned and on every
+    // material it imported next week; these say it once. All default to off, so
+    // an existing project.ron loads to exactly the look it has now, and each
+    // one folds into a material through `floptle_core::Retro::under` — which is
+    // where the precedence rule lives.
+    //
+    // They reach RASTER MESHES: primitives, models, tilemaps, map geometry,
+    // skinned characters. SDF matter and terrain are raymarched and have no
+    // vertices to snap.
+    /// Snap every surface's vertices to a screen grid of this many steps across
+    /// the viewport — the PS1's integer vertex coordinates. `0` = off. A
+    /// material with its own jitter keeps it; one marked exempt takes none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub retro_jitter: f32,
+    /// Interpolate every surface's UVs without the perspective divide.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retro_affine_uv: bool,
+    /// Light every surface per vertex instead of per pixel (Gouraud).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retro_vertex_lit: bool,
+    /// Draw every partial opacity as screen-door dither instead of blending.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retro_dither_alpha: bool,
+
     #[serde(default = "true_bool")]
     pub matter: bool,
     /// The game's title: names exported builds (their binary + window title).
@@ -1967,6 +1994,10 @@ impl ProjectConfigDoc {
             retro_height: 240,
             retro_width: 0,
             retro_integer_scale: false,
+            retro_jitter: 0.0,
+            retro_affine_uv: false,
+            retro_vertex_lit: false,
+            retro_dither_alpha: false,
             matter: true,
             title: None,
             entry_scene: None,
@@ -1988,6 +2019,64 @@ impl ProjectConfigDoc {
     /// A higher-resolution PS2-ish look.
     pub fn ps2() -> Self {
         Self { retro_height: 480, ..Self::ps1() }
+    }
+
+    /// The jitter grid that lands one cell on one **pixel row** of this
+    /// project's own retro target — the era's actual behaviour, and the
+    /// subtlest setting that is still visible.
+    ///
+    /// Derived rather than a fixed number, because the right value is not a
+    /// matter of taste: hardware with no fractional vertex coordinates snapped
+    /// to ITS pixels, so the grid that reads as authentic depends entirely on
+    /// how many pixels this project renders. A 240-row game and a 480-row game
+    /// want different numbers for the same look, and asking somebody to work
+    /// that out from a slider labelled 0–512 is asking them to guess.
+    ///
+    /// Halved because the shader's steps are counted across normalised device
+    /// coordinates, which span 2 — so `height / 2` steps is `height` cells.
+    ///
+    /// Keyed on the HEIGHT and not the width: the width often follows the
+    /// window ([`retro_width`](Self::retro_width) = 0), and a look that changed
+    /// when somebody resized the window would be the same complaint in a
+    /// different place. The cells are then square in NDC, so at a wide aspect
+    /// they are a little wider than one pixel — which is the correct trade for
+    /// a number that holds still.
+    pub fn retro_jitter_pixels(&self) -> f32 {
+        (self.retro_height.max(80) as f32 * 0.5).round()
+    }
+
+    /// The named strengths offered in Project Settings, coarsest cell last.
+    /// Each is a whole multiple of the pixel grid, so they stay in step with
+    /// each other and with the project's resolution.
+    ///
+    /// There is nothing FINER than pixel-exact on offer, because there is
+    /// nothing to see there: a grid finer than the pixels it is drawn on snaps
+    /// vertices to positions the frame cannot tell apart.
+    pub fn retro_jitter_presets(&self) -> [(&'static str, f32, &'static str); 4] {
+        let px = self.retro_jitter_pixels();
+        [
+            ("off", 0.0, "no snapping at all"),
+            ("pixels", px, "one cell per pixel row — what the hardware actually did, and the \
+                            subtlest setting that still shows"),
+            ("chunky", (px * 0.5).round(), "cells twice the size of a pixel — the look, turned up"),
+            ("heavy", (px * 0.25).round(), "four pixels to a cell. Geometry visibly swims; a \
+                                            whole game at this is a lot"),
+        ]
+    }
+
+    /// The project-wide artefacts as a [`Retro`](floptle_core::Retro), ready to
+    /// fold into a material with [`Retro::under`](floptle_core::Retro::under).
+    ///
+    /// `exempt` is meaningless at this level — the project has nothing to be
+    /// exempt from — so it is always `false` here.
+    pub fn retro_artefacts(&self) -> floptle_core::Retro {
+        floptle_core::Retro {
+            jitter: self.retro_jitter.max(0.0),
+            affine_uv: self.retro_affine_uv,
+            vertex_lit: self.retro_vertex_lit,
+            dither_alpha: self.retro_dither_alpha,
+            exempt: false,
+        }
     }
 
     /// The retro target's internal size for a view of `aspect` (width / height).
@@ -2170,6 +2259,10 @@ pub struct MaterialDoc {
     pub rim_strength: f32,
     #[serde(default)]
     pub unlit: bool,
+    /// Does the scene's fog reach this surface? Skips at `true`, so a material
+    /// that never turned it off writes byte-identical RON to a pre-v0.51 one.
+    #[serde(default = "true_bool", skip_serializing_if = "is_true")]
+    pub fog: bool,
     #[serde(default = "one_f32")]
     pub ambient: f32,
     #[serde(default = "one_f32")]
@@ -2275,6 +2368,9 @@ pub struct RetroDoc {
     pub vertex_lit: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dither_alpha: bool,
+    /// Take none of the project-wide artefacts (`ProjectConfigDoc::retro_*`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exempt: bool,
 }
 
 impl RetroDoc {
@@ -2287,6 +2383,7 @@ impl RetroDoc {
             affine_uv: self.affine_uv,
             vertex_lit: self.vertex_lit,
             dither_alpha: self.dither_alpha,
+            exempt: self.exempt,
         }
     }
     pub fn from_retro(r: floptle_core::Retro) -> Self {
@@ -2295,6 +2392,7 @@ impl RetroDoc {
             affine_uv: r.affine_uv,
             vertex_lit: r.vertex_lit,
             dither_alpha: r.dither_alpha,
+            exempt: r.exempt,
         }
     }
 }
@@ -2412,6 +2510,7 @@ impl MaterialDoc {
             rim: self.rim,
             rim_strength: self.rim_strength,
             unlit: self.unlit,
+            fog: self.fog,
             ambient: self.ambient,
             alpha: self.alpha,
             shader: self.shader.clone(),
@@ -2450,6 +2549,7 @@ impl MaterialDoc {
             rim: m.rim,
             rim_strength: m.rim_strength,
             unlit: m.unlit,
+            fog: m.fog,
             ambient: m.ambient,
             alpha: m.alpha,
             shader: m.shader.clone(),
@@ -3099,6 +3199,74 @@ mod tests {
         assert_eq!((m.sheet_cols, m.sheet_rows, m.cell), (0, 0, 0));
         assert!(!m.is_sheet());
         assert_eq!(m.cell_uv(), [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    /// The fog opt-out survives a save/load, and a material that never touched
+    /// it writes nothing — so adding the flag cannot churn every existing
+    /// material file in a project's diff.
+    #[test]
+    fn a_fog_opt_out_round_trips_and_stays_out_of_every_other_file() {
+        let m = Material { fog: false, ..Material::default() };
+        let ron = ron::ser::to_string(&MaterialDoc::from_material(&m)).expect("serialize");
+        let back: MaterialDoc = ron::from_str(&ron).expect("deserialize");
+        assert!(!back.to_material().fog, "the opt-out did not survive the round trip: {ron}");
+
+        let plain =
+            ron::ser::to_string(&MaterialDoc::from_material(&Material::default())).expect("ser");
+        assert!(!plain.contains("fog"), "a fogged material must write no fog key: {plain}");
+    }
+
+    /// A material file written before the flag existed loads as FOGGED, which
+    /// is what those files were authored against. Defaulting a bool the other
+    /// way would silently lift the fog off every surface in every old project.
+    #[test]
+    fn a_material_file_from_before_the_fog_flag_still_fogs() {
+        let doc: MaterialDoc = ron::from_str("(color:(1,1,1),unlit:true)").expect("load");
+        assert!(doc.to_material().fog);
+    }
+
+    /// The project's era artefacts survive a save/load, default to off, and
+    /// write nothing while they are off — an existing `project.ron` must load
+    /// to exactly the look it already has.
+    #[test]
+    fn the_projects_era_artefacts_default_to_off_and_write_nothing() {
+        let off = ProjectConfigDoc::ps1();
+        assert_eq!(off.retro_artefacts(), floptle_core::Retro::default());
+        let ron = ron::ser::to_string(&off).expect("serialize");
+        assert!(!ron.contains("retro_jitter"), "an untouched project wrote a jitter: {ron}");
+        assert!(!ron.contains("retro_vertex_lit"), "…or a lighting switch: {ron}");
+
+        let on = ProjectConfigDoc { retro_jitter: 160.0, retro_vertex_lit: true, ..off };
+        let back: ProjectConfigDoc =
+            ron::from_str(&ron::ser::to_string(&on).expect("ser")).expect("load");
+        let r = back.retro_artefacts();
+        assert_eq!(r.jitter, 160.0);
+        assert!(r.vertex_lit && !r.affine_uv);
+        assert!(!r.exempt, "the project itself has nothing to be exempt from");
+    }
+
+    /// The named jitter strengths are measured against the project's OWN pixel
+    /// resolution, so the same preset means the same look at any resolution —
+    /// which is the whole reason they are derived rather than fixed numbers.
+    /// They must also be ordered coarsest-last, because that is the order they
+    /// are offered in.
+    #[test]
+    fn the_jitter_presets_follow_the_projects_own_resolution() {
+        let p240 = ProjectConfigDoc { retro_height: 240, ..ProjectConfigDoc::ps1() };
+        let p480 = ProjectConfigDoc { retro_height: 480, ..ProjectConfigDoc::ps1() };
+        assert_eq!(p240.retro_jitter_pixels(), 120.0, "240 rows is 120 steps across NDC's span of 2");
+        assert_eq!(p480.retro_jitter_pixels(), 240.0, "a taller target needs a finer grid");
+
+        let steps: Vec<f32> = p240.retro_jitter_presets().iter().map(|(_, s, _)| *s).collect();
+        assert_eq!(steps, vec![0.0, 120.0, 60.0, 30.0]);
+        assert!(
+            steps[1..].windows(2).all(|w| w[0] > w[1]),
+            "presets must run finest to coarsest — fewer steps is a BIGGER cell, and a list \
+             that climbed would read as getting subtler while getting harsher"
+        );
+        // Nothing finer than pixel-exact is offered: a grid finer than the
+        // pixels it is drawn on snaps vertices to positions no frame can show.
+        assert_eq!(steps[1], p240.retro_jitter_pixels());
     }
 
     /// floptle/0046: the whole point of a stable link. Inserting a node ahead of

@@ -345,6 +345,66 @@ Four era-accurate artefacts, all off by default, each independent
 - **`dither_alpha`** — screen-door transparency. Stays in the **opaque** pass
   (`is_opaque` accounts for it), so it needs no sorting.
 
+Two things to know about `jitter` in particular, because both read as bugs:
+
+- It is a **snap, not an oscillation**. It runs in the vertex shader every
+  frame, but a still surface under a still camera lands in the same cell every
+  time and holds perfectly still. The wobble is what motion looks like through
+  the grid. `retro_fog_probe` measures exactly this — the same pan produces
+  fewer distinct frames through the grid than without it.
+- Each **vertex** snaps on its own. A quad does not translate rigidly; its
+  corners cross cell boundaries on different frames, which is where the era's
+  characteristic warping comes from rather than a clean stepped slide.
+
+### Project-wide, and the opt-out (v0.51)
+
+The same four live on `ProjectConfigDoc` (`retro_jitter`, `retro_affine_uv`,
+`retro_vertex_lit`, `retro_dither_alpha`) for a game whose whole look is of
+that era — otherwise it has to be set on every material it owns and on every
+material it imports next week. All default off, so an existing project loads to
+exactly the look it has.
+
+`Retro::under` is the one place the precedence rule is written: a material's own
+jitter wins, `0` means "follow the project", the three switches are ORs, and
+`exempt` takes nothing at all. It is folded in at `Raster::push_surface_extras`.
+
+The fold **moves the neutral entry**: index 0 stops meaning "no artefacts" and
+starts meaning "the project's artefacts, nothing of its own". That is what makes
+it reach the draws that name no material — terrain chunks, tilemaps, map
+geometry, an untinted primitive — without a gather having to remember to apply
+it. Those all carry index 0 and always have.
+
+It reaches raster surfaces only. SDF matter and terrain are raymarched and have
+no vertices to snap.
+
+The project-level jitter is offered as **named strengths derived from the
+project's own `retro_height`** (`retro_jitter_presets`), not as a bare number.
+The number counts grid steps, so bigger is subtler — the opposite of what a
+strength slider implies — and the value that reads as authentic depends on how
+many pixels the project renders, not on taste: hardware with no fractional
+vertex coordinates snapped to ITS pixels. `retro_jitter_pixels` is
+`retro_height / 2` (steps are counted across NDC, which spans 2), keyed on the
+height because the width often follows the window and a look that changed on
+resize would be the same problem somewhere else. Nothing finer than pixel-exact
+is offered: a grid finer than the pixels it is drawn on snaps vertices to
+positions the frame cannot show.
+
+### Fog, per surface (v0.51)
+
+`Material::fog` (default `true`) says whether the scene's fog reaches this
+surface — both the distance ramp and the marched volumetric layer. It rides the
+extras store as `EXT_NO_FOG`, stored **inverted** so the neutral entry's
+all-zero flags still mean "fogged".
+
+`surface_fog` in `raster.wgsl` is the single call site, used by all three
+shading returns (unlit, vertex-lit, full). An opt-out that only held on one of
+them would be worse than none: it would work in the frame somebody tested and
+come back when the material was lit differently.
+
+Aerial perspective from a `CelestialBody`'s atmosphere is deliberately still
+applied — a separate effect with its own controls, and a planet seen from orbit
+should still haze.
+
 ### Where the extra properties live
 
 The instance stream is full at 16/16 attributes, so the PBR scalars and the

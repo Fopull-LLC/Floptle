@@ -421,6 +421,9 @@ pub struct SurfaceExtras {
     pub occlusion_strength: f32,
     /// Metal-rough GGX instead of Blinn-Phong ([`floptle_core::Shading`]).
     pub physical: bool,
+    /// Does the scene's fog reach this surface? `true` is what every surface
+    /// did before there was a choice ([`floptle_core::Material::fog`]).
+    pub fog: bool,
     /// The deliberate PS1/N64 artefacts.
     pub retro: floptle_core::Retro,
 }
@@ -433,6 +436,7 @@ impl Default for SurfaceExtras {
             normal_strength: 1.0,
             occlusion_strength: 1.0,
             physical: false,
+            fog: true,
             retro: floptle_core::Retro::default(),
         }
     }
@@ -444,6 +448,10 @@ pub(crate) const EXT_PHYSICAL: u32 = 1;
 pub(crate) const EXT_AFFINE_UV: u32 = 2;
 pub(crate) const EXT_VERTEX_LIT: u32 = 4;
 pub(crate) const EXT_DITHER_ALPHA: u32 = 8;
+/// Set when the surface is exempt from the scene's fog. Stored INVERTED — as
+/// "no fog" rather than "fog" — so the neutral entry stays all-zero flags and
+/// every existing instance keeps meaning what it meant.
+pub(crate) const EXT_NO_FOG: u32 = 16;
 
 impl SurfaceExtras {
     /// Read a material's extras. `Classic` still carries the normal and
@@ -455,11 +463,14 @@ impl SurfaceExtras {
             normal_strength: m.normal_strength,
             occlusion_strength: m.occlusion_strength,
             physical: matches!(m.shading, floptle_core::Shading::Physical),
+            fog: m.fog,
             retro: m.retro,
         }
     }
 
-    /// Is this the neutral entry — the one already sitting at index 0?
+    /// Does this set nothing at all? Not the same question as "is this index 0"
+    /// — under project-wide retro artefacts index 0 carries THOSE, and
+    /// [`Raster::push_surface_extras`] tests against that folded neutral.
     pub fn is_neutral(&self) -> bool {
         *self == Self::default()
     }
@@ -477,6 +488,9 @@ impl SurfaceExtras {
         }
         if self.retro.dither_alpha {
             f |= EXT_DITHER_ALPHA;
+        }
+        if !self.fog {
+            f |= EXT_NO_FOG;
         }
         f
     }
@@ -705,6 +719,9 @@ pub struct Raster {
     mat_ext_cap: u32,
     mat_ext_index: HashMap<[u32; 8], u32>,
     mat_ext_dirty: bool,
+    /// The project's retro artefacts, folded into every pushed material.
+    /// See [`Raster::set_retro_defaults`].
+    retro_defaults: floptle_core::Retro,
     /// Combined surface sets built by [`Raster::material_set`], keyed by the five
     /// [`TexId`]s they bind (`u32::MAX` = "use the neutral default"). Cached
     /// because a material asks for its set every frame and a fresh bind group
@@ -1241,6 +1258,7 @@ impl Raster {
             mat_ext_cap,
             mat_ext_index: HashMap::new(),
             mat_ext_dirty: false,
+            retro_defaults: floptle_core::Retro::default(),
             mat_sets: HashMap::new(),
             instance_buf,
             instance_cap,
@@ -1862,11 +1880,54 @@ impl Raster {
         id
     }
 
+    /// The PROJECT's retro artefacts — the era's look asked for once instead of
+    /// on every material (see [`floptle_core::Retro::under`] for the precedence
+    /// rule). All-default, the initial value, is the identity.
+    ///
+    /// Call it once per frame before gathering. It is a frame setting rather
+    /// than a per-draw argument because it is a property of the project, not of
+    /// the surface: threading it through every gather would give each call site
+    /// its own chance to forget it, and a surface that quietly missed the
+    /// project's look is precisely the failure this exists to remove.
+    ///
+    /// **It moves the NEUTRAL entry.** Index 0 stops meaning "no artefacts" and
+    /// starts meaning "the project's artefacts, nothing of its own" — which is
+    /// what makes this reach the draws that never name a material at all:
+    /// terrain chunks, tilemaps, map geometry, an untinted primitive. Those all
+    /// carry index 0 and always have, so there is no gather to remember to
+    /// update and none that can be missed.
+    ///
+    /// Changing it resets the store, because every interned key was computed
+    /// under the old project and the gather refills it this same frame anyway.
+    pub fn set_retro_defaults(&mut self, retro: floptle_core::Retro) {
+        if self.retro_defaults == retro {
+            return;
+        }
+        self.retro_defaults = retro;
+        self.mat_ext_cpu.clear();
+        self.mat_ext_cpu.extend_from_slice(&self.neutral_extras().lanes());
+        self.mat_ext_index.clear();
+        self.mat_ext_dirty = true;
+    }
+
+    /// What index 0 holds: a material that sets nothing of its own, under the
+    /// project's artefacts.
+    fn neutral_extras(&self) -> SurfaceExtras {
+        let mut e = SurfaceExtras::default();
+        e.retro = e.retro.under(self.retro_defaults);
+        e
+    }
+
     /// Intern a [`SurfaceExtras`] and return the index the instance must carry
     /// (see [`MaterialParams::ext_index`]). The neutral set is index 0 and costs
     /// nothing, so a caller can hand this every material unconditionally.
-    pub fn push_surface_extras(&mut self, e: SurfaceExtras) -> u32 {
-        if e.is_neutral() {
+    ///
+    /// The project's artefacts are folded in HERE, before the neutral test, and
+    /// the test is against the folded neutral — so a material that sets nothing
+    /// still lands on index 0 and still shares one entry with every other.
+    pub fn push_surface_extras(&mut self, mut e: SurfaceExtras) -> u32 {
+        e.retro = e.retro.under(self.retro_defaults);
+        if e == self.neutral_extras() {
             return 0;
         }
         let key = e.key();

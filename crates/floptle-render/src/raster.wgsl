@@ -95,6 +95,10 @@ const EXT_PHYSICAL: u32 = 1u;
 const EXT_AFFINE_UV: u32 = 2u;
 const EXT_VERTEX_LIT: u32 = 4u;
 const EXT_DITHER_ALPHA: u32 = 8u;
+// Set when the surface is exempt from the scene's fog. Stored INVERTED so the
+// neutral entry's all-zero flags still mean "fogged", which is what every
+// instance authored before this bit existed meant.
+const EXT_NO_FOG: u32 = 16u;
 
 struct Ext {
     rough: f32,
@@ -117,6 +121,22 @@ fn ext_at(idx: u32) -> Ext {
 
 fn ext_has(e: Ext, bit: u32) -> bool {
     return (e.flags & bit) != 0u;
+}
+
+// The scene's fog over a shaded surface, unless this surface is exempt from it
+// (`Material::fog = false`). Spelled once and called from all THREE shading
+// returns below — unlit, vertex-lit and the full path — because a fog opt-out
+// that only held on one of them is worse than none: it would work in the frame
+// somebody tested and quietly come back when the material was lit differently.
+//
+// Aerial perspective is deliberately still applied: `apply_fog` composites a
+// planet's atmosphere before the fog, and that is a separate effect with its
+// own controls on the CelestialBody. This exempts the SCENE'S FOG.
+fn surface_fog(e: Ext, color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
+    if (ext_has(e, EXT_NO_FOG)) {
+        return atmo_composite(color, pos, length(pos), false);
+    }
+    return apply_fog(color, pos, pix);
 }
 // The shared SDF field (struct + all functions in field.wgsl): the raymarch
 // globals buffer and distance atlas, bound read-only here.
@@ -877,7 +897,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
 
     // Unlit (fullbright/flat) — pure albedo + emissive, the classic retro look.
     if (in.params.z > 0.5) {
-        return vec4<f32>(apply_fog(albedo + emissive, in.view_pos, pix), out_a);
+        return vec4<f32>(surface_fog(ext, albedo + emissive, in.view_pos, pix), out_a);
     }
 
     // Field sun-shadows + true SDF AO, received from the fused field at group(2).
@@ -910,7 +930,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         // does not fail at the shading site; it fails at pipeline creation, for
         // every raster draw in the engine.
         let vl = albedo * (ambient + max(in.vlit, vec3<f32>(0.0)) * gi_only_gate());
-        return vec4<f32>(apply_fog(vl + emissive, in.view_pos, pix), out_a);
+        return vec4<f32>(surface_fog(ext, vl + emissive, in.view_pos, pix), out_a);
     }
 
     var lit: vec3<f32>;
@@ -953,7 +973,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         glow = albedo * tsplat_val.w * 0.9;
     }
 
-    return vec4<f32>(apply_fog(lit * occ + emissive + glow, in.view_pos, pix), out_a);
+    return vec4<f32>(surface_fog(ext, lit * occ + emissive + glow, in.view_pos, pix), out_a);
 }
 
 // Silhouette mask: solid 1.0 wherever the mesh covers a pixel. Rendered into a

@@ -661,6 +661,12 @@ impl Editor {
         // indices handed out by an earlier gather. Resetting between them would
         // leave the mask pointing at a table that had moved under it.
         raster.begin_skin_frame();
+        // …and the project's era artefacts, for the same reason and in the same
+        // place: a frame gathers the scene several times over, and the look has
+        // to be the same in the Scene view, the Game view and every render
+        // target. Setting it here — before any gather — is what makes that so
+        // rather than something each gather has to remember.
+        raster.set_retro_defaults(self.project.retro_artefacts());
 
         // ---- gather the scene from the World ----
         let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;

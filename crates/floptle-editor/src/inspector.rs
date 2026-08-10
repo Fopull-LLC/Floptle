@@ -733,6 +733,22 @@ pub(crate) fn material_props_ui(
         ui.label("unlit");
         r.changed |= ui.checkbox(&mut m.unlit, "fullbright / flat").changed();
         ui.end_row();
+        ui.label("fog");
+        r.changed |= ui
+            .checkbox(&mut m.fog, "affected by scene fog")
+            .on_hover_text(
+                "Off draws this surface at its own colour however far away it is — \
+                 both the distance ramp and the volumetric layer leave it alone.\n\n\
+                 What it is for: the things that are not really in the world at that \
+                 distance. A first-person weapon sits a metre from the eye and a \
+                 hundred metres from the level's origin; a sky shell or a backdrop \
+                 card is painted at its own depth and greying it out fogs the horizon \
+                 twice; a marker has to stay readable through the weather that is the \
+                 point of the scene.\n\nA planet's atmosphere is a separate effect \
+                 with its own controls and still applies.",
+            )
+            .changed();
+        ui.end_row();
     });
 
     // ---- spritesheet: which cell of the sliced texture this surface draws.
@@ -1088,14 +1104,19 @@ pub(crate) fn material_props_ui(
     ui.add_enabled_ui(true, |ui| {
         egui::CollapsingHeader::new("Retro artefacts")
             .id_salt(salt.with("mat_retro"))
-            .default_open(m.retro.any())
+            .default_open(m.retro.any() || m.retro.exempt)
             .show(ui, |ui| {
                 egui::Grid::new("mat_retro_rows").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
                     ui.label("vertex jitter").on_hover_text(
                         "Snap vertices to a screen grid, the way hardware with no \
                          fractional vertex coordinates did. Geometry near the camera \
                          wobbles between cells as it moves.\n\n0 = off. Lower = coarser \
-                         (80 is very chunky, 320 is a hint).",
+                         (80 is very chunky, 320 is a hint).\n\nThe wobble is MOTION: \
+                         the snap happens every frame, but a still camera on a still \
+                         object lands in the same cell every time and holds perfectly \
+                         still. Move something to see it.\n\n0 here also means \"follow \
+                         the project\" — see Project Settings ⏵ Rendering ⏵ Era \
+                         artefacts.",
                     );
                     r.changed |= ui
                         .add(egui::Slider::new(&mut m.retro.jitter, 0.0..=512.0).step_by(1.0))
@@ -1128,6 +1149,19 @@ pub(crate) fn material_props_ui(
                             "Draw partial opacity as a 4×4 dither of solid pixels instead \
                              of blending. Stays in the opaque pass, so it never needs \
                              sorting and never shows the sky through the wall behind it.",
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("project artefacts");
+                    r.changed |= ui
+                        .checkbox(&mut m.retro.exempt, "opt out")
+                        .on_hover_text(
+                            "Take NONE of the project-wide artefacts (Project Settings ⏵ \
+                             Rendering). This surface then shows exactly what is set \
+                             above and nothing else.\n\nWhat it is for: the one thing \
+                             that has to hold still in a world that wobbles — a \
+                             first-person weapon, a screen-facing card, a sky shell \
+                             whose seams the snap would tear open.",
                         )
                         .changed();
                     ui.end_row();

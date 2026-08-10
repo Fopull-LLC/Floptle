@@ -98,12 +98,48 @@ pub struct Retro {
     /// surface in the opaque pass, so it needs no sorting and never shows the
     /// sky through the hill behind it.
     pub dither_alpha: bool,
+    /// Take **none** of the project's artefacts (Project Settings → Rendering).
+    /// The surface then shows exactly what is set above and nothing else.
+    ///
+    /// The escape hatch a project-wide setting needs: a game can ask for the
+    /// whole world to wobble and still hold one thing steady — a first-person
+    /// weapon, a screen-facing card, a sky shell whose seams the snap would
+    /// tear open.
+    pub exempt: bool,
 }
 
 impl Retro {
     /// Is any artefact asked for? All-off is the default and costs nothing.
     pub fn any(&self) -> bool {
         self.jitter > 0.0 || self.affine_uv || self.vertex_lit || self.dither_alpha
+    }
+
+    /// This material's artefacts once the PROJECT's are folded in.
+    ///
+    /// The rule, in one place because it is the kind of rule that otherwise
+    /// gets written twice and drifts:
+    ///
+    /// * [`exempt`](Self::exempt) takes nothing — the material stands alone.
+    /// * A jitter the material asked for wins; `0` means "whatever the project
+    ///   says", so an untouched material follows the project and a material
+    ///   that was dialled in by hand keeps the number that was dialled.
+    /// * The three switches are ORs. A project switch turns the whole world on;
+    ///   a material switch still turns itself on inside a project that left it
+    ///   off.
+    ///
+    /// With an all-default project this returns `self` unchanged, so nothing
+    /// that exists today shades differently.
+    pub fn under(self, project: Retro) -> Retro {
+        if self.exempt {
+            return self;
+        }
+        Retro {
+            jitter: if self.jitter > 0.0 { self.jitter } else { project.jitter.max(0.0) },
+            affine_uv: self.affine_uv || project.affine_uv,
+            vertex_lit: self.vertex_lit || project.vertex_lit,
+            dither_alpha: self.dither_alpha || project.dither_alpha,
+            exempt: false,
+        }
     }
 }
 
@@ -128,6 +164,22 @@ pub struct Material {
     pub rim_strength: f32,
     /// Ignore scene lighting entirely (flat fullbright — the classic retro look).
     pub unlit: bool,
+    /// Whether the scene's fog reaches this surface. `true` (fogged) is the
+    /// default and is what every surface did before there was a choice.
+    ///
+    /// Turning it off exempts the surface from BOTH fog modes — the distance
+    /// ramp and the marched volumetric layer — so it draws at its own colour
+    /// however far away it is. What it is for: the things that are not really
+    /// in the world at that distance. A first-person weapon sits a metre from
+    /// the eye and a hundred metres from the level's origin; a sky shell or a
+    /// backdrop card is painted at its own depth and greying it out fogs the
+    /// horizon twice; a marker or an interface prop has to stay readable
+    /// through the weather that is the point of the scene.
+    ///
+    /// Aerial perspective from a [`CelestialBody`](crate::CelestialBody)'s
+    /// atmosphere is a separate effect with its own controls and is NOT
+    /// affected — a planet seen from orbit still hazes.
+    pub fog: bool,
     /// Multiplier on the scene ambient term (0 = pure black shadows).
     pub ambient: f32,
     /// Opacity (1 = fully opaque, 0 = invisible). Below 1 the surface alpha-blends
@@ -227,6 +279,7 @@ impl Default for Material {
             rim: [0.0, 0.0, 0.0],
             rim_strength: 0.0,
             unlit: false,
+            fog: true,
             ambient: 1.0,
             alpha: 1.0,
             normal_map: None,
@@ -433,6 +486,61 @@ mod tests {
         // A 1×1 grid is not a sheet, so it must not steal the tiling block.
         let one = Material { tiling: Some(tri), sheet_cols: 1, sheet_rows: 1, ..Material::default() };
         assert_eq!(one.effective_tiling(), Some(tri));
+    }
+
+    /// A project that asks for nothing must leave every material exactly as it
+    /// was authored. This is the whole compatibility claim for the project-wide
+    /// artefacts: they are opt-in, and until somebody opts in the fold is the
+    /// identity.
+    #[test]
+    fn a_project_that_asks_for_nothing_changes_nothing() {
+        for m in [
+            Retro::default(),
+            Retro { jitter: 160.0, ..Retro::default() },
+            Retro { vertex_lit: true, dither_alpha: true, ..Retro::default() },
+        ] {
+            assert_eq!(m.under(Retro::default()), m);
+        }
+    }
+
+    /// The project sets the look and a material that never mentioned it follows
+    /// — which is the entire point of the setting. A material that WAS dialled
+    /// in keeps its own number, because somebody chose it against that surface.
+    #[test]
+    fn the_project_supplies_what_a_material_left_alone() {
+        let project = Retro { jitter: 160.0, vertex_lit: true, ..Retro::default() };
+        let plain = Retro::default().under(project);
+        assert_eq!(plain.jitter, 160.0, "an untouched material must follow the project");
+        assert!(plain.vertex_lit);
+
+        let dialled = Retro { jitter: 320.0, ..Retro::default() }.under(project);
+        assert_eq!(dialled.jitter, 320.0, "a hand-dialled jitter must survive the project's");
+        assert!(dialled.vertex_lit, "…while the switches still come down from the project");
+    }
+
+    /// A material switch works inside a project that left that switch off — the
+    /// switches are ORs, not an override, so the two levels compose instead of
+    /// one silently cancelling the other.
+    #[test]
+    fn a_material_switch_still_works_under_a_quiet_project() {
+        let project = Retro { jitter: 80.0, ..Retro::default() };
+        let m = Retro { affine_uv: true, ..Retro::default() }.under(project);
+        assert!(m.affine_uv, "the material's own switch was thrown away");
+        assert_eq!(m.jitter, 80.0);
+    }
+
+    /// The escape hatch takes NOTHING from the project — not the jitter, not
+    /// the switches. A first-person weapon in a wobbling world is the case, and
+    /// "mostly exempt" would be no use at all.
+    #[test]
+    fn an_exempt_material_takes_none_of_it() {
+        let project =
+            Retro { jitter: 160.0, affine_uv: true, vertex_lit: true, dither_alpha: true, exempt: false };
+        let m = Retro { exempt: true, ..Retro::default() };
+        assert_eq!(m.under(project), m, "an exempt material picked something up");
+        // …and it still shows its OWN artefacts, so exempt means "alone", not "off".
+        let own = Retro { jitter: 40.0, exempt: true, ..Retro::default() };
+        assert_eq!(own.under(project).jitter, 40.0);
     }
 }
 

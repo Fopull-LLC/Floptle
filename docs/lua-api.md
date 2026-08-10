@@ -429,7 +429,9 @@ node:setMaterial{color={r,g,b}, emissive={r,g,b}, emissiveStrength=…, unlit=tr
 
 Surface maps: normalMap / roughnessMap / metallicMap / occlusionMap (paths, "" clears) with normalStrength / roughness / metallic / occlusionStrength. shading="physical" switches from the hand-set Blinn-Phong highlight to metal-rough; roughness and metallic only mean anything there, while a normal or occlusion map works under either.
 
-Retro artefacts: jitter (screen-grid vertex snapping, 0 = off), affineUv, vertexLit, ditherAlpha.
+fog=false exempts the surface from the scene's fog — both the distance ramp and the volumetric layer — so it draws at its own colour however far away it is. For the things that are not really in the world at that distance: a first-person weapon, a backdrop card, a marker that has to stay readable through the weather. A planet's atmosphere is a separate effect and still applies.
+
+Retro artefacts: jitter (screen-grid vertex snapping, 0 = follow the project), affineUv, vertexLit, ditherAlpha. The project can ask for all four at once (Project Settings ⏵ Rendering); retroExempt=true takes none of them, which is how you hold a viewmodel steady in a world that wobbles.
 
 ```lua
 -- setup-time; use setShaderParam for per-frame values
