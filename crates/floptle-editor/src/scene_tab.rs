@@ -237,7 +237,7 @@ impl EditorTabViewer<'_> {
                 });
         }
 
-        // ▦ Map tool HUD. The Map PANEL is the control surface; this is a
+        // ▦ Model tool HUD. The Map PANEL is the control surface; this is a
         // status strip — what the next click and the next drag will do, on one
         // line, so it states the tool's mode without duplicating the panel or
         // covering the scene. `⏷` opens the same chips for anyone who would
@@ -380,7 +380,7 @@ impl EditorTabViewer<'_> {
                                     accent,
                                     egui::RichText::new(format!(
                                         "drawing {}",
-                                        shape.label().trim_start_matches("Map ").to_lowercase()
+                                        shape.label().trim_start_matches("Model ").to_lowercase()
                                     ))
                                     .small(),
                                 );
@@ -408,7 +408,7 @@ impl EditorTabViewer<'_> {
                             ui.horizontal(|ui| {
                                 for shape in crate::map_edit::MapShape::ALL {
                                     let armed = self.map_arm == Some(shape);
-                                    let label = shape.label().trim_start_matches("Map ");
+                                    let label = shape.label().trim_start_matches("Model ");
                                     if ui
                                         .add_sized(
                                             [62.0, 20.0],
@@ -556,6 +556,11 @@ impl EditorTabViewer<'_> {
                                     ui.checkbox(&mut f.physics, "Rigidbodies & contacts");
                                     ui.checkbox(&mut f.colliders, "Collider wireframes");
                                     ui.checkbox(&mut f.particles, "Particle emitters");
+                                    ui.checkbox(&mut f.bones, "Rig bones").on_hover_text(
+                                        "draw the skeleton of a selected rigged mesh, and let \
+                                         you click a joint to pose it. Only the selected \
+                                         mesh's rig is ever drawn.",
+                                    );
                                     ui.checkbox(&mut f.script, "Script gizmos (Lua)");
                                     ui.indent("script_gizmo_game", |ui| {
                                         ui.add_enabled_ui(f.script, |ui| {
@@ -883,6 +888,78 @@ impl EditorTabViewer<'_> {
             for lines in self.light_gizmos {
                 for (a, b) in lines {
                     painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(1.5, col));
+                }
+            }
+        }
+
+        // The rig of the selected mesh: sticks between the joints, a dot on each
+        // joint, and the selected joint ringed. Drawn over the model rather than
+        // depth-tested against it — a bone you cannot see is a bone you cannot
+        // click, and hiding the far arm is exactly when you need it.
+        if !game && !self.rig_gizmos.is_empty() {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("rig_gizmos")))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
+            let bone_col = egui::Color32::from_rgb(225, 225, 235);
+            let joint_col = egui::Color32::from_rgb(180, 190, 210);
+            let sel_col = egui::Color32::from_rgb(255, 190, 90);
+            for r in self.rig_gizmos {
+                for (a, b) in &r.bones {
+                    // A thin dark line under the light one, so the rig reads
+                    // against a white wall as well as a dark floor.
+                    painter.line_segment(
+                        [pt(*a), pt(*b)],
+                        egui::Stroke::new(3.0, egui::Color32::from_black_alpha(90)),
+                    );
+                    painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(1.4, bone_col));
+                }
+                for (s, idx, _) in &r.joints {
+                    let at = pt(*s);
+                    if !rect.contains(at) {
+                        continue;
+                    }
+                    if r.selected == Some(*idx) {
+                        painter.circle_filled(at, 4.0, sel_col);
+                        painter.circle_stroke(at, 6.5, egui::Stroke::new(1.5, sel_col));
+                    } else {
+                        painter.circle_filled(at, 2.6, joint_col);
+                        painter.circle_stroke(
+                            at,
+                            2.6,
+                            egui::Stroke::new(1.0, egui::Color32::from_black_alpha(120)),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Baked-GI probes, each in the colour it baked. A probe the leak test has
+        // thrown away is drawn hollow rather than hidden: "this probe is inside
+        // the wall" is the thing you came here to see.
+        if !game && !self.gi_probe_dots.is_empty() {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("gi_probes")))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            for (p, rgb, dead) in self.gi_probe_dots {
+                let at = egui::pos2(p.x / ppp, p.y / ppp);
+                if !rect.contains(at) {
+                    continue;
+                }
+                // The bake is linear light with no ceiling; a dot has 8 bits.
+                // Reinhard rather than a clamp so a bright probe still reads as
+                // brighter than a merely lit one instead of flattening to white.
+                let b = |v: f32| ((v / (1.0 + v)).clamp(0.0, 1.0) * 255.0) as u8;
+                let col = egui::Color32::from_rgb(b(rgb[0]), b(rgb[1]), b(rgb[2]));
+                if *dead {
+                    painter.circle_stroke(at, 3.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 70, 70)));
+                } else {
+                    painter.circle_filled(at, 2.5, col);
+                    painter.circle_stroke(at, 2.5, egui::Stroke::new(0.8, egui::Color32::from_black_alpha(120)));
                 }
             }
         }

@@ -255,13 +255,121 @@ texture from the Asset Browser straight onto a surface in the Scene View. Floptl
 
 No dialog hunting, no shader writing — drop, see it tile, tweak.
 
+## 6b. Surface maps, two lighting models, and the retro flags (v0.43)
+
+> **STATUS (2026-08-09): shipped.** Fields on `Material` /`MaterialDoc`, rows in
+> the Inspector, keys on `node:setMaterial{…}`, asserted by
+> `crates/floptle-render/examples/pbr_probe.rs`.
+
+### The maps
+
+Four slots beside the base colour, each `None` by default and each with a
+**neutral** 1×1 default bound when it is: a flat `(0.5, 0.5, 1)` normal and
+white for the rest. A material that names no map therefore shades exactly as it
+did before they existed, and there is no "is a map bound" flag anywhere that
+could disagree with what is actually bound.
+
+| slot | reads | means |
+| --- | --- | --- |
+| `normal_map` | RGB | tangent-space normal; `normal_strength` scales the tilt, **negative flips green** (the handedness fix) |
+| `roughness_map` | **G** | × `roughness` |
+| `metallic_map` | **B** | × `metallic` |
+| `ao_map` | **R** | baked occlusion; × `occlusion_strength` |
+
+The channels are not arbitrary: R/G/B is glTF's packed
+occlusion-roughness-metallic layout, so **one image drops into all three
+slots** and does the right thing.
+
+Occlusion multiplies **ambient and indirect only, never the key light**.
+Occlusion darkens light arriving from everywhere, not light arriving from one
+place; applying it to everything is the usual mistake and reads as a surface
+covered in grey smudges.
+
+### No tangent attribute
+
+The tangent frame is derived **per pixel from screen-space derivatives**
+(`tangent_frame` in `raster.wgsl`), re-orthogonalised against the interpolated
+normal so smooth shading still wins.
+
+This is a decision, not a shortcut. The raster vertex stream is full at 16
+attributes so there is no room for a tangent — but more to the point, most of
+what this engine draws could never carry one: SDF terrain is re-extracted on
+every sculpt dab, primitives and Model-tool meshes are generated, tilemaps are
+rebuilt per frame. A per-pixel frame works on all of them, and on skinned
+characters too, because it reads the position *after* skinning.
+
+> **Gotcha, and it cost real time.** The published cotangent-frame derivation
+> assumes screen +y points UP. Here it points DOWN. Under a downward y, `dpdy`
+> of both position and UV come back with the opposite sign, which negates T and
+> B *together* — every tangent-space normal ends up tilted the wrong way in both
+> axes. Nothing looks broken: the surface is lit, the highlight moves, it is
+> simply inside out. `pbr_probe` caught it as "the half tilted toward the light
+> is the dark one".
+
+### Two lighting models, neither a degraded version of the other
+
+`Shading::Classic` is the Blinn-Phong that shipped from the start — a specular
+colour, an exponent and a strength, all set by hand. `Shading::Physical` is
+Cook-Torrance GGX with `roughness` and `metallic`: the highlight falls out of
+the microsurface rather than being dialled in, a dielectric reflects white at
+4%, and a metal has no diffuse at all and reflects its own colour.
+
+A stylised surface wants the first and a realistic one wants the second, so
+neither is simulated with the other's knobs. **A normal map, an occlusion map
+and the retro flags apply under both** — they describe the surface, not the
+shading model. So do rim and opacity, which are art direction rather than
+physics. Only `roughness` and `metallic` are Physical-only.
+
+`key_light_ggx` in `raster.wgsl` is deliberately the mirror image of
+field.wgsl's `key_light`: same star loop, same `star_shadow` / `sun_shadow`
+calls in the same places, so a Physical surface receives exactly the shadows a
+Classic one does and the two can only differ in the BRDF.
+
+### The retro flags
+
+Four era-accurate artefacts, all off by default, each independent
+(`floptle_core::Retro`):
+
+- **`jitter`** — snap vertices to a screen grid of N steps, the way hardware
+  with no fractional vertex coordinates did. Applied in NDC and scaled back by
+  `w`; a vertex at the eye plane is left alone, because dividing there sends it
+  to infinity and shows up as a triangle stretched over the whole screen.
+- **`affine_uv`** — interpolate UVs without the perspective divide. Both UV
+  varyings are always emitted and `surface_uv` picks between them per material,
+  rather than compiling a shader variant, because the choice is per-instance and
+  instances batch.
+- **`vertex_lit`** — Gouraud. Computed in `vs` from the group(0) globals only,
+  because group(2)'s field is fragment-visible: a vertex-lit surface receives no
+  SDF shadow, no AO and no normal map. Hardware that shaded per vertex had none
+  of those.
+- **`dither_alpha`** — screen-door transparency. Stays in the **opaque** pass
+  (`is_opaque` accounts for it), so it needs no sorting.
+
+### Where the extra properties live
+
+The instance stream is full at 16/16 attributes, so the PBR scalars and the
+retro flags ride a **surface-extras storage buffer** on group(0) — the third
+store on the `vpaint` pattern, indexed by `normal_mat[1].w >> 1`. Entry 0 is a
+reserved neutral, so an instance that sets none of this reads it and shades as
+before.
+
+An indexed store and not a uniform on group(1), for a correctness reason rather
+than a tidiness one: two untextured nodes of the same mesh share one group(1)
+bind, so a roughness living there would give both of them whichever was bound
+last. It also ends the attribute famine for good — every material property
+invented from here on lands in this buffer behind one index, instead of being
+bit-packed into a lane meant for something else.
+
 ## 7. Out of scope
 
 We are lightweight — **not a PBR authoring suite, not Substance.**
 
-- **Full PBR authoring** (metallic/roughness/clearcoat/sheen/anisotropy layer
-  stacks). We import glTF PBR as a *seed* ([`./asset-pipeline.md`](./asset-pipeline.md))
-  and expose the knobs a shader chooses to — no film-grade material model.
+- **Layered PBR authoring** — clearcoat, sheen, anisotropy, transmission,
+  subsurface, material stacks. §6b ships the metal-rough base (roughness,
+  metallic, normal, occlusion), which is the layer everything else is a
+  refinement of; the refinements are not planned. We import glTF PBR as a *seed*
+  ([`./asset-pipeline.md`](./asset-pipeline.md)) and expose the knobs a shader
+  chooses to — no film-grade material model.
 - **Substance-style procedural texture graphs.** Procedural *looks* are the
   shader IR's job ([`./shaders.md`](./shaders.md)) — noise/warp/color nodes make
   generated surfaces; we don't bake a separate node-based texture authoring tool.

@@ -68,6 +68,15 @@ pub struct Globals {
     pub point_pos: [[f32; 4]; 16],
     /// Each point light's rgb = color × intensity (w unused).
     pub point_color: [[f32; 4]; 16],
+    /// Each light's EMITTER: `[kind, a, b, flags]` — 0 point, 1 sphere
+    /// (a = radius), 2 rect (a/b = half width/height, flag 1 = two-sided),
+    /// 3 disk (a = radius, flag 1 = two-sided), 4 tube (a = half length,
+    /// b = radius). All zero (a point) unless the scene says otherwise, so a
+    /// caller that never sets it gets exactly the point light it always had.
+    pub point_shape: [[f32; 4]; 16],
+    /// Each light's world orientation (xyzw quaternion): a rect/disk faces the
+    /// node's forward, a tube lies along its local X.
+    pub point_rot: [[f32; 4]; 16],
     /// Meshed-terrain splat params: y = triplanar world scale (x/z/w unused — the
     /// per-slot bitmasks moved to `terrain_bits`, where 32 slots stay bit-exact;
     /// f32 packing silently corrupts bits past 2^24).
@@ -87,6 +96,8 @@ impl Default for Globals {
             point_count: [0.0; 4],
             point_pos: [[0.0; 4]; 16],
             point_color: [[0.0; 4]; 16],
+            point_shape: [[0.0; 4]; 16],
+            point_rot: [[0.0, 0.0, 0.0, 1.0]; 16],
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
             terrain_bits: [0; 4],
         }
@@ -168,6 +179,15 @@ pub struct MaterialParams {
     /// imported glTF COLOR_0 (whose spec is a linear ×1 multiply). Ignored when
     /// `paint_base == 0`. Rides the free `normal_mat[1].w` instance lane.
     pub paint_modulate: bool,
+    /// This instance's entry in the SURFACE EXTRAS store — the PBR scalars and
+    /// the retro flags ([`SurfaceExtras`]). `0` is the reserved neutral entry, so
+    /// leaving it alone shades exactly as before v0.43. Fill it from
+    /// [`Raster::push_surface_extras`], the same way `paint_base` is filled: the
+    /// index is renderer state, so the value can only be resolved by the caller
+    /// that has the `Raster` to hand.
+    ///
+    /// Rides `normal_mat[1].w` above the paint-modulate bit.
+    pub ext_index: u32,
     /// Meshed-TERRAIN splat: interpret the vertex color's alpha as a 1-based palette slot
     /// and triplanar-sample the terrain palette (× the rgb tint), instead of treating alpha
     /// as opacity. True only for terrain chunk instances. Rides `normal_mat[2].w`.
@@ -196,6 +216,7 @@ impl MaterialParams {
             terrain_paint_base: 0,
             paint_modulate: false,
             terrain_splat: false,
+            ext_index: 0,
         }
     }
 
@@ -250,6 +271,7 @@ impl MaterialParams {
             terrain_paint_base: 0,
             paint_modulate: false,
             terrain_splat: false,
+            ext_index: 0,
         }
     }
 }
@@ -302,6 +324,7 @@ fn make_globals_bind(
     skin_weights: &wgpu::Buffer,
     skin_palette: &wgpu::Buffer,
     skin_meta: &wgpu::Buffer,
+    mat_ext: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("raster-globals"),
@@ -317,8 +340,170 @@ fn make_globals_bind(
             wgpu::BindGroupEntry { binding: 7, resource: skin_weights.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 8, resource: skin_palette.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 9, resource: skin_meta.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 10, resource: mat_ext.as_entire_binding() },
         ],
     })
+}
+
+/// The five surface maps a draw binds, in group(1) order: base colour, normal,
+/// roughness, metallic, occlusion. Each slot is a texture + its own sampler, so
+/// a normal map can be crisp while the albedo is filtered.
+///
+/// Every slot has a NEUTRAL default rather than a shader branch: white for the
+/// three scalar maps (× a scalar that is 1, or 0 for metallic) and a flat
+/// `(0.5, 0.5, 1)` for the normal. A material that names no map therefore shades
+/// bit-for-bit as it did before v0.43, and there is no "is a map bound" flag
+/// anywhere that could disagree with what is actually bound.
+const SURFACE_SLOTS: usize = 5;
+
+/// Build a group(1) bind group from five (view, sampler) pairs.
+pub(crate) fn make_surface_bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    label: &str,
+    slots: [(&wgpu::TextureView, &wgpu::Sampler); SURFACE_SLOTS],
+) -> wgpu::BindGroup {
+    let mut entries = Vec::with_capacity(SURFACE_SLOTS * 2);
+    for (i, (view, samp)) in slots.iter().enumerate() {
+        entries.push(wgpu::BindGroupEntry {
+            binding: (i * 2) as u32,
+            resource: wgpu::BindingResource::TextureView(view),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: (i * 2 + 1) as u32,
+            resource: wgpu::BindingResource::Sampler(samp),
+        });
+    }
+    device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(label), layout, entries: &entries })
+}
+
+/// The group(1) layout: five texture + sampler pairs (see [`SURFACE_SLOTS`]).
+pub(crate) fn surface_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let mut entries = Vec::with_capacity(SURFACE_SLOTS * 2);
+    for i in 0..SURFACE_SLOTS as u32 {
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: i * 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        });
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: i * 2 + 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        });
+    }
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("raster-surface"),
+        entries: &entries,
+    })
+}
+
+/// The per-material properties that live in the SURFACE EXTRAS store rather than
+/// in an instance attribute — because there is no attribute left (the stream is
+/// full at 16/16) and because these will keep arriving.
+///
+/// One index per distinct set, resolved by [`Raster::push_surface_extras`] and
+/// carried in `normal_mat[1].w`. Instances sharing a set stay in one batch, which
+/// is the reason this is an indexed store and not a uniform on group(1): two
+/// untextured nodes of the same mesh have the same group(1) bind, so a roughness
+/// living there would give both of them whichever one was bound last.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SurfaceExtras {
+    pub roughness: f32,
+    pub metallic: f32,
+    pub normal_strength: f32,
+    pub occlusion_strength: f32,
+    /// Metal-rough GGX instead of Blinn-Phong ([`floptle_core::Shading`]).
+    pub physical: bool,
+    /// The deliberate PS1/N64 artefacts.
+    pub retro: floptle_core::Retro,
+}
+
+impl Default for SurfaceExtras {
+    fn default() -> Self {
+        Self {
+            roughness: 1.0,
+            metallic: 0.0,
+            normal_strength: 1.0,
+            occlusion_strength: 1.0,
+            physical: false,
+            retro: floptle_core::Retro::default(),
+        }
+    }
+}
+
+/// Flag bits in `mat_ext[i*2 + 1].x`. Mirrored in `raster.wgsl` — the two lists
+/// are the same list and must be edited together.
+pub(crate) const EXT_PHYSICAL: u32 = 1;
+pub(crate) const EXT_AFFINE_UV: u32 = 2;
+pub(crate) const EXT_VERTEX_LIT: u32 = 4;
+pub(crate) const EXT_DITHER_ALPHA: u32 = 8;
+
+impl SurfaceExtras {
+    /// Read a material's extras. `Classic` still carries the normal and
+    /// occlusion strengths — those describe the surface, not the shading model.
+    pub fn from_material(m: &floptle_core::Material) -> Self {
+        Self {
+            roughness: m.roughness,
+            metallic: m.metallic,
+            normal_strength: m.normal_strength,
+            occlusion_strength: m.occlusion_strength,
+            physical: matches!(m.shading, floptle_core::Shading::Physical),
+            retro: m.retro,
+        }
+    }
+
+    /// Is this the neutral entry — the one already sitting at index 0?
+    pub fn is_neutral(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn flags(&self) -> u32 {
+        let mut f = 0;
+        if self.physical {
+            f |= EXT_PHYSICAL;
+        }
+        if self.retro.affine_uv {
+            f |= EXT_AFFINE_UV;
+        }
+        if self.retro.vertex_lit {
+            f |= EXT_VERTEX_LIT;
+        }
+        if self.retro.dither_alpha {
+            f |= EXT_DITHER_ALPHA;
+        }
+        f
+    }
+
+    fn lanes(&self) -> [[f32; 4]; 2] {
+        [
+            [self.roughness, self.metallic, self.normal_strength, self.occlusion_strength],
+            [self.flags() as f32, self.retro.jitter, 0.0, 0.0],
+        ]
+    }
+
+    /// The exact bit pattern of [`lanes`](Self::lanes) — the dedup key, so two
+    /// materials that produce the same GPU bytes share one index no matter how
+    /// they were spelled.
+    fn key(&self) -> [u32; 8] {
+        let l = self.lanes();
+        let mut k = [0u32; 8];
+        for (i, v) in l[0].iter().chain(l[1].iter()).enumerate() {
+            k[i] = v.to_bits();
+        }
+        k
+    }
+}
+
+/// The reserved neutral entry at index 0 of the surface-extras store.
+fn neutral_mat_ext() -> Vec<[f32; 4]> {
+    SurfaceExtras::default().lanes().to_vec()
 }
 
 /// One of the three group(0) skinning stores: a vertex-stage read-only storage
@@ -500,6 +685,31 @@ pub struct Raster {
     /// pick theirs by filter/wrap; samplers are cheap to share).
     samplers: HashMap<TexSampling, wgpu::Sampler>,
     default_tex: wgpu::Texture,
+    /// The neutral surface-map defaults: a 1×1 `(0.5, 0.5, 1)` flat normal, and
+    /// one plain sampler for it and for `default_tex` when they stand in for a
+    /// map nobody set. See [`SURFACE_SLOTS`].
+    flat_normal_view: wgpu::TextureView,
+    _flat_normal_tex: wgpu::Texture,
+    neutral_samp: wgpu::Sampler,
+    /// This frame's SURFACE EXTRAS: two `vec4`s per distinct material, indexed
+    /// by the instance's `normal_mat[1].w >> 1`.
+    ///
+    ///   `[i*2 + 0]` = roughness, metallic, normal strength, occlusion strength
+    ///   `[i*2 + 1]` = flag bits, retro jitter, 0, 0
+    ///
+    /// Entry 0 is a RESERVED neutral: index 0 means "this instance sets none of
+    /// this", exactly like `paint_base == 0` means unpainted, so the shader's
+    /// clamped read always lands on something harmless.
+    mat_ext_buf: wgpu::Buffer,
+    mat_ext_cpu: Vec<[f32; 4]>,
+    mat_ext_cap: u32,
+    mat_ext_index: HashMap<[u32; 8], u32>,
+    mat_ext_dirty: bool,
+    /// Combined surface sets built by [`Raster::material_set`], keyed by the five
+    /// [`TexId`]s they bind (`u32::MAX` = "use the neutral default"). Cached
+    /// because a material asks for its set every frame and a fresh bind group
+    /// per frame per material would be a leak with a slow fuse.
+    mat_sets: HashMap<[u32; SURFACE_SLOTS], TexId>,
     instance_buf: wgpu::Buffer,
     instance_cap: u32,
     meshes: Vec<RegisteredMesh>,
@@ -559,6 +769,22 @@ pub fn raster_custom_source(code: Option<(&str, &str)>) -> String {
 struct TexBind {
     bind: wgpu::BindGroup,
     view: wgpu::TextureView,
+    /// The SAME pixels, read WITHOUT the sRGB decode.
+    ///
+    /// A base-colour image is a picture and belongs in sRGB. A normal map, a
+    /// roughness map, an occlusion map are not pictures — they are numbers that
+    /// happen to be stored in an image, and putting them through a display
+    /// transform silently changes every one of them. 0.5 becomes 0.216, which
+    /// on a normal map is not "slightly off": the flat normal (128,128,255)
+    /// decodes to a surface tilted 39°, so EVERY unmapped material shades as
+    /// though its geometry were bent. (Found by `gi_probe`, which is the first
+    /// thing in the engine that measures a shading normal directly rather than
+    /// looking at a highlight and judging it plausible.)
+    ///
+    /// One upload, two views — `view_formats` on the texture is what makes the
+    /// second reading legal — so nothing costs anything and a texture can still
+    /// be used as either without being registered twice.
+    linear_view: wgpu::TextureView,
     sampling: TexSampling,
     _texture: wgpu::Texture,
 }
@@ -715,31 +941,29 @@ impl Raster {
                 wgpu::BindGroupLayoutEntry { binding: 7, ..SKIN_STORAGE_ENTRY },
                 wgpu::BindGroupLayoutEntry { binding: 8, ..SKIN_STORAGE_ENTRY },
                 wgpu::BindGroupLayoutEntry { binding: 9, ..SKIN_STORAGE_ENTRY },
-            ],
-        });
-        // Group 1: the per-material base-color texture + its own sampler (so each
-        // texture can choose its own filtering / wrap mode).
-        let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("raster-texture"),
-            entries: &[
+                // Binding 10: the SURFACE EXTRAS store — see `mat_ext_buf`. The
+                // third store on the `vpaint` pattern, and the one that ends the
+                // instance-attribute famine for good: the vertex stream is FULL
+                // at 16/16 attributes, so every material property invented from
+                // here on lands in this buffer behind one index, instead of
+                // being bit-packed into a lane meant for something else.
+                // VERTEX_FRAGMENT because the retro flags are read in `vs`
+                // (jitter, per-vertex lighting) and the PBR scalars in `fs`.
                 wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
             ],
         });
+        // Group 1: this surface's five maps, each with its own sampler (so each
+        // texture chooses its own filtering / wrap mode).
+        let tex_layout = surface_bind_layout(device);
 
         // Group 2: the shared SDF field (the raymarch pass's globals + distance
         // atlas). The editor passes `Raymarch::field_bind`; standalone callers get
@@ -842,6 +1066,19 @@ impl Raster {
             mapped_at_creation: false,
         });
 
+        // The surface-extras store. Slot 0 and 1 are the RESERVED neutral entry
+        // (index 0): classic shading, roughness 1, metallic 0, full normal and
+        // occlusion strength, no retro artefacts.
+        let mat_ext_cpu = neutral_mat_ext();
+        let mat_ext_cap = mat_ext_cpu.len() as u32;
+        let mat_ext_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster-mat-ext"),
+            size: (mat_ext_cpu.len() * 16) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue.write_buffer(&mat_ext_buf, 0, bytemuck::cast_slice(&mat_ext_cpu));
+
         let globals_bind = make_globals_bind(
             device,
             &globals_layout,
@@ -855,6 +1092,7 @@ impl Raster {
             &skin_weights_buf,
             &skin_palette_buf,
             &skin_meta_buf,
+            &mat_ext_buf,
         );
 
         // 1×1 white default for meshes registered without a texture (the tint then
@@ -863,6 +1101,23 @@ impl Raster {
             gpu,
             &TextureData { pixels: vec![255, 255, 255, 255], width: 1, height: 1 },
         );
+        // 1×1 FLAT normal — `(0.5, 0.5, 1)` decodes to `(0, 0, 1)` in tangent
+        // space, i.e. "the surface's own normal". Bound wherever a material names
+        // no normal map, so the shader has one code path and no flag to get
+        // out of step with what is actually bound.
+        let flat_normal_tex = upload_texture(
+            gpu,
+            &TextureData { pixels: vec![128, 128, 255, 255], width: 1, height: 1 },
+        );
+        // RAW, not sRGB-decoded: (128,128,255) has to mean (0,0,1) and nothing
+        // else — it is the identity normal map, and an identity that tilts the
+        // surface 39° is worse than no default at all.
+        let flat_normal_view = linear_view_of(&flat_normal_tex);
+        let neutral_samp = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("raster-neutral-samp"),
+            ..Default::default()
+        });
+
 
         // The empty field fallback: a zeroed globals buffer (wgpu zero-initializes)
         // + a 1³ distance texture that's never actually sampled.
@@ -893,8 +1148,44 @@ impl Raster {
             view_formats: &[],
         });
         let empty_field_samp = device.create_sampler(&wgpu::SamplerDescriptor::default());
+        // The GI slot's stand-in. A 4x1x1 of zeroes rather than a 1x1: the probe
+        // texture is four texels per probe wide, and a shader that ever did read
+        // it (it cannot — `gi_meta.x` is 0 here) would read inside the texture
+        // rather than off the end of it.
+        let empty_gi = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raster-empty-gi"),
+            size: wgpu::Extent3d { width: 4, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        // A 1×1 stand-in for the depth prepass: the shader reads its dimensions
+        // to decide whether there IS a prepass this frame, so 1×1 means "no
+        // contact shadows" without a flag anyone has to keep in sync.
+        let empty_prime = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("raster-empty-prime"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let empty_field_bind = crate::raymarch::make_field_bind(
-            device, &field_layout, &empty_field_buf, &empty_dist, &empty_color, &empty_field_samp,
+            device,
+            &field_layout,
+            &empty_field_buf,
+            &empty_dist,
+            &empty_color,
+            &empty_field_samp,
+            &empty_gi,
+            &empty_prime,
         );
 
         let instance_cap = 16;
@@ -936,12 +1227,21 @@ impl Raster {
             terrain_samp,
             terrain_samp_nearest,
             terrain_nearest_mask: 0,
-            light2d: crate::light2d::Light2d::new(gpu, &tex_layout, gpu.surface_format()),
-            palette: crate::palette::Palette::new(gpu, gpu.surface_format()),
+            light2d: crate::light2d::Light2d::new(gpu, &tex_layout, gpu.scene_format()),
+            palette: crate::palette::Palette::new(gpu, gpu.scene_format()),
             tex_layout,
             empty_field_bind,
             samplers: HashMap::new(),
             default_tex,
+            flat_normal_view,
+            _flat_normal_tex: flat_normal_tex,
+            neutral_samp,
+            mat_ext_buf,
+            mat_ext_cpu,
+            mat_ext_cap,
+            mat_ext_index: HashMap::new(),
+            mat_ext_dirty: false,
+            mat_sets: HashMap::new(),
             instance_buf,
             instance_cap,
             meshes: Vec::new(),
@@ -1005,7 +1305,7 @@ impl Raster {
                 entry_point: Some("fs"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
+                    format: gpu.scene_format(),
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1083,7 +1383,7 @@ impl Raster {
                 entry_point: Some("fs"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
+                    format: gpu.scene_format(),
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1246,7 +1546,7 @@ impl Raster {
                 entry_point: Some("fs_flsl"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
+                    format: gpu.scene_format(),
                     blend: match blend {
                         FlslBlend::Opaque => None,
                         FlslBlend::Alpha => Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -1460,6 +1760,147 @@ impl Raster {
         self.textures.get(id.0 as usize).map(|t| &t.bind)
     }
 
+    /// A group(1) bind that puts `view`/`samp` in the base-colour slot and the
+    /// neutral defaults in the other four. What every caller wants that has one
+    /// image and no surface maps — a mesh's own texture, a render target, a
+    /// registered image.
+    fn plain_surface_bind(
+        &self,
+        gpu: &Gpu,
+        label: &str,
+        view: &wgpu::TextureView,
+        samp: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        // The base-colour slot takes the caller's (sRGB) view; the four DATA
+        // slots take raw ones, so a neutral 255 means 1.0 rather than 1.0 by
+        // luck and a neutral 128 would mean 0.5.
+        let white = linear_view_of(&self.default_tex);
+        let n = (&self.flat_normal_view, &self.neutral_samp);
+        let w = (&white, &self.neutral_samp);
+        make_surface_bind(&gpu.device, &self.tex_layout, label, [(view, samp), n, w, w, w])
+    }
+
+    /// The [`TexId`] whose group(1) binds all five maps at once: `base` in the
+    /// colour slot and `maps` = `[normal, roughness, metallic, occlusion]`, each
+    /// `None` taking its neutral default.
+    ///
+    /// The result is a perfectly ordinary `TexId`, so the whole draw path —
+    /// bucketing, instancing, the custom-shader path, the particle pass — needs
+    /// no idea that surface maps exist. Sets are cached by the ids they bind, so
+    /// asking every frame (which the editor does) costs a hash lookup.
+    pub fn material_set(&mut self, gpu: &Gpu, base: Option<TexId>, maps: [Option<TexId>; 4]) -> TexId {
+        let key = {
+            let mut k = [u32::MAX; SURFACE_SLOTS];
+            k[0] = base.map_or(u32::MAX, |t| t.0);
+            for (i, m) in maps.iter().enumerate() {
+                k[i + 1] = m.map_or(u32::MAX, |t| t.0);
+            }
+            k
+        };
+        // No maps at all: the base texture's own bind already binds four neutral
+        // defaults, so there is nothing to combine and nothing to cache.
+        if key[1..].iter().all(|&v| v == u32::MAX)
+            && let Some(b) = base
+            && (b.0 as usize) < self.textures.len()
+        {
+            return b;
+        }
+        if let Some(&id) = self.mat_sets.get(&key) {
+            return id;
+        }
+        let white = linear_view_of(&self.default_tex);
+        // Resolve each slot to (view, sampler), falling back to the neutral pair.
+        // An unknown id falls back too rather than failing the draw: a material
+        // pointing at a texture that failed to load should render untextured,
+        // not disappear.
+        //
+        // `data` picks the RAW view. Slot 0 is the base colour — a picture, and
+        // sRGB is how pictures are stored. Slots 1..4 are a normal map, a
+        // roughness, a metallic and an occlusion: numbers, which must come back
+        // as the numbers that were authored.
+        let slot = |k: u32, flat: bool, data: bool| -> (&wgpu::TextureView, &wgpu::Sampler) {
+            match self.textures.get(k as usize) {
+                Some(t) => (
+                    if data { &t.linear_view } else { &t.view },
+                    self.samplers.get(&t.sampling).unwrap_or(&self.neutral_samp),
+                ),
+                None if flat => (&self.flat_normal_view, &self.neutral_samp),
+                None => (&white, &self.neutral_samp),
+            }
+        };
+        let bind = make_surface_bind(
+            &gpu.device,
+            &self.tex_layout,
+            "raster-surface-set",
+            [
+                slot(key[0], false, false),
+                slot(key[1], true, true),
+                slot(key[2], false, true),
+                slot(key[3], false, true),
+                slot(key[4], false, true),
+            ],
+        );
+        // The set's own `view` / `_texture` mirror its BASE, so `texture_view`
+        // and `texture_size` keep answering about the image an artist would
+        // point at (a spritesheet's cell inset asks for exactly this).
+        let (view, texture) = match self.textures.get(key[0] as usize) {
+            Some(t) => (t.view.clone(), t._texture.clone()),
+            None => (
+                self.default_tex.create_view(&wgpu::TextureViewDescriptor::default()),
+                self.default_tex.clone(),
+            ),
+        };
+        let linear_view = linear_view_of(&texture);
+        let sampling = self
+            .textures
+            .get(key[0] as usize)
+            .map(|t| t.sampling)
+            .unwrap_or_default();
+        let id = TexId(self.textures.len() as u32);
+        self.textures.push(TexBind { bind, view, linear_view, sampling, _texture: texture });
+        self.mat_sets.insert(key, id);
+        id
+    }
+
+    /// Intern a [`SurfaceExtras`] and return the index the instance must carry
+    /// (see [`MaterialParams::ext_index`]). The neutral set is index 0 and costs
+    /// nothing, so a caller can hand this every material unconditionally.
+    pub fn push_surface_extras(&mut self, e: SurfaceExtras) -> u32 {
+        if e.is_neutral() {
+            return 0;
+        }
+        let key = e.key();
+        if let Some(&i) = self.mat_ext_index.get(&key) {
+            return i;
+        }
+        let i = (self.mat_ext_cpu.len() / 2) as u32;
+        self.mat_ext_cpu.extend_from_slice(&e.lanes());
+        self.mat_ext_index.insert(key, i);
+        self.mat_ext_dirty = true;
+        i
+    }
+
+    /// Upload the surface-extras store if it grew since the last pass. Called
+    /// from `begin_pass`, so a caller only ever has to `push_surface_extras`.
+    fn upload_mat_ext(&mut self, gpu: &Gpu) {
+        if !self.mat_ext_dirty {
+            return;
+        }
+        self.mat_ext_dirty = false;
+        let needed = self.mat_ext_cpu.len() as u32;
+        if needed > self.mat_ext_cap {
+            self.mat_ext_cap = needed.next_power_of_two();
+            self.mat_ext_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("raster-mat-ext"),
+                size: (self.mat_ext_cap as u64) * 16,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.rebuild_globals_bind(&gpu.device);
+        }
+        gpu.queue.write_buffer(&self.mat_ext_buf, 0, bytemuck::cast_slice(&self.mat_ext_cpu));
+    }
+
     /// The raw texture view of a registered material texture — for editor
     /// passes (the shader-graph preview) that bind scene textures themselves.
     pub fn texture_view(&self, id: TexId) -> Option<&wgpu::TextureView> {
@@ -1486,16 +1927,10 @@ impl Raster {
         let id = TexId(self.textures.len() as u32);
         let texture = upload_texture_mips(gpu, data, matches!(sampling.filter, TexFilter::SmoothMipmaps));
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let linear_view = linear_view_of(&texture);
         let sampler = self.sampler_for(gpu, sampling);
-        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raster-material-tex"),
-            layout: &self.tex_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-            ],
-        });
-        self.textures.push(TexBind { bind, view, sampling, _texture: texture });
+        let bind = self.plain_surface_bind(gpu, "raster-material-tex", &view, &sampler);
+        self.textures.push(TexBind { bind, view, linear_view, sampling, _texture: texture });
         id
     }
 
@@ -1518,10 +1953,12 @@ impl Raster {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            // The surface format, so every scene pipeline renders into it
-            // unchanged; sampling the sRGB view decodes to linear exactly like
-            // a regular sRGB material texture.
-            format: gpu.surface_format(),
+            // The SCENE format, so every scene pipeline renders into it
+            // unchanged — a render target is a second view of the world, drawn
+            // by the same passes. It is sampled back as an ordinary material
+            // texture, and in linear light either way (an sRGB view decodes on
+            // read; a float one was never encoded).
+            format: gpu.scene_format(),
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -1542,16 +1979,10 @@ impl Raster {
         // never tile its edges.
         let sampling = TexSampling { filter: TexFilter::Smooth, wrap: TexWrap::Clamp };
         let sampler = self.sampler_for(gpu, sampling);
-        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raster-render-target"),
-            layout: &self.tex_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-            ],
-        });
+        let bind = self.plain_surface_bind(gpu, "raster-render-target", &view, &sampler);
         let id = TexId(self.textures.len() as u32);
-        self.textures.push(TexBind { bind, view, sampling, _texture: color });
+        let linear_view = linear_view_of(&color);
+        self.textures.push(TexBind { bind, view, linear_view, sampling, _texture: color });
         (id, attach, depth_view)
     }
 
@@ -1638,6 +2069,7 @@ impl Raster {
             &self.skin_weights_buf,
             &self.skin_palette_buf,
             &self.skin_meta_buf,
+            &self.mat_ext_buf,
         );
     }
 
@@ -1923,6 +2355,7 @@ impl Raster {
     fn begin_pass(&mut self, gpu: &Gpu, globals: Globals) {
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         self.upload_skin_frame(gpu);
+        self.upload_mat_ext(gpu);
     }
 
     /// A skinned draw's instance data with its pose index stamped into the lane
@@ -2040,14 +2473,7 @@ impl Raster {
 
         let view = self.default_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = self.sampler_for(gpu, TexSampling::default());
-        let tex_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raster-dyn-tex"),
-            layout: &self.tex_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-            ],
-        });
+        let tex_bind = self.plain_surface_bind(gpu, "raster-dyn-tex", &view, &sampler);
         let mesh = RegisteredMesh {
             gpu_mesh,
             tex_bind,
@@ -2183,14 +2609,7 @@ impl Raster {
             .unwrap_or(&self.default_tex)
             .create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = self.sampler_for(gpu, TexSampling::default());
-        let tex_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raster-mesh-tex"),
-            layout: &self.tex_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-            ],
-        });
+        let tex_bind = self.plain_surface_bind(gpu, "raster-mesh-tex", &view, &sampler);
 
         self.meshes.push(RegisteredMesh {
             gpu_mesh,
@@ -2208,17 +2627,14 @@ impl Raster {
     /// meshes without their own texture (the shared default stays crisp).
     pub fn set_mesh_sampling(&mut self, gpu: &Gpu, id: MeshId, sampling: TexSampling) {
         let sampler = self.sampler_for(gpu, sampling);
-        let Some(m) = self.meshes.get_mut(id.0 as usize) else { return };
-        let Some(tex) = m._texture.as_ref() else { return };
+        let Some(tex) = self.meshes.get(id.0 as usize).and_then(|m| m._texture.as_ref()) else {
+            return;
+        };
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        m.tex_bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raster-mesh-tex"),
-            layout: &self.tex_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-            ],
-        });
+        let bind = self.plain_surface_bind(gpu, "raster-mesh-tex", &view, &sampler);
+        if let Some(m) = self.meshes.get_mut(id.0 as usize) {
+            m.tex_bind = bind;
+        }
     }
 
     /// Clone a registered mesh into a new slot with its OWN vertex buffer, sharing
@@ -2418,7 +2834,21 @@ impl Raster {
         // dim it toward the sky rather than reveal it, drop it out of the depth
         // prepass, and make it order-dependent against the chunks behind it,
         // which on a planet is every other chunk.
-        let is_opaque = |raw: &InstanceRaw| is_terrain(raw) || raw.color[3] >= OPAQUE_CUTOFF;
+        // Which surface-extras entries asked for SCREEN-DOOR transparency. A
+        // dithered surface belongs in the OPAQUE pass — that is the whole point
+        // of dithering instead of blending — so it must not be routed by its
+        // alpha like everything else. Snapshotted rather than read through
+        // `self` because the bucketing closures below borrow `raws` mutably.
+        let dithers: Vec<bool> = self
+            .mat_ext_cpu
+            .chunks_exact(2)
+            .map(|c| (c[1][0] as u32) & EXT_DITHER_ALPHA != 0)
+            .collect();
+        let is_opaque = |raw: &InstanceRaw| {
+            is_terrain(raw)
+                || raw.color[3] >= OPAQUE_CUTOFF
+                || dithers.get(ext_index_of(raw) as usize).copied().unwrap_or(false)
+        };
         let bucketize =
             |want_opaque: bool, raws: &mut Vec<InstanceRaw>| -> Vec<(usize, Option<u32>, u32, u32)> {
                 let groups = group_by_key(
@@ -2896,6 +3326,21 @@ impl Raster {
 }
 
 /// Upload an RGBA8 image as a single-level sRGB texture (base-color data is sRGB).
+/// The raw (un-decoded) view of an sRGB-uploaded image — what every surface-map
+/// slot binds. Falls back to the ordinary view for a texture that was not
+/// uploaded as sRGB (a render target in the float scene format), where there is
+/// no decode to undo.
+fn linear_view_of(tex: &wgpu::Texture) -> wgpu::TextureView {
+    if tex.format() == wgpu::TextureFormat::Rgba8UnormSrgb {
+        tex.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(wgpu::TextureFormat::Rgba8Unorm),
+            ..Default::default()
+        })
+    } else {
+        tex.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+}
+
 fn upload_texture(gpu: &Gpu, t: &TextureData) -> wgpu::Texture {
     upload_texture_mips(gpu, t, false)
 }
@@ -2915,7 +3360,9 @@ fn upload_texture_mips(gpu: &Gpu, t: &TextureData, gen_mips: bool) -> wgpu::Text
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
+        // So the same pixels can also be read raw, for the surface maps that are
+        // data rather than colour. See `TexBind::linear_view`.
+        view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
     });
     let write = |level: u32, w: u32, h: u32, pixels: &[u8]| {
         gpu.queue.write_texture(
@@ -2979,6 +3426,23 @@ pub fn is_terrain(raw: &InstanceRaw) -> bool {
     raw.normal_mat[2][3] > 0.5
 }
 
+/// This instance's [`SurfaceExtras`] index, unpacked from `normal_mat[1].w`
+/// (which carries `modulate_bit | (ext_index << 1)`).
+pub fn ext_index_of(raw: &InstanceRaw) -> u32 {
+    (raw.normal_mat[1][3] as u32) >> 1
+}
+
+/// Set an already-built instance's [`SurfaceExtras`] index, leaving the
+/// paint-modulate bit it shares the lane with alone.
+///
+/// For a caller that builds instances through helpers which have no `Raster` to
+/// ask for an index — it stamps the value on afterwards instead of threading the
+/// renderer through every one of them.
+pub fn set_ext_index(raw: &mut InstanceRaw, ext: u32) {
+    let modul = (raw.normal_mat[1][3] as u32) & 1;
+    raw.normal_mat[1][3] = (modul | (ext << 1)) as f32;
+}
+
 pub fn instance_of_mat(model: Mat4, m: &MaterialParams) -> InstanceRaw {
     // The inverse-transpose is correct under rotation + non-uniform scale; guard a
     // degenerate (zero/singular) scale, whose non-invertible 3×3 would otherwise
@@ -2992,7 +3456,17 @@ pub fn instance_of_mat(model: Mat4, m: &MaterialParams) -> InstanceRaw {
         // `vs`, where it is exact off the attribute rather than interpolated.
         normal_mat: [
             [nm.x_axis.x, nm.x_axis.y, nm.x_axis.z, m.terrain_paint_base as f32],
-            [nm.y_axis.x, nm.y_axis.y, nm.y_axis.z, f32::from(m.paint_modulate)],
+            // n1.w packs TWO things, on the same rule params.z follows: bit 0 =
+            // paint-modulate, bits 1.. = this instance's SURFACE EXTRAS index
+            // (0 = the neutral entry). Both are read only in `vs`, exact off the
+            // attribute — a ~16.7M integer that got perspective-interpolated
+            // could land one entry over and read another material's roughness.
+            [
+                nm.y_axis.x,
+                nm.y_axis.y,
+                nm.y_axis.z,
+                (u32::from(m.paint_modulate) | (m.ext_index << 1)) as f32,
+            ],
             [nm.z_axis.x, nm.z_axis.y, nm.z_axis.z, f32::from(m.terrain_splat)],
         ],
         color: [m.color[0], m.color[1], m.color[2], m.alpha],

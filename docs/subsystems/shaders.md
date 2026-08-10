@@ -24,8 +24,21 @@
 > last-good-pipeline fallback; `.flsl` syntax highlighting, live squiggles and
 > a stdlib Docs section in the Scripting tab; `◈ New Shader` in Assets.
 > Divergences from this pre-spec: stdlib identifiers are **camelCase**, the
-> stage is named `sdf` (not raymarch), and `Vertex`/light/post stages are
+> stage is named `sdf` (not raymarch), and the `Vertex`/light stages are still
 > reserved (proposal §9). Probes: `shader_probe`, `field_shape_probe`.
+>
+> **`stage post` is live** (v0.44): full-screen passes over the finished frame,
+> carried as an ORDERED LIST on the PostProcess node rather than as one slot, so
+> a project stacks its own looks instead of choosing from a fixed menu. Its four
+> `screen`-category ops — `sceneColor` / `sceneDepth` / `sceneNormal` /
+> `screenTexel` — each take an OPTIONAL uv, and that optionality is the design:
+> the default makes a colour grade a one-liner, and passing another pixel's uv
+> is what makes an edge detect, a blur or a warp expressible at all. Normals are
+> reconstructed from depth, so every kind of geometry has one with nothing to
+> author. Shipped examples: `inkOutline.flsl` (the comic-book look) and
+> `crtScanlines.flsl` (the short one to read first). Full description, the pass
+> ORDER and why it is that order: [`./post-processing.md`](./post-processing.md).
+> Probe: `post_shader_probe`.
 >
 > **Phase 5 — the ◈ Shaders GRAPH EDITOR — is live too** (this doc's §2
 > two-view diagram, realized): a pan/zoom node canvas (`floptle-shader::graph`
@@ -203,6 +216,14 @@ Start small (the ADR-0007 subset), grow over time. Categories, with examples:
 - **Texture sampling** — `sample(tex, uv)` honoring the material's **tiling
   options** (repeat/clamp/flip/count) so "drag on and tile" needs no shader edit;
   see [`./materials-and-textures.md`](./materials-and-textures.md).
+- **Screen** (`stage post` only) — `sceneColor`, `sceneDepth`, `sceneNormal`,
+  `screenTexel`: the finished frame, readable at any pixel rather than only this
+  one. See [`./post-processing.md`](./post-processing.md).
+
+`stdlib::CATEGORIES` is the one list of these, and both palettes (the graph tab's
+node menu, the IDE's autocomplete) walk it. They used to hold a hardcoded copy
+each, which meant an op in a new category compiled, documented and worked — and
+was never offered to anybody. A test keeps the list exhaustive.
 
 ### 4.1 Angles, and working in polar coordinates
 

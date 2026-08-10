@@ -11,6 +11,7 @@ rust-version.workspace = true
 [dependencies]
 floptle-core = { path = "../floptle-core" }
 floptle-field = { path = "../floptle-field" }
+floptle-gi = { path = "../floptle-gi" }
 floptle-rules = { path = "../floptle-rules" }
 floptle-ui = { path = "../floptle-ui" }
 

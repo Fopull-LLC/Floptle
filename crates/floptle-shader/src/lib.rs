@@ -26,8 +26,9 @@ pub mod transpile;
 pub use ir::{Blend, IrError, ShaderIr, Stage, Ty, Uniform};
 pub use text::{parse, print, ParseError};
 pub use transpile::{
-    transpile_fragment, transpile_sdf, transpile_sky, validate, validate_module, CompiledFragment,
-    CompiledSdf, CompiledSky, CompiledUi, TilingPack, TranspileError, WgslDiag,
+    transpile_fragment, transpile_post, transpile_sdf, transpile_sky, validate, validate_module,
+    CompiledFragment, CompiledPost, CompiledSdf, CompiledSky, CompiledUi, TilingPack,
+    TranspileError, WgslDiag,
 };
 
 /// File extension for the textual shader format ("FLoptle Shading Language").
@@ -59,6 +60,12 @@ pub fn compile_fragment(src: &str) -> Result<CompiledFragment, String> {
     if ir.stage == Some(Stage::Ui) {
         return Err("this is a ui shader — assign it to a UI element, not a mesh material".into());
     }
+    if ir.stage == Some(Stage::Post) {
+        return Err(
+            "this is a post shader — add it to the PostProcess node's screen shaders, not a mesh material"
+                .into(),
+        );
+    }
     transpile::transpile_fragment(&ir, &ck).map_err(|e| {
         let (l, c) = text::line_col(src, e.span.start);
         format!("{l}:{c}: {}", e.message)
@@ -86,6 +93,32 @@ pub fn compile_ui(src: &str) -> Result<transpile::CompiledUi, String> {
         return Err("not a ui shader — add `stage ui` and `output color = …`".into());
     }
     transpile::transpile_ui(&ir, &ck).map_err(|e| {
+        let (l, c) = text::line_col(src, e.span.start);
+        format!("{l}:{c}: {}", e.message)
+    })
+}
+
+/// Parse + type-check + transpile a Post-stage `.flsl`, for a full-screen pass
+/// on the PostProcess node. Human-readable `line:col`-prefixed errors; a shader
+/// of any other stage is rejected with a hint.
+pub fn compile_post(src: &str) -> Result<transpile::CompiledPost, String> {
+    let ir = text::parse(src).map_err(|e| {
+        let (l, c) = text::line_col(src, e.span.start);
+        format!("{l}:{c}: {}", e.message)
+    })?;
+    let ck = ir::check(&ir).map_err(|errs| {
+        errs.iter()
+            .map(|e| {
+                let (l, c) = text::line_col(src, e.span.start);
+                format!("{l}:{c}: {}", e.message)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    if ir.stage != Some(Stage::Post) {
+        return Err("not a post shader — add `stage post` and `output color = …`".into());
+    }
+    transpile::transpile_post(&ir, &ck).map_err(|e| {
         let (l, c) = text::line_col(src, e.span.start);
         format!("{l}:{c}: {}", e.message)
     })

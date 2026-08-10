@@ -1,4 +1,4 @@
-//! The ▦ Map tab: draw/spawn blockout shapes, the vertex/edge/face sub-mode,
+//! The ▦ Model tab: draw/spawn blockout shapes, the vertex/edge/face sub-mode,
 //! modeling ops on the current sub-object selection, and the material-slot
 //! list (assign faces to slots; override each slot's material per node).
 //!
@@ -90,7 +90,7 @@ impl EditorTabViewer<'_> {
             egui::Frame::group(ui.style()).fill(ui.visuals().faint_bg_color).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if ui
-                        .button("▦  Turn on the Map tool")
+                        .button("▦  Turn on the Model tool")
                         .on_hover_text(
                             "key 8 — needed to draw shapes and select faces in the viewport",
                         )
@@ -127,7 +127,7 @@ impl EditorTabViewer<'_> {
         ui.horizontal_wrapped(|ui| {
             for shape in MapShape::ALL {
                 let armed = self.map_arm == Some(shape);
-                let label = shape.label().trim_start_matches("Map ");
+                let label = shape.label().trim_start_matches("Model ");
                 if ui
                     .add_sized(
                         [CHIP_W + 14.0, BTN_H + 2.0],
@@ -162,7 +162,7 @@ impl EditorTabViewer<'_> {
                         DRAW_ACCENT,
                         format!(
                             "✏  drag out a {} — base first, then height",
-                            shape.label().trim_start_matches("Map ").to_lowercase()
+                            shape.label().trim_start_matches("Model ").to_lowercase()
                         ),
                     );
                     if ui.small_button("stop (Esc)").clicked() {
@@ -236,7 +236,7 @@ impl EditorTabViewer<'_> {
                     ui.label(RichText::new("spawn at camera:").weak());
                     for shape in MapShape::ALL {
                         if ui
-                            .small_button(shape.label().trim_start_matches("Map "))
+                            .small_button(shape.label().trim_start_matches("Model "))
                             .on_hover_text("drop one at a default size in front of the camera")
                             .clicked()
                         {
@@ -557,7 +557,7 @@ impl EditorTabViewer<'_> {
         let title = match spec {
             Some(s) => format!(
                 "SHAPE — {}",
-                MapShape::of_kind(s.kind).label().trim_start_matches("Map ").to_uppercase()
+                MapShape::of_kind(s.kind).label().trim_start_matches("Model ").to_uppercase()
             ),
             None => "SHAPE".to_string(),
         };
@@ -741,7 +741,7 @@ impl EditorTabViewer<'_> {
                 "makes a slot from the selection and gives it its own material — this is how \
                  one face gets a different look from the rest"
             } else {
-                "select some faces first (▦ Map tool, face mode)"
+                "select some faces first (▦ Model tool, face mode)"
             };
             if r.on_hover_text(hover).on_disabled_hover_text(hover).clicked() {
                 let name = {
@@ -835,6 +835,8 @@ impl EditorTabViewer<'_> {
                                         tex_set,
                                     );
                                     self.cmd.inspector_changed |= res.changed;
+                                    self.cmd.open_shader_graph =
+                                        res.open_shader.or(self.cmd.open_shader_graph.take());
                                 }
                                 if ui.small_button("✖ clear override").clicked()
                                     && let Some(om) =
@@ -904,7 +906,7 @@ impl EditorTabViewer<'_> {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(
-                    "map keys only fire while the ▦ Map tool is active and you're not typing",
+                    "model keys only fire while the ▦ Model tool is active and you're not typing",
                 )
                 .weak()
                 .small(),

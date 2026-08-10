@@ -91,6 +91,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
 ---@field setShaderParam fun(self: Node, name: string, x: number, y?: number, z?: number, w?: number) Drive a `.flsl` uniform on this node every tick (a GPU uniform write, never a recompile): the node's Material shader, or its UI element's `stage ui` shader (instruments like the navball). Unset lanes are 0.
 ---@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, luminosity, starColor, occluderRadius (occlusion culling: radius of the solid core geometry never pierces — chunks fully behind it skip their draws; keep it BELOW the deepest cave/dig; 0 = off).
+---@field setShaderTexture fun(self: Node, slot: string, ref: string) Point one of this node's `.flsl` shader texture SLOTS somewhere else, at runtime. `slot` is the name the shader declares (`texture ramp` gives \"ramp\"); `ref` is a project-relative image path, an `rt:<name>` render target (what another camera sees, live), or \"\" to clear the slot. A shader can declare up to 8 slots.
 ---@field setMaterial fun(self: Node, t: table) Construction API — SETUP-TIME, not per-frame: set (and create if absent) the node's Material. It inserts the component and queues a deferred write, so call it on transitions and use `setShaderParam` for values that change every tick. Fields: color/emissive/specular/rim (a colour takes {r,g,b}, {x,y,z}, {1,0.5,0.2} or vec3), emissiveStrength, shininess, specularStrength, rimStrength, unlit (bool), ambient, alpha, texture (path or \"rt:<name>\"), sheetCols/sheetRows/cell (spritesheet grid + which cell draws — `cell` is also a live mirror field, see MaterialHandle).
 ---@field setTerrain fun(self: Node, id: number) Construction API: make this node a Terrain volume with the given id (generate its field with `terrain.generatePlanet`).
 ---@field setTerrainGen fun(self: Node, opts: table|nil) Construction API: attach an ON-DEMAND generation spec (same opts table as `terrain.generatePlanet`) — the body's field generates in the background when first approached, so no field file is needed at all (galaxy streaming). Player edits saved under `terrain.saveDir` take priority over regeneration. nil clears the spec.
@@ -101,7 +102,8 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---A Rigidbody's live tunables (every Inspector field). Assign to change while playing;
 ---booleans may be written true/false and read back as 1/0.
 ---@class RigidBodyHandle
----@field friction number Surface friction 0..1 (0 = frictionless).
+---@field friction number Grip, as a coefficient: a ramp holds while tan(its angle) <= friction. 0 is ice, 1 holds exactly 45 degrees, above 1 is grippier still.
+---@field slopeLimit number Steepest standable surface, in degrees (default 60). Past it nothing grounds the body and no grip holds it.
 ---@field restitution number Bounciness 0..1 (0 = no bounce).
 ---@field gravity number Gravity pull on this body (1/0; assign true/false).
 ---@field kinematic number Transform-driven mode (1/0; assign true/false, live): never falls or gets pushed, but PUSHES dynamic bodies — platforms, elevators, grabbed objects. (Static mode is the Inspector dropdown — a baked collider, nothing to toggle here.)
@@ -126,6 +128,13 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field r number Color red 0..1.
 ---@field g number Color green 0..1.
 ---@field b number Color blue 0..1.
+---@field shape number The surface it emits from: 0 point, 1 sphere, 2 rect, 3 disk, 4 tube. Assigning keeps the size it had.
+---@field width number Rect only: its width in world units (0 on other shapes).
+---@field height number Rect only: its height in world units.
+---@field radius number Sphere / disk only: its radius in world units.
+---@field length number Tube only: how long the bar is.
+---@field thickness number Tube only: how thick the bar is.
+---@field twoSided number Rect / disk only (1/0): lights out of the back as well as the front.
 
 ---The scene's LIGHTING NODE (`find(\"Lighting\"):getcomponent(\"Light\")`) — the one
 ---environment a world has: the key light, the ambients, the shadows and the fog.
@@ -156,6 +165,10 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field shadowDither number Bayer-dither the penumbra (1/0) — the classic PS1 dithered shadow edge.
 ---@field shadowDistance number Max world distance a shadow ray marches before giving up; far geometry stops casting past it.
 ---@field fog number Depth fog on (1/0; assign true/false).
+---@field contactShadows number Contact shadows (1/0): the small dark line where things touch, traced from the depth buffer so a mesh casts its real silhouette. Only what is ON SCREEN casts one.
+---@field contactLength number How far a contact shadow traces, in world units.
+---@field contactSteps number Samples along the contact trace (2..32).
+---@field contactStrength number How dark a contact shadow gets, 0..1.
 ---@field fogColorR number Fog colour red — match it to the horizon or a seam shows.
 ---@field fogColorG number Fog colour green.
 ---@field fogColorB number Fog colour blue.
@@ -169,6 +182,10 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field fogFalloff number Volumetric: softness of the layer's top edge, world units.
 ---@field fogNoise number Volumetric: how much drifting noise breaks up the media, 0..1.
 ---@field fogNoiseScale number Volumetric: noise feature size, world units per repeat.
+---@field fogLight number Volumetric: how much of the scene's light scatters in the fog (0 = a flat colour, 1 = lit by the sun/points/bounce, past 1 exaggerates).
+---@field fogAnisotropy number Volumetric: which way the media throws light (-0.9..0.9, positive blooms toward the sun).
+---@field fogSteps number Volumetric: samples along each pixel's fog ray (2..64).
+---@field fogShafts number Volumetric (1/0): march the sun shadow per fog step — the beams, and the cost.
 
 ---A Camera's live properties (`node:getcomponent(\"Camera\")`).
 ---@class CameraHandle

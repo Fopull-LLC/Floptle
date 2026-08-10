@@ -23,7 +23,7 @@ use floptle_image::doc::{Image, Mode};
 use floptle_image::{io as fio, Palette};
 
 use crate::assets::FilterMode;
-use crate::image_edit::NewForm;
+use crate::image_edit::{ImageEditState, NewForm};
 use crate::image_ui::ImageExport;
 use crate::Editor;
 
@@ -123,10 +123,28 @@ impl Editor {
     /// Open any image (or `.flimg`) in the 🖼 Image tab. A bare PNG is wrapped in
     /// a one-layer document; a PNG with a sibling `.flimg` opens the document.
     pub(crate) fn open_image_doc(&mut self, path: &str) {
-        if !self.confirm_discard_image() {
+        let file = self.resolve_asset_path(path);
+        // Already open? Switch to it rather than reloading — reloading would
+        // throw away that document's undo stack and any unsaved work in it,
+        // which is the exact opposite of what double-clicking a thumbnail means.
+        let doc_path_for_file = fio::doc_path_for(&file);
+        if self.image.path.as_deref() == Some(doc_path_for_file.as_path()) {
+            self.focus_image_tab();
             return;
         }
-        let file = self.resolve_asset_path(path);
+        if let Some(i) =
+            self.image_stash.iter().position(|s| s.path.as_deref() == Some(doc_path_for_file.as_path()))
+        {
+            self.activate_image_doc(i);
+            self.focus_image_tab();
+            return;
+        }
+        // A live document is PARKED, not discarded. This used to refuse the open
+        // ("save it, or repeat that to discard") and the refusal was the whole
+        // problem: a document you could not save yet — because it had no name —
+        // was a document you could not leave, so the 🖼 tab held you hostage
+        // until you closed the project.
+        self.park_image_doc();
         let Some(doc) = fio::open_any(&file, Mode::Painterly) else {
             let why = if is_image_doc(&file.to_string_lossy()) {
                 "the .flimg is from a different format version (refused rather than misread)"
@@ -164,9 +182,7 @@ impl Editor {
 
     /// Create a fresh document from the New dialog (unsaved until you save it).
     pub(crate) fn new_image_doc(&mut self, form: &NewForm) {
-        if !self.confirm_discard_image() {
-            return;
-        }
+        self.park_image_doc();
         let mut doc = Image::new(form.w, form.h, form.mode);
         if form.background
             && let Some(g) = doc.layers[0].grid_mut(0)
@@ -179,21 +195,180 @@ impl Editor {
         self.focus_image_tab();
     }
 
-    /// Refuse to drop an unsaved document silently. (No modal: this is a toast +
-    /// a refusal, because losing work to a stray double-click is unforgivable
-    /// and a modal here would be worse than the disease.)
-    fn confirm_discard_image(&mut self) -> bool {
-        if !self.image.dirty || self.image.doc.is_none() {
-            return true;
+    // --- the OS clipboard's image side --------------------------------------
+
+    /// Pull an image off the OS clipboard into the 🖼 tab's own clipboard, so
+    /// the next paste places it.
+    ///
+    /// The 🖼 tab already had a clipboard; it was fed only by its own
+    /// copy/cut. That makes the obvious workflow — find a reference in a
+    /// browser, copy it, paste it into the thing you are drawing — impossible,
+    /// and the workaround (save to disk, import, delete the file) is enough
+    /// friction that people stop trying.
+    ///
+    /// `arboard` is opened per call rather than held: an X11/Wayland clipboard
+    /// connection that lives for the session is a connection that goes stale
+    /// when the compositor restarts, and this runs on a keypress.
+    ///
+    /// Returns whether anything was found.
+    pub(crate) fn clipboard_image_into_tab(&mut self) -> bool {
+        let img = match arboard::Clipboard::new().and_then(|mut c| c.get_image()) {
+            Ok(i) => i,
+            Err(_) => return false,
+        };
+        let (w, h) = (img.width as u32, img.height as u32);
+        if w == 0 || h == 0 {
+            return false;
         }
-        if self.image_discard_armed {
-            self.image_discard_armed = false;
-            return true;
+        // arboard hands back straight RGBA8, which is what the tab's clipboard
+        // is — but a clipboard image can be enormous (a 4K screenshot), and a
+        // paste is a transform gesture over a document that may be 32×32. It is
+        // pasted whole and the gesture scales it; refusing at a size would be
+        // worse, because the reference you wanted is the one that is too big.
+        let px: Vec<u8> = img.bytes.into_owned();
+        if px.len() as u32 != w * h * 4 {
+            return false;
         }
-        self.image_discard_armed = true;
-        self.image
-            .toast("this image has unsaved changes — save it, or repeat that to discard them");
-        false
+        self.image.clip = Some((px, w, h));
+        true
+    }
+
+    /// Paste whatever is on the OS clipboard, falling back to the tab's own
+    /// clipboard when the OS has no image on it.
+    ///
+    /// OS first, because that is what "paste" means everywhere else: the most
+    /// recent copy wins, and a copy made in another application is still a copy.
+    pub(crate) fn image_paste(&mut self) {
+        let from_os = self.clipboard_image_into_tab();
+        if !self.image.paste() && from_os {
+            // `paste` said no for its own reasons (no unlocked pixel layer) and
+            // has already said which.
+        }
+    }
+
+    /// Put the 🖼 tab's clipboard on the OS clipboard as an image, so a copy
+    /// here can be pasted into another application.
+    pub(crate) fn image_clip_to_os(&mut self) {
+        let Some((px, w, h)) = self.image.clip.clone() else { return };
+        let img = arboard::ImageData {
+            width: w as usize,
+            height: h as usize,
+            bytes: std::borrow::Cow::Owned(px),
+        };
+        if let Ok(mut c) = arboard::Clipboard::new() {
+            let _ = c.set_image(img);
+        }
+    }
+
+    /// Make a NEW document out of whatever image is on the OS clipboard.
+    ///
+    /// The other half of "paste an image in": sometimes the clipboard IS the
+    /// thing you want to work on, and pasting it into a document you had to
+    /// invent the size of first is the long way round.
+    pub(crate) fn new_image_from_clipboard(&mut self) {
+        if !self.clipboard_image_into_tab() {
+            self.image.toast("no image on the clipboard");
+            return;
+        }
+        let Some((px, w, h)) = self.image.clip.clone() else { return };
+        self.park_image_doc();
+        let mut doc = Image::new(w, h, Mode::Painterly);
+        if let Some(g) = doc.layers[0].grid_mut(0) {
+            for y in 0..h {
+                for x in 0..w {
+                    let i = ((y * w + x) * 4) as usize;
+                    if let Some(c) = px.get(i..i + 4) {
+                        g.set(x as i64, y as i64, [c[0], c[1], c[2], c[3]]);
+                    }
+                }
+            }
+        }
+        doc.layers[0].name = "Pasted".into();
+        self.image.adopt(doc, None, None);
+        self.image.toast(format!("pasted {w}×{h} from the clipboard — Save gives it a name"));
+        self.focus_image_tab();
+    }
+
+    // --- several documents at once ------------------------------------------
+    //
+    // The 🖼 tab holds ONE live `ImageEditState` and a stash of parked ones.
+    // Switching documents swaps a stash entry with the live state, carrying the
+    // tab-level things (palettes, clipboard, tool, brush) across.
+    //
+    // Why a stash rather than splitting `ImageEditState` into per-document and
+    // shared halves: the split already exists and is already tested — it is what
+    // `close()` preserves — and a state that IS a document, whole, cannot get a
+    // document's undo stack attached to another document's pixels. Every gesture,
+    // filter, selection and undo entry in the tab reads `self.image` and needs no
+    // idea that any of this is happening.
+
+    /// Move the live document into the stash, leaving the tab empty.
+    ///
+    /// A no-op when nothing is open. **Never discards** — that is the point.
+    pub(crate) fn park_image_doc(&mut self) {
+        if self.image.doc.is_none() {
+            return;
+        }
+        let mut parked = ImageEditState::default();
+        std::mem::swap(&mut parked, &mut self.image);
+        self.image.take_tab_state(&mut parked);
+        self.image_stash.push(parked);
+    }
+
+    /// Make stash entry `i` the live document, parking whatever was live.
+    pub(crate) fn activate_image_doc(&mut self, i: usize) {
+        if i >= self.image_stash.len() {
+            return;
+        }
+        let mut next = self.image_stash.remove(i);
+        // Park the current one FIRST, so the tab strip keeps a stable order and
+        // an accidental double-activate cannot drop a document on the floor.
+        if self.image.doc.is_some() {
+            let mut parked = ImageEditState::default();
+            std::mem::swap(&mut parked, &mut self.image);
+            next.take_tab_state(&mut parked);
+            self.image_stash.insert(i.min(self.image_stash.len()), parked);
+        } else {
+            let mut empty = std::mem::take(&mut self.image);
+            next.take_tab_state(&mut empty);
+        }
+        self.image = next;
+    }
+
+    /// Close a document by stash index (or `None` for the live one).
+    ///
+    /// Dirty documents route through the confirm; clean ones just go.
+    pub(crate) fn close_image_doc(&mut self, which: Option<usize>) {
+        let dirty = match which {
+            None => self.image.dirty && self.image.doc.is_some(),
+            Some(i) => self.image_stash.get(i).is_some_and(|s| s.dirty),
+        };
+        if dirty {
+            self.image_close_confirm = Some(which);
+            return;
+        }
+        self.discard_image_doc(which);
+    }
+
+    /// Drop a document without asking — the "Discard" arm of the confirm, and
+    /// the path a clean close takes.
+    pub(crate) fn discard_image_doc(&mut self, which: Option<usize>) {
+        match which {
+            Some(i) if i < self.image_stash.len() => {
+                self.image_stash.remove(i);
+            }
+            Some(_) => {}
+            None => {
+                self.image.close();
+                // Closing the live document promotes the most recent parked one,
+                // so a tab strip with three files in it does not go blank
+                // because you shut one of them.
+                if !self.image_stash.is_empty() {
+                    let last = self.image_stash.len() - 1;
+                    self.activate_image_doc(last);
+                }
+            }
+        }
     }
 
     pub(crate) fn focus_image_tab(&mut self) {
@@ -218,7 +393,6 @@ impl Editor {
             Ok(png) => {
                 self.image.dirty = false;
                 self.image.png_dirty = false;
-                self.image_discard_armed = false;
                 self.image.mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
                 self.after_png_written(&png, &doc);
                 self.image.toast(format!("saved {}", short_name(&png)));

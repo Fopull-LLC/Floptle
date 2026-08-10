@@ -18,6 +18,38 @@ pub(crate) fn material_params(m: &Material) -> MaterialParams {
     MaterialParams::from_material(m)
 }
 
+/// Everything a draw needs from a [`Material`] that only the RENDERER can
+/// resolve: the group(1) texture set (base colour + the four surface maps) and
+/// the surface-extras index (the PBR scalars and the retro flags).
+///
+/// Returns `(texture, params)` — a drop-in for the pair the gather already
+/// carried, so the whole downstream path keeps treating a PBR material as one
+/// `TexId` and one `MaterialParams`. Both halves are cached inside the renderer,
+/// so calling this per node per frame costs two hash lookups.
+///
+/// `fallback` is the texture to use when the material names no base colour of
+/// its own (a mesh's imported texture, a tilemap's page).
+pub(crate) fn material_draw(
+    raster: &mut floptle_render::Raster,
+    gpu: &floptle_render::Gpu,
+    m: &Material,
+    registry: &std::collections::HashMap<String, floptle_render::TexId>,
+    fallback: Option<floptle_render::TexId>,
+) -> (Option<floptle_render::TexId>, MaterialParams) {
+    let look = |p: Option<&String>| p.and_then(|p| registry.get(p.as_str()).copied());
+    let base = look(m.texture.as_ref()).or(fallback);
+    let mut params = material_params(m);
+    params.ext_index =
+        raster.push_surface_extras(floptle_render::SurfaceExtras::from_material(m));
+    // A material with no maps gets its base texture back unchanged — no set is
+    // built, nothing is cached, and the draw is byte-for-byte what it was.
+    if !m.has_maps() {
+        return (base, params);
+    }
+    let maps = m.maps().map(look);
+    (Some(raster.material_set(gpu, base, maps)), params)
+}
+
 /// The default look for a Blob with no Material: neutral tint plus the subtle blue
 /// rim the blob shipped with, so material-less blobs render exactly as before while a
 /// blob that DOES carry a Material is fully driven by it.
@@ -48,16 +80,46 @@ pub(crate) fn blob_mat_arrays(set: &[(DVec3, f32, MaterialParams)]) -> BlobMatAr
     (tint, emissive, specular, params, rim)
 }
 
-/// One side of the light split: how many, where, what colour, and — for the 2D
-/// side — which sorting layers each one reaches and how its falloff is shaped.
+/// One side of the light split: how many, where, what colour, what SURFACE each
+/// one emits from, and — for the 2D side — which sorting layers it reaches and
+/// how its falloff is shaped.
 ///
-/// `(count, pos, colour, layer mask, falloff)`, where `falloff[i]` is
-/// `[inner radius, exponent, casts-are-honoured, spare]`.
-///
-/// The 3D side fills that lane and ignores it — one shape for both sides is
-/// what stops the two from drifting.
-pub(crate) type LightSlots =
-    (usize, [[f32; 4]; 16], [[f32; 4]; 16], [[u32; 4]; 16], [[f32; 4]; 16]);
+/// One shape for both sides is what stops the two from drifting: the 3D side
+/// fills the 2D lanes and ignores them, and vice versa.
+#[derive(Clone, Copy)]
+pub(crate) struct LightSlots {
+    pub count: usize,
+    /// xyz = camera-relative position, w = range.
+    pub pos: [[f32; 4]; 16],
+    /// rgb = colour × intensity.
+    pub color: [[f32; 4]; 16],
+    /// 2D only: which sorting-layer ranks this light reaches.
+    pub mask: [[u32; 4]; 16],
+    /// 2D only: `[inner radius, exponent, casts-are-honoured, spare]`.
+    pub falloff: [[f32; 4]; 16],
+    /// The EMITTER: `[kind, a, b, flags]` — 0 point, 1 sphere (a = radius),
+    /// 2 rect (a/b = half width/height, flag 1 = two-sided), 3 disk (a = radius,
+    /// flag 1 = two-sided), 4 tube (a = half length, b = radius). Sizes are in
+    /// world units, with the node's scale already folded in.
+    pub shape: [[f32; 4]; 16],
+    /// The emitter's world orientation (xyzw quaternion) — a rect faces the
+    /// node's forward, a tube lies along its local X.
+    pub rot: [[f32; 4]; 16],
+}
+
+impl Default for LightSlots {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            pos: [[0.0; 4]; 16],
+            color: [[0.0; 4]; 16],
+            mask: [[0; 4]; 16],
+            falloff: [[0.0; 4]; 16],
+            shape: [[0.0; 4]; 16],
+            rot: [[0.0, 0.0, 0.0, 1.0]; 16],
+        }
+    }
+}
 
 /// The scene's placeable lights, separated into the two systems that light with
 /// them.
@@ -105,7 +167,7 @@ pub(crate) fn split_point_lights(
     let mut three: Vec<Candidate> = Vec::new();
     let mut two: Vec<Candidate> = Vec::new();
     for (e, m) in world.query::<Matter>() {
-        let Matter::PointLight { color, intensity, range } = m else { continue };
+        let Matter::PointLight { color, intensity, range, shape } = m else { continue };
         // A light turned off does not take a slot. Keeping N lights and parking
         // the spare ones at zero is the standard way to pool a capped resource —
         // and scripts cannot create a PointLight, so it is the ONLY way. A
@@ -125,9 +187,10 @@ pub(crate) fn split_point_lights(
         }
         let lit = world.get::<floptle_core::Lighting2D>(e).cloned().unwrap_or_default();
         let (is_2d, _) = floptle_core::resolve_2d(lit.mode, facts);
-        let wp = floptle_core::world_transform(world, e).translation;
-        let c = (wp - cam_world).as_vec3();
+        let wt = floptle_core::world_transform(world, e);
+        let c = (wt.translation - cam_world).as_vec3();
         let side = if is_2d { &mut two } else { &mut three };
+        let q = wt.rotation;
         side.push(Candidate {
             order: e.index(),
             score: contribution(c.length(), *range, *color, *intensity),
@@ -135,10 +198,40 @@ pub(crate) fn split_point_lights(
             color: [color[0] * intensity, color[1] * intensity, color[2] * intensity, 0.0],
             mask: layer_mask(&lit, sorting_names),
             falloff: lit.falloff_lane(*range),
+            shape: emitter_lane(*shape, wt.scale),
+            rot: [q.x, q.y, q.z, q.w],
         });
     }
     let dropped = three.len().saturating_sub(16) + two.len().saturating_sub(16);
     SplitLights { three_d: fill(three), two_d: fill(two), dropped }
+}
+
+/// A light's emitter packed for the shader: `[kind, a, b, flags]`.
+///
+/// The node's SCALE is folded in here rather than in the shader, because that is
+/// what dragging a scale handle on a window light is expected to do — and doing
+/// it once per light per frame beats doing it once per light per fragment.
+fn emitter_lane(shape: floptle_core::LightShape, scale: Vec3) -> [f32; 4] {
+    use floptle_core::LightShape as S;
+    // A uniform-ish scale for the shapes that only have a radius: the largest
+    // axis, so scaling a bulb up never makes it smaller in some direction.
+    let s = scale.x.abs().max(scale.y.abs()).max(scale.z.abs());
+    match shape {
+        S::Point => [0.0; 4],
+        S::Sphere { radius } => [1.0, (radius * s).max(0.0), 0.0, 0.0],
+        S::Rect { width, height, two_sided } => [
+            2.0,
+            (width * 0.5 * scale.x.abs()).max(1e-4),
+            (height * 0.5 * scale.y.abs()).max(1e-4),
+            if two_sided { 1.0 } else { 0.0 },
+        ],
+        S::Disk { radius, two_sided } => {
+            [3.0, (radius * s).max(1e-4), 0.0, if two_sided { 1.0 } else { 0.0 }]
+        }
+        S::Tube { length, radius } => {
+            [4.0, (length * 0.5 * scale.x.abs()).max(1e-4), (radius * s).max(1e-4), 0.0]
+        }
+    }
 }
 
 /// One light that qualified, before the sixteen are chosen.
@@ -152,6 +245,8 @@ struct Candidate {
     color: [f32; 4],
     mask: [u32; 4],
     falloff: [f32; 4],
+    shape: [f32; 4],
+    rot: [f32; 4],
 }
 
 /// How much a light can matter to this frame: how bright it is, against how far
@@ -182,13 +277,14 @@ fn fill(mut lights: Vec<Candidate>) -> LightSlots {
         });
         lights.truncate(16);
     }
-    let mut out: LightSlots =
-        (lights.len(), [[0.0; 4]; 16], [[0.0; 4]; 16], [[0; 4]; 16], [[0.0; 4]; 16]);
+    let mut out = LightSlots { count: lights.len(), ..LightSlots::default() };
     for (i, l) in lights.iter().enumerate() {
-        out.1[i] = l.pos;
-        out.2[i] = l.color;
-        out.3[i] = l.mask;
-        out.4[i] = l.falloff;
+        out.pos[i] = l.pos;
+        out.color[i] = l.color;
+        out.mask[i] = l.mask;
+        out.falloff[i] = l.falloff;
+        out.shape[i] = l.shape;
+        out.rot[i] = l.rot;
     }
     out
 }
@@ -335,6 +431,18 @@ pub(crate) fn shadow_uniforms(l: &Light) -> ([f32; 4], [f32; 4], [f32; 4]) {
     )
 }
 
+/// The contact-shadow lane. Reported OFF when the sun's shadows are off, because
+/// a contact shadow is the same shadow: leaving it running under a scene whose
+/// shadows are switched off would mean "shadows off" did not mean off.
+pub(crate) fn contact_uniform(l: &Light) -> [f32; 4] {
+    [
+        if l.contact_shadows && l.shadows { 1.0 } else { 0.0 },
+        l.contact_length.clamp(0.01, 20.0),
+        l.contact_steps.clamp(2, 32) as f32,
+        l.contact_strength.clamp(0.0, 1.0),
+    ]
+}
+
 /// The depth-fog uniforms for the Lighting node: `(fog_color, fog_params)` where
 /// `fog_params = [start, end, on, dither_mode]` and the spare `fog_color.w` carries
 /// the effective dither strength (0 = off). Fed to the raymarch/raster field globals
@@ -344,7 +452,13 @@ pub(crate) fn shadow_uniforms(l: &Light) -> ([f32; 4], [f32; 4], [f32; 4]) {
 /// Volumetric-fog uniform lanes (`vol_fog_a/b`): densities/heights straight off
 /// the Lighting node, `time` drifting the noise, and the camera's WORLD height
 /// so the shader can map camera-relative positions back to world y.
-pub(crate) fn vol_fog_uniforms(l: &Light, time: f32, cam_y: f32) -> ([f32; 4], [f32; 4]) {
+/// The third lane carries the light injection: amount, phase anisotropy, march
+/// steps, and whether each step marches the sun shadow (the shafts). `fog_shafts`
+/// is reported as off when the amount is 0 — with no light to inject there is
+/// nothing for a shadow to darken, and a scene left on the flat look should not
+/// be paying for a shadow march per step to reach it.
+pub(crate) fn vol_fog_uniforms(l: &Light, time: f32, cam_y: f32) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    let amount = l.fog_light.max(0.0);
     (
         [
             l.fog_density.max(0.0),
@@ -357,6 +471,12 @@ pub(crate) fn vol_fog_uniforms(l: &Light, time: f32, cam_y: f32) -> ([f32; 4], [
             time,
             cam_y,
             if l.fog && l.fog_volumetric { 1.0 } else { 0.0 },
+        ],
+        [
+            amount,
+            l.fog_anisotropy.clamp(-0.95, 0.95),
+            l.fog_steps.clamp(2, 64) as f32,
+            if l.fog_shafts && amount > 0.0 { 1.0 } else { 0.0 },
         ],
     )
 }
@@ -458,28 +578,43 @@ pub(crate) fn water_infos(
     out
 }
 
-/// [`fog_uniforms`], overridden while the camera is under water.
+/// [`fog_uniforms`], overridden while the camera is under water — plus the
+/// `fog_params` the PARTICLE pass should use.
 ///
 /// The scene's own fog is REPLACED rather than added to: underwater is a
 /// different medium, not the same air with more of it. Going through the one
 /// fog channel every draw path already reads is what makes meshes, terrain, SDF
 /// matter and particles go murky *together* — a separate underwater pass would
 /// have had to be taught about each of them, and would have missed one.
-pub(crate) fn fog_uniforms_at(
+///
+/// The two sets of params differ in volumetric mode and only there. Particles
+/// fade on a plain distance ramp — they don't march the media — so handing them the volumetric
+/// lane's `y` would hand them the sky-ray *fence*, a number an artist raises for
+/// distant sky quality and which would then silently stop particles fading at
+/// all. Instead the ramp is derived from the density itself: `2.3/σ` is where
+/// the marched layer reaches ~90% coverage, so a particle disappears roughly
+/// where the fog behind it does.
+pub(crate) fn fog_uniforms_and_particles_at(
     l: &Light,
     world: &floptle_core::World,
     cam: floptle_core::math::DVec3,
-) -> ([f32; 4], [f32; 4]) {
-    match underwater_at(world, cam) {
-        Some((tint, vis)) => (
-            [tint[0], tint[1], tint[2], if l.fog_dither { l.fog_dither_strength.clamp(0.0, 1.0) } else { 0.0 }],
-            // Start close to the eye: water attenuates from the first
-            // centimetre, and a start distance would give you a crisp bubble of
-            // clear water around the camera that moves with you.
-            [vis * 0.05, vis, 1.0, 0.0],
-        ),
-        None => fog_uniforms(l),
+) -> (([f32; 4], [f32; 4]), [f32; 4]) {
+    if let Some((tint, vis)) = underwater_at(world, cam) {
+        let dither = if l.fog_dither { l.fog_dither_strength.clamp(0.0, 1.0) } else { 0.0 };
+        // Start close to the eye: water attenuates from the first centimetre,
+        // and a start distance would give you a crisp bubble of clear water
+        // around the camera that moves with you.
+        let params = [vis * 0.05, vis, 1.0, 0.0];
+        return (([tint[0], tint[1], tint[2], dither], params), params);
     }
+    let (color, params) = fog_uniforms(l);
+    let particles = if l.fog && l.fog_volumetric {
+        let full = 2.3 / l.fog_density.max(1e-4);
+        [full * 0.15, full, 1.0, params[3]]
+    } else {
+        params
+    };
+    ((color, params), particles)
 }
 
 /// Harvest up to 32 proxy shadow occluders from the world's collider shapes —
@@ -635,25 +770,89 @@ pub(crate) fn skybox_uniforms(
 /// (bloom / vignette / SSAO) plus the raymarch SDF-AO params `[on, strength,
 /// radius, _]`. A disabled chain — or a node deleted mid-session — turns
 /// everything off (it self-heals back on the next scene load).
+/// The camera history motion blur reprojects against: the previous frame's
+/// view-projection, and where the camera was when it was taken.
+pub(crate) type MotionHistory = (floptle_core::math::Mat4, DVec3);
+
+/// Fill in the per-frame half of motion blur and return the history to keep.
+///
+/// The scene owns the shutter; the frame owns the two matrices and the streak
+/// ceiling, because only the frame knows which camera is rendering and how many
+/// pixels tall it is.
+///
+/// **The world is camera-relative** (ADR-0015), so the previous view-projection
+/// cannot be used as it was taken: a point sitting still in the world has a
+/// different relative position in each frame's coordinates. Shifting by how far
+/// the camera itself moved is what turns "where was this pixel" into a question
+/// about the scene rather than about the origin.
+///
+/// With no history — the first frame after a load, a scene switch, a camera cut
+/// — the previous matrix IS the current one, so every pixel reports zero motion
+/// and the frame is left sharp. That is the right answer for a cut, and the only
+/// safe one: the alternative is one frame smeared by whatever the camera used to
+/// be looking at.
+pub(crate) fn motion_frame(
+    s: &mut floptle_render::PostSettings,
+    prev: Option<MotionHistory>,
+    view_proj: floptle_core::math::Mat4,
+    cam_world: DVec3,
+    height: u32,
+) -> MotionHistory {
+    // The ceiling scales with the frame, because the same streak in uv is twice
+    // as long on a 2160-tall picture as on a 1080-tall one — a fixed pixel cap
+    // would be a different look at every window size.
+    s.motion_max = (height.max(1) as f32 * 0.05).clamp(8.0, 96.0);
+    s.motion_inv_view_proj = view_proj.inverse().to_cols_array_2d();
+    s.motion_prev_view_proj = match prev {
+        Some((vp, at)) => {
+            let delta = (cam_world - at).as_vec3();
+            (vp * floptle_core::math::Mat4::from_translation(delta)).to_cols_array_2d()
+        }
+        None => view_proj.to_cols_array_2d(),
+    };
+    (view_proj, cam_world)
+}
+
+/// Resolve the PostProcess node's **focus node** into a focus distance for one
+/// camera, or `None` when the scene isn't using one.
+///
+/// Separate from [`post_process_uniforms`] because it is the one post setting
+/// that depends on where the camera IS, and the editor renders the same scene
+/// from more than one — the Scene view, the Game view, a camera preview. Folding
+/// it into the settings would pick one of those cameras and be wrong in the
+/// others: the Scene view would show the game camera's focus while you fly
+/// around, which reads as the effect being broken.
+///
+/// A name that resolves to nothing returns `None`, so the authored `dof_focus`
+/// stands. Renaming a node must not silently soften the whole frame.
+pub(crate) fn dof_focus_distance(
+    world: &floptle_core::World,
+    cam_pos: floptle_core::math::DVec3,
+) -> Option<f32> {
+    let name = world.query::<Matter>().find_map(|(e, m)| match m {
+        Matter::PostProcess { dof_focus_node, enabled, .. }
+            if *enabled
+                && !dof_focus_node.is_empty()
+                && world.get::<floptle_core::Disabled>(e).is_none() =>
+        {
+            Some(dof_focus_node.clone())
+        }
+        _ => None,
+    })?;
+    let target = world
+        .query::<floptle_core::Name>()
+        .find(|(e, n)| n.0 == name && world.get::<floptle_core::Disabled>(*e).is_none())
+        .map(|(e, _)| e)?;
+    let p = floptle_core::world_transform(world, target).translation;
+    Some((p - cam_pos).length() as f32)
+}
+
 pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_render::PostSettings, [f32; 4]) {
     use floptle_core::AoMode;
-    let off = floptle_render::PostSettings {
-        bloom: false,
-        bloom_threshold: 1.0,
-        bloom_intensity: 0.7,
-        vignette: false,
-        vignette_strength: 0.5,
-        vignette_radius: 0.7,
-        ssao: false,
-        ssao_strength: 0.7,
-        ssao_radius: 0.5,
-        posterize_bands: 0,
-        posterize_dither: false,
-        posterize_chroma: false,
-        color_filter: 0,
-        color_filter_strength: 1.0,
-        simulate_deficiency: false,
-    };
+    // `PostSettings::default()` IS off, and is the one definition of what the
+    // identity values are — half of them are 1.0, and writing them out a second
+    // time here is how the two drift.
+    let off = floptle_render::PostSettings::default();
     for (e, m) in world.query::<Matter>() {
         // Same rule as the skybox above: a disabled chain is not the scene's
         // chain, so it is skipped rather than returning `off` — which would let
@@ -662,6 +861,7 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
             continue;
         }
         if let Matter::PostProcess {
+            tonemap,
             enabled,
             bloom,
             bloom_threshold,
@@ -675,6 +875,36 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
             posterize_bands,
             posterize_dither,
             posterize_chroma,
+            exposure,
+            contrast,
+            saturation,
+            temperature,
+            tint,
+            lift,
+            grade_gamma,
+            gain,
+            aberration,
+            distortion,
+            sharpen,
+            denoise,
+            grain,
+            grain_size,
+            dof_focus,
+            dof_range,
+            dof_near_range,
+            dof_max_blur,
+            dof_blades,
+            dof_blade_rotation,
+            dof_highlight,
+            dof_quality,
+            motion_blur,
+            motion_samples,
+            dof_show_focus,
+            // Resolved per VIEWPORT, against that viewport's own camera —
+            // see `dof_focus_distance`. It cannot be folded in here: this
+            // function does not know which eye is about to render.
+            dof_focus_node: _,
+            screen_shaders: _,
         } = m
         {
             if !enabled {
@@ -693,9 +923,44 @@ pub(crate) fn post_process_uniforms(world: &floptle_core::World) -> (floptle_ren
                 posterize_bands: *posterize_bands,
                 posterize_dither: *posterize_dither,
                 posterize_chroma: *posterize_chroma,
-                color_filter: 0,
-                color_filter_strength: 1.0,
-                simulate_deficiency: false,
+                // A tonemap the scene never chose falls back to Clip, which is
+                // what the pipeline did before there was a choice.
+                tonemap: floptle_render::Tonemap::ALL
+                    .get(*tonemap as usize)
+                    .copied()
+                    .unwrap_or_default(),
+                exposure: *exposure,
+                contrast: *contrast,
+                saturation: *saturation,
+                temperature: *temperature,
+                tint: *tint,
+                lift: *lift,
+                grade_gamma: *grade_gamma,
+                gain: *gain,
+                aberration: *aberration,
+                distortion: *distortion,
+                sharpen: *sharpen,
+                denoise: *denoise,
+                grain: *grain,
+                grain_size: *grain_size,
+                dof_focus: *dof_focus,
+                dof_range: *dof_range,
+                dof_near_range: *dof_near_range,
+                dof_max_blur: *dof_max_blur,
+                dof_blades: *dof_blades,
+                dof_blade_rotation: dof_blade_rotation.to_radians(),
+                dof_highlight: *dof_highlight,
+                dof_quality: *dof_quality,
+                dof_show_focus: *dof_show_focus,
+                // The shutter comes from the scene; the two matrices and the
+                // streak ceiling come from the FRAME (and only the game view
+                // fills them — see `motion_frame`).
+                motion_blur: *motion_blur,
+                motion_samples: *motion_samples,
+                // The accessibility filter is a PREFERENCE, not a scene
+                // setting — the caller folds it in after this (`floptle/0079`),
+                // and `time` likewise comes from the frame, not the node.
+                ..floptle_render::PostSettings::default()
             };
             let ao_p =
                 if *ao == AoMode::Sdf { [1.0, *ao_strength, *ao_radius, 0.0] } else { [0.0; 4] };
@@ -712,7 +977,7 @@ mod light_split_tests {
 
     fn light_at(world: &mut World, x: f64, mode: Option<Lighting2D>) -> floptle_core::Entity {
         let e = world.spawn();
-        world.insert(e, Matter::PointLight { color: [1.0, 0.5, 0.25], intensity: 2.0, range: 8.0 });
+        world.insert(e, Matter::PointLight { color: [1.0, 0.5, 0.25], intensity: 2.0, range: 8.0, shape: Default::default() });
         world.insert(
             e,
             floptle_core::transform::Transform {
@@ -741,10 +1006,10 @@ mod light_split_tests {
 
         // Flat scene: auto is 2D, the stated 3D one is not.
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), true);
-        assert_eq!((s.two_d.0, s.three_d.0), (1, 1));
+        assert_eq!((s.two_d.count, s.three_d.count), (1, 1));
         // Perspective scene: both are 3D and nothing is on the 2D side.
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
-        assert_eq!((s.two_d.0, s.three_d.0), (0, 2));
+        assert_eq!((s.two_d.count, s.three_d.count), (0, 2));
     }
 
     /// A scene with no 2D lights in it must hand the 3D shader exactly what it
@@ -755,7 +1020,7 @@ mod light_split_tests {
         light_at(&mut world, 3.0, None);
         light_at(&mut world, -2.0, None);
         let s = split_point_lights(&world, DVec3::new(1.0, 0.0, 0.0), &layers(), false);
-        let (count, pos, col) = (s.three_d.0, s.three_d.1, s.three_d.2);
+        let (count, pos, col) = (s.three_d.count, s.three_d.pos, s.three_d.color);
         assert_eq!(count, 2, "both lights are 3D in a perspective scene");
         assert_eq!(pos[0], [2.0, 0.0, 0.0, 8.0], "camera-relative, range in w");
         assert_eq!(col[0], [2.0, 1.0, 0.5, 0.0], "colour times intensity");
@@ -770,8 +1035,8 @@ mod light_split_tests {
         let mut world = World::default();
         light_at(&mut world, 0.0, Some(Lighting2D { mode: Lit2D::Yes, ..Default::default() }));
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
-        assert_eq!(s.two_d.0, 1);
-        assert_eq!(s.two_d.3[0], [!0u32; 4], "the mask must be all-ones, never zero");
+        assert_eq!(s.two_d.count, 1);
+        assert_eq!(s.two_d.mask[0], [!0u32; 4], "the mask must be all-ones, never zero");
     }
 
     /// Named layers become RANK bits, so the shader compares a number rather
@@ -790,7 +1055,7 @@ mod light_split_tests {
             }),
         );
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
-        assert_eq!(s.two_d.3[0], [1 << 2, 0, 0, 0], "only Characters, which is rank 2");
+        assert_eq!(s.two_d.mask[0], [1 << 2, 0, 0, 0], "only Characters, which is rank 2");
     }
 
     /// A rank past the 32nd has to land in a later WORD, not fall off the end of
@@ -806,7 +1071,7 @@ mod light_split_tests {
             Some(Lighting2D { mode: Lit2D::Yes, layers: vec!["layer35".into()], ..Default::default() }),
         );
         let s = split_point_lights(&world, DVec3::ZERO, &names, false);
-        assert_eq!(s.two_d.3[0], [0, 1 << 3, 0, 0], "rank 35 is bit 3 of word 1");
+        assert_eq!(s.two_d.mask[0], [0, 1 << 3, 0, 0], "rank 35 is bit 3 of word 1");
     }
 
     /// A light turned off must not hold a slot. Scripts cannot create a
@@ -819,15 +1084,15 @@ mod light_split_tests {
         let dark = light_at(&mut world, 0.0, None);
         world.insert(
             dark,
-            Matter::PointLight { color: [1.0; 3], intensity: 0.0, range: 8.0 },
+            Matter::PointLight { color: [1.0; 3], intensity: 0.0, range: 8.0, shape: Default::default() },
         );
         let spent = light_at(&mut world, 1.0, None);
-        world.insert(spent, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 0.0 });
+        world.insert(spent, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 0.0, shape: Default::default() });
         light_at(&mut world, 2.0, None); // the only one actually lighting anything
 
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
-        assert_eq!(s.three_d.0, 1, "a parked light took a slot");
-        assert_eq!(s.three_d.1[0][0], 2.0, "…and the wrong one survived");
+        assert_eq!(s.three_d.count, 1, "a parked light took a slot");
+        assert_eq!(s.three_d.pos[0][0], 2.0, "…and the wrong one survived");
     }
 
     /// A node you switched OFF is off. `Disabled` already takes a node out of
@@ -849,8 +1114,8 @@ mod light_split_tests {
         light_at(&mut world, 2.0, None); // the one still switched on
 
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
-        assert_eq!(s.three_d.0, 1, "a disabled node's light still lit the scene");
-        assert_eq!(s.three_d.1[0][0], 2.0, "…and it was the wrong one that survived");
+        assert_eq!(s.three_d.count, 1, "a disabled node's light still lit the scene");
+        assert_eq!(s.three_d.pos[0][0], 2.0, "…and it was the wrong one that survived");
         assert_eq!(s.dropped, 0, "nothing was dropped — they never qualified");
     }
 
@@ -870,7 +1135,7 @@ mod light_split_tests {
             }
             let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
             let mut got: Vec<i32> =
-                (0..s.three_d.0).map(|i| s.three_d.1[i][0].round() as i32).collect();
+                (0..s.three_d.count).map(|i| s.three_d.pos[i][0].round() as i32).collect();
             got.sort_unstable();
             got
         };
@@ -894,7 +1159,7 @@ mod light_split_tests {
             light_at(&mut world, i as f64, Some(Lighting2D { mode: Lit2D::No, ..Default::default() }));
         }
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
-        assert_eq!(s.two_d.0, 16, "the 2D side fills up");
-        assert_eq!(s.three_d.0, 3, "…and the 3D side still gets all of its own");
+        assert_eq!(s.two_d.count, 16, "the 2D side fills up");
+        assert_eq!(s.three_d.count, 3, "…and the 3D side still gets all of its own");
     }
 }

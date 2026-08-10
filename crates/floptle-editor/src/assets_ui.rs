@@ -743,6 +743,7 @@ impl<'a> EditorTabViewer<'a> {
         }
         ui.separator();
         let r = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
+        self.cmd.open_shader_graph = r.open_shader.or(self.cmd.open_shader_graph.take());
         if let Some(name) = r.save_as
             && !name.is_empty() {
                 self.cmd.save_material = Some((name, MaterialDoc::from_material(mat)));

@@ -195,30 +195,12 @@ impl Particles {
                 count: None,
             }],
         });
-        // Group 1 mirrors the raster material-texture layout exactly, so the two
-        // passes share registered textures (wgpu bind groups are compatible across
-        // structurally-equal layouts).
-        let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("particles-texture"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+        // Group 1 IS the raster surface layout — the same builder, not a copy of
+        // it — so the two passes share registered textures. A bind group is only
+        // usable with a structurally-equal layout, and "we wrote the same entries
+        // in two places" stops being true the moment one side gains a slot, which
+        // is exactly what the surface maps did.
+        let tex_layout = crate::raster::surface_bind_layout(device);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("particles"),
             bind_group_layouts: &[Some(&globals_layout), Some(&tex_layout)],
@@ -257,7 +239,7 @@ impl Particles {
                         ..Default::default()
                     },
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: gpu.surface_format(),
+                        format: gpu.scene_format(),
                         blend: Some(blend),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -312,20 +294,11 @@ impl Particles {
         );
         let white_view = white.create_view(&wgpu::TextureViewDescriptor::default());
         let white_samp = device.create_sampler(&wgpu::SamplerDescriptor::default());
-        let default_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("particles-white"),
-            layout: &tex_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&white_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&white_samp),
-                },
-            ],
-        });
+        // A billboard only ever reads the colour slot; the other four take the
+        // same white so the group matches the shared layout.
+        let w = (&white_view, &white_samp);
+        let default_bind =
+            crate::raster::make_surface_bind(device, &tex_layout, "particles-white", [w, w, w, w, w]);
 
         let quad_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("particles-quad"),

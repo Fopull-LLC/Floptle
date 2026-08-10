@@ -41,6 +41,9 @@ pub(crate) struct ImageCtx<'a> {
     pub(crate) st: &'a mut ImageEditState,
     pub(crate) project_root: &'a std::path::Path,
     pub(crate) cmd: &'a mut EditorCmd,
+    /// The PARKED documents' tab labels, in stash order — see
+    /// `Editor::image_stash`. The live one is `st`; it is not in here.
+    pub(crate) parked: &'a [String],
 }
 
 /// A first cell grid for a canvas that has just been declared a sheet: the
@@ -64,6 +67,7 @@ impl ImageCtx<'_> {
             self.st.palettes_loaded = true;
         }
         if self.st.doc.is_none() {
+            self.image_tab_strip(ui);
             self.image_welcome(ui);
             return;
         }
@@ -73,6 +77,7 @@ impl ImageCtx<'_> {
             let ctx = ui.ctx().clone();
             self.st.render_text(&ctx);
         }
+        self.image_tab_strip(ui);
         self.image_menu_bar(ui);
         self.image_tool_strip(ui);
         self.image_side_panel(ui);
@@ -105,6 +110,48 @@ impl ImageCtx<'_> {
         if !ui.ctx().input(|i| i.pointer.any_down()) {
             self.st.flush_edit();
         }
+    }
+
+    /// One chip per open document, active one first.
+    ///
+    /// This is the whole answer to "closing an image does not close it and I am
+    /// stuck editing that image": there is no longer one slot to be stuck in.
+    /// Opening another image parks this one, the ✖ closes exactly the document
+    /// it is on, and a document with no name yet is no longer a document you
+    /// cannot leave.
+    fn image_tab_strip(&mut self, ui: &mut egui::Ui) {
+        if self.parked.is_empty() && self.st.doc.is_none() {
+            return;
+        }
+        egui::Panel::top("image-tabs").show(ui, |ui| {
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if self.st.doc.is_some() {
+                        let label = self.st.tab_label();
+                        ui.scope(|ui| {
+                            ui.visuals_mut().widgets.inactive.weak_bg_fill =
+                                ui.visuals().selection.bg_fill;
+                            let _ = ui.button(RichText::new(&label).strong());
+                        });
+                        if ui.small_button("✖").on_hover_text("close this image").clicked() {
+                            self.cmd.image_close = true;
+                        }
+                        ui.separator();
+                    }
+                    for (i, label) in self.parked.iter().enumerate() {
+                        if ui.button(label).on_hover_text("switch to this image").clicked() {
+                            self.cmd.image_activate = Some(i);
+                        }
+                        if ui.small_button("✖").on_hover_text("close this image").clicked() {
+                            self.cmd.image_close_tab = Some(i);
+                        }
+                    }
+                    if ui.button("✚").on_hover_text("new image…").clicked() {
+                        self.st.new_form = Some(NewForm::default());
+                    }
+                });
+            });
+        });
     }
 
     /// The empty state: what this tab is and the two ways in.
@@ -336,6 +383,17 @@ impl ImageCtx<'_> {
         ui.menu_button("File", |ui| {
             if ui.button("✚ New image…").clicked() {
                 self.st.new_form = Some(NewForm::default());
+                ui.close();
+            }
+            if ui
+                .button("📋 New from clipboard")
+                .on_hover_text(
+                    "make a document out of whatever image is on the system clipboard — a \
+                     browser image, a screenshot — at its own size",
+                )
+                .clicked()
+            {
+                self.cmd.image_new_from_clipboard = true;
                 ui.close();
             }
             ui.separator();
@@ -2139,7 +2197,7 @@ mod tests {
         let mut cmd = EditorCmd::default();
         for _ in 0..2 {
             let _ = ctx.run_ui(crate::icons::test_input(), |ui| {
-                let mut cx = ImageCtx { st, project_root: std::path::Path::new("/tmp"), cmd: &mut cmd };
+                let mut cx = ImageCtx { st, project_root: std::path::Path::new("/tmp"), cmd: &mut cmd, parked: &[] };
                 cx.ui(ui);
             });
         }
@@ -2248,7 +2306,7 @@ mod tests {
         let mut cmd = EditorCmd::default();
         let input = egui::RawInput { events, ..crate::icons::test_input() };
         let _ = ctx.run_ui(input, |ui| {
-            let mut cx = ImageCtx { st, project_root: std::path::Path::new("/tmp"), cmd: &mut cmd };
+            let mut cx = ImageCtx { st, project_root: std::path::Path::new("/tmp"), cmd: &mut cmd, parked: &[] };
             cx.ui(ui);
         });
     }
@@ -2402,7 +2460,7 @@ mod tests {
         let mut cmd = EditorCmd::default();
         let ctx = crate::icons::test_context();
         let _ = ctx.run_ui(crate::icons::test_input(), |ui| {
-            let mut cx = ImageCtx { st: &mut st, project_root: std::path::Path::new("/tmp"), cmd: &mut cmd };
+            let mut cx = ImageCtx { st: &mut st, project_root: std::path::Path::new("/tmp"), cmd: &mut cmd, parked: &[] };
             cx.ui(ui);
         });
         assert!(st.save_name.is_some(), "the dialog stays up until it's answered");

@@ -421,8 +421,9 @@ impl ShaderGraphPreview {
             })
         };
         let layouts: Vec<wgpu::BindGroupLayout> = match compiled.stage {
-            // Sky previews through the Fragment tile path (see preview.rs).
-            Stage::Fragment | Stage::Sky | Stage::Ui => {
+            // Sky, Ui and Post previews all go through the Fragment tile path
+            // (see preview.rs — Post supplies its own synthetic frame).
+            Stage::Fragment | Stage::Sky | Stage::Ui | Stage::Post => {
                 let mut g2 = vec![ubo(0)];
                 for i in 0..compiled.textures.len() as u32 {
                     g2.push(texture(1 + 2 * i));
@@ -490,7 +491,7 @@ impl ShaderGraphPreview {
         }
         let mut binds = Vec::new();
         match compiled.stage {
-            Stage::Fragment | Stage::Sky | Stage::Ui => {
+            Stage::Fragment | Stage::Sky | Stage::Ui | Stage::Post => {
                 binds.push(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("pv-b0"),
                     layout: &pipeline.get_bind_group_layout(0),

@@ -392,3 +392,56 @@ pub(crate) fn unique_path(dir: &Path, stem: &str, ext: Option<&str>) -> PathBuf 
     }
     p
 }
+
+/// Turn what somebody typed into a filename stem.
+///
+/// Deliberately permissive about what it ACCEPTS and strict about what it
+/// writes: a person naming an effect types "muzzle flash", and refusing that
+/// with a validation error teaches them nothing except to type underscores.
+/// Spaces become camel humps (the engine's naming convention), and anything a
+/// filesystem or a project-relative asset key could not carry is dropped.
+///
+/// Never returns empty — a blank result would make `vfx/.vfx.ron`, a hidden
+/// file nobody would find again.
+pub(crate) fn sanitize_asset_name(input: &str) -> String {
+    let mut out = String::new();
+    let mut upper_next = false;
+    for c in input.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            if upper_next {
+                out.extend(c.to_uppercase());
+                upper_next = false;
+            } else {
+                out.push(c);
+            }
+        } else if c == '-' || c == '_' {
+            out.push(c);
+        } else {
+            // Any other run (spaces, punctuation, slashes — a slash especially,
+            // which would silently write into another folder) becomes a hump.
+            // Leading junk is simply dropped: `../secret` is `secret`, not
+            // `Secret`, because the leading dots are not a word boundary the
+            // person typed.
+            upper_next = !out.is_empty();
+        }
+    }
+    if out.is_empty() { "untitled".to_string() } else { out }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::sanitize_asset_name;
+
+    #[test]
+    fn a_typed_name_becomes_a_filename_without_refusing_anything() {
+        assert_eq!(sanitize_asset_name("muzzle flash"), "muzzleFlash");
+        assert_eq!(sanitize_asset_name("  Rain  "), "Rain");
+        assert_eq!(sanitize_asset_name("hit-spark_2"), "hit-spark_2");
+        // A slash must not survive: `vfx/../../etc` is a path, not a name.
+        assert_eq!(sanitize_asset_name("a/b"), "aB");
+        assert_eq!(sanitize_asset_name("../secret"), "secret");
+        // Never empty — `vfx/.vfx.ron` is a file you cannot find again.
+        assert_eq!(sanitize_asset_name("   "), "untitled");
+        assert_eq!(sanitize_asset_name("!!!"), "untitled");
+    }
+}

@@ -148,6 +148,12 @@ pooling, impossible/running shadows. Cost: one `bend` eval/step + worse early-ou
 
 ## 5. Tier 3 — Participating media (research)
 
+*The unsigned half of this shipped in v0.46.0 — see
+[`./volumetrics.md`](./volumetrics.md). Single-scattering fog that takes the
+scene's light, marched per pixel, with the sun's occlusion evaluated inside the
+media so a shadow crossing the air becomes a beam. What is described below is
+what is still research: the **signed** coefficients.*
+
 Accumulate radiance along the march instead of only at the hit:
 
 ```

@@ -43,7 +43,7 @@ pub(crate) enum Tool {
     /// Vertex paint brush (LMB-drag paints per-vertex color onto a mesh).
     Paint,
     /// Map-building sub-object editor: select/drag vertices, edges, faces of a
-    /// `Matter::MapMesh` node, extrude, assign per-face materials (▦ Map tab).
+    /// `Matter::MapMesh` node, extrude, assign per-face materials (▦ Model tab).
     MapEdit,
     /// Tile painting: the ◫ Tiles tab's brush, in the Scene view. Which tool the
     /// pointer actually holds (brush, rectangle, bucket, …) is the Tiles tab's

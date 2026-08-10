@@ -53,7 +53,7 @@ impl EditorTab {
             EditorTab::Hierarchy => "Hierarchy",
             EditorTab::Inspector => "Inspector",
             EditorTab::Terrain => "Δ Terrain",
-            EditorTab::Map => "▦ Map",
+            EditorTab::Map => "▦ Model",
             EditorTab::Tiles => "◫ Tiles",
             EditorTab::Assets => "Assets",
             EditorTab::Console => "Console",
@@ -266,7 +266,7 @@ pub(crate) fn focus_ui_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     }
 }
 
-/// Focus the ▦ Map dock tab — re-adding it if the user closed it. Used when the
+/// Focus the ▦ Model dock tab — re-adding it if the user closed it. Used when the
 /// Map tool is selected, so the shape/op controls are never a tab-hunt away.
 pub(crate) fn focus_map_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     if let Some(path) = dock.find_tab(&EditorTab::Map) {

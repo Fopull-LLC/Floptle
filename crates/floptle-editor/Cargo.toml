@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 floptle-core = { path = "../floptle-core" }
+floptle-gi = { path = "../floptle-gi" }
 floptle-render = { path = "../floptle-render" }
 floptle-scene = { path = "../floptle-scene" }
 floptle-dist = { path = "../floptle-dist" }
@@ -42,6 +43,12 @@ egui = { workspace = true }
 egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
 egui_dock = { workspace = true }
+# The OS clipboard's IMAGE side. egui-winit already pulls this in for text, but
+# only exposes the text half — pasting a screenshot or a browser image into the
+# 🖼 tab needs `get_image`/`set_image`, so the editor names it directly. Same
+# version and the same feature set egui-winit asks for, so it is one build of
+# one crate either way.
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 ron = { workspace = true }
 serde = { workspace = true }
 floptle-net = { path = "../floptle-net" }

@@ -16,7 +16,7 @@ each group, and meant to be searched.
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 24
 - [node — transform & body fields](#node--transform--body-fields) — 36
-- [node — methods & handles](#node--methods--handles) — 21
+- [node — methods & handles](#node--methods--handles) — 23
 - [vectors, directions & easing](#vectors-directions--easing) — 47
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
@@ -39,7 +39,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
-- [components — getcomponent](#components--getcomponent) — 66
+- [components — getcomponent](#components--getcomponent) — 82
 - [animation — node:animator](#animation--nodeanimator) — 16
 - [particles — effects from script](#particles--effects-from-script) — 10
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 27
@@ -427,6 +427,10 @@ node:setLighting2D{mode="2d", layers={"Terrain","Characters"}, blocks="on", inne
 
 node:setMaterial{color={r,g,b}, emissive={r,g,b}, emissiveStrength=…, unlit=true, texture="…", alpha=…, …} — set (creating if absent) the node's Material. texture also takes a live render target: "rt:<name>".
 
+Surface maps: normalMap / roughnessMap / metallicMap / occlusionMap (paths, "" clears) with normalStrength / roughness / metallic / occlusionStrength. shading="physical" switches from the hand-set Blinn-Phong highlight to metal-rough; roughness and metallic only mean anything there, while a normal or occlusion map works under either.
+
+Retro artefacts: jitter (screen-grid vertex snapping, 0 = off), affineUv, vertexLit, ditherAlpha.
+
 ```lua
 -- setup-time; use setShaderParam for per-frame values
 node:setMaterial{ unlit = true, emissive = {1, 0.45, 0.15}, emissiveStrength = 2.5 }
@@ -434,19 +438,40 @@ node:setMaterial{ unlit = true, emissive = {1, 0.45, 0.15}, emissiveStrength = 2
 
 ### `node:setPointLight`
 
-node:setPointLight{color={1,0.8,0.5}, intensity=2, range=8} — make this node a POINT LIGHT, or retune one. Every field is optional and keeps what the node had. Sixteen lights reach the shader at once; past that the ones contributing most at the camera win, and a light at intensity=0 gives its slot back — which is how you pool them. perf.counts().lights and .lightsDropped say where you stand.
+node:setPointLight{color={1,0.8,0.5}, intensity=2, range=8} — make this node a light, or retune one. Every field is optional and keeps what the node had, INCLUDING its emitter shape — retuning a window’s colour never turns it back into a bare point. The shape itself is set through node:getcomponent("PointLight").shape. Sixteen lights reach the shader at once; past that the ones contributing most at the camera win, and a light at intensity=0 gives its slot back — which is how you pool them. perf.counts().lights and .lightsDropped say where you stand.
 
 ### `node:setPrimitive`
 
 node:setPrimitive("Sphere" [, {r,g,b}]) — make the node a primitive (Cube/Sphere/Capsule/Plane).
 
+### `node:setScreenShader`
+
+node:setScreenShader("inkOutline", false) — switch one of the Post Processing node's screen shaders on or off. The name is the file without its extension, the one the Inspector lists. The pass and its knobs stay in the scene, so this is a switch and not a deletion: turn the outline on for a boss fight and off again after. Pass "" for every pass on the node.
+
+```lua
+-- switch one of the scene's screen shaders on or off (it keeps its knobs)
+local post = find("Post Processing")
+post:setScreenShader("inkOutline", bossFight)
+post:setShaderParam("inkOutline.thickness", 1 + rage * 2)
+```
+
 ### `node:setShaderParam`
 
-node:setShaderParam("glow", 2.5) / node:setShaderParam("nose", x, y, z) — drive a .flsl uniform on this node every tick (a GPU uniform write, never a recompile). Targets the node's Material shader, or its UI element's `stage ui` shader (the navball pattern: a script feeds an instrument's uniforms each tick). Unset lanes are 0.
+node:setShaderParam("glow", 2.5) / node:setShaderParam("nose", x, y, z) — drive a .flsl uniform on this node every tick (a GPU uniform write, never a recompile). Targets the node's Material shader, its UI element's `stage ui` shader (the navball pattern: a script feeds an instrument's uniforms each tick), the Skybox's sky shader, or — on the Post Processing node — its SCREEN shaders: name one with `"inkOutline.thickness"`, or leave the prefix off to set that knob on every pass. Unset lanes are 0.
 
 ```lua
 -- a live uniform write: safe every tick, never recompiles
 node:setShaderParam("cell", math.floor(time * 8) % 16)
+```
+
+### `node:setShaderTexture`
+
+node:setShaderTexture(slot, ref) — point one of this node's .flsl shader TEXTURE SLOTS somewhere else, at runtime. `slot` is the name the shader declares (`texture ramp` -> "ramp"); `ref` is a project-relative image path, an `rt:<name>` render target (what another camera sees, live), or "" to clear it. A shader may declare up to 8 slots, so a material can mix a base, a mask, a ramp and a screen — and a script can swap any of them per frame.
+
+```lua
+-- swap a shader's texture slot at runtime (a path, or a live render target)
+node:setShaderTexture("decal", damaged and "textures/scorch.png" or "")
+node:setShaderTexture("screen", "rt:securityCam")
 ```
 
 ### `node:setSorting`
@@ -2244,7 +2269,7 @@ Vertical field of view, radians.
 
 ### `env.ambient2d`
 
-find("Lighting"):getcomponent("Light") — the scene's Lighting node, read and written like any other component. THIS IS WHERE A 2D SCENE'S BRIGHTNESS LIVES: ambient2dR/G/B is the 2D base light, the whole light a flat scene has before a single 2D light is placed, so turning it down is how you get a dark room for a torch to carve a circle out of — and reading it back first is how you put it where it was. Also colorR/G/B + intensity + directionX/Y/Z (a day cycle), ambientR/G/B (the 3D fill, deliberately a different value), shadows/shadowSoftness/shadowStrength/shadowTintR/G/B/shadowQuantize/shadowDither/shadowDistance, and the whole fog set: fog, fogColorR/G/B, fogStart, fogEnd, fogDensity, fogHeight, fogFalloff, fogNoise, fogNoiseScale, fogVolumetric, fogDither, fogDitherStrength. Every scene has exactly one Lighting node and the loader makes it, so find("Lighting") always finds it. Writes land the same frame.
+find("Lighting"):getcomponent("Light") — the scene's Lighting node, read and written like any other component. THIS IS WHERE A 2D SCENE'S BRIGHTNESS LIVES: ambient2dR/G/B is the 2D base light, the whole light a flat scene has before a single 2D light is placed, so turning it down is how you get a dark room for a torch to carve a circle out of — and reading it back first is how you put it where it was. Also colorR/G/B + intensity + directionX/Y/Z (a day cycle), ambientR/G/B (the 3D fill, deliberately a different value), shadows/shadowSoftness/shadowStrength/shadowTintR/G/B/shadowQuantize/shadowDither/shadowDistance/contactShadows/contactLength/contactSteps/contactStrength, and the whole fog set: fog, fogColorR/G/B, fogStart, fogEnd, fogDensity, fogHeight, fogFalloff, fogNoise, fogNoiseScale, fogVolumetric, fogDither, fogDitherStrength, and the volumetric light injection (fogLight, fogAnisotropy, fogSteps, fogShafts). Every scene has exactly one Lighting node and the loader makes it, so find("Lighting") always finds it. Writes land the same frame.
 
 ### `env.ambient2dB`
 
@@ -2282,6 +2307,22 @@ Key light colour green.
 
 Key light colour red.
 
+### `env.contactLength`
+
+How far a contact shadow traces, in world units. Short is the point — the shadow under a foot, in a seam, behind a bolt.
+
+### `env.contactShadows`
+
+The small dark line where things touch (1/0). A moving mesh casts through its COLLIDER, so a character's shadow is a capsule's — this shadows from the real silhouette of whatever is on screen. Only what is ON SCREEN casts one.
+
+### `env.contactSteps`
+
+Samples along the contact trace (2..32). Raise it if the shadow looks striped.
+
+### `env.contactStrength`
+
+How dark a contact shadow gets, 0..1, before the shared shadow tint and strength.
+
 ### `env.directionX`
 
 Key light direction X — lerp the three for a day cycle.
@@ -2297,6 +2338,10 @@ Key light direction Z.
 ### `env.fog`
 
 Depth fog on (1/0; assign true/false).
+
+### `env.fogAnisotropy`
+
+Volumetric: which way the media throws light (-0.9..0.9). Positive blooms toward the sun, 0 is an even haze. Fog has no normal — this is what does that job.
 
 ### `env.fogColorB`
 
@@ -2334,6 +2379,10 @@ Volumetric: softness of the layer's top edge, world units.
 
 Volumetric: world height (y) of the fog layer's top.
 
+### `env.fogLight`
+
+Volumetric: how much of the scene's light scatters IN the fog. 0 = a flat colour; 1 = lit by the sun, the point lights and the baked bounce; past 1 exaggerates. Ramp it up as a storm rolls in and the air itself starts carrying the light.
+
 ### `env.fogNoise`
 
 Volumetric: how much drifting noise breaks up the media, 0..1.
@@ -2342,9 +2391,17 @@ Volumetric: how much drifting noise breaks up the media, 0..1.
 
 Volumetric: noise feature size, world units per repeat.
 
+### `env.fogShafts`
+
+Volumetric (1/0): march the sun shadow at every fog step, so beams appear through windows and branches. The entire cost of lit fog lives here.
+
 ### `env.fogStart`
 
 World distance where fog begins (fully clear nearer than this).
+
+### `env.fogSteps`
+
+Volumetric: samples along each pixel's fog ray (2..64). The quality/cost dial — drop it on a weak machine.
 
 ### `env.fogVolumetric`
 
@@ -2402,17 +2459,45 @@ Color blue 0..1.
 
 Color green 0..1.
 
+### `light.height`
+
+Rect only: its height in world units.
+
 ### `light.intensity`
 
 Brightness multiplier.
+
+### `light.length`
+
+Tube only: how long the bar is — a long one streaks its highlight along itself.
 
 ### `light.r`
 
 Color red 0..1.
 
+### `light.radius`
+
+Sphere / disk only: its radius in world units.
+
 ### `light.range`
 
 Reach in world units.
+
+### `light.shape`
+
+The surface it emits from: 0 point, 1 sphere, 2 rect, 3 disk, 4 tube. A rect and a disk face the node's FORWARD and a tube lies along its local X, so a light with a shape is aimed by rotating the node. Assigning keeps the size it had, so cross-fading a window into a bulb does not flash.
+
+### `light.thickness`
+
+Tube only: how thick the bar is.
+
+### `light.twoSided`
+
+Rect / disk only (1/0): lights out of the back as well as the front. Off is a window; on is a floating panel.
+
+### `light.width`
+
+Rect only: its width in world units. Reads 0 on a shape that has no width.
 
 ### `mat.cell`
 
@@ -2428,7 +2513,7 @@ Sheet rows.
 
 ### `node:getcomponent`
 
-node:getcomponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z, two_d — 2D mode), PointLight (intensity, range, r/g/b), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace), PostProcess (enabled, bloom, bloomThreshold, bloomIntensity, vignette, vignetteStrength, vignetteRadius, aoStrength, aoRadius, posterizeBands, posterizeDither — a cutscene pushing a vignette). e.g. node:getcomponent("RigidBody").friction = 0.02 for ice.
+node:getcomponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z, two_d — 2D mode), PointLight (intensity, range, r/g/b, and the EMITTER: shape 0 point / 1 sphere / 2 rect / 3 disk / 4 tube, plus width, height, radius, length, thickness, twoSided — a rect light IS a window, so growing one softens the highlight it leaves on everything), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace), PostProcess (enabled, bloom, bloomThreshold, bloomIntensity, vignette, vignetteStrength, vignetteRadius, aoStrength, aoRadius, posterizeBands, posterizeDither, tonemap, and the lens: dofFocus, dofRange, dofNearRange, dofBlur, dofBlades, dofBladeAngle, dofHighlight, dofSamples, plus the shutter: motionBlur, motionSamples — a cutscene pushing a vignette, pulling a rack focus, or opening the shutter for a slow-motion beat), LightProbes (enabled, intensity, leak, normalBias — the baked bounce's live knobs; the bake-time ones are not here because a script cannot bake). e.g. node:getcomponent("RigidBody").friction = 0.02 for ice.
 
 ```lua
 local rb = node:getcomponent("RigidBody")
@@ -2437,7 +2522,7 @@ if rb then rb.friction = on_ice and 0.02 or 0.6 end
 
 ### `rb.friction`
 
-Surface friction 0..1 (0 = frictionless).
+Grip, as a coefficient: a ramp holds while tan(its angle) <= friction. 0 is ice, 1 holds exactly 45 degrees, above 1 is grippier still.
 
 ### `rb.gravity`
 
@@ -2498,6 +2583,10 @@ Bounciness 0..1 (0 = no bounce).
 ### `rb.shape`
 
 Body shape: 0 = sphere, 1 = capsule, 2 = box.
+
+### `rb.slopeLimit`
+
+Steepest standable surface, in degrees (default 60). Past it nothing grounds the body and no grip holds it.
 
 ### `rb.two_d`
 

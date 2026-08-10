@@ -274,6 +274,10 @@ impl Editor {
         self.ui_flsl_cache.clear();
         self.ui_flsl_binds.clear();
         self.ui_flsl_free.clear();
+        self.post_flsl_cache.clear();
+        if let Some(reg) = self.post_shaders.as_mut() {
+            reg.clear();
+        }
         self.sdf_cache.clear();
         self.flsl_field_key.clear();
         // The passes persist across projects — un-splice any Field Shape code.
@@ -799,3 +803,173 @@ impl Editor {
     }
 }
 pub(crate) type SdfCache = HashMap<String, SdfEntry>;
+
+/// One `stage post` `.flsl` file's compile state, keyed by its path on the
+/// PostProcess node.
+pub(crate) struct PostFlslEntry {
+    mtime: Option<SystemTime>,
+    /// The last GOOD compile — kept while `error` reports a newer failure, so a
+    /// broken save leaves the effect running instead of dropping the frame back
+    /// to un-processed mid-edit.
+    pub(crate) compiled: Option<(floptle_shader::CompiledPost, floptle_render::PostShaderId)>,
+    pub(crate) error: Option<String>,
+}
+
+pub(crate) type PostFlslCache = HashMap<String, PostFlslEntry>;
+
+impl Editor {
+    /// Per-frame driver for the scene's **screen shaders**: hot-reload every
+    /// `stage post` `.flsl` the PostProcess node lists, then hand the renderer
+    /// this frame's ordered pass list with each pass's knob values.
+    ///
+    /// Every listed shader is compiled, including the switched-off ones. A
+    /// pipeline build is expensive enough to see, and a checkbox that stalls for
+    /// a frame the first time you tick it reads as the effect being slow rather
+    /// than as it being compiled.
+    pub(crate) fn ensure_post_shaders(&mut self) {
+        let Some(gpu) = self.gpu.as_ref() else { return };
+        if self.post_shaders.is_none() {
+            self.post_shaders = Some(floptle_render::PostShaders::new(gpu));
+        }
+
+        // The same two rules `post_process_uniforms` follows, and they have to
+        // be the same two: a switched-off node runs NO chain, screen shaders
+        // included, and a node on a disabled layer is not the scene's node at
+        // all (so it is skipped rather than vetoing the layer that replaced it).
+        let listed: Vec<floptle_core::ScreenShader> = self
+            .world
+            .query::<floptle_core::Matter>()
+            .filter(|(e, _)| self.world.get::<floptle_core::Disabled>(*e).is_none())
+            .find_map(|(_, m)| match m {
+                floptle_core::Matter::PostProcess { screen_shaders, enabled, .. } => {
+                    Some(if *enabled { screen_shaders.clone() } else { Vec::new() })
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        // Nothing listed and nothing left over: don't even touch the registry.
+        if listed.is_empty() {
+            if self.post_shaders.as_ref().is_some_and(|s| s.has_passes())
+                && let (Some(gpu), Some(reg)) = (self.gpu.as_ref(), self.post_shaders.as_mut())
+            {
+                reg.set_passes(gpu, &[]);
+            }
+            return;
+        }
+
+        let mut paths: Vec<String> = listed.iter().map(|s| s.shader.clone()).collect();
+        paths.sort();
+        paths.dedup();
+        for p in &paths {
+            self.ensure_post_shader(p);
+        }
+
+        let passes: Vec<(floptle_render::PostShaderId, Vec<u8>)> = listed
+            .iter()
+            .filter(|s| s.enabled)
+            .filter_map(|s| {
+                let (compiled, id) =
+                    self.post_flsl_cache.get(&s.shader).and_then(|e| e.compiled.as_ref())?;
+                Some((*id, compiled.pack_params(&|name| s.params.get(name).copied())))
+            })
+            .collect();
+        let (Some(gpu), Some(reg)) = (self.gpu.as_ref(), self.post_shaders.as_mut()) else {
+            return;
+        };
+        reg.set_passes(gpu, &passes);
+    }
+
+    /// Compile (or hot-reload) one `stage post` `.flsl`. Keeps the last good
+    /// pipeline on failure; Console-reports each new error once.
+    fn ensure_post_shader(&mut self, rel: &str) {
+        let full = self.resolve_asset_path(rel);
+        let mtime = std::fs::metadata(&full).and_then(|m| m.modified()).ok();
+        if let Some(entry) = self.post_flsl_cache.get(rel)
+            && entry.mtime == mtime
+        {
+            return;
+        }
+        let report = |editor: &mut Editor, msg: String| {
+            let changed =
+                editor.post_flsl_cache.get(rel).is_none_or(|e| e.error.as_deref() != Some(&msg));
+            if changed {
+                editor.console.push(floptle_script::LogLevel::Error, format!("◈ {rel}: {msg}"), None);
+            }
+            msg
+        };
+        let keep = |editor: &mut Editor, mtime, msg: String| {
+            let old = editor.post_flsl_cache.remove(rel);
+            editor.post_flsl_cache.insert(
+                rel.to_string(),
+                PostFlslEntry { mtime, compiled: old.and_then(|o| o.compiled), error: Some(msg) },
+            );
+        };
+
+        let src = match std::fs::read_to_string(&full) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = report(self, format!("can't read shader ({e})"));
+                keep(self, mtime, msg);
+                return;
+            }
+        };
+        let outcome = floptle_shader::compile_post(&src).and_then(|compiled| {
+            // naga against the real module, assembled exactly as the pipeline
+            // will be — passing here means the pipeline build can't fail.
+            floptle_shader::validate(&post_prelude(), &compiled.chunk).map_err(|d| {
+                match d.chunk_line.and_then(|l| compiled.flsl_span_of_chunk_line(l)) {
+                    Some(span) => {
+                        let (l, c) = floptle_shader::text::line_col(&src, span.start);
+                        format!("{l}:{c}: {}", d.message)
+                    }
+                    None => d.message,
+                }
+            })?;
+            Ok(compiled)
+        });
+        match outcome {
+            Ok(compiled) => {
+                let replace = self
+                    .post_flsl_cache
+                    .get(rel)
+                    .and_then(|e| e.compiled.as_ref())
+                    .map(|(_, id)| *id);
+                let module_src = post_module_source(&compiled.chunk);
+                let (Some(gpu), Some(reg)) = (self.gpu.as_ref(), self.post_shaders.as_mut()) else {
+                    return;
+                };
+                let id = reg.register(gpu, &module_src, replace);
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!("◈ compiled {rel} (screen)"),
+                    None,
+                );
+                self.post_flsl_cache
+                    .insert(rel.to_string(), PostFlslEntry { mtime, compiled: Some((compiled, id)), error: None });
+            }
+            Err(msg) => {
+                let msg = report(self, msg);
+                keep(self, mtime, msg);
+            }
+        }
+    }
+}
+
+/// What a post chunk is validated against: the language's own prelude plus the
+/// field stand-ins the shared stdlib support needs (a full-screen pass has no
+/// field bound).
+fn post_prelude() -> String {
+    format!(
+        "{}\n{}",
+        floptle_shader::transpile::POST_PRELUDE,
+        floptle_shader::transpile::POST_FIELD_SHIM
+    )
+}
+
+/// The complete WGSL module for one screen shader — the same text `validate`
+/// saw, in the same order, which is the point: the thing that was checked is the
+/// thing that gets built.
+fn post_module_source(chunk: &str) -> String {
+    format!("{}\n{}\n{}", post_prelude(), floptle_shader::stdlib::SUPPORT_WGSL, chunk)
+}

@@ -63,6 +63,7 @@ fn main() {
         color_filter: 0,
         color_filter_strength: 1.0,
         simulate_deficiency: false,
+        ..Default::default()
     };
 
     // Paint the chart into the post input, once — every filter reads the same

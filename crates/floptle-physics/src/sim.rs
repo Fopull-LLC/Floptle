@@ -450,6 +450,7 @@ impl Sim {
         };
         b.restitution = rb.restitution;
         b.friction = rb.friction;
+        b.slope_limit = rb.slope_limit.clamp(0.0, 90.0).to_radians();
         b.use_gravity = rb.gravity;
         b.mass = rb.mass.max(1e-4);
         b.lock_pos = rb.locks_pos();
@@ -1723,6 +1724,7 @@ impl Sim {
                 }
                 b.restitution = rb.restitution;
                 b.friction = rb.friction;
+                b.slope_limit = rb.slope_limit.clamp(0.0, 90.0).to_radians();
                 b.use_gravity = rb.gravity;
                 b.lock_pos = rb.locks_pos();
                 b.radius = rb.radius.max(0.01);
@@ -1937,7 +1939,11 @@ mod runtime_body_tests {
         let mut ecs = World::default();
         let e = ecs.spawn();
         ecs.insert(e, Transform::from_translation(DVec3::new(0.0, 30.0, 4.0)));
-        ecs.insert(e, RigidBody { gravity: true, ..Default::default() });
+        // Enough grip to stand on a 30° pitch: friction is Coulomb, so a ramp
+        // holds while `tan(angle) ≤ friction` and tan(30°) ≈ 0.58. The default
+        // 0.3 slides off it, correctly — and this test is about where the
+        // surface IS, not about whether the body stays on it.
+        ecs.insert(e, RigidBody { gravity: true, friction: 0.8, ..Default::default() });
         let mut sim = Sim::build_layered(
             &ecs,
             &[TerrainVolume { rot, scale, ..TerrainVolume::new(DVec3::ZERO, &field) }],

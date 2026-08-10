@@ -14,6 +14,7 @@ use crate::assets::{
     is_script, is_texture, script_name_of, AssetPayload,
 };
 use crate::matter_catalog::{matter_icon, matter_kind_label, type_catalog};
+use crate::multi_edit;
 use crate::{anim_ui, EditorTabViewer};
 
 /// A copied component's values, held on the editor clipboard so they can be pasted
@@ -620,6 +621,10 @@ pub(crate) struct MatEditResult {
     pub(crate) changed: bool,
     pub(crate) remove: bool,
     pub(crate) save_as: Option<String>,
+    /// The ◈ button was pressed: open this `.flsl` in the Shaders graph. An
+    /// intent rather than a direct call for the same reason the others are —
+    /// this runs with the material borrowed.
+    pub(crate) open_shader: Option<String>,
 }
 /// In-depth material property editors — shared by the Inspector's Material section
 /// and the floating Material Editor window. Edits `m` in place (so undo coalesces
@@ -780,6 +785,17 @@ pub(crate) fn material_props_ui(
             m.shader_textures.clear();
             r.changed = true;
         }
+        // Straight to the graph. Everywhere a shader can be PICKED it can now be
+        // OPENED, because the alternative is finding it again in the Assets
+        // panel every time you want to change a line of it.
+        if let Some(path) = m.shader.clone()
+            && ui
+                .button("◈")
+                .on_hover_text("edit this shader in the ◈ Shaders graph")
+                .clicked()
+        {
+            r.open_shader = Some(path);
+        }
         ui.end_row();
     });
     if let Some(shader_path) = m.shader.clone() {
@@ -870,8 +886,246 @@ pub(crate) fn material_props_ui(
         }
     }
 
-    // These only affect the lit path, so grey them out when unlit.
+    // One surface-map slot: a texture picker over an `Option<String>`, showing
+    // the file name and offering "none". Returns whether it changed.
+    fn map_slot_picker(
+        ui: &mut egui::Ui,
+        salt: egui::Id,
+        project_root: &Path,
+        asset_tree: &[crate::assets::AssetEntry],
+        slot: &mut Option<String>,
+    ) -> bool {
+        let cur = slot
+            .as_deref()
+            .map(|p| Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())
+            .unwrap_or_else(|| "none".into());
+        let picked = crate::ui_widgets::asset_picker(
+            ui,
+            salt,
+            project_root,
+            if cur.is_empty() { "none" } else { &cur },
+            Some("none"),
+            asset_tree,
+            crate::assets::is_texture,
+            160.0,
+        );
+        match picked {
+            Some(p) => {
+                *slot = p;
+                true
+            }
+            None => false,
+        }
+    }
+
+    // ---- the SURFACE MAPS. The answer to "where do I put a normal map".
+    //
+    // Above the lighting model on purpose: a normal map and an occlusion map
+    // describe the surface itself and apply under either model, so they must not
+    // read as belonging to one of them.
     ui.add_enabled_ui(!m.unlit, |ui| {
+        egui::CollapsingHeader::new("Surface maps")
+            .id_salt(salt.with("mat_maps"))
+            .default_open(m.has_maps())
+            .show(ui, |ui| {
+                egui::Grid::new("mat_maps_rows").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
+                    let map_row =
+                        |ui: &mut egui::Ui, id: &str, label: &str, help: &str, slot: &mut Option<String>| {
+                            ui.label(label).on_hover_text(help);
+                            let cur = slot
+                                .as_deref()
+                                .map(|p| {
+                                    Path::new(p)
+                                        .file_name()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                        .unwrap_or_default()
+                                })
+                                .unwrap_or_else(|| "none".into());
+                            if let Some(pick) = crate::ui_widgets::asset_picker(
+                                ui,
+                                salt.with(id),
+                                project_root,
+                                if cur.is_empty() { "none" } else { &cur },
+                                Some("none"),
+                                asset_tree,
+                                crate::assets::is_texture,
+                                160.0,
+                            ) {
+                                *slot = pick;
+                                return true;
+                            }
+                            false
+                        };
+                    r.changed |= map_row(
+                        ui,
+                        "mat_normal",
+                        "normal",
+                        "A tangent-space normal map. Fakes bumps, bricks, panel lines and \
+                         stitching without geometry.\n\nNo tangent attribute needed — the \
+                         frame is derived per pixel, so this works on terrain, primitives, \
+                         Model-tool meshes and skinned characters alike.",
+                        &mut m.normal_map,
+                    );
+                    ui.end_row();
+                    if m.normal_map.is_some() {
+                        ui.label("  strength");
+                        r.changed |= ui
+                            .add(egui::Slider::new(&mut m.normal_strength, -2.0..=2.0))
+                            .on_hover_text(
+                                "1 = as authored, 0 = flat. NEGATIVE flips the green channel — \
+                                 the one-click fix when every bump reads as a dent (a map \
+                                 authored in the other handedness).",
+                            )
+                            .changed();
+                        ui.end_row();
+                    }
+                    r.changed |= map_row(
+                        ui,
+                        "mat_ao",
+                        "occlusion",
+                        "Baked ambient occlusion, read from the RED channel. Darkens ambient \
+                         and indirect light only — never the key light — so it deepens \
+                         crevices instead of greying the whole surface.",
+                        &mut m.ao_map,
+                    );
+                    ui.end_row();
+                    if m.ao_map.is_some() {
+                        ui.label("  strength");
+                        r.changed |= ui
+                            .add(egui::Slider::new(&mut m.occlusion_strength, 0.0..=1.0))
+                            .changed();
+                        ui.end_row();
+                    }
+                });
+            });
+    });
+
+    // ---- the lighting model, and the knobs that belong to whichever one is on.
+    ui.add_enabled_ui(!m.unlit, |ui| {
+        egui::Grid::new("mat_model").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
+            ui.label("lighting").on_hover_text(
+                "Classic — a highlight you set by hand (colour, exponent, strength).\n\
+                 Physical — a highlight that falls out of roughness and metallic.\n\n\
+                 Neither is better. Classic suits a stylised look, Physical suits a \
+                 realistic one, and both take the same surface maps.",
+            );
+            let mut phys = matches!(m.shading, floptle_core::Shading::Physical);
+            egui::ComboBox::from_id_salt(salt.with("mat_shading"))
+                .selected_text(if phys { "Physical (metal-rough)" } else { "Classic (Blinn-Phong)" })
+                .show_ui(ui, |ui| {
+                    r.changed |= ui.selectable_value(&mut phys, false, "Classic (Blinn-Phong)").changed();
+                    r.changed |= ui.selectable_value(&mut phys, true, "Physical (metal-rough)").changed();
+                });
+            m.shading =
+                if phys { floptle_core::Shading::Physical } else { floptle_core::Shading::Classic };
+            ui.end_row();
+        });
+    });
+
+    if matches!(m.shading, floptle_core::Shading::Physical) {
+        ui.add_enabled_ui(!m.unlit, |ui| {
+            egui::Grid::new("mat_pbr").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
+                ui.label("roughness");
+                r.changed |= ui
+                    .add(egui::Slider::new(&mut m.roughness, 0.0..=1.0))
+                    .on_hover_text("0 = mirror, 1 = chalk. Multiplied by the roughness map.")
+                    .changed();
+                ui.end_row();
+                ui.label("  map").on_hover_text(
+                    "Roughness from the GREEN channel — so a glTF-style packed \
+                     occlusion/roughness/metallic image drops straight in (and the \
+                     occlusion slot above reads RED from the same file).",
+                );
+                r.changed |= map_slot_picker(
+                    ui,
+                    salt.with("mat_rough"),
+                    project_root,
+                    asset_tree,
+                    &mut m.roughness_map,
+                );
+                ui.end_row();
+                ui.label("metallic");
+                r.changed |= ui
+                    .add(egui::Slider::new(&mut m.metallic, 0.0..=1.0))
+                    .on_hover_text(
+                        "0 = dielectric (plastic, wood, stone: a white highlight over a \
+                         coloured surface). 1 = metal (no diffuse at all; the highlight \
+                         takes the base colour).\n\nValues in between are a transition, \
+                         not a material — real surfaces sit at one end or the other.",
+                    )
+                    .changed();
+                ui.end_row();
+                ui.label("  map").on_hover_text(
+                    "Metallic from the BLUE channel — the third channel of the same \
+                     packed image roughness and occlusion read.",
+                );
+                r.changed |= map_slot_picker(
+                    ui,
+                    salt.with("mat_metal"),
+                    project_root,
+                    asset_tree,
+                    &mut m.metallic_map,
+                );
+                ui.end_row();
+            });
+        });
+    }
+
+    // ---- the deliberate PS1/N64 artefacts. Its own section, collapsed unless
+    // something is on, because these are a look you opt into — not a quality
+    // setting anyone should stumble across while tuning a material.
+    ui.add_enabled_ui(true, |ui| {
+        egui::CollapsingHeader::new("Retro artefacts")
+            .id_salt(salt.with("mat_retro"))
+            .default_open(m.retro.any())
+            .show(ui, |ui| {
+                egui::Grid::new("mat_retro_rows").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
+                    ui.label("vertex jitter").on_hover_text(
+                        "Snap vertices to a screen grid, the way hardware with no \
+                         fractional vertex coordinates did. Geometry near the camera \
+                         wobbles between cells as it moves.\n\n0 = off. Lower = coarser \
+                         (80 is very chunky, 320 is a hint).",
+                    );
+                    r.changed |= ui
+                        .add(egui::Slider::new(&mut m.retro.jitter, 0.0..=512.0).step_by(1.0))
+                        .changed();
+                    ui.end_row();
+                    ui.label("affine UVs");
+                    r.changed |= ui
+                        .checkbox(&mut m.retro.affine_uv, "skip perspective correction")
+                        .on_hover_text(
+                            "The era's warping, swimming textures on large near-camera \
+                             polygons. Most visible on floors and long walls.",
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("vertex lighting");
+                    r.changed |= ui
+                        .checkbox(&mut m.retro.vertex_lit, "light per vertex (Gouraud)")
+                        .on_hover_text(
+                            "Faceted highlights that slide across a face as it turns.\n\n\
+                             A vertex-lit surface receives no shadows, no SDF occlusion \
+                             and no normal map — hardware that shaded per vertex had none \
+                             of those.",
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("dither alpha");
+                    r.changed |= ui
+                        .checkbox(&mut m.retro.dither_alpha, "screen-door transparency")
+                        .on_hover_text(
+                            "Draw partial opacity as a 4×4 dither of solid pixels instead \
+                             of blending. Stays in the opaque pass, so it never needs \
+                             sorting and never shows the sky through the wall behind it.",
+                        )
+                        .changed();
+                    ui.end_row();
+                });
+            });
+    });
+
+    // These only affect the lit path, so grey them out when unlit.
+    ui.add_enabled_ui(!m.unlit && matches!(m.shading, floptle_core::Shading::Classic), |ui| {
         egui::Grid::new("mat_lit").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
             ui.label("specular");
             ui.horizontal(|ui| {
@@ -885,6 +1139,14 @@ pub(crate) fn material_props_ui(
             ui.label("shininess");
             r.changed |= ui.add(egui::Slider::new(&mut m.shininess, 1.0..=256.0).logarithmic(true)).changed();
             ui.end_row();
+        });
+    });
+
+    // Rim, ambient and opacity are NOT part of either lighting model — a rim
+    // glow is art direction and opacity is opacity — so they stay live whichever
+    // model is selected.
+    ui.add_enabled_ui(!m.unlit, |ui| {
+        egui::Grid::new("mat_common").num_columns(2).spacing([8.0, 5.0]).show(ui, |ui| {
             ui.label("rim");
             ui.horizontal(|ui| {
                 r.changed |= ui.color_edit_button_rgb(&mut m.rim).changed();
@@ -1063,6 +1325,7 @@ impl EditorTabViewer<'_> {
                 {
                     let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
                     self.cmd.inspector_changed |= res.changed;
+                    self.cmd.open_shader_graph = res.open_shader.or(self.cmd.open_shader_graph.take());
                     clear |= res.remove;
                     if let Some(name) = res.save_as {
                         save_as =
@@ -1170,8 +1433,9 @@ impl EditorTabViewer<'_> {
             }
         }
         ui.small(
-            "to change ONE object's look: expand the model in the Hierarchy, select \
-             the object, then \"◑ Override material\" in its inspector",
+            "to change one of these: place the model, select the node, and use \
+             \"◑ Model materials\" in its inspector — or expand the model in the \
+             Hierarchy and override the object directly",
         );
         // Embedded-texture filtering (the whole model's baked-in textures).
         if asset.part_meta.iter().any(|m| m.textured) {
@@ -1253,8 +1517,19 @@ impl EditorTabViewer<'_> {
 
         let primary = self.selection.last().copied();
         if self.selection.len() > 1 {
-            ui.small(format!("{} selected", self.selection.len()));
+            ui.small(format!("{} selected — an edit here applies to all of them", self.selection.len()))
+                .on_hover_text(
+                    "The panel edits the last node you picked. Whatever you change on it — and \
+                     only what you change — is handed to the rest of the selection when you let \
+                     go, so each node keeps everything you didn't touch.\n\nNodes of a different \
+                     kind take whatever they have in common (a material, a transform, a script's \
+                     tunables) and ignore the rest.",
+                );
         }
+        // Everything this panel is about to write goes onto the PRIMARY. Take the
+        // "before" here so the change can be found by comparison afterwards —
+        // an immediate-mode panel leaves no other record of what it touched.
+        let multi = multi_edit::Snapshot::take(self.world, self.selection);
         let cmd = &mut *self.cmd;
         let world = &mut *self.world;
         // Read before `self` is split up below (`floptle/0110`).
@@ -1265,6 +1540,27 @@ impl EditorTabViewer<'_> {
         let cur_bone = *self.bone_selection;
         match primary {
             Some(e) if world.get::<Light>(e).is_some() => {
+                // What ELSE is lighting this scene — counted before the `Light`
+                // borrow, because the answer needs the whole world.
+                //
+                // "I set intensity to 0 and I can still see" is a fair thing to
+                // expect and a fair thing to be confused by: `intensity` scales
+                // the KEY light only, and four other things put photons on the
+                // screen. None of them is discoverable from this panel, so the
+                // panel now names them.
+                let point_lights = world
+                    .query::<Matter>()
+                    .filter(|(pe, m)| {
+                        matches!(m, Matter::PointLight { intensity, .. } if *intensity > 0.0)
+                            && !floptle_core::is_disabled(world, *pe)
+                    })
+                    .count();
+                let unlit_mats =
+                    world.query::<Material>().filter(|(_, m)| m.unlit).count();
+                let emissive_mats = world
+                    .query::<Material>()
+                    .filter(|(_, m)| m.emissive != [0.0; 3] && m.emissive_strength > 0.0)
+                    .count();
                 if let Some(l) = world.get_mut::<Light>(e) {
                     ui.label("Lighting node");
                     cmd.inspector_changed |= ui
@@ -1316,7 +1612,66 @@ impl EditorTabViewer<'_> {
                          the key light.",
                     );
                     cmd.inspector_changed |=
-                        ui.add(egui::Slider::new(&mut l.intensity, 0.0..=8.0).text("intensity")).changed();
+                        ui.add(egui::Slider::new(&mut l.intensity, 0.0..=8.0).text("intensity"))
+                            .on_hover_text(
+                                "brightness of the KEY (directional) light only. It is not a \
+                                 master dimmer — ambient, 2D base light, point lights, emissive \
+                                 and unlit materials are all separate.",
+                            )
+                            .changed();
+
+                    // Turned the key light off and the scene is still lit. Say
+                    // what by, and offer the one thing the person doing this
+                    // almost always wants: actual darkness.
+                    if l.intensity <= 0.0 && !l.stars {
+                        let ambient_on = l.ambient != [0.0; 3];
+                        let base_2d_on = l.ambient_2d != [0.0; 3];
+                        let mut sources: Vec<String> = Vec::new();
+                        if ambient_on {
+                            sources.push("3D ambient".into());
+                        }
+                        if base_2d_on {
+                            sources.push("the 2D base light".into());
+                        }
+                        if point_lights > 0 {
+                            sources.push(format!(
+                                "{point_lights} point light{}",
+                                if point_lights == 1 { "" } else { "s" }
+                            ));
+                        }
+                        if emissive_mats > 0 {
+                            sources.push(format!("{emissive_mats} emissive material(s)"));
+                        }
+                        if unlit_mats > 0 {
+                            sources.push(format!(
+                                "{unlit_mats} UNLIT material(s) — unlit ignores light entirely"
+                            ));
+                        }
+                        ui.add_space(2.0);
+                        if sources.is_empty() {
+                            ui.small("key light off, nothing else lights this scene — it is black.");
+                        } else {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 200, 80),
+                                "the key light is off and the scene is still lit",
+                            );
+                            ui.small(format!("still lighting it: {}.", sources.join(", ")));
+                            if (ambient_on || base_2d_on)
+                                && ui
+                                    .button("🌑  Black it out")
+                                    .on_hover_text(
+                                        "zero the 3D ambient and the 2D base light — the two \
+                                         fills this panel owns. Point lights, emissive and unlit \
+                                         materials are per-node and stay as they are.",
+                                    )
+                                    .clicked()
+                            {
+                                l.ambient = [0.0; 3];
+                                l.ambient_2d = [0.0; 3];
+                                cmd.inspector_changed = true;
+                            }
+                        }
+                    }
 
                     ui.separator();
                     cmd.inspector_changed |= ui
@@ -1373,6 +1728,37 @@ impl EditorTabViewer<'_> {
                             )
                             .on_hover_text("max distance a shadow ray marches (a perf fence — farther geometry stops casting)")
                             .changed();
+                        // Contact shadows: the short-range half, from the depth
+                        // buffer rather than from the field.
+                        ui.separator();
+                        cmd.inspector_changed |= ui
+                            .checkbox(&mut l.contact_shadows, "contact shadows")
+                            .on_hover_text(
+                                "the small dark line where things touch. A moving mesh casts through its \
+                                 COLLIDER, so a character's shadow is a capsule's — this shadows from the \
+                                 real silhouette of whatever is on screen instead. Short range: it is the \
+                                 shadow under a foot, in a seam, behind a bolt.",
+                            )
+                            .changed();
+                        ui.add_enabled_ui(l.contact_shadows, |ui| {
+                            cmd.inspector_changed |= ui
+                                .add(egui::Slider::new(&mut l.contact_length, 0.02..=3.0).text("reach").suffix("m"))
+                                .on_hover_text("how far it traces. Too far and distant geometry starts smearing shadows over things in front of it")
+                                .changed();
+                            cmd.inspector_changed |= ui
+                                .add(egui::Slider::new(&mut l.contact_strength, 0.0..=1.0).text("strength"))
+                                .changed();
+                            let mut steps = l.contact_steps as i32;
+                            if ui
+                                .add(egui::Slider::new(&mut steps, 4..=32).text("steps"))
+                                .on_hover_text("samples along the trace — raise it if the shadow looks striped")
+                                .changed()
+                            {
+                                l.contact_steps = steps as u32;
+                                cmd.inspector_changed = true;
+                            }
+                            ui.small("only shadows what is ON SCREEN — nothing off the edge of the frame casts one");
+                        });
                     });
                     // Fog — distance haze (depth ramp) or real marched media (volumetric).
                     ui.separator();
@@ -1440,6 +1826,59 @@ impl EditorTabViewer<'_> {
                                     .on_hover_text("wisp size in world units")
                                     .changed();
                             });
+                            ui.horizontal(|ui| {
+                                ui.label("max distance");
+                                cmd.inspector_changed |= ui
+                                    .add(egui::DragValue::new(&mut l.fog_end).speed(1.0).range(1.0..=10000.0).suffix("m"))
+                                    .on_hover_text("how far a ray that hits nothing keeps marching fog — a perf fence for sky pixels (an upward ray already stops where the layer ends)")
+                                    .changed();
+                            });
+                            // Light injection: the media lit by the scene rather
+                            // than painted a flat colour.
+                            ui.separator();
+                            cmd.inspector_changed |= ui
+                                .add(egui::Slider::new(&mut l.fog_light, 0.0..=3.0).text("lit by the scene"))
+                                .on_hover_text(
+                                    "0 = the flat fog colour; 1 = the media lit by the sun, the point lights and the baked bounce; \
+                                     past 1 exaggerates. The fog colour becomes what the media is MADE of rather than what it looks like.",
+                                )
+                                .changed();
+                            ui.add_enabled_ui(l.fog_light > 0.0, |ui| {
+                                cmd.inspector_changed |= ui
+                                    .add(egui::Slider::new(&mut l.fog_anisotropy, -0.9..=0.9).text("forward scatter"))
+                                    .on_hover_text(
+                                        "which way the media throws light. Positive blooms toward the sun (look into it and the air glows); \
+                                         0 is an even haze; negative bounces it back at you. A mote of fog has no facing — this is what \
+                                         does the job a surface normal does everywhere else.",
+                                    )
+                                    .changed();
+                                cmd.inspector_changed |= ui
+                                    .checkbox(&mut l.fog_shafts, "shafts (shadows in the fog)")
+                                    .on_hover_text(
+                                        "march the sun shadow at every fog step, so shadowed air stays dark and beams appear through \
+                                         windows and branches. This is the entire cost of lit fog — turn it off and the media is lit \
+                                         but never occluded.",
+                                    )
+                                    .changed();
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("quality");
+                                let mut steps = l.fog_steps as i32;
+                                if ui
+                                    .add(egui::Slider::new(&mut steps, 4..=64).text("steps"))
+                                    .on_hover_text("samples along each pixel's ray — raise it until the fog stops looking stepped, then stop")
+                                    .changed()
+                                {
+                                    l.fog_steps = steps as u32;
+                                    cmd.inspector_changed = true;
+                                }
+                            });
+                            if l.fog_shafts && l.fog_light > 0.0 && !l.shadows {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(220, 170, 90),
+                                    "shafts need shadows on (above) — the fog is lit but nothing occludes it",
+                                );
+                            }
                         } else {
                             ui.horizontal(|ui| {
                                 ui.label("start");
@@ -1468,11 +1907,50 @@ impl EditorTabViewer<'_> {
                 }
             }
             Some(e) if world.get::<Transform>(e).is_some() => {
-                if let Some(n) = world.get_mut::<Name>(e) {
-                    ui.horizontal(|ui| {
-                        ui.label("name");
+                // The on/off switch, where every other editor puts it: on the
+                // name row, one click, always visible. It was reachable only
+                // from a right-click menu, which is fine for something you do
+                // once and wrong for something you do while trying things out —
+                // and a node you cannot SEE the state of is a node you forget is
+                // off. The checkbox reads the node's OWN flag; if an ancestor is
+                // what switched it off, the line under it says so, because
+                // ticking this one would then change nothing visible.
+                let off_self = world.get::<floptle_core::Disabled>(e).is_some();
+                let off_inherited = !off_self && floptle_core::is_disabled(world, e);
+                ui.horizontal(|ui| {
+                    let mut on = !off_self;
+                    if ui
+                        .checkbox(&mut on, "")
+                        .on_hover_text(
+                            "enabled — a switched-off node doesn't draw, doesn't collide, its \
+                             scripts don't run, it can't be the active camera, and find() skips \
+                             it. Everything under it goes with it.",
+                        )
+                        .changed()
+                    {
+                        // The whole selection, so switching six things off is one
+                        // gesture — and the TARGET state is decided here, once,
+                        // rather than each node flipping its own way.
+                        let targets: Vec<floptle_core::Entity> = if self.selection.contains(&e) {
+                            self.selection.clone()
+                        } else {
+                            vec![e]
+                        };
+                        cmd.set_enabled = Some((targets, on));
+                    }
+                    ui.label("name");
+                    if let Some(n) = world.get_mut::<Name>(e) {
                         cmd.inspector_changed |= ui.text_edit_singleline(&mut n.0).changed();
-                    });
+                    }
+                });
+                if off_inherited {
+                    ui.small(
+                        egui::RichText::new(
+                            "⚠ switched off by a parent — turning this one on changes nothing \
+                             until the parent is on",
+                        )
+                        .color(egui::Color32::from_rgb(255, 200, 80)),
+                    );
                 }
                 // ===== Layer + tags — identity every node carries. =====
                 // Layer: the node's collision/query layer (project-defined names,
@@ -1748,7 +2226,7 @@ impl EditorTabViewer<'_> {
                             Matter::MapMesh { id } => {
                                 ui.label(format!("map mesh #{id}"));
                                 ui.small(
-                                    "editable blockout geometry — use the ▦ Map tool (key 8) \
+                                    "editable blockout geometry — use the ▦ Model tool (key 8) \
                                      to edit faces/edges/verts, extrude, and assign per-face \
                                      materials; the Map tab has the shape ops",
                                 );
@@ -1964,9 +2442,10 @@ impl EditorTabViewer<'_> {
                                     cmd.camera_from_view = Some(e);
                                 }
                             }
-                            Matter::PointLight { color, intensity, range } => {
-                                ui.label("point light");
-                                ui.small("an omni light — position comes from the transform below");
+                            Matter::PointLight { color, intensity, range, shape } => {
+                                use floptle_core::LightShape as LS;
+                                ui.label("light");
+                                ui.small("position and facing come from the transform below");
                                 ui.horizontal(|ui| {
                                     ui.label("color");
                                     cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
@@ -1975,6 +2454,71 @@ impl EditorTabViewer<'_> {
                                     ui.add(egui::Slider::new(intensity, 0.0..=20.0).text("intensity")).changed();
                                 cmd.inspector_changed |=
                                     ui.add(egui::Slider::new(range, 0.1..=200.0).text("range")).changed();
+                                // The EMITTER. Switching shape keeps whatever
+                                // size the old one had where the two agree, so
+                                // trying rect against disk is one click and not
+                                // a re-measure.
+                                ui.separator();
+                                let old = *shape;
+                                let size = old.extent().max(0.25);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("emits from");
+                                    let mut pick = |ui: &mut egui::Ui, label: &str, on: bool, make: LS| {
+                                        if ui.selectable_label(on, label).clicked() && !on {
+                                            *shape = make;
+                                            cmd.inspector_changed = true;
+                                        }
+                                    };
+                                    pick(ui, "point", matches!(old, LS::Point), LS::Point);
+                                    pick(ui, "sphere", matches!(old, LS::Sphere { .. }), LS::Sphere { radius: size });
+                                    pick(
+                                        ui,
+                                        "rect",
+                                        matches!(old, LS::Rect { .. }),
+                                        LS::Rect { width: size * 2.0, height: size * 2.0, two_sided: false },
+                                    );
+                                    pick(ui, "disk", matches!(old, LS::Disk { .. }), LS::Disk { radius: size, two_sided: false });
+                                    pick(ui, "tube", matches!(old, LS::Tube { .. }), LS::Tube { length: size * 4.0, radius: size * 0.25 });
+                                });
+                                let drag = |ui: &mut egui::Ui, label: &str, v: &mut f32| -> bool {
+                                    ui.horizontal(|ui| {
+                                        ui.label(label);
+                                        ui.add(egui::DragValue::new(v).speed(0.05).range(0.001..=200.0).suffix("m"))
+                                            .changed()
+                                    })
+                                    .inner
+                                };
+                                match shape {
+                                    LS::Point => {
+                                        ui.small(
+                                            "a dimensionless point — a hard highlight and a hard shadow edge, \
+                                             which is right for a bare bulb and wrong for a window",
+                                        );
+                                    }
+                                    LS::Sphere { radius } => {
+                                        cmd.inspector_changed |= drag(ui, "radius", radius);
+                                        ui.small("a bulb with size: the highlight becomes a disc and the terminator softens");
+                                    }
+                                    LS::Rect { width, height, two_sided } => {
+                                        cmd.inspector_changed |= drag(ui, "width", width);
+                                        cmd.inspector_changed |= drag(ui, "height", height);
+                                        cmd.inspector_changed |= ui
+                                            .checkbox(two_sided, "lights both ways")
+                                            .on_hover_text("off = a window, on = a floating panel that glows from both faces")
+                                            .changed();
+                                        ui.small("faces the node's forward — rotate the node to aim it");
+                                    }
+                                    LS::Disk { radius, two_sided } => {
+                                        cmd.inspector_changed |= drag(ui, "radius", radius);
+                                        cmd.inspector_changed |= ui.checkbox(two_sided, "lights both ways").changed();
+                                        ui.small("faces the node's forward — rotate the node to aim it");
+                                    }
+                                    LS::Tube { length, radius } => {
+                                        cmd.inspector_changed |= drag(ui, "length", length);
+                                        cmd.inspector_changed |= drag(ui, "thickness", radius);
+                                        ui.small("lies along the node's local X, and streaks its highlight along itself");
+                                    }
+                                }
                             }
                             Matter::GravityVolume { mode, strength, radius } => {
                                 use floptle_core::GravityMode;
@@ -2136,6 +2680,14 @@ impl EditorTabViewer<'_> {
                                         *shader = pick;
                                         cmd.inspector_changed = true;
                                     }
+                                    if let Some(path) = shader.clone()
+                                        && ui
+                                            .button("◈")
+                                            .on_hover_text("edit this shader in the ◈ Shaders graph")
+                                            .clicked()
+                                    {
+                                        cmd.open_shader_graph = Some(path);
+                                    }
                                     if shader.is_some() && ui.button("✖").on_hover_text("remove the sky shader").clicked() {
                                         *shader = None;
                                         shader_params.clear();
@@ -2219,7 +2771,262 @@ impl EditorTabViewer<'_> {
                                     .add(egui::Slider::new(size, 10.0..=5000.0).logarithmic(true).text("size (radius)"))
                                     .changed();
                             }
+                            Matter::LightProbes {
+                                half_extents,
+                                spacing,
+                                enabled,
+                                intensity,
+                                bounces,
+                                quality,
+                                leak,
+                                normal_bias,
+                                exclude_layers,
+                            } => {
+                                let gi = self.gi;
+                                if ui.checkbox(enabled, "light this scene").changed() {
+                                    cmd.inspector_changed = true;
+                                    cmd.gi_changed = true;
+                                }
+                                ui.small(
+                                    "Baked bounce light. Inside this box the scene's flat ambient \
+                                     is replaced by what the surfaces around it actually reflect.",
+                                );
+                                ui.separator();
+
+                                // ---- the box ------------------------------------
+                                ui.horizontal(|ui| {
+                                    ui.label("size");
+                                    for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+                                        let mut full = half_extents[i] * 2.0;
+                                        let r = ui.add(
+                                            egui::DragValue::new(&mut full)
+                                                .speed(0.25)
+                                                .range(0.5..=4000.0)
+                                                .prefix(format!("{axis} ")),
+                                        );
+                                        if r.changed() {
+                                            half_extents[i] = full * 0.5;
+                                            cmd.inspector_changed = true;
+                                            cmd.gi_changed = true;
+                                        }
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "The volume's full size in world units, before the node's \
+                                     scale. Move the node to move the box.",
+                                );
+                                if ui
+                                    .add(
+                                        egui::Slider::new(spacing, 0.25..=16.0)
+                                            .logarithmic(true)
+                                            .text("probe spacing"),
+                                    )
+                                    .on_hover_text(
+                                        "World units between probes. This is the resolution of \
+                                         the bounce: it cannot represent a shadow sharper than \
+                                         one cell.",
+                                    )
+                                    .changed()
+                                {
+                                    cmd.inspector_changed = true;
+                                    cmd.gi_changed = true;
+                                }
+                                let planned = gi.planned_count();
+                                ui.small(format!(
+                                    "{}×{}×{} = {planned} probes  ·  {} renders per bounce",
+                                    gi.planned[0],
+                                    gi.planned[1],
+                                    gi.planned[2],
+                                    planned * 6
+                                ));
+
+                                // ---- the bake -----------------------------------
+                                ui.separator();
+                                if gi.baking {
+                                    ui.add(
+                                        egui::ProgressBar::new(gi.progress).text(format!(
+                                            "baking — bounce {}/{}  ·  {:.0}s",
+                                            gi.bounce, gi.bounces, gi.seconds
+                                        )),
+                                    );
+                                    if ui.button("✖  Cancel").clicked() {
+                                        cmd.gi_cancel = true;
+                                    }
+                                } else {
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .button("☀  Bake")
+                                            .on_hover_text(
+                                                "Render the scene from every probe and keep the \
+                                                 light. Saved next to the scene as a .fgi.",
+                                            )
+                                            .clicked()
+                                        {
+                                            cmd.gi_bake = true;
+                                        }
+                                        if gi.baked_probes > 0
+                                            && ui
+                                                .button("🗑  Clear")
+                                                .on_hover_text("Throw the bake away.")
+                                                .clicked()
+                                        {
+                                            cmd.gi_clear = true;
+                                        }
+                                    });
+                                    if gi.baked_probes == 0 {
+                                        ui.small("no bake yet — this volume lights nothing.");
+                                    } else {
+                                        ui.small(format!(
+                                            "baked: {} probes, {} bounce{}",
+                                            gi.baked_probes,
+                                            gi.baked_bounces,
+                                            if gi.baked_bounces == 1 { "" } else { "s" }
+                                        ));
+                                    }
+                                    // Said plainly rather than by going dark: a
+                                    // volume you just resized is still lit by the
+                                    // old data, and that is a choice, not a bug.
+                                    if gi.stale {
+                                        ui.colored_label(
+                                            egui::Color32::from_rgb(220, 180, 90),
+                                            "⚠ the box changed since this was baked — \
+                                             still using the old light",
+                                        );
+                                    }
+                                }
+
+                                // ---- how it is baked ----------------------------
+                                ui.separator();
+                                let mut b = *bounces;
+                                if ui
+                                    .add(egui::Slider::new(&mut b, 1..=4).text("bounces"))
+                                    .on_hover_text(
+                                        "1 is light coming off surfaces once — the difference \
+                                         between a black corner and a lit one. Each extra bounce \
+                                         re-renders every probe.",
+                                    )
+                                    .changed()
+                                {
+                                    *bounces = b;
+                                    cmd.inspector_changed = true;
+                                }
+                                let mut q = *quality;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut q, 8..=64)
+                                            .step_by(8.0)
+                                            .text("bake detail"),
+                                    )
+                                    .on_hover_text(
+                                        "Pixels per cube face. Higher resolves small bright \
+                                         things — a lamp, a window — and does not change how \
+                                         bright the result is.",
+                                    )
+                                    .changed()
+                                {
+                                    *quality = q;
+                                    cmd.inspector_changed = true;
+                                }
+                                let names: Vec<String> = self.layer_names.to_vec();
+                                ui.horizontal(|ui| {
+                                    ui.label("skip layers");
+                                    egui::ComboBox::from_id_salt("gi_skip")
+                                        .selected_text(if exclude_layers.is_empty() {
+                                            "none".to_string()
+                                        } else {
+                                            exclude_layers.join(", ")
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            for n in &names {
+                                                let mut on = exclude_layers.contains(n);
+                                                if ui.checkbox(&mut on, n).changed() {
+                                                    if on {
+                                                        exclude_layers.push(n.clone());
+                                                    } else {
+                                                        exclude_layers.retain(|x| x != n);
+                                                    }
+                                                    cmd.inspector_changed = true;
+                                                }
+                                            }
+                                        });
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Anything that moves — a character, a door, a lift — should \
+                                     not be baked into the light it happens to be standing in.",
+                                );
+
+                                // ---- how it is applied --------------------------
+                                ui.separator();
+                                if ui
+                                    .add(egui::Slider::new(intensity, 0.0..=4.0).text("intensity"))
+                                    .on_hover_text(
+                                        "1 is the light as measured. Past that is a look, not a \
+                                         mistake. Changing this does not need a re-bake.",
+                                    )
+                                    .changed()
+                                {
+                                    cmd.inspector_changed = true;
+                                    cmd.gi_changed = true;
+                                }
+                                if ui
+                                    .add(egui::Slider::new(leak, 0.0..=3.0).text("leak rejection"))
+                                    .on_hover_text(
+                                        "Throws away probes buried in geometry, so the lit room \
+                                         next door stops glowing through the wall. Costs some \
+                                         bounce in tight spaces. 0 = off.",
+                                    )
+                                    .changed()
+                                {
+                                    cmd.inspector_changed = true;
+                                    cmd.gi_changed = true;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Slider::new(normal_bias, 0.0..=2.0)
+                                            .text("surface offset"),
+                                    )
+                                    .on_hover_text(
+                                        "How far a surface steps along its own normal before \
+                                         looking the light up, in cells. Too little leaks at \
+                                         corners; too much drags light around them.",
+                                    )
+                                    .changed()
+                                {
+                                    cmd.inspector_changed = true;
+                                    cmd.gi_changed = true;
+                                }
+
+                                // ---- looking at it ------------------------------
+                                ui.separator();
+                                let mut show_only = gi.show_only;
+                                if ui
+                                    .checkbox(&mut show_only, "show only the bounce")
+                                    .on_hover_text(
+                                        "Every direct light off, so what is left on screen is \
+                                         exactly what was baked. The fastest way to tell a dark \
+                                         bake from a dark scene.",
+                                    )
+                                    .changed()
+                                {
+                                    cmd.gi_show_only = Some(show_only);
+                                }
+                                let mut show_probes = gi.show_probes;
+                                if ui
+                                    .checkbox(&mut show_probes, "show the probes")
+                                    .on_hover_text(
+                                        "Draw each probe in the colour it baked. A grid that is \
+                                         too coarse, or a row of probes buried in the floor, is \
+                                         invisible in the final picture and obvious here.",
+                                    )
+                                    .changed()
+                                {
+                                    cmd.gi_show_probes = Some(show_probes);
+                                }
+                            }
                             Matter::PostProcess {
+                                tonemap,
                                 enabled,
                                 bloom,
                                 bloom_threshold,
@@ -2233,6 +3040,33 @@ impl EditorTabViewer<'_> {
                                 posterize_bands,
                                 posterize_dither,
                                 posterize_chroma,
+                                exposure,
+                                contrast,
+                                saturation,
+                                temperature,
+                                tint,
+                                lift,
+                                grade_gamma,
+                                gain,
+                                aberration,
+                                distortion,
+                                sharpen,
+                                denoise,
+                                grain,
+                                grain_size,
+                                dof_focus,
+                                dof_range,
+                                dof_near_range,
+                                dof_max_blur,
+                                dof_blades,
+                                dof_blade_rotation,
+                                dof_highlight,
+                                dof_quality,
+                                motion_blur,
+                                motion_samples,
+                                dof_show_focus,
+                                dof_focus_node,
+                                screen_shaders,
                             } => {
                                 use floptle_core::AoMode;
                                 ui.label("post processing");
@@ -2345,6 +3179,577 @@ impl EditorTabViewer<'_> {
                                             .changed();
                                     });
                                 });
+
+                                // ---- the look chain -------------------------
+                                //
+                                // One collapsing section per effect, each with
+                                // its own reset, because a grade you cannot get
+                                // back to neutral is a grade you stop touching.
+                                // Every heading says what OFF is, so "is this
+                                // doing anything" is answerable at a glance.
+                                let acc = egui::Color32::from_rgb(255, 200, 80);
+
+                                // Tonemap first, and on its own, because it is
+                                // not one effect among the others: it is how the
+                                // scene's light reaches the display at all. The
+                                // grade below it is working in the range this
+                                // choice defines.
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.label("tonemap").on_hover_text(
+                                        "The scene is lit in real, unbounded light — a lamp can \
+                                         be ten times brighter than white. A screen stops at \
+                                         white. This chooses how to get from one to the other.\n\n\
+                                         Doing nothing is a choice too: each colour channel \
+                                         clips on its own, so a very bright colour slides toward \
+                                         white through whatever hue clips last. That is why \
+                                         blown highlights can go strange colours.",
+                                    );
+                                    let names = [
+                                        ("clip", "clip — clamp each channel (what 2D and pixel art want)"),
+                                        ("Reinhard", "Reinhard — never clips, everything bright washes to grey"),
+                                        ("ACES", "ACES — filmic: crushed shadows, long warm highlight roll-off"),
+                                        ("AgX", "AgX — bright colours whiten the way film does, instead of \
+                                                 hitting a flat ceiling of their own hue"),
+                                    ];
+                                    let cur = (*tonemap as usize).min(3);
+                                    egui::ComboBox::from_id_salt("pp_tonemap")
+                                        .selected_text(names[cur].0)
+                                        .width(160.0)
+                                        .show_ui(ui, |ui| {
+                                            for (i, (short, long)) in names.iter().enumerate() {
+                                                if ui
+                                                    .selectable_label(cur == i, *short)
+                                                    .on_hover_text(*long)
+                                                    .clicked()
+                                                {
+                                                    *tonemap = i as u32;
+                                                    cmd.inspector_changed = true;
+                                                }
+                                            }
+                                        });
+                                });
+                                if *tonemap == 0 {
+                                    ui.small(
+                                        egui::RichText::new(
+                                            "anything brighter than white is clipped — try AgX \
+                                             if bright lights look like flat blocks of colour",
+                                        )
+                                        .small()
+                                        .color(ui.visuals().weak_text_color()),
+                                    );
+                                }
+
+                                // ---- the scene's own screen shaders ---------
+                                //
+                                // Placed after the tonemap and before the grade
+                                // because that is where they RUN, and a panel
+                                // that lists effects in an order the frame does
+                                // not follow is a panel that teaches the wrong
+                                // thing.
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.label("screen shaders");
+                                    ui.small(
+                                        egui::RichText::new(format!(
+                                            "{} pass{}",
+                                            screen_shaders.len(),
+                                            if screen_shaders.len() == 1 { "" } else { "es" }
+                                        ))
+                                        .color(ui.visuals().weak_text_color()),
+                                    );
+                                });
+                                ui.small(
+                                    "full-screen passes you wrote — a `stage post` .flsl gets the \
+                                     finished frame plus its depth and normals, and returns a new \
+                                     colour. They run in this order, over the picture, before the \
+                                     grade and the lens below.",
+                                );
+                                {
+                                    let mut remove: Option<usize> = None;
+                                    let mut swap: Option<(usize, usize)> = None;
+                                    let n = screen_shaders.len();
+                                    for (i, pass) in screen_shaders.iter_mut().enumerate() {
+                                        let name = Path::new(&pass.shader)
+                                            .file_name()
+                                            .map(|s| s.to_string_lossy().to_string())
+                                            .unwrap_or_else(|| pass.shader.clone());
+                                        let entry = self.post_flsl_cache.get(&pass.shader);
+                                        let err = entry.and_then(|e| e.error.as_deref());
+                                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                cmd.inspector_changed |= ui
+                                                    .checkbox(&mut pass.enabled, "")
+                                                    .on_hover_text(
+                                                        "off keeps the pass and its settings \
+                                                         without running it",
+                                                    )
+                                                    .changed();
+                                                ui.label(egui::RichText::new(&name).strong());
+                                                ui.with_layout(
+                                                    egui::Layout::right_to_left(egui::Align::Center),
+                                                    |ui| {
+                                                        if ui
+                                                            .button("✖")
+                                                            .on_hover_text("remove this pass")
+                                                            .clicked()
+                                                        {
+                                                            remove = Some(i);
+                                                        }
+                                                        // Straight to the graph, the
+                                                        // same door a Material's
+                                                        // shader row opens — a pass
+                                                        // you can add and tune but
+                                                        // not open is a pass you
+                                                        // hunt for in the Assets
+                                                        // panel every time.
+                                                        if ui
+                                                            .button("◈")
+                                                            .on_hover_text("edit this shader in the ◈ Shaders graph")
+                                                            .clicked()
+                                                        {
+                                                            cmd.open_shader_graph =
+                                                                Some(pass.shader.clone());
+                                                        }
+                                                        if ui
+                                                            .add_enabled(
+                                                                i + 1 < n,
+                                                                egui::Button::new("▼"),
+                                                            )
+                                                            .on_hover_text("run later")
+                                                            .clicked()
+                                                        {
+                                                            swap = Some((i, i + 1));
+                                                        }
+                                                        if ui
+                                                            .add_enabled(i > 0, egui::Button::new("▲"))
+                                                            .on_hover_text("run earlier")
+                                                            .clicked()
+                                                        {
+                                                            swap = Some((i, i - 1));
+                                                        }
+                                                    },
+                                                );
+                                            });
+                                            match (err, entry.and_then(|e| e.compiled.as_ref())) {
+                                                (Some(msg), _) => {
+                                                    ui.small(
+                                                        egui::RichText::new(format!("◈ {msg}"))
+                                                            .color(egui::Color32::from_rgb(
+                                                                255, 120, 110,
+                                                            )),
+                                                    );
+                                                }
+                                                (None, None) => {
+                                                    ui.small("(compiling — its knobs appear here)");
+                                                }
+                                                (None, Some(_)) => {}
+                                            }
+                                            // Knobs from the compiled shader's own schema. Shown
+                                            // even when the newest edit failed, because they are
+                                            // still driving the last good pipeline.
+                                            if let Some((compiled, _)) =
+                                                entry.and_then(|e| e.compiled.as_ref())
+                                                && !compiled.uniforms.is_empty()
+                                            {
+                                                egui::Grid::new(("pp_shader_rows", i))
+                                                    .num_columns(2)
+                                                    .spacing([8.0, 5.0])
+                                                    .show(ui, |ui| {
+                                                        if shader_uniform_rows(
+                                                            ui,
+                                                            &compiled.uniforms,
+                                                            &mut pass.params,
+                                                        ) {
+                                                            cmd.inspector_changed = true;
+                                                        }
+                                                    });
+                                                if !pass.params.is_empty()
+                                                    && ui
+                                                        .button("Reset knobs")
+                                                        .on_hover_text(
+                                                            "back to the shader's own defaults",
+                                                        )
+                                                        .clicked()
+                                                {
+                                                    pass.params.clear();
+                                                    cmd.inspector_changed = true;
+                                                }
+                                            }
+                                        });
+                                    }
+                                    if let Some((a, b)) = swap {
+                                        screen_shaders.swap(a, b);
+                                        cmd.inspector_changed = true;
+                                    }
+                                    if let Some(i) = remove {
+                                        screen_shaders.remove(i);
+                                        cmd.inspector_changed = true;
+                                    }
+                                    ui.horizontal(|ui| {
+                                        if let Some(pick) = crate::ui_widgets::asset_picker(
+                                            ui,
+                                            egui::Id::new("pp-add-screen-shader"),
+                                            self.project_root,
+                                            "+ Add screen shader",
+                                            None,
+                                            self.asset_tree,
+                                            crate::assets::is_shader,
+                                            200.0,
+                                        ) && let Some(path) = pick
+                                        {
+                                            screen_shaders
+                                                .push(floptle_core::ScreenShader::new(path));
+                                            cmd.inspector_changed = true;
+                                        }
+                                        ui.small(
+                                            egui::RichText::new(
+                                                "try shaders/examples/inkOutline.flsl",
+                                            )
+                                            .color(ui.visuals().weak_text_color()),
+                                        );
+                                    });
+                                }
+
+                                ui.separator();
+                                ui.label("colour grade");
+                                {
+                                    let neutral = *exposure == 0.0
+                                        && *contrast == 1.0
+                                        && *saturation == 1.0
+                                        && *temperature == 0.0
+                                        && *tint == 0.0
+                                        && *lift == 0.0
+                                        && *grade_gamma == 1.0
+                                        && *gain == 1.0;
+                                    ui.horizontal(|ui| {
+                                        ui.small(if neutral {
+                                            "neutral — no pass runs"
+                                        } else {
+                                            "grading"
+                                        });
+                                        if !neutral && ui.small_button("reset").clicked() {
+                                            *exposure = 0.0;
+                                            *contrast = 1.0;
+                                            *saturation = 1.0;
+                                            *temperature = 0.0;
+                                            *tint = 0.0;
+                                            *lift = 0.0;
+                                            *grade_gamma = 1.0;
+                                            *gain = 1.0;
+                                            cmd.inspector_changed = true;
+                                        }
+                                    });
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(exposure, -4.0..=4.0).text("exposure"))
+                                        .on_hover_text(
+                                            "in STOPS: +1 is twice the light. The unit a camera and a \
+                                             renderer already share — it keeps meaning the same thing \
+                                             when the scene's brightness changes.",
+                                        )
+                                        .changed();
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(contrast, 0.0..=3.0).text("contrast"))
+                                        .on_hover_text("pivots on 18% grey, so adding contrast doesn't also darken everything")
+                                        .changed();
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(saturation, 0.0..=3.0).text("saturation"))
+                                        .on_hover_text("0 = greyscale, 1 = untouched. Brightness is preserved.")
+                                        .changed();
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(temperature, -1.0..=1.0).text("temperature"))
+                                        .on_hover_text("cool (−) ↔ warm (+)")
+                                        .changed();
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(tint, -1.0..=1.0).text("tint"))
+                                        .on_hover_text(
+                                            "green (−) ↔ magenta (+) — the axis temperature can't reach, \
+                                             and the one that fixes a scene that has gone subtly sickly",
+                                        )
+                                        .changed();
+                                    ui.small("shadows / midtones / highlights");
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(lift, -0.5..=0.5).text("lift"))
+                                        .on_hover_text("raise or crush the black floor — a lifted black is the film look")
+                                        .changed();
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(grade_gamma, 0.2..=3.0).text("gamma"))
+                                        .on_hover_text("bend the midtones without moving black or white")
+                                        .changed();
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(gain, 0.0..=3.0).text("gain"))
+                                        .on_hover_text("scale the highlights")
+                                        .changed();
+                                }
+
+                                ui.separator();
+                                ui.label("lens");
+                                cmd.inspector_changed |= ui
+                                    .add(egui::Slider::new(aberration, 0.0..=2.0).text("chromatic aberration"))
+                                    .on_hover_text(
+                                        "red and blue drift apart toward the edges, the way real glass \
+                                         disperses. 0 = off.",
+                                    )
+                                    .changed();
+                                cmd.inspector_changed |= ui
+                                    .add(egui::Slider::new(distortion, -0.5..=0.5).text("distortion"))
+                                    .on_hover_text(
+                                        "positive barrels (fisheye), negative pincushions. The corners go \
+                                         BLACK rather than smearing the edge pixel outward — a bent frame \
+                                         genuinely has no picture out there.",
+                                    )
+                                    .changed();
+                                if *aberration == 0.0 && *distortion == 0.0 {
+                                    ui.small("both at 0 — no lens pass runs");
+                                }
+
+                                ui.separator();
+                                ui.label("detail");
+                                cmd.inspector_changed |= ui
+                                    .add(egui::Slider::new(sharpen, 0.0..=2.0).text("sharpen"))
+                                    .on_hover_text(
+                                        "unsharp mask, clamped to the local neighbourhood so edges get \
+                                         crisper without growing a bright halo. 0 = off.",
+                                    )
+                                    .changed();
+                                cmd.inspector_changed |= ui
+                                    .add(egui::Slider::new(denoise, 0.0..=1.0).text("denoise"))
+                                    .on_hover_text(
+                                        "bilateral: averages within a flat region and refuses to average \
+                                         across an edge, which is the difference between removing noise \
+                                         and removing detail. Runs FIRST in the chain, on the raw frame. \
+                                         0 = off.",
+                                    )
+                                    .changed();
+                                if *sharpen > 0.0 && *denoise > 0.0 {
+                                    ui.small("denoise runs first, then sharpen — the useful order");
+                                }
+
+                                ui.separator();
+                                ui.label("film grain");
+                                cmd.inspector_changed |= ui
+                                    .add(egui::Slider::new(grain, 0.0..=1.0).text("amount"))
+                                    .on_hover_text(
+                                        "multiplicative and strongest in the MIDTONES, the way emulsion \
+                                         responds — additive grain lifts every shadow into grey mud, \
+                                         which is the tell of a cheap filter. Applied last, so nothing \
+                                         downstream turns it into crawling static. 0 = off.",
+                                    )
+                                    .changed();
+                                ui.add_enabled_ui(*grain > 0.0, |ui| {
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(grain_size, 1.0..=8.0).text("size"))
+                                        .on_hover_text(
+                                            "grain cell in pixels. 1 is per-pixel — which under a retro \
+                                             upscale is invisible, then suddenly a flat shimmer. 2–4 is \
+                                             what reads as film.",
+                                        )
+                                        .changed();
+                                });
+
+                                ui.separator();
+                                ui.label("depth of field");
+                                cmd.inspector_changed |= ui
+                                    .add(
+                                        egui::Slider::new(dof_focus, 0.0..=200.0)
+                                            .logarithmic(true)
+                                            .text("focus distance"),
+                                    )
+                                    .on_hover_text("world units from the camera that are sharp. 0 = off.")
+                                    .changed();
+                                // Focus on a NODE instead of a number: the focus
+                                // distance becomes the camera's distance to it,
+                                // every frame. This is what a rack focus is made
+                                // of, and by hand it means a script measuring a
+                                // distance the engine already knows.
+                                ui.horizontal(|ui| {
+                                    ui.label("follow");
+                                    let cur = dof_focus_node.clone();
+                                    let label = if cur.is_empty() {
+                                        "(a fixed distance)".to_string()
+                                    } else {
+                                        cur.clone()
+                                    };
+                                    egui::ComboBox::from_id_salt("pp_dof_follow")
+                                        .selected_text(label)
+                                        .width(170.0)
+                                        .show_ui(ui, |ui| {
+                                            if ui
+                                                .selectable_label(cur.is_empty(), "(a fixed distance)")
+                                                .clicked()
+                                                && !cur.is_empty()
+                                            {
+                                                dof_focus_node.clear();
+                                                cmd.inspector_changed = true;
+                                            }
+                                            for (_, name) in self.entity_names {
+                                                if ui.selectable_label(cur == *name, name).clicked()
+                                                    && cur != *name
+                                                {
+                                                    *dof_focus_node = name.clone();
+                                                    cmd.inspector_changed = true;
+                                                }
+                                            }
+                                        });
+                                })
+                                .response
+                                .on_hover_text(
+                                    "keep this node in focus — the focus distance becomes the \
+                                     camera's distance to it, measured every frame and per \
+                                     viewport, so the Scene view shows its own focus while you \
+                                     fly around. A name that matches nothing falls back to the \
+                                     slider above rather than to zero.",
+                                );
+                                if !dof_focus_node.is_empty()
+                                    && !self.entity_names.iter().any(|(_, n)| n == dof_focus_node)
+                                {
+                                    ui.colored_label(
+                                        acc,
+                                        format!(
+                                            "⚠ no node named \"{dof_focus_node}\" in this scene — \
+                                             using the focus distance above"
+                                        ),
+                                    );
+                                }
+                                ui.add_enabled_ui(*dof_focus > 0.0 || !dof_focus_node.is_empty(), |ui| {
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(dof_range, 0.1..=100.0).logarithmic(true).text("far range"))
+                                        .on_hover_text("how far BEYOND the focus distance stays sharp")
+                                        .changed();
+                                    let mut near = *dof_near_range;
+                                    let auto = near <= 0.0;
+                                    if auto {
+                                        near = *dof_range * 0.5;
+                                    }
+                                    let r = ui
+                                        .add(egui::Slider::new(&mut near, 0.05..=100.0).logarithmic(true).text("near range"))
+                                        .on_hover_text(
+                                            "how far IN FRONT of it stays sharp. A lens goes soft \
+                                             on the near side much sooner than on the far side, \
+                                             which is why these are two numbers: a portrait wants \
+                                             the foreground gone and the background readable.",
+                                        );
+                                    if r.changed() {
+                                        *dof_near_range = near;
+                                        cmd.inspector_changed = true;
+                                    }
+                                    if auto {
+                                        ui.small(
+                                            egui::RichText::new("near range is following the far one (half of it)")
+                                                .color(ui.visuals().weak_text_color()),
+                                        );
+                                    } else if ui
+                                        .small_button("link to far range")
+                                        .on_hover_text("back to half the far range")
+                                        .clicked()
+                                    {
+                                        *dof_near_range = 0.0;
+                                        cmd.inspector_changed = true;
+                                    }
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(dof_max_blur, 0.0..=16.0).text("max blur"))
+                                        .on_hover_text("the widest the out-of-focus blur gets, in pixels. 0 = off.")
+                                        .changed();
+
+                                    ui.add_space(3.0);
+                                    ui.small("the iris");
+                                    let mut blades = *dof_blades as f32;
+                                    let r = ui
+                                        .add(
+                                            egui::Slider::new(&mut blades, 0.0..=10.0)
+                                                .step_by(1.0)
+                                                .text("blades"),
+                                        )
+                                        .on_hover_text(
+                                            "0 is a round iris. 3 and up gives the polygonal bokeh \
+                                             of a real lens — six is the classic hexagon.",
+                                        );
+                                    if r.changed() {
+                                        *dof_blades = blades.max(0.0) as u32;
+                                        cmd.inspector_changed = true;
+                                    }
+                                    if *dof_blades >= 3 {
+                                        cmd.inspector_changed |= ui
+                                            .add(
+                                                egui::Slider::new(dof_blade_rotation, 0.0..=180.0)
+                                                    .text("blade angle°"),
+                                            )
+                                            .on_hover_text("turn the polygon")
+                                            .changed();
+                                    }
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(dof_highlight, 0.0..=8.0).text("highlight bokeh"))
+                                        .on_hover_text(
+                                            "how much brighter-than-white pixels dominate the \
+                                             blur. 0 averages them away into grey; turn it up and \
+                                             a specular glint spreads into a visible disc. It \
+                                             reads the scene's real light, so it needs something \
+                                             genuinely brighter than white to work on.",
+                                        )
+                                        .changed();
+                                    let mut q = if *dof_quality == 0 { 16.0 } else { *dof_quality as f32 };
+                                    let r = ui
+                                        .add(egui::Slider::new(&mut q, 4.0..=64.0).step_by(1.0).text("samples"))
+                                        .on_hover_text(
+                                            "taps in the blur. More is smoother bokeh and costs \
+                                             linearly more; fewer is the chunky look, on purpose.",
+                                        );
+                                    if r.changed() {
+                                        *dof_quality = q.round().clamp(4.0, 64.0) as u32;
+                                        cmd.inspector_changed = true;
+                                    }
+                                    cmd.inspector_changed |= ui
+                                        .checkbox(dof_show_focus, "show the focus band")
+                                        .on_hover_text(
+                                            "a tuning view: cool where the near side is going \
+                                             soft, warm where the far side is, the picture itself \
+                                             where it is sharp. Which half of the band a pixel is \
+                                             on is the one thing you cannot read off a blurred \
+                                             frame.",
+                                        )
+                                        .changed();
+                                });
+                                if *dof_show_focus {
+                                    ui.colored_label(acc, "◐ showing the focus band — turn it off before you look at the art");
+                                }
+                                if (*dof_focus > 0.0 || !dof_focus_node.is_empty())
+                                    && *dof_max_blur <= 0.0
+                                {
+                                    ui.colored_label(acc, "⚠ max blur is 0 — nothing will look out of focus");
+                                }
+
+                                // ---- motion blur --------------------------------
+                                ui.separator();
+                                ui.strong("≈ Motion blur");
+                                ui.small("shows in the Game view");
+                                cmd.inspector_changed |= ui
+                                    .add(egui::Slider::new(motion_blur, 0.0..=1.0).text("shutter"))
+                                    .on_hover_text(
+                                        "How much of the frame's camera motion is smeared. 0 is off. \
+                                         0.5 is the 180° shutter a film camera has and is the one \
+                                         that reads as footage; 1 leaves the shutter open for the \
+                                         whole frame and is a stylistic choice.\n\nIt blurs CAMERA \
+                                         motion — a pan, a whip, a dolly, a roll. Something crossing \
+                                         a locked-off shot stays sharp.\n\nThe Scene view is left \
+                                         alone deliberately: you have to be able to place things \
+                                         while the camera is moving.",
+                                    )
+                                    .changed();
+                                if *motion_blur > 0.0 {
+                                    let mut taps =
+                                        if *motion_samples == 0 { 12.0 } else { *motion_samples as f32 };
+                                    if ui
+                                        .add(egui::Slider::new(&mut taps, 4.0..=32.0).text("samples"))
+                                        .on_hover_text(
+                                            "Taps along the streak. Too few and a fast pan bands \
+                                             into separate copies of the picture.",
+                                        )
+                                        .changed()
+                                    {
+                                        *motion_samples = taps.round().clamp(4.0, 32.0) as u32;
+                                        cmd.inspector_changed = true;
+                                    }
+                                }
                             }
                         }
                     }
@@ -2466,6 +3871,7 @@ impl EditorTabViewer<'_> {
                         if let Some(mat) = world.get_mut::<Material>(e) {
                             let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
                             cmd.inspector_changed |= res.changed;
+                            cmd.open_shader_graph = res.open_shader.or(cmd.open_shader_graph.take());
                             if res.remove {
                                 cmd.remove_material = Some(e);
                             }
@@ -2478,6 +3884,162 @@ impl EditorTabViewer<'_> {
                             }
                         }
                     });
+                }
+
+                // ===== The model's OWN materials =====
+                //
+                // An imported model arrives with a material per part, and until
+                // now the only way to see them was to select the model in the
+                // Assets panel (read-only) and the only way to edit one was to
+                // expand the model in the Hierarchy and find the right
+                // sub-object. So "give this model a normal map" or "make this
+                // model jitter" had no obvious door, and the obvious-looking one
+                // — adding a Material to the node — used to flatten every part
+                // to a single colour.
+                //
+                // Both are answered here: the whole list, on the node, editable,
+                // with the model-wide button beside it.
+                if let Some(Matter::Mesh { asset_path }) = world.get::<Matter>(e).cloned()
+                    && let Some(parts) = self.mesh_registry.get(&asset_path).map(|a| {
+                        // Collected up front: the rows below need `world` mutably,
+                        // and the asset is borrowed out of the registry.
+                        a.part_meta
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, m)| {
+                                a.override_key(i).map(|k| {
+                                    (k.to_string(), m.material.clone(), m.base_color, m.textured)
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    && !parts.is_empty()
+                {
+                    ui.separator();
+                    ui.strong("◑ Model materials");
+                    ui.small(
+                        "what this model was imported with. Overriding one changes it for \
+                         this node only — the model file is never touched.",
+                    );
+                    if world.get::<Material>(e).is_none() {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button("◑ Add Material (whole model)")
+                                .on_hover_text(
+                                    "one material over every part at once — the fast way to \
+                                     give a whole model a normal map, a roughness, or the \
+                                     retro artefacts.\n\nIts colour MULTIPLIES each part's \
+                                     own, so a fresh one changes nothing until you dial \
+                                     something in.",
+                                )
+                                .clicked()
+                            {
+                                cmd.add_material = Some(e);
+                            }
+                        });
+                    }
+                    // One row per sub-object, because that is what an override is
+                    // keyed by. A flattened prop's object name IS its material
+                    // name, so the two read the same there.
+                    let mut dedup: std::collections::BTreeSet<String> = Default::default();
+                    for (key, mat_name, base_color, textured) in parts {
+                        if !dedup.insert(key.clone()) {
+                            continue;
+                        }
+                        let overridden = world
+                            .get::<floptle_core::ObjectMaterials>(e)
+                            .is_some_and(|om| om.0.contains_key(&key));
+                        let mut clear = false;
+                        let mut make = false;
+                        ui.horizontal(|ui| {
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                            ui.painter().rect_filled(
+                                rect,
+                                2.0,
+                                egui::Color32::from_rgb(
+                                    (base_color[0] * 255.0) as u8,
+                                    (base_color[1] * 255.0) as u8,
+                                    (base_color[2] * 255.0) as u8,
+                                ),
+                            );
+                            ui.label(&key);
+                            if mat_name != key {
+                                ui.weak(format!("· {mat_name}"));
+                            }
+                            if textured {
+                                ui.small("🖼");
+                            }
+                            if overridden {
+                                clear = ui
+                                    .small_button("🗑")
+                                    .on_hover_text("back to the model's own look")
+                                    .clicked();
+                            } else {
+                                make = ui
+                                    .small_button("override")
+                                    .on_hover_text("give this part its own material")
+                                    .clicked();
+                            }
+                        });
+                        if make {
+                            let mut om = world
+                                .get::<floptle_core::ObjectMaterials>(e)
+                                .cloned()
+                                .unwrap_or_default();
+                            // Seeded with the part's imported colour, so
+                            // overriding is visibly a starting point and not a
+                            // reset to white.
+                            om.0.insert(key.clone(), floptle_core::Material::tinted(base_color));
+                            world.insert(e, om);
+                            cmd.inspector_changed = true;
+                        }
+                        if overridden {
+                            egui::CollapsingHeader::new("edit")
+                                .id_salt(("model_mat", e, &key))
+                                .show(ui, |ui| {
+                                    let mut save_as = None;
+                                    if let Some(mat) = world
+                                        .get_mut::<floptle_core::ObjectMaterials>(e)
+                                        .and_then(|om| om.0.get_mut(&key))
+                                    {
+                                        let res = material_props_ui(
+                                            ui,
+                                            mat,
+                                            self.materials,
+                                            self.asset_tree,
+                                            self.project_root,
+                                            self.mat_name_buf,
+                                            self.flsl_cache,
+                                            self.sdf_cache,
+                                            self.texture_settings,
+                                        );
+                                        cmd.inspector_changed |= res.changed;
+                                        cmd.open_shader_graph =
+                                            res.open_shader.or(cmd.open_shader_graph.take());
+                                        clear |= res.remove;
+                                        if let Some(name) = res.save_as {
+                                            save_as = Some((
+                                                name,
+                                                floptle_scene::MaterialDoc::from_material(mat),
+                                            ));
+                                        }
+                                    }
+                                    if save_as.is_some() {
+                                        cmd.save_material = save_as;
+                                    }
+                                });
+                        }
+                        if clear
+                            && let Some(om) = world.get_mut::<floptle_core::ObjectMaterials>(e)
+                        {
+                            om.0.remove(&key);
+                            if om.0.is_empty() {
+                                world.remove::<floptle_core::ObjectMaterials>(e);
+                            }
+                            cmd.inspector_changed = true;
+                        }
+                    }
                 }
 
                 // ===== Particle System (only when the node has one) =====
@@ -2853,8 +4415,30 @@ impl EditorTabViewer<'_> {
                                     .changed();
                                 cmd.inspector_changed |=
                                     ui.add(egui::Slider::new(&mut rb.restitution, 0.0..=1.0).text("bounce")).changed();
-                                cmd.inspector_changed |=
-                                    ui.add(egui::Slider::new(&mut rb.friction, 0.0..=1.0).text("friction")).changed();
+                                cmd.inspector_changed |= ui
+                                    .add(egui::Slider::new(&mut rb.friction, 0.0..=2.0).text("friction"))
+                                    .on_hover_text(
+                                        "Grip, as a coefficient. A ramp holds this body while \
+                                         tan(its angle) ≤ friction — so 0 is ice, 0.3 lets go \
+                                         at about 17°, 1 holds exactly 45°, and a surface \
+                                         grippier than that goes above 1 (rubber on rubber is \
+                                         around 1.5).\n\nIt opposes motion rather than \
+                                         capping it: a shoved crate slides and then stops.",
+                                    )
+                                    .changed();
+                                cmd.inspector_changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut rb.slope_limit, 0.0..=90.0)
+                                            .text("slope limit °"),
+                                    )
+                                    .on_hover_text(
+                                        "The steepest surface this body can stand on. Past it \
+                                         the body is not grounded, the surface reads as \
+                                         node.wallNormal instead of node.groundNormal, and it \
+                                         stops holding the body up — so a character slides off \
+                                         a cliff face however grippy its boots are.",
+                                    )
+                                    .changed();
                                 cmd.inspector_changed |= ui
                                     .checkbox(&mut rb.gravity, "affected by gravity")
                                     .on_hover_text("off = floats (still collides; a script can still move it)")
@@ -3165,6 +4749,43 @@ impl EditorTabViewer<'_> {
                 {
                     let has_collidable = world.get::<floptle_core::Collidable>(e).is_some()
                         || world.get::<floptle_core::MeshCollider>(e).is_some();
+                    // A tilemap you PAINTED SOLID and cannot stand on. The
+                    // warning existed, and it was printed to the Console at Play
+                    // — which is the one moment you are looking at the game and
+                    // not at the editor, and by then "I fall through the floor"
+                    // already reads as a physics bug. Say it here, next to the
+                    // collider section it is about, with the fix on it.
+                    //
+                    // Still not automatic: a solid tileset implying `Collidable`
+                    // would silently switch collision on in every project that
+                    // ever painted one, including the parallax backgrounds.
+                    if !has_collidable
+                        && world.get::<floptle_core::RigidBody>(e).is_none()
+                        && let Some(Matter::Tilemap { data, tileset, .. }) = world.get::<Matter>(e)
+                        && !tileset.is_empty()
+                        && let Some(set) = self.tiles.get(tileset)
+                        && floptle_tiles::solid_count(data, set) > 0
+                    {
+                        let n = floptle_tiles::solid_count(data, set);
+                        ui.separator();
+                        ui.colored_label(
+                            egui::Color32::from_rgb(255, 200, 80),
+                            format!("⚠ {n} solid squares, but nothing collides with this layer"),
+                        );
+                        ui.small(
+                            "This tilemap's tileset marks squares solid, and the layer has no \
+                             collider — so bodies fall straight through the floor you painted. \
+                             Tilemaps are not collidable by default because most projects have \
+                             background layers painted from the same sheet.",
+                        );
+                        if ui
+                            .button("▦  Make this layer solid")
+                            .on_hover_text("adds a Collidable component — the squares your tileset calls solid become real geometry on Play")
+                            .clicked()
+                        {
+                            cmd.set_collidable = Some((e, true));
+                        }
+                    }
                     if has_collidable {
                         let kind = match world.get::<Matter>(e) {
                             Some(Matter::Mesh { .. }) => "triangle mesh",
@@ -3869,6 +5490,7 @@ impl EditorTabViewer<'_> {
                         if let Some(mat) = world.get_mut::<Material>(e) {
                             let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
                             cmd.inspector_changed |= res.changed;
+                            cmd.open_shader_graph = res.open_shader.or(cmd.open_shader_graph.take());
                             if res.remove {
                                 cmd.remove_material = Some(e);
                             }
@@ -3890,6 +5512,15 @@ impl EditorTabViewer<'_> {
             if !open {
                 *self.show_material_editor = false;
             }
+        }
+
+        // ---- hand the edit to the rest of the selection ---------------------
+        // Runs every frame a multi-selection is up, including mid-drag, so a
+        // slider moves all of them live rather than snapping the others into
+        // place when the mouse comes up. Costs one comparison per selected node
+        // per component when nothing changed.
+        if let Some(snap) = multi {
+            snap.apply(world, self.selection);
         }
     }
 }
@@ -4352,7 +5983,7 @@ mod tests {
     fn auto_shows_what_it_inferred_and_why() {
         let layers = vec!["Default".to_string(), "Background".to_string()];
 
-        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0 }, true);
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() }, true);
         let (painted, _) = run_lighting_2d(&world, e, &layers);
         assert!(painted.contains("2D light"), "no row at all:\n{painted}");
         assert!(painted.contains("auto"), "the flag is not shown:\n{painted}");
@@ -4360,7 +5991,7 @@ mod tests {
         assert!(painted.contains("orthographic"), "…nor why:\n{painted}");
 
         // The same light in a 3D scene decides the other way, and says so.
-        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0 }, false);
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() }, false);
         let (painted, _) = run_lighting_2d(&world, e, &layers);
         assert!(painted.contains("→ 3D"), "a light in a perspective scene must read 3D:\n{painted}");
     }
@@ -4401,7 +6032,7 @@ mod tests {
     #[test]
     fn unticking_a_layer_keeps_the_rest() {
         let layers = vec!["Default".to_string(), "Terrain".to_string(), "Background".to_string()];
-        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0 }, true);
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() }, true);
         let (painted, _) = run_lighting_2d(&world, e, &layers);
         assert!(painted.contains("every layer"), "an untouched light must say it reaches all:\n{painted}");
 

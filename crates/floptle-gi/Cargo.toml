@@ -1,0 +1,12 @@
+[package]
+name = "floptle-gi"
+description = "Baked global illumination: an irradiance probe grid, the spherical-harmonic projection that fills it, and the .fgi file it is saved as."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+floptle-core = { path = "../floptle-core" } # math only (Vec3/Quat) — no ECS, no GPU

@@ -1476,12 +1476,34 @@ impl Editor {
         let kind = script_kind_of(path, &self.scripts_dir());
         let (params, ref_decls, strs) = self.script_host.script_defaults(Path::new(path));
         self.record();
-        let refs = ref_decls.into_iter().map(|(k, _)| (k, String::new())).collect();
-        let inst = ScriptInst { kind, enabled: true, params, refs, strs };
-        if let Some(scr) = self.world.get_mut::<Scripts>(e) {
-            scr.0.push(inst);
-        } else {
-            self.world.insert(e, Scripts(vec![inst]));
+        let refs: Vec<(String, String)> =
+            ref_decls.into_iter().map(|(k, _)| (k, String::new())).collect();
+        // Attaching to a multi-selection attaches to all of it — twenty enemies
+        // get their behaviour in one drag.
+        let group = self.selected_group(e);
+        // Across a group, a node already running this script is left alone
+        // rather than running it twice; on a single node two instances of one
+        // script with different params stays a legitimate thing to build.
+        let skip_dupes = group.len() > 1;
+        for e in group {
+            if self.world.get::<Transform>(e).is_none() {
+                continue;
+            }
+            let inst = ScriptInst {
+                kind: kind.clone(),
+                enabled: true,
+                params: params.clone(),
+                refs: refs.clone(),
+                strs: strs.clone(),
+            };
+            if let Some(scr) = self.world.get_mut::<Scripts>(e) {
+                if skip_dupes && scr.0.iter().any(|s| s.kind == inst.kind) {
+                    continue;
+                }
+                scr.0.push(inst);
+            } else {
+                self.world.insert(e, Scripts(vec![inst]));
+            }
         }
     }
 }

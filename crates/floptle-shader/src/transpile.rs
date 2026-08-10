@@ -223,6 +223,10 @@ pub(crate) enum EmitCtx {
     /// UI-element shaders: the UI pass's `VsOut` (uv across the element rect,
     /// its tint) + a group(2) param block; time rides `globals.viewport.w`.
     Ui,
+    /// Full-screen post passes: the post chain's `VsOut` (screen uv), the frame
+    /// and its depth on groups 0 and 1, and the shader's own knobs in a group(2)
+    /// param block. Time rides the chain's own params (`p.e.w`).
+    Post,
 }
 
 /// The preview transpiler's live-scalar registry: every literal number (and
@@ -346,6 +350,21 @@ impl<'a> Writer<'a> {
                         e.span,
                     ));
                 }
+                // A post pass owns the whole screen: `uv` is 0..1 across the
+                // frame, and time comes from the chain's params rather than the
+                // field globals (the post module has no field).
+                (EmitCtx::Post, Input::Uv) => "in.uv".into(),
+                (EmitCtx::Post, Input::Time) => "p.e.w".into(),
+                (EmitCtx::Post, _) => {
+                    return Err(TranspileError::new(
+                        format!(
+                            "`{}` is not available in post shaders — a full-screen pass has no \
+                             surface. Read the frame with sceneColor/sceneDepth/sceneNormal.",
+                            i.name()
+                        ),
+                        e.span,
+                    ));
+                }
                 (_, Input::Time) => "G.params.x".into(),
                 (EmitCtx::Fragment, Input::InstanceColor) => "in.color".into(),
                 // Sky shaders read the ray DIRECTION (`dir`, the fn's parameter).
@@ -380,8 +399,8 @@ impl<'a> Writer<'a> {
                 };
                 match self.ctx {
                     // Previews bind knobs at `P` for sky too (no globals array there).
-                    // Ui shaders bind their own `P` param block at group(2).
-                    EmitCtx::Fragment | EmitCtx::SkyPreview | EmitCtx::Ui => {
+                    // Ui and Post shaders bind their own `P` param block at group(2).
+                    EmitCtx::Fragment | EmitCtx::SkyPreview | EmitCtx::Ui | EmitCtx::Post => {
                         format!("P.u{u}{access}")
                     }
                     EmitCtx::Sdf { slot } => {
@@ -472,6 +491,21 @@ impl<'a> Writer<'a> {
                             ))
                         }
                     }
+                }
+                // The screen ops. Each takes an optional uv defaulting to this
+                // pixel's, so `sceneColor()` is the whole of a colour grade and
+                // `sceneColor(uv + off)` is the whole of a warp.
+                "sceneColor" | "sceneDepth" | "sceneNormal" => {
+                    let uv = match &call.args[0] {
+                        ResolvedArg::Default(_) => "in.uv".to_string(),
+                        a => self.emit_resolved(a, Some(Ty::Vec2))?,
+                    };
+                    let f = match op.name {
+                        "sceneColor" => "flsl_post_color",
+                        "sceneDepth" => "flsl_post_depth",
+                        _ => "flsl_post_normal",
+                    };
+                    Ok(format!("{f}({uv})"))
                 }
                 "litSurface" => {
                     let albedo = self.emit_resolved(&call.args[0], Some(Ty::Vec3))?;
@@ -866,6 +900,133 @@ pub fn transpile_ui(ir: &ShaderIr, ck: &Checked) -> Result<CompiledUi, Transpile
         line_map: w.line_map,
     })
 }
+
+/// A compiled Post-stage shader: a `fs_flsl_post` entry point over the post
+/// chain's full-screen `VsOut` + a group(2) params UBO. Concatenate as
+/// `POST_PRELUDE + POST_FIELD_SHIM + SUPPORT + chunk`.
+#[derive(Clone, Debug)]
+pub struct CompiledPost {
+    pub name: String,
+    pub chunk: String,
+    /// Exposed uniforms in param-block slot order (one vec4 each).
+    pub uniforms: Vec<ir::Uniform>,
+    /// chunk line (0-based) → `.flsl` source span, for naga error mapping.
+    pub line_map: Vec<(u32, Span)>,
+}
+
+impl CompiledPost {
+    /// Size in bytes of the group(2) params UBO (never zero — an empty block
+    /// still binds 16 bytes).
+    pub fn param_block_size(&self) -> u64 {
+        (self.uniforms.len().max(1) * 16) as u64
+    }
+
+    /// Pack uniform values (overrides where given, declared defaults otherwise).
+    pub fn pack_params(&self, overrides: &dyn Fn(&str) -> Option<[f32; 4]>) -> Vec<u8> {
+        let mut out = vec![0u8; self.param_block_size() as usize];
+        for (i, u) in self.uniforms.iter().enumerate() {
+            let v = overrides(&u.name).unwrap_or(u.default);
+            for (l, val) in v.iter().enumerate() {
+                out[i * 16 + l * 4..i * 16 + l * 4 + 4].copy_from_slice(&val.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// Map a 0-based chunk line to a `.flsl` span (naga errors).
+    pub fn flsl_span_of_chunk_line(&self, line: u32) -> Option<Span> {
+        self.line_map.iter().rev().find(|(l, _)| *l <= line).map(|(_, s)| *s)
+    }
+}
+
+/// Transpile a checked Post-stage shader into its WGSL chunk.
+pub fn transpile_post(ir: &ShaderIr, ck: &Checked) -> Result<CompiledPost, TranspileError> {
+    if ir.stage != Some(Stage::Post) {
+        return Err(TranspileError::new("not a post shader", Span::default()));
+    }
+    if !ir.textures.is_empty() {
+        return Err(TranspileError::new(
+            "post shaders can't declare texture slots yet — the frame, its depth and \
+             its normals are already bound",
+            Span::default(),
+        ));
+    }
+    if ir.uniforms.len() > MAX_UNIFORMS {
+        return Err(TranspileError::new(
+            format!("a shader can expose at most {MAX_UNIFORMS} uniforms"),
+            Span::default(),
+        ));
+    }
+
+    let mut w = Writer::new(ir, ck, EmitCtx::Post);
+    w.line(format!("// generated from shader `{}` — edit the .flsl, not this", ir.name), None);
+    w.line("struct FlslPostParams {".into(), None);
+    if ir.uniforms.is_empty() {
+        w.line("    _pad: vec4<f32>,".into(), None);
+    }
+    for (i, u) in ir.uniforms.iter().enumerate() {
+        w.line(format!("    u{i}: vec4<f32>, // {}", u.name), None);
+    }
+    w.line("};".into(), None);
+    w.line("@group(2) @binding(0) var<uniform> P: FlslPostParams;".into(), None);
+    w.line(String::new(), None);
+
+    w.line("fn flsl_post_surface(in: VsOut) -> vec4<f32> {".into(), None);
+    for (i, (name, root)) in ir.lets.iter().enumerate() {
+        let expr = w.emit(*root)?;
+        let ty = ck.ty(*root).wgsl();
+        w.line(format!("    let l{i}_{name}: {ty} = {expr};"), Some(ir.expr(*root).span));
+    }
+    let out = ir.outputs["color"];
+    let expr = w.emit(out)?;
+    let span = ir.expr(out).span;
+    match ck.ty(out) {
+        Ty::Vec4 => w.line(format!("    return {expr};"), Some(span)),
+        _ => w.line(format!("    return vec4<f32>({expr}, 1.0);"), Some(span)),
+    }
+    w.line("}".into(), None);
+    w.line(String::new(), None);
+
+    // The entry point. Alpha is forced to 1: a post pass REPLACES the pixel (it
+    // writes into the chain's next scratch target, not over the old one), so a
+    // shader that forgot about alpha would otherwise hand the rest of the chain
+    // a transparent frame and every later pass would read it as black.
+    w.line("@fragment".into(), None);
+    w.line("fn fs_flsl_post(in: VsOut) -> @location(0) vec4<f32> {".into(), None);
+    w.line("    let c = flsl_post_surface(in);".into(), None);
+    w.line("    return vec4<f32>(c.rgb, 1.0);".into(), None);
+    w.line("}".into(), None);
+
+    Ok(CompiledPost {
+        name: ir.name.clone(),
+        chunk: w.out,
+        uniforms: ir.uniforms.clone(),
+        line_map: w.line_map,
+    })
+}
+
+/// The post pass's module preamble — bind groups, the full-screen vertex stage,
+/// and the `sceneColor`/`sceneDepth`/`sceneNormal`/`screenTexel` helpers.
+///
+/// This is the REAL source, not a mirror: `PostStack` builds every custom post
+/// pipeline from `POST_PRELUDE + POST_FIELD_SHIM + SUPPORT + chunk` and the
+/// editor validates against the same text, so there is no second copy to drift.
+/// (`TEST_PRELUDE` and `UI_TEST_PRELUDE` are mirrors only because the raster and
+/// UI passes have a real module of their own that a chunk splices onto.)
+pub const POST_PRELUDE: &str = include_str!("post_prelude.wgsl");
+
+/// Field-symbol stand-ins the post module must append before the shared stdlib
+/// SUPPORT, for the same reason the UI pass needs [`UI_FIELD_SHIM`]: the
+/// support's engine-hook wrapper reads `G.ao_params`/`sdf_ao`, and a full-screen
+/// pass has no field bound. The hooks read as "off".
+pub const POST_FIELD_SHIM: &str = r#"
+struct PostFieldShim {
+    params: vec4<f32>,
+    ao_params: vec4<f32>,
+};
+var<private> G: PostFieldShim;
+fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
+"#;
 
 /// A naga diagnostic mapped back toward the `.flsl` source.
 #[derive(Clone, Debug)]

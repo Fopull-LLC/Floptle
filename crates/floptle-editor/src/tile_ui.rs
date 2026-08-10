@@ -2,7 +2,7 @@
 //! tileset editor.
 //!
 //! Laid out in the order you work in — LAYER, TOOL, PALETTE, TILE, AUTOTILE —
-//! with the same visual language as the ▦ Map tab (a rule under each section
+//! with the same visual language as the ▦ Model tab (a rule under each section
 //! title, equal-width chips for anything that picks a mode, equal-width buttons
 //! for anything that acts).
 //!
@@ -42,7 +42,7 @@ use floptle_tiles::{
 
 use crate::tile_edit::{TileStore, TileTool, TileTools};
 
-/// The measurements the panel is built on — matched to the ▦ Map tab so the two
+/// The measurements the panel is built on — matched to the ▦ Model tab so the two
 /// tile-ish panels do not look like they came from different programs.
 const LABEL_W: f32 = 58.0;
 const CHIP_W: f32 = 74.0;

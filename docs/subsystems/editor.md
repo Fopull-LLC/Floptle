@@ -174,6 +174,42 @@ Right in the Inspector / on drop, set the things the developer wants to be trivi
   surface snap so drawn footprints land cleanly. `SnapSettings` is configurable;
   hold a modifier to toggle snap on the fly.
 
+### Multi-select editing (v0.49)
+
+The Inspector shows the **last node picked** and edits it — and hands whatever it
+changed to the rest of the selection. Only what changed travels: set roughness on
+twelve crates and each keeps its own colour, texture and everything else.
+
+It works by DIFFERENCE, because an immediate-mode panel leaves no other record of
+what it touched: `multi_edit::Snapshot::take` clones the primary's components
+before the panel draws and `apply` compares them afterwards, field by field. Every
+struct's diff destructures **exhaustively** — no `..` — so adding a field to
+`Material` or `RigidBody` fails to compile there until someone decides whether it
+should travel. Three things deliberately do not: a `Terrain`/`MapMesh` id (two
+nodes on one field is data loss, not an edit), a scene singleton like the Skybox
+or PostProcess node, and a camera's `active` flag or render-target name (both are
+identities). `Transform` diffs per axis, or typing a height would align nothing.
+
+`Editor::selected_group(e)` is the other half: every ✚ / ✖ component button and
+the script-drop path loop over it, so "add a rigid body" with twelve selected
+means twelve rigid bodies.
+
+### The rig in the viewport (v0.49)
+
+A selected rigged mesh draws its skeleton in the Scene view — sticks between the
+joints, a dot on each, the selected one ringed — and **clicking a joint selects
+it**, so the transform gizmo poses it straight into the open clip. Only the
+selected mesh's rig is drawn: every rig at once buries the picture in white
+sticks, and the one being posed would be the hardest to find.
+
+Picking is `viz::pick_joint` over the projected joints within `BONE_PICK_PX`,
+nearest-to-camera winning a contested click, and it runs *before* the node pick —
+the rig is only on screen for a mesh already selected and is drawn over the
+model, so a click that lands on a joint meant the joint. Selecting a bone clears
+the node selection (they are mutually exclusive, the same swap the Hierarchy
+makes), and the overlay keys on the selection *plus* the bone's own mesh so the
+rig survives that clear. Under **Rig bones** in the gizmo filter menu.
+
 ## 5. Open in VSCode
 
 Scripts (`.lua`) and textual shaders (`.flsl`) open externally

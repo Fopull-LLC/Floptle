@@ -35,6 +35,11 @@
 // of marching the field behind it. Depth32Float binds as unfilterable float.
 @group(0) @binding(7) var prime_tex: texture_2d<f32>;
 
+// Baked GI probes (Matter::LightProbes): four texels per probe along x, holding
+// SH-L1 radiance plus the probe's own clearance. `textureLoad` only — the blend
+// in `gi_bounce` (field.wgsl) applies weights hardware filtering cannot.
+@group(0) @binding(9) var gi_tex: texture_3d<f32>;
+
 const PI: f32 = 3.14159265359;
 
 // The environment color along world ray direction `dir`: a flat color, or the equirect
@@ -195,15 +200,17 @@ fn sky_color(dir: vec3<f32>) -> vec3<f32> {
 // surface normal `n`. Smooth falloff to 0 at each light's range.
 fn point_diffuse(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     var acc = vec3<f32>(0.0);
+    if (G.gi_meta.y > 0.5) {
+        return acc; // "show only the bounce" — see key_light() in field.wgsl
+    }
     let count = min(u32(G.point_count.x), 16u);
     for (var i = 0u; i < count; i = i + 1u) {
         let lp = G.point_pos[i];
-        let to = lp.xyz - p;
-        let dist = length(to);
-        let range = max(lp.w, 0.0001);
-        let ndl = max(dot(n, to / max(dist, 1e-4)), 0.0);
-        let x = clamp(1.0 - dist / range, 0.0, 1.0);
-        acc = acc + G.point_color[i].rgb * (ndl * x * x);
+        // The emitter's SHAPE decides the direction, the softness and the
+        // distance; a point light returns the same three numbers it always did.
+        let a = area_terms(G.point_shape[i], G.point_rot[i], lp.xyz - p, n, n);
+        let x = clamp(1.0 - a.dist / max(lp.w, 0.0001), 0.0, 1.0);
+        acc = acc + G.point_color[i].rgb * (a.ndl * x * x);
     }
     return acc;
 }
@@ -686,7 +693,7 @@ fn fs(in: VOut) -> FsOut {
                 if (spar.z > 0.5) {
                     col = tinted + emissive; // unlit / fullbright
                 } else {
-                    let ambient = G.ambient.rgb * spar.w;
+                    let ambient = gi_ambient(p, n, G.ambient.rgb) * spar.w;
                     let kl = key_light(p, n, v, max(spar.x, 1.0), pix);
                     col = tinted * (ambient + kl.diffuse);
                     col = col + tinted * point_diffuse(p, n);
@@ -705,7 +712,7 @@ fn fs(in: VOut) -> FsOut {
                 if (G.terrain_params.z > 0.5) {
                     col = tinted + emissive; // unlit / fullbright
                 } else {
-                    let ambient = G.ambient.rgb * G.terrain_params.w;
+                    let ambient = gi_ambient(p, n, G.ambient.rgb) * G.terrain_params.w;
                     let kl = key_light(p, n, v, max(G.terrain_params.x, 1.0), pix);
                     col = tinted * (ambient + kl.diffuse);
                     col = col + tinted * point_diffuse(p, n); // placeable point lights
@@ -725,7 +732,7 @@ fn fs(in: VOut) -> FsOut {
                 if (bpar.z > 0.5) {
                     col = tinted + emissive; // unlit / fullbright
                 } else {
-                    let ambient = G.ambient.rgb * bpar.w;
+                    let ambient = gi_ambient(p, n, G.ambient.rgb) * bpar.w;
                     let kl = key_light(p, n, v, max(bpar.x, 1.0), pix);
                     col = tinted * (ambient + kl.diffuse);
                     col = col + tinted * point_diffuse(p, n); // placeable point lights
@@ -734,8 +741,9 @@ fn fs(in: VOut) -> FsOut {
                     col = (col + G.blob_rim[bi].rgb * rim_f) * occ + emissive;
                 }
             }
-            // Depth fog by camera-relative distance (p is camera-relative). The sky
-            // branch below stays UNFOGGED so a textured skybox reads crisp.
+            // Fog by camera-relative distance (p is camera-relative). The sky branch
+            // below takes the VOLUMETRIC layer (a medium the ray really crosses) but
+            // never the depth ramp, so a textured skybox still reads crisp.
             let fogged = apply_fog(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), p, pix);
             out.color = vec4<f32>(fogged, 1.0);
             out.depth = ndc_z;
@@ -748,7 +756,9 @@ fn fs(in: VOut) -> FsOut {
         // component falls back to the sky void colour, and negatives are clamped.
         var sky = sky_color(rd);
         sky = select(G.bg.rgb, sky, sky == sky);
-        out.color = vec4<f32>(max(sky, vec3<f32>(0.0)), 1.0);
+        // Volumetric fog reaches the sky (see `fog_sky`); the depth ramp does not.
+        let spix = vec2<u32>(u32(in.clip.x), u32(in.clip.y));
+        out.color = vec4<f32>(fog_sky(max(sky, vec3<f32>(0.0)), rd, spix), 1.0);
         out.depth = 1.0;
     }
     return out;

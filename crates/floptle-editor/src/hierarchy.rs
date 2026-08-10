@@ -65,6 +65,55 @@ impl<'a> EditorTabViewer<'a> {
             );
             ui.menu_button("✚ New", |ui| self.node_new_menu(ui, None));
         });
+
+        // ---- search ----------------------------------------------------------
+        //
+        // The scope only bites WHILE SEARCHING, and that is deliberate. Hiding
+        // switched-off nodes from the tree itself would take away the only place
+        // you can switch them back on — the disease, not the cure. But a search
+        // is you asking "where is the thing I am working on", and the thing you
+        // are working on is not the camera you retired last week.
+        ui.horizontal(|ui| {
+            ui.label("🔍");
+            let resp = ui.add(
+                egui::TextEdit::singleline(self.hier_search)
+                    .desired_width(120.0)
+                    .hint_text("find a node"),
+            );
+            if !self.hier_search.is_empty() && ui.small_button("✖").on_hover_text("clear").clicked()
+            {
+                self.hier_search.clear();
+            }
+            resp.on_hover_text("filter the tree by name (case-insensitive)");
+            let scope = *self.hier_scope;
+            egui::ComboBox::from_id_salt("hier_scope")
+                .width(78.0)
+                .selected_text(match scope {
+                    floptle_script::FindScope::Enabled => "enabled",
+                    floptle_script::FindScope::All => "all",
+                    floptle_script::FindScope::Disabled => "off only",
+                })
+                .show_ui(ui, |ui| {
+                    for (s, label, tip) in [
+                        (
+                            floptle_script::FindScope::Enabled,
+                            "enabled",
+                            "skip switched-off nodes — the default, and what find() does in a \
+                             script now",
+                        ),
+                        (floptle_script::FindScope::All, "all", "switched-off nodes too"),
+                        (
+                            floptle_script::FindScope::Disabled,
+                            "off only",
+                            "ONLY switched-off nodes — what did I retire and forget about?",
+                        ),
+                    ] {
+                        if ui.selectable_label(scope == s, label).on_hover_text(tip).clicked() {
+                            *self.hier_scope = s;
+                        }
+                    }
+                });
+        });
         ui.separator();
 
         // Build the parent⏵children tree from the world (owned copies, so the
@@ -110,6 +159,46 @@ impl<'a> EditorTabViewer<'a> {
                     stack.extend(kids.iter().rev());
                 }
             }
+        }
+
+        // A search shows a FLAT list of matches, not a tree with the misses
+        // pruned. Pruned-tree filtering keeps the indentation of a structure you
+        // are not currently looking at, and a match nine levels down arrives at
+        // the right-hand edge of the panel where its name is elided away.
+        let query = self.hier_search.trim().to_ascii_lowercase();
+        if !query.is_empty() {
+            let scope = *self.hier_scope;
+            let hits: Vec<Entity> = order
+                .iter()
+                .copied()
+                .filter(|e| {
+                    names.get(e).is_some_and(|n| n.to_ascii_lowercase().contains(&query))
+                        && match scope {
+                            floptle_script::FindScope::All => true,
+                            floptle_script::FindScope::Enabled => {
+                                !floptle_core::is_disabled(self.world, *e)
+                            }
+                            floptle_script::FindScope::Disabled => {
+                                floptle_core::is_disabled(self.world, *e)
+                            }
+                        }
+                })
+                .collect();
+            ui.small(match hits.len() {
+                0 => "no matches".to_string(),
+                1 => "1 match".to_string(),
+                n => format!("{n} matches"),
+            });
+            let empty: HashMap<Entity, Vec<Entity>> = HashMap::new();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for e in &hits {
+                    // No children map: a search result is a row, not a subtree —
+                    // expanding one here would re-introduce the indentation the
+                    // flat list exists to avoid.
+                    self.hierarchy_node(ui, *e, &empty, &names, &hits, 0);
+                }
+            });
+            return;
         }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -205,9 +294,9 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             pick = Some(MatterDoc::Empty);
             ui.close();
         }
-        ui.menu_button("▦ Map shape", |ui| {
+        ui.menu_button("▦ Model shape", |ui| {
             for shape in crate::map_edit::MapShape::ALL {
-                let label = shape.label().trim_start_matches("Map ");
+                let label = shape.label().trim_start_matches("Model ");
                 if ui.button(format!("▦ {label}")).clicked() {
                     cmd.add_map_shape = Some(shape);
                     ui.close();
@@ -216,7 +305,7 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
         })
         .response
         .on_hover_text(
-            "editable blockout geometry — the ▦ Map tool (key 8) edits its \
+            "editable blockout geometry — the ▦ Model tool (key 8) edits its \
              faces/edges/verts, extrudes, and assigns per-face materials",
         );
         ui.separator();
@@ -229,7 +318,12 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             ui.close();
         }
         if ui.button("● Point Light").on_hover_text("a placeable omni light (color / intensity / range)").clicked() {
-            pick = Some(MatterDoc::PointLight { color: [1.0, 0.95, 0.85], intensity: 1.0, range: 10.0 });
+            pick = Some(MatterDoc::PointLight {
+                color: [1.0, 0.95, 0.85],
+                intensity: 1.0,
+                range: 10.0,
+                shape: Default::default(),
+            });
             ui.close();
         }
         if ui.button("⬇ Gravity Volume").on_hover_text("physics gravity: Down (level) or Radial (planet)").clicked() {

@@ -164,6 +164,39 @@ pub struct RaymarchGlobals {
     /// Volumetric fog: x = noise scale (world units), y = time (s, drifts the
     /// noise), z = camera WORLD y, w = enabled (0/1).
     pub vol_fog_b: [f32; 4],
+    /// Baked GI (`Matter::LightProbes`): x = on (0/1), y = leak rejection
+    /// (multiples of the probe spacing, 0 = off), z = normal bias (ditto),
+    /// w = the smallest probe spacing in world units — the unit both of those
+    /// are measured in, resolved once here so the shader never has to derive it
+    /// from the grid.
+    ///
+    /// Intensity is NOT here: it is baked into the probe texels on upload, so a
+    /// shading point pays for it zero times per pixel instead of once.
+    pub gi_meta: [f32; 4],
+    /// Baked GI: xyz = the probe lattice's counts, w = unused.
+    pub gi_dims: [f32; 4],
+    /// Baked GI: xyz = the volume's CAMERA-RELATIVE center, w unused.
+    pub gi_center: [f32; 4],
+    /// Baked GI: xyz = the volume's half-extent (world units), w unused.
+    pub gi_half: [f32; 4],
+    /// Volumetric light injection: x = amount (0 = the flat fog colour, the
+    /// pre-injection look, reached exactly and not approximately), y = phase
+    /// anisotropy g (+ = forward-scattering, the bloom around the sun), z = march
+    /// steps, w = march the sun shadow at every step (0/1) — the shafts, and
+    /// essentially the whole cost of the effect.
+    pub vol_fog_c: [f32; 4],
+    /// Each point light's EMITTER: `[kind, a, b, flags]` — 0 point, 1 sphere
+    /// (a = radius), 2 rect (a/b = half width/height, flag 1 = two-sided),
+    /// 3 disk (a = radius, flag 1 = two-sided), 4 tube (a = half length,
+    /// b = radius). Zero is a point, which is the light every scene already had.
+    pub point_shape: [[f32; 4]; 16],
+    /// Each point light's world orientation (xyzw quaternion).
+    pub point_rot: [[f32; 4]; 16],
+    /// Contact shadows: x = on (0/1), y = how far the screen-space ray reaches
+    /// in world units, z = steps, w = strength. The occluder-thickness window
+    /// and the start bias are derived from the reach rather than exposed —
+    /// there is one number here somebody would ever want to drag.
+    pub contact: [f32; 4],
 }
 
 impl Default for RaymarchGlobals {
@@ -235,6 +268,14 @@ impl Default for RaymarchGlobals {
             star_color: [[0.0; 4]; 4],
             vol_fog_a: [0.0; 4],
             vol_fog_b: [0.0; 4],
+            gi_meta: [0.0; 4],
+            gi_dims: [0.0; 4],
+            gi_center: [0.0; 4],
+            gi_half: [0.0; 4],
+            vol_fog_c: [0.0, 0.0, 16.0, 0.0],
+            point_shape: [[0.0; 4]; 16],
+            point_rot: [[0.0, 0.0, 0.0, 1.0]; 16],
+            contact: [0.0, 0.3, 12.0, 1.0],
         }
     }
 }
@@ -348,6 +389,10 @@ pub struct Raymarch {
     /// (shadows received + true SDF AO). Rebuilt with the atlas.
     field_layout: wgpu::BindGroupLayout,
     field_bind: wgpu::BindGroup,
+    /// The scene's baked GI, if any — owned here because it rides the SHARED
+    /// field bind group, which is what lets one upload light the raymarch pass,
+    /// every raster mesh and every `.flsl` material at once.
+    gi: crate::gi::GiVolume,
     /// The 1x1 "no mesh anywhere" fallback prime view (R32Float = 1.0) that
     /// `bind` always carries — unprimed draws (offscreen previews, probes) and
     /// the mask pass march uncapped.
@@ -459,6 +504,8 @@ impl Raymarch {
                     },
                     count: None,
                 },
+                // Baked GI probes — the same entry the shared field group uses.
+                crate::gi::probe_tex_entry(9),
             ],
         });
 
@@ -520,13 +567,17 @@ impl Raymarch {
         let terrain_tex = make_terrain_array(gpu, &[]);
         let sky_tex = make_sky_texture(gpu, None);
         let prime_fallback = make_prime_fallback(gpu);
+        // No bake yet: a 4x1x1 of zeroes, so the binding is valid and reads black.
+        let gi = crate::gi::GiVolume::empty(gpu);
         let bind = make_bind(
             device, &bind_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &terrain_tex,
-            &tile_sampler, &tile_sampler_nearest, &sky_tex, &prime_fallback,
+            &tile_sampler, &tile_sampler_nearest, &sky_tex, &prime_fallback, &gi.tex,
         );
         let field_layout = field_bind_layout(device);
-        let field_bind =
-            make_field_bind(device, &field_layout, &globals_buf, &dist_tex, &color_tex, &sampler);
+        let field_bind = make_field_bind(
+            device, &field_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &gi.tex,
+            &prime_fallback,
+        );
 
         Self {
             pipeline,
@@ -545,6 +596,7 @@ impl Raymarch {
             bind,
             field_layout,
             field_bind,
+            gi,
             prime_fallback,
             prime_view: None,
             bind_primed: None,
@@ -641,7 +693,7 @@ impl Raymarch {
                 entry_point: Some("fs"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: gpu.surface_format(),
+                    format: gpu.scene_format(),
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -724,9 +776,26 @@ impl Raymarch {
         Self::assembled_source(None, Some(sky_fn), support)
     }
 
-    /// Rebuild `bind` (fallback prime) and, when primed, `bind_primed` — after
-    /// any bound resource (atlas, palette, sky, prime) changes.
+    /// Rebuild `bind` (fallback prime), `bind_primed` when primed, AND the shared
+    /// field bind — after any bound resource (atlas, palette, sky, prime, GI)
+    /// changes.
+    ///
+    /// The field bind is rebuilt HERE rather than at each caller because it now
+    /// carries the depth prepass, which changes on window resize through a path
+    /// (`set_depth_prime`) that has nothing to do with the atlas or the probes.
+    /// Three callers each remembering to rebuild it is the kind of rule that
+    /// holds until the fourth one.
     fn rebuild_binds(&mut self, device: &wgpu::Device) {
+        self.field_bind = make_field_bind(
+            device,
+            &self.field_layout,
+            &self.globals_buf,
+            &self._dist_tex,
+            &self._color_tex,
+            &self.sampler,
+            &self.gi.tex,
+            self.prime_view.as_ref().unwrap_or(&self.prime_fallback),
+        );
         self.bind = make_bind(
             device,
             &self.bind_layout,
@@ -739,6 +808,7 @@ impl Raymarch {
             &self.tile_sampler_nearest,
             &self.sky_tex,
             &self.prime_fallback,
+            &self.gi.tex,
         );
         self.bind_primed = self.prime_view.as_ref().map(|v| {
             make_bind(
@@ -753,6 +823,7 @@ impl Raymarch {
                 &self.tile_sampler_nearest,
                 &self.sky_tex,
                 v,
+                &self.gi.tex,
             )
         });
     }
@@ -764,6 +835,23 @@ impl Raymarch {
     /// frame's data — the raymarch pass draws before the raster pass anyway.
     pub fn field_bind(&self) -> &wgpu::BindGroup {
         &self.field_bind
+    }
+
+    /// Swap in a baked GI volume (or clear it back to none).
+    ///
+    /// This is an UPLOAD, not a bake: `leak`, `intensity` and the debug view are
+    /// resolved into the texels on the way in, so dragging any of those sliders
+    /// re-uploads a few hundred kilobytes and re-lights the scene immediately,
+    /// while the expensive thing — the probes themselves — is untouched.
+    pub fn set_gi(&mut self, gpu: &Gpu, volume: crate::gi::GiVolume) {
+        self.gi = volume;
+        self.rebuild_binds(&gpu.device);
+    }
+
+    /// The scene's baked GI volume — for stamping its uniforms into a frame's
+    /// globals ([`GiVolume::apply`](crate::gi::GiVolume::apply)).
+    pub fn gi(&self) -> &crate::gi::GiVolume {
+        &self.gi
     }
 
     /// Write `globals` (atlas slots patched) WITHOUT drawing — for frames where no
@@ -855,9 +943,6 @@ impl Raymarch {
             let (tight_min, tight_max) = full_content_bounds(b);
             self.slots.push(VolSlot { origin: *origin, dims: b.dims, tight_min, tight_max });
         }
-        self.field_bind = make_field_bind(
-            &gpu.device, &self.field_layout, &self.globals_buf, &dist_tex, &color_tex, &self.sampler,
-        );
         self._dist_tex = dist_tex;
         self._color_tex = color_tex;
         self.rebuild_binds(&gpu.device);
@@ -1118,10 +1203,37 @@ pub(crate) fn field_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout 
             // splat shader textureLoads it so texture transitions blend WEIGHTS of
             // real slots instead of interpolating slot indices.
             vol_tex_entry(3),
+            // Baked GI probes. Part of the FIELD group rather than a group of its
+            // own because the bounce belongs to the same shared shading model as
+            // the shadows and the AO: one bind, and raster meshes, terrain, blobs
+            // and .flsl materials all get it at the same moment.
+            crate::gi::probe_tex_entry(4),
+            // The opaque-mesh depth prepass, for CONTACT shadows. The raymarch
+            // pass has its own copy at group(0) binding 7 (where it caps the
+            // march); this is the same texture reaching the raster pass, so a
+            // mesh's own silhouette shadows what it is standing on. Depth32Float
+            // binds as an unfilterable float; the 1×1 fallback is how the shader
+            // knows there is no prepass this frame.
+            prime_tex_entry(5),
         ],
     })
 }
 
+/// The depth-prepass binding, in both layouts that carry it.
+pub(crate) fn prime_tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn make_field_bind(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -1129,9 +1241,12 @@ pub(crate) fn make_field_bind(
     dist: &wgpu::Texture,
     color: &wgpu::Texture,
     sampler: &wgpu::Sampler,
+    gi: &wgpu::Texture,
+    prime: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+    let gi_view = gi.create_view(&wgpu::TextureViewDescriptor::default());
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("sdf-field"),
         layout,
@@ -1140,6 +1255,8 @@ pub(crate) fn make_field_bind(
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&dist_view) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&color_view) },
+            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&gi_view) },
+            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(prime) },
         ],
     })
 }
@@ -1170,8 +1287,10 @@ fn make_bind(
     tile_sampler_nearest: &wgpu::Sampler,
     sky: &wgpu::Texture,
     prime: &wgpu::TextureView,
+    gi: &wgpu::Texture,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
+    let gi_view = gi.create_view(&wgpu::TextureViewDescriptor::default());
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
     let terrain_view = terrain.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -1191,6 +1310,7 @@ fn make_bind(
             wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(tile_sampler_nearest) },
             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&sky_view) },
             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(prime) },
+            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&gi_view) },
         ],
     })
 }

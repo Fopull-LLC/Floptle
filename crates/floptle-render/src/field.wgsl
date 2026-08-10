@@ -105,6 +105,24 @@ struct Globals {
     // top falloff, noise amount), b = (noise scale, time, camera WORLD y, on).
     vol_fog_a: vec4<f32>,
     vol_fog_b: vec4<f32>,
+    // Baked GI (Matter::LightProbes). Appended at the END so this struct stays
+    // byte-identical to the Rust `RaymarchGlobals`.
+    gi_meta: vec4<f32>,     // x on, y leak (× spacing), z normal bias (× spacing), w min spacing
+    gi_dims: vec4<f32>,     // xyz probe counts
+    gi_center: vec4<f32>,   // xyz camera-relative volume center
+    gi_half: vec4<f32>,     // xyz volume half-extent
+    // Volumetric light injection. Appended at the END so this struct stays
+    // byte-identical to the Rust `RaymarchGlobals`.
+    // x = amount (0 = the flat fog colour, i.e. exactly the pre-injection look),
+    // y = phase anisotropy g (+ = forward, blooms around the sun),
+    // z = march steps, w = march the sun shadow at each step (0/1) — the shafts.
+    vol_fog_c: vec4<f32>,
+    // Area lights: each point light's EMITTER shape and orientation. Appended at
+    // the END so this struct stays byte-identical to the Rust `RaymarchGlobals`.
+    point_shape: array<vec4<f32>, 16>, // [kind, a, b, flags] — see `area_terms`
+    point_rot: array<vec4<f32>, 16>,   // world orientation (xyzw quaternion)
+    // Contact shadows: x = on, y = reach in world units, z = steps, w = strength.
+    contact: vec4<f32>,
 };
 
 // A point mapped into Field Shape `i`'s local frame: un-translate (positions
@@ -608,6 +626,334 @@ fn vol_fog_density(p: vec3<f32>) -> f32 {
     return d;
 }
 
+// ---- Area lights ---------------------------------------------------------------
+//
+// Every placeable light carries the SHAPE it emits from, and `Point` is the
+// zero-size case: with no size the whole of this collapses to the plain
+// `max(dot(n,l),0)` × range falloff a point light always had — numerically, not
+// just in spirit, so a scene of point lights shades exactly as it did.
+//
+// Two things come out, wanted in two different places and honest about being
+// different in kind:
+//
+//   `ndl`   — what replaces `N·L` for DIFFUSE. Its DIRECTION is exact: the
+//             polygon's vector irradiance `w = (1/2π) Σ θᵢ ûᵢ` is linear in the
+//             normal, so one loop over the edges gives the direction the emitter
+//             actually lights from — which for a wide rect standing close is not
+//             the direction of its centre. The terminator is then softened by the
+//             emitter's apparent size, and THAT part is a fit, not a derivation.
+//
+//   `l`,    — where the specular highlight should think the light is: the point
+//   `spread`  on the emitter closest to the mirror direction, and how far to
+//             smear the lobe. This is the "representative point" approximation.
+//             It is why a bar light streaks and a window light broadens, and it
+//             is not energy-exact.
+//
+//   `dist`  — the distance for range falloff, measured to the emitter's SURFACE.
+//             A three-metre bar whose centre is out of range still has an end
+//             beside you.
+
+struct AreaTerms {
+    ndl: f32,
+    l: vec3<f32>,
+    dist: f32,
+    spread: f32,
+};
+
+fn quat_rot(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+
+// One edge's contribution to a polygon's vector irradiance: the angle it
+// subtends, along the normal of the wedge it sweeps.
+fn edge_vector(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
+    let cr = cross(a, b);
+    let len = length(cr);
+    if (len < 1e-7) {
+        return vec3<f32>(0.0); // degenerate: the corners coincide from here
+    }
+    return (cr / len) * acos(clamp(dot(a, b), -1.0, 1.0));
+}
+
+// The terminator softened by how big the emitter looks from here. `s` is its
+// apparent angular half-size; at 0 this is exactly `max(ndl, 0)`, so a point
+// light is not a special case that has to be remembered.
+fn wrap_ndl(ndl: f32, s: f32) -> f32 {
+    return clamp((ndl + s) / (1.0 + s), 0.0, 1.0);
+}
+
+// The point on the segment `c ± ax·half` closest to the ray `ro + rd·t`, as a
+// position. Used for a tube's representative point.
+fn closest_on_segment_to_ray(c: vec3<f32>, ax: vec3<f32>, half: f32, rd: vec3<f32>) -> vec3<f32> {
+    // Ray starts at the origin (everything here is relative to the shading point).
+    let d = dot(ax, rd);
+    let denom = 1.0 - d * d;
+    var t = 0.0;
+    if (abs(denom) > 1e-5) {
+        t = (dot(c, rd) * d - dot(c, ax)) / denom;
+    }
+    return c + ax * clamp(t, -half, half);
+}
+
+fn area_terms(shape: vec4<f32>, rot: vec4<f32>, to: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> AreaTerms {
+    var out: AreaTerms;
+    let d0 = max(length(to), 1e-4);
+    out.l = to / d0;
+    out.dist = d0;
+    out.spread = 0.0;
+    out.ndl = max(dot(n, out.l), 0.0);
+    let kind = i32(shape.x + 0.5);
+    if (kind == 0) {
+        return out; // a point: nothing above this line needed changing
+    }
+    // The mirror direction — where the highlight wants to find the emitter.
+    let r = reflect(-v, n);
+
+    if (kind == 1 || kind == 3) {
+        // SPHERE (1) and DISK (3). Both light from their centre and both soften
+        // the terminator by their apparent size. The disk additionally has a
+        // BACK: a surface behind it gets nothing, and the closer to edge-on you
+        // stand the less of it you see, which is the `front` term.
+        let radius = max(shape.y, 1e-4);
+        out.spread = clamp(radius / d0, 0.0, 1.0);
+        var vis = 1.0;
+        if (kind == 3) {
+            // `to` points AT the light, so a point on the emitting side sees the
+            // emitter's forward (-Z) running back toward it.
+            let front = dot(quat_rot(rot, vec3<f32>(0.0, 0.0, -1.0)), -out.l);
+            vis = select(max(front, 0.0), abs(front), shape.w > 0.5);
+            if (vis <= 0.0) {
+                out.ndl = 0.0;
+                return out;
+            }
+        }
+        out.ndl = wrap_ndl(dot(n, out.l), out.spread) * vis;
+        // Representative point: the point on the sphere nearest the mirror ray.
+        let centre_to_ray = r * dot(to, r) - to;
+        let closest = to + centre_to_ray * clamp(radius / max(length(centre_to_ray), 1e-4), 0.0, 1.0);
+        out.l = normalize(closest);
+        out.dist = max(d0 - radius, 1e-3);
+        return out;
+    }
+
+    if (kind == 2) {
+        // RECT. The four corners, relative to the shading point.
+        let ax = quat_rot(rot, vec3<f32>(1.0, 0.0, 0.0)) * max(shape.y, 1e-4);
+        let ay = quat_rot(rot, vec3<f32>(0.0, 1.0, 0.0)) * max(shape.z, 1e-4);
+        let face = normalize(cross(ax, ay)); // the node's +Z; forward is -Z
+        let front = dot(face, out.l); // > 0 ⇒ the point is on the emitting side
+        if (front <= 0.0 && shape.w < 0.5) {
+            out.ndl = 0.0;
+            return out;
+        }
+        let p0 = normalize(to - ax - ay);
+        let p1 = normalize(to + ax - ay);
+        let p2 = normalize(to + ax + ay);
+        let p3 = normalize(to - ax + ay);
+        let w = edge_vector(p0, p1) + edge_vector(p1, p2) + edge_vector(p2, p3) + edge_vector(p3, p0);
+        let wl = length(w);
+        if (wl < 1e-6) {
+            out.ndl = 0.0;
+            return out;
+        }
+        // The direction the emitter actually lights from — exact, and not the
+        // direction of its centre once it is wide and close.
+        //
+        // The polygon integral is signed by WINDING, so seen from behind a
+        // two-sided emitter it comes out pointing away from the light. Orienting
+        // it toward the emitter fixes that, and is true of vector irradiance in
+        // general: light arrives FROM the light.
+        let dir = normalize(w * select(-1.0, 1.0, dot(w, to) > 0.0));
+        let half = max(shape.y, shape.z);
+        out.spread = clamp(half / d0, 0.0, 1.0);
+        out.ndl = wrap_ndl(dot(n, dir), out.spread);
+        // Range falloff measures to the emitter's nearest point, and that has to
+        // stay VIEW-INDEPENDENT — a light that dims as you walk around it
+        // without moving is not a light anybody can place.
+        let nu = clamp(dot(-to, ax) / max(dot(ax, ax), 1e-6), -1.0, 1.0);
+        let nv = clamp(dot(-to, ay) / max(dot(ay, ay), 1e-6), -1.0, 1.0);
+        out.dist = max(length(to + ax * nu + ay * nv), 1e-3);
+        // Representative point: where the mirror ray meets the emitter's plane,
+        // pinned inside its extents. This one IS view-dependent — that is the
+        // whole idea, and it drives the highlight only.
+        let denom = dot(r, face);
+        var rp = to;
+        if (abs(denom) > 1e-4) {
+            let t = dot(to, face) / denom;
+            if (t > 0.0) {
+                let hit = r * t - to; // the plane hit, in the emitter's own frame
+                let u = clamp(dot(hit, ax) / max(dot(ax, ax), 1e-6), -1.0, 1.0);
+                let vv = clamp(dot(hit, ay) / max(dot(ay, ay), 1e-6), -1.0, 1.0);
+                rp = to + ax * u + ay * vv;
+            }
+        }
+        out.l = normalize(rp);
+        return out;
+    }
+
+    // TUBE (4): a capsule along the node's local X. It lights from the nearest
+    // point on its line, which is what makes a long bar wrap a wall the way a
+    // point at its centre never would.
+    let ax = quat_rot(rot, vec3<f32>(1.0, 0.0, 0.0));
+    let half = max(shape.y, 1e-4);
+    let radius = max(shape.z, 1e-4);
+    // The point on the tube's AXIS nearest the shading point (which is the
+    // origin here): the segment is `to + ax·t`, so |to + ax·t|² is least at
+    // t = -to·ax, pinned to the tube's own length.
+    let cp = to + ax * clamp(-dot(to, ax), -half, half);
+    let cd = max(length(cp), 1e-4);
+    // A bar lights from its length as well as its thickness — standing beside a
+    // three-metre strip, light arrives from a wide arc, not from one spot.
+    out.spread = clamp((radius + half * 0.5) / cd, 0.0, 1.0);
+    out.ndl = wrap_ndl(dot(n, cp / cd), out.spread);
+    // Representative point: the point on the axis nearest the mirror ray, pulled
+    // out to the tube's surface toward us — which is what streaks the highlight
+    // along the bar instead of pinning it to the middle.
+    let rep = closest_on_segment_to_ray(to, ax, half, r);
+    let rl = max(length(rep), 1e-4);
+    out.l = normalize(rep * (1.0 - min(radius / rl, 0.9)));
+    out.dist = max(cd - radius, 1e-3);
+    return out;
+}
+
+// ---- Volumetric light injection ------------------------------------------------
+//
+// Henyey-Greenstein phase, NORMALISED so isotropic (g = 0) reads 1.0 instead of
+// the physical 1/4π. Everything else in this engine is lit in "a surface facing
+// the light reads 1" units; a phase arriving at 0.08 would make the amount
+// slider mean something different from every other lighting knob.
+fn fog_phase(cos_t: f32, g_in: f32) -> f32 {
+    let g = clamp(g_in, -0.95, 0.95);
+    let g2 = g * g;
+    let d = max(1.0 + g2 - 2.0 * g * cos_t, 1e-4);
+    return (1.0 - g2) / pow(d, 1.5);
+}
+
+// The light scattering back toward the camera at camera-relative `p`, for a ray
+// travelling along `rd`. `amb` is the ambient/bounce term, sampled ONCE per ray
+// by the caller: a probe fetch is 32 texture loads, which per step would cost
+// more than the shadow march it sits next to, and the bounce varies far more
+// slowly along a ray than the media does.
+//
+// There is no N·L here and that is not an omission — a mote of fog has no
+// facing. What replaces it is the phase function, which is why the anisotropy
+// knob does the work the surface normal does everywhere else.
+fn fog_inscatter(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
+    let g = G.vol_fog_c.y;
+    // Shafts cost one shadow march per step per pixel — the single most
+    // expensive thing in the fog, and the only thing that draws the beam.
+    let march = G.vol_fog_c.w > 0.5 && G.shadow_params.x > 0.5;
+    var lit = amb;
+    let ns = u32(G.star_meta.x);
+    if (ns == 0u) {
+        let l = sun_dir_at(p);
+        var sh = vec3<f32>(1.0);
+        if (march) {
+            // n = l: no surface to lift off, so the normal-offset term degenerates
+            // to a small nudge along the ray, which is exactly what is wanted.
+            sh = shadow_post(light_vis(p, l, l), pix);
+        }
+        lit += G.light_color.rgb * sh * fog_phase(dot(rd, l), g);
+    } else {
+        for (var i = 0u; i < min(ns, 4u); i++) {
+            let l = star_dir_at(i, p);
+            var sh = vec3<f32>(1.0);
+            if (march) {
+                sh = shadow_post(light_vis(p, l, l), pix);
+            }
+            lit += star_col_at(i, p) * sh * fog_phase(dot(rd, l), g);
+        }
+    }
+    // Placeable point lights: no march (they are unshadowed fill everywhere else
+    // in the engine too), so a lamp costs a distance and a phase.
+    let pc = min(u32(G.point_count.x), 16u);
+    for (var i = 0u; i < pc; i = i + 1u) {
+        let to = G.point_pos[i].xyz - p;
+        // Fog takes the emitter's DISTANCE and DIRECTION but not its `ndl` —
+        // there is no surface here to be facing anything. A long bar therefore
+        // still lights the air along its whole length.
+        let a = area_terms(G.point_shape[i], G.point_rot[i], to, -rd, -rd);
+        let x = clamp(1.0 - a.dist / max(G.point_pos[i].w, 1e-4), 0.0, 1.0);
+        if (x <= 0.0) {
+            continue;
+        }
+        lit += G.point_color[i].rgb * (x * x) * fog_phase(dot(rd, a.l), g);
+    }
+    return lit;
+}
+
+// One volumetric-fog ray: single scattering from the camera to `t_max` along
+// `rd`. The caller composites `behind * transmittance + scattered`.
+//
+// With the amount at 0 the in-scattered radiance is the constant fog colour, and
+// then `scattered = fog_color * (1 - transmittance)` exactly, so the composite
+// collapses to `mix(behind, fog_color, 1 - T)` — the same expression the flat
+// volumetric fog used, not an approximation of it.
+struct FogMarch {
+    scattered: vec3<f32>,
+    transmittance: f32,
+};
+
+fn fog_march(rd: vec3<f32>, t_max: f32, pix: vec2<u32>) -> FogMarch {
+    var out: FogMarch;
+    out.scattered = vec3<f32>(0.0);
+    out.transmittance = 1.0;
+    if (t_max <= 0.0) {
+        return out;
+    }
+    let steps = u32(clamp(G.vol_fog_c.z, 2.0, 64.0));
+    let dt = t_max / f32(steps);
+    let jitter = ign(pix); // per-pixel start offset — the banding hider
+    let amt = clamp(G.vol_fog_c.x, 0.0, 1.0);
+    let gain = max(G.vol_fog_c.x, 1.0); // past 1 the slider brightens rather than blends
+    // "Show only the bounce" (the LightProbes tuning view) switches the injected
+    // direct light off here, the same way `key_light` does for surfaces.
+    let lit_on = amt > 0.0 && G.gi_meta.y < 0.5;
+    var amb = G.ambient.rgb;
+    if (lit_on) {
+        amb = gi_ambient(rd * (t_max * 0.5), -rd, G.ambient.rgb);
+    }
+    for (var i = 0u; i < steps; i = i + 1u) {
+        let p = rd * ((f32(i) + jitter) * dt);
+        let sigma = vol_fog_density(p);
+        if (sigma <= 1e-5) {
+            continue;
+        }
+        var radiance = G.fog_color.rgb;
+        if (lit_on) {
+            // The fog colour is the media's ALBEDO once light is injected: what
+            // it scatters is the light that reaches it, tinted by its own colour.
+            radiance = G.fog_color.rgb * mix(vec3<f32>(1.0), fog_inscatter(p, rd, amb, pix) * gain, amt);
+        }
+        // The fraction of this slab's light that gets out, attenuated by
+        // everything already in front of it.
+        let a = 1.0 - exp(-sigma * dt);
+        out.scattered += out.transmittance * a * radiance;
+        out.transmittance *= 1.0 - a;
+    }
+    return out;
+}
+
+// Volumetric fog over a ray that hit NOTHING. The depth ramp deliberately leaves
+// the sky crisp — it is a stylistic distance ramp, not a medium — but a fog
+// LAYER is something the ray really does pass through on the way out of the
+// world, and leaving it out is what put a hard seam at the horizon and hid every
+// shaft that had sky behind it.
+fn fog_sky(color: vec3<f32>, rd: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
+    if (G.fog_params.z < 0.5 || G.vol_fog_b.w < 0.5) {
+        return color;
+    }
+    var t_max = max(G.fog_params.y, 1.0); // the "max distance" fence
+    if (rd.y > 1e-3) {
+        // An upward ray LEAVES the layer at a known height, so march to there
+        // and no further — most sky pixels cost a fraction of the fence.
+        let top = G.vol_fog_a.y + G.vol_fog_a.z;
+        t_max = min(t_max, max((top - G.vol_fog_b.z) / rd.y, 0.0));
+    }
+    let m = fog_march(rd, t_max, pix);
+    return color * m.transmittance + m.scattered;
+}
+
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     // Aerial perspective first: atmosphere + clouds BETWEEN the camera and this
     // surface (haze over a planet seen from orbit, cloud decks over its disc).
@@ -615,32 +961,30 @@ fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     if (G.fog_params.z < 0.5) {
         return color2;
     }
-    var f = 0.0;
-    if (G.vol_fog_b.w > 0.5) {
-        // VOLUMETRIC: march camera → surface accumulating optical depth. Few
-        // steps + a per-pixel jitter of the start offset hide the banding.
-        let dist = length(pos);
-        let steps = 10u;
-        let dt = dist / f32(steps);
-        let dir = pos / max(dist, 1e-4);
-        let jitter = ign(pix);
-        var od = 0.0;
-        for (var i = 0u; i < steps; i = i + 1u) {
-            let t = (f32(i) + jitter) * dt;
-            od = od + vol_fog_density(dir * t) * dt;
-        }
-        f = 1.0 - exp(-od);
-    } else {
-        let denom = max(G.fog_params.y - G.fog_params.x, 1e-4);
-        f = clamp((length(pos) - G.fog_params.x) / denom, 0.0, 1.0);
-    }
-    // Optional dither of the fog factor to break up 8-bit banding on slow gradients.
-    // Strength rides in the spare fog_color.w lane (0 = off); mode in fog_params.w
-    // (0 = Bayer 4×4, 1 = interleaved-gradient noise). A sub-percent nudge is enough.
+    // Optional dither to break up 8-bit banding on slow gradients. Strength rides
+    // in the spare fog_color.w lane (0 = off); mode in fog_params.w (0 = Bayer
+    // 4×4, 1 = interleaved-gradient noise). A sub-percent nudge is enough.
     let amp = G.fog_color.w;
+    let dith = select(bayer4(pix), ign(pix), G.fog_params.w > 0.5);
+    if (G.vol_fog_b.w > 0.5) {
+        // VOLUMETRIC: march camera → surface, scattering light in as it goes.
+        let dist = length(pos);
+        let m = fog_march(pos / max(dist, 1e-4), dist, pix);
+        // The dither scales the whole result rather than nudging the blend
+        // factor: a clear pixel has nothing to break up, and an additive nudge
+        // there would darken it (there is no fog colour left to mix toward once
+        // the scattered term carries the colour).
+        var k = 1.0;
+        if (amp > 0.0) {
+            k = max(1.0 + (dith - 0.5) * amp * 0.12, 0.0);
+        }
+        let f = clamp((1.0 - m.transmittance) * k, 0.0, 1.0);
+        return color2 * (1.0 - f) + m.scattered * k;
+    }
+    let denom = max(G.fog_params.y - G.fog_params.x, 1e-4);
+    var f = clamp((length(pos) - G.fog_params.x) / denom, 0.0, 1.0);
     if (amp > 0.0) {
-        let d = select(bayer4(pix), ign(pix), G.fog_params.w > 0.5);
-        f = clamp(f + (d - 0.5) * amp * 0.06, 0.0, 1.0);
+        f = clamp(f + (dith - 0.5) * amp * 0.06, 0.0, 1.0);
     }
     return mix(color2, G.fog_color.rgb, f);
 }
@@ -969,6 +1313,110 @@ fn sun_dir_at(p: vec3<f32>) -> vec3<f32> {
     return normalize(G.light_dir.xyz);
 }
 
+// ---- Baked global illumination (Matter::LightProbes) ---------------------------
+//
+// A lattice of probes over a box, each holding the light arriving from every
+// direction as SH-L1. The four coefficients of a probe sit side by side along x
+// in one 3D texture (`gi_tex`, declared by each host module), read with
+// `textureLoad` only: the eight-probe blend below applies its own weights, and
+// hardware trilinear cannot apply a leak test, so there is no filtering to lose.
+//
+// This is a transliteration of `BakedGi::sample` in the floptle-gi crate, which
+// is where the weighting is unit-tested. If you change one, change both — the
+// Rust side is the one with the tests that say what "does not leak through a
+// wall" means.
+
+fn gi_texel(ix: vec3<i32>, c: i32) -> vec4<f32> {
+    return textureLoad(gi_tex, vec3<i32>(ix.x * 4 + c, ix.y, ix.z), 0);
+}
+
+// The baked bounce at camera-relative point `p` on a surface facing `n`:
+// rgb = the value that multiplies albedo, a = coverage (0 outside the volume,
+// fading in over the box's outer tenth so its edge is not a visible seam).
+fn gi_bounce(p: vec3<f32>, n: vec3<f32>) -> vec4<f32> {
+    if (G.gi_meta.x < 0.5) {
+        return vec4<f32>(0.0);
+    }
+    let sp = max(G.gi_meta.w, 1e-4);
+    // Step off the surface first. A shading point sits exactly ON the geometry,
+    // which is the one place where "which side of this wall am I on" is
+    // genuinely ambiguous; half a cell along the normal is not.
+    let bp = p + n * (G.gi_meta.z * sp);
+    let h = max(G.gi_half.xyz, vec3<f32>(1e-4));
+    let local = (bp - G.gi_center.xyz) / h;
+    let m = max(max(abs(local.x), abs(local.y)), abs(local.z));
+    let coverage = 1.0 - clamp((m - 0.9) / 0.1, 0.0, 1.0);
+    if (coverage <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let dims = max(G.gi_dims.xyz, vec3<f32>(2.0));
+    let t = clamp(local * 0.5 + 0.5, vec3<f32>(0.0), vec3<f32>(1.0)) * (dims - 1.0);
+    let base = floor(t);
+    let frac = t - base;
+
+    var c0 = vec3<f32>(0.0);
+    var c1 = vec3<f32>(0.0);
+    var c2 = vec3<f32>(0.0);
+    var c3 = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var k = 0u; k < 8u; k++) {
+        let off = vec3<f32>(f32(k & 1u), f32((k >> 1u) & 1u), f32((k >> 2u) & 1u));
+        let ixf = min(base + off, dims - 1.0);
+        let ix = vec3<i32>(ixf);
+        let tri = mix(1.0 - frac.x, frac.x, off.x)
+            * mix(1.0 - frac.y, frac.y, off.y)
+            * mix(1.0 - frac.z, frac.z, off.z);
+        // Where that probe actually is, so the surface can ask whether it is
+        // even on the right side to be lighting it.
+        let pw = G.gi_center.xyz - h + (ixf / (dims - 1.0)) * 2.0 * h;
+        let to = pw - bp;
+        let l2 = dot(to, to);
+        var dir = n;
+        if (l2 > 1e-12) {
+            dir = to * inverseSqrt(l2);
+        }
+        // Wrap shading, squared: a probe behind the surface cannot be lighting
+        // it. Softened rather than cut off, so a wall sliding past a probe plane
+        // does not pop.
+        let facing = max(dot(n, dir) * 0.5 + 0.5, 0.0);
+        let wrap = facing * facing + 0.05;
+        let e0 = gi_texel(ix, 0);
+        // `.w` is the probe's validity, already resolved against the volume's
+        // leak setting when the texture was uploaded — a probe with no clearance
+        // around it is inside geometry and lights nothing.
+        let w = tri * wrap * e0.w;
+        if (w > 0.0) {
+            c0 += e0.rgb * w;
+            c1 += gi_texel(ix, 1).rgb * w;
+            c2 += gi_texel(ix, 2).rgb * w;
+            c3 += gi_texel(ix, 3).rgb * w;
+            wsum += w;
+        }
+    }
+    if (wsum <= 1e-6) {
+        return vec4<f32>(0.0);
+    }
+    // The cosine convolution (π for band 0, 2π/3 for band 1) and the Lambert
+    // 1/π, folded into two constants. Clamped, because a truncated SH fit dips
+    // negative opposite a strong lobe and negative ambient is a black smear.
+    let inv = 1.0 / wsum;
+    let e = 0.28209479 * c0 * inv
+        + (0.48860251 * 2.0 / 3.0) * (n.x * c1 + n.y * c2 + n.z * c3) * inv;
+    return vec4<f32>(max(e, vec3<f32>(0.0)), coverage);
+}
+
+// The ambient term a surface actually gets: the baked bounce where a probe
+// volume covers it, the scene's flat ambient where none does.
+//
+// REPLACES rather than adds. A flat ambient is a stand-in for the bounce, so
+// keeping both double-counts exactly the light the bake just measured — and the
+// tell is that a scene looks *washed out* after baking, which reads as the bake
+// being wrong rather than as the old patch still being applied.
+fn gi_ambient(p: vec3<f32>, n: vec3<f32>, flat_ambient: vec3<f32>) -> vec3<f32> {
+    let gi = gi_bounce(p, n);
+    return mix(flat_ambient, gi.rgb, gi.a);
+}
+
 // ---- Stars mode (Lighting `stars`): luminous celestial bodies ARE the key
 // lights. Up to 4 reach the uniforms; irradiance falls off with the inverse
 // square of the distance (capped near the star), so far sides of planets go
@@ -1005,7 +1453,8 @@ fn star_shadow(i: u32, p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> 
     if (G.shadow_params.x < 0.5) {
         return vec3<f32>(1.0);
     }
-    return shadow_post(light_vis(p, n, star_dir_at(i, p)), pix);
+    let l = star_dir_at(i, p);
+    return shadow_post(min(light_vis(p, n, l), contact_vis(p, n, l, pix)), pix);
 }
 
 // The full key-light response at a point: Σ over stars (or the one legacy
@@ -1022,6 +1471,14 @@ fn key_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, shininess: f32, pix: vec2
     var out: KeyLight;
     out.diffuse = vec3<f32>(0.0);
     out.spec = vec3<f32>(0.0);
+    // "Show only the bounce" (the LightProbes node's tuning view). Killing the
+    // key light HERE rather than at each shading site is what makes it one line:
+    // raster meshes, terrain, blobs, field shapes and .flsl materials all shade
+    // through this function, so they all go dark together and what is left on
+    // screen is exactly the baked light and the things that emit.
+    if (G.gi_meta.y > 0.5) {
+        return out;
+    }
     let ns = u32(G.star_meta.x);
     if (ns == 0u) {
         let l = sun_dir_at(p);
@@ -1052,12 +1509,98 @@ fn key_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, shininess: f32, pix: vec2
     return out;
 }
 
+// ---- Contact shadows -----------------------------------------------------------
+//
+// The marched field shadow knows about terrain, blobs, baked level meshes and
+// collider PROXIES — and a proxy is a box or a capsule, so a character casts the
+// shadow of a capsule. At arm's length that reads as an object floating: the
+// contact between a foot and the floor is exactly where the proxy is least like
+// the thing it stands for.
+//
+// This closes that gap from the other end. It marches the opaque depth prepass
+// in SCREEN space over a short distance toward the light, so anything on screen
+// occludes with its true silhouette, whatever it is made of and however it is
+// posed — no proxy, no bake, no second gather. What it cannot do is shadow from
+// something off-screen or hidden behind something else, which is why it is a
+// short-range companion to the field march and not a replacement for it.
+//
+// The prepass's own 1×1 fallback is the "no prepass this frame" signal: reading
+// the bound texture's size beats a uniform flag that a resize path could forget
+// to clear.
+fn contact_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>, pix: vec2<u32>) -> f32 {
+    if (G.contact.x < 0.5) {
+        return 1.0;
+    }
+    let dims = textureDimensions(prime_tex, 0);
+    if (dims.x <= 1u || dims.y <= 1u) {
+        return 1.0; // offscreen previews and probes: no prepass, no contact
+    }
+    let reach = max(G.contact.y, 1e-3);
+    let steps = u32(clamp(G.contact.z, 2.0, 32.0));
+    let dt = reach / f32(steps);
+    // Start off the surface, or every pixel shadows itself. A FIXED lift, not one
+    // scaled by the reach: tie it to the reach and turning the reach up lifts the
+    // ray's start over the very thing it was meant to find, so the knob stops
+    // being monotonic — a longer trace finds LESS.
+    let bias = 0.02;
+    let ro = p + n * bias;
+    // How far behind a visible surface still counts as "inside it".
+    //
+    // Depth alone cannot tell "I am inside a thick pillar" from "I am in front of
+    // a wall on the far side of the room", so this number is the whole judgement
+    // call. It scales with the REACH, which is short by design: a trace that only
+    // looks 35 cm ahead can afford to believe that anything within 35 cm behind
+    // what it crossed is the same object, and that is what lets a solid pillar
+    // cast rather than being written off as scenery.
+    let thickness = max(reach, dt * 3.0) + 0.05;
+    let jitter = ign(pix); // the step offset, so banding becomes noise
+    let fdims = vec2<f32>(dims);
+    for (var i = 0u; i < steps; i = i + 1u) {
+        let q = ro + l * ((f32(i) + jitter) * dt);
+        let clip = G.view_proj * vec4<f32>(q, 1.0);
+        if (clip.w <= 0.0) {
+            break; // behind the eye
+        }
+        let ndc = clip.xyz / clip.w;
+        if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0) {
+            break; // off screen: no evidence either way, and guessing is worse
+        }
+        let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        let texel = vec2<i32>(clamp(uv * fdims, vec2<f32>(0.0), fdims - vec2<f32>(1.0)));
+        let depth = textureLoad(prime_tex, texel, 0).x;
+        if (depth >= 1.0) {
+            continue; // nothing was drawn here
+        }
+        // Compare in WORLD distance, not in depth: the depth buffer's units are
+        // nonlinear, so a thickness expressed in them means a different number of
+        // metres at every distance — which is how a screen-space shadow ends up
+        // tuned for one part of a level and broken in the next.
+        let sp = G.inv_view_proj * vec4<f32>(ndc.xy, depth, 1.0);
+        let surface = sp.xyz / sp.w;
+        let behind = length(q) - length(surface);
+        // `behind > bias`: the ray has passed BEHIND whatever is drawn here.
+        // `behind < thickness`: and not so far behind that it is a different
+        // object entirely — without that, a wall in the distance would shadow
+        // everything standing in front of it. This pair is the whole art of a
+        // screen-space trace: too tight and the shadow breaks into stripes, too
+        // loose and every surface shadows the room behind it.
+        if (behind > bias && behind < thickness) {
+            return 1.0 - clamp(G.contact.w, 0.0, 1.0);
+        }
+    }
+    return 1.0;
+}
+
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     if (G.shadow_params.x < 0.5) {
         return vec3<f32>(1.0);
     }
     let l = sun_dir_at(p);
-    var vis = light_vis(p, n, l);
+    // `min`, and BEFORE the styling: a contact shadow is the same shadow seen
+    // from closer up, so it takes the same tint, strength and posterize the
+    // marched one does. Two shadow terms with two different looks would read as
+    // two shadows.
+    var vis = min(light_vis(p, n, l), contact_vis(p, n, l, pix));
     // Retro styling: posterize the penumbra into N bands; Bayer-dither between
     // adjacent bands when dither is on (quantize 2 + dither ≈ the PS1 edge).
     let bands = G.shadow_tint.w;

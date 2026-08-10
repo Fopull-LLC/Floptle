@@ -285,6 +285,149 @@ mod tests {
         assert!(body.grounded, "should be grounded");
     }
 
+    /// A tilted plane whose downhill direction is +X, and a sphere on it.
+    fn ramp_world(degrees: f32) -> PhysicsWorld {
+        let theta = degrees.to_radians();
+        let normal = Vec3::new(theta.sin(), theta.cos(), 0.0);
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(Plane { point: Vec3::ZERO, normal }));
+        w
+    }
+
+    /// **The friction contract.** A ramp holds a body while `tan(angle) ≤
+    /// friction` and lets it go above that — a fact about the ramp, not about
+    /// the solver.
+    ///
+    /// What this replaces: friction used to be a per-contact velocity
+    /// multiplier, so gravity re-added a little downhill speed every step and
+    /// the multiplier only ever scaled it. Nothing ever held. Every crate on
+    /// every ramp crept downhill forever, at a rate that depended on the frame
+    /// rate, and no amount of friction stopped it.
+    #[test]
+    fn a_ramp_holds_a_body_up_to_its_friction_angle_and_lets_go_past_it() {
+        // 20° needs tan(20°) ≈ 0.36 to hold.
+        for (mu, holds) in [(0.6f32, true), (0.2, false)] {
+            let mut w = ramp_world(20.0);
+            let mut body = Body::sphere(Vec3::new(0.0, 2.0, 0.0), 0.5);
+            body.friction = mu;
+            let b = w.add_body(body);
+            simulate(&mut w, 1.0); // land
+            let settled = w.bodies[b].pos.x;
+            simulate(&mut w, 3.0);
+            let travelled = w.bodies[b].pos.x - settled;
+            if holds {
+                assert!(travelled < 0.05, "friction {mu} must hold a 20° ramp, slid {travelled}");
+            } else {
+                assert!(travelled > 1.0, "friction {mu} must let go of a 20° ramp, slid {travelled}");
+            }
+        }
+    }
+
+    /// The same grip at 60 Hz and at 240 Hz. The old multiplier was applied once
+    /// per contact per relaxation pass, so the frame rate silently retuned every
+    /// surface in the game.
+    #[test]
+    fn friction_does_not_depend_on_the_frame_rate() {
+        let travel = |hz: f32| {
+            let mut w = ramp_world(30.0);
+            let mut body = Body::sphere(Vec3::new(0.0, 2.0, 0.0), 0.5);
+            body.friction = 0.2;
+            let b = w.add_body(body);
+            let dt = 1.0 / hz;
+            for _ in 0..(4.0 * hz) as usize {
+                w.step(dt);
+            }
+            w.bodies[b].pos.x
+        };
+        let (slow, fast) = (travel(60.0), travel(240.0));
+        assert!(slow > 1.0 && fast > 1.0, "it slides at both rates: {slow} vs {fast}");
+        let rel = (slow - fast).abs() / slow.max(fast);
+        assert!(rel < 0.12, "the same friction at 60 and 240 Hz: {slow} vs {fast}");
+    }
+
+    /// Standing in a corner is not three times as grippy as standing on open
+    /// floor. Friction is spent once per step, so the number of colliders a body
+    /// happens to touch cannot change how slippery the world is.
+    #[test]
+    fn touching_more_surfaces_does_not_multiply_friction() {
+        let slide = |walls: bool| {
+            let mut w = ramp_world(20.0);
+            if walls {
+                // Two side walls the sphere is wedged between, along the slide
+                // direction — contact, but nothing that resists moving downhill.
+                for z in [-1.0f32, 1.0] {
+                    w.add_collider(Box::new(Plane {
+                        point: Vec3::new(0.0, 0.0, z * 0.99),
+                        normal: Vec3::new(0.0, 0.0, -z),
+                    }));
+                }
+            }
+            let mut body = Body::sphere(Vec3::new(0.0, 2.0, 0.0), 0.5);
+            body.friction = 0.2;
+            let b = w.add_body(body);
+            simulate(&mut w, 3.0);
+            w.bodies[b].pos.x
+        };
+        let (open, wedged) = (slide(false), slide(true));
+        assert!(open > 1.0, "it slides on open ground: {open}");
+        assert!(
+            (open - wedged).abs() / open < 0.2,
+            "the walls must not brake it: open {open} vs wedged {wedged}"
+        );
+    }
+
+    /// Ground too steep to stand on stops carrying the body, so it slides off
+    /// however grippy it is. That is what the slope limit buys — without it,
+    /// "you can't stand here" would be a label the physics ignored.
+    #[test]
+    fn ground_past_the_slope_limit_cannot_be_held_however_high_the_friction() {
+        let mut w = ramp_world(50.0);
+        let mut body = Body::sphere(Vec3::new(0.0, 2.0, 0.0), 0.5);
+        body.friction = 1.0; // would hold a 45° ramp
+        body.slope_limit = 40f32.to_radians(); // …but this is not standable
+        let b = w.add_body(body);
+        simulate(&mut w, 3.0);
+        assert!(!w.bodies[b].grounded, "50° is past a 40° limit");
+        assert!(w.bodies[b].pos.x > 1.0, "so it slides: x = {}", w.bodies[b].pos.x);
+        assert!(w.bodies[b].wall_normal.is_some(), "and it reads as a wall, not a floor");
+
+        // The same ramp with the limit raised past it: now it is ground, and
+        // friction 1.0 holds a 50° slope.
+        let mut w = ramp_world(50.0);
+        let mut body = Body::sphere(Vec3::new(0.0, 2.0, 0.0), 0.5);
+        body.friction = 1.5; // tan(50°) ≈ 1.19
+        body.slope_limit = 70f32.to_radians();
+        let b = w.add_body(body);
+        simulate(&mut w, 1.0);
+        let settled = w.bodies[b].pos.x;
+        simulate(&mut w, 3.0);
+        assert!(w.bodies[b].grounded, "50° is within a 70° limit");
+        assert!(
+            w.bodies[b].pos.x - settled < 0.1,
+            "and grip holds it: slid {}",
+            w.bodies[b].pos.x - settled
+        );
+    }
+
+    /// A body driven by a script still moves: friction opposes motion, it does
+    /// not clamp it. The old multiplier killed a set velocity in a handful of
+    /// steps, which is why every controller had to re-set it every frame.
+    #[test]
+    fn a_shove_across_flat_ground_carries_and_then_stops() {
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        let (v, i) = floor_quad(0.0, 60.0);
+        w.add_collider(Box::new(TriMeshCollider::new(&v, &i)));
+        let mut body = Body::sphere(Vec3::new(0.0, 0.5, 0.0), 0.5);
+        body.friction = 0.2;
+        let b = w.add_body(body);
+        simulate(&mut w, 0.5); // settle
+        w.bodies[b].vel.x = 8.0; // one shove
+        simulate(&mut w, 0.5);
+        assert!(w.bodies[b].pos.x > 2.0, "it travels: x = {}", w.bodies[b].pos.x);
+        simulate(&mut w, 8.0);
+        assert!(w.bodies[b].vel.x.abs() < 0.1, "and comes to rest: v = {}", w.bodies[b].vel.x);
+    }
+
     #[test]
     fn sphere_slides_down_a_slope() {
         // A frictionless plane tilted ~20° (normal toward +X, so downhill is +X): a

@@ -74,6 +74,21 @@ impl Editor {
         self.selection = self.world.query::<Matter>().map(|(e, _)| e).collect();
     }
 
+    /// Who an Inspector button acts on: the whole selection when `e` is the node
+    /// the panel was showing, otherwise just `e`.
+    ///
+    /// Every ✚ / ✖ component button hands back the node it was drawn for, which
+    /// is the primary. With twelve crates selected, "add a rigid body" plainly
+    /// means twelve rigid bodies — but a button drawn for some *other* node (an
+    /// asset row, a bone) still gets exactly the node it named.
+    pub(crate) fn selected_group(&self, e: Entity) -> Vec<Entity> {
+        if self.selection.len() > 1 && self.selection.contains(&e) {
+            self.selection.clone()
+        } else {
+            vec![e]
+        }
+    }
+
     /// Selected entities that are real Matter nodes (excludes the Lighting node).
     pub(crate) fn selected_matter(&self) -> Vec<Entity> {
         self.selection.iter().copied().filter(|&e| self.world.get::<Matter>(e).is_some()).collect()
@@ -280,6 +295,7 @@ impl Editor {
                 | Matter::PointLight { .. }
                 | Matter::GravityVolume { .. }
                 | Matter::WaterVolume { .. }
+                | Matter::LightProbes { .. }
                 | Matter::Skybox { .. }
                 | Matter::PostProcess { .. } => None,
             };

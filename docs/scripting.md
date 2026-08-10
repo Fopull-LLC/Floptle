@@ -1044,7 +1044,8 @@ every step, so a change takes effect immediately with no reset or teleport.
 
 | `getcomponent("RigidBody")` | Meaning (Inspector: ◆ Rigidbody) |
 |---|---|
-| `friction` | Surface friction 0..1 (0 = frictionless — ice). |
+| `friction` | Grip, as a coefficient: a ramp holds this body while `tan(its angle) ≤ friction`. 0 is ice, 0.3 lets go at about 17°, 1 holds exactly 45°, and a grippier surface goes above 1. |
+| `slopeLimit` | The steepest surface this body can stand on, in degrees (60 by default). Past it there is no ground under it and no grip holds it. |
 | `restitution` | Bounciness 0..1 (0 = no bounce). |
 | `gravity` | Gravity pull on this body (assign `true`/`false`; reads back 1/0). |
 | `shape` | Body shape: 0 = sphere, 1 = capsule, 2 = box. |

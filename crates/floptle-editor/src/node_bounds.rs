@@ -100,6 +100,7 @@ pub(crate) fn local_radius(matter: &Matter, m: Measured) -> Option<f32> {
         | Matter::PointLight { .. }
         | Matter::GravityVolume { .. }
         | Matter::FieldShape { .. }
+        | Matter::LightProbes { .. }
         | Matter::Skybox { .. }
         | Matter::PostProcess { .. } => None,
     }

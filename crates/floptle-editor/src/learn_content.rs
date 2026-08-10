@@ -1179,7 +1179,7 @@ of.
   `Player`, and turn the capsule's rendering off. If it's rigged, give it an
   Animation Controller and drive it from the body's speed — `thirdPerson.lua`
   in the shipped scripts does exactly this and is worth reading.
-- **Real level geometry.** The **▦ Map** tab builds proper blockout geometry
+- **Real level geometry.** The **▦ Model** tab builds proper blockout geometry
   with proper collision, which beats a hundred stretched cubes.
 - **Sound.** A coin with no sound is half a coin. `node:sound()` and the
   **≣ Mixer** tab.
@@ -1237,7 +1237,7 @@ in a minute to check they stop you.
 
 ## Do this with the Map tool instead, if you like
 
-The **▦ Map** tab draws blockout geometry properly: rooms, corridors, steps,
+The **▦ Model** tab draws blockout geometry properly: rooms, corridors, steps,
 with collision that matches what you see. For a real project it's the right
 tool. Cubes are fine for today.",
             code: None,

@@ -42,6 +42,15 @@ use mlua::{Lua, RegistryKey, Table};
 
 /// Queued `node:setShaderParam(...)` writes: (entity index, uniform name, vec4 lanes).
 type ShaderParamSets = Rc<RefCell<Vec<(u32, String, [f32; 4])>>>;
+/// `node:setShaderTexture(slot, path)` writes, queued per frame: (entity, slot
+/// name, texture ref). The ref is a project-relative image path, an `rt:` render
+/// target, or the empty string to clear the slot.
+type ShaderTextureSets = Rc<RefCell<Vec<(u32, String, String)>>>;
+/// `node:setScreenShader(name, on)` toggles, queued per frame: (entity, the
+/// screen shader's file stem, on). Its own queue rather than a magic uniform
+/// name, because a shader is free to declare a knob called `enabled` and the
+/// two must not mean the same thing.
+type ScreenShaderToggles = Rc<RefCell<Vec<(u32, String, bool)>>>;
 
 /// `(script key name, why the host keeps it)` — see [`ScriptHost::set_reserved_keys`].
 type ReservedKeys = Rc<RefCell<Vec<(String, String)>>>;
@@ -410,6 +419,11 @@ pub struct ScriptHost {
     /// name, vec4 lanes), drained by the editor into the node's Material or UI
     /// ElementSpec `shader_params` (the per-frame shader drivers then upload).
     shader_param_sets: ShaderParamSets,
+    /// See [`ShaderTextureSets`]. Separate from the uniform queue because a
+    /// texture write is a REBIND, not a buffer write — the two cost different
+    /// things and the driver treats them differently.
+    shader_texture_sets: ShaderTextureSets,
+    screen_shader_toggles: ScreenShaderToggles,
     /// The physics colliders for THIS frame, so `raycast(...)` works inside a script. The
     /// editor lends the sim's colliders before running scripts and takes them back after.
     colliders: Rc<RefCell<Vec<floptle_physics::AnchoredCollider>>>,
@@ -970,6 +984,77 @@ pub(crate) struct SceneMirror {
     dirty: std::collections::HashSet<u32>,
 }
 
+/// Whether a `find*` call may return switched-off nodes.
+///
+/// Enabled-only is the DEFAULT, and it is the whole point: a node you switched
+/// off in the Hierarchy is one you have decided is not part of the scene right
+/// now. Its scripts do not run, physics skips it, it does not draw — but every
+/// `find` in the engine handed it back anyway, so an old camera and an old
+/// player kept being adopted by scripts that had no way to know they were
+/// looking at a corpse. "Off" has to mean off in the place that does the looking.
+///
+/// The escape hatch stays, because a disabled node is a legitimate template: a
+/// parked prefab you clone, a spare rig, a menu you turn on later.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FindScope {
+    /// Skip anything switched off, itself or by an ancestor. The default.
+    #[default]
+    Enabled,
+    /// Everything, switched off or not — the pre-0.42 behaviour, asked for.
+    All,
+    /// ONLY switched-off nodes — for a tool that manages the parked ones.
+    Disabled,
+}
+
+impl FindScope {
+    /// Every spelling the options table accepts, and the list an error prints.
+    ///
+    /// One list read by the parser AND the message, per `floptle/0082` — a
+    /// defaulted bad value is how `pin = "topCenter"` silently meant top-left.
+    pub(crate) const ACCEPTS: &'static [&'static str] = &["enabled", "all", "disabled", "any"];
+
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "enabled" => Some(FindScope::Enabled),
+            "all" | "any" => Some(FindScope::All),
+            "disabled" => Some(FindScope::Disabled),
+            _ => None,
+        }
+    }
+}
+
+impl SceneMirror {
+    /// Is this node switched off — itself, or because an ancestor is?
+    ///
+    /// The mirror stores only each node's OWN `Disabled`, deliberately (the
+    /// engine resolves inheritance and duplicating it would give two answers
+    /// that can drift). So the walk happens here, bounded like every other
+    /// parent walk in the engine, and only for candidates a lookup already
+    /// matched — never per node per frame.
+    pub(crate) fn off(&self, id: u32) -> bool {
+        let mut cur = id;
+        for _ in 0..64 {
+            if self.disabled.contains(&cur) {
+                return true;
+            }
+            match self.parent.get(&cur) {
+                Some(&p) => cur = p,
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// Does `id` belong in the results a `scope` asked for?
+    pub(crate) fn in_scope(&self, id: u32, scope: FindScope) -> bool {
+        match scope {
+            FindScope::All => true,
+            FindScope::Enabled => !self.off(id),
+            FindScope::Disabled => self.off(id),
+        }
+    }
+}
+
 /// A prefab instance a script requested via `spawn(prefab [, pos [, fn]])`:
 /// the prefab name/path, an optional world position for its first root, and
 /// an optional callback (a Lua registry key) the driver invokes with the new
@@ -1148,6 +1233,11 @@ struct Shared {
     sprite_draws: Rc<RefCell<HashMap<u32, Vec<floptle_core::Sprite>>>>,
     /// `node:setShaderParam(...)` writes, drained by the editor per frame.
     shader_param_sets: ShaderParamSets,
+    /// See [`ShaderTextureSets`]. Separate from the uniform queue because a
+    /// texture write is a REBIND, not a buffer write — the two cost different
+    /// things and the driver treats them differently.
+    shader_texture_sets: ShaderTextureSets,
+    screen_shader_toggles: ScreenShaderToggles,
     /// (entity index, script kind) → that instance's live Lua environment, so a
     /// script handle can read its state, call its methods, and read its params.
     ///
@@ -1216,6 +1306,15 @@ struct Shared {
     /// `(script kind, key)` combos already told they were reading from a broken
     /// script, so a handle polled every frame is one Console line.
     broken_read_warned: Rc<RefCell<std::collections::HashSet<(String, String)>>>,
+    /// Names a `find*` came up empty on while a SWITCHED-OFF node of that name
+    /// existed — said once each, because a lookup in `update` would otherwise
+    /// say it every frame.
+    ///
+    /// This exists because enabled-only is a change of behaviour, and a change
+    /// of behaviour that shows up as `nil` is the worst kind: you go and look
+    /// for the bug in your own script. One line naming the node it skipped and
+    /// the option that brings it back turns it into a five-second fix.
+    find_scope_warned: Rc<RefCell<std::collections::HashSet<String>>>,
     /// The Console feed, shared with the host — a handle read is the one place
     /// in the reference layer that has something to say.
     logs: Rc<RefCell<Vec<ScriptLog>>>,
@@ -5667,7 +5766,12 @@ end
         let mut world = World::default();
         let e = world.spawn();
         world.insert(e, Transform::IDENTITY);
-        world.insert(e, Matter::PointLight { color: [1.0, 1.0, 1.0], intensity: 2.0, range: 10.0 });
+        world.insert(e, Matter::PointLight {
+            color: [1.0, 1.0, 1.0],
+            intensity: 2.0,
+            range: 10.0,
+            shape: Default::default(),
+        });
         world.insert(
             e,
             Scripts(vec![floptle_core::ScriptInst { kind: "oscillate".into(), enabled: true, params: vec![], refs: Vec::new(), strs: Vec::new() }]),

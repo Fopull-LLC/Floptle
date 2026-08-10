@@ -600,8 +600,18 @@ pub struct RigidBody {
     pub half_extents: [f32; 3],
     /// Bounciness 0..1 (0 = no bounce).
     pub restitution: f32,
-    /// Surface friction 0..1 (0 = frictionless).
+    /// Surface friction, as a **Coulomb coefficient**: a ramp holds while
+    /// `tan(angle) ≤ friction`, so 0 is ice, 1 holds exactly 45°, and a grippier
+    /// surface than that goes above 1 (rubber on rubber is about 1.5).
     pub friction: f32,
+    /// The steepest surface, in **degrees** from "up", this body can stand on.
+    ///
+    /// Past it the body is not `grounded`, the surface reads as
+    /// `node.wallNormal` rather than `node.groundNormal`, and — the part that
+    /// makes it a design knob rather than a label — the surface stops holding
+    /// the body up, so it slides off however high the friction is. 60° is the
+    /// default, and is what this was fixed at before it was a field.
+    pub slope_limit: f32,
     /// Whether the scene's gravity field pulls on this body (false = floats; it still
     /// collides and can be driven by a script).
     pub gravity: bool,
@@ -676,6 +686,7 @@ impl Default for RigidBody {
             half_extents: [0.5, 0.5, 0.5],
             restitution: 0.0,
             friction: 0.3,
+            slope_limit: 60.0,
             gravity: true,
             lock_pos: [false; 3],
             lock_rot: [false; 3],
@@ -903,6 +914,20 @@ pub struct Light {
     /// Max distance (world units) a shadow ray marches before giving up — a perf
     /// fence; far geometry simply stops casting past it.
     pub shadow_distance: f32,
+    /// CONTACT shadows: a short screen-space trace that catches what the marched
+    /// field cannot. A dynamic mesh casts through a collider PROXY — a box or a
+    /// capsule — so a character's shadow is a capsule's, and the place that reads
+    /// worst is the contact between a foot and the floor. This shadows from the
+    /// real silhouette of whatever is on screen instead.
+    pub contact_shadows: bool,
+    /// How far the contact trace reaches, in world units. Short is the point:
+    /// this is the shadow under a foot, in a seam, behind a bolt.
+    pub contact_length: f32,
+    /// Samples along that trace.
+    pub contact_steps: u32,
+    /// How dark a contact shadow gets (0..1), before the shared shadow tint and
+    /// strength are applied on top.
+    pub contact_strength: f32,
 
     /// Depth fog: blend everything toward `fog_color` between `fog_start` and
     /// `fog_end` world units from the camera. Dirt-cheap (one mix per fragment) and
@@ -933,6 +958,20 @@ pub struct Light {
     pub fog_noise: f32,
     /// Noise feature size, world units per pattern repeat (bigger = broader wisps).
     pub fog_noise_scale: f32,
+    /// VOLUMETRIC only — how much of the scene's own light scatters in the media.
+    /// 0 is the flat fog colour (the pre-injection look, reached exactly); 1 lights
+    /// the fog by the sun, the point lights and the baked bounce; past 1
+    /// exaggerates rather than blending further.
+    pub fog_light: f32,
+    /// Scattering anisotropy (-0.9..0.9). Positive scatters FORWARD, so the media
+    /// blooms toward the light and shafts read; 0 is an even glow. A mote of fog
+    /// has no normal — this is the knob that does the job `N·L` does elsewhere.
+    pub fog_anisotropy: f32,
+    /// Steps the per-pixel fog march takes (quality against cost).
+    pub fog_steps: u32,
+    /// March the sun shadow at every fog step. This is what turns lit fog into
+    /// actual beams, and it is essentially the entire cost of lit fog.
+    pub fog_shafts: bool,
 }
 
 impl Default for Light {
@@ -951,6 +990,10 @@ impl Default for Light {
             shadow_quantize: 0,
             shadow_dither: false,
             shadow_distance: 150.0,
+            contact_shadows: false,
+            contact_length: 0.35,
+            contact_steps: 12,
+            contact_strength: 0.9,
             fog: false,
             fog_color: [0.6, 0.65, 0.72],
             fog_start: 40.0,
@@ -963,6 +1006,10 @@ impl Default for Light {
             fog_falloff: 8.0,
             fog_noise: 0.5,
             fog_noise_scale: 24.0,
+            fog_light: 1.0,
+            fog_anisotropy: 0.6,
+            fog_steps: 16,
+            fog_shafts: true,
         }
     }
 }
@@ -976,6 +1023,61 @@ pub struct CastShadow(pub bool);
 impl Default for CastShadow {
     fn default() -> Self {
         CastShadow(true)
+    }
+}
+
+/// The **shape a light emits from**, which is the difference between a highlight
+/// that is a pinprick and one that is a window.
+///
+/// `Point` is the zero-size case and the default, so a light that never touches
+/// this shades exactly as it always did. Everything else is oriented by the
+/// node's own rotation: a `Rect` and a `Disk` face the node's **forward** (its
+/// local -Z, the same direction a camera looks), and a `Tube` lies along the
+/// node's local X.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum LightShape {
+    /// A dimensionless point — the light every engine starts with.
+    #[default]
+    Point,
+    /// A glowing sphere: a bulb with actual size. The cheapest step away from a
+    /// point, and the one that softens a highlight into a disc and a shadow
+    /// terminator into a gradient.
+    Sphere { radius: f32 },
+    /// A rectangle in the node's local XY plane — a window, a softbox, a screen.
+    /// Emits out of its front face unless `two_sided`.
+    Rect { width: f32, height: f32, two_sided: bool },
+    /// A disc in the node's local XY plane — a downlight, a porthole.
+    Disk { radius: f32, two_sided: bool },
+    /// A capsule along the node's local X: a strip light, a neon bar, a sabre.
+    /// Emits in every direction, and streaks its highlight along its length.
+    Tube { length: f32, radius: f32 },
+}
+
+impl LightShape {
+    /// The largest half-dimension of the emitter, in world units — how far the
+    /// light's own surface reaches from the node. Zero for a point.
+    ///
+    /// This is what the renderer widens a specular lobe and softens a terminator
+    /// by, so a shape with no size falls back to the point-light response
+    /// numerically and not just conceptually.
+    pub fn extent(&self) -> f32 {
+        match self {
+            LightShape::Point => 0.0,
+            LightShape::Sphere { radius } | LightShape::Disk { radius, .. } => radius.max(0.0),
+            LightShape::Rect { width, height, .. } => (width.max(*height) * 0.5).max(0.0),
+            LightShape::Tube { length, radius } => (length * 0.5).max(*radius).max(0.0),
+        }
+    }
+
+    /// A short name for menus and the Inspector.
+    pub fn label(&self) -> &'static str {
+        match self {
+            LightShape::Point => "point",
+            LightShape::Sphere { .. } => "sphere",
+            LightShape::Rect { .. } => "rect",
+            LightShape::Disk { .. } => "disk",
+            LightShape::Tube { .. } => "tube",
+        }
     }
 }
 
@@ -1050,7 +1152,7 @@ pub enum Matter {
     /// A placeable point/omni light. Its world position is the node's transform
     /// translation; `range` is the radius at which its contribution falls to ~zero.
     /// (The scene's single directional/ambient key stays the special `Light` node.)
-    PointLight { color: [f32; 3], intensity: f32, range: f32 },
+    PointLight { color: [f32; 3], intensity: f32, range: f32, shape: LightShape },
     /// A gravity source for the physics sim — `Down` for normal-style level gravity,
     /// `Radial` for a planet (Mario-Galaxy) gravity well centered on the node.
     GravityVolume { mode: GravityMode, strength: f32, radius: f32 },
@@ -1214,7 +1316,212 @@ pub enum Matter {
         /// Preserving chroma cannot do that, because chroma is never quantized.
         /// An exactly grey pixel takes the identical path it always did.
         posterize_chroma: bool,
+
+        // ---- the look chain -------------------------------------------------
+        //
+        // Everything below is OFF at its default, and each is skipped by the
+        // renderer when it is: a scene that touches none of it renders exactly
+        // the frames it rendered before. See `floptle_render::PostSettings` for
+        // the pass order and why it is that order.
+
+        /// How the scene's linear light lands on a display that stops at white.
+        ///
+        /// `0` clip (the default, and what the engine did before there was a
+        /// choice), `1` Reinhard, `2` ACES, `3` AgX. A plain number rather than
+        /// an enum here because `Matter` carries no renderer types; the renderer
+        /// reads it through `floptle_render::Tonemap`.
+        tonemap: u32,
+        /// Colour grade — exposure in STOPS (0 = unchanged, +1 = twice the light).
+        exposure: f32,
+        /// Contrast about 18% grey. 1 = unchanged.
+        contrast: f32,
+        /// Saturation against Rec.709 luma. 1 = unchanged, 0 = greyscale.
+        saturation: f32,
+        /// White balance, blue ↔ amber. 0 = unchanged.
+        temperature: f32,
+        /// White balance, green ↔ magenta — the axis `temperature` cannot reach,
+        /// and the one that fixes a scene that has gone subtly sickly.
+        tint: f32,
+        /// Lift the black floor. 0 = unchanged.
+        lift: f32,
+        /// Midtone gamma. 1 = unchanged.
+        grade_gamma: f32,
+        /// Scale the highlights. 1 = unchanged.
+        gain: f32,
+
+        /// Chromatic aberration: how far the red and blue channels drift apart
+        /// toward the edges of the frame. 0 = off.
+        aberration: f32,
+        /// Lens distortion: positive barrels (fisheye), negative pincushions.
+        /// 0 = off.
+        distortion: f32,
+
+        /// Unsharp mask amount. 0 = off.
+        sharpen: f32,
+        /// Bilateral denoise, 0..1 — averages within flat regions and refuses to
+        /// average across an edge. 0 = off.
+        denoise: f32,
+
+        /// Film grain amount. 0 = off.
+        grain: f32,
+        /// Grain cell size in pixels. 1 is per-pixel; 2+ clumps it, which is
+        /// what it needs to be visible at all under a retro upscale.
+        grain_size: f32,
+
+        /// Depth of field: the distance from the camera, in world units, that is
+        /// in focus. 0 = off.
+        dof_focus: f32,
+        /// How far BEYOND `dof_focus` stays sharp, in world units.
+        dof_range: f32,
+        /// How far IN FRONT of `dof_focus` stays sharp. 0 = half of `dof_range`,
+        /// which is what the effect always did and what a lens roughly does —
+        /// the near side goes soft much sooner than the far side.
+        ///
+        /// Split from `dof_range` because they are the two halves people
+        /// actually reach for: a portrait wants a near side that falls away
+        /// immediately and a far side that keeps some shape, and one number
+        /// cannot say that.
+        dof_near_range: f32,
+        /// The widest the out-of-focus blur gets, in pixels.
+        dof_max_blur: f32,
+        /// Aperture blades: 0 (or 1, 2) is a round iris, 3+ gives the polygonal
+        /// bokeh of a real lens — six is the classic hexagon.
+        dof_blades: u32,
+        /// Turn the blade polygon, in degrees. Only means anything with blades.
+        dof_blade_rotation: f32,
+        /// How much brighter-than-white pixels dominate the blur, so a highlight
+        /// spreads into a visible disc instead of averaging into grey mush. 0 =
+        /// off. It reads the scene's real light, which is why it only became
+        /// possible once the frame stopped being 8-bit.
+        dof_highlight: f32,
+        /// Taps in the blur kernel. 0 = the default 16. More is smoother bokeh
+        /// and linearly more expensive; fewer is the chunky look on purpose.
+        dof_quality: u32,
+        /// MOTION BLUR: the shutter, as a fraction of the step between frames.
+        /// 0 = off. 0.5 is the 180° shutter a film camera has, and is the value
+        /// that reads as footage rather than as a smear; 1 leaves the shutter
+        /// open for the whole frame.
+        ///
+        /// Reconstructed from depth, so it blurs **camera** motion — a pan, a
+        /// whip, a dolly, a roll. An object crossing a locked-off shot stays
+        /// sharp; that half needs a velocity buffer written by every draw path
+        /// in the engine, and is not what this is.
+        motion_blur: f32,
+        /// Taps along the streak. 0 = the default 12; clamped to 4..32.
+        motion_samples: u32,
+        /// Tint the frame by what is in focus — cool where the near side is
+        /// blurring, warm where the far side is, plain where it is sharp. A
+        /// tuning aid: the focus band is otherwise something you infer from a
+        /// picture, and inferring it is how an hour goes.
+        dof_show_focus: bool,
+        /// Focus on a NODE by name instead of at a fixed distance: the focus
+        /// distance becomes the camera's distance to it, every frame. Empty =
+        /// use `dof_focus`.
+        ///
+        /// This is the setting a rack focus is made of, and doing it by hand
+        /// means writing a script to measure a distance the engine already
+        /// knows. A name that resolves to nothing falls back to `dof_focus`
+        /// rather than to zero, so a renamed node softens nothing.
+        dof_focus_node: String,
+
+        /// The scene's **screen shaders**: authored `stage post` `.flsl` passes,
+        /// run over the finished frame in this order.
+        ///
+        /// A list rather than a fixed menu of effects, because the point is that
+        /// the look is the project's to write: an ink outline, a CRT, a heat
+        /// haze and a colour ramp are four passes, not four engine features. See
+        /// `floptle_shader::ir::Stage::Post`.
+        ///
+        /// Empty on every scene that has never used one, so it costs nothing and
+        /// writes nothing to the `.ron`.
+        screen_shaders: Vec<ScreenShader>,
     },
+    /// A **light probe volume**: the box that baked global illumination is
+    /// gathered over, and the box it lights inside.
+    ///
+    /// Direct light tells a surface about the sun. Everything else a real room
+    /// looks like is light that already bounced — off a red wall, off a bright
+    /// floor — and no amount of material work invents it. The engine's answer
+    /// before this node was a single flat ambient colour, which lifts the inside
+    /// of a sealed box exactly as much as it lifts an open field.
+    ///
+    /// Baking renders the scene from a lattice of points inside the box and
+    /// keeps, at each one, the light arriving from every direction. Inside the
+    /// box that replaces the flat ambient; outside, the flat ambient carries on
+    /// as before. So a scene with no volume renders exactly what it always did,
+    /// and a scene with one is lit by its own surfaces.
+    ///
+    /// The node's transform positions and *scales* the box: `half_extents` is
+    /// its size at scale 1, and moving the node moves the volume. The bake
+    /// itself lives in a `.fgi` file beside the scene, because it is a build
+    /// artefact measured in hundreds of kilobytes and a `.ron` is a thing people
+    /// read.
+    LightProbes {
+        /// Half the box, in local units, before the node's scale.
+        half_extents: [f32; 3],
+        /// Requested distance between probes, in world units. The real spacing
+        /// is whatever divides the box evenly; a spacing that would ask for more
+        /// probes than the engine bakes is coarsened, not truncated.
+        spacing: f32,
+        /// Master switch. Off keeps the volume, its settings and its bake, and
+        /// stops it lighting anything — the same shape as a screen shader's own
+        /// switch, and the fastest way to see what the GI is actually doing.
+        enabled: bool,
+        /// How much of the baked light to apply. 1 = as measured. This is the
+        /// artistic knob: physically-correct bounce is often a little too polite
+        /// for a game, and dialling it past 1 is a legitimate look rather than a
+        /// mistake.
+        intensity: f32,
+        /// How many times light is allowed to bounce. 1 is direct light coming
+        /// off surfaces once — the difference between a black corner and a lit
+        /// one. 2 and 3 fill in soft interiors and cost a full re-render of
+        /// every probe each.
+        bounces: u32,
+        /// Cube face resolution for the bake, in pixels per side. Higher resolves
+        /// smaller bright things (a lamp, a window) at a quadratic cost in bake
+        /// time, and does **not** change overall brightness.
+        quality: u32,
+        /// How hard to reject probes that are buried inside geometry, in
+        /// multiples of the probe spacing. 0 = off.
+        ///
+        /// This is the knob for the one artefact everybody recognises: light
+        /// from the lit room next door glowing faintly through the wall. Turning
+        /// it up costs contact bounce in tight spaces, which is why it is a knob
+        /// and not a constant.
+        leak: f32,
+        /// How far along its own normal a surface steps before looking the light
+        /// up, in multiples of the probe spacing. A shading point sits exactly
+        /// on the geometry, which is the one place where "which side of this
+        /// wall am I on" is genuinely ambiguous.
+        normal_bias: f32,
+        /// Layers excluded from the bake, by name. Anything that moves — a
+        /// character, a door, a lift — should not be baked into the light it
+        /// stands in, because it will still be lit by that light after it walks
+        /// away.
+        exclude_layers: Vec<String>,
+    },
+}
+
+/// One authored full-screen pass on a [`Matter::PostProcess`] node.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScreenShader {
+    /// Project-relative path to a `stage post` `.flsl`.
+    pub shader: String,
+    /// Switched off keeps the pass in the list, and its knobs, without running
+    /// it — which is what you want while deciding whether an effect helps, and
+    /// is not the same thing as deleting it.
+    pub enabled: bool,
+    /// Overrides for the shader's exposed uniforms, by name. A name the shader
+    /// no longer declares is ignored, not an error: renaming a uniform must not
+    /// fail to load a scene.
+    pub params: std::collections::BTreeMap<String, [f32; 4]>,
+}
+
+impl ScreenShader {
+    /// A freshly added pass: on, and using the shader's own defaults.
+    pub fn new(shader: impl Into<String>) -> Self {
+        Self { shader: shader.into(), enabled: true, params: Default::default() }
+    }
 }
 
 impl Matter {
@@ -1285,6 +1592,26 @@ impl Matter {
         (w.clamp(Self::TARGET_MIN, Self::TARGET_MAX), h.clamp(Self::TARGET_MIN, Self::TARGET_MAX))
     }
 
+    /// A fresh light probe volume: a room-sized box, one probe per metre, one
+    /// bounce.
+    ///
+    /// One bounce and a 16-pixel face because the first thing anyone does with a
+    /// new volume is bake it, and a bake that takes four minutes on the first
+    /// try teaches the wrong lesson about the feature. Both knobs go up.
+    pub fn default_light_probes() -> Self {
+        Matter::LightProbes {
+            half_extents: [8.0, 4.0, 8.0],
+            spacing: 2.0,
+            enabled: true,
+            intensity: 1.0,
+            bounces: 1,
+            quality: 16,
+            leak: 1.0,
+            normal_bias: 0.5,
+            exclude_layers: Vec::new(),
+        }
+    }
+
     /// The default skybox: solid mid-grey, a large radius, no texture.
     pub fn default_skybox() -> Self {
         Matter::Skybox {
@@ -1336,6 +1663,37 @@ impl Matter {
             // Today's look. Every project's posterize is built on per-channel
             // stepping, so this is opt-in or it is a silent change of art.
             posterize_chroma: false,
+            tonemap: 0,
+            // The look chain, at identity. Note which of these are 1.0: a
+            // derived default would give a black, contrastless, greyscale
+            // picture and read as the feature being broken.
+            exposure: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            temperature: 0.0,
+            tint: 0.0,
+            lift: 0.0,
+            grade_gamma: 1.0,
+            gain: 1.0,
+            aberration: 0.0,
+            distortion: 0.0,
+            sharpen: 0.0,
+            denoise: 0.0,
+            grain: 0.0,
+            grain_size: 1.0,
+            dof_focus: 0.0,
+            dof_range: 5.0,
+            dof_near_range: 0.0,
+            dof_max_blur: 0.0,
+            dof_blades: 0,
+            dof_blade_rotation: 0.0,
+            dof_highlight: 0.0,
+            dof_quality: 0,
+            motion_blur: 0.0,
+            motion_samples: 0,
+            dof_show_focus: false,
+            dof_focus_node: String::new(),
+            screen_shaders: Vec::new(),
         }
     }
 }
@@ -1407,6 +1765,26 @@ pub fn is_disabled(world: &crate::ecs::World, e: crate::ecs::Entity) -> bool {
         cur = p;
     }
     false
+}
+
+/// The camera that holds play authority: `Matter::Camera { active: true }`, and
+/// **not switched off**.
+///
+/// One answer, because there were ten. "Find the active camera" was written out
+/// by hand at every site that needed one — the Game viewport, the audio
+/// listener, the floating-origin focus, the terrain LOD eye, the input snapshot's
+/// aim, the 2D-vs-3D inference — and only two of them remembered [`is_disabled`].
+/// So switching a camera off in the Hierarchy hid it, stopped its scripts, took
+/// it out of physics… and left it rendering the game, which reads as the disable
+/// not working rather than as a missing filter in one of ten copies of the same
+/// query.
+///
+/// Scene order breaks ties, the same as every other "first one wins" index, so a
+/// scene with two active cameras behaves the same way it did before.
+pub fn active_camera(world: &crate::ecs::World) -> Option<crate::ecs::Entity> {
+    world.query::<Matter>().find_map(|(e, m)| {
+        (matches!(m, Matter::Camera { active: true, .. }) && !is_disabled(world, e)).then_some(e)
+    })
 }
 
 /// True if `e` or any ancestor is marked [`Persistent`] — the subtree rule, the

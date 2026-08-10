@@ -35,8 +35,25 @@ pub struct Body {
     pub up: Vec3,
     /// Bounciness: 0 = no bounce, 1 = perfectly elastic.
     pub restitution: f32,
-    /// Surface friction: 0 = frictionless ice, 1 = no sliding.
+    /// Surface friction, as a **Coulomb coefficient**: the fraction of the load
+    /// the surface carries that it can also resist sideways. 0 is ice; a ramp
+    /// holds while `tan(angle) ≤ friction`, so 1 holds exactly 45° and grippier
+    /// surfaces go above 1 (rubber on rubber is about 1.5).
+    ///
+    /// It is a coefficient rather than a damping factor because that is the only
+    /// form in which "does this crate stay on this ramp" has an answer at all —
+    /// one that holds whatever the frame rate, and however many colliders the
+    /// crate happens to be touching. Spent once per step against the surface
+    /// being stood on; see `PhysicsWorld::rub`.
     pub friction: f32,
+    /// The steepest surface, in radians from "up", that counts as **ground**.
+    ///
+    /// Steeper than this and the body is not `grounded`, the surface becomes a
+    /// `wall_normal` rather than a `ground_normal`, and — the part that makes it
+    /// a gameplay knob rather than a label — the surface stops carrying the
+    /// body's weight, so friction can no longer hold it and it slides off
+    /// however grippy it is. 60° is the historical default.
+    pub slope_limit: f32,
     /// Whether the gravity field pulls on this body (false = floats, still collides).
     pub use_gravity: bool,
     /// Freeze world-axis translation (x, y, z) — e.g. lock Z for a 2.5D game.
@@ -119,6 +136,7 @@ impl Body {
             up: Vec3::Y,
             restitution: 0.0,
             friction: 0.3,
+            slope_limit: std::f32::consts::FRAC_PI_3, // 60°
             use_gravity: true,
             lock_pos: [false; 3],
             grounded: false,

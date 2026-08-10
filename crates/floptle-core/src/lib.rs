@@ -44,14 +44,14 @@ pub mod transform;
 
 pub use ecs::{Entity, World};
 pub use layers::Layers;
-pub use material::{Material, ObjectMaterials, Tiling};
+pub use material::{Material, ObjectMaterials, Retro, Shading, Tiling};
 pub use matter::{
-    is_disabled, is_persistent, world_transform, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, Cast2D,
+    active_camera, is_disabled, is_persistent, world_transform, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, Cast2D,
     CastShadow,
-    CelestialBody, Collidable, Disabled, GravityMode, Layer, Light, Lighting2D, Lit2D, Lit2DFacts, Made, Matter,
+    CelestialBody, Collidable, Disabled, GravityMode, Layer, Light, LightShape, Lighting2D, Lit2D, Lit2DFacts, Made, Matter,
     MeshCollider, Name,
     Parent,
-    ParticleSystem, Persistent, RepeatIndex, RigidBody, SceneTag, Shadow2D, Shape, Sorting, Spin, Sprite, Sprites,
+    ParticleSystem, Persistent, RepeatIndex, RigidBody, SceneTag, ScreenShader, Shadow2D, Shape, Sorting, Spin, Sprite, Sprites,
     Tags,
     TerrainGen, TexturePaint, Trigger, VertexPaint, WaterKind,
     Visible, DEFAULT_SORTING_LAYER, EMPTY_TILE, SORT_LAYER_STEP, SORT_ORDER_STEP,

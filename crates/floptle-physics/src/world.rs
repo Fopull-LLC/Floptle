@@ -913,7 +913,9 @@ impl PhysicsWorld {
         }
         let up = -gd.normalize();
         let d = n.dot(up);
-        if d > 0.5 {
+        // The body's own slope limit decides what counts as ground (60° by
+        // default, which is the constant this used to be).
+        if d > self.bodies[bi].slope_limit.clamp(0.0, std::f32::consts::FRAC_PI_2).cos() {
             self.bodies[bi].grounded = true;
             if self.bodies[bi].ground_normal.is_none_or(|g| g.dot(up) < d) {
                 self.bodies[bi].ground_normal = Some(n);
@@ -921,6 +923,39 @@ impl PhysicsWorld {
         } else if self.bodies[bi].wall_normal.is_none_or(|w| w.dot(up) > d) {
             self.bodies[bi].wall_normal = Some(n);
         }
+    }
+
+    /// Spend a **Coulomb friction budget** on body `bi`, sideways along the
+    /// surface `n`.
+    ///
+    /// `budget` is the load the surface is carrying this step, expressed as a
+    /// speed (an impulse per unit mass): the weight it holds up, or the impact
+    /// it just absorbed. Friction can remove at most `friction × budget` of
+    /// tangential speed — never more than there is — which is what makes "does
+    /// this ramp hold" a question with an answer (`tan(angle) ≤ friction`)
+    /// instead of a race between gravity and a damping factor.
+    ///
+    /// It opposes motion; it does not clamp it. A body shoved across a floor
+    /// travels and then stops, rather than stopping in three steps because a
+    /// multiplier ate its velocity.
+    fn rub(&mut self, bi: usize, budget: f32, n: Vec3) {
+        // No upper clamp: a coefficient above 1 is an ordinary grippy surface
+        // (rubber on rubber is about 1.5), and it is the only way to say "you
+        // can stand on this 50° ramp" — 1.0 holds exactly 45°.
+        let mu = self.bodies[bi].friction.max(0.0);
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        if mu <= 0.0 || !(budget > 0.0) {
+            return;
+        }
+        let vel = self.bodies[bi].vel;
+        let vn = vel.dot(n);
+        let vt = vel - n * vn;
+        let len = vt.length();
+        if len <= 1e-6 {
+            return;
+        }
+        let dv = (mu * budget).min(len);
+        self.bodies[bi].vel = vt * ((len - dv) / len) + n * vn;
     }
 
     /// Step ONE body by `dt`. Because the solver has no body-vs-body pass
@@ -1002,6 +1037,19 @@ impl PhysicsWorld {
                     self.bodies[bi].vel += a * dt;
                 }
             }
+            // ---- friction, part one: the weight the floor is holding up -----
+            //
+            // BEFORE the move, against the floor found last step. A body parked
+            // on a ramp gains `g_t · dt` of downhill speed from the gravity line
+            // above; removing it here means the body never travels that
+            // distance. Doing it after the move instead leaves `g_t · dt²` of
+            // creep per step — a few centimetres a minute, which is precisely
+            // the "everything slides downhill eventually" complaint, and it
+            // survives any amount of friction because it is a position error,
+            // not a velocity one.
+            if let Some(n) = self.bodies[bi].ground_normal {
+                self.rub(bi, (-g.dot(n)).max(0.0) * dt, n);
+            }
             let v = self.bodies[bi].vel;
             self.bodies[bi].pos += v * dt;
             self.bodies[bi].grounded = false;
@@ -1017,6 +1065,13 @@ impl PhysicsWorld {
             // separately for the trigger hooks), so it only integrates above.
             let row = self.matrix[self.bodies[bi].layer as usize];
             let passes = if self.bodies[bi].sensor { 0 } else { 2 };
+            // The normal impulse this step, as a speed (per unit mass): how much
+            // into-surface velocity the contacts had to remove. Friction is
+            // Coulomb — bounded by the load the surface is actually carrying —
+            // so this is what a hard landing has that a gentle touchdown does
+            // not, and it is why you skid when you land fast and stick when you
+            // don't. Accumulated here and spent ONCE below.
+            let mut impact_dv = 0.0f32;
             for _ in 0..passes {
                 // Broadphase (`floptle/0076`): ask the index which colliders can
                 // possibly reach this body, instead of walking all of them. The
@@ -1062,12 +1117,13 @@ impl PhysicsWorld {
                         self.bodies[bi].pos += n * pen; // push out to the surface
                         let vn = self.bodies[bi].vel.dot(n);
                         if vn < 0.0 {
-                            // Reflect the normal part by restitution, damp the
-                            // tangential part by friction.
-                            let fr = (1.0 - self.bodies[bi].friction).clamp(0.0, 1.0);
+                            // Reflect the normal part by restitution and bank
+                            // the load; the tangential part is left alone here
+                            // and answered once, after every contact is in.
                             let rest = self.bodies[bi].restitution;
                             let vt = self.bodies[bi].vel - n * vn;
-                            self.bodies[bi].vel = vt * fr - n * vn * rest;
+                            self.bodies[bi].vel = vt - n * vn * rest;
+                            impact_dv += -vn * (1.0 + rest);
                         }
                         self.note_body_contact(bi, n);
                         self.contacts.push(Contact {
@@ -1101,19 +1157,37 @@ impl PhysicsWorld {
                         self.bodies[bi].pos += n * pen;
                         let vn = self.bodies[bi].vel.dot(n);
                         if vn < 0.0 {
-                            let fr = (1.0 - self.bodies[bi].friction).clamp(0.0, 1.0);
                             let rest = self.bodies[bi].restitution;
                             let vt = self.bodies[bi].vel - n * vn;
-                            self.bodies[bi].vel = vt * fr - n * vn * rest;
+                            self.bodies[bi].vel = vt - n * vn * rest;
+                            impact_dv += -vn * (1.0 + rest);
                         }
-                        self.bodies[bi].contact = Some(n);
-                        let gd = self.gravity.accel_at(self.bodies[bi].pos, &self.colliders);
-                        if gd.length_squared() > 1e-6 && n.dot(-gd.normalize()) > 0.5 {
-                            self.bodies[bi].grounded = true;
-                        }
+                        // A moving platform is ground exactly like static
+                        // geometry is, so it goes through the same classifier —
+                        // the body's slope limit, its floor and wall normals,
+                        // and therefore its friction.
+                        self.note_body_contact(bi, n);
                         self.kin_contacts.push((bi, hull.eid, c - n * radius, n));
                     }
                 }
+            }
+
+            // ---- friction, part two: what the contacts just absorbed --------
+            //
+            // Spent ONCE, on the surface actually underfoot, however many
+            // colliders the body turned out to be touching. This is the part
+            // that makes a fast landing skid and a gentle one stick, and the
+            // reason a wall does not slow a body sliding down it: a wall you are
+            // not pushing into absorbs nothing, so there is nothing to spend.
+            let surface = self.bodies[bi].ground_normal.or(self.bodies[bi].contact);
+            if let Some(n) = surface {
+                // Minus the weight, which part one already spent: a body resting
+                // on a slope pushes into it by `g·n · dt` every step and the
+                // contact dutifully cancels that, so counting it here too would
+                // charge the same load twice and make every surface exactly
+                // twice as grippy as its number says.
+                let already = (-g.dot(n)).max(0.0) * dt;
+                self.rub(bi, impact_dv - already, n);
             }
 
             // Constraints: freeze the chosen world translation axes.

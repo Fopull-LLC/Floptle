@@ -404,9 +404,12 @@ pub(crate) struct ImageEditState {
     /// The canvas rect as of the last frame, so keyboard zoom has something to
     /// zoom *about* (the view centre) without waiting for a mouse move.
     last_view: Option<ERect>,
-    /// Cut/copied pixels: straight RGBA and its size. Tab-local — the OS
-    /// clipboard carries text, and a raster block is not text.
-    clip: Option<(Vec<u8>, u32, u32)>,
+    /// Cut/copied pixels: straight RGBA and its size.
+    ///
+    /// Fed by this tab's own copy/cut AND by the OS clipboard's image side
+    /// (`Editor::clipboard_image_into_tab`) — copy a reference in a browser,
+    /// paste it here. `pub(crate)` for that bridge; nothing else writes it.
+    pub(crate) clip: Option<(Vec<u8>, u32, u32)>,
     /// What's being typed into the hex field, while it's being typed. `None`
     /// means "show the current colour" — without this, the field would fight
     /// you for the caret on every keystroke.
@@ -581,6 +584,37 @@ impl ImageEditState {
             clip: self.clip.take(),
             ..Default::default()
         };
+    }
+
+    /// Move the things that belong to the TAB rather than to the document onto
+    /// `self`, taking them from `from`.
+    ///
+    /// The split is the same one [`Self::close`] has always made — palettes and
+    /// the clipboard survive a document — plus the tool and brush, because
+    /// picking up the pencil is a statement about how you are working, not about
+    /// which file is open, and having it reset every time you switch documents
+    /// would make the tab strip annoying to use.
+    pub(crate) fn take_tab_state(&mut self, from: &mut ImageEditState) {
+        self.palettes = std::mem::take(&mut from.palettes);
+        self.palettes_loaded = from.palettes_loaded;
+        self.clip = from.clip.take();
+        self.tool = from.tool;
+        self.brush = from.brush.clone();
+        // A fresh canvas has never been laid out at this panel's size.
+        self.fit_pending = true;
+        self.invalidate_all();
+    }
+
+    /// The document's name for a tab chip: the file stem, `untitled` before it
+    /// has one, with a dot when it has unsaved changes.
+    pub(crate) fn tab_label(&self) -> String {
+        let name = self
+            .path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "untitled".into());
+        if self.dirty { format!("{name} •") } else { name }
     }
 
     pub(crate) fn title(&self) -> String {

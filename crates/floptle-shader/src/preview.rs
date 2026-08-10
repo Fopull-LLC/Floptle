@@ -133,13 +133,20 @@ pub fn transpile_preview(
         Stage::Fragment | Stage::Ui => EmitCtx::Fragment,
         Stage::Sky => EmitCtx::SkyPreview,
         Stage::Sdf => EmitCtx::Sdf { slot: 0 },
+        // Post previews use the REAL post emitter — `uv`, `time` and the scene
+        // ops all spell themselves the same way — over a synthetic frame
+        // (POST_PREVIEW_SHIM) instead of the real one.
+        Stage::Post => EmitCtx::Post,
     };
     let mut w = Writer::new(ir, ck, ctx);
     w.dyn_nums = Some(Default::default());
 
     match stage {
-        Stage::Fragment | Stage::Sky | Stage::Ui => w.raw(FRAG_PRELUDE),
+        Stage::Fragment | Stage::Sky | Stage::Ui | Stage::Post => w.raw(FRAG_PRELUDE),
         Stage::Sdf => w.raw(SDF_PRELUDE),
+    }
+    if stage == Stage::Post {
+        w.raw(POST_PREVIEW_SHIM);
     }
     w.raw(stdlib::SUPPORT_WGSL);
 
@@ -175,6 +182,13 @@ pub fn transpile_preview(
         // viewer, so it is front-facing by construction — there is no primitive to ask.
         // (Sky chunks never read it; naga is fine with an unused local.)
         w.line("    let front = true;".into(), None);
+        if stage == Stage::Post {
+            // The post emitter spells `time` as `p.e.w` and reads the chain's
+            // texel from `p.a.xy`. Here `p` is a private stand-in, filled per
+            // invocation so the preview's clock actually runs.
+            w.line("    p.a = vec4<f32>(PV_POST_TEXEL, PV_POST_TEXEL, 0.0, 0.0);".into(), None);
+            w.line("    p.e.w = G.params.x;".into(), None);
+        }
     } else {
         w.line("fn flsl_pv(q: vec3<f32>, tile: u32) -> vec4<f32> {".into(), None);
     }
@@ -207,7 +221,7 @@ pub fn transpile_preview(
 
     w.raw(PV_VERTEX);
     match stage {
-        Stage::Fragment | Stage::Sky | Stage::Ui => w.raw(FRAG_MAIN),
+        Stage::Fragment | Stage::Sky | Stage::Ui | Stage::Post => w.raw(FRAG_MAIN),
         Stage::Sdf => w.raw(SDF_MAIN),
     }
 
@@ -260,7 +274,9 @@ fn target_vis(
                 Ty::Vec4 => "",
             };
             let e = match stage {
-                Stage::Fragment | Stage::Sky | Stage::Ui => format!("P.u{u}{access}"),
+                Stage::Fragment | Stage::Sky | Stage::Ui | Stage::Post => {
+                    format!("P.u{u}{access}")
+                }
                 Stage::Sdf => format!("G.shape_uniforms[{u}u]{access}"),
             };
             wrap(e, uni.ty)
@@ -268,7 +284,18 @@ fn target_vis(
         // Mirrors the emitter's Input arm (which needs a real expr id).
         PreviewTarget::Input(i) => {
             let e = match (stage, i) {
-                (Stage::Fragment | Stage::Ui, Input::Uv) => "in.uv",
+                // `time` FIRST, and for every stage: it is the one input that
+                // means the same thing everywhere, and each stage's catch-all
+                // below is an error arm — a Ui or Post shader that read the
+                // clock used to be told the clock did not exist.
+                (_, Input::Time) => "fract(G.params.x * 0.25)",
+                (Stage::Fragment | Stage::Ui | Stage::Post, Input::Uv) => "in.uv",
+                (Stage::Post, _) => {
+                    return Err(TranspileError {
+                        message: format!("`{}` is not available in post shaders", i.name()),
+                        span: Default::default(),
+                    });
+                }
                 (Stage::Ui, Input::InstanceColor) => "in.color",
                 (Stage::Ui, _) => {
                     return Err(TranspileError {
@@ -280,7 +307,6 @@ fn target_vis(
                 (Stage::Fragment, Input::WorldPos) => "in.view_pos",
                 (Stage::Fragment, Input::ObjectPos) => "in.lpos",
                 (Stage::Fragment, Input::ViewDir) => "normalize(-in.view_pos)",
-                (_, Input::Time) => "fract(G.params.x * 0.25)",
                 (Stage::Fragment, Input::InstanceColor) => "in.color",
                 (Stage::Sdf, Input::WorldPos) => "q",
                 (Stage::Sdf, _) => {
@@ -311,7 +337,7 @@ fn target_vis(
             format!("textureSample(flsl_tex{t}, flsl_samp{t}, in.uv)")
         }
         PreviewTarget::Output => match stage {
-            Stage::Fragment | Stage::Sky | Stage::Ui => match ir.outputs.get("color") {
+            Stage::Fragment | Stage::Sky | Stage::Ui | Stage::Post => match ir.outputs.get("color") {
                 Some(&out) => match ck.ty(out) {
                     Ty::Vec4 => format!("({})", w.emit(out)?),
                     _ => format!("vec4<f32>({}, 1.0)", w.emit(out)?),
@@ -386,6 +412,84 @@ fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { re
 fn map_d(p: vec3<f32>) -> f32 { return p.y + 0.55; }
 fn base_texel(in: VsOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); }
 fn facing_normal(n: vec3<f32>, front: bool) -> vec3<f32> { return select(-n, n, front); }
+"#;
+
+/// A synthetic FRAME for post-shader previews: a lit ball on a flat wall, with
+/// depth and normals to match.
+///
+/// A post pass has nothing of its own to look at — it is a transform of whatever
+/// the camera drew — so the preview supplies a scene: a sphere at 4 units in
+/// front of a wall at 9, against sky beyond the tile's disc. That gives every
+/// feature a post shader hunts for, all in one tile: a hard depth STEP at the
+/// ball's silhouette, a smooth depth RAMP across the wall (an edge detect must
+/// not fire there), a normal CREASE where they meet, and colour to grade.
+///
+/// The names below are exactly the ones [`crate::transpile::POST_PRELUDE`]
+/// declares — that is the contract, and it is what lets the real emitter run
+/// unchanged into a preview tile.
+const POST_PREVIEW_SHIM: &str = r#"
+struct PvPostParams {
+    a: vec4<f32>,
+    b: vec4<f32>,
+    c: vec4<f32>,
+    d: vec4<f32>,
+    e: vec4<f32>,
+    f: vec4<f32>,
+    g: vec4<f32>,
+};
+var<private> p: PvPostParams;
+const PV_POST_TEXEL: f32 = 0.008;
+const FLSL_SKY_DEPTH: f32 = 1.0e6;
+const PV_BALL_R: f32 = 0.62;
+const PV_BALL_Z: f32 = 4.0;
+const PV_WALL_Z: f32 = 9.0;
+
+fn flsl_post_texel() -> vec2<f32> { return p.a.xy; }
+
+// How far into the ball this uv lands (negative = outside), in tile units.
+fn pv_ball(uv: vec2<f32>) -> f32 {
+    let q = uv * 2.0 - 1.0;
+    return PV_BALL_R * PV_BALL_R - dot(q, q);
+}
+
+fn flsl_post_depth(uv: vec2<f32>) -> f32 {
+    let b = pv_ball(uv);
+    if (b > 0.0) {
+        return PV_BALL_Z - sqrt(b) * 1.4;
+    }
+    // The wall recedes with height, so a depth-difference edge detect has a
+    // gradient to correctly IGNORE.
+    if (uv.y < 0.94 && uv.x > 0.06 && uv.x < 0.94) {
+        return PV_WALL_Z - uv.y * 3.0;
+    }
+    return FLSL_SKY_DEPTH;
+}
+
+fn flsl_post_normal(uv: vec2<f32>) -> vec3<f32> {
+    let b = pv_ball(uv);
+    if (b > 0.0) {
+        let q = uv * 2.0 - 1.0;
+        return normalize(vec3<f32>(q.x, -q.y, sqrt(b) * 1.4));
+    }
+    if (uv.y < 0.94 && uv.x > 0.06 && uv.x < 0.94) {
+        return normalize(vec3<f32>(0.0, 0.42, 1.0));
+    }
+    return vec3<f32>(0.0, 0.0, 1.0);
+}
+
+fn flsl_post_color(uv: vec2<f32>) -> vec4<f32> {
+    let n = flsl_post_normal(uv);
+    let l = normalize(vec3<f32>(-0.4, 0.6, 0.7));
+    let lit = 0.22 + 0.9 * max(dot(n, l), 0.0);
+    let d = flsl_post_depth(uv);
+    if (d >= FLSL_SKY_DEPTH) {
+        return vec4<f32>(0.42, 0.56, 0.78, 1.0);
+    }
+    if (pv_ball(uv) > 0.0) {
+        return vec4<f32>(vec3<f32>(0.85, 0.34, 0.26) * lit, 1.0);
+    }
+    return vec4<f32>(vec3<f32>(0.30, 0.34, 0.30) * lit, 1.0);
+}
 "#;
 
 /// Stand-ins for the field/raymarch symbols an sdf chunk references, plus the

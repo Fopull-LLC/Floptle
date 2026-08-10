@@ -91,6 +91,7 @@ fn main() {
         color_filter: 0,
         color_filter_strength: 1.0,
         simulate_deficiency: false,
+        ..Default::default()
     };
 
     // Pass 1: SSAO off (pure passthrough copy).

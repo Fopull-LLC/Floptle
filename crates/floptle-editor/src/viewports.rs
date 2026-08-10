@@ -44,6 +44,11 @@ fn make_offscreen_target(
     h: u32,
     label: &str,
     filter: wgpu::FilterMode,
+    // Does the SCENE draw into this target? Then it needs its own terminal pass
+    // to get from the floating-point scene format down to the sRGB texture egui
+    // shows. A target that only receives an already-finished picture (the docked
+    // Game view, the UI designer) does not.
+    scene: bool,
 ) -> PreviewTarget {
     let (w, h) = (w.max(1), h.max(1));
     let srgb = gpu.surface_format();
@@ -79,7 +84,8 @@ fn make_offscreen_target(
     });
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
     let tex_id = egui.renderer.register_native_texture(&gpu.device, &egui_view, filter);
-    PreviewTarget { color_view, depth_view, tex_id }
+    let post = scene.then(|| floptle_render::PostStack::new(gpu, w, h));
+    PreviewTarget { color_view, depth_view, tex_id, post }
 }
 
 impl Editor {
@@ -93,7 +99,7 @@ impl Editor {
         let (Some(gpu), Some(egui)) = (self.gpu.as_ref(), self.egui.as_mut()) else { return };
         // Linear: this small turntable preview is a downscale of a larger render.
         self.preview =
-            Some(make_offscreen_target(gpu, egui, 320, 320, "preview", wgpu::FilterMode::Linear));
+            Some(make_offscreen_target(gpu, egui, 320, 320, "preview", wgpu::FilterMode::Linear, true));
     }
 
     /// (Re)load a selected texture asset into an egui texture handle for preview.
@@ -240,18 +246,26 @@ impl Editor {
         };
 
         self.ensure_preview_target();
+        // The scene's own tonemap, so a material reads here the way it will read
+        // in the game. Nothing else from the scene's post chain: a turntable
+        // should not inherit its vignette or its depth of field.
+        let look = floptle_render::PostSettings {
+            tonemap: crate::shading::post_process_uniforms(&self.world).0.tonemap,
+            ..Default::default()
+        };
         if let (Some(gpu), Some(raster), Some(preview)) =
             (self.gpu.as_ref(), self.raster.as_mut(), self.preview.as_ref())
         {
             raster.draw_scene(
                 gpu,
-                &preview.color_view,
+                preview.scene_view(),
                 &preview.depth_view,
                 globals,
                 &instances,
                 Some([0.07, 0.08, 0.10, 1.0]),
                 None, // no field: previews don't receive scene shadows/AO
             );
+            preview.resolve(gpu, &look);
         }
     }
 
@@ -263,7 +277,7 @@ impl Editor {
         }
         let (Some(gpu), Some(egui)) = (self.gpu.as_ref(), self.egui.as_mut()) else { return };
         self.cam_preview =
-            Some(make_offscreen_target(gpu, egui, 320, 180, "cam-preview", wgpu::FilterMode::Linear));
+            Some(make_offscreen_target(gpu, egui, 320, 180, "cam-preview", wgpu::FilterMode::Linear, true));
     }
 
     /// Each frame: if a single Camera node is selected, render the scene from its POV
@@ -286,11 +300,18 @@ impl Editor {
         );
         self.ensure_cam_preview_target();
         let Some((cv, dv)) =
-            self.cam_preview.as_ref().map(|p| (p.color_view.clone(), p.depth_view.clone()))
+            self.cam_preview.as_ref().map(|p| (p.scene_view().clone(), p.depth_view.clone()))
         else {
             return;
         };
         self.render_world_into(&cv, &dv, &cam, 16.0 / 9.0, elapsed, mask, None, (320, 180));
+        let look = floptle_render::PostSettings {
+            tonemap: crate::shading::post_process_uniforms(&self.world).0.tonemap,
+            ..Default::default()
+        };
+        if let (Some(gpu), Some(p)) = (self.gpu.as_ref(), self.cam_preview.as_ref()) {
+            p.resolve(gpu, &look);
+        }
     }
 
     /// A1 render targets: every camera with a non-empty `target` name renders
@@ -400,7 +421,7 @@ impl Editor {
         // pixel-art textures by a sub-pixel — the "blurry despite nearest filtering"
         // report). The main Scene viewport renders direct-to-surface and was already crisp.
         self.game_vp =
-            Some(make_offscreen_target(gpu, egui, w, h, "game-vp", wgpu::FilterMode::Nearest));
+            Some(make_offscreen_target(gpu, egui, w, h, "game-vp", wgpu::FilterMode::Nearest, false));
         self.game_vp_dims = (w, h);
         // Create the viewport's own post chain lazily; its actual size + retro mode are
         // set by `configure` every frame in update_game_viewport (retro composites at the
@@ -427,9 +448,7 @@ impl Editor {
         // The active gameplay camera, or the editor camera if the scene has none.
         let mut cull_mask = u32::MAX;
         let cam = {
-            let active = self.world.query::<Matter>().find_map(|(e, m)| {
-                matches!(m, Matter::Camera { active: true, .. }).then_some(e)
-            });
+            let active = floptle_core::active_camera(&self.world);
             match active {
                 Some(e) => {
                     let (fov_y, ortho, oh) = match self.world.get::<Matter>(e) {
@@ -496,7 +515,10 @@ impl Editor {
         post_settings.color_filter = self.access.color_filter.lane();
         post_settings.color_filter_strength = self.access.color_filter_strength;
         post_settings.simulate_deficiency = self.access.simulate_deficiency;
-        let post_on = post_settings.any();
+        // Film grain needs a clock or it is a dirty lens, not film. Reduced
+        // motion is deliberately NOT applied here: grain is texture, not
+        // movement, and freezing it makes it MORE of a fixed pattern to look at.
+        post_settings.time = self.fog_time;
         let retro_on = self.project.retro;
 
         // Composited resolution: the retro internal res in retro mode (so post/AO/dither
@@ -518,7 +540,10 @@ impl Editor {
                     }
                 }
             }
-            if post_on && let Some(post) = self.game_post.as_mut() {
+            // Always configured, not only when an effect is on: the chain is now
+            // the only route from the scene's floating-point target to the sRGB
+            // texture egui shows.
+            if let Some(post) = self.game_post.as_mut() {
                 post.configure(gpu, cw, ch, retro_on);
             }
         }
@@ -533,13 +558,10 @@ impl Editor {
         } else {
             dv.clone()
         };
-        let scene_target = if post_on {
-            self.game_post.as_ref().map(|p| p.input_view().clone())
-        } else if retro_on {
-            retro_views.as_ref().map(|(c, _)| c.clone())
-        } else {
-            Some(cv.clone())
-        };
+        // Always the post input — see the same change in the surface path: the
+        // scene renders in the floating-point scene format and only the chain's
+        // terminal pass knows how to land that on a display.
+        let scene_target = self.game_post.as_ref().map(|p| p.input_view().clone());
         let Some(scene_target) = scene_target else { return };
         self.render_world_into(&scene_target, &depth, &cam, aspect, elapsed, cull_mask, None, (cw, ch));
         // World canvases: real geometry, so they draw into the scene target with
@@ -566,7 +588,8 @@ impl Editor {
             );
         }
         // Post composites into the retro color (retro) or the game_vp color (non-retro).
-        if post_on && let (Some(gpu), Some(post)) = (self.gpu.as_ref(), self.game_post.as_ref()) {
+        if let (Some(gpu), Some(post)) = (self.gpu.as_ref(), self.game_post.as_ref()) {
+            let post_shaders = self.post_shaders.as_ref();
             let proj = cam.proj_matrix(aspect);
             let ssao_frame = floptle_render::SsaoFrame {
                 depth: &depth,
@@ -578,7 +601,23 @@ impl Editor {
             } else {
                 cv.clone()
             };
-            post.run(gpu, &post_settings, Some(&ssao_frame), &out);
+            let mut ps = post_settings;
+            if let Some(d) = crate::shading::dof_focus_distance(&self.world, cam.world_position) {
+                ps.dof_focus = d;
+            }
+            // This IS the game view, so it gets the shutter.
+            self.motion_prev = Some(crate::shading::motion_frame(
+                &mut ps,
+                self.motion_prev,
+                cam.view_proj(aspect),
+                cam.world_position,
+                self.game_retro
+                    .as_ref()
+                    .filter(|_| retro_on)
+                    .map(|r| r.resolution().1)
+                    .unwrap_or(h),
+            ));
+            post.run_with(gpu, &ps, Some(&ssao_frame), &out, post_shaders);
         }
         // Retro upscale: chunky nearest-neighbor blit of the retro color into game_vp.
         if retro_on && let (Some(gpu), Some(retro)) = (self.gpu.as_ref(), self.game_retro.as_ref()) {
@@ -738,9 +777,7 @@ impl Editor {
     // ---- cameras -----------------------------------------------------------
     /// The camera node that currently holds play-mode authority (active = true).
     pub(crate) fn active_camera(&self) -> Option<Entity> {
-        self.world
-            .query::<Matter>()
-            .find_map(|(e, m)| matches!(m, Matter::Camera { active: true, .. }).then_some(e))
+        floptle_core::active_camera(&self.world)
     }
 
     /// Spawn a camera node at the current editor viewpoint (so "what you see is the
@@ -828,7 +865,7 @@ impl Editor {
         // the render, it doesn't stretch a smaller image), so a linear blit
         // would only soften pixel-art UI for nothing.
         self.ui_design_vp =
-            Some(make_offscreen_target(gpu, egui, w, h, "ui-design", wgpu::FilterMode::Nearest));
+            Some(make_offscreen_target(gpu, egui, w, h, "ui-design", wgpu::FilterMode::Nearest, false));
         self.ui_design_vp_dims = (w, h);
     }
 

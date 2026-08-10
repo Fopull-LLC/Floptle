@@ -12,7 +12,8 @@ use std::path::Path;
 use floptle_core::math::{DVec3, Quat, Vec3};
 use floptle_core::transform::Transform;
 use floptle_core::{
-    AoMode, BodyKind, GravityMode, Light, Material, Matter, Name, RigidBody, ScriptInst, Scripts,
+    AoMode, BodyKind, GravityMode, Light, Material, Matter, Name, RigidBody, ScreenShader,
+    ScriptInst, Scripts,
     Shape, World,
 };
 use serde::{Deserialize, Serialize};
@@ -42,9 +43,11 @@ pub const PREFAB_EXT: &str = ".prefab.ron";
 /// nodes in it. Project-wide render settings live separately in [`ProjectConfigDoc`].
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct SceneDoc {
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub lighting: LightDoc,
+    #[serde(default)]
     pub nodes: Vec<NodeDoc>,
 }
 
@@ -53,6 +56,7 @@ pub struct SceneDoc {
 /// the bone name + bone-local offset are stored here.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AttachmentDoc {
+    #[serde(default)]
     pub bone: String,
     #[serde(default)]
     pub offset: TransformDoc,
@@ -61,8 +65,11 @@ pub struct AttachmentDoc {
 /// One node = one entity's authored data.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct NodeDoc {
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub transform: TransformDoc,
+    #[serde(default)]
     pub matter: MatterDoc,
     #[serde(default)]
     pub scripts: Vec<ScriptDoc>,
@@ -298,6 +305,7 @@ impl ReplicatedDoc {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ParticleSystemDoc {
     /// Effect asset key: project-relative path without extension (`vfx/360Slash`).
+    #[serde(default)]
     pub asset: String,
     #[serde(default = "true_bool")]
     pub play_on_start: bool,
@@ -340,6 +348,10 @@ pub struct RigidBodyDoc {
     pub restitution: f32,
     #[serde(default = "frict_f32")]
     pub friction: f32,
+    /// Steepest standable surface, degrees. Omitted at its 60° default, so
+    /// every scene written before it existed loads meaning exactly what it did.
+    #[serde(default = "slope_limit_f32", skip_serializing_if = "is_default_slope")]
+    pub slope_limit: f32,
     #[serde(default = "true_bool")]
     pub gravity: bool,
     #[serde(default)]
@@ -419,6 +431,12 @@ fn half3_f32() -> [f32; 3] {
 fn frict_f32() -> f32 {
     0.3
 }
+fn slope_limit_f32() -> f32 {
+    60.0
+}
+fn is_default_slope(v: &f32) -> bool {
+    *v == 60.0
+}
 
 impl RigidBodyDoc {
     pub fn to_rigidbody(&self) -> RigidBody {
@@ -436,6 +454,7 @@ impl RigidBodyDoc {
             half_extents: self.half_extents,
             restitution: self.restitution,
             friction: self.friction,
+            slope_limit: self.slope_limit.clamp(0.0, 90.0),
             gravity: self.gravity,
             lock_pos: self.lock_pos,
             lock_rot: self.lock_rot,
@@ -456,6 +475,7 @@ impl RigidBodyDoc {
             half_extents: rb.half_extents,
             restitution: rb.restitution,
             friction: rb.friction,
+            slope_limit: rb.slope_limit,
             gravity: rb.gravity,
             lock_pos: rb.lock_pos,
             lock_rot: rb.lock_rot,
@@ -573,6 +593,7 @@ impl CelestialBodyDoc {
 /// A serializable attached script, mirroring [`floptle_core::ScriptInst`].
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ScriptDoc {
+    #[serde(default)]
     pub kind: String,
     #[serde(default = "yes")]
     pub enabled: bool,
@@ -614,8 +635,11 @@ impl ScriptDoc {
 /// Serializable transform (translation `f64`, rotation `xyzw`, scale `f32`).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct TransformDoc {
+    #[serde(default)]
     pub translation: [f64; 3],
+    #[serde(default = "identity_quat")]
     pub rotation: [f32; 4],
+    #[serde(default = "one3")]
     pub scale: [f32; 3],
 }
 
@@ -646,11 +670,16 @@ impl TransformDoc {
 }
 
 /// Serializable matter kind, mirroring [`floptle_core::Matter`].
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+///
+/// `Empty` is the `Default` so a `NodeDoc` missing its `matter:` line still
+/// loads — a node with nothing in it, which is a thing you can see and fix,
+/// rather than a whole scene that refuses to open.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub enum MatterDoc {
     Primitive { shape: ShapeDoc, color: [f32; 3] },
     Blob { scale: f32 },
     Mesh { asset_path: String },
+    #[default]
     Empty,
     Terrain {
         /// Stable per-terrain id (legacy single-terrain scenes default to 0).
@@ -702,7 +731,7 @@ pub enum MatterDoc {
         #[serde(default = "default_ortho_height", skip_serializing_if = "is_default_ortho_height")]
         ortho_height: f32,
     },
-    /// A placeable point/omni light (position = node transform).
+    /// A placeable point/omni/area light (position = node transform).
     PointLight {
         #[serde(default = "white3")]
         color: [f32; 3],
@@ -710,6 +739,10 @@ pub enum MatterDoc {
         intensity: f32,
         #[serde(default = "default_range")]
         range: f32,
+        /// The surface it emits from. Skipped at `Point`, so every light written
+        /// before area lights existed round-trips byte-identically.
+        #[serde(default, skip_serializing_if = "is_point_shape")]
+        shape: LightShapeDoc,
     },
     /// A physics gravity source (Down = level gravity, Radial = planet).
     GravityVolume {
@@ -816,7 +849,134 @@ pub enum MatterDoc {
         posterize_dither: bool,
         #[serde(default)]
         posterize_chroma: bool,
+        /// 0 clip (default) / 1 Reinhard / 2 ACES / 3 AgX. Skips at 0, so a
+        /// scene that never chose one writes the RON it always did.
+        #[serde(default, skip_serializing_if = "is_zero_u32")]
+        tonemap: u32,
+        // ---- the look chain -------------------------------------------------
+        // Every one has a default AND a `skip_serializing_if` at that default,
+        // so a scene that touches none of it writes not one extra line — and an
+        // older scene, which has none of them, loads unchanged.
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        exposure: f32,
+        #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
+        contrast: f32,
+        #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
+        saturation: f32,
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        temperature: f32,
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        tint: f32,
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        lift: f32,
+        #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
+        grade_gamma: f32,
+        #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
+        gain: f32,
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        aberration: f32,
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        distortion: f32,
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        sharpen: f32,
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        denoise: f32,
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        grain: f32,
+        #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
+        grain_size: f32,
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        dof_focus: f32,
+        #[serde(default = "default_dof_range", skip_serializing_if = "is_default_dof_range")]
+        dof_range: f32,
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        dof_max_blur: f32,
+        /// 0 = half of `dof_range` (what the effect did before there were two).
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        dof_near_range: f32,
+        #[serde(default, skip_serializing_if = "is_zero_u32")]
+        dof_blades: u32,
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        dof_blade_rotation: f32,
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        dof_highlight: f32,
+        /// 0 = the default 16 taps.
+        #[serde(default, skip_serializing_if = "is_zero_u32")]
+        dof_quality: u32,
+        /// Motion-blur shutter (0 = off), and taps along the streak (0 = 12).
+        /// Both omitted at their defaults, so no existing scene grows a line.
+        #[serde(default = "zero_f32", skip_serializing_if = "is_zero_f32")]
+        motion_blur: f32,
+        #[serde(default, skip_serializing_if = "is_zero_u32")]
+        motion_samples: u32,
+        /// A tuning view, so it is deliberately NOT saved when off — and it is
+        /// saved when on, because leaving it on and closing the project is a
+        /// thing that happens and finding it still on is better than a frame
+        /// that mysteriously fixed itself.
+        #[serde(default, skip_serializing_if = "is_false")]
+        dof_show_focus: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        dof_focus_node: String,
+        /// Authored `stage post` passes, in order. Empty on every scene that
+        /// has never used one, and skipped when empty, so nothing is written.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        screen_shaders: Vec<ScreenShaderDoc>,
     },
+    /// The baked-GI volume ([`Matter::LightProbes`]). Every knob defaults, so a
+    /// hand-written `LightProbes()` is a room-sized box at one probe per two
+    /// metres — which is a sensible thing to type and then bake.
+    ///
+    /// The bake itself is NOT here: it lives in a `.fgi` beside the scene. A
+    /// scene file is a thing people read and merge, and a few hundred kilobytes
+    /// of spherical harmonics is neither.
+    LightProbes {
+        #[serde(default = "default_probe_half")]
+        half_extents: [f32; 3],
+        #[serde(default = "default_probe_spacing")]
+        spacing: f32,
+        #[serde(default = "on")]
+        enabled: bool,
+        #[serde(default = "one_f32")]
+        intensity: f32,
+        #[serde(default = "one_u32")]
+        bounces: u32,
+        #[serde(default = "default_probe_quality")]
+        quality: u32,
+        #[serde(default = "one_f32")]
+        leak: f32,
+        #[serde(default = "default_probe_normal_bias")]
+        normal_bias: f32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude_layers: Vec<String>,
+    },
+}
+
+/// Serializable [`ScreenShader`] — one authored full-screen pass.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ScreenShaderDoc {
+    pub shader: String,
+    /// Defaults to ON: a pass that arrives without the field was written before
+    /// there was one, and it was running.
+    #[serde(default = "on")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub params: std::collections::BTreeMap<String, [f32; 4]>,
+}
+
+impl From<&ScreenShader> for ScreenShaderDoc {
+    fn from(s: &ScreenShader) -> Self {
+        Self { shader: s.shader.clone(), enabled: s.enabled, params: s.params.clone() }
+    }
+}
+
+impl ScreenShaderDoc {
+    pub fn to_screen_shader(&self) -> ScreenShader {
+        ScreenShader {
+            shader: self.shader.clone(),
+            enabled: self.enabled,
+            params: self.params.clone(),
+        }
+    }
 }
 
 /// Serializable [`AoMode`] (how the PostProcess node computes ambient occlusion).
@@ -903,8 +1063,102 @@ fn is_default_ortho_height(v: &f32) -> bool {
     *v == Matter::ORTHO_HEIGHT
 }
 
+/// A light's emitting shape, as it appears in a scene file.
+///
+/// Sizes are clamped on the way IN rather than trusted: a hand-typed
+/// `Rect(width: 0, height: 0)` is a degenerate emitter whose polygon integral is
+/// a divide by zero, and "the scene file said so" is not a reason to hand that
+/// to the shader.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+pub enum LightShapeDoc {
+    #[default]
+    Point,
+    Sphere {
+        radius: f32,
+    },
+    Rect {
+        width: f32,
+        height: f32,
+        #[serde(default)]
+        two_sided: bool,
+    },
+    Disk {
+        radius: f32,
+        #[serde(default)]
+        two_sided: bool,
+    },
+    Tube {
+        length: f32,
+        radius: f32,
+    },
+}
+
+/// The floor every authored emitter dimension is held to (1 mm). Small enough to
+/// be indistinguishable from a point, large enough that nothing downstream
+/// divides by it.
+const MIN_EMITTER: f32 = 0.001;
+
+fn is_point_shape(s: &LightShapeDoc) -> bool {
+    matches!(s, LightShapeDoc::Point)
+}
+
+impl LightShapeDoc {
+    pub fn to_shape(self) -> floptle_core::LightShape {
+        use floptle_core::LightShape as S;
+        match self {
+            LightShapeDoc::Point => S::Point,
+            LightShapeDoc::Sphere { radius } => S::Sphere { radius: radius.max(MIN_EMITTER) },
+            LightShapeDoc::Rect { width, height, two_sided } => S::Rect {
+                width: width.max(MIN_EMITTER),
+                height: height.max(MIN_EMITTER),
+                two_sided,
+            },
+            LightShapeDoc::Disk { radius, two_sided } => {
+                S::Disk { radius: radius.max(MIN_EMITTER), two_sided }
+            }
+            LightShapeDoc::Tube { length, radius } => S::Tube {
+                length: length.max(MIN_EMITTER),
+                radius: radius.max(MIN_EMITTER),
+            },
+        }
+    }
+}
+
+impl From<floptle_core::LightShape> for LightShapeDoc {
+    fn from(s: floptle_core::LightShape) -> Self {
+        use floptle_core::LightShape as S;
+        match s {
+            S::Point => LightShapeDoc::Point,
+            S::Sphere { radius } => LightShapeDoc::Sphere { radius },
+            S::Rect { width, height, two_sided } => {
+                LightShapeDoc::Rect { width, height, two_sided }
+            }
+            S::Disk { radius, two_sided } => LightShapeDoc::Disk { radius, two_sided },
+            S::Tube { length, radius } => LightShapeDoc::Tube { length, radius },
+        }
+    }
+}
+
 fn default_range() -> f32 {
     10.0
+}
+
+/// A room, not a level: 16 × 8 × 16 metres. Small enough that the first bake
+/// finishes while you are still looking at it.
+fn default_probe_half() -> [f32; 3] {
+    [8.0, 4.0, 8.0]
+}
+fn default_probe_spacing() -> f32 {
+    2.0
+}
+fn default_probe_quality() -> u32 {
+    16
+}
+fn default_probe_normal_bias() -> f32 {
+    0.5
+}
+fn one_u32() -> u32 {
+    1
 }
 
 /// A tank you could stand in — 10 m across, 4 m deep.
@@ -970,9 +1224,12 @@ impl From<&Matter> for MatterDoc {
                 ortho: *ortho,
                 ortho_height: *ortho_height,
             },
-            Matter::PointLight { color, intensity, range } => {
-                MatterDoc::PointLight { color: *color, intensity: *intensity, range: *range }
-            }
+            Matter::PointLight { color, intensity, range, shape } => MatterDoc::PointLight {
+                color: *color,
+                intensity: *intensity,
+                range: *range,
+                shape: LightShapeDoc::from(*shape),
+            },
             Matter::GravityVolume { mode, strength, radius } => MatterDoc::GravityVolume {
                 radial: *mode == GravityMode::Radial,
                 strength: *strength,
@@ -998,6 +1255,27 @@ impl From<&Matter> for MatterDoc {
                 frozen: *frozen,
                 tint: *tint,
                 visibility: *visibility,
+            },
+            Matter::LightProbes {
+                half_extents,
+                spacing,
+                enabled,
+                intensity,
+                bounces,
+                quality,
+                leak,
+                normal_bias,
+                exclude_layers,
+            } => MatterDoc::LightProbes {
+                half_extents: *half_extents,
+                spacing: *spacing,
+                enabled: *enabled,
+                intensity: *intensity,
+                bounces: *bounces,
+                quality: *quality,
+                leak: *leak,
+                normal_bias: *normal_bias,
+                exclude_layers: exclude_layers.clone(),
             },
             Matter::FieldShape { radius } => MatterDoc::FieldShape { radius: *radius },
             Matter::Tilemap { cols, rows, tile, data, tileset } => MatterDoc::Tilemap {
@@ -1032,6 +1310,34 @@ impl From<&Matter> for MatterDoc {
                 posterize_bands,
                 posterize_dither,
                 posterize_chroma,
+                tonemap,
+                exposure,
+                contrast,
+                saturation,
+                temperature,
+                tint,
+                lift,
+                grade_gamma,
+                gain,
+                aberration,
+                distortion,
+                sharpen,
+                denoise,
+                grain,
+                grain_size,
+                dof_focus,
+                dof_range,
+                dof_near_range,
+                dof_max_blur,
+                dof_blades,
+                dof_blade_rotation,
+                dof_highlight,
+                dof_quality,
+                motion_blur,
+                motion_samples,
+                dof_show_focus,
+                dof_focus_node,
+                screen_shaders,
             } => MatterDoc::PostProcess {
                 enabled: *enabled,
                 bloom: *bloom,
@@ -1046,6 +1352,34 @@ impl From<&Matter> for MatterDoc {
                 posterize_bands: *posterize_bands,
                 posterize_dither: *posterize_dither,
                 posterize_chroma: *posterize_chroma,
+                tonemap: *tonemap,
+                exposure: *exposure,
+                contrast: *contrast,
+                saturation: *saturation,
+                temperature: *temperature,
+                tint: *tint,
+                lift: *lift,
+                grade_gamma: *grade_gamma,
+                gain: *gain,
+                aberration: *aberration,
+                distortion: *distortion,
+                sharpen: *sharpen,
+                denoise: *denoise,
+                grain: *grain,
+                grain_size: *grain_size,
+                dof_focus: *dof_focus,
+                dof_range: *dof_range,
+                dof_max_blur: *dof_max_blur,
+                dof_near_range: *dof_near_range,
+                dof_blades: *dof_blades,
+                dof_blade_rotation: *dof_blade_rotation,
+                dof_highlight: *dof_highlight,
+                dof_quality: *dof_quality,
+                motion_blur: *motion_blur,
+                motion_samples: *motion_samples,
+                dof_show_focus: *dof_show_focus,
+                dof_focus_node: dof_focus_node.clone(),
+                screen_shaders: screen_shaders.iter().map(ScreenShaderDoc::from).collect(),
             },
         }
     }
@@ -1089,9 +1423,12 @@ impl MatterDoc {
                     ortho_height: Matter::clamp_ortho_height(*ortho_height),
                 }
             }
-            MatterDoc::PointLight { color, intensity, range } => {
-                Matter::PointLight { color: *color, intensity: *intensity, range: *range }
-            }
+            MatterDoc::PointLight { color, intensity, range, shape } => Matter::PointLight {
+                color: *color,
+                intensity: *intensity,
+                range: *range,
+                shape: shape.to_shape(),
+            },
             MatterDoc::GravityVolume { radial, strength, radius } => Matter::GravityVolume {
                 mode: if *radial { GravityMode::Radial } else { GravityMode::Down },
                 strength: *strength,
@@ -1121,6 +1458,27 @@ impl MatterDoc {
                 frozen: *frozen,
                 tint: *tint,
                 visibility: *visibility,
+            },
+            MatterDoc::LightProbes {
+                half_extents,
+                spacing,
+                enabled,
+                intensity,
+                bounces,
+                quality,
+                leak,
+                normal_bias,
+                exclude_layers,
+            } => Matter::LightProbes {
+                half_extents: *half_extents,
+                spacing: *spacing,
+                enabled: *enabled,
+                intensity: *intensity,
+                bounces: *bounces,
+                quality: *quality,
+                leak: *leak,
+                normal_bias: *normal_bias,
+                exclude_layers: exclude_layers.clone(),
             },
             MatterDoc::FieldShape { radius } => Matter::FieldShape { radius: *radius },
             MatterDoc::Tilemap { cols, rows, tile, data, tileset } => Matter::Tilemap {
@@ -1155,6 +1513,34 @@ impl MatterDoc {
                 posterize_bands,
                 posterize_dither,
                 posterize_chroma,
+                tonemap,
+                exposure,
+                contrast,
+                saturation,
+                temperature,
+                tint,
+                lift,
+                grade_gamma,
+                gain,
+                aberration,
+                distortion,
+                sharpen,
+                denoise,
+                grain,
+                grain_size,
+                dof_focus,
+                dof_range,
+                dof_near_range,
+                dof_max_blur,
+                dof_blades,
+                dof_blade_rotation,
+                dof_highlight,
+                dof_quality,
+                motion_blur,
+                motion_samples,
+                dof_show_focus,
+                dof_focus_node,
+                screen_shaders,
             } => Matter::PostProcess {
                 enabled: *enabled,
                 bloom: *bloom,
@@ -1169,6 +1555,37 @@ impl MatterDoc {
                 posterize_bands: *posterize_bands,
                 posterize_dither: *posterize_dither,
                 posterize_chroma: *posterize_chroma,
+                tonemap: *tonemap,
+                exposure: *exposure,
+                contrast: *contrast,
+                saturation: *saturation,
+                temperature: *temperature,
+                tint: *tint,
+                lift: *lift,
+                grade_gamma: *grade_gamma,
+                gain: *gain,
+                aberration: *aberration,
+                distortion: *distortion,
+                sharpen: *sharpen,
+                denoise: *denoise,
+                grain: *grain,
+                grain_size: *grain_size,
+                dof_focus: *dof_focus,
+                dof_range: *dof_range,
+                dof_max_blur: *dof_max_blur,
+                dof_near_range: *dof_near_range,
+                dof_blades: *dof_blades,
+                dof_blade_rotation: *dof_blade_rotation,
+                dof_highlight: *dof_highlight,
+                dof_quality: *dof_quality,
+                motion_blur: *motion_blur,
+                motion_samples: *motion_samples,
+                dof_show_focus: *dof_show_focus,
+                dof_focus_node: dof_focus_node.clone(),
+                screen_shaders: screen_shaders
+                    .iter()
+                    .map(ScreenShaderDoc::to_screen_shader)
+                    .collect(),
             },
         }
     }
@@ -1199,13 +1616,16 @@ impl From<ShapeDoc> for Shape {
 /// [`floptle_core::Light`].
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct LightDoc {
+    #[serde(default = "default_light_direction")]
     pub direction: [f32; 3],
     /// Stars mode: the directional light turns off and celestial bodies with
     /// `luminosity > 0` become the key lights (radial terminators + shadows,
     /// genuinely dark far sides, multiple stars). Pre-star scenes → off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stars: bool,
+    #[serde(default = "white3")]
     pub color: [f32; 3],
+    #[serde(default = "default_light_ambient")]
     pub ambient: [f32; 3],
     /// The base light every 2D surface gets. WHITE by default, so a scene
     /// written before 2D lighting existed — and a scene that never turns it
@@ -1229,6 +1649,16 @@ pub struct LightDoc {
     pub shadow_dither: bool,
     #[serde(default = "default_shadow_distance")]
     pub shadow_distance: f32,
+    /// Contact shadows default OFF: they cost a screen-space trace per lit
+    /// fragment, and a scene that never asked for them should not start paying.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub contact_shadows: bool,
+    #[serde(default = "default_contact_length")]
+    pub contact_length: f32,
+    #[serde(default = "default_contact_steps")]
+    pub contact_steps: u32,
+    #[serde(default = "default_contact_strength")]
+    pub contact_strength: f32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fog: bool,
     #[serde(default = "default_fog_color")]
@@ -1255,6 +1685,19 @@ pub struct LightDoc {
     pub fog_noise: f32,
     #[serde(default = "default_fog_noise_scale")]
     pub fog_noise_scale: f32,
+    /// Volumetric light injection. These default to lit rather than to the old
+    /// flat look on purpose: a fog layer that ignores the sun standing behind it
+    /// is the thing that made volumetric mode read as a grey wash, and a scene
+    /// saved before this existed wants the fix, not a preserved bug. Set
+    /// `fog_light: 0` to pin the previous appearance exactly.
+    #[serde(default = "default_fog_light")]
+    pub fog_light: f32,
+    #[serde(default = "default_fog_anisotropy")]
+    pub fog_anisotropy: f32,
+    #[serde(default = "default_fog_steps")]
+    pub fog_steps: u32,
+    #[serde(default = "true_bool")]
+    pub fog_shafts: bool,
 }
 
 fn default_shadow_softness() -> f32 {
@@ -1290,6 +1733,24 @@ fn default_fog_noise() -> f32 {
 fn default_fog_noise_scale() -> f32 {
     24.0
 }
+fn default_contact_length() -> f32 {
+    0.35
+}
+fn default_contact_steps() -> u32 {
+    12
+}
+fn default_contact_strength() -> f32 {
+    0.9
+}
+fn default_fog_light() -> f32 {
+    1.0
+}
+fn default_fog_anisotropy() -> f32 {
+    0.6
+}
+fn default_fog_steps() -> u32 {
+    16
+}
 
 impl Default for LightDoc {
     fn default() -> Self {
@@ -1313,6 +1774,10 @@ impl From<&Light> for LightDoc {
             shadow_quantize: l.shadow_quantize,
             shadow_dither: l.shadow_dither,
             shadow_distance: l.shadow_distance,
+            contact_shadows: l.contact_shadows,
+            contact_length: l.contact_length,
+            contact_steps: l.contact_steps,
+            contact_strength: l.contact_strength,
             fog: l.fog,
             fog_color: l.fog_color,
             fog_start: l.fog_start,
@@ -1325,6 +1790,10 @@ impl From<&Light> for LightDoc {
             fog_falloff: l.fog_falloff,
             fog_noise: l.fog_noise,
             fog_noise_scale: l.fog_noise_scale,
+            fog_light: l.fog_light,
+            fog_anisotropy: l.fog_anisotropy,
+            fog_steps: l.fog_steps,
+            fog_shafts: l.fog_shafts,
         }
     }
 }
@@ -1345,6 +1814,10 @@ impl LightDoc {
             shadow_quantize: self.shadow_quantize,
             shadow_dither: self.shadow_dither,
             shadow_distance: self.shadow_distance,
+            contact_shadows: self.contact_shadows,
+            contact_length: self.contact_length.clamp(0.01, 20.0),
+            contact_steps: self.contact_steps.clamp(2, 32),
+            contact_strength: self.contact_strength.clamp(0.0, 1.0),
             fog: self.fog,
             fog_color: self.fog_color,
             fog_start: self.fog_start,
@@ -1357,6 +1830,10 @@ impl LightDoc {
             fog_falloff: self.fog_falloff,
             fog_noise: self.fog_noise,
             fog_noise_scale: self.fog_noise_scale,
+            fog_light: self.fog_light,
+            fog_anisotropy: self.fog_anisotropy,
+            fog_steps: self.fog_steps.clamp(2, 64),
+            fog_shafts: self.fog_shafts,
         }
     }
 }
@@ -1369,7 +1846,9 @@ impl LightDoc {
 /// `project.ron`'s look can be migrated onto a scene's node, but never written back.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ProjectConfigDoc {
+    #[serde(default = "true_bool")]
     pub retro: bool,
+    #[serde(default = "default_retro_height")]
     pub retro_height: u32,
     /// Fixed internal WIDTH for the retro target, in pixels. `0` = derive it
     /// from the window's aspect, which is the original behaviour.
@@ -1390,6 +1869,7 @@ pub struct ProjectConfigDoc {
     /// stretching is what every existing project is drawn against.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retro_integer_scale: bool,
+    #[serde(default = "true_bool")]
     pub matter: bool,
     /// The game's title: names exported builds (their binary + window title).
     /// `None` = untitled (exports fall back to the project folder's name).
@@ -1670,6 +2150,7 @@ pub fn to_ron(doc: &SceneDoc) -> Result<String, SceneError> {
 /// field past `color` has a serde default, so old color-only files still load.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct MaterialDoc {
+    #[serde(default = "white3")]
     pub color: [f32; 3],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texture: Option<String>,
@@ -1715,10 +2196,107 @@ pub struct MaterialDoc {
     pub sheet_rows: u32,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub cell: u32,
+
+    // --- The surface maps (v0.43). ------------------------------------------
+    // Each skips at its neutral value, so a material that uses none of them
+    // writes byte-identical RON to a pre-v0.43 one. That is not tidiness: it is
+    // what lets an artist diff a scene file and see only what they changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_map: Option<String>,
+    #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
+    pub normal_strength: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roughness_map: Option<String>,
+    #[serde(default = "default_roughness", skip_serializing_if = "is_default_roughness")]
+    pub roughness: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metallic_map: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub metallic: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ao_map: Option<String>,
+    #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
+    pub occlusion_strength: f32,
+    #[serde(default, skip_serializing_if = "ShadingDoc::is_classic")]
+    pub shading: ShadingDoc,
+    #[serde(default, skip_serializing_if = "RetroDoc::is_off")]
+    pub retro: RetroDoc,
 }
 
 fn is_zero_u32(v: &u32) -> bool {
     *v == 0
+}
+fn is_zero(v: &f32) -> bool {
+    *v == 0.0
+}
+fn default_roughness() -> f32 {
+    Material::default().roughness
+}
+fn is_default_roughness(v: &f32) -> bool {
+    *v == Material::default().roughness
+}
+
+/// RON mirror of [`floptle_core::Shading`]. Its own type rather than a bare
+/// string so a typo in a hand-edited scene is a parse error naming the field,
+/// not a silent fall back to the wrong lighting model.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShadingDoc {
+    #[default]
+    Classic,
+    Physical,
+}
+
+impl ShadingDoc {
+    fn is_classic(&self) -> bool {
+        matches!(self, ShadingDoc::Classic)
+    }
+    pub fn to_shading(self) -> floptle_core::Shading {
+        match self {
+            ShadingDoc::Classic => floptle_core::Shading::Classic,
+            ShadingDoc::Physical => floptle_core::Shading::Physical,
+        }
+    }
+    pub fn from_shading(s: floptle_core::Shading) -> Self {
+        match s {
+            floptle_core::Shading::Classic => ShadingDoc::Classic,
+            floptle_core::Shading::Physical => ShadingDoc::Physical,
+        }
+    }
+}
+
+/// RON mirror of [`floptle_core::Retro`] — the deliberate PS1/N64 artefacts.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct RetroDoc {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub jitter: f32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub affine_uv: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vertex_lit: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dither_alpha: bool,
+}
+
+impl RetroDoc {
+    fn is_off(&self) -> bool {
+        *self == RetroDoc::default()
+    }
+    pub fn to_retro(self) -> floptle_core::Retro {
+        floptle_core::Retro {
+            jitter: self.jitter,
+            affine_uv: self.affine_uv,
+            vertex_lit: self.vertex_lit,
+            dither_alpha: self.dither_alpha,
+        }
+    }
+    pub fn from_retro(r: floptle_core::Retro) -> Self {
+        Self {
+            jitter: r.jitter,
+            affine_uv: r.affine_uv,
+            vertex_lit: r.vertex_lit,
+            dither_alpha: r.dither_alpha,
+        }
+    }
 }
 
 /// RON mirror of [`floptle_core::Tiling`].
@@ -1757,8 +2335,55 @@ fn white3() -> [f32; 3] {
     [1.0, 1.0, 1.0]
 }
 
+/// Zero, one, and "is this still the default" — the pair a `skip_serializing_if`
+/// needs so a scene only writes the knobs it actually turned.
+fn zero_f32() -> f32 {
+    0.0
+}
+fn is_one_f32(v: &f32) -> bool {
+    *v == 1.0
+}
+fn default_dof_range() -> f32 {
+    5.0
+}
+fn is_default_dof_range(v: &f32) -> bool {
+    *v == 5.0
+}
+
 fn is_white3(c: &[f32; 3]) -> bool {
     *c == [1.0, 1.0, 1.0]
+}
+
+// ---- defaults for fields that used to be MANDATORY --------------------------
+//
+// A scene file is authored data that outlives the code reading it: hand-edited,
+// generated by a script, written by an older engine, merged by git. Every one of
+// those produces a file with a field missing, and until now a handful of fields
+// answered that by refusing to parse the WHOLE scene — `Unexpected missing field
+// 'direction' in 'LightDoc'` for a `lighting: ()` line, and the double-click that
+// should have opened the level did nothing at all, because the only report was an
+// `eprintln!` to a terminal nobody has.
+//
+// These are the values `Default` already gives; naming them per field just means
+// a missing line costs that line and nothing else.
+fn identity_quat() -> [f32; 4] {
+    [0.0, 0.0, 0.0, 1.0]
+}
+
+fn one3() -> [f32; 3] {
+    [1.0, 1.0, 1.0]
+}
+
+fn default_light_direction() -> [f32; 3] {
+    Light::default().direction
+}
+
+fn default_light_ambient() -> [f32; 3] {
+    Light::default().ambient
+}
+
+fn default_retro_height() -> u32 {
+    240
 }
 
 fn one_f32() -> f32 {
@@ -1801,6 +2426,16 @@ impl MaterialDoc {
             sheet_cols: self.sheet_cols,
             sheet_rows: self.sheet_rows,
             cell: self.cell,
+            normal_map: self.normal_map.clone(),
+            normal_strength: self.normal_strength,
+            roughness_map: self.roughness_map.clone(),
+            roughness: self.roughness,
+            metallic_map: self.metallic_map.clone(),
+            metallic: self.metallic,
+            ao_map: self.ao_map.clone(),
+            occlusion_strength: self.occlusion_strength,
+            shading: self.shading.to_shading(),
+            retro: self.retro.to_retro(),
         }
     }
     pub fn from_material(m: &Material) -> Self {
@@ -1829,6 +2464,16 @@ impl MaterialDoc {
             sheet_cols: m.sheet_cols,
             sheet_rows: m.sheet_rows,
             cell: m.cell,
+            normal_map: m.normal_map.clone(),
+            normal_strength: m.normal_strength,
+            roughness_map: m.roughness_map.clone(),
+            roughness: m.roughness,
+            metallic_map: m.metallic_map.clone(),
+            metallic: m.metallic,
+            ao_map: m.ao_map.clone(),
+            occlusion_strength: m.occlusion_strength,
+            shading: ShadingDoc::from_shading(m.shading),
+            retro: RetroDoc::from_retro(m.retro),
         }
     }
 }
@@ -2606,7 +3251,8 @@ mod tests {
                         half_extents: [0.5, 0.5, 0.5],
                         restitution: 0.2,
                         friction: 0.5,
-                        gravity: false, // exercise the gravity-flag round-trip
+                        slope_limit: 42.0, // exercise the slope-limit round-trip
+                        gravity: false,    // exercise the gravity-flag round-trip
                         lock_pos: [false, false, true],
                         lock_rot: [true, false, true],
                         two_d: true,
@@ -2761,7 +3407,7 @@ mod tests {
                     terrain_gen: None,
                     name: "lamp".into(),
                     transform: TransformDoc::default(),
-                    matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5 },
+                    matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default() },
                     object_materials: Default::default(),
                     scripts: Vec::new(),
                     material: None,
@@ -2851,7 +3497,7 @@ mod tests {
         let mut world = World::new();
         let e = world.spawn();
         world.insert(e, floptle_core::transform::Transform::IDENTITY);
-        world.insert(e, Matter::PointLight { color: [1.0, 0.86, 0.62], intensity: 3.0, range: 8.0 });
+        world.insert(e, Matter::PointLight { color: [1.0, 0.86, 0.62], intensity: 3.0, range: 8.0, shape: Default::default() });
         world.insert(
             e,
             floptle_core::Lighting2D {
@@ -2878,7 +3524,7 @@ mod tests {
         let mut plain = World::new();
         let p = plain.spawn();
         plain.insert(p, floptle_core::transform::Transform::IDENTITY);
-        plain.insert(p, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0 });
+        plain.insert(p, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape: Default::default() });
         plain.insert(p, floptle_core::Lighting2D { mode: floptle_core::Lit2D::Yes, ..Default::default() });
         let text = to_ron(&to_doc("plain", &plain)).unwrap();
         for key in ["light_inner", "light_falloff", "light_shadows"] {
@@ -2945,7 +3591,7 @@ mod tests {
         let lamp = snap.nodes.iter().find(|n| n.name == "lamp").unwrap();
         assert_eq!(
             lamp.matter,
-            MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5 }
+            MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default() }
         );
         // the camera's fov/active round-trip
         let eye = snap.nodes.iter().find(|n| n.name == "eye").unwrap();
@@ -2953,6 +3599,297 @@ mod tests {
             eye.matter,
             MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT }
         );
+    }
+
+    /// A HAND-WRITTEN screen shader list loads, including the fields a person
+    /// leaves out.
+    ///
+    /// The round trip below proves the code can read what it wrote; this proves
+    /// it can read what somebody TYPED. It matters because every field here has
+    /// a serde default, so a name that does not line up does not fail the
+    /// load — it silently yields an empty list, and the scene renders exactly as
+    /// it did before with no message anywhere.
+    #[test]
+    fn a_hand_written_screen_shader_list_loads() {
+        const SRC: &str = r#"(
+    name: "post",
+    nodes: [
+        (
+            name: "Post Processing",
+            transform: (translation: (0, 0, 0), rotation: (0, 0, 0, 1), scale: (1, 1, 1)),
+            matter: PostProcess(
+                screen_shaders: [
+                    (
+                        shader: "shaders/examples/inkOutline.flsl",
+                        params: {"thickness": (2, 0, 0, 0)},
+                    ),
+                    (
+                        shader: "shaders/examples/crtScanlines.flsl",
+                        enabled: false,
+                    ),
+                ],
+            ),
+        ),
+    ],
+)"#;
+        let doc = from_ron(SRC).expect("a hand-written scene loads");
+        let MatterDoc::PostProcess { screen_shaders, .. } = &doc.nodes[0].matter else {
+            panic!("the node is a PostProcess");
+        };
+        assert_eq!(screen_shaders.len(), 2, "both passes survive: {screen_shaders:?}");
+        // Omitted `enabled` means ON — a pass written before the field existed
+        // was running, and so is one somebody typed without it.
+        assert!(screen_shaders[0].enabled, "an omitted `enabled` is on");
+        assert_eq!(screen_shaders[0].params["thickness"], [2.0, 0.0, 0.0, 0.0]);
+        assert!(!screen_shaders[1].enabled);
+        assert!(screen_shaders[1].params.is_empty());
+        // …and the ORDER is the list's meaning, so it must not be a set.
+        assert!(screen_shaders[0].shader.ends_with("inkOutline.flsl"));
+    }
+
+    /// A light probe volume survives World → RON → World, and a hand-written one
+    /// with nothing but a size loads as a usable volume rather than as a black
+    /// box of zeroes. The second half is the one that matters: a `spacing` of 0
+    /// or a `quality` of 0 is not a smaller bake, it is a divide by zero.
+    #[test]
+    fn light_probe_volumes_round_trip_and_default_sanely() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, Name("GI".into()));
+        world.insert(e, Transform::IDENTITY);
+        let authored = Matter::LightProbes {
+            half_extents: [20.0, 6.0, 12.0],
+            spacing: 1.5,
+            enabled: false,
+            intensity: 1.4,
+            bounces: 3,
+            quality: 32,
+            leak: 0.5,
+            normal_bias: 0.25,
+            exclude_layers: vec!["Characters".into(), "FX".into()],
+        };
+        world.insert(e, authored.clone());
+        let ron = to_ron(&to_doc("gi", &world)).expect("serializes");
+        let mut round = World::new();
+        spawn_into(&from_ron(&ron).expect("parses"), &mut round);
+        let got = round
+            .query::<Matter>()
+            .find(|(_, m)| matches!(m, Matter::LightProbes { .. }))
+            .map(|(_, m)| m.clone())
+            .expect("the volume survives");
+        assert_eq!(got, authored, "every knob round trips");
+
+        // The bake is a build artefact, not scene text: nothing that looks like
+        // probe data may appear in the `.ron`.
+        assert!(!ron.contains("probes:"), "the bake stays out of the scene file");
+
+        const BARE: &str = r#"(
+    name: "gi",
+    nodes: [
+        (
+            name: "GI",
+            transform: (translation: (0, 2, 0), rotation: (0, 0, 0, 1), scale: (1, 1, 1)),
+            matter: LightProbes(half_extents: (30, 5, 30)),
+        ),
+    ],
+)"#;
+        let doc = from_ron(BARE).expect("a hand-written volume loads");
+        let MatterDoc::LightProbes { spacing, quality, bounces, enabled, intensity, .. } =
+            &doc.nodes[0].matter
+        else {
+            panic!("the node is a LightProbes");
+        };
+        assert!(*spacing > 0.0 && *quality >= 4 && *bounces >= 1, "usable, not zeroed");
+        assert!(*enabled, "a volume you typed out is on");
+        assert_eq!(*intensity, 1.0);
+    }
+
+    #[test]
+    fn a_light_emitter_round_trips_and_an_old_light_stays_a_point() {
+        use floptle_core::LightShape as LS;
+        let mut world = World::new();
+        for (name, shape) in [
+            ("Window", LS::Rect { width: 2.5, height: 4.0, two_sided: false }),
+            ("Panel", LS::Rect { width: 1.0, height: 1.0, two_sided: true }),
+            ("Bulb", LS::Sphere { radius: 0.35 }),
+            ("Downlight", LS::Disk { radius: 0.6, two_sided: false }),
+            ("Strip", LS::Tube { length: 3.0, radius: 0.04 }),
+            ("Bare", LS::Point),
+        ] {
+            let e = world.spawn();
+            world.insert(e, Name(name.into()));
+            world.insert(e, Transform::IDENTITY);
+            world.insert(
+                e,
+                Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape },
+            );
+        }
+        let ron = to_ron(&to_doc("lights", &world)).expect("serializes");
+        let mut round = World::new();
+        spawn_into(&from_ron(&ron).expect("parses"), &mut round);
+        let mut seen = 0;
+        for (e, m) in round.query::<Matter>() {
+            let Matter::PointLight { shape, .. } = m else { continue };
+            let name = round.get::<Name>(e).map(|n| n.0.clone()).unwrap_or_default();
+            seen += 1;
+            match (name.as_str(), shape) {
+                ("Window", LS::Rect { width, height, two_sided }) => {
+                    assert_eq!((*width, *height, *two_sided), (2.5, 4.0, false));
+                }
+                ("Panel", LS::Rect { two_sided, .. }) => assert!(*two_sided),
+                ("Bulb", LS::Sphere { radius }) => assert_eq!(*radius, 0.35),
+                ("Downlight", LS::Disk { radius, .. }) => assert_eq!(*radius, 0.6),
+                ("Strip", LS::Tube { length, radius }) => assert_eq!((*length, *radius), (3.0, 0.04)),
+                ("Bare", LS::Point) => {}
+                other => panic!("{other:?} came back as a different emitter"),
+            }
+        }
+        assert_eq!(seen, 6, "every light survived");
+
+        // A bare point writes NOTHING extra. Every light in every scene that
+        // exists is one, and a release that rewrites all of them on first save
+        // is a release that shows up as a diff nobody asked for.
+        let just_a_point = to_ron(&{
+            let mut w = World::new();
+            let e = w.spawn();
+            w.insert(e, Name("Bare".into()));
+            w.insert(e, Transform::IDENTITY);
+            w.insert(e, Matter::PointLight {
+                color: [1.0; 3],
+                intensity: 1.0,
+                range: 10.0,
+                shape: LS::Point,
+            });
+            to_doc("one", &w)
+        })
+        .expect("serializes");
+        assert!(!just_a_point.contains("shape"), "a point light writes no emitter: {just_a_point}");
+
+        // A hand-typed emitter with a zero dimension is a degenerate polygon
+        // whose integral divides by zero. The scene file does not get to hand
+        // that to the shader.
+        const FLAT: &str = r#"(
+    name: "lights",
+    nodes: [
+        (
+            name: "Window",
+            transform: (translation: (0, 2, 0), rotation: (0, 0, 0, 1), scale: (1, 1, 1)),
+            matter: PointLight(shape: Rect(width: 0, height: 0)),
+        ),
+    ],
+)"#;
+        let doc = from_ron(FLAT).expect("a hand-written emitter loads");
+        let MatterDoc::PointLight { shape, .. } = &doc.nodes[0].matter else {
+            panic!("the node is a light");
+        };
+        let LS::Rect { width, height, .. } = shape.to_shape() else { panic!("still a rect") };
+        assert!(width > 0.0 && height > 0.0, "a zero-size emitter is clamped, not passed on");
+    }
+
+    #[test]
+    fn contact_shadow_settings_round_trip_and_default_off() {
+        let authored = Light {
+            contact_shadows: true,
+            contact_length: 0.8,
+            contact_steps: 24,
+            contact_strength: 0.55,
+            ..Light::default()
+        };
+        let doc = LightDoc::from(&authored);
+        let ron = ron::ser::to_string(&doc).expect("serializes");
+        let back: LightDoc = ron::from_str(&ron).expect("parses");
+        assert_eq!(back.to_light(), authored, "every contact knob round trips");
+
+        // A scene written before this existed must arrive with contact shadows
+        // OFF. They cost a trace per lit fragment, and a release that silently
+        // switches on a per-fragment cost in every existing project is a release
+        // that reads as "the update made my game slower".
+        let old: LightDoc = ron::from_str(
+            "(direction: (0.4, 0.9, 0.45), color: (1, 1, 1), ambient: (0.1, 0.1, 0.1), intensity: 1)",
+        )
+        .expect("a pre-contact Lighting block still loads");
+        assert!(!old.to_light().contact_shadows, "an old scene does not start paying");
+
+        // …and the loader clamps, because a hand-typed 0-step trace divides by
+        // its own step count.
+        let wild: LightDoc = ron::from_str(
+            "(direction: (0, 1, 0), color: (1, 1, 1), ambient: (0, 0, 0), intensity: 1, \
+             contact_shadows: true, contact_steps: 0, contact_length: 900)",
+        )
+        .expect("parses");
+        let l = wild.to_light();
+        assert_eq!(l.contact_steps, 2, "a zero step count is clamped, not honoured");
+        assert_eq!(l.contact_length, 20.0, "and a wild reach is fenced");
+    }
+
+    /// A body's slope limit round-trips, and a scene written before it existed
+    /// arrives at the 60° this used to be fixed at — because the limit now
+    /// decides what counts as ground, so a different default would silently
+    /// change where every existing character can stand.
+    #[test]
+    fn a_slope_limit_round_trips_and_an_old_body_keeps_the_old_angle() {
+        let authored = floptle_core::RigidBody { slope_limit: 38.5, ..Default::default() };
+        let doc = RigidBodyDoc::from_rigidbody(&authored);
+        let ron = ron::ser::to_string(&doc).expect("serializes");
+        let back: RigidBodyDoc = ron::from_str(&ron).expect("parses");
+        assert_eq!(back.to_rigidbody().slope_limit, 38.5);
+
+        let old: RigidBodyDoc =
+            ron::from_str("(capsule: true, radius: 0.4, height: 1.8)").expect("an old body loads");
+        assert_eq!(old.to_rigidbody().slope_limit, 60.0, "the angle it always had");
+
+        // A default body does not write the field at all, so scenes do not all
+        // grow a line the day this shipped.
+        let plain = RigidBodyDoc::from_rigidbody(&floptle_core::RigidBody::default());
+        assert!(
+            !ron::ser::to_string(&plain).expect("serializes").contains("slope_limit"),
+            "the default is omitted"
+        );
+
+        // Hand-typed nonsense is fenced: a limit past vertical has no cosine
+        // that means anything.
+        let wild: RigidBodyDoc = ron::from_str("(slope_limit: 400)").expect("parses");
+        assert_eq!(wild.to_rigidbody().slope_limit, 90.0);
+    }
+
+    #[test]
+    fn lit_fog_round_trips_and_an_old_scene_arrives_lit() {
+        let authored = Light {
+            fog: true,
+            fog_volumetric: true,
+            fog_light: 2.25,
+            fog_anisotropy: -0.4,
+            fog_steps: 40,
+            fog_shafts: false,
+            ..Light::default()
+        };
+        let doc = LightDoc::from(&authored);
+        let ron = ron::ser::to_string(&doc).expect("serializes");
+        let back: LightDoc = ron::from_str(&ron).expect("parses");
+        assert_eq!(back.to_light(), authored, "every injection knob round trips");
+
+        // A `Lighting` block written before light injection existed. The defaults
+        // land it on LIT rather than on the flat colour, deliberately: fog that
+        // ignores the sun standing behind it is what made volumetric mode read as
+        // a grey wash, and a scene saved before the fix wants the fix.
+        let old: LightDoc = ron::from_str(
+            "(direction: (0.4, 0.9, 0.45), color: (1, 1, 1), ambient: (0.1, 0.1, 0.1), \
+             intensity: 1, fog: true, fog_volumetric: true, fog_density: 0.03)",
+        )
+        .expect("a pre-injection Lighting block still loads");
+        let l = old.to_light();
+        assert!(l.fog_light > 0.0, "an old volumetric scene arrives lit, not flat");
+        assert!(l.fog_shafts, "and with its beams on");
+        assert!(l.fog_anisotropy > 0.0, "scattering forward, which is what makes them read");
+        assert_eq!(l.fog_density, 0.03, "without disturbing what the scene did say");
+
+        // The march is bounded on BOTH ends: 0 steps is a divide, and an
+        // unbounded one is a hang no scene should be able to author.
+        let wild: LightDoc =
+            ron::from_str("(direction: (0, 1, 0), color: (1, 1, 1), ambient: (0, 0, 0), \
+                           intensity: 1, fog_steps: 100000)")
+                .expect("parses");
+        assert_eq!(wild.to_light().fog_steps, 64, "a wild step count is clamped, not honoured");
     }
 
     #[test]
@@ -2977,6 +3914,52 @@ mod tests {
             posterize_bands: 6,
             posterize_dither: true,
             posterize_chroma: true,
+            tonemap: 2,
+            // The look chain, all non-default, so the round trip is proving the
+            // NEW knobs survive it and not just that the old ones still do.
+            exposure: -0.75,
+            contrast: 1.4,
+            saturation: 0.6,
+            temperature: 0.3,
+            tint: -0.2,
+            lift: 0.05,
+            grade_gamma: 0.85,
+            gain: 1.2,
+            aberration: 0.4,
+            distortion: -0.15,
+            sharpen: 0.7,
+            denoise: 0.35,
+            grain: 0.25,
+            grain_size: 3.0,
+            dof_focus: 12.5,
+            dof_range: 2.5,
+            dof_near_range: 0.8,
+            dof_max_blur: 6.0,
+            dof_blades: 6,
+            dof_blade_rotation: 0.4,
+            dof_highlight: 2.0,
+            dof_quality: 32,
+            motion_blur: 0.5,
+            motion_samples: 20,
+            dof_show_focus: true,
+            dof_focus_node: "Hero".into(),
+            // Two passes, one of them switched off and one with a knob override:
+            // the ORDER, the switch and the params all have to survive, and a
+            // Vec of structs is exactly where a round trip quietly loses one.
+            screen_shaders: vec![
+                floptle_core::ScreenShader {
+                    shader: "shaders/examples/inkOutline.flsl".into(),
+                    enabled: true,
+                    params: [("thickness".to_string(), [2.0, 0.0, 0.0, 0.0])]
+                        .into_iter()
+                        .collect(),
+                },
+                floptle_core::ScreenShader {
+                    shader: "shaders/examples/crtScanlines.flsl".into(),
+                    enabled: false,
+                    params: Default::default(),
+                },
+            ],
         };
         world.insert(e, authored.clone());
 

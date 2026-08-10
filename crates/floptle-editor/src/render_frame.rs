@@ -227,7 +227,7 @@ fn light2d_uniform(
     two_d: &crate::shading::LightSlots,
     view_proj: floptle_core::math::Mat4,
 ) -> floptle_render::Light2dUniform {
-    let (n, pos, color, mask, falloff) = *two_d;
+    let (n, pos, color, mask, falloff) = (two_d.count, two_d.pos, two_d.color, two_d.mask, two_d.falloff);
     // The scene's **2D base light**, always — not the 3D ambient, and not a
     // special case for "no lights placed".
     //
@@ -342,12 +342,8 @@ impl Editor {
         // LOD rings center on what the player actually sees: the active game camera
         // during Play, the editor fly-camera otherwise.
         let lod_cam = if self.playing {
-            self.world
-                .query::<Matter>()
-                .find_map(|(e, m)| {
-                    matches!(m, Matter::Camera { active: true, .. })
-                        .then(|| floptle_core::world_transform(&self.world, e).translation)
-                })
+            floptle_core::active_camera(&self.world)
+                .map(|e| floptle_core::world_transform(&self.world, e).translation)
                 .unwrap_or(self.camera.position)
         } else {
             self.camera.position
@@ -456,6 +452,14 @@ impl Editor {
         // Shapes follow: their sdf shaders splice into both passes on change.
         self.ensure_flsl_materials();
         self.ensure_ui_shaders();
+        self.ensure_post_shaders();
+        // Baked GI: push any pending probe upload, then advance a bake by one
+        // frame's slice. Both run BEFORE the gathers below, so this frame's
+        // draws see this frame's light — and a bake, which renders the scene
+        // itself, cannot be re-entered from inside one of them.
+        self.refresh_gi();
+        self.step_gi_bake();
+        self.drive_auto_bake();
         self.sync_field_shapes();
 
         // Edit-mode animation preview (Animating tab): pose the bound node at the
@@ -623,6 +627,9 @@ impl Editor {
             Some(post),
             Some(egui),
             Some(window),
+            // Not `Some(...)`: a project with no screen shaders has no registry
+            // yet, and that must not stop the frame from being drawn.
+            post_shaders,
         ) = (
             self.gpu.as_mut(),
             self.raster.as_mut(),
@@ -636,6 +643,7 @@ impl Editor {
             self.post.as_mut(),
             self.egui.as_mut(),
             self.window.as_ref(),
+            self.post_shaders.as_ref(),
         ) else {
             return;
         };
@@ -667,13 +675,7 @@ impl Editor {
         // view only — the editor Scene view always shows everything.
         let mut game_cull_mask = u32::MAX;
         let cam = {
-            let active = if game_view {
-                self.world.query::<Matter>().find_map(|(e, m)| {
-                    matches!(m, Matter::Camera { active: true, .. }).then_some(e)
-                })
-            } else {
-                None
-            };
+            let active = if game_view { floptle_core::active_camera(&self.world) } else { None };
             match active {
                 Some(e) => {
                     let (fov_y, ortho, oh) = match self.world.get::<Matter>(e) {
@@ -716,6 +718,8 @@ impl Editor {
         // the game view, where you're seeing the game, not the editor overlays).
         self.camera_gizmos.clear();
         self.light_gizmos.clear();
+        self.rig_gizmos.clear();
+        self.gi_probe_dots.clear();
         self.body_gizmos.clear();
         self.contact_gizmos.clear();
         self.terrain_wire_gizmo.clear();
@@ -754,13 +758,34 @@ impl Editor {
                 );
             }
         }
+        // The GI probes, drawn where they actually are. Not behind `show_gizmos`:
+        // this is a switch on the Light Probes node itself, and somebody who
+        // ticks "show the probes" has asked for exactly this.
+        if !game_view
+            && self.gi_show_probes
+            && let (Some(baked), Some((e, floptle_core::Matter::LightProbes { leak, .. }))) =
+                (self.gi_baked.as_ref(), crate::gi_bake::gi_node(&self.world))
+        {
+            let center = floptle_core::world_transform(&self.world, e).translation;
+            let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
+            crate::viz::probe_dots(
+                baked,
+                center,
+                leak,
+                cam.world_position,
+                view_proj,
+                gw,
+                gh,
+                &mut self.gi_probe_dots,
+            );
+        }
         if !game_view && self.show_gizmos {
             let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
             // Only cameras and point lights get gizmos — gather the few Copy fields we
             // need (no per-frame Matter clone over the whole world).
             enum Giz {
                 Cam(f32, bool, Option<f32>),
-                Light(f32),
+                Light(f32, floptle_core::LightShape),
                 Gravity(bool, f32), // radial?, radius
             }
             let filter = self.gizmo_filter;
@@ -773,8 +798,8 @@ impl Editor {
                     {
                         Some((e, Giz::Cam(*fov_y, *active, ortho.then_some(*ortho_height))))
                     }
-                    Matter::PointLight { range, .. } if filter.lights => {
-                        Some((e, Giz::Light(*range)))
+                    Matter::PointLight { range, shape, .. } if filter.lights => {
+                        Some((e, Giz::Light(*range, *shape)))
                     }
                     Matter::GravityVolume { mode, radius, .. } if filter.lights => {
                         Some((e, Giz::Gravity(*mode == floptle_core::GravityMode::Radial, *radius)))
@@ -794,9 +819,11 @@ impl Editor {
                             self.camera_gizmos.push(CameraGizmo { lines, active });
                         }
                     }
-                    Giz::Light(range) => {
-                        let lines =
-                            point_light_lines(wt.translation, range, cam.world_position, view_proj, gw, gh);
+                    Giz::Light(range, shape) => {
+                        let lines = point_light_lines(
+                            wt.translation, wt.rotation, wt.scale, range, shape,
+                            cam.world_position, view_proj, gw, gh,
+                        );
                         if !lines.is_empty() {
                             self.light_gizmos.push(lines);
                         }
@@ -808,6 +835,43 @@ impl Editor {
                         if !lines.is_empty() {
                             self.light_gizmos.push(lines);
                         }
+                    }
+                }
+            }
+            // The rig of a selected mesh — the sticks you click to pose it.
+            //
+            // Only for a mesh that is selected, or whose bone is: every rig in
+            // the scene at once buries the picture in white sticks, and the one
+            // being posed would be the hardest of all to find.
+            if filter.bones {
+                let bone_sel = self.bone_selection;
+                let mut rigged: Vec<Entity> = Vec::new();
+                for e in self.selection.iter().copied().chain(bone_sel.map(|(m, _)| m)) {
+                    if !rigged.contains(&e) {
+                        rigged.push(e);
+                    }
+                }
+                for e in rigged {
+                    let Some(Matter::Mesh { asset_path }) = self.world.get::<Matter>(e) else {
+                        continue;
+                    };
+                    let Some(rig) = self.mesh_registry.get(asset_path).and_then(|m| m.rig.as_ref())
+                    else {
+                        continue;
+                    };
+                    let viz = crate::viz::rig_viz(
+                        e,
+                        rig,
+                        self.anim.poses.get(&e).map(|p| p.as_slice()),
+                        floptle_core::world_transform(&self.world, e).world_matrix(),
+                        bone_sel.filter(|(m, _)| *m == e).map(|(_, i)| i),
+                        cam.world_position,
+                        view_proj,
+                        gw,
+                        gh,
+                    );
+                    if !viz.joints.is_empty() {
+                        self.rig_gizmos.push(viz);
                     }
                 }
             }
@@ -1168,9 +1232,8 @@ impl Editor {
         let sun = crate::shading::sun_vec(&self.world, &light_node, cam.world_position);
         let li = light_node.intensity;
         // Whether `Auto` reads as 2D in this scene, asked once rather than per node.
-        let flat_camera = self.world.query::<Matter>().any(|(ce, m)| {
-            matches!(m, Matter::Camera { active: true, ortho: true, .. })
-                && !floptle_core::is_disabled(&self.world, ce)
+        let flat_camera = floptle_core::active_camera(&self.world).is_some_and(|ce| {
+            matches!(self.world.get::<Matter>(ce), Some(Matter::Camera { ortho: true, .. }))
         });
         // One split serves both: the 3D slots the raster globals want, and the
         // count of what the sixteen-slot cap refused (`floptle/0116`). Asked here
@@ -1182,18 +1245,18 @@ impl Editor {
             &self.project.sorting_order(),
             flat_camera,
         );
-        let (pl_count, pl_pos, pl_col) = {
-            let (n, pos, col, _, _) = lights_split.three_d;
-            ([n as f32, 0.0, 0.0, 0.0], pos, col)
-        };
+        let lit3 = lights_split.three_d;
+        let (pl_count, pl_pos, pl_col, pl_shape, pl_rot) =
+            ([lit3.count as f32, 0.0, 0.0, 0.0], lit3.pos, lit3.color, lit3.shape, lit3.rot);
         self.light_counts =
-            (lights_split.three_d.0 + lights_split.two_d.0, lights_split.dropped);
+            (lights_split.three_d.count + lights_split.two_d.count, lights_split.dropped);
         // Sun shadows (Lighting node knobs) + the collider-proxy occluders that let
         // raster meshes cast — both ride the raymarch globals, which the raster pass
         // reads too through the shared field bind group.
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
-        let (fog_color, fog_params) =
-            crate::shading::fog_uniforms_at(&light_node, &self.world, cam.world_position);
+        let contact = crate::shading::contact_uniform(&light_node);
+        let ((fog_color, fog_params), particle_fog) =
+            crate::shading::fog_uniforms_and_particles_at(&light_node, &self.world, cam.world_position);
         let (atmo_meta, atmo_color, atmo_body, atmo_params) =
             crate::shading::atmo_uniforms(&self.world, cam.world_position);
         let (star_meta, star_pos, star_color) =
@@ -1208,6 +1271,8 @@ impl Editor {
             point_count: pl_count,
             point_pos: pl_pos,
             point_color: pl_col,
+            point_shape: pl_shape,
+            point_rot: pl_rot,
             // Meshed terrain reads the triplanar scale + the per-slot NEAREST /
             // GLOW bitmasks here (bitmasks as u32 — bit-exact at 32 slots).
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
@@ -1382,10 +1447,24 @@ impl Editor {
                 let mp = mat.as_ref().map(material_params).unwrap_or_else(|| MaterialParams::flat([1.0, 1.0, 1.0]));
                 crate::paint_tex::push_painted_node(&self.world, &self.paint_tex, *e, model, &mp, &mut instances);
             }
-            let tex = mat
-                .as_ref()
-                .and_then(|m| m.texture.as_deref())
-                .and_then(|p| self.texture_registry.get(p).copied());
+            // The node's texture and its SURFACE EXTRAS index, both resolved by
+            // the renderer: a material with normal/roughness/metallic/occlusion
+            // maps comes back as ONE combined `TexId`, so every arm below (and
+            // everything downstream of them) keeps handling a single texture.
+            let (tex, node_ext) = match mat.as_ref() {
+                Some(m) => {
+                    let (t, p) =
+                        crate::shading::material_draw(raster, gpu, m, &self.texture_registry, None);
+                    (t, p.ext_index)
+                }
+                None => (None, 0),
+            };
+            // Where this node's instances start. The extras index is stamped onto
+            // every one of them after the match rather than threaded through the
+            // eight arms and the helpers they call — those build their own
+            // `MaterialParams` and would each need the renderer passed down to
+            // ask for an index. One stamp at the end cannot miss an arm.
+            let ext_from = (instances.len(), flsl_draws.len(), skin_draws.len());
             let flsl = self.flsl_binds.get(e).map(|b| b.binding);
             match matter {
                 Matter::Primitive { shape, color } => {
@@ -1515,8 +1594,37 @@ impl Editor {
                 | Matter::PointLight { .. }
                 | Matter::GravityVolume { .. }
                 | Matter::FieldShape { .. }
+                | Matter::LightProbes { .. }
                 | Matter::Skybox { .. }
                 | Matter::PostProcess { .. } => {}
+            }
+
+            // Stamp this node's surface-extras index onto everything it just
+            // pushed. `0` is the neutral entry, so a node with no material (or a
+            // material that sets none of this) writes the value that is already
+            // there and the whole block is a no-op.
+            if node_ext != 0 {
+                use floptle_render::{ext_index_of, set_ext_index};
+                // Only where nothing is set yet. A model part with its own
+                // material override resolved its OWN extras a moment ago, and
+                // the node's must not overwrite them — the override is the more
+                // specific answer, exactly as it is for colour and texture.
+                let fill = |raw: &mut floptle_render::InstanceRaw| {
+                    if ext_index_of(raw) == 0 {
+                        set_ext_index(raw, node_ext);
+                    }
+                };
+                for (_, _, raw) in &mut instances[ext_from.0..] {
+                    fill(raw);
+                }
+                for (_, _, _, raw) in &mut flsl_draws[ext_from.1..] {
+                    fill(raw);
+                }
+                for d in &mut skin_draws[ext_from.2..] {
+                    fill(&mut d.instance);
+                }
+                // `flat2d` is deliberately absent: the 2D lit pass has its own
+                // shader and its own instance type, and none of this reaches it.
             }
         }
 
@@ -1728,6 +1836,10 @@ impl Editor {
         post_settings.color_filter = self.access.color_filter.lane();
         post_settings.color_filter_strength = self.access.color_filter_strength;
         post_settings.simulate_deficiency = self.access.simulate_deficiency;
+        // Film grain needs a clock or it is a dirty lens, not film. Reduced
+        // motion is deliberately NOT applied here: grain is texture, not
+        // movement, and freezing it makes it MORE of a fixed pattern to look at.
+        post_settings.time = self.fog_time;
         // Sky shader: when active, `sky_meta.x = 1` makes the raymarch's `sky_color` call the
         // spliced `flsl_sky`, and its uniforms (Inspector knobs over `.flsl` defaults) drive
         // `sky_uniforms`. (Captured before the closure — it can't borrow `self`.)
@@ -1738,7 +1850,7 @@ impl Editor {
         };
         // Build raymarch globals for a set of blobs (all of them, or just one for the
         // selection mask). Up to 16 blobs are folded together in one march.
-        let (vol_fog_a, vol_fog_b) =
+        let (vol_fog_a, vol_fog_b, vol_fog_c) =
             vol_fog_uniforms(&light_node, self.fog_time, cam.world_position.y as f32);
         let make_rm = |set: &[(DVec3, f32, MaterialParams)]| -> RaymarchGlobals {
             let mut arr = [[0.0f32; 4]; 16];
@@ -1774,6 +1886,8 @@ impl Editor {
                 point_count: pl_count,
                 point_pos: pl_pos,
                 point_color: pl_col,
+                point_shape: pl_shape,
+                point_rot: pl_rot,
                 blob_tint,
                 blob_emissive,
                 blob_specular,
@@ -1794,6 +1908,8 @@ impl Editor {
                 fog_params,
                 vol_fog_a,
                 vol_fog_b,
+                vol_fog_c,
+                contact,
                 sky_meta,
                 sky_uniforms,
                 atmo_meta,
@@ -1939,6 +2055,7 @@ impl Editor {
                     | Matter::PointLight { .. }
                     | Matter::GravityVolume { .. }
                     | Matter::WaterVolume { .. }
+                    | Matter::LightProbes { .. }
                     | Matter::Skybox { .. }
                     | Matter::PostProcess { .. } => {}
                 }
@@ -1971,6 +2088,10 @@ impl Editor {
             let mut g = make_rm(if show_blobs { &blobs } else { &[] });
             Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_slots, &self.world, &mut g, cam.world_position);
             crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, None);
+            // Baked GI. The renderer owns the probe texture; these four lanes
+            // are only where the volume IS, and they have to be stamped per
+            // view because the field is camera-relative (ADR-0015).
+            raymarch.gi().apply(&mut g, cam.world_position.into());
             g
         };
 
@@ -1983,7 +2104,11 @@ impl Editor {
         // conventional inventory key there is had no way to tell. Gated on a text
         // field NOT wanting input, so typing into the Console or the Inspector
         // during play still works; a click is how you go back to the editor.
-        if self.playing && game_focused && !egui.ctx.egui_wants_keyboard_input() {
+        // `text_edit_focused`, not `egui_wants_keyboard_input` — the latter is
+        // "any widget has focus", so clicking a Play-mode HUD button used to
+        // hand Tab back to the dock for the rest of the session. See the same
+        // fix at the `typing` gate in `main.rs`.
+        if self.playing && game_focused && !egui.ctx.text_edit_focused() {
             crate::game_keys::claim_keys_for_game(&mut raw_input, &egui.ctx);
         }
         let ctx = egui.ctx.clone();
@@ -2011,6 +2136,14 @@ impl Editor {
         // Every named entity, Matter nodes and the Lighting node alike.
         let entity_names: Vec<(Entity, String)> =
             self.world.query::<Name>().map(|(e, n)| (e, n.0.clone())).collect();
+        // Read before `self` is split into the panel context's borrows.
+        let gi_status = crate::gi_bake::gi_status(
+            &self.world,
+            self.gi_bake.as_ref(),
+            self.gi_baked.as_ref(),
+            self.gi_show_only,
+            self.gi_show_probes,
+        );
         let old_retro_h = self.project.retro_height;
         let old_retro_w = self.project.retro_width;
         let ppp = ctx.pixels_per_point();
@@ -2078,12 +2211,22 @@ impl Editor {
         let map_rebind_err = &mut self.map_rebind_err;
         let map_tool_on = self.tool == Tool::MapEdit;
         let map_playing = self.playing;
+        // Copied, not borrowed: it is read by panels that also hold &mut borrows
+        // of half the editor, and it does not change during the dock draw.
+        let focused_tab = self.focused_tab;
         let has_selection = !self.selection.is_empty();
         let selection = &mut self.selection;
         let bone_selection = &mut self.bone_selection;
         let pivot_edit = &mut self.pivot_edit;
         let collapsed = &mut self.collapsed;
         let hier_fold_pending = &mut self.hier_fold_pending;
+        let hier_search = &mut self.hier_search;
+        let hier_scope = &mut self.hier_scope;
+        // Labels only — the parked documents themselves stay on the Editor, so
+        // the tab strip can name them without the panel being able to reach into
+        // another document's undo stack.
+        let image_parked: Vec<String> =
+            self.image_stash.iter().map(|s| s.tab_label()).collect();
         let console = &mut self.console;
         let preview_zoom = &mut self.preview_zoom;
         let preview_spin = &mut self.preview_spin;
@@ -2099,10 +2242,16 @@ impl Editor {
         let show_mesh_colliders = &mut self.show_mesh_colliders;
         let rename_target = &mut self.rename_target;
         let new_scene_buf = &mut self.new_scene_buf;
+        let new_asset_prompt = &mut self.new_asset_prompt;
         let show_quit_confirm = &mut self.show_quit_confirm;
+        let image_close_confirm = &mut self.image_close_confirm;
         let delete_confirm = &mut self.delete_confirm;
         let toast = &mut self.toast;
-        let scene_dirty_now = self.scene_dirty;
+        // Dirty tilesets ride the scene's flag here. They are not scene state —
+        // they are their own files — but every gate that asks "is there unsaved
+        // work" wants one answer, and a tileset's collision shapes and autotile
+        // groups are hours of work that used to leave with the window.
+        let scene_dirty_now = self.scene_dirty || !self.tiles.dirty.is_empty();
         // The 🖼 tab keeps its own dirty flag — an unsaved image is unsaved
         // work, and quitting past it silently is the same loss as quitting past
         // a scene.
@@ -2146,8 +2295,7 @@ impl Editor {
         let cursor_held_by_editor = self.cursor_freed && self.script_mouse_lock;
         let paused = self.paused;
         let game_tick_no = self.game_tick_no;
-        let has_active_camera =
-            world.query::<Matter>().any(|(_, m)| matches!(m, Matter::Camera { active: true, .. }));
+        let has_active_camera = floptle_core::active_camera(world).is_some();
         // The selected camera's POV preview texture (only when a camera is selected).
         let cam_preview = selection
             .last()
@@ -2181,6 +2329,8 @@ impl Editor {
         let paint_viz = self.paint_viz.as_ref();
         let camera_gizmos = self.camera_gizmos.as_slice();
         let light_gizmos = self.light_gizmos.as_slice();
+        let rig_gizmos = self.rig_gizmos.as_slice();
+        let gi_probe_dots = self.gi_probe_dots.as_slice();
         let body_gizmos = self.body_gizmos.as_slice();
         let contact_gizmos = self.contact_gizmos.as_slice();
         let script_gizmo_lines = self.script_gizmo_lines.as_slice();
@@ -2475,7 +2625,7 @@ impl Editor {
                             cmd.focus_terrain = true;
                             ui.close();
                         }
-                        if ui.button("▦ Map tools").clicked() {
+                        if ui.button("▦ Model tools").clicked() {
                             cmd.focus_map = true;
                             ui.close();
                         }
@@ -3195,6 +3345,9 @@ impl Editor {
                 bone_selection,
                 pivot_edit,
                 fullscreen_tab,
+                focused_tab,
+                hier_search,
+                hier_scope,
                 collapsed,
                 hier_fold_pending,
                 bone_names: &bone_names,
@@ -3205,10 +3358,12 @@ impl Editor {
                 preview_spinning,
                 preview_material,
                 entity_names: &entity_names,
+                gi: gi_status,
                 materials,
                 mat_name_buf,
                 flsl_cache: &self.flsl_cache,
                 ui_flsl_cache: &self.ui_flsl_cache,
+                post_flsl_cache: &self.post_flsl_cache,
                 ui_styles: &self.ui_styles,
                 ui_tokens: &self.ui_tokens,
                 ui_design,
@@ -3246,6 +3401,8 @@ impl Editor {
                 paint_viz,
                 camera_gizmos,
                 light_gizmos,
+                rig_gizmos,
+                gi_probe_dots,
                 body_gizmos,
                 contact_gizmos,
                 script_gizmo_lines,
@@ -3280,6 +3437,7 @@ impl Editor {
                 anim_ui: anim_ui_state,
                 shader_graph: shader_graph_state,
                 image: image_state,
+                image_parked: &image_parked,
                 shader_preview: shader_preview_state,
                 mesh_registry,
                 pointer_down,
@@ -3656,7 +3814,7 @@ impl Editor {
                     .show(ui.ctx(), |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             ui.set_max_width(190.0);
-                            // ---- ▦ Map tool: the operations for what's selected ----
+                            // ---- ▦ Model tool: the operations for what's selected ----
                             //
                             // Right-click is where people look for "what can I do to
                             // this?" — every one of these was previously a key you had
@@ -3892,6 +4050,52 @@ impl Editor {
                 }
             }
 
+            // ---- name a new asset ----
+            //
+            // One modal for every "✚ New <thing>" that writes a file, so the
+            // rule is the same everywhere: you name it, then it exists. The
+            // words come from the kind; the mechanics (Enter to accept, Escape
+            // or ✖ to cancel, empty is refused) do not vary.
+            if let Some((kind, buf)) = new_asset_prompt.as_mut() {
+                let (title, prompt, hint) = kind.words();
+                let kind = *kind;
+                let mut open = true;
+                let mut close = false;
+                egui::Window::new(title)
+                    .open(&mut open)
+                    .resizable(false)
+                    .collapsible(false)
+                    .default_width(300.0)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(prompt);
+                        let edit = ui.add(
+                            egui::TextEdit::singleline(buf).desired_width(260.0).hint_text(hint),
+                        );
+                        edit.request_focus();
+                        let enter =
+                            edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.horizontal(|ui| {
+                            let valid = !buf.trim().is_empty();
+                            if ui.add_enabled(valid, egui::Button::new("Create")).clicked()
+                                || (enter && valid)
+                            {
+                                match kind {
+                                    crate::NewAsset::Effect(e) => {
+                                        cmd.do_new_particles = Some((e, buf.clone()));
+                                    }
+                                }
+                                close = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                if !open || close {
+                    *new_asset_prompt = None;
+                }
+            }
+
             // ---- quit with unsaved changes ----
             if *show_quit_confirm {
                 let mut open = true;
@@ -3941,6 +4145,66 @@ impl Editor {
                     });
                 if !open || close {
                     *show_quit_confirm = false;
+                }
+            }
+
+            // ---- closing an image with unsaved changes ----
+            //
+            // Three answers, because there are three things a person means.
+            // The old code offered ONE — "save first" — and a document that has
+            // never been named cannot be saved without a name, so that answer
+            // was sometimes not available and the close simply never happened.
+            // Discard is the arm that was missing, and it is the arm that turns
+            // "I'm stuck editing this image" back into an ordinary decision.
+            if let Some(which) = *image_close_confirm {
+                let mut decided = None;
+                let mut open = true;
+                egui::Window::new("Close this image?")
+                    .open(&mut open)
+                    .resizable(false)
+                    .collapsible(false)
+                    .default_width(340.0)
+                    .show(ui.ctx(), |ui| {
+                        ui.label("This image has unsaved changes.");
+                        ui.small(
+                            "Saving writes the layered .flimg and the flat .png beside it.",
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            // Only offered for the LIVE document: saving a parked
+                            // one would mean making it live first, and a button
+                            // that silently switches which image you are looking
+                            // at is worse than not being there.
+                            if which.is_none() && ui.button("💾  Save & close").clicked() {
+                                decided = Some(1);
+                            }
+                            if ui
+                                .button("🗑  Discard")
+                                .on_hover_text("close it and lose the changes")
+                                .clicked()
+                            {
+                                decided = Some(2);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                decided = Some(0);
+                            }
+                        });
+                    });
+                if !open {
+                    decided = Some(0);
+                }
+                match decided {
+                    Some(0) => *image_close_confirm = None,
+                    Some(1) => *image_close_confirm = Some(which), // saved below, then closed
+                    Some(2) => {
+                        *image_close_confirm = None;
+                        cmd.image_discard = Some(which);
+                    }
+                    _ => {}
+                }
+                if decided == Some(1) {
+                    *image_close_confirm = None;
+                    cmd.image_save_then_close = true;
                 }
             }
 
@@ -4233,7 +4497,6 @@ impl Editor {
         // retro internal res in retro mode (BEFORE the nearest-neighbor upscale, so
         // AO/bloom/vignette land on the same chunky pixel grid as the scene), else
         // full frame res. The stack lazily re-sizes when retro toggles/resizes.
-        let post_on = post_settings.any();
         let post_size =
             if self.project.retro { retro.resolution() } else { (gpu.config.width, gpu.config.height) };
         post.configure(gpu, post_size.0, post_size.1, self.project.retro);
@@ -4241,20 +4504,19 @@ impl Editor {
         // ---- draw: scene into the retro target, blit, then egui on top ----
         match gpu.acquire() {
             Some(frame) => {
-                let (color, depth) = if self.project.retro {
-                    if post_on {
-                        // Retro + post: scene renders into the (retro-sized) post
-                        // input; the chain later writes the retro color target.
-                        (post.input_view(), retro.depth_view())
-                    } else {
-                        (retro.color_view(), retro.depth_view())
-                    }
-                } else if post_on {
-                    // Non-retro + post: render the scene into the post input target.
-                    (post.input_view(), gpu.depth_view())
-                } else {
-                    (&frame.view, gpu.depth_view())
-                };
+                // The scene ALWAYS renders into the post input, whether or not
+                // any effect is switched on.
+                //
+                // It used to go straight to the swapchain when the chain was
+                // empty, which was a real saving when both were the same 8-bit
+                // sRGB texture. They are not any more: the scene renders in the
+                // floating-point scene format, the window takes 8-bit sRGB, and
+                // the chain's terminal pass is the only thing that knows how to
+                // get from one to the other. So "no effects" is now a chain of
+                // exactly one pass rather than a different route.
+                let depth =
+                    if self.project.retro { retro.depth_view() } else { gpu.depth_view() };
+                let color = post.input_view();
                 // `rm_draw` already accounts for the matter toggle + terrain presence;
                 // with nothing to raymarch the globals still upload so the raster
                 // pass's field group (shadows/AO/proxies) sees this frame's data.
@@ -4366,7 +4628,7 @@ impl Editor {
                         gpu,
                         color,
                         depth,
-                        crate::vfx::particle_globals(&cam, aspect, fog_color, fog_params),
+                        crate::vfx::particle_globals(&cam, aspect, fog_color, particle_fog),
                         &vfx_instances,
                         &vfx_batches,
                         raster,
@@ -4480,13 +4742,20 @@ impl Editor {
                 // the same chunky pixels as the scene.
                 // Capture the composited scene into the UI backdrop BEFORE post
                 // consumes it, so frosted-glass UI (`backdrop()`) works in
-                // fullscreen/player. Only the post-on, non-retro path has a
-                // sampleable offscreen (`post.input_view()`); otherwise clear the
-                // backdrop so `backdrop()` reads black rather than a stale capture.
+                // fullscreen/player. Retro mode is the one case with nothing to
+                // capture at this size — its offscreen is the retro internal
+                // resolution, not the frame's — so there the backdrop is cleared
+                // and `backdrop()` reads black rather than a stale capture.
+                //
+                // What is captured is the scene BEFORE the tonemap, so anything
+                // brighter than white clamps on the way into the (8-bit) backdrop
+                // texture. Frosted glass is a blur of what is behind it, not a
+                // measurement, so that is the right trade rather than a second
+                // floating-point full-screen texture.
                 if !ui_layers.is_empty()
                     && let Some(uir) = self.ui_render.as_mut()
                 {
-                    if post_on && !self.project.retro {
+                    if !self.project.retro {
                         let mut enc = gpu.device.create_command_encoder(
                             &wgpu::CommandEncoderDescriptor { label: Some("ui-backdrop") },
                         );
@@ -4502,15 +4771,47 @@ impl Editor {
                         uir.clear_backdrop();
                     }
                 }
-                if post_on {
+                {
                     let proj = cam.proj_matrix(aspect);
                     let ssao_frame = floptle_render::SsaoFrame {
                         depth: if self.project.retro { retro.depth_view() } else { gpu.depth_view() },
                         proj: proj.to_cols_array_2d(),
                         inv_proj: proj.inverse().to_cols_array_2d(),
                     };
+                    // In retro mode the chain writes the retro colour target and
+                    // the nearest-neighbour blit carries the finished picture up;
+                    // otherwise it writes the window.
                     let out = if self.project.retro { retro.color_view() } else { &frame.view };
-                    post.run(gpu, &post_settings, Some(&ssao_frame), out);
+                    // Focus-on-a-node is resolved HERE, against the camera this
+                    // view is actually rendering from, so the Scene view shows
+                    // its own focus while you fly around instead of the game
+                    // camera's.
+                    let mut ps = post_settings;
+                    if let Some(d) =
+                        crate::shading::dof_focus_distance(&self.world, cam.world_position)
+                    {
+                        ps.dof_focus = d;
+                    }
+                    // Motion blur is a GAME-view effect. The Scene view is a
+                    // tool: you have to be able to place a prop while the
+                    // camera is still coasting, and a viewport that smears
+                    // whenever you orbit is a viewport you fight.
+                    if game_view {
+                        self.motion_prev = Some(crate::shading::motion_frame(
+                            &mut ps,
+                            self.motion_prev,
+                            cam.view_proj(aspect),
+                            cam.world_position,
+                            if self.project.retro {
+                                retro.resolution().1
+                            } else {
+                                gpu.config.height
+                            },
+                        ));
+                    } else {
+                        ps.motion_blur = 0.0;
+                    }
+                    post.run_with(gpu, &ps, Some(&ssao_frame), out, post_shaders);
                 }
                 if self.project.retro {
                     if self.project.retro_integer_scale {
@@ -5122,13 +5423,10 @@ impl Editor {
             // The active camera's view angles ride every input snapshot
             // (`input.aimYaw()`): camera-relative movement stays deterministic
             // under prediction because the aim IS part of the input command.
-            let aim = self.world.query::<Matter>().find_map(|(e, m)| {
-                matches!(m, Matter::Camera { active: true, .. }).then(|| {
-                    let wt = floptle_core::world_transform(&self.world, e);
-                    let (yaw, pitch, _) =
-                        wt.rotation.to_euler(floptle_core::math::EulerRot::YXZ);
-                    [yaw, pitch]
-                })
+            let aim = floptle_core::active_camera(&self.world).map(|e| {
+                let wt = floptle_core::world_transform(&self.world, e);
+                let (yaw, pitch, _) = wt.rotation.to_euler(floptle_core::math::EulerRot::YXZ);
+                [yaw, pitch]
             });
             // Repeaters first: a list whose count changed last frame gets its
             // rows NOW, so this frame's layout, hit-testing and hooks all see
@@ -5384,10 +5682,8 @@ impl Editor {
             // rebuilt from the scene's GravityVolume node(s) every frame (cheap scan) so
             // tweaking mode/strength/radius takes effect immediately. The active camera
             // is the floating-origin focus: drift far enough and the sim recenters on it.
-            let focus = self.world.query::<Matter>().find_map(|(e, m)| {
-                matches!(m, Matter::Camera { active: true, .. })
-                    .then(|| floptle_core::world_transform(&self.world, e).translation)
-            });
+            let focus = floptle_core::active_camera(&self.world)
+                .map(|e| floptle_core::world_transform(&self.world, e).translation);
             if let Some(sim) = self.sim.as_mut() {
                 sim.world.gravity = Self::build_gravity_field(&self.world, sim.world.origin);
                 sim.world.colliders = self.script_host.take_colliders(); // reclaim before stepping
@@ -5807,11 +6103,8 @@ impl Editor {
                 self.audio.apply_script_commands(&self.world, &root, audio_cmds);
             }
             // Listener = the active camera's ears.
-            let listener = self
-                .world
-                .query::<Matter>()
-                .find(|(_, m)| matches!(m, Matter::Camera { active: true, .. }))
-                .map(|(e, _)| {
+            let listener = floptle_core::active_camera(&self.world)
+                .map(|e| {
                     let wt = floptle_core::world_transform(&self.world, e);
                     floptle_audio::Listener {
                         position: wt.translation,
@@ -6069,7 +6362,7 @@ impl Editor {
                 MatterDoc::Blob { .. } => "Blob",
                 MatterDoc::Mesh { .. } => "Mesh",
                 MatterDoc::Empty => "Group",
-                MatterDoc::MapMesh { .. } => "Map Mesh",
+                MatterDoc::MapMesh { .. } => "Model Mesh",
                 MatterDoc::Terrain { .. } => "Terrain",
                 MatterDoc::Camera { .. } => "Camera",
                 MatterDoc::PointLight { .. } => "Point Light",
@@ -6080,6 +6373,7 @@ impl Editor {
                 MatterDoc::SpriteBatch { .. } => "Sprite Batch",
                 MatterDoc::Skybox { .. } => "Skybox",
                 MatterDoc::PostProcess { .. } => "Post Processing",
+                MatterDoc::LightProbes { .. } => "Light Probes",
             };
             self.add_node(name, m);
         }
@@ -6283,6 +6577,32 @@ impl Editor {
         if cmd.inspector_changed {
             self.begin_edit();
         }
+        // ---- baked GI ------------------------------------------------------
+        if cmd.gi_changed {
+            self.gi_dirty = true;
+        }
+        if let Some(v) = cmd.gi_show_only {
+            self.gi_show_only = v;
+            self.gi_dirty = true;
+        }
+        if let Some(v) = cmd.gi_show_probes {
+            self.gi_show_probes = v;
+        }
+        if cmd.gi_bake && !self.start_gi_bake() {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                "nothing to bake: the scene has no enabled Light Probes node".into(),
+                None,
+            );
+        }
+        if cmd.gi_cancel {
+            self.cancel_gi_bake();
+        }
+        if cmd.gi_clear {
+            self.gi_baked = None;
+            self.gi_dirty = true;
+            let _ = std::fs::remove_file(self.gi_path());
+        }
         // Close the undo-coalescing session whenever the pointer isn't held. A drag
         // (gizmo, DragValue, UI move) keeps the button down across frames, so it stays
         // ONE step; but a discrete edit (checkbox, combo pick, typed value) releases
@@ -6408,62 +6728,89 @@ impl Editor {
             self.asset_tree = build_assets(&self.project_root);
         }
         if let Some(e) = cmd.add_material {
-            // Seed from the primitive's current color (else white), then customize.
-            let base = match self.world.get::<Matter>(e) {
-                Some(Matter::Primitive { color, .. }) => *color,
-                _ => [1.0, 1.0, 1.0],
-            };
             self.record();
-            self.world.insert(e, Material::tinted(base));
+            for e in self.selected_group(e) {
+                // Seed from each node's own primitive color (else white), so a
+                // multi-selection keeps twelve colours instead of taking one.
+                let base = match self.world.get::<Matter>(e) {
+                    Some(Matter::Primitive { color, .. }) => *color,
+                    _ => [1.0, 1.0, 1.0],
+                };
+                self.world.insert(e, Material::tinted(base));
+            }
         }
         if let Some(e) = cmd.remove_material {
             self.record();
-            self.world.remove::<Material>(e);
+            for e in self.selected_group(e) {
+                self.world.remove::<Material>(e);
+            }
         }
         if let Some(e) = cmd.add_rigidbody {
             self.record();
-            self.world.insert(e, floptle_core::RigidBody::default());
+            for e in self.selected_group(e) {
+                self.world.insert(e, floptle_core::RigidBody::default());
+            }
             self.rebuild_sim();
         }
         if let Some(e) = cmd.remove_rigidbody {
             self.record();
-            self.world.remove::<floptle_core::RigidBody>(e);
+            for e in self.selected_group(e) {
+                self.world.remove::<floptle_core::RigidBody>(e);
+            }
             self.rebuild_sim();
         }
         if let Some(e) = cmd.add_celestial {
             self.record();
-            self.world.insert(e, floptle_core::CelestialBody::default());
-            self.rebuild_sim(); // it's a gravity source now
+            for e in self.selected_group(e) {
+                self.world.insert(e, floptle_core::CelestialBody::default());
+            }
+            self.rebuild_sim(); // they're gravity sources now
         }
         if let Some(e) = cmd.remove_celestial {
             self.record();
-            self.world.remove::<floptle_core::CelestialBody>(e);
+            for e in self.selected_group(e) {
+                self.world.remove::<floptle_core::CelestialBody>(e);
+            }
             self.rebuild_sim();
         }
         if let Some(e) = cmd.add_networked {
             self.record();
-            self.world.insert(e, floptle_core::Replicated::default());
+            for e in self.selected_group(e) {
+                self.world.insert(e, floptle_core::Replicated::default());
+            }
         }
         if let Some((e, key)) = cmd.add_particles {
             self.record();
-            self.world.insert(
-                e,
-                floptle_core::ParticleSystem { asset: key.clone(), play_on_start: true },
-            );
-            // Attached mid-play: start emitting right away (live-tweak discipline).
-            if self.playing {
-                self.vfx.spawn(e, &key);
+            for e in self.selected_group(e) {
+                self.world.insert(
+                    e,
+                    floptle_core::ParticleSystem { asset: key.clone(), play_on_start: true },
+                );
+                // Attached mid-play: start emitting right away (live-tweak discipline).
+                if self.playing {
+                    self.vfx.spawn(e, &key);
+                }
             }
         }
+        // ✚ Effect asks for a name BEFORE it writes anything.
+        //
+        // It used to invent `NewEffect`, `NewEffect1`, `NewEffect2` and hand you
+        // the timeline — so naming your own effect meant renaming a file that a
+        // node already pointed at, which is the moment nobody does it. Asking
+        // first is also the only order that is safe: a `.vfx.ron` renamed after
+        // the fact leaves the `ParticleSystem.asset` on the node pointing at the
+        // old key.
         if let Some(e) = cmd.new_particles {
-            // Write a starter effect asset (unique name), attach it, refresh assets.
+            self.new_asset_prompt = Some((crate::NewAsset::Effect(e), String::new()));
+        }
+        if let Some((e, name)) = cmd.do_new_particles {
+            // Sanitised into a filename here rather than refused in the modal: a
+            // space in an effect name is a reasonable thing to type.
+            let stem = crate::assets::sanitize_asset_name(&name);
             let mut n = 0;
             let (key, path) = loop {
-                let key = if n == 0 {
-                    "vfx/NewEffect".to_string()
-                } else {
-                    format!("vfx/NewEffect{n}")
-                };
+                let key =
+                    if n == 0 { format!("vfx/{stem}") } else { format!("vfx/{stem}{n}") };
                 let path = self.project_root.join(format!("{key}{}", floptle_scene::VFX_EXT));
                 if !path.exists() {
                     break (key, path);
@@ -6490,15 +6837,21 @@ impl Editor {
         }
         if let Some(e) = cmd.remove_particles {
             self.record();
-            self.world.remove::<floptle_core::ParticleSystem>(e);
+            for e in self.selected_group(e) {
+                self.world.remove::<floptle_core::ParticleSystem>(e);
+            }
         }
         if let Some(e) = cmd.add_audio {
             self.record();
-            self.world.insert(e, floptle_audio::AudioSource::default());
+            for e in self.selected_group(e) {
+                self.world.insert(e, floptle_audio::AudioSource::default());
+            }
         }
         if let Some(e) = cmd.remove_audio {
             self.record();
-            self.world.remove::<floptle_audio::AudioSource>(e);
+            for e in self.selected_group(e) {
+                self.world.remove::<floptle_audio::AudioSource>(e);
+            }
         }
         if let Some(key) = cmd.preview_audio.take() {
             let rel = crate::assets::asset_rel_path(&key, &self.project_root).replace('\\', "/");
@@ -6516,21 +6869,25 @@ impl Editor {
         }
         if let Some((e, on)) = cmd.set_mesh_collider {
             self.record();
-            if on {
-                self.world.insert(e, floptle_core::MeshCollider);
-            } else {
-                self.world.remove::<floptle_core::MeshCollider>(e);
+            for e in self.selected_group(e) {
+                if on {
+                    self.world.insert(e, floptle_core::MeshCollider);
+                } else {
+                    self.world.remove::<floptle_core::MeshCollider>(e);
+                }
             }
             self.rebuild_sim();
         }
         if let Some((e, on)) = cmd.set_collidable {
             self.record();
-            if on {
-                self.world.insert(e, floptle_core::Collidable);
-            } else {
-                // Clear both the new marker and any legacy mesh-collider marker.
-                self.world.remove::<floptle_core::Collidable>(e);
-                self.world.remove::<floptle_core::MeshCollider>(e);
+            for e in self.selected_group(e) {
+                if on {
+                    self.world.insert(e, floptle_core::Collidable);
+                } else {
+                    // Clear both the new marker and any legacy mesh-collider marker.
+                    self.world.remove::<floptle_core::Collidable>(e);
+                    self.world.remove::<floptle_core::MeshCollider>(e);
+                }
             }
             self.rebuild_sim();
         }
@@ -6539,10 +6896,12 @@ impl Editor {
         }
         if let Some((e, on)) = cmd.set_trigger {
             self.record();
-            if on {
-                self.world.insert(e, floptle_core::Trigger);
-            } else {
-                self.world.remove::<floptle_core::Trigger>(e);
+            for e in self.selected_group(e) {
+                if on {
+                    self.world.insert(e, floptle_core::Trigger);
+                } else {
+                    self.world.remove::<floptle_core::Trigger>(e);
+                }
             }
             self.rebuild_sim(); // the sensor flag bakes into the static collider
         }
@@ -6880,11 +7239,36 @@ impl Editor {
         if cmd.image_save_palette {
             self.save_image_palette();
         }
+        // Closing goes through `close_image_doc`, which asks about unsaved work
+        // and takes DISCARD for an answer. It used to refuse outright and say
+        // "save first" — which is not a thing you can do to a document that has
+        // never had a name, so the only exit was closing the project.
         if cmd.image_close {
-            if self.image.dirty {
-                self.image.toast("unsaved changes — save first, or use File ⏵ Save");
+            self.close_image_doc(None);
+        }
+        if let Some(i) = cmd.image_close_tab {
+            self.close_image_doc(Some(i));
+        }
+        if let Some(i) = cmd.image_activate {
+            self.activate_image_doc(i);
+        }
+        if cmd.image_new_from_clipboard {
+            self.new_image_from_clipboard();
+        }
+        if let Some(which) = cmd.image_discard {
+            self.discard_image_doc(which);
+        }
+        if cmd.image_save_then_close {
+            // An unnamed document routes to Save As, which is a dialog, so the
+            // close waits for it rather than happening behind it.
+            if self.image.path.is_some() {
+                self.save_image_doc();
+                if !self.image.dirty {
+                    self.discard_image_doc(None);
+                }
             } else {
-                self.image.close();
+                self.image.save_name = Some(String::new());
+                self.image.toast("give it a name first — then close it");
             }
         }
         if let Some(key) = cmd.open_particle_editor {
@@ -7362,9 +7746,8 @@ impl Editor {
         let sun = crate::shading::sun_vec(&self.world, &light_node, cam.world_position);
         let li = light_node.intensity;
         // Whether `Auto` reads as 2D in this scene, asked once rather than per node.
-        let flat_camera = self.world.query::<Matter>().any(|(ce, m)| {
-            matches!(m, Matter::Camera { active: true, ortho: true, .. })
-                && !floptle_core::is_disabled(&self.world, ce)
+        let flat_camera = floptle_core::active_camera(&self.world).is_some_and(|ce| {
+            matches!(self.world.get::<Matter>(ce), Some(Matter::Camera { ortho: true, .. }))
         });
         // ONE split, both halves — the 3D slots the globals want and the 2D ones
         // the gather filters by. This path used to walk the scene's lights twice
@@ -7376,13 +7759,13 @@ impl Editor {
             &self.project.sorting_order(),
             flat_camera,
         );
-        let (pl_count, pl_pos, pl_col) = {
-            let (n, pos, col, _, _) = off_split.three_d;
-            ([n as f32, 0.0, 0.0, 0.0], pos, col)
-        };
+        let lit3 = off_split.three_d;
+        let (pl_count, pl_pos, pl_col, pl_shape, pl_rot) =
+            ([lit3.count as f32, 0.0, 0.0, 0.0], lit3.pos, lit3.color, lit3.shape, lit3.rot);
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
-        let (fog_color, fog_params) =
-            crate::shading::fog_uniforms_at(&light_node, &self.world, cam.world_position);
+        let contact = crate::shading::contact_uniform(&light_node);
+        let ((fog_color, fog_params), particle_fog) =
+            crate::shading::fog_uniforms_and_particles_at(&light_node, &self.world, cam.world_position);
         let (atmo_meta, atmo_color, atmo_body, atmo_params) =
             crate::shading::atmo_uniforms(&self.world, cam.world_position);
         let (star_meta, star_pos, star_color) =
@@ -7397,6 +7780,8 @@ impl Editor {
             point_count: pl_count,
             point_pos: pl_pos,
             point_color: pl_col,
+            point_shape: pl_shape,
+            point_rot: pl_rot,
             // Meshed terrain reads the triplanar scale + the per-slot NEAREST /
             // GLOW bitmasks here (bitmasks as u32 — bit-exact at 32 slots).
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
@@ -7678,6 +8063,7 @@ impl Editor {
                 Matter::PointLight { .. } => {}  // collect_point_lights, into globals
                 Matter::Camera { .. } => {}      // it is the eye, not a thing seen
                 Matter::PostProcess { .. } => {} // post_process_uniforms
+                Matter::LightProbes { .. } => {} // baked GI: uniforms + one texture
                 Matter::GravityVolume { .. } => {} // physics only; no visual
                 Matter::Empty => {}              // a transform with nothing on it
             }
@@ -7726,7 +8112,7 @@ impl Editor {
             let (blob_tint, blob_emissive, blob_specular, blob_params, blob_rim) =
                 if show_blobs { blob_mat_arrays(&blobs) } else { blob_mat_arrays(&[]) };
             let tm = &terrain_mat;
-            let (vol_fog_a, vol_fog_b) =
+            let (vol_fog_a, vol_fog_b, vol_fog_c) =
                 vol_fog_uniforms(&light_node, self.fog_time, cam.world_position.y as f32);
             let mut g = RaymarchGlobals {
                 view_proj: view_proj.to_cols_array_2d(),
@@ -7761,6 +8147,8 @@ impl Editor {
                 point_count: pl_count,
                 point_pos: pl_pos,
                 point_color: pl_col,
+                point_shape: pl_shape,
+                point_rot: pl_rot,
                 blob_tint,
                 blob_emissive,
                 blob_specular,
@@ -7781,6 +8169,8 @@ impl Editor {
                 fog_params,
                 vol_fog_a,
                 vol_fog_b,
+                vol_fog_c,
+                contact,
                 atmo_meta,
                 atmo_color,
                 atmo_body,
@@ -7798,6 +8188,9 @@ impl Editor {
             }
             Self::fill_terrain_volumes(&self.terrains, &self.terrain_slots, &self.mesh_occluders, &self.occluder_slots, &self.world, &mut g, cam.world_position);
             crate::shaders::apply_field_shapes(&self.world, &self.flsl_shape_slots, &self.sdf_cache, &mut g, cam.world_position, None);
+            if let Some(rmarch) = self.raymarch.as_ref() {
+                rmarch.gi().apply(&mut g, cam.world_position.into());
+            }
             g
         };
 
@@ -7904,7 +8297,7 @@ impl Editor {
                     gpu,
                     color,
                     depth,
-                    crate::vfx::particle_globals(cam, aspect, fog_color, fog_params),
+                    crate::vfx::particle_globals(cam, aspect, fog_color, particle_fog),
                     &vfx_instances,
                     &vfx_batches,
                     raster,
@@ -7967,24 +8360,47 @@ fn push_mesh_instances(
     };
     // A part's look: an ObjectMaterials override for its object wins, else the
     // node Material covers the whole model, else the part's imported base color.
-    let part_look = |asset: &MeshAsset, part: usize| -> (Option<TexId>, MaterialParams) {
+    let part_look = |raster: &mut floptle_render::Raster,
+                         asset: &MeshAsset,
+                         part: usize|
+     -> (Option<TexId>, MaterialParams) {
+        // The part's own imported base-colour factor — its share of the model's
+        // built-in look, and the thing a node-level Material used to throw away.
+        let base = asset.part_meta.get(part).map(|pm| pm.base_color).unwrap_or([1.0; 3]);
         if let Some(m) = obj_mats.and_then(|om| asset.override_key(part).and_then(|k| om.0.get(k)))
         {
-            let ptex = m
-                .texture
-                .as_deref()
-                .and_then(|p| texture_registry.get(p).copied())
-                .or(tex);
-            return (ptex, material_params(m));
+            // An override is a whole material, surface maps and retro flags
+            // included — resolved the same way a node's own Material is, so
+            // "give this one object a normal map" works.
+            //
+            // It REPLACES the part's imported colour rather than tinting it,
+            // unlike the node-level Material below. The two are different acts:
+            // a node Material is a layer over the whole model, an override is
+            // this one part's look, stated. (The Inspector seeds a new override
+            // with the part's own colour, so it still starts as what it was.)
+            return crate::shading::material_draw(raster, gpu, m, texture_registry, tex);
         }
         match mp {
-            Some(m) => (tex, *m),
-            None => (
-                tex,
-                MaterialParams::flat(
-                    asset.part_meta.get(part).map(|pm| pm.base_color).unwrap_or([1.0; 3]),
-                ),
-            ),
+            // A node-level Material TINTS each part rather than replacing it.
+            //
+            // It used to replace: put a Material on a model and every part
+            // collapsed to one flat colour, losing the per-part base colours the
+            // model was imported with. Which made the Material component
+            // unusable for exactly the thing people reach for it for — "make
+            // this whole model jitter", "give the whole model a normal map" —
+            // because paying for that cost the model's own colours.
+            //
+            // Multiplying is both non-destructive and what the default already
+            // promises: a fresh Material is white, so applying one changes
+            // nothing until you dial something in. It is also the rule `color`
+            // already follows against a texture.
+            Some(m) => {
+                let mut mpar = *m;
+                mpar.color =
+                    [mpar.color[0] * base[0], mpar.color[1] * base[1], mpar.color[2] * base[2]];
+                (tex, mpar)
+            }
+            None => (tex, MaterialParams::flat(base)),
         }
     };
     // Vertex paint is per-PART: import splits a model per-material into parts with
@@ -8001,7 +8417,7 @@ fn push_mesh_instances(
     };
     let Some(rig) = asset.rig.as_ref() else {
         for (i, &mid) in asset.parts.iter().enumerate() {
-            let (ptex, pmp) = part_look(asset, i);
+            let (ptex, pmp) = part_look(raster, asset, i);
             push(mid, ptex, instance_of_mat(model, &painted(raster, mid, i, pmp)));
         }
         return;
@@ -8009,7 +8425,7 @@ fn push_mesh_instances(
     let node_world = pose.unwrap_or(rig.rest_world.as_slice());
     for (i, &mid) in asset.parts.iter().enumerate() {
         let part_node = rig.part_nodes.get(i).copied().unwrap_or(0);
-        let (ptex, pmp) = part_look(asset, i);
+        let (ptex, pmp) = part_look(raster, asset, i);
         if let Some(Some(skin)) = rig.skins.get(i) {
             let raw = instance_of_mat(model, &painted(raster, mid, i, pmp));
             let skin_base = rig.skin_bases.get(i).copied().unwrap_or(0);

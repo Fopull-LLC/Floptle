@@ -14,6 +14,9 @@ on the [`../decisions/`](../decisions/) ADRs and the top-level
 - [shaders.md](shaders.md) — the shader IR: one source of truth, edited as graph **and** `.flsl` text → WGSL.
 - [light.md](light.md) — programmable light transport: light as the fourth field; bend rays (bend can *be* gravity).
 - [shadows.md](shadows.md) — field-marched sun shadows: terrain casts from the field itself, meshes cast and receive against it.
+- [global-illumination.md](global-illumination.md) — the **bounce**: baked irradiance probe volumes, where a probe is a camera.
+- [volumetrics.md](volumetrics.md) — light **in the air**: single-scattering fog that takes the scene's light, so shadows crossing it become beams.
+- [area-lights.md](area-lights.md) — lights with a **size**: windows, strip lights and bulbs, and what a highlight's shape is telling you.
 - [post-processing.md](post-processing.md) — the per-scene **✨ Post Processing** node, so each scene can own its look.
 - [deformable-matter.md](deformable-matter.md) — the unifying idea: everything is malleable matter (morph · blend/soup · soft-body · stick · fracture).
 

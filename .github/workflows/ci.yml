@@ -92,6 +92,17 @@ jobs:
           run light2d_smooth_probe light2d_smooth_probe -- "$P"
           run sky_sweep_probe     sky_sweep_probe     -- "$P"
           run ui_text_snap_probe  ui_text_snap_probe  -- "$P"
+          run look_probe          look_probe          -- "$P"
+          run pbr_probe           pbr_probe           -- "$P"
+          run particles_bind_probe particles_bind_probe
+          run hdr_probe           hdr_probe           -- "$P"
+          run post_shader_probe   post_shader_probe   -- "$P"
+          run dof_probe           dof_probe           -- "$P"
+          run gi_probe            gi_probe            -- "$P"
+          run fog_probe           fog_probe           -- "$P"
+          run area_light_probe    area_light_probe    -- "$P"
+          run contact_shadow_probe contact_shadow_probe -- "$P"
+          run motion_probe        motion_probe        -- "$P"
 
       # On a failure the PNGs are the evidence — these probes exist because the
       # bugs they catch are visual, and a red X with no image to look at makes

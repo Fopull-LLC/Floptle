@@ -29,6 +29,8 @@ pub const EXAMPLES: &[(&str, &str)] = &[
     ("nebulaDream.flsl", NEBULA_DREAM),
     ("wobbleOrb.flsl", WOBBLE_ORB),
     ("ringTower.flsl", RING_TOWER),
+    ("inkOutline.flsl", INK_OUTLINE),
+    ("crtScanlines.flsl", CRT_SCANLINES),
 ];
 
 const PLASMA: &str = r#"// Plasma — the classic start. Space is melted by a drifting warp, noise
@@ -497,6 +499,99 @@ shader ringTower {
 //@layout { bound: (-456, 278), in.worldPos: (-1368, 0), out: (0, 0), rings: (-456, 0), solid: (-228, 0), stack: (-684, 0), stripes: (-456, 534), u.major: (-684, 256), u.minor: (-684, 402), u.spacing: (-1140, 0) }
 "#;
 
+const INK_OUTLINE: &str = r#"// Ink Outline — the comic-book look, drawn over the finished frame.
+// Drop it on the PostProcess node (Inspector -> Post Processing -> Screen
+// shaders -> +), and every object in the scene gets a drawn edge.
+//
+// Nothing in the scene has to change: the lines come from what the camera
+// already knows. `sceneDepth` says how far away each pixel is, `sceneNormal`
+// says which way it faces, and an edge is where either one BREAKS.
+//
+// This is also the worked example for writing your own — `stage post` shaders
+// read the frame at any pixel, not just their own, which is what makes an edge
+// detect (or a blur, or a warp) possible at all.
+shader inkOutline {
+  stage post
+  uniform inkColor: color = #14100E
+  uniform thickness: float = 1 range(0.5, 4)
+  // How eagerly a SILHOUETTE draws — where the surface in front stops and
+  // something much further away begins.
+  uniform silhouette: float = 8 range(0, 40)
+  // How eagerly a CREASE draws — where one flat face folds into another at the
+  // same distance. Depth alone can barely see these; the normals can.
+  uniform crease: float = 1 range(0, 4)
+  // 0 is a hard aliased line, 1 fades it in like a brush.
+  uniform softness: float = 0.4 range(0, 1)
+
+  // One pixel, in uv. `thickness` steps further out for a fatter line, and it
+  // follows the retro resolution, so a 1-pixel line stays 1 pixel.
+  let px = screenTexel() * thickness
+
+  // A cross of four neighbours — the cheapest kernel that finds an edge running
+  // in any direction.
+  let d0 = sceneDepth()
+  let dl = sceneDepth(uv - vec2(px.x, 0))
+  let dr = sceneDepth(uv + vec2(px.x, 0))
+  let du = sceneDepth(uv - vec2(0, px.y))
+  let dd = sceneDepth(uv + vec2(0, px.y))
+
+  // The BEND in depth, not the difference. `dl + dr - 2*d0` is zero across any
+  // flat surface however steeply it is tilted away from the camera — which is
+  // the whole trick. A plain difference would paint a floor seen at a grazing
+  // angle solid black, because a distant floor's depth changes fast per pixel
+  // even though nothing about it is an edge. Divided by this pixel's own depth
+  // so a line looks the same width close up and far away, and the sky (a huge
+  // depth) makes every silhouette against it enormous.
+  let bend = (abs(dl + dr - d0 * 2) + abs(du + dd - d0 * 2)) / max(d0, 0.01)
+
+  // Where the surface FOLDS. Four dot products against the neighbours' normals:
+  // 0 on a flat wall, 1 per right-angle turn, and gentle on a curve so a sphere
+  // doesn't fill in with ink.
+  let n0 = sceneNormal()
+  let fold = 4
+    - dot(n0, sceneNormal(uv - vec2(px.x, 0)))
+    - dot(n0, sceneNormal(uv + vec2(px.x, 0)))
+    - dot(n0, sceneNormal(uv - vec2(0, px.y)))
+    - dot(n0, sceneNormal(uv + vec2(0, px.y)))
+
+  let edge = saturate(bend * silhouette + fold * crease * 0.5)
+  let ink = smoothstep(0.5 - softness * 0.5, 0.5 + softness * 0.5 + 0.001, edge)
+
+  // `inkColor`'s ALPHA is how black the line goes — pull it down for a sketch.
+  output color = vec4(mix(sceneColor().rgb, inkColor.rgb, ink * inkColor.a), 1)
+}
+"#;
+
+const CRT_SCANLINES: &str = r#"// CRT Scanlines — the small one. Read this first if you want to write your own
+// screen shader: it is the whole shape of a `stage post` pass in a dozen lines.
+//
+// A post shader gets the finished frame and returns a new colour for each pixel.
+// `uv` is 0..1 across the screen, `sceneColor()` is the pixel it lands on, and
+// `sceneColor(somewhere else)` is any OTHER pixel — which is how you blur, warp
+// or outline. Add it under the PostProcess node's screen shaders.
+shader crtScanlines {
+  stage post
+  uniform lines: float = 240 range(60, 1080)
+  uniform darkness: float = 0.35 range(0, 1)
+  // How far the picture bulges outward, like glass.
+  uniform bulge: float = 0.06 range(0, 0.3)
+  uniform roll: float = 0.15 range(0, 2)
+
+  // Bend the sampling point away from the centre and the picture curves.
+  let c = uv * 2 - 1
+  let warped = (c * (1 + bulge * dot(c, c))) * 0.5 + 0.5
+
+  // One dark band per scan line, drifting slowly so it reads as a live signal.
+  let band = sin((warped.y + time * roll * 0.01) * lines * 3.14159265) * 0.5 + 0.5
+  let dim = 1 - darkness * band
+
+  // Off the edge of the tube after the bulge — that is the bezel.
+  let inside = step(0, warped.x) * step(warped.x, 1) * step(0, warped.y) * step(warped.y, 1)
+
+  output color = vec4(sceneColor(warped).rgb * dim * inside, 1)
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,6 +626,17 @@ mod tests {
                 }
                 Some(Stage::Ui) => {
                     crate::compile_ui(src).unwrap_or_else(|e| panic!("{name}: {e}"));
+                }
+                Some(Stage::Post) => {
+                    let compiled =
+                        crate::compile_post(src).unwrap_or_else(|e| panic!("{name}: {e}"));
+                    let prelude = format!(
+                        "{}\n{}",
+                        crate::transpile::POST_PRELUDE,
+                        crate::transpile::POST_FIELD_SHIM
+                    );
+                    crate::transpile::validate(&prelude, &compiled.chunk)
+                        .unwrap_or_else(|e| panic!("{name}: naga rejects: {}", e.message));
                 }
                 None => panic!("{name}: missing stage"),
             }

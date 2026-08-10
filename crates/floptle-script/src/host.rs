@@ -1719,6 +1719,8 @@ impl ScriptHost {
             body_pos_changes: Rc::new(RefCell::new(HashMap::new())),
             sprite_draws: Rc::new(RefCell::new(HashMap::new())),
             shader_param_sets: Rc::new(RefCell::new(Vec::new())),
+            shader_texture_sets: Rc::new(RefCell::new(Vec::new())),
+            screen_shader_toggles: Rc::new(RefCell::new(Vec::new())),
             envs: Rc::new(RefCell::new(HashMap::new())),
             model_changes: Rc::new(RefCell::new(HashMap::new())),
             material_changes: Rc::new(RefCell::new(HashMap::new())),
@@ -1741,6 +1743,7 @@ impl ScriptHost {
             vfx_commands: Rc::new(RefCell::new(Vec::new())),
             broken: Rc::new(RefCell::new(std::collections::HashSet::new())),
             broken_read_warned: Rc::new(RefCell::new(std::collections::HashSet::new())),
+            find_scope_warned: Rc::new(RefCell::new(std::collections::HashSet::new())),
             logs: logs.clone(),
         };
         if let Err(e) = install_handle_api(&lua, &shared) {
@@ -1938,6 +1941,8 @@ impl ScriptHost {
             sprite_draws: shared.sprite_draws.clone(),
             sprites_written: None,
             shader_param_sets: shared.shader_param_sets.clone(),
+            shader_texture_sets: shared.shader_texture_sets.clone(),
+            screen_shader_toggles: shared.screen_shader_toggles.clone(),
             colliders,
             hulls,
             sim_origin,
@@ -4261,7 +4266,36 @@ impl ScriptHost {
                     .is_some_and(|s| !s.shader.is_empty());
                 let on_sky =
                     matches!(world.get::<Matter>(ent), Some(Matter::Skybox { .. }));
-                if on_ui {
+                let on_post =
+                    matches!(world.get::<Matter>(ent), Some(Matter::PostProcess { .. }));
+                if on_post {
+                    // A PostProcess node holds a LIST of screen shaders, so the
+                    // name may carry which one: `"inkOutline.thickness"`. Left
+                    // bare it writes the knob on every pass that has one, which
+                    // is what a scene with a single screen shader wants and what
+                    // it will almost always be.
+                    //
+                    // Matched on the file STEM, because the file name is what
+                    // the Inspector shows and what a script author is looking
+                    // at — not the project-relative path they never typed.
+                    if let Some(Matter::PostProcess { screen_shaders, .. }) =
+                        world.get_mut::<Matter>(ent)
+                    {
+                        let (want, knob) = match name.split_once('.') {
+                            Some((pass, knob)) => (Some(pass.to_ascii_lowercase()), knob),
+                            None => (None, name.as_str()),
+                        };
+                        for pass in screen_shaders.iter_mut() {
+                            let stem = std::path::Path::new(&pass.shader)
+                                .file_stem()
+                                .map(|s| s.to_string_lossy().to_ascii_lowercase())
+                                .unwrap_or_default();
+                            if want.as_ref().is_none_or(|w| *w == stem) {
+                                pass.params.insert(knob.to_string(), v);
+                            }
+                        }
+                    }
+                } else if on_ui {
                     if let Some(spec) = world.get_mut::<floptle_ui::ElementSpec>(ent) {
                         spec.shader_params.insert(name, v);
                     }
@@ -4276,6 +4310,49 @@ impl ScriptHost {
                     }
                 } else if let Some(mat) = world.get_mut::<floptle_core::Material>(ent) {
                     mat.shader_params.insert(name, v);
+                }
+            }
+            // `node:setShaderTexture(slot, ref)`: point one of the shader's
+            // declared texture slots somewhere else, this frame.
+            //
+            // A shader could always DECLARE up to eight textures; what it could
+            // not do was change one at runtime, so every multi-texture effect
+            // was frozen at whatever the Inspector was set to when the scene was
+            // saved. A damage state, a swapped decal, a screen showing what
+            // another camera sees — all of them are this one call.
+            //
+            // Empty CLEARS the slot rather than binding an empty path: a slot
+            // pointed at "" would otherwise fail to resolve every frame and the
+            // shader would read whatever the fallback is, silently.
+            for (eid, slot, path) in self.shader_texture_sets.borrow_mut().drain(..) {
+                let Some(&ent) = scene.ents.get(&eid) else { continue };
+                if let Some(mat) = world.get_mut::<floptle_core::Material>(ent) {
+                    if path.is_empty() {
+                        mat.shader_textures.remove(&slot);
+                    } else {
+                        mat.shader_textures.insert(slot, path);
+                    }
+                }
+            }
+            // `node:setScreenShader(name, on)`: switch one of the PostProcess
+            // node's screen shaders on or off this frame. The pass and its knobs
+            // stay in the scene either way — an outline that turns on for a boss
+            // and off again is one call, not an edit to the scene's list.
+            for (eid, name, on) in self.screen_shader_toggles.borrow_mut().drain(..) {
+                let Some(&ent) = scene.ents.get(&eid) else { continue };
+                if let Some(Matter::PostProcess { screen_shaders, .. }) =
+                    world.get_mut::<Matter>(ent)
+                {
+                    let want = name.to_ascii_lowercase();
+                    for pass in screen_shaders.iter_mut() {
+                        let stem = std::path::Path::new(&pass.shader)
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+                            .unwrap_or_default();
+                        if want.is_empty() || want == stem {
+                            pass.enabled = on;
+                        }
+                    }
                 }
             }
         }

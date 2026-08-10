@@ -1928,6 +1928,9 @@ impl EditorTabViewer<'_> {
     /// The full dopesheet for an editable clip doc.
     fn timeline_ui(&mut self, ui: &mut egui::Ui, target: Entity) {
         let playing = self.playing;
+        // Does the Animating tab own the keyboard right now? Read before the
+        // long borrow below; see the transport gate for why it matters.
+        let tab_focused = matches!(self.focused_tab, Some(crate::EditorTab::Animation));
         // Live per-node data for timeline interactions, gathered BEFORE the clip-doc
         // borrow: current local TRS (double-click / "key pose here"), current numeric
         // field values (keying a property writes what's on the node right now, like
@@ -2827,7 +2830,26 @@ impl EditorTabViewer<'_> {
             }
 
             // ---- keyboard transport (only when no text field is focused, not playing) ----
-            if !playing && ui.memory(|m| m.focused().is_none()) {
+            //
+            // The comment was right and the test was not. `m.focused().is_none()`
+            // is "NOTHING anywhere in the editor has focus", and egui focuses
+            // every clickable widget you click — so clicking a lane header, a
+            // state button, the ⏵ transport, or any slider in this very panel
+            // switched the whole transport off: copy, cut, paste, Delete, Space,
+            // the arrows and Ctrl+Z all stopped, with no visible reason and no
+            // way back except clicking dead space. That is the reported "it just
+            // stops letting me copy keyframes".
+            //
+            // What actually needs to yield is a TEXT field (a clip name, a
+            // numeric entry) — `text_edit_focused` asks exactly that, and it is
+            // the same predicate the window-level `typing` gate uses now.
+            //
+            // `tab_focused` is the other half, and it is now load-bearing rather
+            // than accidental: the window handler routes Ctrl+C/V to the SCENE
+            // whenever the focused tab is not a timeline, so without this a
+            // paste aimed at the Hierarchy would also drop keyframes at the
+            // playhead. One chord, one owner, decided by which tab has focus.
+            if !playing && tab_focused && !ui.ctx().text_edit_focused() {
                 // egui turns Ctrl+C/X/V into Copy/Cut/Paste EVENTS (the raw key is
                 // consumed), so those must be read from `events`, not key_pressed —
                 // that was why copy/paste "did nothing". Undo/redo have no such event.

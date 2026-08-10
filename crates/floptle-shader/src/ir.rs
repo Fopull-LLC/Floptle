@@ -28,6 +28,21 @@ pub enum Stage {
     /// element's `uv` (0..1 across its rect), its tint (`instanceColor`) and
     /// `time` — procedural instruments (navballs, gauges) live here.
     Ui,
+    /// A full-screen pass over the finished scene: `output color` replaces the
+    /// pixel. Dropped on the PostProcess node as an ordered list, so a project
+    /// adds the passes it wants instead of choosing from a fixed menu.
+    ///
+    /// Its inputs are the screen `uv` and `time`; everything about the scene
+    /// arrives through ops — [`sceneColor`], [`sceneDepth`], [`sceneNormal`],
+    /// [`screenTexel`] — because a post shader reads the frame at ANY pixel,
+    /// not only its own, and that is what makes an edge detect (or a blur, or a
+    /// warp) expressible at all.
+    ///
+    /// [`sceneColor`]: crate::stdlib::OPS
+    /// [`sceneDepth`]: crate::stdlib::OPS
+    /// [`sceneNormal`]: crate::stdlib::OPS
+    /// [`screenTexel`]: crate::stdlib::OPS
+    Post,
 }
 
 /// How a Fragment-stage surface composites over the scene.
@@ -187,6 +202,11 @@ impl Input {
             Stage::Sdf => matches!(self, Input::WorldPos | Input::Time),
             Stage::Sky => matches!(self, Input::SkyDir | Input::Time),
             Stage::Ui => matches!(self, Input::Uv | Input::InstanceColor | Input::Time),
+            // A post pass has no surface and no instance — it has a screen. The
+            // frame itself comes through `sceneColor`/`sceneDepth`/`sceneNormal`
+            // rather than as varyings, because those are sampled at an ARBITRARY
+            // uv and a varying can only ever describe this pixel.
+            Stage::Post => matches!(self, Input::Uv | Input::Time),
         }
     }
 }
@@ -485,6 +505,20 @@ pub fn check(ir: &ShaderIr) -> Result<Checked, Vec<IrError>> {
                 errors.push(IrError::new("`blend` only applies to fragment shaders", Span::default()));
             }
         }
+        Stage::Post => {
+            expect_output(ir, "color", &[Ty::Vec3, Ty::Vec4], &let_ty, &mut ck, &mut errors);
+            for name in ir.outputs.keys() {
+                if name != "color" {
+                    errors.push(IrError::new(
+                        format!("post shaders output `color` only (got `{name}`)"),
+                        ir.expr(ir.outputs[name]).span,
+                    ));
+                }
+            }
+            if ir.blend != Blend::Opaque {
+                errors.push(IrError::new("`blend` only applies to fragment shaders", Span::default()));
+            }
+        }
     }
 
     if errors.is_empty() { Ok(ck) } else { Err(errors) }
@@ -612,6 +646,7 @@ fn stage_name(stage: Stage) -> &'static str {
         Stage::Sdf => "sdf",
         Stage::Sky => "sky",
         Stage::Ui => "ui",
+        Stage::Post => "post",
     }
 }
 

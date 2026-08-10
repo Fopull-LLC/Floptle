@@ -45,6 +45,7 @@ mod curve_edit;
 mod dock;
 mod export;
 mod game_keys;
+mod gi_bake;
 mod gizmo;
 mod hierarchy;
 mod history;
@@ -70,6 +71,7 @@ mod map_edit;
 mod map_paint;
 mod map_ui;
 mod matter_catalog;
+mod multi_edit;
 mod net;
 mod node_bounds;
 mod paint_io;
@@ -149,6 +151,26 @@ pub(crate) type ScriptDefaults = floptle_script::ScriptDefaults;
 /// (keyed by terrain id) and the terrain texture palette.
 pub(crate) type PlayTerrains = (Vec<(u32, floptle_field::ChunkField)>, Vec<String>);
 
+/// What the "name your new asset" modal is going to create once it is answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NewAsset {
+    /// A particle effect, attached to this node once written.
+    Effect(Entity),
+}
+
+impl NewAsset {
+    /// (window title, prompt, hint) — the modal is generic, the words are not.
+    fn words(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            NewAsset::Effect(_) => (
+                "New particle effect",
+                "Name this effect:",
+                "sparks, muzzleFlash, rain…",
+            ),
+        }
+    }
+}
+
 #[derive(Default)]
 struct EditorCmd {
     add: Option<MatterDoc>,
@@ -164,6 +186,16 @@ struct EditorCmd {
     redo: bool,
     /// An inspector widget changed this frame (opens a coalesced undo step).
     inspector_changed: bool,
+    /// A light-probe setting that affects the UPLOAD changed (intensity, leak,
+    /// the box) — re-push the probe texture without re-baking anything.
+    gi_changed: bool,
+    /// Start / stop / throw away the GI bake.
+    gi_bake: bool,
+    gi_cancel: bool,
+    gi_clear: bool,
+    /// The two GI view toggles (`Some` = the new state).
+    gi_show_only: Option<bool>,
+    gi_show_probes: Option<bool>,
     /// Dismiss the viewport context menu.
     close_menu: bool,
     /// Toggle play mode (run scripts).
@@ -358,7 +390,7 @@ struct EditorCmd {
     new_scene: Option<String>,
     /// Switch the active tool (from the Scene-tab tool strip).
     set_tool: Option<Tool>,
-    /// Spawn a new map-mesh blockout shape (▦ Map tab / Add menu).
+    /// Spawn a new map-mesh blockout shape (▦ Model tab / Add menu).
     add_map_shape: Option<map_edit::MapShape>,
     /// A Map-tab modeling op on the current sub-object selection.
     map_op: Option<map_edit::MapOp>,
@@ -379,7 +411,7 @@ struct EditorCmd {
     map_turn: Option<i32>,
     /// Drop stored map geometry no node references any more.
     map_prune: bool,
-    /// Focus the ▦ Map dock tab (Window menu).
+    /// Focus the ▦ Model dock tab (Window menu).
     focus_map: bool,
     /// Focus (or open) the 🎓 Learn dock tab (Help menu).
     focus_learn: bool,
@@ -411,6 +443,18 @@ struct EditorCmd {
     image_save_palette: bool,
     /// Close the open document.
     image_close: bool,
+    /// Make parked document `i` the live one (a click on its tab chip).
+    image_activate: Option<usize>,
+    /// Close parked document `i` (the ✖ on its tab chip).
+    image_close_tab: Option<usize>,
+    /// The close confirm answered "discard": `None` = the live document.
+    image_discard: Option<Option<usize>>,
+    /// The close confirm answered "save & close" (live document only).
+    image_save_then_close: bool,
+    /// File ⏵ New from clipboard.
+    image_new_from_clipboard: bool,
+    /// The name modal was answered for a new particle effect: (node, name).
+    do_new_particles: Option<(Entity, String)>,
     /// The graph tab's ✚ New: after `new_shader_in` runs, open the fresh file
     /// in the graph (instead of only the text editor).
     new_shader_to_graph: bool,
@@ -600,7 +644,7 @@ enum ProjectAction {
 struct EditorTabViewer<'a> {
     world: &'a mut World,
     selection: &'a mut Vec<Entity>,
-    /// Map-building suite state for the ▦ Map tab (read-only; ops go via cmd).
+    /// Map-building suite state for the ▦ Model tab (read-only; ops go via cmd).
     maps: &'a map_edit::MapStore,
     map_sel: &'a Option<map_edit::MapSel>,
     map_mode: map_edit::MapSubMode,
@@ -646,6 +690,15 @@ struct EditorTabViewer<'a> {
     pivot_edit: &'a mut bool,
     /// Double-clicking a tab toggles it into this slot (maximized full-window).
     fullscreen_tab: &'a mut Option<EditorTab>,
+    /// Which dock tab holds keyboard focus this frame (last frame's dock state —
+    /// see `Editor::focused_tab`). A panel that reads raw keys out of egui has to
+    /// check this or it acts on chords aimed at another panel: the Animating
+    /// timeline pasting keyframes while you meant to paste a node into the
+    /// scene, which is what the old "nothing is focused" gate accidentally hid.
+    focused_tab: Option<EditorTab>,
+    /// The Hierarchy's search box, and what it lets through.
+    hier_search: &'a mut String,
+    hier_scope: &'a mut floptle_script::FindScope,
     /// Folders collapsed in the Hierarchy (hide their children).
     collapsed: &'a mut std::collections::HashSet<Entity>,
     /// One-shot: fold every parent on the first draw after a scene load.
@@ -664,6 +717,9 @@ struct EditorTabViewer<'a> {
     /// The material being previewed/edited when a material asset is selected.
     preview_material: &'a mut Option<(String, Material)>,
     entity_names: &'a [(Entity, String)],
+    /// This frame's baked-GI summary — the Light Probes section's bake button,
+    /// progress bar and probe counts.
+    gi: crate::gi_bake::GiStatus,
     materials: &'a [(String, floptle_scene::MaterialDoc)],
     mat_name_buf: &'a mut String,
     /// Compiled `.flsl` shaders — the Inspector's Material section reads the
@@ -672,6 +728,9 @@ struct EditorTabViewer<'a> {
     /// Compiled `stage ui` element shaders — the Inspector's UI Element section
     /// reads the selected shader's uniform schema (and error) from here.
     ui_flsl_cache: &'a shaders::UiFlslCache,
+    /// Compiled `stage post` screen shaders — the Post Processing section reads
+    /// each listed pass's knobs (and its compile error) from here.
+    post_flsl_cache: &'a shaders::PostFlslCache,
     /// The project's UI style sheet — the UI Element section offers its names
     /// in a picker so a style is chosen, not typed.
     ui_styles: &'a floptle_ui::StyleSheet,
@@ -744,6 +803,11 @@ struct EditorTabViewer<'a> {
     paint_viz: Option<&'a PaintViz>,
     camera_gizmos: &'a [CameraGizmo],
     light_gizmos: &'a [Vec<(Vec2, Vec2)>],
+    /// The selected rigged meshes' skeletons, projected for this frame.
+    rig_gizmos: &'a [crate::viz::RigViz],
+    /// Baked-GI probes projected to screen: position, baked colour, and whether
+    /// the leak test threw the probe away.
+    gi_probe_dots: &'a [(Vec2, [f32; 3], bool)],
     body_gizmos: &'a [Vec<(Vec2, Vec2)>],
     contact_gizmos: &'a [(Vec2, Vec2)],
     /// Script `gizmo.*` debug lines (projected px + 0-1 color) — Scene view.
@@ -808,6 +872,8 @@ struct EditorTabViewer<'a> {
     shader_graph: &'a mut shader_graph::ShaderGraphState,
     /// The 🖼 Image tab: the open image document, its view and its tools.
     image: &'a mut image_edit::ImageEditState,
+    /// Tab labels for the 🖼 tab's PARKED documents, in stash order.
+    image_parked: &'a [String],
     /// The graph's per-node preview atlas (tiles drawn on the nodes).
     shader_preview: &'a mut shader_preview::ShaderGraphPreview,
     /// Registered models — rig lookups for the animation UI.
@@ -894,6 +960,7 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
                     st: self.image,
                     project_root: self.project_root,
                     cmd: self.cmd,
+                    parked: self.image_parked,
                 };
                 cx.ui(ui);
             }
@@ -1001,7 +1068,7 @@ fn main() {
             }
             "--help" | "-h" => {
                 println!(
-                    "{} editor {}\n\nUSAGE:\n  floptle-editor [PROJECT_DIR]              open a project (default: assets/)\n  floptle-editor --play [PROJECT_DIR]      run the project as a GAME (no editor UI; F1 = multiplayer menu)\n  floptle-editor --new <DIR>               scaffold a new project and exit\n  floptle-editor --template <NAME>         which starter project --new scaffolds\n                                           (with --new; see --list-templates)\n  floptle-editor --list-templates          print the starter templates and exit\n  floptle-editor --export <PROJ> <OUT> <PLATFORM> [TITLE]  stamp a build and exit\n                                           PLATFORM: host | windows-x86_64 | linux-x86_64 | macos-aarch64 | macos-x86_64\n  floptle-editor --migrate <DIR>           migrate a project's assets to this version and exit\n  floptle-editor --extract-clips <DIR> <MODEL>  re-bake a model's embedded glTF clips and exit\n  floptle-editor --engine-version <V>      version to stamp for --new/--migrate (Hub-driven)\n  floptle-editor --version                 print the engine version and exit\n\nA floptle-game.ron manifest next to the binary (File \u{2192} Export Game\u{2026}) implies --play.",
+                    "{} editor {}\n\nUSAGE:\n  floptle-editor [PROJECT_DIR]              open a project (default: assets/)\n  floptle-editor --play [PROJECT_DIR]      run the project as a GAME (no editor UI; F1 = multiplayer menu)\n  floptle-editor --new <DIR>               scaffold a new project and exit\n  floptle-editor --template <NAME>         which starter project --new scaffolds\n                                           (with --new; see --list-templates)\n  floptle-editor --list-templates          print the starter templates and exit\n  floptle-editor --export <PROJ> <OUT> <PLATFORM> [TITLE]  stamp a build and exit\n                                           PLATFORM: host | windows-x86_64 | linux-x86_64 | macos-aarch64 | macos-x86_64\n  floptle-editor --bake-gi [PROJECT_DIR]   bake the open scene's light probes and exit\n  floptle-editor --migrate <DIR>           migrate a project's assets to this version and exit\n  floptle-editor --extract-clips <DIR> <MODEL>  re-bake a model's embedded glTF clips and exit\n  floptle-editor --engine-version <V>      version to stamp for --new/--migrate (Hub-driven)\n  floptle-editor --version                 print the engine version and exit\n\nA floptle-game.ron manifest next to the binary (File \u{2192} Export Game\u{2026}) implies --play.",
                     floptle_core::ENGINE_NAME, distribution_version()
                 );
                 return;
@@ -1092,6 +1159,9 @@ fn main() {
                 ));
             }
             "--play" => player_mode = true,
+            // Scanned position-independently above; consumed here so it is not
+            // an "unknown argument".
+            "--bake-gi" => {}
             s if !s.starts_with('-') => project_path = Some(PathBuf::from(s)),
             other => {
                 eprintln!("unknown argument: {other} (try --help)");
@@ -1129,6 +1199,7 @@ fn main() {
     let mut editor = Editor {
         show_gizmos: !player_mode,
         player_mode,
+        auto_bake_gi: args.iter().any(|a| a == "--bake-gi").then_some(false),
         game_title,
         crash_prompt: (!player_mode).then(report::take_last_crash).flatten(),
         // No Console tab in a build, so warnings and errors go to stderr
@@ -1339,7 +1410,7 @@ struct Editor {
     /// Editable map-mesh geometry (the map-building suite) — the authority
     /// behind every `Matter::MapMesh { id }` node and its `@map/<id>` parts.
     maps: map_edit::MapStore,
-    /// Active sub-object selection of the ▦ Map tool (verts/edges/faces on
+    /// Active sub-object selection of the ▦ Model tool (verts/edges/faces on
     /// the primary map-mesh node). Cleared on undo restore — see history.rs.
     map_sel: Option<map_edit::MapSel>,
     /// The Map tool's vertex/edge/face sub-mode (Tab cycles it).
@@ -1708,6 +1779,15 @@ struct Editor {
     camera_gizmos: Vec<CameraGizmo>,
     /// Projected point-light gizmos (cross + range ring) for this frame.
     light_gizmos: Vec<Vec<(Vec2, Vec2)>>,
+    /// The projected skeletons of the selected rigged meshes — drawn, and the
+    /// thing a viewport click tests against to select a bone.
+    rig_gizmos: Vec<crate::viz::RigViz>,
+    /// Where the GAME camera was last frame, for motion blur. `None` on the
+    /// first frame and after a cut, which reads as a still camera — see
+    /// `shading::motion_frame`.
+    motion_prev: Option<crate::shading::MotionHistory>,
+    /// This frame's projected GI probes (see `gi_show_probes`).
+    gi_probe_dots: Vec<(Vec2, [f32; 3], bool)>,
     /// Projected rigidbody collider outlines (sphere/capsule) for this frame.
     body_gizmos: Vec<Vec<(Vec2, Vec2)>>,
     /// Projected collision-contact crosses (telegraphed during Play).
@@ -1808,6 +1888,19 @@ struct Editor {
     /// Set by `set_scene_file`; the Hierarchy folds every parent once and clears it.
     /// See the note there — a freshly opened scene should not be a wall of rows.
     hier_fold_pending: bool,
+    /// A new asset is waiting for its name — the modal is up, holding what has
+    /// been typed so far.
+    ///
+    /// Asked BEFORE the file is written, so the asset is born with the name you
+    /// gave it and nothing ever points at a placeholder. Creating first and
+    /// renaming after is how `NewEffect3` ends up shipping in a game.
+    new_asset_prompt: Option<(NewAsset, String)>,
+    /// The Hierarchy's search text (empty = draw the tree).
+    hier_search: String,
+    /// Whether that search reaches switched-off nodes. Enabled-only by default,
+    /// which is the same rule `find()` follows in a script — one answer to "does
+    /// off mean off", wherever you do the looking.
+    hier_scope: floptle_script::FindScope,
     /// The engine Console: captured script logs/warnings/errors + its view filters.
     console: ConsoleState,
     /// Player-input state fed to scripts (the Lua `input` API), accumulated from
@@ -2212,6 +2305,42 @@ struct Editor {
     ui_flsl_binds: shaders::UiFlslBinds,
     /// Retired UI binding slots, reused before growing the registry.
     ui_flsl_free: Vec<floptle_render::UiBindingId>,
+    /// Compiled `stage post` `.flsl` screen shaders by path (mtime hot reload).
+    post_flsl_cache: shaders::PostFlslCache,
+    /// The pipelines behind them, and this frame's ordered pass list. ONE
+    /// registry for the whole editor, not one per viewport: the scene's screen
+    /// shaders belong to the scene, and the surface view and the docked Game
+    /// view have to run the same list.
+    post_shaders: Option<floptle_render::PostShaders>,
+    /// The scene's baked global illumination, loaded from its `.fgi` — `None`
+    /// until a volume is baked. Held here rather than in the renderer because
+    /// the editor also draws it (the probe gizmo) and writes it (the bake).
+    gi_baked: Option<floptle_gi::BakedGi>,
+    /// A bake in progress, advanced a slice per frame.
+    gi_bake: Option<gi_bake::GiBake>,
+    /// Force the next `refresh_gi` to re-upload even if nothing looks changed
+    /// (a fresh scene load, a cleared bake).
+    gi_dirty: bool,
+    /// `--bake-gi`: bake the open scene's light probes and quit.
+    ///
+    /// A batch bake is a real thing to want — re-light a dozen scenes after
+    /// moving the sun, or bake on a build machine so the `.fgi` ships without
+    /// anyone having remembered to press the button. It is also the only way to
+    /// exercise the bake end to end without a hand on the mouse, which is why it
+    /// exists at all rather than after somebody asked.
+    ///
+    /// `None` = the ordinary editor. `Some(false)` = asked for, not yet started.
+    /// `Some(true)` = running; quit when it finishes.
+    auto_bake_gi: Option<bool>,
+    /// What the probe texture currently on the GPU was built from.
+    gi_uploaded: Option<gi_bake::GiKey>,
+    /// The tuning view: show ONLY the baked bounce, with every direct light
+    /// switched off. A view flag rather than a scene setting — like the ortho
+    /// grid or the gizmo filter, it is about what you are looking at, not about
+    /// what the game looks like.
+    gi_show_only: bool,
+    /// Draw the probes themselves in the Scene view.
+    gi_show_probes: bool,
     /// Parsed Sdf-stage shaders by material path (Field Shapes, mtime-cached).
     sdf_cache: shaders::SdfCache,
     /// Live Field Shape entities → their splice slot (0..4).
@@ -2228,8 +2357,17 @@ struct Editor {
     texture_mtime: HashMap<String, SystemTime>,
     /// When the mtime poll last ran (it stats files at most twice a second).
     texture_poll_at: Option<Instant>,
-    /// "Discard unsaved image changes" is armed: the next open goes through.
-    image_discard_armed: bool,
+    /// Documents open in the 🖼 tab but not on screen — see `park_image_doc`.
+    ///
+    /// Each entry is a WHOLE `ImageEditState`: its pixels, its path, its undo
+    /// stack, its zoom, its selection. Switching documents swaps one of these
+    /// with `image`, so a parked document's undo history cannot be applied to a
+    /// different document's pixels — the failure the obvious "share one undo
+    /// stack" design invites.
+    image_stash: Vec<image_edit::ImageEditState>,
+    /// A close is waiting on the unsaved-changes confirm: `None` = the live
+    /// document, `Some(i)` = stash entry `i`.
+    image_close_confirm: Option<Option<usize>>,
     /// The graph's live per-node preview atlas (pipeline + egui texture).
     shader_preview: shader_preview::ShaderGraphPreview,
     /// The terrain fields (id-keyed) + texture palette when Play started.
@@ -2464,11 +2602,21 @@ pub(crate) struct GizmoFilter {
     pub(crate) particles: bool,
     /// Lua `gizmo.*` debug draws.
     pub(crate) script: bool,
+    /// The skeleton of a selected rigged mesh.
+    pub(crate) bones: bool,
 }
 
 impl Default for GizmoFilter {
     fn default() -> Self {
-        Self { cameras: true, lights: true, physics: true, colliders: true, particles: true, script: true }
+        Self {
+            cameras: true,
+            lights: true,
+            physics: true,
+            colliders: true,
+            particles: true,
+            script: true,
+            bones: true,
+        }
     }
 }
 
@@ -2478,6 +2626,31 @@ struct PreviewTarget {
     color_view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
     tex_id: egui::TextureId,
+    /// Present when the SCENE is drawn into this target, rather than a finished
+    /// picture being blitted into it.
+    ///
+    /// Scene passes render in the floating-point scene format and `color_view`
+    /// is the 8-bit sRGB texture egui shows, so something has to map between
+    /// them — and that something is the same terminal pass the main frame uses,
+    /// tonemap included. Which is also why a material preview can be trusted:
+    /// it lands on the display through exactly the path the scene does.
+    post: Option<floptle_render::PostStack>,
+}
+
+impl PreviewTarget {
+    /// Where the SCENE draws — the post input when there is one, else the
+    /// display texture itself (a target that only receives finished pictures).
+    fn scene_view(&self) -> &wgpu::TextureView {
+        self.post.as_ref().map_or(&self.color_view, |p| p.input_view())
+    }
+
+    /// Land what was drawn onto the display texture. A no-op for a target that
+    /// never held a scene.
+    fn resolve(&self, gpu: &floptle_render::Gpu, s: &floptle_render::PostSettings) {
+        if let Some(p) = &self.post {
+            p.run(gpu, s, None, &self.color_view);
+        }
+    }
 }
 
 /// What the Inspector preview shows this frame (built from the selected asset).
@@ -2697,7 +2870,7 @@ impl ApplicationHandler for Editor {
 
         match event {
             WindowEvent::CloseRequested => {
-                if (self.scene_dirty || self.image.dirty) && !self.player_mode {
+                if self.unsaved_work() && !self.player_mode {
                     self.show_quit_confirm = true;
                 } else {
                     event_loop.exit();
@@ -2776,7 +2949,23 @@ impl ApplicationHandler for Editor {
                 let pressed = event.state == ElementState::Pressed;
                 // Don't trigger shortcuts/tools (or fly the camera) while typing
                 // into a field. `typing` is read live each event.
-                let typing = self.egui.as_ref().is_some_and(|e| e.ctx.egui_wants_keyboard_input());
+                //
+                // **A TEXT FIELD, not any focused widget.** This was
+                // `egui_wants_keyboard_input()`, which is literally
+                // `memory.focused().is_some()` — and in egui every clickable
+                // widget takes focus when you click it. So one click on a
+                // toolbar button, a checkbox, a slider or a combo left `typing`
+                // stuck true, and from that moment Ctrl+C / Ctrl+V / Ctrl+D /
+                // Delete / F silently did NOTHING until you happened to click
+                // some non-interactive background that surrendered focus. That
+                // is the "copy between scenes just stops working" report, and it
+                // is why it looked random: the trigger was the last thing you
+                // clicked, not anything about the copy.
+                //
+                // `text_edit_focused()` is egui's own answer to "is the user
+                // typing" — it loads the focused id's `TextEditState` and is
+                // true for exactly the widgets that want the letters.
+                let typing = self.egui.as_ref().is_some_and(|e| e.ctx.text_edit_focused());
                 // The Game view plays like a build: no editor free-fly camera, no editor
                 // shortcuts — only raw key state is tracked (below) for the game's scripts.
                 let game_view = self.game_view();
@@ -2865,7 +3054,7 @@ impl ApplicationHandler for Editor {
                         self.capture_map_rebind(code);
                         return;
                     }
-                    // ▦ Map tool keybinds. They run BEFORE the editor's own
+                    // ▦ Model tool keybinds. They run BEFORE the editor's own
                     // shortcuts but only inside the map context (tool active,
                     // not typing, no Ctrl), and map_keys.rs refuses to bind
                     // anything the editor answers in that same context — so
@@ -2949,7 +3138,7 @@ impl ApplicationHandler for Editor {
                             // the unsaved-changes confirm. Editor only: a build has
                             // no editor to leave (its window close / Alt+F4 quit it).
                             KeyCode::KeyQ if self.ctrl && !self.player_mode => {
-                                if self.scene_dirty || self.image.dirty {
+                                if self.unsaved_work() {
                                     self.show_quit_confirm = true;
                                 } else {
                                     event_loop.exit();
@@ -3029,14 +3218,23 @@ impl ApplicationHandler for Editor {
                                         KeyCode::KeyA | KeyCode::KeyD if in_image => {
                                             self.image.deselect()
                                         }
+                                        // …and a copy goes OUT to the OS
+                                        // clipboard too, so the 🖼 tab is a
+                                        // participant in the system clipboard
+                                        // rather than an island.
                                         KeyCode::KeyC if in_image => {
                                             self.image.copy_selection(false);
+                                            self.image_clip_to_os();
                                         }
                                         KeyCode::KeyX if in_image => {
                                             self.image.copy_selection(true);
+                                            self.image_clip_to_os();
                                         }
+                                        // Whatever is on the OS clipboard first
+                                        // — a browser image, a screenshot —
+                                        // then the tab's own copy buffer.
                                         KeyCode::KeyV if in_image => {
-                                            self.image.paste();
+                                            self.image_paste();
                                         }
                                         KeyCode::KeyT if in_image => {
                                             self.image.tool = crate::image_edit::ImgTool::Transform;
@@ -3087,7 +3285,7 @@ impl ApplicationHandler for Editor {
                                         // selected for animation (there's no scene selection
                                         // to delete anyway — this just prevents accidents).
                                         KeyCode::Delete | KeyCode::Backspace if posing_bone => {}
-                                        // (the ▦ Map tool's delete-faces bind runs
+                                        // (the ▦ Model tool's delete-faces bind runs
                                         // before this and only claims the key while
                                         // faces are selected — see the dispatch above)
                                         KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
@@ -3294,13 +3492,33 @@ impl ApplicationHandler for Editor {
                                 cursor_start: self.cursor.unwrap_or(Vec2::ZERO),
                             });
                         } else if let Some(cursor) = self.cursor {
-                            // Empty viewport ⏵ pick: single-select, or Shift/Ctrl to add
-                            // (Ctrl matches the Hierarchy's toggle-select).
-                            match self.pick(cursor) {
-                                Some(e) if self.shift || self.ctrl => self.select_toggle(e),
-                                Some(e) => self.select_single(e),
-                                None if !self.shift && !self.ctrl => self.selection.clear(),
-                                None => {}
+                            // A drawn joint wins over the body behind it: the
+                            // rig is only on screen for a mesh you already
+                            // selected, and it is drawn over the model, so a
+                            // click that lands on a joint meant the joint.
+                            if let Some((mesh, idx)) =
+                                crate::viz::pick_joint(&self.rig_gizmos, cursor)
+                            {
+                                // Same swap the Hierarchy makes: a bone and a
+                                // node selection are mutually exclusive, so the
+                                // Inspector becomes the bone editor.
+                                self.bone_selection = Some((mesh, idx));
+                                self.selection.clear();
+                                self.selected_asset = None;
+                            } else {
+                                // Empty viewport ⏵ pick: single-select, or Shift/Ctrl to add
+                                // (Ctrl matches the Hierarchy's toggle-select).
+                                match self.pick(cursor) {
+                                    Some(e) if self.shift || self.ctrl => self.select_toggle(e),
+                                    Some(e) => self.select_single(e),
+                                    None if !self.shift && !self.ctrl => {
+                                        self.selection.clear();
+                                        // Empty space clears the bone too, or a
+                                        // rig with nothing selected stays lit.
+                                        self.bone_selection = None;
+                                    }
+                                    None => {}
+                                }
                             }
                         }
                     }

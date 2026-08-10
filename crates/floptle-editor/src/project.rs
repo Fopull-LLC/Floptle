@@ -357,6 +357,8 @@ impl Editor {
         self.adopt_maps();
         self.adopt_paint();
         self.adopt_tex_paint();
+        // A brand-new scene has no bake; clear whatever the last one had.
+        self.load_gi();
         self.selection.clear();
         self.history = History::default();
         self.mesh_registry.clear();
@@ -379,6 +381,18 @@ impl Editor {
         let doc = match floptle_scene::load(p) {
             Ok(d) => d,
             Err(e) => {
+                // **Say so.** This was an `eprintln!`, which in a windowed build
+                // goes to a terminal that is usually not there — so a scene the
+                // loader refused looked exactly like a double-click that did not
+                // register, and the reasonable conclusion was that opening scenes
+                // is flaky. It is not: the file did not parse, and the parser
+                // says where.
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("could not open {} — {e}", p.display()),
+                    None,
+                );
+                self.toast = Some((format!("⚠  {} did not load — see the Console", p.display()), 6.0));
                 eprintln!("  open scene failed: {e}");
                 return;
             }
@@ -400,6 +414,9 @@ impl Editor {
         self.adopt_maps();
         self.adopt_paint();
         self.adopt_tex_paint();
+        // The scene's baked GI (its `.fgi`), if it has one. Absent = no bounce,
+        // which is exactly how every scene rendered before v0.45.
+        self.load_gi();
         self.register_scene_meshes();
         self.selection.clear();
         self.selected_asset = None;
@@ -1404,6 +1421,17 @@ impl Editor {
         self.project_root.join("terrain").join(format!("{}.palette", self.scene_name))
     }
 
+    /// Is there work that would be lost by closing right now?
+    ///
+    /// ONE definition, so the window's close button, Ctrl+Q and the confirm
+    /// dialog cannot disagree about what counts. Tilesets are in here because
+    /// they are edited from a dock tab like everything else and their file is
+    /// not the scene's — a level's collision shapes used to walk out the door
+    /// without a word.
+    pub(crate) fn unsaved_work(&self) -> bool {
+        self.scene_dirty || self.image.dirty || !self.tiles.dirty.is_empty()
+    }
+
     /// Ctrl+S: save everything — the project config, the open scene, and every
     /// dirty script open in the IDE (so "the script you're editing" is saved too).
     pub(crate) fn save_all(&mut self) {
@@ -1420,6 +1448,19 @@ impl Editor {
             self.save_image_doc();
         }
         self.save_scene(); // clears scene_dirty ONLY on success + logs either way
+        // Tilesets. **Ctrl+S did not write these**, and that is the whole of the
+        // "my tile collision shapes are gone every time I reopen the project"
+        // report: a tileset's solid flags, its collision polygons, its autotile
+        // groups and its tags all live in `tilesets/*.tileset.ron`, and the ONLY
+        // thing that ever wrote that file was a small `Save` button inside the
+        // ◫ Tiles tab. Everything else about the level — the squares you painted,
+        // the layer nodes — is scene state and saved fine, so the level came back
+        // looking correct and collided with nothing.
+        //
+        // Save-everything has to mean everything. `save_tilesets` is already a
+        // no-op when nothing is dirty and already refuses to write over a file it
+        // could not parse, so this is safe to call unconditionally.
+        self.save_tilesets();
         if let Err(e) = floptle_scene::save_project(&self.project, &self.project_cfg_path()) {
             self.console.push(
                 floptle_script::LogLevel::Error,

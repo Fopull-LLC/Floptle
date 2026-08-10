@@ -1,4 +1,4 @@
-//! Keybinds for the ▦ Map tool: every control it has, bound to a chord you can
+//! Keybinds for the ▦ Model tool: every control it has, bound to a chord you can
 //! change, with conflicts made impossible rather than merely unlikely.
 //!
 //! Two rules make "doesn't interfere with anything else" a property of the

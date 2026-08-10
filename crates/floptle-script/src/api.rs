@@ -241,14 +241,18 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
                 "PostProcess",
                 "enabled" | "bloom" | "vignette" | "posterizeDither" | "posterizeChroma"
             )
+            | ("LightProbes", "enabled")
+            | ("PointLight", "twoSided")
             | (
                 "Light",
                 "stars"
                     | "shadows"
                     | "shadowDither"
+                    | "contactShadows"
                     | "fog"
                     | "fogDither"
                     | "fogVolumetric"
+                    | "fogShafts"
             )
             | (
                 "RigidBody",
@@ -266,12 +270,58 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
     )
 }
 
+/// A light emitter's kind as the number scripts read and write: 0 point,
+/// 1 sphere, 2 rect, 3 disk, 4 tube. A number rather than a string because every
+/// component-handle field in this API is a number, and a script that reads
+/// `l.shape` to restore it later must get something it can assign straight back.
+fn light_shape_id(s: floptle_core::LightShape) -> f64 {
+    use floptle_core::LightShape as LS;
+    match s {
+        LS::Point => 0.0,
+        LS::Sphere { .. } => 1.0,
+        LS::Rect { .. } => 2.0,
+        LS::Disk { .. } => 3.0,
+        LS::Tube { .. } => 4.0,
+    }
+}
+
+/// The inverse, carrying `size` across so switching kind keeps the emitter the
+/// size it was. An unknown number is a point, not an error: a script computing a
+/// shape index should degrade to the light every scene already has.
+fn light_shape_from_id(id: f64, size: f32) -> floptle_core::LightShape {
+    use floptle_core::LightShape as LS;
+    let s = size.max(0.25);
+    match id.round() as i32 {
+        1 => LS::Sphere { radius: s },
+        2 => LS::Rect { width: s * 2.0, height: s * 2.0, two_sided: false },
+        3 => LS::Disk { radius: s, two_sided: false },
+        4 => LS::Tube { length: s * 4.0, radius: s * 0.25 },
+        _ => LS::Point,
+    }
+}
+
 /// The numeric component fields exposed to scripts via `node:getcomponent(name)`, mirrored
 /// from the live ECS each frame. Extend here (and in [`apply_component_field`]) to reach
 /// more components / fields.
 pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<String, f64>> {
     let mut out: HashMap<String, HashMap<String, f64>> = HashMap::new();
-    if let Some(Matter::PointLight { color, intensity, range }) = world.get::<Matter>(e) {
+    if let Some(Matter::PointLight { color, intensity, range, shape }) = world.get::<Matter>(e) {
+        use floptle_core::LightShape as LS;
+        // The emitter's dimensions, each reading 0 on a shape that has no such
+        // dimension. One flat set rather than a nested table because every
+        // component handle in this API is flat numbers, and because "the width
+        // of a sphere" should read as an obvious nothing rather than as an error.
+        let (w, h, rad, len, thick, two) = match shape {
+            LS::Point => (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            LS::Sphere { radius } => (0.0, 0.0, *radius as f64, 0.0, 0.0, 0.0),
+            LS::Rect { width, height, two_sided } => {
+                (*width as f64, *height as f64, 0.0, 0.0, 0.0, f64::from(*two_sided))
+            }
+            LS::Disk { radius, two_sided } => {
+                (0.0, 0.0, *radius as f64, 0.0, 0.0, f64::from(*two_sided))
+            }
+            LS::Tube { length, radius } => (0.0, 0.0, 0.0, *length as f64, *radius as f64, 0.0),
+        };
         out.insert(
             "PointLight".to_string(),
             HashMap::from([
@@ -280,6 +330,13 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("r".to_string(), color[0] as f64),
                 ("g".to_string(), color[1] as f64),
                 ("b".to_string(), color[2] as f64),
+                ("shape".to_string(), light_shape_id(*shape)),
+                ("width".to_string(), w),
+                ("height".to_string(), h),
+                ("radius".to_string(), rad),
+                ("length".to_string(), len),
+                ("thickness".to_string(), thick),
+                ("twoSided".to_string(), two),
             ]),
         );
     }
@@ -331,6 +388,10 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("shadowQuantize".to_string(), l.shadow_quantize as f64),
                 ("shadowDither".to_string(), f64::from(l.shadow_dither)),
                 ("shadowDistance".to_string(), l.shadow_distance as f64),
+                ("contactShadows".to_string(), f64::from(l.contact_shadows)),
+                ("contactLength".to_string(), l.contact_length as f64),
+                ("contactSteps".to_string(), l.contact_steps as f64),
+                ("contactStrength".to_string(), l.contact_strength as f64),
                 ("fog".to_string(), f64::from(l.fog)),
                 ("fogColorR".to_string(), l.fog_color[0] as f64),
                 ("fogColorG".to_string(), l.fog_color[1] as f64),
@@ -345,6 +406,10 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("fogFalloff".to_string(), l.fog_falloff as f64),
                 ("fogNoise".to_string(), l.fog_noise as f64),
                 ("fogNoiseScale".to_string(), l.fog_noise_scale as f64),
+                ("fogLight".to_string(), l.fog_light as f64),
+                ("fogAnisotropy".to_string(), l.fog_anisotropy as f64),
+                ("fogSteps".to_string(), l.fog_steps as f64),
+                ("fogShafts".to_string(), f64::from(l.fog_shafts)),
             ]),
         );
     }
@@ -367,6 +432,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
     // here. `ao` is deliberately absent: it picks HOW occlusion is computed, and
     // switching that mid-scene is a look change nobody asked a number for.
     if let Some(Matter::PostProcess {
+        tonemap,
         enabled,
         bloom,
         bloom_threshold,
@@ -379,6 +445,17 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
         posterize_bands,
         posterize_dither,
         posterize_chroma,
+        dof_focus,
+        dof_range,
+        dof_near_range,
+        dof_max_blur,
+        dof_blades,
+        dof_blade_rotation,
+        dof_highlight,
+        dof_quality,
+        dof_show_focus,
+        motion_blur,
+        motion_samples,
         ..
     }) = world.get::<Matter>(e)
     {
@@ -395,8 +472,48 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("aoStrength".to_string(), *ao_strength as f64),
                 ("aoRadius".to_string(), *ao_radius as f64),
                 ("posterizeBands".to_string(), *posterize_bands as f64),
+                ("tonemap".to_string(), *tonemap as f64),
                 ("posterizeDither".to_string(), f64::from(*posterize_dither)),
                 ("posterizeChroma".to_string(), f64::from(*posterize_chroma)),
+                // Depth of field. `dofFocus` is here because a rack focus is a
+                // SCRIPT: pull the focus from one distance to another over a
+                // second and the shot changes. Doing it by hand meant a shader
+                // edit, which is not a thing that can happen mid-cutscene.
+                ("dofFocus".to_string(), *dof_focus as f64),
+                ("dofRange".to_string(), *dof_range as f64),
+                ("dofNearRange".to_string(), *dof_near_range as f64),
+                ("dofBlur".to_string(), *dof_max_blur as f64),
+                ("dofBlades".to_string(), *dof_blades as f64),
+                ("dofBladeAngle".to_string(), *dof_blade_rotation as f64),
+                ("dofHighlight".to_string(), *dof_highlight as f64),
+                ("dofSamples".to_string(), *dof_quality as f64),
+                ("dofShowFocus".to_string(), f64::from(*dof_show_focus)),
+                // The shutter. Scriptable for the same reason the focus is: a
+                // slow-motion moment wants it opened up and a freeze wants it
+                // shut, and both are things that happen mid-shot.
+                ("motionBlur".to_string(), *motion_blur as f64),
+                ("motionSamples".to_string(), *motion_samples as f64),
+            ]),
+        );
+    }
+    // Baked GI. Read/write is the LIVE half of the volume — the numbers that
+    // change what the bake looks like without re-baking it. Dimming `intensity`
+    // as the lights go out, or dropping it to 0 for a flashback, is exactly the
+    // kind of thing a script should be able to do to a bounce.
+    if let Some(Matter::LightProbes { enabled, intensity, leak, normal_bias, bounces, .. }) =
+        world.get::<Matter>(e)
+    {
+        out.insert(
+            "LightProbes".to_string(),
+            HashMap::from([
+                ("enabled".to_string(), f64::from(*enabled)),
+                ("intensity".to_string(), *intensity as f64),
+                ("leak".to_string(), *leak as f64),
+                ("normalBias".to_string(), *normal_bias as f64),
+                // Read-only in practice: writing it does nothing until the next
+                // bake, which a script cannot start. Exposed so a script can ASK
+                // what it is looking at.
+                ("bounces".to_string(), *bounces as f64),
             ]),
         );
     }
@@ -571,6 +688,9 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             "RigidBody".to_string(),
             HashMap::from([
                 ("friction".to_string(), rb.friction as f64),
+                // Degrees. The steepest surface this body can stand on: past it
+                // there is no ground under it and no grip holds it.
+                ("slopeLimit".to_string(), rb.slope_limit as f64),
                 ("restitution".to_string(), rb.restitution as f64),
                 ("gravity".to_string(), b(rb.gravity)),
                 // Kinematic (1/0): transform-driven, never falls/pushed, but
@@ -867,18 +987,67 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "cell" => m.cell = n,
                     "sheetCols" => m.sheet_cols = n,
                     "sheetRows" => m.sheet_rows = n,
+                    // The PBR scalars, on the same cheap per-tick write path —
+                    // so a script can rust a surface over, wet a floor down, or
+                    // key roughness on a property track.
+                    "roughness" => m.roughness = val as f32,
+                    "metallic" => m.metallic = val as f32,
+                    "normalStrength" => m.normal_strength = val as f32,
+                    "occlusionStrength" => m.occlusion_strength = val as f32,
+                    "jitter" => m.retro.jitter = val as f32,
                     _ => {}
                 }
             }
         }
         "PointLight" => {
-            if let Some(Matter::PointLight { color, intensity, range }) = world.get_mut::<Matter>(ent) {
+            if let Some(Matter::PointLight { color, intensity, range, shape }) =
+                world.get_mut::<Matter>(ent)
+            {
+                use floptle_core::LightShape as LS;
+                let v = (val as f32).max(0.0);
                 match field {
                     "intensity" => *intensity = val as f32,
                     "range" => *range = val as f32,
                     "r" => color[0] = val as f32,
                     "g" => color[1] = val as f32,
                     "b" => color[2] = val as f32,
+                    // Switching kind KEEPS the size where the two shapes have
+                    // one, so a script cross-fading a window into a bulb does
+                    // not have to restate its dimensions to avoid a flash.
+                    "shape" => *shape = light_shape_from_id(val, shape.extent()),
+                    // A dimension write lands only on a shape that has it. A
+                    // zero would collapse the emitter into a degenerate polygon,
+                    // so every one of these has a floor.
+                    "radius" => match shape {
+                        LS::Sphere { radius } | LS::Disk { radius, .. } => *radius = v.max(0.001),
+                        _ => {}
+                    },
+                    "width" => {
+                        if let LS::Rect { width, .. } = shape {
+                            *width = v.max(0.001);
+                        }
+                    }
+                    "height" => {
+                        if let LS::Rect { height, .. } = shape {
+                            *height = v.max(0.001);
+                        }
+                    }
+                    "length" => {
+                        if let LS::Tube { length, .. } = shape {
+                            *length = v.max(0.001);
+                        }
+                    }
+                    "thickness" => {
+                        if let LS::Tube { radius, .. } = shape {
+                            *radius = v.max(0.001);
+                        }
+                    }
+                    "twoSided" => match shape {
+                        LS::Rect { two_sided, .. } | LS::Disk { two_sided, .. } => {
+                            *two_sided = val != 0.0;
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
             }
@@ -888,6 +1057,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
         // shader's uniforms, so they come through the component route.
         "PostProcess" => {
             if let Some(Matter::PostProcess {
+                tonemap,
                 enabled,
                 bloom,
                 bloom_threshold,
@@ -900,6 +1070,17 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 posterize_bands,
                 posterize_dither,
                 posterize_chroma,
+                dof_focus,
+                dof_range,
+                dof_near_range,
+                dof_max_blur,
+                dof_blades,
+                dof_blade_rotation,
+                dof_highlight,
+                dof_quality,
+                dof_show_focus,
+                motion_blur,
+                motion_samples,
                 ..
             }) = world.get_mut::<Matter>(ent)
             {
@@ -917,10 +1098,46 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     // 0 and 1 both mean off, and the field is a count, so a
                     // negative from Lua must not wrap into a huge one.
                     "posterizeBands" => *posterize_bands = val.max(0.0) as u32,
+                    // 0 clip / 1 Reinhard / 2 ACES / 3 AgX.
+                    "tonemap" => *tonemap = val.clamp(0.0, 3.0) as u32,
                     "posterizeDither" => *posterize_dither = val != 0.0,
                     // `floptle/0126`: step BRIGHTNESS and keep the colour,
                     // so a warm light does not band into hues nobody chose.
                     "posterizeChroma" => *posterize_chroma = val != 0.0,
+                    // Depth of field. Every one clamped where it has a range and
+                    // floored at 0 where it is a count, so a negative from Lua
+                    // cannot wrap into an enormous one.
+                    "dofFocus" => *dof_focus = v.max(0.0),
+                    "dofRange" => *dof_range = v.max(0.01),
+                    // 0 is meaningful here: it means "half the far range".
+                    "dofNearRange" => *dof_near_range = v.max(0.0),
+                    "dofBlur" => *dof_max_blur = v.clamp(0.0, 64.0),
+                    "dofBlades" => *dof_blades = val.clamp(0.0, 12.0) as u32,
+                    "dofBladeAngle" => *dof_blade_rotation = v,
+                    "dofHighlight" => *dof_highlight = v.max(0.0),
+                    "dofSamples" => *dof_quality = val.clamp(0.0, 64.0) as u32,
+                    "dofShowFocus" => *dof_show_focus = val != 0.0,
+                    "motionBlur" => *motion_blur = v.clamp(0.0, 1.0),
+                    "motionSamples" => *motion_samples = val.clamp(0.0, 32.0) as u32,
+                    _ => {}
+                }
+            }
+        }
+        // Baked GI (`Matter::LightProbes`). Only the knobs that take effect
+        // WITHOUT a re-bake are here: intensity, leak rejection, the surface
+        // offset and the master switch. `bounces`, `quality` and `spacing`
+        // describe how to bake and would do nothing at all from a script, so
+        // offering them would be offering a lie.
+        "LightProbes" => {
+            if let Some(Matter::LightProbes { enabled, intensity, leak, normal_bias, .. }) =
+                world.get_mut::<Matter>(ent)
+            {
+                let v = val as f32;
+                match field {
+                    "enabled" => *enabled = val != 0.0,
+                    "intensity" => *intensity = v.max(0.0),
+                    "leak" => *leak = v.max(0.0),
+                    "normalBias" => *normal_bias = v.max(0.0),
                     _ => {}
                 }
             }
@@ -958,6 +1175,10 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "shadowQuantize" => l.shadow_quantize = val.max(0.0) as u32,
                     "shadowDither" => l.shadow_dither = val != 0.0,
                     "shadowDistance" => l.shadow_distance = v.max(0.0),
+                    "contactShadows" => l.contact_shadows = val != 0.0,
+                    "contactLength" => l.contact_length = v.clamp(0.01, 20.0),
+                    "contactSteps" => l.contact_steps = (val.max(2.0) as u32).min(32),
+                    "contactStrength" => l.contact_strength = v.clamp(0.0, 1.0),
                     "fog" => l.fog = val != 0.0,
                     "fogColorR" => l.fog_color[0] = v.max(0.0),
                     "fogColorG" => l.fog_color[1] = v.max(0.0),
@@ -972,6 +1193,10 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "fogFalloff" => l.fog_falloff = v.max(0.0),
                     "fogNoise" => l.fog_noise = v.clamp(0.0, 1.0),
                     "fogNoiseScale" => l.fog_noise_scale = v.max(0.001),
+                    "fogLight" => l.fog_light = v.max(0.0),
+                    "fogAnisotropy" => l.fog_anisotropy = v.clamp(-0.95, 0.95),
+                    "fogSteps" => l.fog_steps = (val.max(2.0) as u32).min(64),
+                    "fogShafts" => l.fog_shafts = val != 0.0,
                     _ => {}
                 }
             }
@@ -1015,6 +1240,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
             if let Some(rb) = world.get_mut::<RigidBody>(ent) {
                 match field {
                     "friction" => rb.friction = val as f32,
+                    "slopeLimit" => rb.slope_limit = (val as f32).clamp(0.0, 90.0),
                     "restitution" => rb.restitution = val as f32,
                     "gravity" => rb.gravity = val != 0.0,
                     // Live Dynamic ↔ Kinematic (the sim re-reads the mode each
@@ -1160,6 +1386,68 @@ pub(crate) fn apply_rich_sets(
                         }
                         "sheetRows" => {
                             m.sheet_rows = num(v).unwrap_or(m.sheet_rows as f64).max(0.0) as u32
+                        }
+                        // --- the surface maps + the two lighting models. An
+                        // empty string clears a map slot, the same spelling
+                        // `texture` uses.
+                        "normalMap" => {
+                            if let CompVal::Str(t) = v {
+                                m.normal_map = (!t.is_empty()).then(|| t.clone());
+                            }
+                        }
+                        "normalStrength" => {
+                            m.normal_strength =
+                                num(v).map(|n| n as f32).unwrap_or(m.normal_strength)
+                        }
+                        "roughnessMap" => {
+                            if let CompVal::Str(t) = v {
+                                m.roughness_map = (!t.is_empty()).then(|| t.clone());
+                            }
+                        }
+                        "roughness" => {
+                            m.roughness = num(v).map(|n| n as f32).unwrap_or(m.roughness)
+                        }
+                        "metallicMap" => {
+                            if let CompVal::Str(t) = v {
+                                m.metallic_map = (!t.is_empty()).then(|| t.clone());
+                            }
+                        }
+                        "metallic" => {
+                            m.metallic = num(v).map(|n| n as f32).unwrap_or(m.metallic)
+                        }
+                        "occlusionMap" => {
+                            if let CompVal::Str(t) = v {
+                                m.ao_map = (!t.is_empty()).then(|| t.clone());
+                            }
+                        }
+                        "occlusionStrength" => {
+                            m.occlusion_strength =
+                                num(v).map(|n| n as f32).unwrap_or(m.occlusion_strength)
+                        }
+                        // A bad name here would silently pick a lighting model,
+                        // so an unparseable one leaves the material alone and the
+                        // key check (`MATERIAL_KEYS`) is what reports the typo.
+                        "shading" => {
+                            if let CompVal::Str(t) = v
+                                && let Some(sh) = floptle_core::Shading::parse(t)
+                            {
+                                m.shading = sh;
+                            }
+                        }
+                        // --- the deliberate PS1/N64 artefacts.
+                        "jitter" => {
+                            m.retro.jitter = num(v).map(|n| n as f32).unwrap_or(m.retro.jitter)
+                        }
+                        "affineUv" => {
+                            m.retro.affine_uv = num(v).map(|n| n != 0.0).unwrap_or(m.retro.affine_uv)
+                        }
+                        "vertexLit" => {
+                            m.retro.vertex_lit =
+                                num(v).map(|n| n != 0.0).unwrap_or(m.retro.vertex_lit)
+                        }
+                        "ditherAlpha" => {
+                            m.retro.dither_alpha =
+                                num(v).map(|n| n != 0.0).unwrap_or(m.retro.dither_alpha)
                         }
                         _ => {}
                     }
@@ -1359,11 +1647,13 @@ pub(crate) fn apply_rich_sets(
             // both "make a light" and "retune this one"; a node that was not a
             // light yet starts from the same defaults the editor's Add gives.
             RichSet::MatterPointLight { color, intensity, range } => {
-                let (mut c, mut i, mut r) = match world.get::<Matter>(e) {
-                    Some(Matter::PointLight { color, intensity, range }) => {
-                        (*color, *intensity, *range)
+                // The SHAPE is kept, never reset: a script retuning a window's
+                // colour must not quietly turn it back into a bare point.
+                let (mut c, mut i, mut r, shape) = match world.get::<Matter>(e) {
+                    Some(Matter::PointLight { color, intensity, range, shape }) => {
+                        (*color, *intensity, *range, *shape)
                     }
-                    _ => ([1.0, 1.0, 1.0], 1.0, 10.0),
+                    _ => ([1.0, 1.0, 1.0], 1.0, 10.0, floptle_core::LightShape::default()),
                 };
                 if let Some(v) = color {
                     c = v;
@@ -1377,7 +1667,7 @@ pub(crate) fn apply_rich_sets(
                 if let Some(v) = range {
                     r = v.max(0.0);
                 }
-                world.insert(e, Matter::PointLight { color: c, intensity: i, range: r });
+                world.insert(e, Matter::PointLight { color: c, intensity: i, range: r, shape });
             }
             RichSet::TileCells(writes) => {
                 let Some(Matter::Tilemap { cols, rows, data, .. }) =
@@ -1511,6 +1801,9 @@ pub(crate) const CAMERA_KEYS: &[&str] = &[
 pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "color", "emissive", "emissiveStrength", "specular", "shininess", "specularStrength", "rim",
     "rimStrength", "unlit", "ambient", "alpha", "texture", "cell", "sheetCols", "sheetRows",
+    "normalMap", "normalStrength", "roughnessMap", "roughness", "metallicMap", "metallic",
+    "occlusionMap", "occlusionStrength", "shading", "jitter", "affineUv", "vertexLit",
+    "ditherAlpha",
 ];
 
 /// Every key `node:setCelestial{...}` reads (`floptle/0082`).
@@ -2094,10 +2387,23 @@ pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, fie
             }
         }
         "Material" => {
-            if field == "texture"
-                && let Some(m) = world.get_mut::<floptle_core::Material>(ent)
-            {
-                m.texture = if val.is_empty() { None } else { Some(val.to_string()) };
+            if let Some(m) = world.get_mut::<floptle_core::Material>(ent) {
+                // `""` clears a slot — the spelling `texture` already used, kept
+                // for the surface maps so there is one rule, not five.
+                let path = (!val.is_empty()).then(|| val.to_string());
+                match field {
+                    "texture" => m.texture = path,
+                    "normalMap" => m.normal_map = path,
+                    "roughnessMap" => m.roughness_map = path,
+                    "metallicMap" => m.metallic_map = path,
+                    "occlusionMap" => m.ao_map = path,
+                    "shading" => {
+                        if let Some(sh) = floptle_core::Shading::parse(val) {
+                            m.shading = sh;
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         _ => {}
@@ -3060,15 +3366,18 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let scene = shared.scene.clone();
         methods.set(
             "find",
-            lua.create_function(move |lua, (this, name): (Table, String)| {
+            lua.create_function(move |lua, (this, name, opts): (Table, String, Option<Value>)| {
                 let e: u32 = this.raw_get("__id")?;
+                let scope = find_scope(&opts)?;
                 let found = {
                     let s = scene.borrow();
                     let mut stack: Vec<u32> =
                         s.children.get(&e).cloned().unwrap_or_default();
                     let mut hit = None;
                     while let Some(c) = stack.pop() {
-                        if s.names.get(&c).map(|n| n == &name).unwrap_or(false) {
+                        if s.names.get(&c).map(|n| n == &name).unwrap_or(false)
+                            && s.in_scope(c, scope)
+                        {
                             hit = Some(c);
                             break;
                         }
@@ -4054,6 +4363,56 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 )?,
             )?;
         }
+
+        // node:setShaderTexture(slot, ref) — point one of a `.flsl` shader's
+        // declared texture slots at a different image, at runtime.
+        //
+        // `ref` is a project-relative path ("textures/rust.png"), an `rt:` render
+        // target ("rt:securityCam" — what another camera is looking at, live), or
+        // "" to clear the slot back to nothing.
+        //
+        // The slot NAME is the one the shader declares (`texture ramp` → "ramp"),
+        // so a script names what the artist named, not an index that shifts the
+        // moment a slot is added.
+        {
+            let sets = shared.shader_texture_sets.clone();
+            methods.set(
+                "setShaderTexture",
+                lua.create_function(move |_, (this, slot, path): (Table, String, String)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    if slot.trim().is_empty() {
+                        return Err(mlua::Error::RuntimeError(
+                            "node:setShaderTexture(slot, ref) — slot is the name the shader \
+                             declares, e.g. \"ramp\" for `texture ramp`"
+                                .into(),
+                        ));
+                    }
+                    sets.borrow_mut().push((e, slot, path));
+                    Ok(())
+                })?,
+            )?;
+        }
+
+        // node:setScreenShader(name, on) — switch one of the PostProcess node's
+        // screen shaders on or off.
+        //
+        // `name` is the shader's file name without the extension ("inkOutline"),
+        // which is what the Inspector lists and what the author is looking at.
+        // Empty means every pass on the node — the whole authored look, off.
+        //
+        // The pass and its knobs stay in the scene, so this is a switch and not
+        // a deletion: turn the outline on for a boss fight and off again after.
+        {
+            let toggles = shared.screen_shader_toggles.clone();
+            methods.set(
+                "setScreenShader",
+                lua.create_function(move |_, (this, name, on): (Table, String, bool)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    toggles.borrow_mut().push((e, name, on));
+                    Ok(())
+                })?,
+            )?;
+        }
     }
 
     // ---- orientation, local ↔ world, movement ---------------------------------------
@@ -4399,14 +4758,101 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     }
     lua.set_named_registry_value("floptle_script_mt", script_mt)?;
 
+    // Every `find*` takes the same optional trailing options table, so the rule
+    // is learned once. See [`FindScope`] for why enabled-only is the default.
+    //
+    //     find("Player")                        -- enabled only (the default)
+    //     find("Player", { scope = "all" })     -- switched-off ones too
+    //     find("Spawner", { scope = "disabled" })
+    //     findAll("Enemy", { includeDisabled = true })   -- sugar for scope="all"
+    //
+    // A wrong KEY and a wrong VALUE both raise, listing what is accepted. A
+    // defaulted typo is how `pin = "topCenter"` silently meant top-left
+    // (`floptle/0072`), and an options table nobody can see the effect of is
+    // exactly the shape that goes unnoticed for a month.
+    fn find_scope(opts: &Option<Value>) -> mlua::Result<crate::FindScope> {
+        let t = match opts {
+            None | Some(Value::Nil) => return Ok(crate::FindScope::default()),
+            Some(Value::Table(t)) => t,
+            Some(_) => {
+                return Err(mlua::Error::RuntimeError(
+                    "the second argument to find/findAll/findScript/findTagged is an options \
+                     TABLE, e.g. { scope = \"all\" }"
+                        .into(),
+                ));
+            }
+        };
+        for pair in t.clone().pairs::<String, Value>() {
+            let (k, _) = pair?;
+            if !matches!(k.as_str(), "scope" | "includeDisabled" | "onlyDisabled") {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "find options: unknown key '{k}' — accepted: scope, includeDisabled, \
+                     onlyDisabled"
+                )));
+            }
+        }
+        if let Some(s) = t.get::<Option<String>>("scope")? {
+            return crate::FindScope::parse(&s).ok_or_else(|| {
+                mlua::Error::RuntimeError(format!(
+                    "find options: scope = '{s}' — accepted: {}",
+                    crate::FindScope::ACCEPTS.join(", ")
+                ))
+            });
+        }
+        if t.get::<Option<bool>>("onlyDisabled")?.unwrap_or(false) {
+            return Ok(crate::FindScope::Disabled);
+        }
+        if t.get::<Option<bool>>("includeDisabled")?.unwrap_or(false) {
+            return Ok(crate::FindScope::All);
+        }
+        Ok(crate::FindScope::default())
+    }
+
     // ---- globals: find / findAll / findScript / noderef -----------------------------
     {
         let scene = shared.scene.clone();
+        let logs = shared.logs.clone();
+        let warned = shared.find_scope_warned.clone();
         lua.globals().set(
             "find",
-            lua.create_function(move |lua, name: String| {
-                // O(1): the name index built each sync (first node in scene order wins).
-                let found = scene.borrow().by_name.get(&name).copied();
+            lua.create_function(move |lua, (name, opts): (String, Option<Value>)| {
+                let scope = find_scope(&opts)?;
+                let s = scene.borrow();
+                // O(1) against the name index when the default scope can take
+                // its answer (first node in scene order wins, as always). A
+                // narrowed scope has to walk, because the index holds the FIRST
+                // node of that name and it may be the one being filtered out —
+                // returning nil while a perfectly good second one exists would
+                // be worse than the bug this fixes.
+                let found = match s.by_name.get(&name).copied() {
+                    Some(e) if s.in_scope(e, scope) => Some(e),
+                    _ => s
+                        .order
+                        .iter()
+                        .copied()
+                        .find(|e| s.names.get(e).is_some_and(|n| n == &name) && s.in_scope(*e, scope)),
+                };
+                // Came up empty, but a node of that name IS in the scene and is
+                // simply switched off. Say so — once. Without this the only
+                // symptom of the enabled-only default is a `nil` in somebody
+                // else's code.
+                if found.is_none()
+                    && scope == crate::FindScope::Enabled
+                    && s.order.iter().any(|e| s.names.get(e).is_some_and(|n| n == &name))
+                    && warned.borrow_mut().insert(name.clone())
+                {
+                    logs.borrow_mut().push(crate::ScriptLog {
+                        level: crate::LogLevel::Warn,
+                        msg: format!(
+                            "find(\"{name}\") found nothing — a node called \"{name}\" IS in this \
+                             scene, but it is switched OFF, and find skips switched-off nodes now. \
+                             Turn it on in the Hierarchy, or ask for it with \
+                             find(\"{name}\", {{ scope = \"all\" }})."
+                        ),
+                        source: None,
+                    });
+                }
+                drop(s);
                 Ok(match found {
                     Some(e) => Value::Table(new_node_handle(lua, e)?),
                     None => Value::Nil,
@@ -4457,10 +4903,18 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let scene = shared.scene.clone();
         lua.globals().set(
             "findAll",
-            lua.create_function(move |lua, name: String| {
+            lua.create_function(move |lua, (name, opts): (String, Option<Value>)| {
+                let scope = find_scope(&opts)?;
                 let ids: Vec<u32> = {
                     let s = scene.borrow();
-                    s.order.iter().copied().filter(|e| s.names.get(e).map(|n| n == &name).unwrap_or(false)).collect()
+                    s.order
+                        .iter()
+                        .copied()
+                        .filter(|e| {
+                            s.names.get(e).map(|n| n == &name).unwrap_or(false)
+                                && s.in_scope(*e, scope)
+                        })
+                        .collect()
                 };
                 let arr = lua.create_table()?;
                 for (i, e) in ids.iter().enumerate() {
@@ -4472,13 +4926,18 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     }
     {
         let scene = shared.scene.clone();
-        let f = lua.create_function(move |lua, kind: String| {
+        let f = lua.create_function(move |lua, (kind, opts): (String, Option<Value>)| {
+            let scope = find_scope(&opts)?;
             // O(1) against the kind index (`floptle/0063`). Still the FIRST in
             // scene order, because the index is built in scene order — call
-            // sites depend on which one they get.
+            // sites depend on which one they get. The scope filter runs over the
+            // index rather than replacing it, so the ordering guarantee holds.
             let found = {
                 let s = scene.borrow();
-                s.by_kind.get(&kind).and_then(|v| v.first().copied()).map(|e| (e, kind.clone()))
+                s.by_kind
+                    .get(&kind)
+                    .and_then(|v| v.iter().copied().find(|e| s.in_scope(*e, scope)))
+                    .map(|e| (e, kind.clone()))
             };
             Ok(match found {
                 Some((e, k)) => Value::Table(new_script_handle(lua, e, &k)?),
@@ -4495,10 +4954,14 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let scene = shared.scene.clone();
         lua.globals().set(
             "findScripts",
-            lua.create_function(move |lua, kind: String| {
+            lua.create_function(move |lua, (kind, opts): (String, Option<Value>)| {
+                let scope = find_scope(&opts)?;
                 let ids: Vec<u32> = {
                     let s = scene.borrow();
-                    s.by_kind.get(&kind).cloned().unwrap_or_default()
+                    s.by_kind
+                        .get(&kind)
+                        .map(|v| v.iter().copied().filter(|e| s.in_scope(*e, scope)).collect())
+                        .unwrap_or_default()
                 };
                 let arr = lua.create_table()?;
                 for (i, e) in ids.iter().enumerate() {
@@ -4514,10 +4977,14 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let scene = shared.scene.clone();
         lua.globals().set(
             "findTagged",
-            lua.create_function(move |lua, tag: String| {
+            lua.create_function(move |lua, (tag, opts): (String, Option<Value>)| {
+                let scope = find_scope(&opts)?;
                 let ids: Vec<u32> = {
                     let s = scene.borrow();
-                    s.by_tag.get(&tag).cloned().unwrap_or_default()
+                    s.by_tag
+                        .get(&tag)
+                        .map(|v| v.iter().copied().filter(|e| s.in_scope(*e, scope)).collect())
+                        .unwrap_or_default()
                 };
                 let arr = lua.create_table()?;
                 for (i, e) in ids.iter().enumerate() {

@@ -37,7 +37,7 @@ in a minute to check they stop you.
 
 ### Do this with the Map tool instead, if you like
 
-The **▦ Map** tab draws blockout geometry properly: rooms, corridors, steps,
+The **▦ Model** tab draws blockout geometry properly: rooms, corridors, steps,
 with collision that matches what you see. For a real project it's the right
 tool. Cubes are fine for today.
 

@@ -29,6 +29,84 @@ impl Tiling {
     }
 }
 
+/// Which lighting model a surface answers to.
+///
+/// Two models, not one, because the engine serves two looks equally
+/// (`docs/engine-roadmap.md`): a stylised/retro surface wants a highlight it can
+/// dial by hand, and a realistic one wants a highlight that falls out of a
+/// measured roughness. Neither is a degraded version of the other, so neither is
+/// simulated with the other's knobs.
+///
+/// **A normal map, an AO map and the retro flags apply to BOTH** — they describe
+/// the surface, not the shading model. Only roughness and metallic are
+/// [`Physical`](Shading::Physical)-only, because only there do they mean
+/// anything.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Shading {
+    /// Blinn-Phong: `specular` colour, a `shininess` exponent and a strength,
+    /// all set by hand. Every material authored before v0.43 is this, and the
+    /// default, so no existing scene changes look.
+    #[default]
+    Classic,
+    /// Metal-rough (Cook-Torrance GGX): `roughness` and `metallic` describe the
+    /// microsurface and the specular colour follows from them — white-ish for a
+    /// dielectric, the base colour itself for a metal.
+    Physical,
+}
+
+impl Shading {
+    /// The spelling used in scene files and in Lua (`shading = "physical"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Shading::Classic => "classic",
+            Shading::Physical => "physical",
+        }
+    }
+    /// Parse [`as_str`](Self::as_str). `None` for anything else, so a caller can
+    /// report the typo rather than silently pick a model.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "classic" | "blinnPhong" | "blinn_phong" => Some(Shading::Classic),
+            "physical" | "pbr" | "metalRough" | "metal_rough" => Some(Shading::Physical),
+            _ => None,
+        }
+    }
+}
+
+/// The PS1/N64-era rendering artefacts, per material.
+///
+/// These are **deliberate** — the era's hardware limits, offered as choices. All
+/// four are off by default and each is independent: a wall can affine-map its
+/// texture without jittering, a character can jitter without dithering.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Retro {
+    /// Snap the vertex to a screen-space grid of this many steps across the
+    /// viewport — the PS1's integer vertex coordinates, and the "wobble" of
+    /// geometry near the camera. `0` = off. Typical: 80–320 (lower = coarser).
+    pub jitter: f32,
+    /// Interpolate UVs **without** the perspective divide — the era's warping,
+    /// swimming textures on large near-camera polygons. Correct perspective is
+    /// the default.
+    pub affine_uv: bool,
+    /// Light per VERTEX and interpolate the result, instead of lighting per
+    /// pixel. Highlights become faceted and slide across a face as it turns —
+    /// the Gouraud look. Normal maps are ignored while this is on (there is no
+    /// per-pixel normal to map).
+    pub vertex_lit: bool,
+    /// Render partial opacity as an ordered 4×4 dither of fully-opaque pixels
+    /// instead of blending — the era's screen-door transparency. Keeps the
+    /// surface in the opaque pass, so it needs no sorting and never shows the
+    /// sky through the hill behind it.
+    pub dither_alpha: bool,
+}
+
+impl Retro {
+    /// Is any artefact asked for? All-off is the default and costs nothing.
+    pub fn any(&self) -> bool {
+        self.jitter > 0.0 || self.affine_uv || self.vertex_lit || self.dither_alpha
+    }
+}
+
 /// The surface look attached to a node (a component). Default is a plain white
 /// matte — applying it changes nothing until the artist dials in properties.
 #[derive(Clone, Debug, PartialEq)]
@@ -55,6 +133,54 @@ pub struct Material {
     /// Opacity (1 = fully opaque, 0 = invisible). Below 1 the surface alpha-blends
     /// over what's behind it; multiplied by any base-color texture's own alpha.
     pub alpha: f32,
+
+    // --- The surface maps (v0.43). ------------------------------------------
+    // Every one of these is `None`/neutral by default and its default binding is
+    // the value that changes nothing: a flat normal, white roughness, white
+    // metallic (× a 0 scalar), white occlusion. So a material that names no map
+    // shades EXACTLY as it did before, with no branch in the shader to get wrong.
+    /// A tangent-space normal map (project-relative path). RGB = the perturbed
+    /// normal, the usual `(0.5, 0.5, 1.0)` = flat. Works under both shading
+    /// models; ignored when [`Retro::vertex_lit`] is on (no per-pixel normal).
+    ///
+    /// The tangent frame is derived per-pixel from screen-space derivatives, so
+    /// this needs no tangent attribute on the mesh and works on geometry that
+    /// could never carry one — SDF terrain, primitives, Model-tool meshes,
+    /// tilemaps and skinned characters alike.
+    pub normal_map: Option<String>,
+    /// How far the normal map tilts the surface. `1` = as authored, `0` = flat,
+    /// above 1 exaggerates. Negative flips the map's green channel, which is the
+    /// one-click fix for a map authored in the other handedness (DirectX vs
+    /// OpenGL) — the difference that makes lighting look inverted.
+    pub normal_strength: f32,
+    /// A roughness map — how blurred the reflection is, read from the **green**
+    /// channel (so a glTF-style packed occlusion/roughness/metallic image drops
+    /// straight in). Multiplied by [`roughness`](Self::roughness).
+    /// [`Shading::Physical`] only.
+    pub roughness_map: Option<String>,
+    /// Microsurface roughness: `0` = mirror, `1` = fully diffuse.
+    /// [`Shading::Physical`] only.
+    pub roughness: f32,
+    /// A metallic map, read from the **blue** channel (again matching glTF's
+    /// packed layout). Multiplied by [`metallic`](Self::metallic).
+    /// [`Shading::Physical`] only.
+    pub metallic_map: Option<String>,
+    /// `0` = dielectric (plastic, wood, stone: a white highlight over a coloured
+    /// diffuse), `1` = metal (no diffuse at all; the highlight takes the base
+    /// colour). Values between are for a transition, not a material.
+    /// [`Shading::Physical`] only.
+    pub metallic: f32,
+    /// An ambient-occlusion map — baked contact shading, read from the **red**
+    /// channel. Darkens ambient and indirect light only, never the key light,
+    /// so it deepens crevices without turning a lit surface grey.
+    pub ao_map: Option<String>,
+    /// How much of the AO map to apply (`0` = ignore it, `1` = as authored).
+    pub occlusion_strength: f32,
+    /// Which lighting model this surface answers to.
+    pub shading: Shading,
+    /// Deliberate PS1/N64-era artefacts. All off by default.
+    pub retro: Retro,
+
     /// A custom `.flsl` shader (project-relative path) — the shader-IR path
     /// (ADR-0007). `None` = the built-in look above. When set, the shader's
     /// exposed uniforms/texture slots (below) drive the surface; the fields
@@ -103,6 +229,16 @@ impl Default for Material {
             unlit: false,
             ambient: 1.0,
             alpha: 1.0,
+            normal_map: None,
+            normal_strength: 1.0,
+            roughness_map: None,
+            roughness: 0.5,
+            metallic_map: None,
+            metallic: 0.0,
+            ao_map: None,
+            occlusion_strength: 1.0,
+            shading: Shading::Classic,
+            retro: Retro::default(),
             shader: None,
             shader_params: std::collections::BTreeMap::new(),
             shader_textures: std::collections::BTreeMap::new(),
@@ -119,6 +255,25 @@ impl Material {
     /// A plain matte material of the given base color.
     pub fn tinted(color: [f32; 3]) -> Self {
         Self { color, ..Self::default() }
+    }
+
+    /// The four surface maps in the order the renderer binds them:
+    /// normal, roughness, metallic, occlusion. A `None` binds that slot's
+    /// neutral default, so this is safe to call on any material.
+    pub fn maps(&self) -> [Option<&String>; 4] {
+        [
+            self.normal_map.as_ref(),
+            self.roughness_map.as_ref(),
+            self.metallic_map.as_ref(),
+            self.ao_map.as_ref(),
+        ]
+    }
+
+    /// Does this material name any surface map? Used to decide whether a draw
+    /// needs a combined texture set at all — a material with none keeps taking
+    /// the plain single-texture path it always did.
+    pub fn has_maps(&self) -> bool {
+        self.maps().iter().any(Option::is_some)
     }
 
     /// The spritesheet grid, clamped to at least 1×1 — `(1, 1)` means "not a

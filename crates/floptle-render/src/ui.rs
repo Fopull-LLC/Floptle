@@ -618,7 +618,7 @@ impl Ui {
                     module: &module,
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: gpu.surface_format(),
+                        format: gpu.scene_format(),
                         blend: Some(blend_state(b)),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],

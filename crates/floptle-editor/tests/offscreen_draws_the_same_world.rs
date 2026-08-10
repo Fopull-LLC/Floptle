@@ -36,7 +36,7 @@ const SRC: &str = include_str!("../src/render_frame.rs");
 /// The calls that put world geometry into a frame. Each must appear on both
 /// paths; a call that exists on only one is a kind of object some views cannot
 /// see.
-const GATHERS: [(&str, &str); 6] = [
+const GATHERS: [(&str, &str); 7] = [
     ("push_mesh_instances", "imported models, map meshes, skinned characters"),
     ("tilemap_draws", "tilemaps — the 2D level itself"),
     ("sprite_draws", "sprite batches"),
@@ -47,6 +47,12 @@ const GATHERS: [(&str, &str); 6] = [
     // Game view posterizes its lighting while the Scene view does not
     // (`floptle/0127`).
     ("quantize_palette", "the palette quantize, before the 2D light"),
+    // Also not geometry: where the baked GI volume IS. The probe texture is
+    // shared, but the four uniform lanes that locate it are camera-relative, so
+    // they have to be stamped per view. Stamped on one path only, the Game view
+    // would render with no bounce at all while the Scene view looked right —
+    // which is precisely the shape of failure this file exists for.
+    (".gi().apply(", "the baked GI volume's camera-relative position"),
 ];
 
 /// The body of `render_world_into`, from its signature to the end of the file.

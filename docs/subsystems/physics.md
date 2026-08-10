@@ -219,6 +219,38 @@ same world behind `CollisionShape`; a mesh just answers `distance`/`normal` via 
 BVH instead of a field. (No re-meshing here — that's the whole point of staying SDF
 for the things that *do* deform.)
 
+## Friction and slopes (v0.49)
+
+Friction on a `RigidBody` is a **Coulomb coefficient**, not a damping factor. The
+surface can resist sideways at most `friction ×` the load it is carrying, so a
+ramp holds a body while
+
+```
+tan(slope angle) ≤ friction
+```
+
+and lets go above it. 0 is ice, 0.3 lets go at about 17°, 1 holds exactly 45°, and
+a grippier surface than that goes above 1 (rubber on rubber is around 1.5). The
+answer does not depend on the frame rate, on how many colliders the body happens
+to be touching, or on the solver's iteration count.
+
+The budget is spent in two places inside one step, and each has a distinct job:
+
+| When | Budget | What it does |
+|---|---|---|
+| Before the position integrates | the weight the floor holds up, `(−g·n)·dt` | Stops a parked body creeping. Removing the downhill velocity *after* the move leaves `g_t·dt²` of travel per step — a position error no amount of friction can cancel, and the reason everything used to slide downhill eventually. |
+| After the contacts resolve | the impulse they absorbed, minus the weight already spent above | Makes a fast landing skid and a gentle one stick. Subtracting the weight matters: a resting body pushes into its floor every step and the contact dutifully cancels that, so counting it twice would make every surface exactly twice as grippy as its number says. |
+
+A **wall** is handled by the same expression with no special case: a surface you
+are not pushing into absorbs nothing, so there is nothing to spend, so sliding
+down a wall does not slow you.
+
+`slope_limit` (degrees, 60 by default) is the steepest surface that counts as
+ground. Past it the body is not `grounded`, the surface is reported as
+`node.wallNormal` rather than `node.groundNormal`, and — the part that makes it a
+design knob rather than a label — **it stops carrying the body's weight**, so
+friction has no budget on it and the body slides off however grippy it is.
+
 ## Kinematic character controller (capsule)
 
 A capsule, moved by **move-and-slide** built on `spherecast`/`sweep` — no rigid-body

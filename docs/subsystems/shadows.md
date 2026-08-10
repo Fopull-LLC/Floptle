@@ -150,14 +150,76 @@ or past `shadow_distance`; empty scenes break out after one sample. At retro
 internal resolutions the cost is trivial. If a full-res scene ever burns here,
 the SSAO-style half-res + blur-upsample path is the known next lever.
 
+## 5b. Contact shadows (v0.48.0)
+
+The field march knows about terrain, blobs, baked level meshes and collider
+**proxies** — and a proxy is a box or a capsule, so a moving mesh casts a box's
+shadow. The place that reads worst is the contact between a foot and the floor,
+which is exactly where a capsule is least like a character.
+
+Contact shadows close that from the other end: a short **screen-space** trace
+along the light ray, tested against the opaque depth prepass the renderer already
+produces. Anything on screen occludes with its true silhouette — skinned,
+morphing, tilemapped, whatever it is made of — with no proxy, no bake, and no
+second gather of the scene.
+
+```
+        marched field shadow  ──────────────────────────────►  long range, true
+                                                               shapes for anything
+                                                               IN the field
+        contact trace  ──►  short range, true shapes for
+                            anything ON SCREEN
+```
+
+The two combine with `min` **before** the styling, so a contact shadow takes the
+same tint, strength and posterize the marched one does — two shadow terms with
+two different looks would read as two shadows.
+
+**What it cannot do**, and these are the shape of the technique rather than
+bugs:
+
+- shadow from something off the edge of the frame, or hidden behind something
+  else — there is no depth for what was never drawn
+- reach far. Turning the reach up widens the "is this the same object" window
+  (see below), which is what starts smearing distant geometry over things in
+  front of it
+
+**The one judgement call.** Depth alone cannot distinguish *"I am inside a thick
+pillar"* from *"I am in front of a wall on the far side of the room"*. The
+tolerance is tied to the reach, which is short by design: a trace that only looks
+35 cm ahead can afford to believe that anything within 35 cm behind what it
+crossed is the same object — and that is what lets a solid pillar cast rather
+than being written off as scenery. Tie the start bias to the reach instead and
+the knob stops being monotonic: a longer trace lifts its own start over the thing
+it was meant to find, and finds **less**.
+
+Knobs on the Lighting node (`contact shadows`, `reach`, `strength`, `steps`), and
+in Lua as `contactShadows`, `contactLength`, `contactStrength`, `contactSteps`.
+Off by default — it costs a trace per lit fragment, and a scene that never asked
+should not start paying.
+
+Verified by `contact_shadow_probe`, whose caster deliberately has **no proxy and
+no volume**: the field has nothing to say about it, so anything that appears
+under it came from the trace. Control pairs on/off, strength 0 back to the
+control frame, and a longer reach giving a longer shadow — not merely a darker
+one.
+
 ## 6. Not yet
 
 - **Point-light shadows** — same march per light is N× cost; rim/AO carries
   interiors for now. Decide if a game needs it.
 - **Bent shadow rays** — arrives with light.md Tier 2 (the ray is already a
   field march, so nothing here blocks it).
-- **Hero-caster shadow map** — only if exact dynamic-mesh silhouettes are ever
-  required; folds into the same visibility term.
+- **Cascaded shadow maps.** Considered and deliberately not taken. CSM buys one
+  thing this engine lacks — a moving mesh's exact silhouette at *long* range —
+  and charges 2–4 extra whole-scene renders per frame, a cascade seam to
+  maintain, and (worst here) a **second scene gather** to keep in step with the
+  first, which is a mistake this codebase has already made four separate times.
+  The near half of that gap is now covered by contact shadows at a fraction of
+  the cost. If the far half ever matters, a **per-hero shadow map** — one small
+  map for the one character that needs it, folded into the same visibility term —
+  buys most of it for a fraction of CSM's machinery, and is the recommended next
+  step over cascades.
 - **Lua control** — the Lighting node's shadow fields aren't scripted yet
   (same gap as the PostProcess node; do both together).
 

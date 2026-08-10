@@ -286,18 +286,103 @@ pub(crate) fn terrain_collider_wire(b: &floptle_field::BakedSdf, stride: u32) ->
     segs
 }
 
-/// Build a point light's projected gizmo: a small 3-axis cross at its position plus a
-/// horizontal ring at its `range` (so its reach on the ground is visible). Empty if
-/// it doesn't project in front of the camera.
-pub(crate) fn point_light_lines(pos: DVec3, range: f32, cam_world: DVec3, vp: Mat4, w: f32, h: f32) -> Vec<(Vec2, Vec2)> {
+/// Build a light's projected gizmo: the SHAPE it emits from, plus a horizontal
+/// ring at its `range` (so its reach on the ground is visible). Empty if it
+/// doesn't project in front of the camera.
+///
+/// Drawing the emitter at its real size and facing is the whole point. A rect
+/// light aimed at the wall behind it lights nothing, and there is no way to see
+/// that in the finished picture — the room is just dark, and the light looks
+/// like it is on.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn point_light_lines(
+    pos: DVec3,
+    rot: Quat,
+    scale: Vec3,
+    range: f32,
+    shape: floptle_core::LightShape,
+    cam_world: DVec3,
+    vp: Mat4,
+    w: f32,
+    h: f32,
+) -> Vec<(Vec2, Vec2)> {
+    use floptle_core::LightShape as LS;
     let mut lines = Vec::new();
-    let s = 0.5; // cross half-size (world units)
-    for a in [DVec3::X, DVec3::Y, DVec3::Z] {
+    let seg = |a: DVec3, b: DVec3, lines: &mut Vec<(Vec2, Vec2)>| {
         if let (Some(p0), Some(p1)) = (
-            project(pos - a * s, cam_world, vp, w, h),
-            project(pos + a * s, cam_world, vp, w, h),
+            project(a, cam_world, vp, w, h),
+            project(b, cam_world, vp, w, h),
         ) {
             lines.push((p0, p1));
+        }
+    };
+    let ax = |v: DVec3| rot.as_dquat() * v;
+    let sx = scale.x.abs() as f64;
+    let sy = scale.y.abs() as f64;
+    let su = scale.x.abs().max(scale.y.abs()).max(scale.z.abs()) as f64;
+    // A ring of `n` segments about `pos` in the plane spanned by `u` and `v`.
+    let ring = |u: DVec3, v: DVec3, r: f64, n: usize, lines: &mut Vec<(Vec2, Vec2)>| {
+        let mut prev = pos + u * r;
+        for i in 1..=n {
+            let a = (i as f64 / n as f64) * std::f64::consts::TAU;
+            let p = pos + u * (a.cos() * r) + v * (a.sin() * r);
+            if let (Some(p0), Some(p1)) = (
+                project(prev, cam_world, vp, w, h),
+                project(p, cam_world, vp, w, h),
+            ) {
+                lines.push((p0, p1));
+            }
+            prev = p;
+        }
+    };
+    match shape {
+        LS::Point => {
+            let s = 0.5; // cross half-size (world units)
+            for a in [DVec3::X, DVec3::Y, DVec3::Z] {
+                seg(pos - a * s, pos + a * s, &mut lines);
+            }
+        }
+        LS::Sphere { radius } => {
+            let r = (radius as f64 * su).max(0.01);
+            ring(DVec3::X, DVec3::Y, r, 20, &mut lines);
+            ring(DVec3::Y, DVec3::Z, r, 20, &mut lines);
+            ring(DVec3::Z, DVec3::X, r, 20, &mut lines);
+        }
+        LS::Rect { width, height, two_sided } => {
+            let hx = ax(DVec3::X) * (width as f64 * 0.5 * sx).max(0.001);
+            let hy = ax(DVec3::Y) * (height as f64 * 0.5 * sy).max(0.001);
+            let c = [pos - hx - hy, pos + hx - hy, pos + hx + hy, pos - hx + hy];
+            for i in 0..4 {
+                seg(c[i], c[(i + 1) % 4], &mut lines);
+            }
+            // The facing arrow: which way it actually lights. Both ways when
+            // it is two-sided, because that is a different light.
+            let reach = (width.max(height) as f64 * 0.5).max(0.3);
+            let fwd = ax(DVec3::NEG_Z) * reach;
+            seg(pos, pos + fwd, &mut lines);
+            if two_sided {
+                seg(pos, pos - fwd, &mut lines);
+            }
+        }
+        LS::Disk { radius, two_sided } => {
+            let r = (radius as f64 * su).max(0.001);
+            ring(ax(DVec3::X), ax(DVec3::Y), r, 24, &mut lines);
+            let fwd = ax(DVec3::NEG_Z) * r.max(0.3);
+            seg(pos, pos + fwd, &mut lines);
+            if two_sided {
+                seg(pos, pos - fwd, &mut lines);
+            }
+        }
+        LS::Tube { length, radius } => {
+            let half = ax(DVec3::X) * (length as f64 * 0.5 * sx).max(0.001);
+            let r = (radius as f64 * su).max(0.001);
+            let u = ax(DVec3::Y) * r;
+            let v = ax(DVec3::Z) * r;
+            for (a, b) in [(u, v), (-u, v), (u, -v), (-u, -v)] {
+                let off = a + b;
+                seg(pos - half + off, pos + half + off, &mut lines);
+            }
+            ring(ax(DVec3::Y), ax(DVec3::Z), r, 16, &mut lines);
         }
     }
     let r = range.clamp(0.2, 500.0) as f64;
@@ -428,6 +513,39 @@ pub(crate) fn gravity_volume_lines(
 /// Build a world-axis-aligned box wireframe (12 edges) centered at `center` with the
 /// given world half-extents — the outline of a `BodyKind::Box` collider (which the
 /// solver treats as axis-aligned).
+/// The Scene view's baked-GI probe dots: each probe projected to screen with the
+/// colour it baked, plus a flag for probes the leak test has thrown away.
+///
+/// Seeing the probes is not decoration. A grid too coarse for the room, a volume
+/// nudged half out of the level, or a row of probes buried in the floor are all
+/// invisible in the final picture — they only make the light quietly wrong — and
+/// all three are obvious the instant the probes are drawn.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn probe_dots(
+    baked: &floptle_gi::BakedGi,
+    center: DVec3,
+    leak: f32,
+    cam_world: DVec3,
+    vp: Mat4,
+    w: f32,
+    h: f32,
+    out: &mut Vec<(Vec2, [f32; 3], bool)>,
+) {
+    let sp = baked.grid.spacing();
+    let min_sp = sp[0].min(sp[1]).min(sp[2]).max(1e-4);
+    let origin = Vec3::from(baked.grid.center);
+    for (i, p) in baked.probes.iter().enumerate() {
+        let local = baked.grid.probe_world(i) - origin;
+        let world = center + DVec3::new(local.x as f64, local.y as f64, local.z as f64);
+        let Some(s) = project(world, cam_world, vp, w, h) else { continue };
+        // Its light as an upward-facing surface would see it — the direction
+        // most easily compared against the floor underneath the probe.
+        let e = p.sh.irradiance(Vec3::Y);
+        let dead = leak > 0.0 && p.nearest < leak * 0.20 * min_sp;
+        out.push((s, e, dead));
+    }
+}
+
 pub(crate) fn box_lines(
     center: DVec3,
     half: Vec3,
@@ -730,4 +848,138 @@ pub(crate) fn particle_gizmo_lines(
         }
     }
     out
+}
+
+// ---- the rig, in the viewport ------------------------------------------------
+
+/// How near the cursor has to be to a joint, in physical pixels, to pick it.
+/// Roughly a fingertip at 100% scale — bones are small and often overlapping,
+/// so this is the difference between "clickable" and "a game of darts".
+pub(crate) const BONE_PICK_PX: f32 = 12.0;
+
+/// One rigged mesh's skeleton, projected for the Scene view.
+///
+/// A rig is only ever drawn for a mesh you have selected (or whose bone you have
+/// selected). Every rig in the scene at once would bury the picture in white
+/// sticks, and the one you are posing would be the hardest of all to see.
+pub(crate) struct RigViz {
+    /// The mesh node the rig hangs off.
+    pub mesh: floptle_core::Entity,
+    /// Parent joint → joint, in screen space. A root bone contributes none.
+    pub bones: Vec<(Vec2, Vec2)>,
+    /// Per joint: where it is on screen, its skeleton index, and how far it is
+    /// from the camera (nearest wins a contested click).
+    pub joints: Vec<(Vec2, usize, f32)>,
+    /// The selected bone, when the selection is on this mesh.
+    pub selected: Option<usize>,
+}
+
+/// Project one mesh's rig. `pose` is the live animated pose when there is one,
+/// otherwise the rig's rest pose — the same source the bone gizmo and the bone
+/// Inspector read, so what you click is where the gizmo appears.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rig_viz(
+    mesh: floptle_core::Entity,
+    rig: &crate::anim::RigAsset,
+    pose: Option<&[Mat4]>,
+    mesh_world: floptle_core::math::DMat4,
+    selected: Option<usize>,
+    cam_world: DVec3,
+    vp: Mat4,
+    w: f32,
+    h: f32,
+) -> RigViz {
+    let node_world = pose.filter(|p| p.len() == rig.skeleton.nodes.len()).unwrap_or(&rig.rest_world);
+    // Every joint's absolute world position, in skeleton order (so a parent is
+    // always already resolved — `Skeleton::new` guarantees parent < child).
+    let mut world: Vec<DVec3> = Vec::with_capacity(rig.skeleton.nodes.len());
+    for (i, n) in rig.skeleton.nodes.iter().enumerate() {
+        let local = node_world.get(i).copied().unwrap_or(Mat4::IDENTITY);
+        // The joint, not the node origin: for a baked object model the origin is
+        // at the model root (the feet), which is exactly the wrong place to put
+        // a handle for the elbow.
+        let m = mesh_world * (local * Mat4::from_translation(n.pivot)).as_dmat4();
+        world.push(m.w_axis.truncate());
+    }
+    let mut out =
+        RigViz { mesh, bones: Vec::new(), joints: Vec::new(), selected };
+    for (i, n) in rig.skeleton.nodes.iter().enumerate() {
+        let Some(s) = project(world[i], cam_world, vp, w, h) else { continue };
+        out.joints.push((s, i, (world[i] - cam_world).length() as f32));
+        if let Some(p) = n.parent
+            && let Some(ps) = world.get(p).and_then(|wp| project(*wp, cam_world, vp, w, h))
+        {
+            out.bones.push((ps, s));
+        }
+    }
+    out
+}
+
+/// The joint nearest `cursor` across every drawn rig, within [`BONE_PICK_PX`].
+/// Ties go to the joint nearest the camera, which is what "the one on top"
+/// means when two bones of the same rig line up.
+pub(crate) fn pick_joint(rigs: &[RigViz], cursor: Vec2) -> Option<(floptle_core::Entity, usize)> {
+    let mut best: Option<(floptle_core::Entity, usize, f32, f32)> = None;
+    for r in rigs {
+        for &(s, idx, depth) in &r.joints {
+            let d = (s - cursor).length();
+            if d > BONE_PICK_PX {
+                continue;
+            }
+            // Within the radius, depth decides — so reaching for a near hand
+            // never lands on the far one behind it.
+            if best.is_none_or(|(_, _, _, bd)| depth < bd) {
+                best = Some((r.mesh, idx, d, depth));
+            }
+        }
+    }
+    best.map(|(e, i, _, _)| (e, i))
+}
+
+#[cfg(test)]
+mod rig_pick_tests {
+    use super::*;
+    use floptle_core::{Entity, World};
+
+    fn viz(mesh: Entity, joints: &[(f32, f32, usize, f32)]) -> RigViz {
+        RigViz {
+            mesh,
+            bones: Vec::new(),
+            joints: joints.iter().map(|&(x, y, i, d)| (Vec2::new(x, y), i, d)).collect(),
+            selected: None,
+        }
+    }
+
+    /// Clicking near a joint picks that joint; clicking the empty picture picks
+    /// nothing, so a click that missed the rig still reaches the node under it.
+    #[test]
+    fn a_click_near_a_joint_picks_it_and_a_click_away_picks_nothing() {
+        let mut w = World::new();
+        let mesh = w.spawn();
+        let rigs = [viz(mesh, &[(100.0, 100.0, 3, 5.0), (300.0, 100.0, 7, 5.0)])];
+        assert_eq!(pick_joint(&rigs, Vec2::new(104.0, 103.0)), Some((mesh, 3)));
+        assert_eq!(pick_joint(&rigs, Vec2::new(296.0, 100.0)), Some((mesh, 7)));
+        assert_eq!(pick_joint(&rigs, Vec2::new(200.0, 100.0)), None);
+    }
+
+    /// The radius is a real limit, not a nearest-joint search: just outside it
+    /// the click belongs to whatever is behind the rig.
+    #[test]
+    fn the_pick_radius_is_a_limit() {
+        let mut w = World::new();
+        let mesh = w.spawn();
+        let rigs = [viz(mesh, &[(100.0, 100.0, 0, 5.0)])];
+        assert!(pick_joint(&rigs, Vec2::new(100.0 + BONE_PICK_PX - 0.5, 100.0)).is_some());
+        assert!(pick_joint(&rigs, Vec2::new(100.0 + BONE_PICK_PX + 0.5, 100.0)).is_none());
+    }
+
+    /// Two joints on top of each other: the near one wins. Reaching for the hand
+    /// in front must never land on the one behind it.
+    #[test]
+    fn the_nearer_joint_wins_a_contested_click() {
+        let mut w = World::new();
+        let mesh = w.spawn();
+        let rigs = [viz(mesh, &[(100.0, 100.0, 1, 9.0), (102.0, 101.0, 2, 3.0)])];
+        assert_eq!(pick_joint(&rigs, Vec2::new(100.0, 100.0)), Some((mesh, 2)));
+    }
 }

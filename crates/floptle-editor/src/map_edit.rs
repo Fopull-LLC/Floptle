@@ -133,13 +133,13 @@ impl MapShape {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            MapShape::Box => "Map Box",
-            MapShape::Plane => "Map Plane",
-            MapShape::Wedge => "Map Wedge",
-            MapShape::Cylinder => "Map Cylinder",
-            MapShape::Sphere => "Map Sphere",
-            MapShape::Stairs => "Map Stairs",
-            MapShape::Arch => "Map Arch",
+            MapShape::Box => "Model Box",
+            MapShape::Plane => "Model Plane",
+            MapShape::Wedge => "Model Wedge",
+            MapShape::Cylinder => "Model Cylinder",
+            MapShape::Sphere => "Model Sphere",
+            MapShape::Stairs => "Model Stairs",
+            MapShape::Arch => "Model Arch",
         }
     }
 

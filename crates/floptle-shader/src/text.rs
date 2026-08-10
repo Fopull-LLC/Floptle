@@ -332,9 +332,10 @@ impl Parser<'_> {
             "sdf" => Stage::Sdf,
             "sky" => Stage::Sky,
             "ui" => Stage::Ui,
+            "post" => Stage::Post,
             other => {
                 return Err(ParseError::new(
-                    format!("unknown stage `{other}` (fragment | sdf | sky | ui)"),
+                    format!("unknown stage `{other}` (fragment | sdf | sky | ui | post)"),
                     span,
                 ));
             }
@@ -617,6 +618,7 @@ pub fn print(ir: &ShaderIr) -> String {
         Some(Stage::Sdf) => s.push_str("  stage sdf\n"),
         Some(Stage::Sky) => s.push_str("  stage sky\n"),
         Some(Stage::Ui) => s.push_str("  stage ui\n"),
+        Some(Stage::Post) => s.push_str("  stage post\n"),
     }
     match ir.blend {
         Blend::Opaque => {}

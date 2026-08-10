@@ -482,7 +482,7 @@ of.
   `Player`, and turn the capsule's rendering off. If it's rigged, give it an
   Animation Controller and drive it from the body's speed — `thirdPerson.lua`
   in the shipped scripts does exactly this and is worth reading.
-- **Real level geometry.** The **▦ Map** tab builds proper blockout geometry
+- **Real level geometry.** The **▦ Model** tab builds proper blockout geometry
   with proper collision, which beats a hundred stretched cubes.
 - **Sound.** A coin with no sound is half a coin. `node:sound()` and the
   **≣ Mixer** tab.

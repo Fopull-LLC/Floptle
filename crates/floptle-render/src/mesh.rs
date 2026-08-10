@@ -178,6 +178,52 @@ impl GpuMesh {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MeshId(pub u32);
 
+/// Wind every triangle so that `(v1 - v0) × (v2 - v0)` points the same way as its
+/// own vertex normals, flipping the two that disagree.
+///
+/// ## Why every builder ends with this
+///
+/// Nothing in this renderer culls back faces — single-sided geometry has to
+/// rasterize from both sides — so a triangle's winding looks like it does not
+/// matter. It does, in exactly one place: `facing_normal` in raster.wgsl decides
+/// whether a fragment is being seen from behind by asking the hardware for
+/// `@builtin(front_facing)`, and flips the shading normal when it is. That test
+/// is by WINDING, deliberately: it is exact, where testing the interpolated
+/// normal's own sign puts a black rim around every smooth silhouette.
+///
+/// So a mesh wound against its normals is lit **inside out**. Its visible side
+/// takes the inward normal, the key light lands on the face pointing away, and
+/// what you see is a dark surface with a bright rim — which reads as a strange
+/// material rather than as a bug, and is why this survived so long.
+///
+/// A scan of the built-in shapes found `cube` correct and **every other one
+/// wrong**: `uv_sphere` and `capsule` entirely inverted, `pyramid`, `cone` and
+/// `cylinder` inverted in part, so one shape lit from both sides at once.
+///
+/// Doing it here, from the data, rather than by hand-correcting six index
+/// loops: the loops are readable as written, the rule is one sentence, and a
+/// seventh shape gets it right for free.
+///
+/// Degenerate triangles (a UV sphere's pole rows) have no winding to correct and
+/// are left exactly as they are.
+fn oriented(vertices: Vec<Vertex>, indices: Vec<u32>) -> MeshData {
+    let mut m = MeshData { vertices, indices, colors: None };
+    orient_faces(&mut m);
+    m
+}
+
+fn orient_faces(m: &mut MeshData) {
+    for t in m.indices.chunks_exact_mut(3) {
+        let p = |i: u32| glam::Vec3::from(m.vertices[i as usize].pos);
+        let n: glam::Vec3 =
+            t.iter().map(|&i| glam::Vec3::from(m.vertices[i as usize].normal)).sum();
+        let cross = (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0]));
+        if cross.length_squared() > 1e-12 && cross.dot(n) < 0.0 {
+            t.swap(1, 2);
+        }
+    }
+}
+
 /// A unit-ish cube of half-extent `half`, centered at the origin. Each of the six
 /// faces has its own four vertices so normals stay flat (sharing corners would
 /// average them and round the cube) and each face carries a clean 0..1 UV square.
@@ -208,7 +254,7 @@ pub fn cube(half: f32) -> MeshData {
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
-    MeshData { vertices, indices, colors: None }
+    oriented(vertices, indices)
 }
 
 /// A latitude/longitude UV-sphere of the given `radius`. Normals are smooth (the
@@ -242,7 +288,7 @@ pub fn uv_sphere(radius: f32, rings: u32, sectors: u32) -> MeshData {
             indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
         }
     }
-    MeshData { vertices, indices, colors: None }
+    oriented(vertices, indices)
 }
 
 /// A capsule (a cylinder of length `2·half_height` capped by two hemispheres of
@@ -287,7 +333,7 @@ pub fn capsule(radius: f32, half_height: f32, rings: u32, sectors: u32) -> MeshD
             indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
         }
     }
-    MeshData { vertices, indices, colors: None }
+    oriented(vertices, indices)
 }
 
 /// A flat square of half-extent `half` in the XY plane, facing +Z. ONE face:
@@ -308,7 +354,7 @@ pub fn plane(half: f32) -> MeshData {
             uv: [u, 1.0 - v],
         })
         .collect();
-    MeshData { vertices, indices: vec![0, 1, 2, 0, 2, 3], colors: None }
+    oriented(vertices, vec![0, 1, 2, 0, 2, 3])
 }
 
 /// A grid of spritesheet cells as ONE mesh, centred on the origin in the XY
@@ -394,7 +440,7 @@ pub fn tilemap(
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
-    MeshData { vertices, indices, colors: None }
+    oriented(vertices, indices)
 }
 
 // Small f32 vec helpers for the flat-shaded primitives below.
@@ -443,7 +489,7 @@ pub fn pyramid(half: f32, height: f32) -> MeshData {
         vertices.push(Vertex { pos: p, normal: n, uv: [p[0] / (2.0 * half) + 0.5, p[2] / (2.0 * half) + 0.5] });
     }
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    MeshData { vertices, indices, colors: None }
+    oriented(vertices, indices)
 }
 
 /// A cone of base `radius` and `height` along Y, apex up, centered (base at y=−height/2,
@@ -480,7 +526,7 @@ pub fn cone(radius: f32, height: f32, sectors: u32) -> MeshData {
     for j in 0..sectors {
         indices.extend_from_slice(&[center, rim + j, rim + j + 1]);
     }
-    MeshData { vertices, indices, colors: None }
+    oriented(vertices, indices)
 }
 
 /// A cylinder of `radius` and half-height `half_height` along Y, centered on the origin.
@@ -519,7 +565,7 @@ pub fn cylinder(radius: f32, half_height: f32, sectors: u32) -> MeshData {
             indices.extend_from_slice(&[center, rim + j, rim + j + 1]);
         }
     }
-    MeshData { vertices, indices, colors: None }
+    oriented(vertices, indices)
 }
 
 #[cfg(test)]

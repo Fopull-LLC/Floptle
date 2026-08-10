@@ -1798,7 +1798,7 @@ fn palette_ui(
             }
         }
         // ---- the stdlib, by category ----
-        for cat in ["math", "noise", "color", "texture", "sdf", "engine"] {
+        for cat in stdlib::CATEGORIES.iter().copied() {
             let ops: Vec<&'static stdlib::OpSpec> = stdlib::OPS
                 .iter()
                 .filter(|o| o.category == cat && o.stages.contains(&stage) && hit(o.name, o.doc))
@@ -1890,6 +1890,7 @@ fn node_color(ui: &egui::Ui, n: &GNode) -> Color32 {
             "texture" => Color32::from_rgb(190, 140, 255),
             "sdf" => Color32::from_rgb(120, 190, 110),
             "engine" => Color32::from_rgb(220, 190, 90),
+            "screen" => Color32::from_rgb(120, 200, 235),
             _ => ui.visuals().weak_text_color(),
         },
         NodeKind::VecCtor(_) | NodeKind::Binary(_) | NodeKind::Neg | NodeKind::Swizzle(_) => {

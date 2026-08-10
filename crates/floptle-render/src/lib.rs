@@ -24,6 +24,7 @@ pub mod camera;
 pub mod cull;
 pub mod device;
 pub mod frame;
+pub mod gi;
 pub mod graph;
 pub mod grid;
 pub mod light2d;
@@ -43,6 +44,7 @@ pub use camera::{FlyCamera, Input, ViewLock};
 pub use cull::Frustum;
 pub use device::Gpu;
 pub use frame::{Projection, RenderCamera};
+pub use gi::GiVolume;
 pub use grid::Grid;
 pub use light2d::{Light2d, Light2dInstance, Light2dUniform};
 pub use lines::{LineVertex, Lines};
@@ -54,12 +56,12 @@ pub use mesh::{
 pub use outline::Outline;
 pub use palette::{Palette, PaletteQuantize};
 pub use particles::{ParticleBatch, ParticleBlend, ParticleGlobals, ParticleInstance, Particles};
-pub use post::{PostSettings, PostStack, SsaoFrame};
+pub use post::{PostSettings, PostShaderId, PostShaders, PostStack, SsaoFrame, Tonemap};
 pub use ui::{Ui, UiBatch, UiBindingId, UiInstance, UiPlane, UiShaderId, UiTex};
 pub use raster::{
-    instance_of, instance_of_mat, pass_prelude, raster_custom_source, FlslBindingId, FlslBlend,
-    FlslDraw, FlslShaderId, Globals, InstanceRaw, MaterialParams, Raster, SkinDraw, TexFilter,
-    TexId, TexSampling, TexWrap,
+    ext_index_of, instance_of, instance_of_mat, pass_prelude, raster_custom_source, set_ext_index,
+    FlslBindingId, FlslBlend, FlslDraw, FlslShaderId, Globals, InstanceRaw, MaterialParams, Raster,
+    SkinDraw, SurfaceExtras, TexFilter, TexId, TexSampling, TexWrap,
 };
 pub use raymarch::{
     Raymarch, RaymarchGlobals, MAX_FIELD_SHAPES, MAX_SHADOW_PROXIES, MAX_VOLUMES, TERRAIN_SLOTS,

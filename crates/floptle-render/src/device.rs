@@ -23,6 +23,11 @@ pub struct Gpu {
     pub config: wgpu::SurfaceConfiguration,
     depth_tex: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    /// The format every SCENE-space pass renders into — the raster, the
+    /// raymarch, particles, the 2D light composite, world-space UI, the editor's
+    /// grid and gizmo overlays, live render targets, and the post chain's own
+    /// scratch. See [`Gpu::scene_format`].
+    scene_format: wgpu::TextureFormat,
 }
 
 /// A surface image acquired for one frame. Render into `view`, then `present()`.
@@ -100,7 +105,17 @@ impl Gpu {
 
         let (depth_tex, depth_view) = Self::make_depth(&device, config.width, config.height);
 
-        Self { instance, adapter, device, queue, surface: Some(surface), config, depth_tex, depth_view }
+        Self {
+            instance,
+            adapter,
+            device,
+            queue,
+            surface: Some(surface),
+            config,
+            depth_tex,
+            depth_view,
+            scene_format: Self::HDR_FORMAT,
+        }
     }
 
     /// Create a headless GPU (no window/surface) for offscreen rendering at
@@ -109,6 +124,21 @@ impl Gpu {
     /// caller supplies its own color target (a texture with `COPY_SRC`) to read
     /// back. Used by render tests and tools.
     pub fn headless(width: u32, height: u32) -> Self {
+        Self::headless_with(width, height, None)
+    }
+
+    /// [`headless`](Self::headless) with the HDR scene format the windowed path
+    /// uses — for a probe that means to exercise the pipeline as it SHIPS.
+    ///
+    /// The plain `headless` deliberately keeps the 8-bit surface format for the
+    /// scene as well, because forty render probes read their target back as
+    /// tightly-packed RGBA8 and none of them is about the format. This is the
+    /// opt-in for the ones that are.
+    pub fn headless_hdr(width: u32, height: u32) -> Self {
+        Self::headless_with(width, height, Some(Self::HDR_FORMAT))
+    }
+
+    fn headless_with(width: u32, height: u32, scene: Option<wgpu::TextureFormat>) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::default(),
@@ -142,7 +172,18 @@ impl Gpu {
             view_formats: vec![],
         };
         let (depth_tex, depth_view) = Self::make_depth(&device, config.width, config.height);
-        Self { instance, adapter, device, queue, surface: None, config, depth_tex, depth_view }
+        let scene_format = scene.unwrap_or(config.format);
+        Self {
+            instance,
+            adapter,
+            device,
+            queue,
+            surface: None,
+            config,
+            depth_tex,
+            depth_view,
+            scene_format,
+        }
     }
 
     /// The depth format the renderer uses everywhere (always available as a depth
@@ -185,6 +226,36 @@ impl Gpu {
     pub fn surface_format(&self) -> wgpu::TextureFormat {
         self.config.format
     }
+
+    /// The format every SCENE-space pass renders into, which is **not** the
+    /// surface format.
+    ///
+    /// A window's surface is 8-bit sRGB: it can hold nothing brighter than
+    /// white, and anything that goes over gets clipped per channel — which is
+    /// not merely "bright things go white", it is a HUE SHIFT, because the
+    /// channel that clips first drags the colour toward the other two. A sunlit
+    /// white wall and a light bulb ten times brighter store as the same pixel,
+    /// so bloom cannot tell them apart and there is nothing left for an exposure
+    /// or a tonemap to work with.
+    ///
+    /// So the scene renders into a floating-point target and stays in linear
+    /// light, at whatever intensity it actually has, all the way to the end of
+    /// the post chain — where exactly ONE pass maps it down to the display
+    /// ([`PostSettings::tonemap`](crate::PostSettings)). Every pass in between —
+    /// depth of field, denoise, grade, bloom, lens, sharpen — is then working on
+    /// the real values.
+    ///
+    /// Windowed rendering uses `Rgba16Float`. A headless GPU keeps the surface
+    /// format unless it was built by [`headless_hdr`](Self::headless_hdr), so
+    /// the render probes go on reading 8-bit RGBA the way they always have.
+    pub fn scene_format(&self) -> wgpu::TextureFormat {
+        self.scene_format
+    }
+
+    /// The scene format the windowed path uses. Half floats rather than full:
+    /// a 16-bit float holds ~5 decimal digits and reaches 65504, which is far
+    /// past any light anybody sets, at half the bandwidth of `Rgba32Float`.
+    pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
     /// Reconfigure the surface after the window resizes. Clamps to a minimum of 1
     /// so a minimized window (0×0) doesn't produce an invalid configuration, and

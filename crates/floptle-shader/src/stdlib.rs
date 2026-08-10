@@ -64,15 +64,20 @@ const fn opt(name: &'static str, ty: SigTy, default: f64) -> SigInput {
 
 const BOTH: &[Stage] = &[Stage::Fragment, Stage::Sdf];
 const FRAG: &[Stage] = &[Stage::Fragment];
-// Pure math/noise/color: valid in ANY stage, including Sky and Ui shaders.
-const ANY: &[Stage] = &[Stage::Fragment, Stage::Sdf, Stage::Sky, Stage::Ui];
-// Fragment + Sky + Ui (color helpers; no field position needed).
-const FSKY: &[Stage] = &[Stage::Fragment, Stage::Sky, Stage::Ui];
+// Pure math/noise/color: valid in ANY stage, including Sky, Ui and Post shaders.
+const ANY: &[Stage] = &[Stage::Fragment, Stage::Sdf, Stage::Sky, Stage::Ui, Stage::Post];
+// Fragment + Sky + Ui + Post (color helpers; no field position needed). Post
+// belongs here for the obvious reason: grading a finished frame is most of what
+// a screen shader is for.
+const FSKY: &[Stage] = &[Stage::Fragment, Stage::Sky, Stage::Ui, Stage::Post];
 // Fragment + Ui: texture sampling (a UI element's own image is bound like a
 // material texture, so the same ops read it).
 const FRAGUI: &[Stage] = &[Stage::Fragment, Stage::Ui];
 // Ui only: the backdrop (scene behind the UI layer) exists only in the UI pass.
 const UIONLY: &[Stage] = &[Stage::Ui];
+// Post only: the finished frame, its depth and the normals reconstructed from
+// that depth. None of these exist anywhere else in the pipeline.
+const POSTONLY: &[Stage] = &[Stage::Post];
 
 const F: SigTy = SigTy::Exact(Ty::Float);
 const V2: SigTy = SigTy::Exact(Ty::Vec2);
@@ -165,7 +170,26 @@ pub static OPS: &[OpSpec] = &[
     OpSpec { name: "sdfAo", inputs: &[req("p", V3), req("n", V3)], output: F, stages: FRAG, emit: Emit::Fn("flsl_ao"), doc: "True SDF ambient occlusion at a point (1 = open sky).", category: "engine" },
     OpSpec { name: "applyFog", inputs: &[req("c", V3), req("p", V3)], output: V3, stages: FRAG, emit: Emit::Special, doc: "The scene's distance fog applied to a color.", category: "engine" },
     OpSpec { name: "fieldDistance", inputs: &[req("p", V3)], output: F, stages: FRAG, emit: Emit::Fn("map_d"), doc: "Distance from a point to the scene's SDF field (terrain + blobs) — glow near walls, darken in crevices…", category: "engine" },
+
+    // ---- screen (post shaders: the finished frame, readable anywhere) --------
+    //
+    // Every one of these takes an OPTIONAL uv and defaults to this pixel's. That
+    // default is what makes a colour grade a one-liner; the argument is what makes
+    // an edge detect, a blur and a warp possible at all, and no varying could
+    // offer it.
+    OpSpec { name: "sceneColor", inputs: &[opt("uv", V2, f64::NAN)], output: V4, stages: POSTONLY, emit: Emit::Special, doc: "The frame so far, in real light (a bright light really is brighter than 1). Omit uv for this pixel.", category: "screen" },
+    OpSpec { name: "sceneDepth", inputs: &[opt("uv", V2, f64::NAN)], output: F, stages: POSTONLY, emit: Emit::Special, doc: "How far the camera is from what it sees, in world units. Sky reads a very large number, so a silhouette is an edge.", category: "screen" },
+    OpSpec { name: "sceneNormal", inputs: &[opt("uv", V2, f64::NAN)], output: V3, stages: POSTONLY, emit: Emit::Special, doc: "Which way the surface faces, in view space (+z toward the camera) — worked out from depth, so every kind of geometry has one.", category: "screen" },
+    OpSpec { name: "screenTexel", inputs: &[], output: V2, stages: POSTONLY, emit: Emit::Fn("flsl_post_texel"), doc: "The size of one pixel in uv. Step by this to reach a neighbour — and it follows the retro resolution, so an effect stays one pixel wide.", category: "screen" },
 ];
+
+/// Every op category, in palette order.
+///
+/// One list, because there are two palettes (the graph tab's node menu and the
+/// IDE's autocomplete) and they used to hardcode a copy each — so an op in a new
+/// category compiled, documented and worked, and was simply never offered to
+/// anybody. A test keeps this exhaustive.
+pub const CATEGORIES: &[&str] = &["math", "noise", "color", "texture", "sdf", "engine", "screen"];
 
 /// Look up an op by its `.flsl` name.
 pub fn op(name: &str) -> Option<&'static OpSpec> {
@@ -497,3 +521,45 @@ fn flsl_triplanar(t: texture_2d<f32>, s: sampler, p: vec3<f32>, n: vec3<f32>, sc
         + textureSample(t, s, q.xy) * w.z;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every op's category is one the palettes list.
+    ///
+    /// Both the ◈ graph tab's node menu and the IDE's autocomplete walk
+    /// [`CATEGORIES`] and filter `OPS` by it, so an op in a category nobody
+    /// lists compiles, documents and works — and is never offered to anybody.
+    /// That is exactly what happened to the `screen` ops the day they were
+    /// added, when the two palettes each held their own hardcoded copy.
+    #[test]
+    fn every_op_is_in_a_listed_category() {
+        for op in OPS {
+            assert!(
+                CATEGORIES.contains(&op.category),
+                "`{}` is in category `{}`, which no palette lists",
+                op.name,
+                op.category
+            );
+        }
+        for cat in CATEGORIES {
+            assert!(
+                OPS.iter().any(|o| o.category == *cat),
+                "category `{cat}` has no ops — a heading that never draws"
+            );
+        }
+    }
+
+    /// Every stage a shader can declare has at least one op it can call, and
+    /// the post stage can reach the frame.
+    #[test]
+    fn the_post_stage_can_read_the_screen() {
+        for name in ["sceneColor", "sceneDepth", "sceneNormal", "screenTexel"] {
+            let o = op(name).unwrap_or_else(|| panic!("`{name}` exists"));
+            assert_eq!(o.stages, POSTONLY, "`{name}` is post-only");
+        }
+        assert!(op("saturate").unwrap().stages.contains(&Stage::Post), "math reaches post");
+        assert!(op("posterize").unwrap().stages.contains(&Stage::Post), "colour reaches post");
+    }
+}
