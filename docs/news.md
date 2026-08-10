@@ -1,5 +1,16 @@
 ## Just shipped
 
+**v0.50.1** — opening a scene whose UI uses a `stage ui` shader killed the
+editor before it drew a frame; if you have a custom meter, gauge or instrument
+built that way, take this one. It had been broken since the release that made
+the scene render in real light — the shader's world-space pipeline was still
+built for the window's 8-bit format while the scene it draws into is now HDR —
+and you would only meet it once 0.50.0 fixed the textured-menu crash that used
+to happen first. Behind it, a change so the next one is not a crash at all:
+when the graphics driver refuses a draw, the editor now names it in the Console
+and keeps rendering instead of ending the session, and a crash report keeps the
+**first** failure rather than the last thing to fall over on the way down.
+
 **v0.50.0 "Show Your Work"** — if you have a project that worked on 0.41.1 and
 died on 0.49.0, this is the one to take: a UI element drawing an image from your
 project crashed the game on the frame that element first appeared, so any menu
