@@ -453,6 +453,13 @@ impl Editor {
         self.ensure_flsl_materials();
         self.ensure_ui_shaders();
         self.ensure_post_shaders();
+        // Anything the GPU rejected since the last frame. It no longer takes
+        // the process down (see `Gpu::new`), so this is the only place it
+        // becomes visible — and it has to, or a pass that silently stops
+        // drawing looks like the feature never worked.
+        for e in floptle_render::take_gpu_errors() {
+            self.console.push(floptle_script::LogLevel::Error, format!("GPU: {e}"), None);
+        }
         // Baked GI: push any pending probe upload, then advance a bake by one
         // frame's slice. Both run BEFORE the gathers below, so this frame's
         // draws see this frame's light — and a bake, which renders the scene

@@ -7,8 +7,57 @@
 //! live window, and a battle-tested implementation already exists in
 //! `crates/floptle-proof/src/main.rs` (wgpu 29) — Phase 1 lifts it here.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
 use winit::window::Window;
+
+/// GPU errors waiting for the host to pick up, plus every message already
+/// reported this session.
+///
+/// The `seen` half matters as much as the queue: a bad pipeline is rejected on
+/// EVERY frame the pass runs, so reporting each occurrence would write sixty
+/// identical Console lines a second and bury whatever else is wrong. Each
+/// distinct message is said once, which is the same bargain the shader
+/// compiler's error reporting already makes.
+static GPU_ERRORS: Mutex<(Vec<String>, Vec<String>)> = Mutex::new((Vec::new(), Vec::new()));
+
+/// What went wrong, flattened onto one line.
+///
+/// `Display` already carries the whole "Caused by:" chain — which pass, which
+/// pipeline, which attachment — across several indented lines. That is right
+/// for a terminal and wrong for a Console row, so the indentation collapses to
+/// single spaces and the whole thing becomes one entry. (Walking `source()` to
+/// rebuild the chain by hand is redundant: it only reprints what `Display`
+/// already said.)
+fn describe(e: &wgpu::Error) -> String {
+    let text = match e {
+        wgpu::Error::OutOfMemory { .. } => "out of GPU memory".to_string(),
+        other => other.to_string(),
+    };
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn gpu_error(e: &wgpu::Error) {
+    let message = describe(e);
+    if let Ok(mut g) = GPU_ERRORS.lock() {
+        let (queue, seen) = &mut *g;
+        if seen.contains(&message) {
+            return;
+        }
+        // Always to the terminal too: somebody running from a shell should see
+        // it whether or not a host ever drains the queue.
+        eprintln!("GPU error: {message}");
+        seen.push(message.clone());
+        queue.push(message);
+    }
+}
+
+/// Take the GPU errors reported since the last call — the editor drains this
+/// into the Console each frame. Empty when the GPU is happy, which is the
+/// normal case and costs one uncontended lock.
+pub fn take_gpu_errors() -> Vec<String> {
+    GPU_ERRORS.lock().map(|mut g| std::mem::take(&mut g.0)).unwrap_or_default()
+}
 
 /// Owns the GPU connection and (when windowed) the surface. `surface` is `None`
 /// for a headless GPU — one created without a window for offscreen rendering
@@ -76,6 +125,20 @@ impl Gpu {
             trace: wgpu::Trace::Off,
         }))
         .expect("no GPU device");
+        // A GPU validation error must not end the session.
+        //
+        // wgpu's default handler panics, and a panic here is worse than it
+        // sounds: it unwinds through a frame that is holding a surface
+        // texture, the swapchain destructor panics in turn, and the process
+        // takes a non-unwinding abort — everything unsaved gone, and the crash
+        // note naming the destructor rather than the cause. Twice now that has
+        // been one mismatched pipeline in a pass that draws once a frame.
+        //
+        // So: record it, keep the frame, let the editor say so. Deliberately
+        // NOT installed on the headless path (see `headless_with`) — a probe
+        // that swallowed a validation error would report a pass it never made,
+        // and that trade only makes sense when there is a person at the window.
+        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| gpu_error(&e)));
 
         let caps = surface.get_capabilities(&adapter);
         let format =

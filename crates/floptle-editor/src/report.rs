@@ -35,10 +35,21 @@ fn environment() -> String {
 /// backtrace are still worth having) and additionally leaves a note on disk.
 pub(crate) fn install_panic_hook() {
     let previous = std::panic::take_hook();
+    // Only the FIRST panic of a run gets written down.
+    //
+    // A graphics panic rarely arrives alone: it unwinds, a device object is
+    // dropped mid-flight, its destructor panics too, and the run ends on
+    // "panic in a destructor during cleanup" — which names nothing and is what
+    // the user ends up sending. Every panic after the first is fallout of the
+    // first, so the note keeps the cause and the terminal keeps the rest.
+    static WRITTEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     std::panic::set_hook(Box::new(move |info| {
         // The default hook first: if writing our own note goes wrong, the normal
         // crash output has already happened.
         previous(info);
+        if WRITTEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         let payload = info
             .payload()
             .downcast_ref::<&str>()

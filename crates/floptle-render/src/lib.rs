@@ -42,7 +42,7 @@ pub mod ui;
 
 pub use camera::{FlyCamera, Input, ViewLock};
 pub use cull::Frustum;
-pub use device::Gpu;
+pub use device::{take_gpu_errors, Gpu};
 pub use frame::{Projection, RenderCamera};
 pub use gi::GiVolume;
 pub use grid::Grid;

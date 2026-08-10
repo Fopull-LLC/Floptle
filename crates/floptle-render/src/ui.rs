@@ -1044,11 +1044,21 @@ impl Ui {
             ],
             immediate_size: 0,
         });
-        let targets = [Some(wgpu::ColorTargetState {
-            format: gpu.surface_format(),
-            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
+        // A screen layer draws onto the window; a world layer draws into the
+        // SCENE target, which is HDR and a different format. Built as a
+        // function of which pass the pipeline is for, because sharing one
+        // `targets` array between the two is exactly how the world pipeline
+        // came to be built for the window's format — a hard validation error
+        // the moment a world-space layer used a UI shader.
+        let target = |format| {
+            [Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })]
+        };
+        let screen_targets = target(gpu.surface_format());
+        let world_targets = target(gpu.scene_format());
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("ui-flsl"),
             layout: Some(&layout),
@@ -1061,7 +1071,7 @@ impl Ui {
             fragment: Some(wgpu::FragmentState {
                 module: &module,
                 entry_point: Some("fs_flsl_ui"),
-                targets: &targets,
+                targets: &screen_targets,
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),
@@ -1082,7 +1092,7 @@ impl Ui {
             fragment: Some(wgpu::FragmentState {
                 module: &module,
                 entry_point: Some("fs_flsl_ui"),
-                targets: &targets,
+                targets: &world_targets,
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),
