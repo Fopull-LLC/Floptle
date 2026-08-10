@@ -1,5 +1,26 @@
 ## Just shipped
 
+**v0.51.0 "Ask Once"** — the PS1-era look is a **project setting** now instead of
+four checkboxes on every material you own. Project Settings ⏵ Rendering ⏵ Era
+artefacts turns vertex jitter, affine textures, vertex lighting and screen-door
+transparency on for everything that draws — models, primitives, tilemaps, map
+geometry, terrain, characters, including the surfaces that never named a
+material at all, which is most of a level. Jitter is offered as named strengths
+— **off / pixels / chunky / heavy** — measured against your own pixel
+resolution, so "pixels" means the same thing whether you render at 240 rows or
+480 and you never have to work out which number suits your target. One thing
+worth knowing if you have been staring at a paused scene wondering whether it is
+on: jitter is a **snap, not a shimmer**. A still camera on a still object lands
+in the same grid cell every frame and holds perfectly still, exactly as the
+hardware did — move something to see it. Any material can take **none** of it
+(*project artefacts ⏵ opt out*), which is how a first-person weapon or a sky
+shell holds steady in a world that wobbles. And every material gained a **fog**
+switch: turn it off and that surface draws at its own colour however far away it
+is, for the things that are not really in the world at that distance — a
+viewmodel a metre from your eye, a backdrop card, a marker that has to stay
+readable through the weather. Nothing to do on upgrade; every new setting starts
+at the value that changes nothing.
+
 **v0.50.1** — opening a scene whose UI uses a `stage ui` shader killed the
 editor before it drew a frame; if you have a custom meter, gauge or instrument
 built that way, take this one. It had been broken since the release that made
