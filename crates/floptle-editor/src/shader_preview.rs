@@ -37,6 +37,13 @@ pub(crate) struct ShaderGraphPreview {
     pub(crate) atlas_px: (u32, u32),
     /// Preview-only failure (the graph stays fully editable).
     pub(crate) err: Option<String>,
+    /// The open shader reads `time`, so its tiles move on their own — the ONE
+    /// reason the graph tab is allowed to ask for a continuous repaint.
+    pub(crate) animates: bool,
+    /// The last compile, and the graph revision it came from. Anything the
+    /// shader didn't change cannot change the module.
+    compiled: Option<CompiledPreview>,
+    pub(crate) rev: Option<u64>,
     wgsl_hash: u64,
     stage: Option<Stage>,
     pipeline: Option<wgpu::RenderPipeline>,
@@ -59,6 +66,9 @@ impl Default for ShaderGraphPreview {
             grid: (1, 1),
             atlas_px: (0, 0),
             err: None,
+            animates: false,
+            compiled: None,
+            rev: None,
             wgsl_hash: 0,
             stage: None,
             pipeline: None,
@@ -91,29 +101,54 @@ fn f32_bytes(v: &[f32]) -> Vec<u8> {
 impl Editor {
     /// Per-frame driver (before the main GPU destructure): while the ◈
     /// Shaders tab is visible with a checked shader open, keep the preview
-    /// atlas compiled, bound and rendered. The graph re-transpiles every
-    /// frame (cheap string work) so live literal/knob drags stream through
-    /// the lane array; the PIPELINE only rebuilds when the WGSL changes.
+    /// atlas compiled, bound and rendered. The compile is keyed on the graph's
+    /// revision, so an idle frame costs three buffer writes; the PIPELINE only
+    /// rebuilds when the WGSL changes, and live literal/knob drags stream
+    /// through the lane array without touching either.
     pub(crate) fn update_shader_graph_preview(&mut self, elapsed: f32) {
         let visible = std::mem::take(&mut self.shader_graph.tab_visible);
         if !visible || !self.shader_preview.enabled {
             return;
         }
         let Some(path) = self.shader_graph.path.clone() else { return };
-        let Some(ir) = self.shader_graph.ir.clone() else { return };
-        // A fresh check every time: live edits mutate the arena, so the
-        // reload-time `Checked` may be stale. Mid-edit type breaks simply
-        // keep the last good atlas on screen.
-        let Ok(ck) = ir::check(&ir) else { return };
-        let pairs = preview::preview_targets(&ir, &self.shader_graph.view);
-        let targets: Vec<_> = pairs.iter().map(|(_, t)| t.clone()).collect();
-        let compiled = match preview::transpile_preview(&ir, &ck, &targets) {
-            Ok(c) => c,
-            Err(e) => {
-                self.shader_preview.err = Some(e.message);
-                return;
+        if self.shader_graph.ir.is_none() {
+            return;
+        }
+
+        // ---- compile, but only when the graph actually moved ----
+        //
+        // This used to clone the IR, type-check it and re-transpile the whole
+        // shader EVERY frame the tab was open. On a hundred-node sky graph
+        // that is a real per-frame bill, paid to produce a byte-identical
+        // module: the live literal values it exists to stream ride the uniform
+        // lane array uploaded further down, which costs nothing.
+        let rev = self.shader_graph.ir_rev;
+        let recompiled = self.shader_preview.rev != Some(rev);
+        if recompiled {
+            let ir = self.shader_graph.ir.as_ref().expect("checked above");
+            // Check afresh: live edits mutate the arena, so the reload-time
+            // `Checked` may be stale. A mid-edit type break simply keeps the
+            // last good atlas on screen.
+            let Ok(ck) = ir::check(ir) else { return };
+            let pairs = preview::preview_targets(ir, &self.shader_graph.view);
+            let targets: Vec<_> = pairs.iter().map(|(_, t)| t.clone()).collect();
+            match preview::transpile_preview(ir, &ck, &targets) {
+                Ok(c) => {
+                    self.shader_preview.animates = c.animates;
+                    self.shader_preview.compiled = Some(c);
+                    self.shader_preview.rev = Some(rev);
+                    self.shader_preview.tiles =
+                        pairs.into_iter().enumerate().map(|(i, (k, _))| (k, i)).collect();
+                }
+                Err(e) => {
+                    self.shader_preview.err = Some(e.message);
+                    return;
+                }
             }
-        };
+        }
+        // Moved out for the draw: the atlas render needs it by reference while
+        // the preview borrows itself mutably. Put back on the way out.
+        let Some(compiled) = self.shader_preview.compiled.take() else { return };
 
         // Slot + base textures from the first scene material using this
         // shader — previews show the art the artist actually assigned.
@@ -122,10 +157,19 @@ impl Editor {
             .query::<Material>()
             .find(|(_, m)| m.shader.as_deref() == Some(path.as_str()))
             .map(|(_, m)| m.clone());
+        // Slot images, most specific first: a scene Material's override, then
+        // the slot's own declared default (the picker on the texture node), then
+        // the checkerboard. The middle rung is what lets a shader that is not on
+        // anything yet still preview its real art.
         let slot_paths: Vec<Option<String>> = compiled
             .textures
             .iter()
-            .map(|slot| mat.as_ref().and_then(|m| m.shader_textures.get(slot).cloned()))
+            .zip(&compiled.texture_defaults)
+            .map(|(slot, dflt)| {
+                mat.as_ref()
+                    .and_then(|m| m.shader_textures.get(slot).cloned())
+                    .or_else(|| dflt.clone())
+            })
             .collect();
         let slot_tex: Vec<Option<TexId>> =
             slot_paths.iter().map(|p| p.as_deref().and_then(|p| self.ensure_texture(p))).collect();
@@ -134,15 +178,23 @@ impl Editor {
             .and_then(|m| m.texture.clone())
             .and_then(|p| self.ensure_texture(&p));
 
-        self.shader_preview.tiles =
-            pairs.into_iter().enumerate().map(|(i, (k, _))| (k, i)).collect();
-
-        let (Some(gpu), Some(raster), Some(egui)) =
-            (self.gpu.as_ref(), self.raster.as_ref(), self.egui.as_mut())
-        else {
-            return;
-        };
-        self.shader_preview.render(gpu, raster, egui, &ir, &compiled, &slot_tex, base_tex, elapsed);
+        // A still shader whose graph hasn't moved draws the atlas it drew last
+        // frame. Skip the pass — the texture is still there, and the tab has
+        // stopped asking for a repaint too.
+        let rebind = self.shader_preview.bound_tex.as_ref().map(|(s, b)| (s.as_slice(), *b))
+            != Some((slot_tex.as_slice(), base_tex));
+        if (recompiled || rebind || compiled.animates || self.shader_preview.tex_id.is_none())
+            && let (Some(gpu), Some(raster), Some(egui), Some(ir)) = (
+                self.gpu.as_ref(),
+                self.raster.as_ref(),
+                self.egui.as_mut(),
+                self.shader_graph.ir.as_ref(),
+            )
+        {
+            self.shader_preview
+                .render(gpu, raster, egui, ir, &compiled, &slot_tex, base_tex, elapsed);
+        }
+        self.shader_preview.compiled = Some(compiled);
     }
 }
 
@@ -270,6 +322,22 @@ impl ShaderGraphPreview {
             let mut p = [0f32; 128];
             for (i, u) in compiled.uniforms.iter().enumerate().take(16) {
                 p[i * 4..i * 4 + 4].copy_from_slice(&u.default);
+            }
+            // Each slot's two tiling lanes follow the knobs (the generated
+            // `t{i}a`/`t{i}b` fields). All-zero is NOT neutral: it reads as a
+            // triplanar scale of 0, which `flsl_triplanar` clamps to 1e-4 and
+            // turns any sampleTriplanar preview into noise. Spell out the
+            // identity transform instead: no rotation (mode 0), one tile,
+            // world-unit triplanar scale, the usual axis blend.
+            let base = compiled.uniforms.len().min(16);
+            for i in 0..compiled.textures.len().min(8) {
+                let a = (base + 2 * i) * 4;
+                let b = a + 4;
+                if b + 4 > p.len() {
+                    break;
+                }
+                p[a..a + 4].copy_from_slice(&[1.0, 1.0, 0.0, 0.0]);
+                p[b..b + 4].copy_from_slice(&[0.0, 0.0, 1.0, 4.0]);
             }
             gpu.queue.write_buffer(&bufs.p, 0, &f32_bytes(&p));
         }

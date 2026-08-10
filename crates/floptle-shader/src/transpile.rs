@@ -45,6 +45,10 @@ pub struct CompiledFragment {
     pub uniforms: Vec<ir::Uniform>,
     /// Texture slot names, in group(3) binding order (binding 1+2i / 2+2i).
     pub textures: Vec<String>,
+    /// Each slot's DEFAULT image path, aligned with [`Self::textures`] — what
+    /// binds when the material leaves the slot empty (see
+    /// [`ShaderIr::texture_defaults`](crate::ir::ShaderIr::texture_defaults)).
+    pub texture_defaults: Vec<Option<String>>,
     /// chunk line (0-based) → `.flsl` source span, for naga error mapping.
     pub line_map: Vec<(u32, Span)>,
 }
@@ -177,6 +181,11 @@ pub fn transpile_fragment(ir: &ShaderIr, ck: &Checked) -> Result<CompiledFragmen
         chunk: w.out,
         uniforms: ir.uniforms.clone(),
         textures: ir.textures.clone(),
+        texture_defaults: ir
+            .textures
+            .iter()
+            .map(|t| ir.texture_defaults.get(t).cloned())
+            .collect(),
         line_map: w.line_map,
     })
 }

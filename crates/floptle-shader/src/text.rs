@@ -462,6 +462,25 @@ impl Parser<'_> {
         self.pos += 1; // `texture`
         let (name, span) = self.expect_ident("a texture slot name")?;
         self.check_fresh_name(&name, span)?;
+        // `= "path"` — the slot's default image, used wherever the material
+        // leaves the slot empty (and by the graph's previews).
+        if self.eat_punct('=') {
+            let span = self.span();
+            match self.bump().map(|t| t.tok.clone()) {
+                Some(Tok::Str(p)) => {
+                    let p = p.trim().to_string();
+                    if !p.is_empty() {
+                        self.ir.texture_defaults.insert(name.clone(), p);
+                    }
+                }
+                _ => {
+                    return Err(ParseError::new(
+                        "a texture's default is an image path in quotes, e.g. \"art/ramp.png\"",
+                        span,
+                    ));
+                }
+            }
+        }
         self.ir.textures.push(name);
         Ok(())
     }
@@ -608,6 +627,13 @@ impl Parser<'_> {
 
 // ---- printer ---------------------------------------------------------------
 
+/// A path as a `.flsl` string literal. The lexer has no escapes, so the two
+/// characters that would end (or run off) the literal are dropped rather than
+/// written out unreadable — a printed shader always parses back.
+fn quoted(s: &str) -> String {
+    format!("\"{}\"", s.replace(['"', '\n'], ""))
+}
+
 /// Print the IR as canonical `.flsl` text (the graph's "Open in VSCode"
 /// projection). Deterministic; `parse(print(ir))` is `same_shader(ir)`.
 pub fn print(ir: &ShaderIr) -> String {
@@ -634,7 +660,10 @@ pub fn print(ir: &ShaderIr) -> String {
         s.push('\n');
     }
     for t in &ir.textures {
-        s.push_str(&format!("  texture {t}\n"));
+        match ir.texture_defaults.get(t) {
+            Some(path) => s.push_str(&format!("  texture {t} = {}\n", quoted(path))),
+            None => s.push_str(&format!("  texture {t}\n")),
+        }
     }
     if !ir.lets.is_empty() {
         s.push('\n');

@@ -29,7 +29,7 @@ use egui::{
     StrokeKind, UiBuilder,
 };
 use floptle_shader::graph::{
-    self, GNode, InlineVal, NodeKey, NodeKind, Site, NODE_HEADER_H, NODE_ROW_H, NODE_W,
+    self, GNode, GPort, InlineVal, NodeKey, NodeKind, Site, NODE_HEADER_H, NODE_ROW_H, NODE_W,
 };
 use floptle_shader::ir::{self, BinOp, Checked, Input, ShaderIr, Stage, Ty};
 use floptle_shader::stdlib;
@@ -38,6 +38,16 @@ use crate::assets::is_shader;
 use crate::ide::IdeState;
 use crate::project::resolve_asset_path;
 use crate::{Editor, EditorTabViewer};
+
+/// Every canvas gesture in one hover — the graph has enough of them now that
+/// "right-click to add nodes" is no longer the whole story.
+const SHORTCUTS: &str = "\
+wheel — zoom · middle-drag — pan · left-drag — box select
+right-click — add a node · drag a wire into empty space — add + connect
+click a node — see it big in the ▣ panel
+Ctrl+A select all · F frame the selection · arrows nudge (shift = fine)
+Ctrl+C / Ctrl+V copy & paste (works between shaders)
+Ctrl+D duplicate · Delete removes · Ctrl+Z / Ctrl+Shift+Z undo";
 
 /// Graph coords (sink at the origin, sources at negative x) sit at this offset
 /// inside the egui Scene's positive space.
@@ -53,6 +63,11 @@ pub(crate) struct ShaderGraphState {
     mtime: Option<SystemTime>,
     src: String,
     pub(crate) ir: Option<ShaderIr>,
+    /// Bumped every time the IR changes. The preview driver keys its compile
+    /// off this: re-checking and re-transpiling the whole graph EVERY frame
+    /// (which is what it used to do) is real work on a hundred-node sky, and
+    /// on an idle frame it can't produce a different answer.
+    pub(crate) ir_rev: u64,
     ck: Option<Checked>,
     pub(crate) view: Vec<GNode>,
     /// Session positions by reparse-stable node identity — the "nothing moves
@@ -75,6 +90,9 @@ pub(crate) struct ShaderGraphState {
     /// The palette popup's search text + spawn position (graph space).
     palette_search: String,
     palette_at: (f32, f32),
+    /// The canvas palette when it's open: where to draw it, where the node
+    /// lands, and the wire waiting to be finished (if a dropped wire opened it).
+    palette: Option<Palette>,
     undo: Vec<String>,
     redo: Vec<String>,
     /// The pre-edit source backing the NEXT undo push (set when an edit
@@ -89,6 +107,19 @@ pub(crate) struct ShaderGraphState {
     pub(crate) tab_visible: bool,
     /// Nodes whose preview thumbnail the user collapsed (session-local).
     pv_hidden: BTreeSet<NodeKey>,
+    /// Slot → image, for the first scene Material using this shader. Snapshot
+    /// once per frame; the texture nodes read it instead of each running its
+    /// own component scan.
+    mat_slots: std::collections::BTreeMap<String, String>,
+    /// The node the focus panel is watching — the last single node clicked.
+    /// `None` watches the output, so the panel always shows SOMETHING.
+    focus: Option<NodeKey>,
+    /// The focus panel is open (▣ in the header).
+    focus_open: bool,
+    /// Nodes copied with Ctrl+C: printed `.flsl` source of the whole shader
+    /// plus the keys to graft. Lives on the state so a copy survives switching
+    /// shaders — paste works across files.
+    clip: Option<(String, Vec<NodeKey>)>,
 }
 
 impl Default for ShaderGraphState {
@@ -98,6 +129,7 @@ impl Default for ShaderGraphState {
             mtime: None,
             src: String::new(),
             ir: None,
+            ir_rev: 0,
             ck: None,
             view: Vec::new(),
             pos_cache: HashMap::new(),
@@ -111,6 +143,7 @@ impl Default for ShaderGraphState {
             field_buf: None,
             palette_search: String::new(),
             palette_at: (0.0, 0.0),
+            palette: None,
             undo: Vec::new(),
             redo: Vec::new(),
             pending_undo: None,
@@ -118,6 +151,10 @@ impl Default for ShaderGraphState {
             status: None,
             tab_visible: false,
             pv_hidden: BTreeSet::new(),
+            mat_slots: Default::default(),
+            focus: None,
+            focus_open: true,
+            clip: None,
         }
     }
 }
@@ -150,6 +187,47 @@ enum WireDrag {
     FromIn(Site),
 }
 
+/// The canvas palette: opened by right-click, or by letting a wire go over
+/// empty canvas — in which case `link` is the connection it owes.
+struct Palette {
+    /// Where to draw it (screen space — the palette is not part of the scene,
+    /// so it must not zoom with it).
+    screen: Pos2,
+    /// Where the new node lands (graph space).
+    at: (f32, f32),
+    link: Option<Link>,
+    /// The frame it opened on: the pointer event that opened it must not also
+    /// be read as a click-outside that closes it again.
+    fresh: bool,
+}
+
+/// The wire a dropped-then-picked node completes.
+enum Link {
+    /// The new node's output feeds this waiting input port.
+    FeedInto(Site),
+    /// This source feeds the new node's first fitting input; `true` when the
+    /// source is a texture slot (so the wire finds the texture port).
+    TakeFrom(NodeKey, bool),
+}
+
+/// A palette entry's edit: adds one node and reports its key, so the caller can
+/// select it and finish any pending wire.
+type AddFn = Box<dyn FnOnce(&mut ShaderIr) -> Result<NodeKey, String>>;
+
+/// One frame's canvas keyboard, read in a single `input` borrow.
+struct Keys {
+    del: bool,
+    undo: bool,
+    redo: bool,
+    dup: bool,
+    all: bool,
+    copy: bool,
+    paste: bool,
+    frame: bool,
+    /// Arrow-key move for the selection, in graph units (shift = fine).
+    nudge: egui::Vec2,
+}
+
 /// A boxed IR edit queued by the UI pass.
 type Edit = Box<dyn FnOnce(&mut ShaderIr) -> Result<(), String>>;
 
@@ -161,6 +239,9 @@ enum Act {
     Commit { edit: Edit, strict: bool },
     /// A continuous edit (knob drag): applied in memory, flushed on release.
     Live(Edit),
+    /// Add one node from the palette, select it, and finish the wire that was
+    /// dropped to open the palette (when there was one).
+    Add { add: AddFn, link: Option<Link> },
     /// Replace the selection.
     Select(Vec<NodeKey>),
     /// Extend the selection (shift-box).
@@ -173,6 +254,10 @@ enum Act {
     Delete(Vec<NodeKey>),
     /// Duplicate the listed nodes and select the copies.
     Duplicate(Vec<NodeKey>),
+    /// Remember the listed nodes for a later paste (works across shaders).
+    Copy(Vec<NodeKey>),
+    /// Graft the copied nodes in at this graph position.
+    Paste((f32, f32)),
     /// Re-run the auto-layout over the whole graph (one undoable commit).
     Arrange,
     Undo,
@@ -184,8 +269,17 @@ impl Editor {
     pub(crate) fn open_shader_in_graph(&mut self, path: &str) {
         if self.shader_graph.path.as_deref() != Some(path) {
             self.shader_graph.flush(&self.project_root, &mut self.ide, true, false);
-            self.shader_graph =
-                ShaderGraphState { path: Some(path.to_string()), ..Default::default() };
+            // The clipboard and the panel's open/closed state belong to the
+            // ARTIST, not the file — carrying them over is what makes copying
+            // a chunk of one shader into another work at all.
+            let clip = self.shader_graph.clip.take();
+            let focus_open = self.shader_graph.focus_open;
+            self.shader_graph = ShaderGraphState {
+                path: Some(path.to_string()),
+                clip,
+                focus_open,
+                ..Default::default()
+            };
             self.shader_graph.reload(&self.project_root);
         }
         if let Some(dock) = self.dock_state.as_mut() {
@@ -199,6 +293,7 @@ impl ShaderGraphState {
     /// view). Keeps the selection when the nodes still exist.
     pub(crate) fn reload(&mut self, project_root: &Path) {
         let Some(path) = self.path.clone() else { return };
+        self.ir_rev = self.ir_rev.wrapping_add(1);
         let full = resolve_asset_path(project_root, &path);
         self.mtime = std::fs::metadata(&full).and_then(|m| m.modified()).ok();
         let src = match std::fs::read_to_string(&full) {
@@ -262,6 +357,11 @@ impl ShaderGraphState {
                 let view = std::mem::take(&mut self.view);
                 self.sel.retain(|k| view.iter().any(|n| n.key == *k));
                 self.pv_hidden.retain(|k| view.iter().any(|n| n.key == *k));
+                // A focused node that a reparse dissolved (an anon promoted, a
+                // let deleted) falls back to the output instead of a blank box.
+                if self.focus.as_ref().is_some_and(|k| !view.iter().any(|n| n.key == *k)) {
+                    self.focus = None;
+                }
                 self.view = view;
             }
         }
@@ -300,6 +400,7 @@ impl ShaderGraphState {
     /// Rebuild the view from the in-memory IR (live knob edits) without
     /// touching disk — positions stay frozen.
     fn rebuild_view(&mut self) {
+        self.ir_rev = self.ir_rev.wrapping_add(1);
         if let Some(ir) = &self.ir {
             self.view = graph::build_view_padded(ir, self.ck.as_ref(), &graph_pad);
             self.freeze_positions();
@@ -382,10 +483,19 @@ impl ShaderGraphState {
     /// Apply one queued edit.
     fn apply(&mut self, act: Act, project_root: &Path, ide: &mut IdeState) {
         match act {
-            Act::Select(keys) => self.sel = keys.into_iter().collect(),
+            Act::Select(keys) => {
+                // A single pick is what the focus panel follows; clearing the
+                // selection leaves the panel where it was rather than blanking
+                // it (clicking empty canvas is not "stop showing me things").
+                if let [k] = keys.as_slice() {
+                    self.focus = Some(k.clone());
+                }
+                self.sel = keys.into_iter().collect();
+            }
             Act::SelectAdd(keys) => self.sel.extend(keys),
             Act::SelectToggle(k) => {
                 if !self.sel.remove(&k) {
+                    self.focus = Some(k.clone());
                     self.sel.insert(k);
                 }
             }
@@ -486,6 +596,32 @@ impl ShaderGraphState {
                     ide,
                 );
             }
+            Act::Add { add, link } => {
+                let key = self.commit_returning(
+                    move |ir| {
+                        let key = add(ir)?;
+                        match link {
+                            Some(Link::FeedInto(site)) => graph::connect(ir, &key, site)?,
+                            Some(Link::TakeFrom(src, is_tex)) => {
+                                // A source node (a knob, a slot) has no inputs
+                                // of its own — the wire simply has nowhere to
+                                // go, which is not an error worth a toast.
+                                if let Some(site) = graph::first_input_site(ir, &key, is_tex) {
+                                    graph::connect(ir, &src, site)?;
+                                }
+                            }
+                            None => {}
+                        }
+                        Ok(key)
+                    },
+                    project_root,
+                    ide,
+                );
+                if let Some(key) = key {
+                    self.focus = Some(key.clone());
+                    self.sel = [key].into_iter().collect();
+                }
+            }
             Act::Duplicate(keys) => {
                 let copies = self.commit_returning(
                     move |ir| graph::duplicate_nodes(ir, &keys),
@@ -493,6 +629,44 @@ impl ShaderGraphState {
                     ide,
                 );
                 if let Some(keys) = copies {
+                    self.sel = keys.into_iter().collect();
+                }
+            }
+            Act::Copy(keys) => {
+                // The clipboard is the shader's SOURCE plus the picked names —
+                // text, so it survives a reparse, a file switch, and this
+                // shader being edited (or closed) before the paste.
+                let named = keys.iter().filter(|k| matches!(k, NodeKey::Let(_))).count();
+                self.clip = Some((self.src.clone(), keys));
+                self.status = Some((
+                    match named {
+                        0 => "copied — but only named nodes carry (double-click a title to name one)"
+                            .to_string(),
+                        1 => "copied 1 node".to_string(),
+                        n => format!("copied {n} nodes"),
+                    },
+                    2.0,
+                ));
+            }
+            Act::Paste(at) => {
+                let Some((src, keys)) = self.clip.clone() else {
+                    self.status = Some(("nothing copied yet (Ctrl+C over a selection)".into(), 2.5));
+                    return;
+                };
+                let from = match floptle_shader::parse(&src) {
+                    Ok(ir) => ir,
+                    Err(e) => {
+                        self.status = Some((format!("the copied shader no longer parses: {}", e.message), 3.0));
+                        return;
+                    }
+                };
+                let pasted = self.commit_returning(
+                    move |ir| graph::paste_nodes(ir, &from, &keys, at),
+                    project_root,
+                    ide,
+                );
+                if let Some(keys) = pasted {
+                    self.focus = keys.first().cloned();
                     self.sel = keys.into_iter().collect();
                 }
             }
@@ -532,8 +706,14 @@ impl EditorTabViewer<'_> {
 
     pub(crate) fn shader_graph_ui(&mut self, ui: &mut egui::Ui) {
         // Arm the preview driver for next frame + keep animated previews live.
+        //
+        // Only ANIMATED ones. This tab used to ask for a repaint every frame it
+        // was open, which pins the whole editor — Scene view and all — at full
+        // framerate for the sake of a picture that, in a shader with no `time`
+        // in it, cannot change until you touch something.
         self.shader_graph.tab_visible = true;
-        if self.shader_preview.enabled && self.shader_graph.ir.is_some() {
+        let compile_pending = self.shader_preview.rev != Some(self.shader_graph.ir_rev);
+        if self.shader_preview.enabled && (self.shader_preview.animates || compile_pending) {
             ui.ctx().request_repaint();
         }
         // External edits (VSCode, the Scripting tab, hot tools) re-sync the
@@ -550,6 +730,18 @@ impl EditorTabViewer<'_> {
         self.shader_graph_header(ui, &mut acts);
         ui.separator();
 
+        // One scan for the whole frame, feeding every texture node's "a
+        // Material is overriding this" note.
+        self.shader_graph.mat_slots = match self.shader_graph.path.as_deref() {
+            Some(path) => self
+                .world
+                .query::<floptle_core::Material>()
+                .find(|(_, m)| m.shader.as_deref() == Some(path))
+                .map(|(_, m)| m.shader_textures.clone())
+                .unwrap_or_default(),
+            None => Default::default(),
+        };
+
         if self.shader_graph.path.is_none() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
@@ -559,7 +751,32 @@ impl EditorTabViewer<'_> {
             return;
         }
         if self.shader_graph.ir.is_some() {
-            self.shader_graph_canvas(ui, &mut acts);
+            // The canvas yields a fixed strip to the focus panel — fixed, so
+            // opening a node never reflows the graph you were reading.
+            let full = ui.available_rect_before_wrap();
+            let panel_w = 268.0;
+            let split = self.shader_graph.focus_open && full.width() > panel_w + 320.0;
+            let canvas_rect = if split {
+                Rect::from_min_max(full.min, Pos2::new(full.right() - panel_w - 8.0, full.bottom()))
+            } else {
+                full
+            };
+            ui.scope_builder(
+                UiBuilder::new().max_rect(canvas_rect).id_salt("sg-canvas"),
+                |ui| self.shader_graph_canvas(ui, &mut acts),
+            );
+            if split {
+                let prect =
+                    Rect::from_min_max(Pos2::new(full.right() - panel_w, full.top()), full.max);
+                ui.painter().vline(
+                    prect.left() - 4.0,
+                    prect.y_range(),
+                    Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                );
+                ui.scope_builder(UiBuilder::new().max_rect(prect).id_salt("sg-focus"), |ui| {
+                    self.shader_graph_focus_panel(ui);
+                });
+            }
         } else if let Some(err) = self.shader_graph.err.clone() {
             ui.add_space(16.0);
             ui.colored_label(Color32::from_rgb(235, 100, 100), format!("⚠ {err}"));
@@ -634,8 +851,8 @@ impl EditorTabViewer<'_> {
             }
             egui::Popup::menu(&btn).id(egui::Id::new("sg-add-node")).show(|ui| {
                 let mut search = std::mem::take(&mut self.shader_graph.palette_search);
-                if let Some(act) = palette_ui(ui, stage, &mut search, center) {
-                    acts.push(act);
+                if let Some(add) = palette_ui(ui, stage, &mut search, center, None) {
+                    acts.push(Act::Add { add, link: None });
                     ui.close();
                 }
                 self.shader_graph.palette_search = search;
@@ -705,6 +922,7 @@ impl EditorTabViewer<'_> {
                 // Re-frame after the shuffle so the tidied graph is in view.
                 self.shader_graph.scene_rect = Rect::ZERO;
             }
+            self.shader_graph_align_menu(ui, acts);
             if ui
                 .selectable_label(self.shader_preview.enabled, "👁")
                 .on_hover_text("live previews on every node (right-click a node to hide just its own)")
@@ -712,6 +930,14 @@ impl EditorTabViewer<'_> {
             {
                 self.shader_preview.enabled = !self.shader_preview.enabled;
             }
+            if ui
+                .selectable_label(self.shader_graph.focus_open, "▣")
+                .on_hover_text("the focus panel: the selected node big, with its type and what it does")
+                .clicked()
+            {
+                self.shader_graph.focus_open = !self.shader_graph.focus_open;
+            }
+            ui.add(egui::Label::new("?").selectable(false)).on_hover_text(SHORTCUTS);
             let path = self.shader_graph.path.clone().unwrap_or_default();
             if ui
                 .button("</>")
@@ -761,6 +987,157 @@ impl EditorTabViewer<'_> {
                         ui.weak("not in the scene yet — assign it on a Material to watch edits live");
                     }
                 }
+            }
+        });
+    }
+
+    /// Tidy-up for a hand-placed selection: ⇅ Arrange re-lays out EVERYTHING,
+    /// which is the wrong tool once a graph has a shape you like. These move
+    /// only what you picked.
+    fn shader_graph_align_menu(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
+        let picked: Vec<Placed> = self
+            .shader_graph
+            .view
+            .iter()
+            .filter(|n| self.shader_graph.sel.contains(&n.key))
+            .map(|n| (n.key.clone(), n.pos))
+            .collect();
+        let btn = ui
+            .add_enabled(picked.len() > 1, egui::Button::new("⬌"))
+            .on_hover_text("line up or space out the selected nodes")
+            .on_disabled_hover_text("select two or more nodes to line them up");
+        egui::Popup::menu(&btn).id(egui::Id::new("sg-align")).show(|ui| {
+            let mut emit = |ui: &mut egui::Ui, label: &str, f: fn(&mut Vec<Placed>)| {
+                if ui.button(label).clicked() {
+                    let mut moves = picked.clone();
+                    f(&mut moves);
+                    acts.push(Act::Place(moves));
+                    ui.close();
+                }
+            };
+            emit(ui, "⇤ align left", |m| {
+                let x = m.iter().map(|(_, p)| p.0).fold(f32::MAX, f32::min);
+                m.iter_mut().for_each(|(_, p)| p.0 = x);
+            });
+            emit(ui, "⇥ align right", |m| {
+                let x = m.iter().map(|(_, p)| p.0).fold(f32::MIN, f32::max);
+                m.iter_mut().for_each(|(_, p)| p.0 = x);
+            });
+            emit(ui, "⬆ align top", |m| {
+                let y = m.iter().map(|(_, p)| p.1).fold(f32::MAX, f32::min);
+                m.iter_mut().for_each(|(_, p)| p.1 = y);
+            });
+            ui.separator();
+            emit(ui, "⇔ space out across", |m| spread(m, true));
+            emit(ui, "⇕ space out down", |m| spread(m, false));
+        });
+    }
+
+    // ---- the focus panel -------------------------------------------------------
+
+    /// The selected node, big: its preview at panel width, what it is, what
+    /// type it carries, and — the part a beginner actually needs — how that
+    /// type is being DRAWN, since a float and a vec3 become pictures by very
+    /// different rules. Falls back to the output, so the panel is never blank
+    /// and the finished shader is always one glance away.
+    fn shader_graph_focus_panel(&mut self, ui: &mut egui::Ui) {
+        let key = self.shader_graph.focus.clone().unwrap_or(NodeKey::Out);
+        let node = self.shader_graph.view.iter().find(|n| n.key == key).cloned();
+        let Some(n) = node else { return };
+        let stage = self.shader_graph.ir.as_ref().and_then(|ir| ir.stage).unwrap_or(Stage::Fragment);
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(n.title()).strong());
+            if n.name.is_some() {
+                ui.weak(egui::RichText::new(n.op_label()).small());
+            }
+        });
+
+        // The picture. Same atlas the node thumbnails read — one render.
+        let side = ui.available_width().min(248.0);
+        let (prect, _) = ui.allocate_exact_size(egui::vec2(side, side), Sense::hover());
+        match (self.shader_preview.tex_id, self.shader_preview.tiles.get(&n.key)) {
+            (Some(tex), Some(&tile)) if self.shader_preview.enabled => {
+                ui.painter().image(tex, prect, self.shader_preview.tile_uv(tile), Color32::WHITE);
+            }
+            _ => {
+                ui.painter().rect_filled(prect, 4.0, ui.visuals().extreme_bg_color);
+                let msg = if !self.shader_preview.enabled {
+                    "previews are off (👁)"
+                } else if matches!(n.kind, NodeKind::Uniform(_) | NodeKind::Constant(_)) {
+                    "its value is the widget on the node"
+                } else {
+                    "not compiled yet"
+                };
+                ui.painter().text(
+                    prect.center(),
+                    Align2::CENTER_CENTER,
+                    msg,
+                    FontId::proportional(12.0),
+                    ui.visuals().weak_text_color(),
+                );
+            }
+        }
+        ui.painter().rect_stroke(
+            prect,
+            4.0,
+            Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+            StrokeKind::Inside,
+        );
+        ui.add_space(6.0);
+
+        // What it carries, and how that is being shown.
+        ui.horizontal_wrapped(|ui| {
+            let ty_name = match n.ty {
+                Some(t) => t.flsl(),
+                None if matches!(n.key, NodeKey::Out) => "output",
+                None => "—",
+            };
+            ui.colored_label(port_color(ui, n.ty, matches!(n.kind, NodeKind::Texture(_))), "●");
+            ui.label(egui::RichText::new(ty_name).strong().small());
+            ui.weak(egui::RichText::new(preview_reading(stage, &n)).small());
+        });
+        if let NodeKind::Op(spec) = &n.kind {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(spec.doc).small());
+        }
+
+        // Its inputs, with where each one comes from — the panel doubles as a
+        // readout of the wiring you'd otherwise have to trace by eye.
+        if !n.inputs.is_empty() {
+            ui.add_space(6.0);
+            ui.separator();
+            for port in &n.inputs {
+                ui.horizontal(|ui| {
+                    ui.colored_label(port_color(ui, port.ty, port.is_texture), "●");
+                    ui.label(egui::RichText::new(&port.label).small());
+                    let from = match (&port.wired, &port.inline) {
+                        (Some(src), _) => source_label(src),
+                        (None, Some(InlineVal::Missing)) => "— nothing wired in".into(),
+                        (None, Some(InlineVal::Default(d))) => format!("default {d}"),
+                        (None, Some(_)) => "a value on the node".into(),
+                        (None, None) => String::new(),
+                    };
+                    ui.weak(egui::RichText::new(from).small());
+                });
+            }
+        }
+
+        // The legend, once, where it can be read — the port colors are the
+        // graph's whole type vocabulary.
+        ui.add_space(8.0);
+        ui.collapsing(egui::RichText::new("what the dot colors mean").small(), |ui| {
+            for (ty, is_tex, label) in [
+                (Some(Ty::Float), false, "float — one number, drawn as grey"),
+                (Some(Ty::Vec2), false, "vec2 — two numbers, drawn red/green"),
+                (Some(Ty::Vec3), false, "vec3 — a color (or a direction)"),
+                (Some(Ty::Vec4), false, "vec4 — a color with alpha"),
+                (None, true, "texture — an image slot"),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.colored_label(port_color(ui, ty, is_tex), "●");
+                    ui.weak(egui::RichText::new(label).small());
+                });
             }
         });
     }
@@ -940,24 +1317,43 @@ impl EditorTabViewer<'_> {
         // ---- wire-drag resolution (release over a compatible port) ----
         let released = ui.input(|i| i.pointer.any_released());
         if released && self.shader_graph.wire.is_some() {
+            // A wire let go over nothing used to just vanish. Now it opens the
+            // palette where it landed and connects whatever you pick — the node
+            // editor idiom, and the fastest way to build a chain.
+            let mut loose: Option<Link> = None;
             match self.shader_graph.wire.take() {
-                Some(WireDrag::FromOut(src)) => {
-                    if let Some(site) = hover_in {
-                        acts.push(Act::Commit {
-                            edit: Box::new(move |ir| graph::connect(ir, &src, site)),
-                            strict: true,
-                        });
+                Some(WireDrag::FromOut(src)) => match hover_in {
+                    Some(site) => acts.push(Act::Commit {
+                        edit: Box::new(move |ir| graph::connect(ir, &src, site)),
+                        strict: true,
+                    }),
+                    None => {
+                        let is_tex = view
+                            .iter()
+                            .find(|n| n.key == src)
+                            .is_some_and(|n| matches!(n.kind, NodeKind::Texture(_)));
+                        loose = Some(Link::TakeFrom(src, is_tex));
                     }
-                }
-                Some(WireDrag::FromIn(site)) => {
-                    if let Some(src) = hover_out {
-                        acts.push(Act::Commit {
-                            edit: Box::new(move |ir| graph::connect(ir, &src, site)),
-                            strict: true,
-                        });
-                    }
-                }
+                },
+                Some(WireDrag::FromIn(site)) => match hover_out {
+                    Some(src) => acts.push(Act::Commit {
+                        edit: Box::new(move |ir| graph::connect(ir, &src, site)),
+                        strict: true,
+                    }),
+                    None => loose = Some(Link::FeedInto(site)),
+                },
                 None => {}
+            }
+            if let (Some(link), Some(screen), Some(scene)) =
+                (loose, ui.input(|i| i.pointer.latest_pos()), pointer_scene)
+            {
+                self.shader_graph.palette_search.clear();
+                self.shader_graph.palette = Some(Palette {
+                    screen,
+                    at: (scene.x - ORIGIN.x, scene.y - ORIGIN.y),
+                    link: Some(link),
+                    fresh: true,
+                });
             }
         }
 
@@ -999,42 +1395,104 @@ impl EditorTabViewer<'_> {
             acts.push(Act::Select(Vec::new()));
         }
         if bg.secondary_clicked()
-            && let Some(ptr) = pointer_scene
+            && let (Some(ptr), Some(screen)) = (pointer_scene, ui.input(|i| i.pointer.latest_pos()))
         {
-            self.shader_graph.palette_at = (ptr.x - ORIGIN.x, ptr.y - ORIGIN.y);
             self.shader_graph.palette_search.clear();
+            self.shader_graph.palette_at = (ptr.x - ORIGIN.x, ptr.y - ORIGIN.y);
+            self.shader_graph.palette = Some(Palette {
+                screen,
+                at: self.shader_graph.palette_at,
+                link: None,
+                fresh: true,
+            });
         }
-        bg.context_menu(|ui| {
-            let at = self.shader_graph.palette_at;
-            let mut search = std::mem::take(&mut self.shader_graph.palette_search);
-            if let Some(act) = palette_ui(ui, stage, &mut search, at) {
-                acts.push(act);
-                ui.close();
-            }
-            self.shader_graph.palette_search = search;
-        });
-        if bg.hovered() {
-            let (del, undo, redo, dup) = ui.input(|i| {
-                (
-                    i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
-                    i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
-                    (i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z))
-                        || (i.modifiers.command && i.key_pressed(egui::Key::Y)),
-                    i.modifiers.command && i.key_pressed(egui::Key::D),
-                )
+        self.shader_graph_palette(ui, stage, acts);
+        // Keys reach the canvas only while it has the pointer AND nothing is
+        // taking text — otherwise `f` in the palette's search box would frame
+        // the graph and Delete would eat a node mid-rename.
+        let typing = self.shader_graph.field_buf.is_some()
+            || self.shader_graph.palette.is_some()
+            || ui.memory(|m| m.focused().is_some());
+        if bg.hovered() && !typing {
+            let k = ui.input(|i| Keys {
+                del: i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
+                undo: i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
+                redo: (i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z))
+                    || (i.modifiers.command && i.key_pressed(egui::Key::Y)),
+                dup: i.modifiers.command && i.key_pressed(egui::Key::D),
+                all: i.modifiers.command && i.key_pressed(egui::Key::A),
+                copy: i.modifiers.command && i.key_pressed(egui::Key::C),
+                paste: i.modifiers.command && i.key_pressed(egui::Key::V),
+                frame: !i.modifiers.command && i.key_pressed(egui::Key::F),
+                // Deliberately ignoring key REPEAT: every nudge is a commit
+                // with its own undo entry, and holding an arrow down would
+                // otherwise flush thirty of them a second and shove the rest
+                // of the session's history off the 64-deep stack.
+                nudge: i
+                    .events
+                    .iter()
+                    .filter_map(|e| match e {
+                        egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } => {
+                            let d = match key {
+                                egui::Key::ArrowLeft => egui::vec2(-1.0, 0.0),
+                                egui::Key::ArrowRight => egui::vec2(1.0, 0.0),
+                                egui::Key::ArrowUp => egui::vec2(0.0, -1.0),
+                                egui::Key::ArrowDown => egui::vec2(0.0, 1.0),
+                                _ => return None,
+                            };
+                            Some(d * if modifiers.shift { 1.0 } else { 8.0 })
+                        }
+                        _ => None,
+                    })
+                    .fold(egui::Vec2::ZERO, |a, b| a + b),
             });
             let sel: Vec<NodeKey> = self.shader_graph.sel.iter().cloned().collect();
-            if del && self.shader_graph.field_buf.is_none() && !sel.is_empty() {
+            if k.del && !sel.is_empty() {
                 acts.push(Act::Delete(sel.clone()));
             }
-            if dup && !sel.is_empty() {
-                acts.push(Act::Duplicate(sel));
+            if k.dup && !sel.is_empty() {
+                acts.push(Act::Duplicate(sel.clone()));
             }
-            if undo {
+            if k.undo {
                 acts.push(Act::Undo);
             }
-            if redo {
+            if k.redo {
                 acts.push(Act::Redo);
+            }
+            if k.all {
+                acts.push(Act::Select(view.iter().map(|n| n.key.clone()).collect()));
+            }
+            if k.copy && !sel.is_empty() {
+                acts.push(Act::Copy(sel.clone()));
+            }
+            if k.paste {
+                // Paste lands where you're looking, not where it was cut from.
+                let at = pointer_scene
+                    .map(|p| (p.x - ORIGIN.x, p.y - ORIGIN.y))
+                    .unwrap_or(self.shader_graph.palette_at);
+                acts.push(Act::Paste(at));
+            }
+            if k.nudge != egui::Vec2::ZERO && !sel.is_empty() {
+                let moves: Vec<(NodeKey, (f32, f32))> = view
+                    .iter()
+                    .filter(|n| sel.contains(&n.key))
+                    .map(|n| (n.key.clone(), (n.pos.0 + k.nudge.x, n.pos.1 + k.nudge.y)))
+                    .collect();
+                acts.push(Act::Place(moves));
+            }
+            if k.frame {
+                // Frame the selection (or everything, when nothing is picked).
+                let picked: Vec<&Rect> = view
+                    .iter()
+                    .filter(|n| sel.is_empty() || sel.contains(&n.key))
+                    .filter_map(|n| rects.get(&n.key))
+                    .collect();
+                if sel.is_empty() {
+                    self.shader_graph.scene_rect = Rect::ZERO; // the Scene's own fit
+                } else if let Some(first) = picked.first() {
+                    let bounds = picked.iter().fold(**first, |a, r| a.union(**r));
+                    self.shader_graph.scene_rect = bounds.expand(64.0);
+                }
             }
         }
         // First-visit hint + toast overlay, bottom of the canvas.
@@ -1056,6 +1514,47 @@ impl EditorTabViewer<'_> {
                 FontId::proportional(13.0),
                 Color32::from_rgb(235, 170, 90),
             );
+        }
+    }
+
+    /// The canvas palette: one floating list serving both ways of asking for a
+    /// node (right-click, or a wire let go over empty canvas), drawn in SCREEN
+    /// space so it stays readable at any zoom. Closes on pick, Escape, or a
+    /// click outside — never on the very gesture that opened it.
+    fn shader_graph_palette(&mut self, ui: &mut egui::Ui, stage: Stage, acts: &mut Vec<Act>) {
+        let Some(p) = self.shader_graph.palette.as_ref() else { return };
+        let (screen, at, fresh) = (p.screen, p.at, p.fresh);
+        let hint = match &p.link {
+            Some(Link::FeedInto(_)) => Some("what feeds this input?"),
+            Some(Link::TakeFrom(..)) => Some("what takes this value?"),
+            None => None,
+        };
+        let mut search = std::mem::take(&mut self.shader_graph.palette_search);
+        let mut picked: Option<AddFn> = None;
+        let area = egui::Area::new(ui.id().with("sg-palette"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen)
+            .constrain(true)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::menu(ui.style()).show(ui, |ui| {
+                    picked = palette_ui(ui, stage, &mut search, at, hint);
+                });
+            });
+        self.shader_graph.palette_search = search;
+
+        if let Some(add) = picked {
+            let link = self.shader_graph.palette.take().and_then(|p| p.link);
+            acts.push(Act::Add { add, link });
+            return;
+        }
+        let outside = ui.input(|i| i.pointer.any_click())
+            && ui
+                .input(|i| i.pointer.interact_pos())
+                .is_none_or(|pos| !area.response.rect.contains(pos));
+        if !fresh && (outside || ui.input(|i| i.key_pressed(egui::Key::Escape))) {
+            self.shader_graph.palette = None;
+        } else if let Some(p) = self.shader_graph.palette.as_mut() {
+            p.fresh = false;
         }
     }
 
@@ -1168,6 +1667,14 @@ impl EditorTabViewer<'_> {
                 acts.push(Act::Duplicate(targets.clone()));
                 ui.close();
             }
+            if ui
+                .button(format!("📋 Copy{word}"))
+                .on_hover_text("Ctrl+C — paste into this shader or another one with Ctrl+V")
+                .clicked()
+            {
+                acts.push(Act::Copy(targets.clone()));
+                ui.close();
+            }
             if !matches!(n.key, NodeKey::Out) && ui.button(format!("🗑 Delete{word}")).clicked() {
                 acts.push(Act::Delete(targets));
                 ui.close();
@@ -1260,7 +1767,8 @@ impl EditorTabViewer<'_> {
             let dot = Rect::from_center_size(at, egui::vec2(16.0, 16.0));
             let dresp = ui
                 .interact(dot, id.with(("in", i)), Sense::click_and_drag())
-                .on_hover_cursor(CursorIcon::PointingHand);
+                .on_hover_cursor(CursorIcon::PointingHand)
+                .on_hover_text(port_tip(n, i, port));
             let col = port_color(ui, port.ty, port.is_texture);
             if port.wired.is_some() {
                 ui.painter().circle_filled(at, if dresp.hovered() { 6.0 } else { 4.5 }, col);
@@ -1306,7 +1814,8 @@ impl EditorTabViewer<'_> {
                                 .color(ui.visuals().text_color()),
                         )
                         .selectable(false),
-                    );
+                    )
+                    .on_hover_text(port_tip(n, i, port));
                     if let Some(v) = &port.inline {
                         self.inline_editor(ui, id.with(("val", i)), port.site, v, acts);
                     }
@@ -1343,6 +1852,10 @@ impl EditorTabViewer<'_> {
                             }, acts);
                         });
                     });
+                    // The image the slot shows: pickable right here, so a
+                    // texture shader previews its real art before it is ever
+                    // on a material. Materials still override per-node.
+                    self.texture_slot_picker(ui, salted(1), id, ir, &name, acts);
                 }
             }
             NodeKind::Swizzle(sw) => {
@@ -1442,6 +1955,74 @@ impl EditorTabViewer<'_> {
                 StrokeKind::Inside,
             );
         }
+    }
+
+    /// The texture slot's image row: an asset picker writing the slot's
+    /// `texture name = "path"` default.
+    ///
+    /// This is what makes a texture graph legible. Before it, a slot had a
+    /// name and nothing else: every `sample()` downstream previewed against
+    /// the checkerboard fallback, so the one node kind whose whole job is to
+    /// bring an image in was the one node kind you could not see.
+    fn texture_slot_picker(
+        &mut self,
+        ui: &mut egui::Ui,
+        row: UiBuilder,
+        id: egui::Id,
+        ir: &ShaderIr,
+        slot: &str,
+        acts: &mut Vec<Act>,
+    ) {
+        let current = ir.texture_defaults.get(slot).cloned();
+        // A scene material may be overriding this slot — say so, because the
+        // preview follows the material and the mismatch is otherwise a mystery.
+        // Read from the once-per-frame snapshot: asking the ECS again for every
+        // texture node, every frame, is a full component scan per node.
+        let override_path = self.shader_graph.mat_slots.get(slot).cloned();
+        ui.scope_builder(row, |ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+            ui.horizontal_centered(|ui| {
+                ui.add(egui::Label::new(egui::RichText::new("image").small()).selectable(false));
+                let label = current
+                    .as_deref()
+                    .and_then(|p| Path::new(p).file_name())
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "none".into());
+                let picked = crate::ui_widgets::asset_picker(
+                    ui,
+                    id.with("texdefault"),
+                    self.project_root,
+                    &label,
+                    Some("none"),
+                    self.asset_tree,
+                    crate::assets::is_texture,
+                    104.0,
+                );
+                if let Some(pick) = picked {
+                    let slot = slot.to_string();
+                    acts.push(Act::Commit {
+                        edit: Box::new(move |ir| graph::set_texture_default(ir, &slot, pick)),
+                        strict: false,
+                    });
+                }
+                if let Some(over) = &override_path {
+                    let file = Path::new(over)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| over.clone());
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("⬈").small().color(Color32::from_rgb(230, 180, 90)),
+                        )
+                        .selectable(false),
+                    )
+                    .on_hover_text(format!(
+                        "a Material in the scene overrides this slot with {file} — that's what \
+                         the previews show"
+                    ));
+                }
+            });
+        });
     }
 
     /// The uniform node's body: name, type, default value, range — the
@@ -1724,9 +2305,13 @@ fn palette_ui(
     stage: Stage,
     search: &mut String,
     at: (f32, f32),
-) -> Option<Act> {
-    let mut out: Option<Act> = None;
+    hint: Option<&str>,
+) -> Option<AddFn> {
+    let mut out: Option<AddFn> = None;
     ui.set_min_width(240.0);
+    if let Some(hint) = hint {
+        ui.add(egui::Label::new(egui::RichText::new(hint).small().weak()).selectable(false));
+    }
     let resp = ui.add(egui::TextEdit::singleline(search).hint_text("🔍 add node…"));
     if ui.memory(|m| m.focused().is_none()) {
         resp.request_focus();
@@ -1736,9 +2321,9 @@ fn palette_ui(
     let hit = |name: &str, doc: &str| {
         q.is_empty() || name.to_lowercase().contains(&q) || doc.to_lowercase().contains(&q)
     };
-    let mut entry = |ui: &mut egui::Ui, label: String, doc: &str, act: Act| {
+    let mut entry = |ui: &mut egui::Ui, label: String, doc: &str, add: AddFn| {
         if ui.button(label).on_hover_text(doc).clicked() {
-            out = Some(act);
+            out = Some(add);
         }
     };
 
@@ -1759,10 +2344,7 @@ fn palette_ui(
             ui.add(egui::Label::new(egui::RichText::new("values").small().weak()).selectable(false));
             for (name, doc, f) in values {
                 if hit(name, doc) {
-                    entry(ui, name.to_string(), doc, Act::Commit {
-                        edit: Box::new(move |ir| f(ir, at).map(|_| ())),
-                        strict: false,
-                    });
+                    entry(ui, name.to_string(), doc, Box::new(move |ir| f(ir, at)));
                 }
             }
         }
@@ -1772,10 +2354,12 @@ fn palette_ui(
             ui.add(egui::Label::new(egui::RichText::new("inputs").small().weak()).selectable(false));
             for i in ins {
                 if hit(i.name(), "input") {
-                    entry(ui, i.name().to_string(), "a built-in value from the engine", Act::Commit {
-                        edit: Box::new(move |ir| graph::add_input_node(ir, i, at).map(|_| ())),
-                        strict: false,
-                    });
+                    entry(
+                        ui,
+                        i.name().to_string(),
+                        "a built-in value from the engine",
+                        Box::new(move |ir| graph::add_input_node(ir, i, at)),
+                    );
                 }
             }
         }
@@ -1790,10 +2374,12 @@ fn palette_ui(
             ui.add(egui::Label::new(egui::RichText::new("operators").small().weak()).selectable(false));
             for (name, op) in ops {
                 if hit(name, "operator math") {
-                    entry(ui, name.to_string(), "combine two values", Act::Commit {
-                        edit: Box::new(move |ir| graph::add_binary_node(ir, op, at).map(|_| ())),
-                        strict: false,
-                    });
+                    entry(
+                        ui,
+                        name.to_string(),
+                        "combine two values",
+                        Box::new(move |ir| graph::add_binary_node(ir, op, at)),
+                    );
                 }
             }
         }
@@ -1808,10 +2394,7 @@ fn palette_ui(
             }
             ui.add(egui::Label::new(egui::RichText::new(cat).small().weak()).selectable(false));
             for op in ops {
-                entry(ui, op.name.to_string(), op.doc, Act::Commit {
-                    edit: Box::new(move |ir| graph::add_op_node(ir, op, at).map(|_| ())),
-                    strict: false,
-                });
+                entry(ui, op.name.to_string(), op.doc, Box::new(move |ir| graph::add_op_node(ir, op, at)));
             }
         }
     });
@@ -1864,6 +2447,96 @@ fn draw_wire(p: &egui::Painter, a: Pos2, b: Pos2, color: Color32, width: f32) {
         Color32::TRANSPARENT,
         Stroke::new(width, color),
     ));
+}
+
+/// One node and where it should sit — what `Act::Place` moves.
+type Placed = (NodeKey, (f32, f32));
+
+/// Even the gaps between the selected nodes along one axis, keeping the two
+/// end nodes exactly where they are (so a spread never walks the graph away).
+fn spread(moves: &mut [Placed], horizontal: bool) {
+    if moves.len() < 3 {
+        return;
+    }
+    let axis = |p: &(f32, f32)| if horizontal { p.0 } else { p.1 };
+    let mut order: Vec<usize> = (0..moves.len()).collect();
+    order.sort_by(|&a, &b| axis(&moves[a].1).total_cmp(&axis(&moves[b].1)));
+    let lo = axis(&moves[order[0]].1);
+    let hi = axis(&moves[*order.last().unwrap()].1);
+    let step = (hi - lo) / (order.len() - 1) as f32;
+    for (rank, &i) in order.iter().enumerate() {
+        let v = lo + step * rank as f32;
+        if horizontal {
+            moves[i].1.0 = v;
+        } else {
+            moves[i].1.1 = v;
+        }
+    }
+}
+
+/// What one input port wants, in a sentence — the type it takes, whether it's
+/// required, and what it currently carries. A graph teaches types by hovering
+/// or it doesn't teach them at all: the dot's color says "vec3" only to
+/// somebody who already knows.
+fn port_tip(n: &GNode, i: usize, port: &GPort) -> String {
+    let mut s = port.label.clone();
+    if let NodeKind::Op(spec) = &n.kind
+        && let Some(sig) = spec.inputs.get(i)
+    {
+        let want = match sig.ty {
+            stdlib::SigTy::Exact(t) => t.flsl().to_string(),
+            stdlib::SigTy::Generic => "any number or vector".into(),
+            stdlib::SigTy::GenericVec => "vec2 or vec3".into(),
+            stdlib::SigTy::Texture => "a texture slot".into(),
+            stdlib::SigTy::Str => "a name".into(),
+        };
+        s.push_str(&format!(": {want}"));
+        match sig.default {
+            Some(d) => s.push_str(&format!(" — optional, {d} when left alone")),
+            None => s.push_str(" — required"),
+        }
+    } else if let Some(t) = port.ty {
+        s.push_str(&format!(": {}", t.flsl()));
+    }
+    match (&port.wired, &port.inline) {
+        (Some(src), _) => s.push_str(&format!("\n{}", source_label(src))),
+        (None, Some(InlineVal::Missing)) => s.push_str("\nnothing wired in yet"),
+        _ => {}
+    }
+    s
+}
+
+/// How this node's value becomes the picture in its preview tile — the rule
+/// [`floptle_shader::preview::target_vis`] applies, said in words. Without it
+/// the tiles are a puzzle: a float shows up grey, a vec2 is missing its blue,
+/// and an sdf tile isn't a color at all but a distance read-out.
+fn preview_reading(stage: Stage, n: &GNode) -> &'static str {
+    if stage == Stage::Sdf && matches!(n.ty, Some(Ty::Float)) {
+        return "shown as distance — blue inside, amber outside, white at the surface";
+    }
+    match n.kind {
+        NodeKind::Texture(_) => "the slot's image, sampled across the tile",
+        NodeKind::Out => "the finished shader",
+        _ => match n.ty {
+            Some(Ty::Float) => "shown as grey (0 black → 1 white)",
+            Some(Ty::Vec2) => "shown as red = x, green = y",
+            Some(Ty::Vec3) => "shown as red/green/blue",
+            Some(Ty::Vec4) => "shown as color over a checker (alpha shows through)",
+            None => "",
+        },
+    }
+}
+
+/// A one-line "where this port's value comes from", for the focus panel.
+fn source_label(src: &NodeKey) -> String {
+    match src {
+        NodeKey::Let(n) => format!("← {n}"),
+        NodeKey::Input(i) => format!("← {} (engine)", i.name()),
+        NodeKey::Uniform(n) => format!("← {n} (knob)"),
+        NodeKey::Texture(n) => format!("← {n} (slot)"),
+        NodeKey::Anon(_) => "← the node beside it".into(),
+        NodeKey::Out => "← output".into(),
+    }
 }
 
 /// Port dot color by value type (the legend beginners learn by osmosis).

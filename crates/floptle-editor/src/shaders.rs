@@ -88,10 +88,14 @@ impl Editor {
                 &|name| mat.shader_params.get(name).copied(),
                 &|slot| mat.shader_tiling.get(slot).map(tiling_pack),
             );
+            // The material's override wins; a slot it leaves empty falls back to
+            // the image the shader itself declares, so a texture shader looks
+            // right the moment it's assigned instead of sampling nothing.
             let slot_paths = compiled
                 .textures
                 .iter()
-                .map(|slot| mat.shader_textures.get(slot).cloned())
+                .zip(&compiled.texture_defaults)
+                .map(|(slot, dflt)| mat.shader_textures.get(slot).cloned().or_else(|| dflt.clone()))
                 .collect();
             plans.push(Plan { e: *e, shader: *shader, params, slot_paths });
         }

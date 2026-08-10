@@ -374,6 +374,36 @@ shader duo {
         assert_eq!(print(&reparsed), printed);
     }
 
+    /// A texture slot can carry its own image, so a shader shows its real art
+    /// in the graph's previews before any material exists. The path rides the
+    /// slot through print/parse and out to the compiled binding order.
+    #[test]
+    fn a_texture_slot_carries_its_default_image() {
+        const SRC: &str = "shader t {\n  stage fragment\n  texture ramp = \"art/ramp.png\"\n  \
+                           texture mask\n  output color = sample(ramp, uv) * sample(mask, uv)\n}\n";
+        let ir = parse(SRC).expect("parses");
+        assert_eq!(ir.textures, vec!["ramp".to_string(), "mask".to_string()]);
+        assert_eq!(ir.texture_defaults.get("ramp").map(String::as_str), Some("art/ramp.png"));
+        assert!(!ir.texture_defaults.contains_key("mask"), "a bare slot has no default");
+
+        let printed = print(&ir);
+        assert!(printed.contains("texture ramp = \"art/ramp.png\""), "printed:\n{printed}");
+        let reparsed = parse(&printed).expect("reprint parses");
+        assert!(ir.same_shader(&reparsed), "the default survives the round trip:\n{printed}");
+        assert_eq!(print(&reparsed), printed);
+
+        // …and reaches the host that binds it, aligned with the slot order.
+        let compiled = compile_fragment(SRC).expect("compiles");
+        assert_eq!(compiled.texture_defaults, vec![Some("art/ramp.png".to_string()), None]);
+
+        // A slot renamed in the graph keeps its image; deleting it drops it.
+        let mut ir = ir;
+        graph::rename_texture(&mut ir, "ramp", "gradient").expect("renames");
+        assert_eq!(ir.texture_defaults.get("gradient").map(String::as_str), Some("art/ramp.png"));
+        graph::set_texture_default(&mut ir, "gradient", None).expect("clears");
+        assert!(ir.texture_defaults.is_empty());
+    }
+
     #[test]
     fn checks_and_transpiles_to_valid_wgsl() {
         let compiled = compile_fragment(PLASMA).expect("compiles");

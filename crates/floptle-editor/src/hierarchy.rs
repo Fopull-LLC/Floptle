@@ -341,6 +341,21 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             pick = Some(MatterDoc::FieldShape { radius: 1.5 });
             ui.close();
         }
+        if ui
+            .button("☀ Light Probes")
+            .on_hover_text(
+                "baked bounce light: a box you place over the space, then Bake in the \
+                 Inspector. Inside it, flat ambient is replaced by what the surrounding \
+                 surfaces actually reflect. Saved as a .fgi beside the scene.",
+            )
+            .clicked()
+        {
+            // One source of defaults (`Matter::default_light_probes`): a
+            // room-sized box at one probe per two metres and a fast first bake,
+            // which is the right thing to drop in and press Bake on.
+            pick = Some(MatterDoc::from(&Matter::default_light_probes()));
+            ui.close();
+        }
         if ui.button("◎ Skybox").on_hover_text("the scene environment background (solid color or equirect texture)").clicked() {
             pick = Some(MatterDoc::from(&Matter::default_skybox()));
             ui.close();

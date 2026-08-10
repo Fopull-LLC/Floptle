@@ -813,22 +813,33 @@ pub(crate) fn material_props_ui(
                         r.changed |= shader_uniform_rows(ui, &compiled.uniforms, &mut m.shader_params);
                         for (i, slot) in compiled.textures.iter().enumerate() {
                             ui.label(slot);
+                            let file_of = |p: &str| {
+                                Path::new(p)
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| p.to_string())
+                            };
+                            // Empty here means the shader's own default binds —
+                            // name it, so "none" never lies about what renders.
+                            let dflt = compiled
+                                .texture_defaults
+                                .get(i)
+                                .and_then(|d| d.as_deref());
+                            let empty = match dflt {
+                                Some(p) => format!("{} (shader)", file_of(p)),
+                                None => "none".into(),
+                            };
                             let cur = m
                                 .shader_textures
                                 .get(slot)
-                                .map(|p| {
-                                    Path::new(p)
-                                        .file_name()
-                                        .map(|s| s.to_string_lossy().to_string())
-                                        .unwrap_or_else(|| p.clone())
-                                })
-                                .unwrap_or_else(|| "none".into());
+                                .map(|p| file_of(p))
+                                .unwrap_or_else(|| empty.clone());
                             if let Some(pick) = crate::ui_widgets::asset_picker(
                                 ui,
                                 salt.with(("mat_shader_tex", i)),
                                 project_root,
                                 &cur,
-                                Some("none"),
+                                Some(empty.as_str()),
                                 asset_tree,
                                 crate::assets::is_texture,
                                 160.0,

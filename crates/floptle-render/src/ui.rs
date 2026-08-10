@@ -445,6 +445,11 @@ pub struct Ui {
     // (kept for late pipeline builds), the registered pipelines, and the
     // per-element param bindings.
     globals_layout: wgpu::BindGroupLayout,
+    /// group(1): the RASTER SURFACE layout, so a registered project texture
+    /// binds straight into a UI draw. See `Ui::new` — this is not the same
+    /// shape as `tex_layout` and has not been since the surface grew its
+    /// material maps.
+    elem_layout: wgpu::BindGroupLayout,
     tex_layout: wgpu::BindGroupLayout,
     /// The element sampler, kept so a grown atlas can be re-bound.
     tex_sampler: wgpu::Sampler,
@@ -546,8 +551,24 @@ impl Ui {
                 count: None,
             }],
         });
-        // Group 1 mirrors the raster material-texture layout, so project
-        // textures bind here without re-registration (same trick particles use).
+        // Group 1 IS the raster material-texture layout, so project textures
+        // bind here without re-registration (the same trick particles use).
+        //
+        // Taken from `raster::surface_bind_layout` rather than written out
+        // again, because a hand-copied mirror of it is a mirror that goes
+        // stale: it did, when the surface grew from one texture to five
+        // (base + normal + roughness + metallic + occlusion). A `ui.image`
+        // pointing at a project texture then bound a ten-entry group into a
+        // two-entry pipeline layout and took the process down on the first
+        // frame that drew one — which is every menu in every game.
+        //
+        // The shader still only declares bindings 0 and 1; the other four
+        // pairs are present in the layout and simply unused, which is exactly
+        // how particles.wgsl reads the same group.
+        let elem_layout = crate::raster::surface_bind_layout(device);
+        // The PLAIN texture+sampler shape, for the two internal groups that are
+        // never a project texture: the backdrop (group 3) and the capture blit's
+        // own source (group 0).
         let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ui-tex"),
             entries: &[
@@ -571,7 +592,7 @@ impl Ui {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ui"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&tex_layout)],
+            bind_group_layouts: &[Some(&globals_layout), Some(&elem_layout)],
             immediate_size: 0,
         });
         // One pipeline per blend mode. Only the colour-target blend state
@@ -677,21 +698,7 @@ impl Ui {
             ..Default::default()
         });
         let make_tex_bind = |tex: &wgpu::Texture, label: &str| {
-            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout: &tex_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&sampler),
-                    },
-                ],
-            })
+            make_elem_bind(device, &elem_layout, &sampler, tex, label)
         };
 
         let white = device.create_texture(&wgpu::TextureDescriptor {
@@ -875,6 +882,7 @@ impl Ui {
             quad_vbuf,
             quad_ibuf,
             globals_layout,
+            elem_layout,
             tex_layout,
             tex_sampler: sampler,
             params_layout,
@@ -1027,7 +1035,7 @@ impl Ui {
             label: Some("ui-flsl"),
             bind_group_layouts: &[
                 Some(&self.globals_layout),
-                Some(&self.tex_layout),
+                Some(&self.elem_layout),
                 Some(&self.params_layout),
                 // group(3) = the backdrop (scene behind the UI). Reuses the
                 // texture+sampler layout; always bound (a 1×1 default when no
@@ -1365,9 +1373,9 @@ impl Ui {
         keep.sort_unstable_by(|a, b| b.2.cmp(&a.2).then(a.cmp(b)));
 
         self.atlas = make_atlas(&gpu.device, self.atlas_size);
-        self.atlas_bind = make_tex_bind_with(
+        self.atlas_bind = make_elem_bind(
             &gpu.device,
-            &self.tex_layout,
+            &self.elem_layout,
             &self.tex_sampler,
             &self.atlas,
             "ui-atlas",
@@ -2001,9 +2009,14 @@ fn make_atlas(device: &wgpu::Device, size: u32) -> wgpu::Texture {
     })
 }
 
-/// The element bind group for a texture — the standalone form of `Ui::new`'s
-/// `make_tex_bind`, callable after construction (a grown atlas needs re-binding).
-fn make_tex_bind_with(
+/// A group(1) ELEMENT bind for one texture, in the raster surface shape.
+///
+/// The UI has one picture per element, and the surface layout has five slots —
+/// so the same view and sampler fill all five. The four extra slots are never
+/// read (ui.wgsl declares bindings 0 and 1 only); they exist so that this bind
+/// and a raster material's bind are the same shape, which is what lets a
+/// project texture be drawn by the UI without re-registering it.
+fn make_elem_bind(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
@@ -2011,14 +2024,8 @@ fn make_tex_bind_with(
     label: &str,
 ) -> wgpu::BindGroup {
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some(label),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
-        ],
-    })
+    let slot = (&view, sampler);
+    crate::raster::make_surface_bind(device, layout, label, [slot, slot, slot, slot, slot])
 }
 
 /// Draw the ▯ box into the atlas's reserved top-left corner: a hollow square

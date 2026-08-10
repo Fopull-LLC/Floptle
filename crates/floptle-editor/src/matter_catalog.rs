@@ -155,6 +155,7 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
         ("⬇  Gravity Volume", Matter::GravityVolume { mode: GravityMode::Down, strength: 9.81, radius: 20.0 }),
         ("≈  Water Volume", Matter::default_water()),
         ("◈  Field Shape", Matter::FieldShape { radius: 1.5 }),
+        ("☀  Light Probes", Matter::default_light_probes()),
         ("◎  Skybox", Matter::default_skybox()),
     ]
 }

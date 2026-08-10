@@ -617,8 +617,10 @@ pub fn node_height(n: &GNode) -> f32 {
         // Uniform nodes carry meta editors (name/type/default/range rows).
         NodeKind::Uniform(_) => 4.0 * NODE_ROW_H,
         NodeKind::Swizzle(_) => NODE_ROW_H,
-        // Constants: a type-switch row; textures: a name row.
-        NodeKind::Constant(_) | NodeKind::Texture(_) => NODE_ROW_H,
+        // Constants: a type-switch row.
+        NodeKind::Constant(_) => NODE_ROW_H,
+        // Textures: a slot-name row + the image picker that fills it.
+        NodeKind::Texture(_) => 2.0 * NODE_ROW_H,
         _ => 0.0,
     };
     NODE_HEADER_H + n.inputs.len() as f32 * NODE_ROW_H + extra + 8.0
@@ -1287,6 +1289,7 @@ pub fn delete_node(ir: &mut ShaderIr, key: &NodeKey) -> Result<(), EditError> {
             }
             ir.textures.remove(t);
             ir.layout.remove(&format!("tex.{name}"));
+            ir.texture_defaults.remove(name);
             for e in ir.exprs.iter_mut() {
                 if let ExprKind::Texture(x) = &mut e.kind
                     && *x > t
@@ -1365,7 +1368,44 @@ pub fn rename_texture(ir: &mut ShaderIr, old: &str, new: &str) -> Result<(), Edi
     if let Some(pos) = ir.layout.remove(&format!("tex.{old}")) {
         ir.layout.insert(format!("tex.{new}"), pos);
     }
+    if let Some(path) = ir.texture_defaults.remove(old) {
+        ir.texture_defaults.insert(new.to_string(), path);
+    }
     Ok(())
+}
+
+/// Set (or clear) a texture slot's default image — the picker on the slot node.
+/// Paths are stored exactly as the asset browser gives them (project-relative);
+/// `resolve_asset_path` does the rest.
+pub fn set_texture_default(
+    ir: &mut ShaderIr,
+    name: &str,
+    path: Option<String>,
+) -> Result<(), EditError> {
+    if !ir.textures.iter().any(|t| t == name) {
+        return Err("stale texture".into());
+    }
+    match path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) {
+        Some(p) => ir.texture_defaults.insert(name.to_string(), p),
+        None => ir.texture_defaults.remove(name),
+    };
+    Ok(())
+}
+
+/// Where a value dropped ONTO a node should land: the first input port whose
+/// texture-ness matches what's being dropped, else simply the first input.
+///
+/// This is what closes the loop on dragging a wire into empty canvas — the
+/// artist picks a node from the palette and the wire finishes itself, instead
+/// of the wire evaporating and leaving them to aim at a 16-pixel dot.
+pub fn first_input_site(ir: &ShaderIr, key: &NodeKey, texture: bool) -> Option<Site> {
+    let view = build_view(ir, None);
+    let n = view.iter().find(|n| n.key == *key)?;
+    n.inputs
+        .iter()
+        .find(|p| p.is_texture == texture)
+        .or_else(|| n.inputs.first())
+        .map(|p| p.site)
 }
 
 /// Persist a node position (dragging an anonymous node names it first —
@@ -1447,6 +1487,145 @@ pub fn duplicate_nodes(ir: &mut ShaderIr, keys: &[NodeKey]) -> Result<Vec<NodeKe
         out.push(NodeKey::Let(fresh));
     }
     sort_lets(ir).map_err(|_| "loop".to_string())?;
+    Ok(out)
+}
+
+/// Graft nodes from ANOTHER shader (or the same one) into `ir` as fresh named
+/// lets, placed around `at`. The pasted chunk is self-contained: a `let` the
+/// selection reads but doesn't include comes along too, and a knob or texture
+/// slot it reads is re-declared here unless a slot of that name already exists
+/// (in which case it binds to the local one — pasting into a shader that
+/// already has `tint` should use YOUR `tint`).
+///
+/// Returns the pasted nodes' keys, in the order they were asked for.
+pub fn paste_nodes(
+    ir: &mut ShaderIr,
+    from: &ShaderIr,
+    keys: &[NodeKey],
+    at: (f32, f32),
+) -> Result<Vec<NodeKey>, EditError> {
+    /// Source let index → the name it took in the destination.
+    type Names = BTreeMap<usize, String>;
+
+    fn ensure_uniform(ir: &mut ShaderIr, from: &ShaderIr, u: usize) -> Option<usize> {
+        let src = from.uniforms.get(u)?;
+        if let Some(i) = ir.uniforms.iter().position(|x| x.name == src.name) {
+            return Some(i);
+        }
+        ir.uniforms.push(src.clone());
+        Some(ir.uniforms.len() - 1)
+    }
+
+    fn ensure_texture(ir: &mut ShaderIr, from: &ShaderIr, t: usize) -> Option<usize> {
+        let name = from.textures.get(t)?;
+        if let Some(i) = ir.textures.iter().position(|x| x == name) {
+            return Some(i);
+        }
+        ir.textures.push(name.clone());
+        if let Some(p) = from.texture_defaults.get(name) {
+            ir.texture_defaults.insert(name.clone(), p.clone());
+        }
+        Some(ir.textures.len() - 1)
+    }
+
+    /// Deep-copy one source expression into `ir`, pulling in whatever it reads.
+    fn copy_expr(
+        ir: &mut ShaderIr,
+        from: &ShaderIr,
+        at: ExprId,
+        names: &mut Names,
+        depth: usize,
+    ) -> ExprId {
+        if depth > 256 {
+            return push(ir, ExprKind::Num(0.0));
+        }
+        let kind = match from.expr(at).kind.clone() {
+            ExprKind::Let(l) => {
+                let name = copy_let(ir, from, l, names, depth + 1);
+                match ir.lets.iter().position(|(n, _)| *n == name) {
+                    Some(i) => ExprKind::Let(i),
+                    // The dependency couldn't be brought over — a zero is an
+                    // honest, checkable stand-in for "this came from elsewhere".
+                    None => ExprKind::Num(0.0),
+                }
+            }
+            ExprKind::Uniform(u) => match ensure_uniform(ir, from, u) {
+                Some(i) => ExprKind::Uniform(i),
+                None => ExprKind::Num(0.0),
+            },
+            ExprKind::Texture(t) => match ensure_texture(ir, from, t) {
+                Some(i) => ExprKind::Texture(i),
+                None => ExprKind::Num(0.0),
+            },
+            ExprKind::Call { op, args } => ExprKind::Call {
+                op,
+                args: args
+                    .into_iter()
+                    .map(|a| CallArg {
+                        name: a.name,
+                        value: copy_expr(ir, from, a.value, names, depth + 1),
+                    })
+                    .collect(),
+            },
+            ExprKind::Binary(op, a, b) => {
+                let (a, b) = (
+                    copy_expr(ir, from, a, names, depth + 1),
+                    copy_expr(ir, from, b, names, depth + 1),
+                );
+                ExprKind::Binary(op, a, b)
+            }
+            ExprKind::Neg(a) => ExprKind::Neg(copy_expr(ir, from, a, names, depth + 1)),
+            ExprKind::Swizzle(a, sw) => {
+                ExprKind::Swizzle(copy_expr(ir, from, a, names, depth + 1), sw)
+            }
+            leaf => leaf,
+        };
+        push(ir, kind)
+    }
+
+    /// Copy source let `l` (once), returning the name it has here.
+    fn copy_let(
+        ir: &mut ShaderIr,
+        from: &ShaderIr,
+        l: usize,
+        names: &mut Names,
+        depth: usize,
+    ) -> String {
+        if let Some(n) = names.get(&l) {
+            return n.clone();
+        }
+        let Some((src_name, root)) = from.lets.get(l).cloned() else { return String::new() };
+        // Reserve the name BEFORE recursing: a malformed source with a cycle
+        // must not spin here (the parser forbids one, a hand-edited file may not).
+        let name = fresh_name(ir, &src_name);
+        names.insert(l, name.clone());
+        let copy = copy_expr(ir, from, root, names, depth + 1);
+        ir.lets.push((name.clone(), copy));
+        name
+    }
+
+    let mut names: Names = BTreeMap::new();
+    let mut out = Vec::new();
+    for (i, key) in keys.iter().enumerate() {
+        // Anonymous nodes have no identity across a reprint, so a paste only
+        // carries what has a name — which is also what the artist can see.
+        let l = match key {
+            NodeKey::Let(n) => from.lets.iter().position(|(x, _)| x == n),
+            _ => None,
+        };
+        let Some(l) = l else { continue };
+        let name = copy_let(ir, from, l, &mut names, 0);
+        if name.is_empty() {
+            continue;
+        }
+        let step = i as f32 * 28.0;
+        ir.layout.insert(name.clone(), ((at.0 + step).round(), (at.1 + step).round()));
+        out.push(NodeKey::Let(name));
+    }
+    if out.is_empty() {
+        return Err("nothing pasteable was copied (name the nodes you want to carry over)".into());
+    }
+    sort_lets(ir).map_err(|_| "the pasted nodes would form a loop".to_string())?;
     Ok(out)
 }
 
@@ -1855,6 +2034,68 @@ shader plasma {
         let ir = reload(&ir);
         crate::ir::check(&ir).expect("checks after renames");
         assert_eq!(ir.layout.get("melted"), Some(&(120.0, 80.0)), "layout followed the rename");
+    }
+
+    /// Copying nodes between two shaders carries everything the chunk needs to
+    /// still mean something over there — the lets it reads, the knobs it reads,
+    /// the texture slot and the image on it — while a name that already exists
+    /// in the destination binds to the LOCAL one.
+    #[test]
+    fn pasting_carries_a_chunk_into_another_shader() {
+        let from = parse(PLASMA).unwrap();
+        let mut into = parse(
+            "shader b {\n  stage fragment\n  uniform tint: color = #202020\n  \
+             output color = vec4(1, 0, 0, 1)\n}\n",
+        )
+        .unwrap();
+        // `hue` reads `n`, which reads `warped`, which reads the `speed` knob.
+        paste_nodes(&mut into, &from, &[NodeKey::Let("hue".into())], (40.0, 60.0)).unwrap();
+
+        let names: Vec<&str> = into.lets.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.iter().any(|n| n.starts_with("hue")), "the picked node came: {names:?}");
+        assert!(names.iter().any(|n| n.starts_with("warped")), "its chain came too: {names:?}");
+        assert!(
+            into.uniforms.iter().any(|u| u.name == "speed"),
+            "the knob it reads was declared here"
+        );
+        assert_eq!(
+            into.uniforms.iter().filter(|u| u.name == "tint").count(),
+            1,
+            "a name the destination already had is NOT duplicated"
+        );
+        // The graft is a real shader: it prints, parses and type-checks.
+        let printed = crate::text::print(&into);
+        let re = parse(&printed).unwrap_or_else(|e| panic!("paste reparses: {}\n{printed}", e.message));
+        crate::ir::check(&re).unwrap_or_else(|e| panic!("paste checks: {}\n{printed}", e[0].message));
+    }
+
+    /// A texture slot pastes WITH the image on it — otherwise the copy arrives
+    /// showing the checkerboard, which is the exact thing slot defaults exist
+    /// to prevent.
+    #[test]
+    fn pasting_carries_a_texture_slots_image() {
+        let from = parse(
+            "shader a {\n  stage fragment\n  texture ramp = \"art/ramp.png\"\n  \
+             let lit = sample(ramp, uv)\n  output color = lit\n}\n",
+        )
+        .unwrap();
+        let mut into = parse("shader b {\n  stage fragment\n  output color = vec4(0,0,0,1)\n}\n").unwrap();
+        paste_nodes(&mut into, &from, &[NodeKey::Let("lit".into())], (0.0, 0.0)).unwrap();
+        assert_eq!(into.textures, vec!["ramp".to_string()]);
+        assert_eq!(into.texture_defaults.get("ramp").map(String::as_str), Some("art/ramp.png"));
+    }
+
+    /// A wire dropped on empty canvas finds the port the picked node offers —
+    /// and a texture wire skips past value ports to the slot one.
+    #[test]
+    fn a_dropped_wire_finds_the_right_port() {
+        let mut ir = parse(PLASMA).unwrap();
+        let key = add_op_node(&mut ir, stdlib::op("sample").unwrap(), (0.0, 0.0)).unwrap();
+        let tex = first_input_site(&ir, &key, true).expect("a texture port");
+        let val = first_input_site(&ir, &key, false).expect("a value port");
+        assert_ne!(tex, val, "the slot port and the uv port are different sites");
+        connect(&mut ir, &NodeKey::Input(Input::Uv), val).expect("uv wires into the value port");
+        crate::ir::check(&ir).expect("still checks");
     }
 
     #[test]

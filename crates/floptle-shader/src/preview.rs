@@ -59,6 +59,9 @@ pub struct CompiledPreview {
     pub uniforms: Vec<ir::Uniform>,
     /// Texture slot names in binding order (group(2), bindings 1+2i / 2+2i).
     pub textures: Vec<String>,
+    /// Each slot's declared default image, aligned with [`Self::textures`] —
+    /// what the host binds when no material overrides the slot.
+    pub texture_defaults: Vec<Option<String>>,
     /// Live-scalar slots: `(expr, lanes)` in lane order — read the expr's
     /// current literal each frame and upload into `PV.nums`.
     pub dyn_slots: Vec<(ExprId, u8)>,
@@ -66,6 +69,11 @@ pub struct CompiledPreview {
     pub tiles: usize,
     pub cols: u32,
     pub rows: u32,
+    /// The shader reads `time` somewhere, so its tiles change on their own.
+    /// A host that redraws the atlas every frame regardless is spending a
+    /// render pass — and a continuous repaint of the whole editor — on a
+    /// picture that cannot have changed.
+    pub animates: bool,
 }
 
 /// The tiles a graph view wants, in view order: one per node that draws a
@@ -231,10 +239,19 @@ pub fn transpile_preview(
         stage,
         uniforms: ir.uniforms.clone(),
         textures: ir.textures.clone(),
+        texture_defaults: ir
+            .textures
+            .iter()
+            .map(|t| ir.texture_defaults.get(t).cloned())
+            .collect(),
         dyn_slots,
         tiles: targets.len(),
         cols,
         rows,
+        // Over-reporting is the safe direction here: an unreachable leftover
+        // `time` in the arena costs a redraw, a missed one freezes the tile.
+        animates: ir.exprs.iter().any(|e| matches!(e.kind, ir::ExprKind::Input(Input::Time)))
+            || targets.contains(&PreviewTarget::Input(Input::Time)),
     })
 }
 

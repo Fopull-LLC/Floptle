@@ -291,6 +291,12 @@ pub struct ShaderIr {
     pub uniforms: Vec<Uniform>,
     /// Texture slot names, in declaration order (= group(3) binding order).
     pub textures: Vec<String>,
+    /// Per-slot DEFAULT image (`texture ramp = "art/ramp.png"`), keyed by slot
+    /// name. Semantic, not cosmetic: a slot with a default binds that image
+    /// everywhere the material leaves the slot empty — which is what makes a
+    /// texture shader show its art in the graph's previews (and on a fresh
+    /// material) instead of a checkerboard nobody can read.
+    pub texture_defaults: BTreeMap<String, String>,
     /// The expression arena. `lets` and `outputs` index into it.
     pub exprs: Vec<Expr>,
     /// Ordered named bindings — each is a graph node the artist named.
@@ -323,6 +329,7 @@ impl ShaderIr {
             || self.blend != other.blend
             || self.uniforms != other.uniforms
             || self.textures != other.textures
+            || self.texture_defaults != other.texture_defaults
             || self.lets.len() != other.lets.len()
             || self.outputs.len() != other.outputs.len()
         {
