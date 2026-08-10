@@ -1,5 +1,26 @@
 ## Just shipped
 
+**v0.50.0 "Show Your Work"** — if you have a project that worked on 0.41.1 and
+died on 0.49.0, this is the one to take: a UI element drawing an image from your
+project crashed the game on the frame that element first appeared, so any menu
+with a logo, a custom button face or an item icon was gone on its first frame.
+Open the project and it draws. The rest is the shader graph, which now shows you
+what your shader is doing. A **texture slot carries its own image**, picked right
+on the node — before this a slot was a name and nothing else, so the slot's
+thumbnail, the `sample()` reading it and the final colour all came back as a grey
+checkerboard, and the one node whose whole job is to bring a picture in was the
+one node you could not look at. That image binds wherever a material leaves the
+slot empty, so a texture shader looks right the moment you assign it. A new **▣
+focus panel** shows the selected node large with its type, what the op does,
+where each input comes from, and how its preview is being drawn — a float is
+grey, a vec2 is red and green, an sdf is a distance read-out — which is the
+difference between a wall of thumbnails and a picture you can read. **Let a wire
+go over empty canvas** and the palette opens there and connects what you pick;
+**Ctrl+C / Ctrl+V** carries a chunk of one shader into another, knobs and texture
+slots included. Baked lighting finally has a way in: **Add → ☀ Light Probes**,
+which shipped in 0.49.0 with no menu entry to create it. And the Shaders tab
+stops redrawing every node's preview every frame when nothing has changed.
+
 **v0.49.0 "All At Once"** — everything since 0.41.1, in one release. Materials
 have a **Physical** shading model with roughness, metallic and four surface maps,
 so metal behaves like metal. The scene is rendered in real light all the way
