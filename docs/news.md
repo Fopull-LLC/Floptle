@@ -1,5 +1,19 @@
 ## Just shipped
 
+**v0.54.0 "Where The Time Goes"** — a polished surface can finally be a mirror.
+Roughness 0 was sharp and everything above it fell off a cliff, so the only crisp
+reflection available was the one at exactly zero; the blur now follows the
+highlight the surface actually has, and a reflection of something close stays
+sharper than one of something far. **Project Settings ⏵ Rendering ⏵ Reflection
+detail** gives a probe four times the detail it used to capture, and two mirrors
+facing each other settle instead of climbing into a white blob
+(**Lighting ⏵ brightness cap**). New **Window ⏵ ⏱ Frame timing** says which part
+of a frame is slow rather than only that it is — pointed at a Backrooms-style
+interior it found volumetric fog asking every lamp for a full surface-lighting
+calculation and using two numbers out of it, and that scene now renders **2.6×
+faster**. Children parented to anything that is not a folder no longer disappear
+from the Hierarchy when a project is reopened.
+
 **v0.53.1** — the Scene view and the Game view agree again: reflections, contact
 shadows, shoreline foam and lamp shadows could be missing from one while working
 in the other, and could start working on their own after a resize. And if a small
