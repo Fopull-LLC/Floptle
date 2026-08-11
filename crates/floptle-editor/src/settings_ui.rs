@@ -498,6 +498,47 @@ impl<'a> SettingsCtx<'a> {
                 }
             },
         );
+        row(
+            ui,
+            "Reflection detail",
+            Some(
+                "how much detail a ◐ Reflection Probe's capture keeps. A probe's picture spans a \
+                 whole turn across its width, so this IS the finest thing a mirror in that room \
+                 can show — below it no roughness setting helps, and a polished surface reads as \
+                 frosted however it is authored. The cost is paid when a probe captures, not \
+                 every frame: standing still, all four cost the same",
+            ),
+            |ui| {
+                use floptle_scene::ProbeDetailDoc as D;
+                let mut d = project.probe_detail;
+                egui::ComboBox::from_id_salt("project-probe-detail")
+                    .selected_text(match d {
+                        D::Low => "low",
+                        D::Medium => "medium",
+                        D::High => "high",
+                        D::Ultra => "ultra",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut d, D::Low, "low").on_hover_text(
+                            "for projects where a probe is a hint of colour in a reflection \
+                             rather than something anybody looks into",
+                        );
+                        ui.selectable_value(&mut d, D::Medium, "medium")
+                            .on_hover_text("a reflected room reads as a room");
+                        ui.selectable_value(&mut d, D::High, "high").on_hover_text(
+                            "the default — a mirror can show a doorway as a doorway",
+                        );
+                        ui.selectable_value(&mut d, D::Ultra, "ultra").on_hover_text(
+                            "for a hero mirror. Sixteen times high's capture cost and 22 MB \
+                             across the four probe slots",
+                        );
+                    });
+                if d != project.probe_detail {
+                    project.probe_detail = d;
+                    out.save_project = true;
+                }
+            },
+        );
         row(ui, "Retro", Some("render at a low resolution and upscale"), |ui| {
             out.save_project |= ui.checkbox(&mut project.retro, "pixelization").changed();
         });

@@ -703,6 +703,9 @@ impl Editor {
             // scene asks for reflections and dropped when it stops asking, so
             // "absent" is its ordinary state and not a reason to skip the frame.
             scene_history,
+            // …and likewise: a device without timestamp queries has no timer, and
+            // that is a missing measurement, not a missing frame.
+            mut gpu_timer,
         ) = (
             self.gpu.as_mut(),
             self.raster.as_mut(),
@@ -718,6 +721,7 @@ impl Editor {
             self.window.as_ref(),
             self.post_shaders.as_ref(),
             &mut self.scene_history,
+            self.gpu_timer.as_mut(),
         ) else {
             return;
         };
@@ -727,6 +731,25 @@ impl Editor {
         // render target, the selection mask — and each of those passes reads pose
         // indices handed out by an earlier gather. Resetting between them would
         // leave the mask pointing at a table that had moved under it.
+        // ⏱ Open a timing frame. `begin` refuses while the previous frame's
+        // readback is still out, and `timing` carries that refusal to every mark
+        // below — a frame is measured whole or not at all, because half a frame's
+        // marks would report each pass against its neighbour's name.
+        let timing = self.gpu_timing_open
+            && gpu_timer.as_mut().map(|t| {
+                t.poll();
+                t.begin()
+            }) == Some(true);
+        macro_rules! gpu_mark {
+            ($label:expr) => {
+                if timing {
+                    if let Some(t) = gpu_timer.as_mut() {
+                        t.mark(gpu, $label);
+                    }
+                }
+            };
+        }
+
         raster.begin_skin_frame();
         // …and the project's era artefacts, for the same reason and in the same
         // place: a frame gathers the scene several times over, and the look has
@@ -1365,6 +1388,7 @@ impl Editor {
             &self.probe_slots,
             self.capturing_probes,
             cam.world_position,
+            crate::shading::reflection_clamp(&light_node),
         );
         let ((fog_color, fog_params), particle_fog) =
             crate::shading::fog_uniforms_and_particles_at(&light_node, &self.world, cam.world_position);
@@ -2365,6 +2389,28 @@ impl Editor {
         let project_path_buf = &mut self.project_path_buf;
         let grid = &mut self.grid;
         let show_grid_settings = &mut self.show_grid_settings;
+        // ⏱ The frame-timing panel's open flag and the last frame it collected,
+        // both taken out here for the same reason everything else on this line is
+        // — the UI below runs while `self` is split apart.
+        let show_gpu_timing = &mut self.gpu_timing_open;
+        // Read from the borrowed timer rather than back out of `self`: the frame
+        // took it mutably at the destructure. `poll` has already run this frame,
+        // so these are the newest results that have actually landed.
+        let gpu_spans: Vec<floptle_render::Span> =
+            gpu_timer.as_deref().map(|t| t.spans().to_vec()).unwrap_or_default();
+        let gpu_total = gpu_timer.as_deref().map(|t| t.total_ms()).unwrap_or(0.0);
+        self.gpu_timing_frames = self.gpu_timing_frames.wrapping_add(1);
+        let gpu_timing_supported = gpu_timer.is_some();
+        if !gpu_spans.is_empty()
+            && *show_gpu_timing
+            && std::env::var("FLOPTLE_GPU_TIMING").is_ok()
+            && self.gpu_timing_frames.is_multiple_of(120)
+        {
+            println!("--- GPU frame {gpu_total:.2} ms");
+            for sp in &gpu_spans {
+                println!("  {:>7.3} ms  {}", sp.ms, sp.label);
+            }
+        }
         let show_terrain_collider = &mut self.show_terrain_collider;
         let show_mesh_colliders = &mut self.show_mesh_colliders;
         let rename_target = &mut self.rename_target;
@@ -2746,6 +2792,17 @@ impl Editor {
                         }
                         if ui.button("✏ Animating").on_hover_text("the animation timeline: preview, keys, events").clicked() {
                             cmd.focus_animating = true;
+                            ui.close();
+                        }
+                        if ui
+                            .checkbox(&mut *show_gpu_timing, "⏱ Frame timing")
+                            .on_hover_text(
+                                "where the frame's time actually goes, measured on the GPU pass \
+                                 by pass. Nothing is measured while this is shut, so leaving it \
+                                 off costs nothing",
+                            )
+                            .changed()
+                        {
                             ui.close();
                         }
                         if ui.button("Δ Terrain tools").clicked() {
@@ -3899,6 +3956,66 @@ impl Editor {
                     ui.small("Syntax colors + background of the in-engine script editor.");
                 });
 
+            // ---- frame timing window ----
+            //
+            // **The number that answers "why is this slow".** Wall-clock frame
+            // time says a frame was slow; this says which pass was, which is the
+            // only version of the question anybody can act on. Measured with GPU
+            // timestamps, so it is time the card spent rather than time the CPU
+            // spent asking — those differ by orders of magnitude and it is
+            // routinely the second one that looks fine.
+            egui::Window::new("⏱ Frame timing")
+                .open(show_gpu_timing)
+                .resizable(false)
+                .default_width(300.0)
+                .show(ui.ctx(), |ui| {
+                    if !gpu_timing_supported {
+                        ui.label("This GPU does not offer timestamp queries.");
+                        ui.small(
+                            "Nothing can be measured per pass here. The frame cost in the title \
+                             bar still applies.",
+                        );
+                        return;
+                    }
+                    if gpu_spans.is_empty() {
+                        ui.label("measuring…");
+                        ui.small("a frame's timings arrive a frame or two after it is drawn");
+                        return;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.strong(format!("{gpu_total:.2} ms"));
+                        ui.small("on the GPU, this frame");
+                    });
+                    ui.separator();
+                    let worst = gpu_spans.iter().map(|s| s.ms).fold(0.0f32, f32::max).max(1e-4);
+                    for s in &gpu_spans {
+                        ui.horizontal(|ui| {
+                            // A bar, because the ordering is the point: the eye
+                            // finds the longest one without reading six numbers.
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(96.0, 12.0),
+                                egui::Sense::hover(),
+                            );
+                            let vis = ui.visuals();
+                            ui.painter().rect_filled(rect, 2.0, vis.extreme_bg_color);
+                            let w = (s.ms / worst).clamp(0.0, 1.0) * rect.width();
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_size(rect.min, egui::vec2(w, rect.height())),
+                                2.0,
+                                vis.selection.bg_fill,
+                            );
+                            ui.label(format!("{:>6.2} ms", s.ms));
+                            ui.label(&s.label);
+                        });
+                    }
+                    ui.separator();
+                    ui.small(
+                        "GPU time per pass. A frame the display is pacing shows a small total \
+                         here and a large one in the title bar — that is the display waiting, \
+                         not the scene costing.",
+                    );
+                });
+
             // ---- grid settings window ----
             egui::Window::new("Grid Settings")
                 .open(show_grid_settings)
@@ -4706,6 +4823,7 @@ impl Editor {
                 // uniforms `rm` carries — and every frame, because skies move:
                 // a cached one would be wrong exactly when someone was watching
                 // it change. It costs a 256×128 draw and eight tinier ones.
+                gpu_mark!("sky / environment");
                 raymarch.upload_globals(gpu, rm);
                 raymarch.capture_env(gpu);
                 // A custom shader that measures the gap to the surface behind it
@@ -4724,11 +4842,13 @@ impl Editor {
                     let depth_tex =
                         if self.project.retro { retro.depth_texture() } else { gpu.depth_texture() };
                     let hist = scene_history.as_ref().map(|h| (h.view(), h.sampler()));
+                    gpu_mark!("depth prepass");
                     prepass_and_bind(
                         gpu, raster, raymarch, globals, &instances, &flsl_draws, &skin_draws,
                         depth_tex, hist,
                     );
                     if rm_draw {
+                        gpu_mark!("matter / terrain");
                         raymarch.draw_into_primed(gpu, color, depth, rm);
                         None
                     } else {
@@ -4743,6 +4863,7 @@ impl Editor {
                     raymarch.upload_globals(gpu, rm);
                     Some(clear.map(|c| c as f64))
                 };
+                gpu_mark!("opaque + lighting");
                 raster.draw_scene_with(
                     gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,
                     raster_clear, Some(raymarch.field_bind()),
@@ -4766,6 +4887,7 @@ impl Editor {
                 // 2D lighting composites over the scene the raster pass just
                 // drew, so a lit tilemap replaces its own unlit pixels. Runs on
                 // BOTH draw paths — see `lit_2d_rank`.
+                gpu_mark!("2D lighting");
                 raster.light2d_pass(
                     gpu,
                     color,
@@ -4785,6 +4907,7 @@ impl Editor {
                 // picture that exists during the main pass is the previous
                 // frame's — which has the glass in it. Its tint would deepen
                 // every frame it stayed on screen.
+                gpu_mark!("glass");
                 if glass && let Some(h) = scene_history.as_mut() {
                     // The stored picture is THIS frame's, taken from THIS
                     // camera, so the reprojection is the identity — say so, or
@@ -5078,6 +5201,7 @@ impl Editor {
                     } else {
                         ps.motion_blur = 0.0;
                     }
+                    gpu_mark!("post (AO, bloom, blur…)");
                     post.run_with(gpu, &ps, Some(&ssao_frame), out, post_shaders);
                 }
                 if self.project.retro {
@@ -5154,6 +5278,7 @@ impl Editor {
                 for (id, delta) in &full_output.textures_delta.set {
                     egui.renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
                 }
+                gpu_mark!("editor UI");
                 let mut encoder = gpu
                     .device
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("egui") });
@@ -5180,6 +5305,12 @@ impl Editor {
                     egui.renderer.render(&mut pass, &tris, &screen);
                 }
                 gpu.queue.submit([encoder.finish()]);
+                // ⏱ Close the frame BEFORE `present`: what happens after this is
+                // the display's business, and the panel's job is to account for
+                // the work the engine asked for.
+                if timing && let Some(t) = gpu_timer.as_mut() {
+                    t.end(gpu);
+                }
                 for id in &full_output.textures_delta.free {
                     egui.renderer.free_texture(id);
                 }
@@ -8092,6 +8223,7 @@ impl Editor {
             &self.probe_slots,
             self.capturing_probes,
             cam.world_position,
+            crate::shading::reflection_clamp(&light_node),
         );
         // Any lamp casting here? Same question and same answer as the window
         // path — a local shadow marches the prepass, so this decides whether one

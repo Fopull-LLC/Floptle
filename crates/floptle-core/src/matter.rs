@@ -962,6 +962,22 @@ pub struct Light {
     /// holes; too large and thin objects — railings, leaves, grates — smear
     /// their colour over whatever is truly behind them.
     pub reflection_thickness: f32,
+    /// The most a single reflected bounce may carry, in the same light units
+    /// everything else is measured in. **0 turns the cap off.**
+    ///
+    /// A screen-space reflection reads the picture the frame before it finished,
+    /// and that picture already contains its own reflections. Two mirrors facing
+    /// each other therefore re-reflect each other every frame, and a polished
+    /// metal loses almost nothing per pass — so anything both of them can see
+    /// does not settle at some bright value, it climbs, one bounce per frame,
+    /// until the pair is a white blob. It looks like the renderer failing rather
+    /// than like a hall of mirrors.
+    ///
+    /// This is the ceiling that makes it settle instead. Ordinary highlights sit
+    /// well underneath and pass through untouched; raise it if a scene's lights
+    /// are genuinely brighter than this and their reflections are coming out
+    /// dimmed, lower it if facing mirrors still bloom more than you want.
+    pub reflection_clamp: f32,
 
     /// How many depth layers of **glass** a frame draws, 1..=4.
     ///
@@ -1058,6 +1074,7 @@ impl Default for Light {
             reflection_distance: 30.0,
             reflection_steps: 32,
             reflection_thickness: 0.5,
+            reflection_clamp: 8.0,
             // Two, not one: a fish tank, a window with something behind it and a
             // pair of doors are the ordinary cases, and all three are wrong at
             // one. The second layer costs nothing in a scene with no glass in it

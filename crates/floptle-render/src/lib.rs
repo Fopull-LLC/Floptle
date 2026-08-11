@@ -26,6 +26,7 @@ pub mod device;
 pub mod env;
 pub mod frame;
 pub mod gi;
+pub mod gpu_timer;
 pub mod graph;
 pub mod grid;
 pub mod light2d;
@@ -58,7 +59,8 @@ pub use mesh::{
     MeshId, TextureData, Vertex,
 };
 pub use outline::Outline;
-pub use reflect::{MAX_PROBES, PROBE_FACE, PROBE_H, PROBE_W, ReflectionProbes};
+pub use gpu_timer::{GpuTimer, Span};
+pub use reflect::{MAX_PROBES, PROBE_FACE, PROBE_H, PROBE_W, ProbeDetail, ReflectionProbes};
 pub use ssr::SceneHistory;
 pub use palette::{Palette, PaletteQuantize};
 pub use particles::{ParticleBatch, ParticleBlend, ParticleGlobals, ParticleInstance, Particles};

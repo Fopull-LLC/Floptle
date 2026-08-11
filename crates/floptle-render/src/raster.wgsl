@@ -168,6 +168,11 @@ fn surface_fog(e: Ext, color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3
 // with — these are the raster pass's own.
 const INV_PI: f32 = 0.31830988618;
 const INV_TAU: f32 = 0.15915494309;
+const TAU: f32 = 6.28318530718;
+// Where a screen-space reflection starts giving way to the probe and the sky,
+// and where it stops being traced at all. See `ssr_trace`.
+const SSR_ROUGH_FADE: f32 = 0.35;
+const SSR_ROUGH_MAX: f32 = 0.6;
 
 // The captured sky (equirectangular, with a roughness mip chain) — see `env.rs`.
 // A 1x1 map means "no environment this frame": offscreen previews and probes
@@ -202,6 +207,62 @@ fn env_brdf(f0: vec3<f32>, rough: f32, ndv: f32) -> vec3<f32> {
     return f0 * ab.x + vec3<f32>(ab.y);
 }
 
+// ---- how blurred a reflection should be -------------------------------------
+//
+// A GGX lobe's half-angle is very nearly its `alpha`, which is the SQUARE of the
+// roughness slider, and that angle is what a blur has to match. Every chain
+// below is box-filtered, so level m blurs by one texel × 2^m: the level whose
+// blur matches the lobe is log2(lobe ÷ texel).
+//
+// **This used to be `sqrt(roughness) × levels` everywhere, which is backwards.**
+// The stated intent was to spend more of the chain on the polished end, but sqrt
+// LIFTS small values: roughness 0.1 came out at 0.32 and landed three levels up
+// the chain — an eightfold blur on a surface the author had asked to be nearly a
+// mirror. Only an exact 0 stayed sharp, and no slider sits exactly on 0. That
+// one line is why a mirror was easy to frost and hard to polish.
+fn lobe_alpha(rough: f32) -> f32 {
+    let r = clamp(rough, 0.0, 1.0);
+    return max(r * r, 1e-5);
+}
+
+// For a map that spans the whole sphere across its width — the sky, and each
+// reflection probe — one texel is TAU/width radians wherever you read it.
+fn equirect_mip(rough: f32, levels: f32, width: f32) -> f32 {
+    let texel = TAU / max(width, 1.0);
+    return clamp(log2(lobe_alpha(rough) / texel), 0.0, levels);
+}
+
+// For the screen-space chain, whose texels are not angles: take the lobe's WORLD
+// radius where the ray landed and measure it in pixels by projecting it.
+//
+// This is the part a roughness curve cannot express on its own, because it does
+// not know how far the ray went. The same polished floor should mirror a chair
+// leg an inch away and blur the far wall, and the difference between those is
+// entirely the ray's length.
+fn screen_cone_mip(
+    rough: f32,
+    origin: vec3<f32>,
+    at: vec3<f32>,
+    axis: vec3<f32>,
+    levels: f32,
+    h: f32,
+) -> f32 {
+    let radius = lobe_alpha(rough) * length(at - origin);
+    // Any direction across the ray will do — the footprint is a disc.
+    var side = cross(axis, vec3<f32>(0.0, 1.0, 0.0));
+    if (dot(side, side) < 1e-8) {
+        side = cross(axis, vec3<f32>(1.0, 0.0, 0.0));
+    }
+    let off = normalize(side) * radius;
+    let c0 = G.view_proj * vec4<f32>(at, 1.0);
+    let c1 = G.view_proj * vec4<f32>(at + off, 1.0);
+    if (c0.w <= 1e-4 || c1.w <= 1e-4) {
+        return 0.0;
+    }
+    let px = length(ssr_uv(c1.xy / c1.w) - ssr_uv(c0.xy / c0.w)) * max(h, 1.0);
+    return clamp(log2(max(px, 1.0)), 0.0, levels);
+}
+
 // What this surface reflects of the sky. `n` and `v` are camera-relative but the
 // captured sky is in WORLD directions — which are the same thing here, because
 // the view matrix carries no translation and no rotation into the instance data
@@ -214,11 +275,8 @@ fn env_radiance(r: vec3<f32>, rough: f32) -> vec3<f32> {
     // Direction -> equirectangular uv, the exact inverse of `fs_env`'s mapping.
     let u = atan2(r.z, r.x) * INV_TAU + 0.5;
     let t = acos(clamp(r.y, -1.0, 1.0)) * INV_PI;
-    // Roughness picks a level. Squaring it spends more of the chain on the
-    // polished end, where the difference between mirror and nearly-mirror is
-    // what the eye actually reads; the rough end is a blur either way.
     let levels = f32(textureNumLevels(env_tex) - 1u);
-    let mip = sqrt(clamp(rough, 0.0, 1.0)) * levels;
+    let mip = equirect_mip(rough, levels, f32(dims.x));
     return textureSampleLevel(env_tex, env_samp, vec2<f32>(u, t), mip).rgb;
 }
 
@@ -280,8 +338,22 @@ fn ssr_trace(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>, rough: f32, pix: vec2<u32
         return out;
     }
 
+    // **Rough surfaces do not need the march.** Past about a quarter of the
+    // roughness range the lobe is wide enough that the hit is blurred to the top
+    // of the chain, where it is indistinguishable from what the probe or the sky
+    // already says — so the march buys nothing and costs the most of anything in
+    // the frame. Faded rather than cut, or the change of answer draws a line
+    // across every surface whose roughness crosses the threshold.
+    let sharp = 1.0 - smoothstep(SSR_ROUGH_FADE, SSR_ROUGH_MAX, rough);
+    if (sharp <= 0.0) {
+        return out;
+    }
+
     let reach = max(G.ssr.y, 0.001);
-    let steps = i32(clamp(G.ssr.z, 8.0, 64.0));
+    // Sharper surfaces get more of the budget. A mirror shows the step size as
+    // banding and needs every sample; a satin one is about to blur the result
+    // anyway, so the same count is spent on detail nobody can see.
+    let steps = i32(clamp(G.ssr.z * mix(0.35, 1.0, sharp), 8.0, 64.0));
     let thickness = max(G.ssr.w, 0.001);
     // Start off the surface along the normal, or the first sample reads the very
     // texel this fragment is shading and every surface reflects itself. Scaled by
@@ -392,10 +464,37 @@ fn ssr_trace(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>, rough: f32, pix: vec2<u32
             //  3. Distance. A long ray crosses more of the scene it cannot see
             //     around, and its hit is the more likely to be the wrong surface.
             conf = conf * (1.0 - smoothstep(0.7, 1.0, hi));
+            //  4. Roughness. The crossover to the probe/sky, matching the early
+            //     return above so there is no step where the march stops.
+            conf = conf * sharp;
 
             let levels = f32(textureNumLevels(scene_tex) - 1u);
-            let mip = sqrt(clamp(rough, 0.0, 1.0)) * levels;
-            out.color = textureSampleLevel(scene_tex, scene_samp, puv, mip).rgb;
+            let mip = screen_cone_mip(rough, p, hit_pos, r, levels, f32(sdims.y));
+            let c = textureSampleLevel(scene_tex, scene_samp, puv, mip).rgb;
+
+            // **Bound what one bounce may carry.** The stored picture already
+            // contains last frame's reflections, so two mirrors facing each other
+            // re-reflect each other's reflection every frame. With a polished
+            // metal the loop barely loses anything per pass, and the pair does not
+            // settle — it RAMPS, over about a second, into a white blob, which
+            // reads as the renderer breaking rather than as a hall of mirrors.
+            //
+            // Clamping the brightest channel and scaling the others with it keeps
+            // the colour and only takes the runaway: an ordinary highlight is far
+            // below the cap and passes through untouched.
+            //
+            // Zero means NO CAP, so a globals block that never learned about this
+            // field reflects exactly as it did before. Read the other way round —
+            // zero as a cap of zero — an unset uniform would turn every
+            // screen-space reflection black, which is the failure this engine
+            // keeps meeting and the reason the harmless reading gets the 0.
+            var lit = c;
+            let cap = G.probe_meta.y;
+            if (cap > 0.0) {
+                let lum = max(max(c.r, c.g), c.b);
+                lit = c * (cap / max(lum, cap));
+            }
+            out.color = lit;
             out.hit = clamp(conf, 0.0, 1.0);
             return out;
         }
@@ -472,11 +571,13 @@ fn refracted(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, rough: f32, ior: f32, thi
         }
         uv = clamp(ssr_uv(straight.xy / straight.w), vec2<f32>(0.0), vec2<f32>(1.0));
     }
-    // Roughness frosts it, on the same chain and the same index the sky and the
-    // screen-space reflection use — so a frosted pane blurs what is behind it by
-    // as much as it blurs what it reflects.
+    // Roughness frosts it, by the same rule the sky and the screen-space
+    // reflection use — so a frosted pane blurs what is behind it by as much as it
+    // blurs what it reflects, and a pane held against a wall frosts it less than
+    // the same pane held across the room.
     let levels = f32(textureNumLevels(scene_tex) - 1u);
-    let mip = sqrt(clamp(rough, 0.0, 1.0)) * levels;
+    let mip = screen_cone_mip(
+        rough, p, exit, t, levels, f32(textureDimensions(scene_tex, 0).y));
     return textureSampleLevel(scene_tex, scene_samp, uv, mip).rgb;
 }
 
@@ -533,7 +634,7 @@ fn probe_radiance(i: u32, p: vec3<f32>, r: vec3<f32>, rough: f32) -> vec3<f32> {
     let u = atan2(dir.z, dir.x) * INV_TAU + 0.5;
     let t = acos(clamp(dir.y, -1.0, 1.0)) * INV_PI;
     let levels = f32(textureNumLevels(probe_tex) - 1u);
-    let mip = sqrt(clamp(rough, 0.0, 1.0)) * levels;
+    let mip = equirect_mip(rough, levels, f32(textureDimensions(probe_tex, 0).x));
     return textureSampleLevel(probe_tex, probe_samp, vec2<f32>(u, t), i32(i), mip).rgb
         * max(G.probe_pos[i].w, 0.0);
 }
@@ -1001,7 +1102,16 @@ fn key_light_ggx(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, rough:
     if (G.gi_meta.y > 0.5) {
         return out; // "show only the bounce" — see key_light() in field.wgsl
     }
+    // **A key light that emits nothing still cast a shadow.** The march below is
+    // gated on the BRDF, which is geometry and is nonzero almost everywhere, so
+    // an interior with the sun turned down to zero — every indoor scene — paid
+    // for a 64-step shadow trace per pixel and multiplied the result by black.
+    // Intensity is already folded into `light_color`, so this one test is the
+    // whole saving.
     let ns = u32(G.star_meta.x);
+    if (ns == 0u && dot(G.light_color.rgb, G.light_color.rgb) <= 1e-8) {
+        return out;
+    }
     if (ns == 0u) {
         let l = sun_dir_at(p);
         let r = ggx_light(n, v, l, f0, rough);
@@ -1410,7 +1520,16 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         // nothing to put in it: at roughness 0 it was a sun dot on black, which
         // is exactly why a mirror could not be made. `ext.reflect` scales it,
         // and the AO map damps it like any other ambient term.
-        lit += env_specular(in.view_pos, n, v, f0, rough, pix) * ext.reflect * gi_only_gate();
+        //
+        // **Tested before it is computed, not after.** `env_specular` contains
+        // the screen-space march — up to sixty-nine depth samples — and
+        // multiplying its result by a zero `reflect` afterwards still pays for
+        // every one of them. A scene with two mirrors in it was marching every
+        // wall, floor and ceiling pixel it had.
+        let refl = ext.reflect * gi_only_gate();
+        if (refl > 0.0) {
+            lit += env_specular(in.view_pos, n, v, f0, rough, pix) * refl;
+        }
         // …and what comes through from behind. Weighted by what the surface did
         // NOT reflect: a pane seen face-on is mostly window, the same pane seen
         // edge-on is mostly mirror, and that swap is Fresnel doing its job

@@ -145,6 +145,11 @@ struct Globals {
     // Reflection probes (Matter::ReflectionProbe). Appended at the END so this
     // struct stays byte-identical to the Rust `RaymarchGlobals`.
     //
+    // `probe_meta.y` is the reflection clamp — the most one screen-space bounce
+    // may carry. It lives here rather than in `ssr` because that vector is full,
+    // and because it is the same question the probes answer: how much of the
+    // scene is a reflection allowed to be.
+    //
     // `probe_meta.x` is the live count. Each probe is a captured picture of its
     // surroundings PLUS the box it was captured in: the box is what makes a
     // reflected wall land on the wall — an environment map on its own is a
@@ -641,20 +646,79 @@ fn atmo_composite(base: vec3<f32>, rd_in: vec3<f32>, tmax: f32, is_sky: bool) ->
 // Volumetric fog media density at camera-relative `p`: a layer filling world
 // space below `vol_fog_a.y`, its top softened over `vol_fog_a.z` units and
 // broken up by drifting value-noise (reusing the atmosphere's cloud_fbm).
-fn vol_fog_density(p: vec3<f32>) -> f32 {
+// The fog's noise, at the detail a step of `step` world units can actually
+// resolve.
+//
+// **An octave finer than the sample spacing is not detail, it is aliasing.** The
+// march takes a fixed number of steps between the camera and the surface, so a
+// step is short up close and long far away — and the far steps were sampling
+// three octaves of noise whose finest features were many times smaller than the
+// gap between samples. That is the most expensive part of the fog buying the one
+// thing fog must not have: a crawl.
+//
+// A dropped octave contributes its MEAN rather than nothing. Truncating outright
+// would make the fog visibly thin with distance, which is a worse artefact than
+// the detail being saved.
+fn cloud_fbm_lod(p: vec3<f32>, step: f32) -> f32 {
+    // Octave i has features 1/2.13^i across; it is worth sampling while those
+    // are wider than a step. log(2.13) ≈ 0.7561.
+    let octaves = i32(clamp(log(max(1.0 / max(step, 1e-6), 1.0)) / 0.7561, 0.0, 2.0)) + 1;
+    var v = 0.0;
+    var amp = 0.55;
+    var q = p;
+    for (var i = 0; i < 3; i = i + 1) {
+        if (i < octaves) {
+            v += amp * vnoise(q);
+        } else {
+            v += amp * 0.5;
+        }
+        q = q * 2.13 + vec3<f32>(11.7, 5.1, 7.3);
+        amp *= 0.5;
+    }
+    return v;
+}
+
+// The fog's smooth part: how thick the layer is at this height. Cheap, and
+// wanted at every single step — it is what gives a fog layer an edge.
+fn vol_fog_layer(p: vec3<f32>) -> f32 {
     let world_y = p.y + G.vol_fog_b.z; // camera-relative → world height
     let falloff = max(G.vol_fog_a.z, 1e-3);
     // 1 inside the layer, fading to 0 across the falloff band above its top.
     let layer = clamp(1.0 - (world_y - G.vol_fog_a.y) / falloff, 0.0, 1.0);
-    var d = G.vol_fog_a.x * layer;
+    return G.vol_fog_a.x * layer;
+}
+
+// The fog's lumpy part, as a multiplier on the layer. 1 when noise is off.
+//
+// This is the expensive half — three octaves of value noise, eight hashes each —
+// and unlike the layer it does NOT want sampling at every step. See
+// [`fog_noise_stride`].
+fn vol_fog_noise(p: vec3<f32>, step: f32) -> f32 {
     let noise_amt = G.vol_fog_a.w;
-    if (noise_amt > 0.0 && d > 0.0) {
-        let scale = max(G.vol_fog_b.x, 1e-3);
-        let drift = vec3<f32>(G.vol_fog_b.y * 0.6, G.vol_fog_b.y * 0.13, G.vol_fog_b.y * 0.45);
-        let n = cloud_fbm(p / scale + drift);
-        d = d * mix(1.0, clamp(n * 1.6, 0.0, 1.0), noise_amt);
+    if (noise_amt <= 0.0) {
+        return 1.0;
     }
-    return d;
+    let scale = max(G.vol_fog_b.x, 1e-3);
+    let drift = vec3<f32>(G.vol_fog_b.y * 0.6, G.vol_fog_b.y * 0.13, G.vol_fog_b.y * 0.45);
+    let n = cloud_fbm_lod(p / scale + drift, step / scale);
+    return mix(1.0, clamp(n * 1.6, 0.0, 1.0), noise_amt);
+}
+
+// How many consecutive steps one noise sample may stand in for.
+//
+// **The march was sampling a smooth field forty times per feature.** The noise is
+// a fixed number of world units across — tens of metres in a typical scene — and
+// a step is a fraction of a metre, so consecutive samples differed by far less
+// than the dither the march already applies on purpose. Holding a sample for a
+// run of steps costs nothing visible and is most of what the noise was charging
+// for. Sampling at least eight times across one feature is the fence; a ray
+// shorter than a single feature needs one sample and gets it.
+fn fog_noise_stride(dt: f32) -> i32 {
+    if (G.vol_fog_a.w <= 0.0) {
+        return 1;
+    }
+    let scale = max(G.vol_fog_b.x, 1e-3);
+    return i32(clamp(floor(scale / max(dt, 1e-4) * 0.125), 1.0, 8.0));
 }
 
 // ---- Area lights ---------------------------------------------------------------
@@ -881,6 +945,42 @@ fn fog_phase(cos_t: f32, g_in: f32) -> f32 {
 // There is no N·L here and that is not an omission — a mote of fog has no
 // facing. What replaces it is the phase function, which is why the anisotropy
 // knob does the work the surface normal does everywhere else.
+// How far an emitter reaches past its own centre — its radius, or a rect's
+// larger half-extent. Conservative on purpose: it only ever widens a rejection
+// test.
+fn fog_extent(shape: vec4<f32>) -> f32 {
+    if (i32(shape.x + 0.5) == 0) {
+        return 0.0; // a point has no size
+    }
+    return max(max(shape.y, shape.z), 0.0);
+}
+
+// What a lamp is as far as the AIR is concerned: a direction and a distance.
+//
+// **Fog was calling the full area-light model and throwing nearly all of it
+// away.** There is no surface out here — no `ndl` to integrate over an emitter's
+// solid angle, no mirror direction to find a representative point for — and the
+// only two numbers used were the ones that come out at the top of it. A rect
+// emitter costs four quaternion rotations and an edge integral to produce them,
+// and that was being paid per light, per step, per pixel: sixteen steps and four
+// ceiling panels is sixty-four of them for one pixel of air.
+//
+// Softening the distance by the emitter's own size is the one part worth
+// keeping — the air beside a long strip light should be lit by the strip and not
+// by a point at its middle — and it is one subtraction.
+struct FogEmitter {
+    l: vec3<f32>,
+    dist: f32,
+};
+
+fn fog_emitter(shape: vec4<f32>, to: vec3<f32>) -> FogEmitter {
+    var o: FogEmitter;
+    let d0 = max(length(to), 1e-4);
+    o.l = to / d0;
+    o.dist = max(d0 - fog_extent(shape), 1e-3);
+    return o;
+}
+
 fn fog_inscatter(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
     let g = G.vol_fog_c.y;
     // Shafts cost one shadow march per step per pixel — the single most
@@ -888,15 +988,25 @@ fn fog_inscatter(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>) ->
     let march = G.vol_fog_c.w > 0.5 && G.shadow_params.x > 0.5;
     var lit = amb;
     let ns = u32(G.star_meta.x);
+    // A key light emitting nothing lights no air either — every interior turns
+    // the sun down, so this is the common case rather than the odd one.
+    //
+    // **It skips the SUN, not the function.** Written as an early return it also
+    // skipped the placeable lamps below, and an interior lit entirely by its own
+    // ceiling panels — which is every interior — got no light in its air at all.
+    let sun_on = dot(G.light_color.rgb, G.light_color.rgb) > 1e-8;
     if (ns == 0u) {
-        let l = sun_dir_at(p);
-        var sh = vec3<f32>(1.0);
-        if (march) {
-            // n = l: no surface to lift off, so the normal-offset term degenerates
-            // to a small nudge along the ray, which is exactly what is wanted.
-            sh = shadow_post(light_vis(p, l, l), pix);
+        if (sun_on) {
+            let l = sun_dir_at(p);
+            var sh = vec3<f32>(1.0);
+            if (march) {
+                // n = l: no surface to lift off, so the normal-offset term
+                // degenerates to a small nudge along the ray, which is exactly
+                // what is wanted.
+                sh = shadow_post(light_vis(p, l, l), pix);
+            }
+            lit += G.light_color.rgb * sh * fog_phase(dot(rd, l), g);
         }
-        lit += G.light_color.rgb * sh * fog_phase(dot(rd, l), g);
     } else {
         for (var i = 0u; i < min(ns, 4u); i++) {
             let l = star_dir_at(i, p);
@@ -911,16 +1021,23 @@ fn fog_inscatter(p: vec3<f32>, rd: vec3<f32>, amb: vec3<f32>, pix: vec2<u32>) ->
     // in the engine too), so a lamp costs a distance and a phase.
     let pc = min(u32(G.point_count.x), 16u);
     for (var i = 0u; i < pc; i = i + 1u) {
+        let range = max(G.point_pos[i].w, 1e-4);
         let to = G.point_pos[i].xyz - p;
-        // Fog takes the emitter's DISTANCE and DIRECTION but not its `ndl` —
-        // there is no surface here to be facing anything. A long bar therefore
-        // still lights the air along its whole length.
-        let a = area_terms(G.point_shape[i], G.point_rot[i], to, -rd, -rd);
-        let x = clamp(1.0 - a.dist / max(G.point_pos[i].w, 1e-4), 0.0, 1.0);
+        // **Out of range before anything is computed.** This test used to sit
+        // after the emitter evaluation, so a lamp at the far end of a level was
+        // fully evaluated and then multiplied by zero — once per light, per
+        // step, per pixel. Widened by the emitter's own size so it can only ever
+        // reject a lamp the evaluation would have rejected too.
+        let reach = range + fog_extent(G.point_shape[i]);
+        if (dot(to, to) > reach * reach) {
+            continue;
+        }
+        let e = fog_emitter(G.point_shape[i], to);
+        let x = clamp(1.0 - e.dist / range, 0.0, 1.0);
         if (x <= 0.0) {
             continue;
         }
-        lit += G.point_color[i].rgb * (x * x) * fog_phase(dot(rd, a.l), g);
+        lit += G.point_color[i].rgb * (x * x) * fog_phase(dot(rd, e.l), g);
     }
     return lit;
 }
@@ -956,9 +1073,18 @@ fn fog_march(rd: vec3<f32>, t_max: f32, pix: vec2<u32>) -> FogMarch {
     if (lit_on) {
         amb = gi_ambient(rd * (t_max * 0.5), -rd, G.ambient.rgb);
     }
+    let stride = fog_noise_stride(dt);
+    var noise = 1.0;
     for (var i = 0u; i < steps; i = i + 1u) {
         let p = rd * ((f32(i) + jitter) * dt);
-        let sigma = vol_fog_density(p);
+        let layer = vol_fog_layer(p);
+        if (layer <= 1e-5) {
+            continue;
+        }
+        if (i32(i) % stride == 0) {
+            noise = vol_fog_noise(p, dt * f32(stride));
+        }
+        let sigma = layer * noise;
         if (sigma <= 1e-5) {
             continue;
         }
@@ -973,6 +1099,13 @@ fn fog_march(rd: vec3<f32>, t_max: f32, pix: vec2<u32>) -> FogMarch {
         let a = 1.0 - exp(-sigma * dt);
         out.scattered += out.transmittance * a * radiance;
         out.transmittance *= 1.0 - a;
+        // Nothing behind a fog this thick is going to be seen, and neither is
+        // anything scattered further along the ray. Dense fog is the case that
+        // marches most and gains most.
+        if (out.transmittance < 0.003) {
+            out.transmittance = 0.0;
+            break;
+        }
     }
     return out;
 }

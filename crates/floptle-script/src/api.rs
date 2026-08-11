@@ -400,6 +400,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("reflectionDistance".to_string(), l.reflection_distance as f64),
                 ("reflectionSteps".to_string(), l.reflection_steps as f64),
                 ("reflectionThickness".to_string(), l.reflection_thickness as f64),
+                ("reflectionClamp".to_string(), l.reflection_clamp as f64),
                 ("fog".to_string(), f64::from(l.fog)),
                 ("fogColorR".to_string(), l.fog_color[0] as f64),
                 ("fogColorG".to_string(), l.fog_color[1] as f64),
@@ -1226,6 +1227,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "reflectionDistance" => l.reflection_distance = v.clamp(0.1, 500.0),
                     "reflectionSteps" => l.reflection_steps = (val.max(8.0) as u32).min(64),
                     "reflectionThickness" => l.reflection_thickness = v.clamp(0.01, 20.0),
+                    "reflectionClamp" => l.reflection_clamp = v.clamp(0.0, 10_000.0),
                     "refractionLayers" => {
                         l.refraction_layers = (val.max(1.0) as u32)
                             .min(floptle_core::Light::MAX_REFRACTION_LAYERS)

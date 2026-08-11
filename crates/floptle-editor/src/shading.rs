@@ -470,6 +470,16 @@ pub(crate) fn ssr_uniform(l: &Light, primed: bool) -> [f32; 4] {
     ]
 }
 
+/// The ceiling on one reflected bounce — see [`Light::reflection_clamp`]. Rides
+/// the probe lane rather than [`ssr_uniform`] because that vector is full.
+///
+/// **0 means no ceiling**, and that reading is deliberate: it is the value a
+/// globals block that never heard of this field already holds, and it has to
+/// mean "reflect as before" rather than "clamp everything to nothing".
+pub(crate) fn reflection_clamp(l: &Light) -> f32 {
+    l.reflection_clamp.clamp(0.0, 10_000.0)
+}
+
 /// The depth-fog uniforms for the Lighting node: `(fog_color, fog_params)` where
 /// `fog_params = [start, end, on, dither_mode]` and the spare `fog_color.w` carries
 /// the effective dither strength (0 = off). Fed to the raymarch/raster field globals

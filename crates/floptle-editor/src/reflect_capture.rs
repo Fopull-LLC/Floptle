@@ -21,7 +21,7 @@
 //! placed — that is four frames of setup and then nothing at all.
 
 use floptle_core::{Entity, Matter, World, math::DVec3, world_transform};
-use floptle_render::{MAX_PROBES, PROBE_FACE};
+use floptle_render::MAX_PROBES;
 
 use crate::Editor;
 use crate::render_frame::OffscreenOpts;
@@ -38,6 +38,17 @@ pub(crate) struct ProbeKey {
     at: [i64; 3],
     half: [i32; 3],
     epoch: u64,
+}
+
+/// The project's stored detail setting as the renderer's own enum.
+pub(crate) fn probe_detail(d: floptle_scene::ProbeDetailDoc) -> floptle_render::ProbeDetail {
+    use floptle_render::ProbeDetail as P;
+    match d {
+        floptle_scene::ProbeDetailDoc::Low => P::Low,
+        floptle_scene::ProbeDetailDoc::Medium => P::Medium,
+        floptle_scene::ProbeDetailDoc::High => P::High,
+        floptle_scene::ProbeDetailDoc::Ultra => P::Ultra,
+    }
 }
 
 /// The uniform lanes `field.wgsl` reads: `(meta, pos, half)`.
@@ -59,11 +70,14 @@ pub(crate) fn probe_uniforms(
     slots: &[(Entity, ProbeKey)],
     capturing: bool,
     cam_world: DVec3,
+    clamp: f32,
 ) -> ProbeUniforms {
     let mut pos = [[0.0f32; 4]; MAX_PROBES];
     let mut half = [[1.0f32; 4]; MAX_PROBES];
     if capturing {
-        return ([0.0; 4], pos, half);
+        // A capture still wants the bounce ceiling — it is what keeps a mirror
+        // inside the room from baking a runaway into the picture of that room.
+        return ([0.0, clamp, 0.0, 0.0], pos, half);
     }
     let mut n = 0usize;
     for (e, _) in slots {
@@ -73,7 +87,7 @@ pub(crate) fn probe_uniforms(
         half[n] = [h[0], h[1], h[2], fade.max(0.0)];
         n += 1;
     }
-    ([n as f32, 0.0, 0.0, 0.0], pos, half)
+    ([n as f32, clamp, 0.0, 0.0], pos, half)
 }
 
 /// Every enabled probe in the scene, nearest-first, capped at [`MAX_PROBES`].
@@ -127,6 +141,22 @@ impl Editor {
     pub(crate) fn step_reflection_probes(&mut self) {
         let Some(gpu) = self.gpu.as_ref() else { return };
         let eye = self.camera.position;
+
+        // Rebuild when the project's detail no longer matches what the maps were
+        // allocated at — the size is baked into the texture, so this is the one
+        // place a changed setting can take effect. Dropping the maps drops their
+        // captures too, which is right: they hold less detail than was just
+        // asked for.
+        //
+        // **Before the slots are scanned, not after.** The scan picks WHICH slot
+        // to refill, and clearing the slot list under it would file the new
+        // capture's key against a slot index that no longer means the same thing.
+        let detail = probe_detail(self.project.probe_detail);
+        if self.reflection_probes.as_ref().is_some_and(|p| p.detail() != detail) {
+            self.reflection_probes = None;
+            self.probe_slots.clear();
+        }
+
         let wanted = probes_near(&self.world, eye);
         // Retire slots whose probe is gone or switched off, so the next capture
         // does not inherit a stale picture along with a reused slot.
@@ -165,7 +195,8 @@ impl Editor {
         let Some((at, half, _, _)) = placement(&self.world, entity) else { return };
 
         if self.reflection_probes.is_none() {
-            self.reflection_probes = Some(floptle_render::ReflectionProbes::new(gpu));
+            self.reflection_probes =
+                Some(floptle_render::ReflectionProbes::with_detail(gpu, detail));
         }
         // Taken OUT of `self` for the duration: `render_world_into` needs
         // `&mut self`, and the targets it is rendering into live here. Put back
@@ -186,6 +217,7 @@ impl Editor {
         // The capture must not contain its own reflections. Left on, probe 0's
         // picture would hold probe 0's last picture, which compounds — the same
         // trap glass avoids by drawing into a capture that excludes it.
+        let face = probes.face_size();
         self.capturing_probes = true;
         for f in 0..6 {
             let cam = floptle_render::RenderCamera::new(
@@ -210,7 +242,7 @@ impl Editor {
                 0.0,
                 u32::MAX,
                 None,
-                (PROBE_FACE, PROBE_FACE),
+                (face, face),
                 // A capture is not a view anybody looks at: no depth prepass and
                 // no reflection history, exactly as the GI bake asks for.
                 OffscreenOpts::default(),

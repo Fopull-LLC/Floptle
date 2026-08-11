@@ -971,6 +971,16 @@ pub enum MatterDoc {
     },
 }
 
+/// Serializable reflection-probe detail — mirrors `floptle_render::ProbeDetail`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ProbeDetailDoc {
+    Low,
+    Medium,
+    #[default]
+    High,
+    Ultra,
+}
+
 /// Serializable frame pacing — mirrors `floptle_render::Vsync`.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum VsyncDoc {
@@ -1728,6 +1738,8 @@ pub struct LightDoc {
     pub reflection_steps: u32,
     #[serde(default = "default_reflection_thickness")]
     pub reflection_thickness: f32,
+    #[serde(default = "default_reflection_clamp")]
+    pub reflection_clamp: f32,
     #[serde(default = "default_refraction_layers")]
     pub refraction_layers: u32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1822,6 +1834,9 @@ fn default_reflection_steps() -> u32 {
 fn default_reflection_thickness() -> f32 {
     0.5
 }
+fn default_reflection_clamp() -> f32 {
+    8.0
+}
 fn default_refraction_layers() -> u32 {
     2
 }
@@ -1865,6 +1880,7 @@ impl From<&Light> for LightDoc {
             reflection_distance: l.reflection_distance,
             reflection_steps: l.reflection_steps,
             reflection_thickness: l.reflection_thickness,
+            reflection_clamp: l.reflection_clamp,
             refraction_layers: l.refraction_layers,
             fog: l.fog,
             fog_color: l.fog_color,
@@ -1913,6 +1929,9 @@ impl LightDoc {
             reflection_distance: self.reflection_distance.clamp(0.1, 500.0),
             reflection_steps: self.reflection_steps.clamp(8, 64),
             reflection_thickness: self.reflection_thickness.clamp(0.01, 20.0),
+            // 0 is meaningful — it means no ceiling — so the floor is 0 and not
+            // some small positive number that would quietly darken every mirror.
+            reflection_clamp: self.reflection_clamp.clamp(0.0, 10_000.0),
             refraction_layers: self
                 .refraction_layers
                 .clamp(1, floptle_core::Light::MAX_REFRACTION_LAYERS),
@@ -2003,6 +2022,15 @@ pub struct ProjectConfigDoc {
     /// apart from the engine being slow, let alone escape it.
     #[serde(default)]
     pub vsync: VsyncDoc,
+
+    /// How much detail a reflection probe's capture keeps.
+    ///
+    /// A probe's picture spans a full turn across its width, so its width IS the
+    /// finest thing a mirror in that room can show. Too little and no roughness
+    /// setting recovers it — the surface reads as frosted however it is
+    /// authored. The cost is paid at capture, not per frame.
+    #[serde(default)]
+    pub probe_detail: ProbeDetailDoc,
 
     #[serde(default = "true_bool")]
     pub matter: bool,
@@ -2107,6 +2135,7 @@ impl ProjectConfigDoc {
             retro_vertex_lit: false,
             retro_dither_alpha: false,
             vsync: VsyncDoc::default(),
+            probe_detail: ProbeDetailDoc::default(),
             matter: true,
             title: None,
             entry_scene: None,

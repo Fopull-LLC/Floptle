@@ -1912,6 +1912,19 @@ impl EditorTabViewer<'_> {
                                 )
                                 .on_hover_text("how solid things are assumed to be. Too little and reflections come out speckled with holes; too much and railings and leaves smear over what is really behind them")
                                 .changed();
+                            cmd.inspector_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut l.reflection_clamp, 0.0..=64.0)
+                                        .text("brightness cap"),
+                                )
+                                .on_hover_text(
+                                    "the most one reflected bounce may carry. Two mirrors facing \
+                                     each other re-reflect each other every frame and a polished \
+                                     metal loses almost nothing per pass, so without a ceiling the \
+                                     pair climbs into a white blob. Ordinary highlights sit well \
+                                     under this. 0 removes the ceiling.",
+                                )
+                                .changed();
                             ui.small("reflects the PREVIOUS frame, so a reflection is one frame behind — invisible except on a mirror under a whipping camera");
                         });
                         ui.small("off screen, a reflection falls back to the SKY — place a ◐ Reflection Probe to give a room something else to show");

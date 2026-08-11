@@ -260,6 +260,55 @@ time: forty lines of winit and wgpu that clear a window and report the rate. If
 it reads 60 and the editor reads 20, the editor is doing something; if both read
 20, the display path is.
 
+## 6c. Where the time goes, per pass (v0.54.0)
+
+Frame pacing above answers "is the engine slow or is the display pacing me". It
+does not answer "which part of the frame is slow", and until v0.54.0 nothing
+did. The only method available was to switch a feature off and look at the
+number again — slow, and under vsync useless, because every answer comes back
+quantised to the same value.
+
+`gpu_timer.rs` measures the frame **on the GPU**, and that distinction is the
+whole point: the CPU records commands and moves on, so timing the recording
+measures how fast the encoder ran, which is nearly always fast and nearly never
+the answer. `write_timestamp` puts a marker in the command stream instead.
+
+- **Requested, never required.** `timing_features(&adapter)` asks for
+  `TIMESTAMP_QUERY` + `TIMESTAMP_QUERY_INSIDE_ENCODERS` only where the adapter
+  offers them; `GpuTimer::new` then asks the **device**, because the two can
+  disagree and the device is what decides whether the call is legal. No timer
+  means the panel says so — it does not report zeros.
+- **A mark is its own submission.** Every pass in `floptle-render` creates and
+  submits its own encoder, so there is no shared one to bracket. A mark carries a
+  single command, which is cheap and needs no change inside any pass.
+- **Nothing is submitted while the panel is shut.** `gpu_timing_open` gates it
+  all, so a profiler nobody is reading costs nothing.
+- **n labels need n+1 marks.** A label names the region that *follows* it;
+  `GpuTimer::end` writes the closing one. Off by one and every cost is reported
+  against its neighbour's name, which is worse than no profiler because the
+  answer gets acted on.
+- **Results arrive a frame or two late**, deliberately. Blocking for a readback
+  would make the profiler the most expensive thing in the frame.
+
+`Window ⏵ ⏱ Frame timing` in the editor; `FLOPTLE_GPU_TIMING=1` opens it at
+startup and repeats the numbers to stdout, which is the form a measurement needs
+when the person reading it is not the person at the window.
+
+**What it found first.** Pointed at a Backrooms-style interior reported as
+running at 20–32 fps, it named `opaque + lighting` as 6.7 ms of an 8.3 ms frame
+in one reading. Ablation inside that pass then put 6.0 ms of it in the volumetric
+fog, and 4.45 ms of *that* in light injection — `fog_inscatter` was calling
+`area_terms` (for a rect emitter: four quaternion rotations and an edge integral)
+per lamp, per step, per pixel, and using two numbers out of it. There is no
+surface in mid-air, so there is no `ndl` to integrate and no mirror direction to
+find a representative point for. See `field.wgsl`'s `fog_emitter`, `fog_extent`
+and `fog_noise_stride`. That pass now costs 2.7 ms.
+
+The general lesson is the one the vsync investigation already taught in a
+different form: **an ablation is only as good as its resolution.** Toggling
+features under vsync gave six identical readings. The profiler gave the answer in
+one frame.
+
 ## 7. Out of scope
 
 We are lightweight — **not Unreal, not photoreal**. Explicitly *not* doing:

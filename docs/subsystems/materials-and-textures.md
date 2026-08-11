@@ -486,6 +486,56 @@ catches a face table rotated or mirrored by one face. That the no-probe shot
 reads green in the same windows is also what proves those windows are on the ball
 and not on a wall.
 
+### How blurred a reflection is (v0.54.0)
+
+The mip a reflection is read from used to be `sqrt(roughness) * levels`,
+everywhere — the sky, each probe, the screen-space hit and refraction. The
+comment said this spent more of the chain on the polished end. **It does the
+opposite.** `sqrt` lifts small values: roughness 0.1 comes out at 0.32 and lands
+about three levels up a box-filtered chain, an eightfold blur on a surface the
+author asked to be nearly a mirror. Only an exact 0 stayed sharp, and no slider
+sits exactly on 0. That one line is why a mirror was easy to frost and impossible
+to polish.
+
+What replaces it starts from the lobe. A GGX lobe's half-angle is very nearly its
+`alpha`, which is roughness **squared**, and level *m* of a box chain blurs by one
+texel × 2^m — so the level that matches is `log2(lobe / texel)`:
+
+- `equirect_mip` for the sky and the probes, where a texel is `TAU / width`
+  radians everywhere.
+- `screen_cone_mip` for the screen-space chain, whose texels are not angles: it
+  takes the lobe's **world** radius where the ray landed and measures it in
+  pixels by projecting it. This is the part a roughness curve cannot express on
+  its own, because it does not know how far the ray went — the same polished
+  floor should mirror a chair leg an inch away and blur the far wall.
+
+**Detail is a setting now.** `ProbeDetail` (`Project Settings ⏵ Rendering ⏵
+Reflection detail`) sizes a probe's map: `High` is 1024 wide by default, four
+times the old fixed 256. A probe's width spans a full turn, so it *is* the finest
+thing a mirror in that room can show — below it, no roughness setting helps,
+because the detail was never captured. The cost is paid at capture, not per
+frame.
+
+**Two mirrors facing each other used to climb, not settle.** A screen-space
+reflection reads the picture from the frame before, and that picture already
+holds its own reflections; with a polished metal (`f0 ≈ 1`) the loop gain is
+about 1, so the growth is **linear** — anything both surfaces can see gains one
+bounce per frame, without bound, until the pair is white. `Light::reflection_clamp`
+(`Lighting ⏵ brightness cap`, default 8) is the ceiling that makes it converge.
+It rides `probe_meta.y` because the `ssr` vector is full, and **0 means no cap**:
+read the other way round, a globals block that never heard of the field would
+turn every screen-space reflection black.
+
+A note on verifying this, because the first two attempts proved nothing.
+`interior_reflection_probe` could not see the bug: its ball was at roughness
+**exactly 0**, the one value the old mapping got right, and its room was
+flat-coloured walls, which look the same however hard you blur them. It now has
+nine narrow bright bars on the wall **behind the eye** — a ball seen head-on
+reflects what is behind the camera at its centre, which is where every
+measurement in that probe already looks — and asserts that bar *contrast* at
+roughness 0.1 stays above 75% of the mirror's. Confirmed to fail on the old
+shader (64%) and pass on the new one (96%).
+
 ### Glass: seeing through, bent
 
 `Material::transmission` is how much light passes THROUGH a surface instead of

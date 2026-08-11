@@ -16,6 +16,37 @@ use crate::{EditorCmd, EditorTabViewer};
 #[derive(Clone)]
 pub(crate) struct NodePayload(pub(crate) Entity);
 
+/// Does this row get a disclosure triangle?
+///
+/// **Anything that can hide children must be able to reveal them.** This used to
+/// also require the row to be an Empty — a "folder" — so a Reflection Probe
+/// parented to a Plane, or a light parented to a mesh, was folded away by
+/// [`fold_all_parents`] on load and then had no triangle to open it again. The
+/// children were still there, still in the scene, still saved; there was simply
+/// no way left to reach them, and adding another child only added to the pile.
+/// A node with children IS a folder, whatever else it also is.
+pub(crate) fn row_expandable(has_kids: bool, has_bones: bool) -> bool {
+    has_kids || has_bones
+}
+
+/// Fold every parent in the tree, once, on the first draw after a scene load, so
+/// a freshly opened scene reads as a list of top-level things rather than as
+/// everything at once.
+///
+/// The roots' own top level stays readable: a scene whose nodes all hang off one
+/// folder would otherwise open as a single collapsed row, which is the opposite
+/// problem.
+pub(crate) fn fold_all_parents(
+    children: &HashMap<Entity, Vec<Entity>>,
+    roots: &[Entity],
+    collapsed: &mut std::collections::HashSet<Entity>,
+) {
+    collapsed.extend(children.iter().filter(|(_, k)| !k.is_empty()).map(|(p, _)| *p));
+    if roots.len() == 1 {
+        collapsed.remove(&roots[0]);
+    }
+}
+
 impl EditorTabViewer<'_> {
     /// What a hierarchy drag actually moves: the whole selection when the dragged
     /// row is part of a multi-selection, else just the dragged row (same rule as
@@ -137,13 +168,7 @@ impl<'a> EditorTabViewer<'a> {
         // six chances to forget.
         if *self.hier_fold_pending {
             *self.hier_fold_pending = false;
-            self.collapsed.extend(children.keys().copied());
-            // …except the roots' own top level stays readable: a scene whose nodes all
-            // hang off one folder would otherwise open as a single collapsed row, which
-            // is the opposite problem.
-            if roots.len() == 1 {
-                self.collapsed.remove(&roots[0]);
-            }
+            fold_all_parents(&children, &roots, self.collapsed);
         }
 
         // The flat VISIBLE row order (DFS, collapsed subtrees skipped) — the
@@ -405,7 +430,7 @@ impl EditorTabViewer<'_> {
         let has_kids = children.get(&e).map(|c| !c.is_empty()).unwrap_or(false);
         // A rigged Mesh expands to reveal its bones/sub-objects as attach targets.
         let has_bones = self.bone_names.contains_key(&e);
-        let expandable = (is_folder && has_kids) || has_bones;
+        let expandable = row_expandable(has_kids, has_bones);
         let collapsed = self.collapsed.contains(&e);
         let icon = if is_folder {
             "🗀"
@@ -421,8 +446,6 @@ impl EditorTabViewer<'_> {
             "◎"
         } else if matches!(matter, Some(Matter::PostProcess { .. })) {
             "✨"
-        } else if has_kids {
-            "⏷"
         } else {
             "•"
         };
@@ -654,5 +677,60 @@ impl EditorTabViewer<'_> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floptle_core::World;
+    use std::collections::HashSet;
+
+    /// **Nothing may be hidden that cannot be un-hidden.** The fold collapses
+    /// every parent on load; a parent that is not expandable has no triangle to
+    /// reopen, so its children leave the panel for good — still in the scene,
+    /// still saved, simply unreachable, and a newly added child joins them. That
+    /// is what a Reflection Probe parented to a Plane used to do, and it read as
+    /// "the children I added just vanished" rather than as a hierarchy bug.
+    #[test]
+    fn the_fold_never_hides_a_row_it_cannot_reopen() {
+        let mut w = World::new();
+        let plane = w.spawn(); // a MESH with a child — the shape that broke
+        let probe = w.spawn();
+        let folder = w.spawn(); // an Empty with a child — the shape that worked
+        let inner = w.spawn();
+        let lone = w.spawn(); // no children at all
+
+        let mut children: HashMap<Entity, Vec<Entity>> = HashMap::new();
+        children.insert(plane, vec![probe]);
+        children.insert(folder, vec![inner]);
+        let roots = vec![plane, folder, lone];
+
+        let mut collapsed: HashSet<Entity> = HashSet::new();
+        fold_all_parents(&children, &roots, &mut collapsed);
+
+        for e in &collapsed {
+            let has_kids = children.get(e).is_some_and(|k| !k.is_empty());
+            assert!(
+                row_expandable(has_kids, false),
+                "the fold hid a row with no way to reopen it — its subtree is unreachable"
+            );
+        }
+        assert!(collapsed.contains(&plane), "a non-folder parent must fold like any other");
+        assert!(!collapsed.contains(&lone), "a childless row is never folded");
+    }
+
+    /// An empty child list is not a parent. Left in, such a row would fold to
+    /// nothing and take a disclosure triangle that opens onto an empty subtree.
+    #[test]
+    fn an_empty_child_list_is_not_a_parent() {
+        let mut w = World::new();
+        let a = w.spawn();
+        let b = w.spawn();
+        let mut children: HashMap<Entity, Vec<Entity>> = HashMap::new();
+        children.insert(a, Vec::new());
+        let mut collapsed: HashSet<Entity> = HashSet::new();
+        fold_all_parents(&children, &[a, b], &mut collapsed);
+        assert!(collapsed.is_empty());
     }
 }

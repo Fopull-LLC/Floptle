@@ -34,14 +34,66 @@
 
 use crate::device::Gpu;
 
-/// Cube face resolution for a capture. 256 is a compromise with a specific
-/// shape: a reflection is read through a roughness blur and at a glancing angle,
-/// so resolution buys much less here than it does in a picture you look at
-/// directly, and six renders per probe is a cost paid in whole frames.
-pub const PROBE_FACE: u32 = 256;
-/// The equirectangular map each probe folds down to. Width, with height half —
-/// the same shape and the same mapping as the sky in [`crate::env`].
-pub const PROBE_W: u32 = 256;
+/// How much detail a probe capture keeps.
+///
+/// **This is the difference between a mirror and a frosted pane**, and it was
+/// not adjustable before. A probe's picture is an equirectangular map: its width
+/// spans a full turn, so a 256-wide map gives one texel every 1.4° and a mirror
+/// reading it can show nothing finer than that — a doorway across a room lands
+/// on about four texels. No roughness setting can recover detail the capture
+/// never held, which is why a polished surface came out looking frosted however
+/// it was authored.
+///
+/// The cost of raising it is paid at CAPTURE, not per frame: six renders of the
+/// scene when a probe is first seen or its room changes. Per frame the extra
+/// only costs memory bandwidth on the lookup. Sitting still, `High` and `Low`
+/// cost the same.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ProbeDetail {
+    /// 128-wide faces → a 256-wide map. For projects where probes are a hint of
+    /// colour rather than something anybody looks into.
+    Low,
+    /// 256-wide faces → a 512-wide map.
+    Medium,
+    /// 512-wide faces → a 1024-wide map. The default: a mirror can show a
+    /// doorway as a doorway.
+    #[default]
+    High,
+    /// 1024-wide faces → a 2048-wide map. For a hero mirror, at 16× the capture
+    /// cost of `High` and 22 MB of the four slots.
+    Ultra,
+}
+
+impl ProbeDetail {
+    /// The equirectangular map's width. Height is half — the same shape and the
+    /// same mapping as the sky in [`crate::env`].
+    pub fn width(self) -> u32 {
+        match self {
+            ProbeDetail::Low => 256,
+            ProbeDetail::Medium => 512,
+            ProbeDetail::High => 1024,
+            ProbeDetail::Ultra => 2048,
+        }
+    }
+    pub fn height(self) -> u32 {
+        self.width() / 2
+    }
+    /// The square cube face each of the six captures renders at.
+    ///
+    /// Half the map's width. A face spans 90° and the map spans 360°, so equal
+    /// angular density at the equator would want a face a QUARTER of the width;
+    /// half of it is deliberately generous, because the conversion then averages
+    /// rather than magnifies, and a magnified capture shows its own texels in a
+    /// mirror.
+    pub fn face(self) -> u32 {
+        self.width() / 2
+    }
+}
+
+/// The default capture face size — see [`ProbeDetail::face`].
+pub const PROBE_FACE: u32 = 512;
+/// The default equirectangular map size — see [`ProbeDetail::width`].
+pub const PROBE_W: u32 = 1024;
 pub const PROBE_H: u32 = PROBE_W / 2;
 /// How many probes one scene can have live at once.
 ///
@@ -165,6 +217,7 @@ pub struct ReflectionProbes {
     convert_pipeline: wgpu::RenderPipeline,
     convert_bind: wgpu::BindGroup,
     mips: u32,
+    detail: ProbeDetail,
     format: wgpu::TextureFormat,
 }
 
@@ -184,14 +237,22 @@ impl ReflectionProbes {
     /// captures 8-bit sRGB, each matching what its own scene actually looks
     /// like.
     pub fn new(gpu: &Gpu) -> Self {
+        Self::with_detail(gpu, ProbeDetail::default())
+    }
+
+    /// [`ReflectionProbes::new`] at a chosen level of detail. The maps are sized
+    /// once here; changing the setting rebuilds them, which is why the editor
+    /// keeps the detail it built with and compares.
+    pub fn with_detail(gpu: &Gpu, detail: ProbeDetail) -> Self {
         let device = &gpu.device;
         let format = gpu.scene_format();
-        let mips = PROBE_W.ilog2() + 1;
+        let (probe_w, probe_h, probe_face) = (detail.width(), detail.height(), detail.face());
+        let mips = probe_w.ilog2() + 1;
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("reflection-probes"),
             size: wgpu::Extent3d {
-                width: PROBE_W,
-                height: PROBE_H,
+                width: probe_w,
+                height: probe_h,
                 depth_or_array_layers: MAX_PROBES as u32,
             },
             mip_level_count: mips,
@@ -246,8 +307,8 @@ impl ReflectionProbes {
         let faces = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("reflection-probe-faces"),
             size: wgpu::Extent3d {
-                width: PROBE_FACE,
-                height: PROBE_FACE,
+                width: probe_face,
+                height: probe_face,
                 depth_or_array_layers: 6,
             },
             mip_level_count: 1,
@@ -273,8 +334,8 @@ impl ReflectionProbes {
         let face_depth = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("reflection-probe-depth"),
             size: wgpu::Extent3d {
-                width: PROBE_FACE,
-                height: PROBE_FACE,
+                width: probe_face,
+                height: probe_face,
                 depth_or_array_layers: 6,
             },
             mip_level_count: 1,
@@ -411,6 +472,7 @@ impl ReflectionProbes {
             convert_pipeline,
             convert_bind,
             mips,
+            detail,
             format,
         }
     }
@@ -494,6 +556,15 @@ impl ReflectionProbes {
         &self.sampler
     }
 
+    /// The detail these maps were built at — compare it against the project's
+    /// setting to know whether they need rebuilding.
+    pub fn detail(&self) -> ProbeDetail {
+        self.detail
+    }
+    /// The square size one capture face renders at.
+    pub fn face_size(&self) -> u32 {
+        self.detail.face()
+    }
     pub fn mips(&self) -> u32 {
         self.mips
     }

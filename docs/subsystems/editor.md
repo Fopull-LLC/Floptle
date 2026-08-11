@@ -303,6 +303,32 @@ target reallocated?", which reads like "does the bind need refreshing?" and is a
 different question. `tests/offscreen_draws_the_same_world.rs` requires both
 functions by name in the offscreen path.
 
+## Nothing may be hidden that cannot be un-hidden (v0.54.0)
+
+The Hierarchy folds every parent on the first draw after a scene loads, so an
+opened scene reads as a list of top-level things rather than as everything at
+once. Whether a row gets a disclosure triangle was a *different* question:
+`is_folder && has_kids`, where `is_folder` meant `Matter::Empty`.
+
+The two disagreed, and the disagreement was silent and permanent. A Reflection
+Probe parented to a Plane, a light parented to a mesh — anything under a node
+that is not an Empty — was folded shut by the first rule and had no triangle to
+open it under the second. Its children left the panel for good: still in the
+scene, still saved, still loaded, simply unreachable. Adding another child added
+to the pile. It reads as "the children I added just vanished", which is not a
+sentence anybody connects to the word *hierarchy*.
+
+`row_expandable(has_kids, has_bones)` is the fix and the invariant: **a node with
+children IS a folder, whatever else it also is.** `fold_all_parents` is now a free
+function next to it, and the test that guards them asserts the property rather
+than the behaviour — for every row the fold hides, `row_expandable` must answer
+true. A row that can hide children must be able to reveal them.
+
+The icon changed too. A non-folder with children used to be drawn with `⏷`, the
+*expanded* triangle glyph, in the icon column — so a collapsed unreachable
+subtree announced itself as already open, which is why the panel looked correct
+while being wrong.
+
 ## 7. Out of scope
 
 This section has narrowed over time (texture painting and the embedded IDE both

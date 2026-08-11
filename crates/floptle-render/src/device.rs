@@ -139,6 +139,18 @@ impl Frame {
     }
 }
 
+/// The timestamp features, when this adapter has them.
+///
+/// **Asked for, never required.** They are what lets the editor say where a
+/// frame's time went (see [`crate::gpu_timer`]), and a device that cannot offer
+/// them must still start — an engine that refused to run on a card without a
+/// profiler would be trading the product for the tool. `GpuTimer::new` asks the
+/// DEVICE afterwards, so the two can never drift apart.
+fn timing_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+    let want = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+    adapter.features() & want
+}
+
 impl Gpu {
     /// Create the GPU connection for `window` and configure its surface. Picks a
     /// high-performance adapter, an sRGB surface format when available, and Mailbox
@@ -165,7 +177,7 @@ impl Gpu {
 
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("floptle-device"),
-            required_features: wgpu::Features::empty(),
+            required_features: timing_features(&adapter),
             required_limits: wgpu::Limits::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::Performance,

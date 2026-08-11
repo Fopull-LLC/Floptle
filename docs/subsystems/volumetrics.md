@@ -114,7 +114,45 @@ Three ways down, in the order worth trying:
 
 The march is bounded by the density: a step in air thin enough to contribute
 nothing skips its shadow march entirely, so a layer that sits below the camera
-costs almost nothing for the sky above it.
+costs almost nothing for the sky above it. A ray also stops once its
+transmittance falls below a thousandth — nothing behind fog that thick is going
+to be seen, and dense fog is the case that marches most.
+
+### What it used to cost, and why (v0.54.0)
+
+The first scene the GPU profiler was pointed at spent **six of its eight
+milliseconds here**, on four ceiling lights in a corridor. Three separate
+mistakes, all in the per-step loop, all now fixed — worth writing down because
+each is the kind that looks correct while reading it:
+
+- **`fog_inscatter` asked every lamp for a full surface-lighting calculation and
+  used two numbers out of it.** `area_terms` integrates an emitter's solid angle
+  against a surface normal and finds a representative point for the highlight; a
+  rect emitter costs four quaternion rotations and an edge loop to do it. **There
+  is no surface in mid-air** — no `ndl`, no mirror direction — and the code even
+  said so in a comment while calling it anyway. `fog_emitter` is a length and one
+  subtraction, and the subtraction (the emitter's own size, via `fog_extent`) is
+  the only part that mattered: the air beside a strip light should be lit by the
+  strip, not by a point in the middle of it.
+- **The range test came after the expensive part.** A lamp at the far end of a
+  level was evaluated in full and then multiplied by zero. It is now a squared
+  distance against the range widened by `fog_extent`, so it can only ever reject
+  a lamp the evaluation would have rejected too.
+- **The noise was sampled about forty times per lump.** It is tens of metres
+  across; a step is a fraction of a metre. `fog_noise_stride` holds one sample
+  for a run of steps sized so the field is still sampled eight times across its
+  finest feature, and `cloud_fbm_lod` stops evaluating octaves finer than a step
+  can resolve — replacing each with its **mean**, not with nothing, because
+  truncating an octave removes its average too and the fog then visibly thins
+  with distance.
+
+Alongside them, `fog_inscatter` now returns early on the **sun** when
+`light_color` is black, which is every interior. Note the shape of the bug that
+came out of writing that: it was first an early `return` from the whole function,
+which also skipped the placeable lamps below it — so a room lit entirely by its
+own ceiling panels got no light in its air at all. `fog_probe` caught it.
+
+Together: **6.0 ms → 0.9 ms**, with the frames pixel-identical.
 
 ## Editing it
 
@@ -146,7 +184,25 @@ them control pairs and one against arithmetic:
 5. a lamp glows on its own side of the frame, in its own colour, and stops doing
    so at amount 0
 
-Runs under lavapipe in CI.
+**`fog_probe` runs with the noise switched off**, deliberately — its arithmetic
+checks want a density that is exactly constant. That also means it covers none of
+the noise work above, and every assertion in it passed unchanged while that code
+was being rewritten underneath.
+
+`cargo run -p floptle-render --example fog_noise_probe -- <dir>` is the one that
+does. Its assertions are **convergence rather than appearance**, which is how to
+ask whether a held sample landed where the un-held march was going without a
+golden image to compare against:
+
+1. switching the noise on moves the picture, measured pixel against matching
+   pixel — a frame's own spread is dominated by the lamp's glow and would pass
+   with the noise off entirely
+2. the same fog marched at 8, 16 and 48 steps — three different strides over one
+   field — comes out the same brightness (measured: within 0.75%)
+3. fog whose noise is too fine to resolve is still as **thick** as coarse fog,
+   which is the check on replacing a dropped octave with its mean
+
+Both run under lavapipe in CI.
 
 ## Not in this one
 

@@ -1362,6 +1362,14 @@ struct Editor {
     window: Option<Arc<Window>>,
     raster: Option<Raster>,
     raymarch: Option<Raymarch>,
+    /// Per-pass GPU timings — `None` on a device without timestamp queries, so
+    /// the panel says so rather than reporting zeros.
+    gpu_timer: Option<floptle_render::GpuTimer>,
+    /// Frames drawn — only used to pace the `FLOPTLE_GPU_TIMING` terminal dump.
+    gpu_timing_frames: u64,
+    /// Is the ⏱ Frame panel open? Nothing is submitted for timing while it is
+    /// shut, so a profiler that nobody is reading costs nothing at all.
+    gpu_timing_open: bool,
     retro: Option<Retro>,
     /// Post-processing stack (bloom + vignette), full frame res.
     post: Option<floptle_render::PostStack>,
@@ -2766,6 +2774,11 @@ impl ApplicationHandler for Editor {
         let plane_id = raster.register(&gpu, &primitive_mesh(Shape::Plane), None);
         self.mesh_ids = vec![cube_id, sphere_id, capsule_id, plane_id];
         self.raymarch = Some(Raymarch::new(&gpu));
+        self.gpu_timer = floptle_render::GpuTimer::new(&gpu);
+        // `FLOPTLE_GPU_TIMING=1` opens the ⏱ panel on startup and repeats its
+        // numbers to the terminal — the form a measurement has to take when the
+        // person reading it is not the person at the window.
+        self.gpu_timing_open = std::env::var("FLOPTLE_GPU_TIMING").is_ok();
 
         // Built-in primitive meshes for particle mesh-render tracks (see vfx.rs). Reserved
         // `builtin://…` keys in mesh_registry so the VFX picker offers stock shapes and

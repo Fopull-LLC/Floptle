@@ -125,6 +125,51 @@ fn main() {
         round3(r)
     );
 
+    // 4. A NEARLY polished surface is nearly a mirror.
+    //
+    // **Roughness 0 was the one value the old blur got right**, which is why this
+    // check is taken against 0.1 rather than at it. The mip a reflection was read
+    // at came from `sqrt(roughness)`, and sqrt LIFTS small values: 0.1 came out
+    // at 0.32 and landed a third of the way up a box-filtered chain — an
+    // eightfold blur on a surface the author had asked to be a mirror. Every
+    // slider but a hard zero read as frosted, and no probe noticed, because every
+    // probe used a hard zero.
+    //
+    // The assertion is a COMPARISON rather than a threshold: whatever a mirror in
+    // this room looks like, a surface at roughness 0.1 has to look almost the
+    // same. Stated that way it needs no golden image and no tuned constant, and
+    // it fails loudly on the old mapping, which put four mip levels between these
+    // two renders.
+    let mirror = shot_rough(&gpu, true, 0.0, &format!("{dir}/interior_reflection_r000.png"));
+    let nearly = shot_rough(&gpu, true, 0.1, &format!("{dir}/interior_reflection_r010.png"));
+    let frosted = shot_rough(&gpu, true, 0.7, &format!("{dir}/interior_reflection_r070.png"));
+    // What is measured is CONTRAST across the bars, in the patch at the ball's
+    // centre where they land. A blur does not move a reflection, it flattens it:
+    // the bars stay where they are and stop being bars. Comparing each render's
+    // contrast against the mirror's makes the check a ratio, so it needs no
+    // golden image and no absolute constant.
+    let bars = |px: &[u8]| contrast(px, 0.36, 0.64, 0.42, 0.58);
+    let (c_mirror, c_nearly, c_frosted) = (bars(&mirror), bars(&nearly), bars(&frosted));
+    println!(
+        "bar contrast — mirror {c_mirror:.4}  rough 0.1 {c_nearly:.4}  rough 0.7 {c_frosted:.4}"
+    );
+    assert!(
+        c_nearly > c_mirror * 0.75,
+        "a mirror shows the bars at contrast {c_mirror:.4} and a surface at roughness 0.1 \
+         shows them at {c_nearly:.4} — a surface this close to polished has to keep \
+         nearly all of the detail. Losing it means the reflection is being read from a \
+         mip far coarser than its lobe calls for, which is the difference between a \
+         polished floor and a frosted one, and is why a mirror could be frosted and \
+         not polished"
+    );
+    assert!(
+        c_frosted < c_mirror * 0.5,
+        "roughness 0.7 shows the bars at contrast {c_frosted:.4} against a mirror's \
+         {c_mirror:.4} — a rough surface is supposed to LOSE them. If it does not, \
+         roughness is not reaching the reflection at all and the check above proves \
+         nothing"
+    );
+
     println!("interior reflection probe OK");
 }
 
@@ -151,9 +196,54 @@ fn room() -> Vec<(Mat4, [f32; 3])> {
         (face(Vec3::new(0.0, -ROOM, 0.0), Quat::from_rotation_x(-hp)), [0.06, 0.06, 0.06]),
         (face(Vec3::new(0.0, ROOM, 0.0), Quat::from_rotation_x(hp)), [0.06, 0.06, 0.06]),
     ]
+    .into_iter()
+    // …and a row of narrow bright bars on the back wall.
+    //
+    // **Flat walls cannot measure a blur.** Averaging a wall of one colour with
+    // itself gives that colour back, so a room made only of flat faces reads the
+    // same through a mirror as through a frosted pane — which is why the old
+    // over-blurring survived every check here for as long as it did. Detail
+    // finer than the blur is the only thing that can tell them apart, and these
+    // bars are it: a mirror shows five bars, a frosted surface shows one grey
+    // smear, and the difference is a contrast measurement.
+    // They go on the wall BEHIND the eye. A ball seen head-on reflects what is
+    // behind the camera at its centre — the one part of it every measurement here
+    // already looks through — so anywhere else and the bars would sit at the rim
+    // where the silhouette compresses them to nothing.
+    .chain((0..9).map(|i| {
+        let x = (i as f32 - 4.0) * ROOM * 0.19;
+        (
+            Mat4::from_translation(Vec3::new(x, 0.0, ROOM * 0.98))
+                * Mat4::from_rotation_y(std::f32::consts::PI)
+                * Mat4::from_scale(Vec3::new(ROOM * 0.032, ROOM, 1.0)),
+            [2.2, 2.2, 2.2],
+        )
+    }))
+    .collect()
 }
 
+/// Standard deviation of luminance over a fractional window — how much detail
+/// a patch of the picture actually holds.
+fn contrast(px: &[u8], x0: f32, x1: f32, y0: f32, y1: f32) -> f32 {
+    let mut v = Vec::new();
+    for y in (y0 * S as f32) as u32..(y1 * S as f32) as u32 {
+        for x in (x0 * S as f32) as u32..(x1 * S as f32) as u32 {
+            let i = ((y * S + x) * 4) as usize;
+            if i + 2 < px.len() {
+                v.push((px[i] as f32 + px[i + 1] as f32 + px[i + 2] as f32) / (3.0 * 255.0));
+            }
+        }
+    }
+    let m = v.iter().sum::<f32>() / v.len().max(1) as f32;
+    (v.iter().map(|x| (x - m) * (x - m)).sum::<f32>() / v.len().max(1) as f32).sqrt()
+}
+
+
 fn shot(gpu: &Gpu, use_probe: bool, out: &str) -> Vec<u8> {
+    shot_rough(gpu, use_probe, 0.0, out)
+}
+
+fn shot_rough(gpu: &Gpu, use_probe: bool, rough: f32, out: &str) -> Vec<u8> {
     let mut raster = Raster::new(gpu);
     let wall = raster.register(gpu, &plane(1.0), None);
     let ball = raster.register(gpu, &uv_sphere(1.0, 48, 24), None);
@@ -172,7 +262,7 @@ fn shot(gpu: &Gpu, use_probe: bool, out: &str) -> Vec<u8> {
     // instead of the environment.
     let mut ball_mp = MaterialParams::flat([0.95, 0.95, 0.95]);
     ball_mp.ext_index = raster.push_surface_extras(SurfaceExtras {
-        roughness: 0.0,
+        roughness: rough,
         metallic: 1.0,
         physical: true,
         reflectivity: 1.0,
