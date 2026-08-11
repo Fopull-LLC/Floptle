@@ -78,14 +78,18 @@ fn make_offscreen_target(
         dimension: wgpu::TextureDimension::D2,
         format: Gpu::DEPTH_FORMAT,
         // TEXTURE_BINDING so a viewport's SSAO pass can sample this depth (harmless for
-        // the previews that never do).
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        // the previews that never do). COPY_DST so the opaque depth prepass can
+        // prime it — that is what lets a docked Game panel have the contact
+        // shadows, shoreline foam, reflections and lamp shadows the window has.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
     let tex_id = egui.renderer.register_native_texture(&gpu.device, &egui_view, filter);
     let post = scene.then(|| floptle_render::PostStack::new(gpu, w, h));
-    PreviewTarget { color_view, depth_view, tex_id, post }
+    PreviewTarget { color_view, depth_view, depth_tex: depth, tex_id, post }
 }
 
 impl Editor {
@@ -315,7 +319,11 @@ impl Editor {
         else {
             return;
         };
-        self.render_world_into(&cv, &dv, &cam, 16.0 / 9.0, elapsed, mask, None, (320, 180));
+        // A thumbnail of a camera's view: no prepass and no reflection history.
+        // It is a 320×180 orientation aid, not a view of the game.
+        self.render_world_into(
+            &cv, &dv, &cam, 16.0 / 9.0, elapsed, mask, None, (320, 180), Default::default(),
+        );
         let look = floptle_render::PostSettings {
             tonemap: crate::shading::post_process_uniforms(&self.world).0.tonemap,
             ..Default::default()
@@ -411,6 +419,7 @@ impl Editor {
                 r.mask,
                 Some(tex),
                 (r.w, r.h),
+                Default::default(),
             );
             self.render_target_last.insert(r.name, elapsed);
         }
@@ -574,7 +583,30 @@ impl Editor {
         // terminal pass knows how to land that on a display.
         let scene_target = self.game_post.as_ref().map(|p| p.input_view().clone());
         let Some(scene_target) = scene_target else { return };
-        self.render_world_into(&scene_target, &depth, &cam, aspect, elapsed, cull_mask, None, (cw, ch));
+        // The depth TEXTURE behind `depth` — the retro target's in retro mode,
+        // the panel's own otherwise. This is what lets the prepass run here, and
+        // therefore what makes a docked Game panel show the same picture as the
+        // same game fullscreen: contact shadows, shoreline foam, screen-space
+        // reflections and lamp shadows all read it.
+        let depth_tex = if retro_on {
+            self.game_retro.as_ref().map(|r| r.depth_texture().clone())
+        } else {
+            self.game_vp.as_ref().map(|p| p.depth_tex.clone())
+        };
+        self.render_world_into(
+            &scene_target,
+            &depth,
+            &cam,
+            aspect,
+            elapsed,
+            cull_mask,
+            None,
+            (cw, ch),
+            crate::render_frame::OffscreenOpts {
+                depth_tex: depth_tex.as_ref(),
+                history: crate::render_frame::HistorySlot::GamePanel,
+            },
+        );
         // World canvases: real geometry, so they draw into the scene target with
         // its depth, before post. `include_screen: false` — this tab shows a
         // BUILD, so screen-space layers belong in the flat overlay below, not

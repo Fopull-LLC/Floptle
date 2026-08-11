@@ -140,6 +140,17 @@ pub(crate) struct GizmoFrame {
     pub(crate) box_edges: Vec<[Vec2; 2]>,
     /// Rotation-ring polylines, one per local axis (only filled for the Rotate tool).
     pub(crate) ring_pts: [Vec<Vec2>; 3],
+    /// Per ring point: is it on the camera-facing half of the sphere?
+    ///
+    /// Drawing all three rings whole makes a ball of overlapping circles in which
+    /// no ring can be told from another, and nothing says which way any of them
+    /// faces. Painting only the near half is what turns it back into three
+    /// readable arcs — and the near half is also the half you can actually reach,
+    /// so the picture stops promising a grab the far side would win.
+    ///
+    /// Parallel to [`Self::ring_pts`] (built in the same pass, so points dropped
+    /// for projecting behind the camera are dropped from both).
+    pub(crate) ring_front: [Vec<bool>; 3],
     /// A flat screen-space ring around the center: the free/trackball handle for
     /// Rotate, drawn so the center handle is grabbable (Move/Scale use a box).
     pub(crate) center_ring: Vec<Vec2>,
@@ -330,6 +341,7 @@ pub(crate) fn build_gizmo(
             neg_tips,
             box_edges,
             ring_pts: [Vec::new(), Vec::new(), Vec::new()],
+            ring_front: [Vec::new(), Vec::new(), Vec::new()],
             center_ring: Vec::new(),
             hovered,
         });
@@ -349,6 +361,7 @@ pub(crate) fn build_gizmo(
 
     // Rotation rings live in the planes spanned by the object's local axes.
     let mut ring_pts: [Vec<Vec2>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut ring_front: [Vec<bool>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     let mut center_ring: Vec<Vec2> = Vec::new();
     if tool == Tool::Rotate {
         const N: usize = 48;
@@ -356,14 +369,32 @@ pub(crate) fn build_gizmo(
             let u = local_axis(rot, (i + 1) % 3);
             let v = local_axis(rot, (i + 2) % 3);
             let mut pts = Vec::with_capacity(N + 1);
+            let mut front = Vec::with_capacity(N + 1);
             for k in 0..=N {
                 let a = (k as f32) / (N as f32) * std::f32::consts::TAU;
-                let p = t.translation + ((u * a.cos() + v * a.sin()) * axis_len).as_dvec3();
+                let off = (u * a.cos() + v * a.sin()) * axis_len;
+                let p = t.translation + off.as_dvec3();
                 if let Some(s) = project(p, cam_world, vp, w, h) {
                     pts.push(s);
+                    // Facing us when the outward radial points back toward the
+                    // eye. The two are computed in doubles from the same world
+                    // positions the point was projected from, so the near/far
+                    // split lands exactly on the silhouette.
+                    front.push(off.as_dvec3().dot(p - cam_world) < 0.0);
                 }
             }
+            // A ring whose axis points at the camera is seen face-on, and the
+            // test above — which is the EXACT sphere-silhouette test, so it is
+            // right about this — puts every one of its points a hair behind the
+            // silhouette. Ghosting it whole would fade out the one ring you can
+            // see as a full circle and are most likely to be reaching for. Read
+            // "no near half at all" as "this ring IS the silhouette" and draw it
+            // solid.
+            if !front.iter().any(|f| *f) {
+                front.fill(true);
+            }
             *ring = pts;
+            ring_front[i] = front;
         }
         // A flat screen-space trackball ring around the center — the free-rotate handle.
         const M: usize = 40;
@@ -380,6 +411,7 @@ pub(crate) fn build_gizmo(
         neg_tips: [None; 3],
         box_edges: Vec::new(),
         ring_pts,
+        ring_front,
         center_ring,
         hovered,
     })
@@ -508,10 +540,63 @@ pub(crate) fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, g
             for (i, (ring, col)) in g.ring_pts.iter().zip(axis_col).enumerate() {
                 let on = active(handle_for_axis(i));
                 let col = brighten(col, on);
-                let pts: Vec<Pos2> = ring.iter().map(|v| pt(*v)).collect();
-                if pts.len() >= 2 {
-                    painter.line(pts, Stroke::new(if on { 3.5 } else { 2.0 }, col));
+                let front = &g.ring_front[i];
+                // The far half in a faint ghost, the near half solid. Dropping
+                // the far half entirely would leave three arcs floating with no
+                // hint of the sphere they belong to; this way the ring still
+                // reads as a ring, and which way it faces is never in doubt.
+                let mut run: Vec<Pos2> = Vec::new();
+                let mut ghost: Vec<Pos2> = Vec::new();
+                let flush = |painter: &egui::Painter, run: &mut Vec<Pos2>, near: bool| {
+                    if run.len() >= 2 {
+                        let s = if near {
+                            Stroke::new(if on { 3.5 } else { 2.0 }, col)
+                        } else {
+                            Stroke::new(1.0, col.gamma_multiply(0.25))
+                        };
+                        painter.line(std::mem::take(run), s);
+                    } else {
+                        run.clear();
+                    }
+                };
+                for (k, v) in ring.iter().enumerate() {
+                    let near = front.get(k).copied().unwrap_or(true);
+                    if near {
+                        flush(painter, &mut ghost, false);
+                        run.push(pt(*v));
+                    } else {
+                        flush(painter, &mut run, true);
+                        ghost.push(pt(*v));
+                    }
                 }
+                flush(painter, &mut run, true);
+                flush(painter, &mut ghost, false);
+            }
+            // The object's own axes, named. Three rings tell you the planes you
+            // can turn in; they do not tell you which way the object is FACING,
+            // which is the thing you actually need when the object is a head, a
+            // wing or a gun. A short stub with a letter on it does, and it is the
+            // same red/green/blue the ring uses, so the two read as one gizmo.
+            for (i, (tip, col)) in g.tips.iter().zip(axis_col).enumerate() {
+                let Some(tip) = *tip else { continue };
+                let tp = pt(tip);
+                let d = tp - center;
+                if d.length() < 6.0 {
+                    // Pointing at (or away from) the camera — a stub here would be
+                    // a dot on the pivot, and the letter would sit on the origin
+                    // marker. The ring's own foreshortening already says so.
+                    continue;
+                }
+                let stub = center + d * 0.45;
+                let on = active(handle_for_axis(i));
+                painter.line_segment([center, stub], Stroke::new(if on { 2.5 } else { 1.5 }, col));
+                painter.text(
+                    center + d * 0.58,
+                    egui::Align2::CENTER_CENTER,
+                    ["X", "Y", "Z"][i],
+                    egui::FontId::proportional(11.0),
+                    col,
+                );
             }
             painter.circle_filled(center, 3.0, Color32::from_gray(200));
         }
@@ -544,5 +629,60 @@ pub(crate) fn paint_gizmo(painter: &egui::Painter, g: &GizmoFrame, tool: Tool, g
             }
         }
         Tool::Select | Tool::Sculpt | Tool::Paint | Tool::Tiles => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floptle_core::math::DVec3;
+    use floptle_core::transform::Transform;
+
+    /// A camera at the origin looking down −Z, and an object 10 units in front.
+    fn setup() -> (World, Entity, DVec3, Mat4) {
+        let mut w = World::new();
+        let e = w.spawn();
+        w.insert(e, Transform { translation: DVec3::new(0.0, 0.0, -10.0), ..Default::default() });
+        // Camera-relative projection: the view carries no translation, so the
+        // object's world position IS its position relative to the eye (ADR-0015).
+        let proj = Mat4::perspective_rh(60f32.to_radians(), 1.0, 0.1, 1000.0);
+        (w, e, DVec3::ZERO, proj)
+    }
+
+    /// The near/far split is what makes three rings readable instead of a ball of
+    /// circles. A ring seen edge-on — one that contains the view direction — must
+    /// come out genuinely halved.
+    #[test]
+    fn a_ring_seen_edge_on_is_split_into_a_near_and_a_far_half() {
+        let (world, e, cam, vp) = setup();
+        let g = build_gizmo(Tool::Rotate, Some(e), &world, None, cam, vp, 800.0, 800.0, None, None)
+            .expect("the rotate gizmo builds");
+        // Rings 0 and 1 (local Y/Z and Z/X) both contain the camera's view axis.
+        for i in [0usize, 1] {
+            let front = &g.ring_front[i];
+            assert_eq!(front.len(), g.ring_pts[i].len(), "ring {i}: flags match points");
+            let near = front.iter().filter(|f| **f).count();
+            let far = front.len() - near;
+            assert!(near > 0 && far > 0, "ring {i}: got {near} near / {far} far");
+            let skew = (near as f32 - far as f32).abs() / front.len() as f32;
+            assert!(skew < 0.35, "ring {i} splits lopsidedly ({near}/{far})");
+        }
+    }
+
+    /// The ring facing the camera is the one you see as a full circle and the one
+    /// you are most likely to reach for. The exact sphere-silhouette test puts all
+    /// of it a hair BEHIND the silhouette, so without the degenerate-case rule it
+    /// would be the only ring drawn entirely as a ghost — the exact opposite of
+    /// what it deserves.
+    #[test]
+    fn a_ring_seen_face_on_is_drawn_whole() {
+        let (world, e, cam, vp) = setup();
+        let g = build_gizmo(Tool::Rotate, Some(e), &world, None, cam, vp, 800.0, 800.0, None, None)
+            .expect("builds");
+        // Ring 2 spans local X/Y — face-on to a camera looking down −Z.
+        assert!(
+            g.ring_front[2].iter().all(|f| *f),
+            "the face-on ring draws solid, not as a ghost"
+        );
     }
 }

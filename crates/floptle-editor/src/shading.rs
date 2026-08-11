@@ -167,7 +167,7 @@ pub(crate) fn split_point_lights(
     let mut three: Vec<Candidate> = Vec::new();
     let mut two: Vec<Candidate> = Vec::new();
     for (e, m) in world.query::<Matter>() {
-        let Matter::PointLight { color, intensity, range, shape } = m else { continue };
+        let Matter::PointLight { color, intensity, range, shape, shadows } = m else { continue };
         // A light turned off does not take a slot. Keeping N lights and parking
         // the spare ones at zero is the standard way to pool a capped resource —
         // and scripts cannot create a PointLight, so it is the ONLY way. A
@@ -198,7 +198,7 @@ pub(crate) fn split_point_lights(
             color: [color[0] * intensity, color[1] * intensity, color[2] * intensity, 0.0],
             mask: layer_mask(&lit, sorting_names),
             falloff: lit.falloff_lane(*range),
-            shape: emitter_lane(*shape, wt.scale),
+            shape: emitter_lane(*shape, wt.scale, *shadows),
             rot: [q.x, q.y, q.z, q.w],
         });
     }
@@ -211,28 +211,38 @@ pub(crate) fn split_point_lights(
 /// The node's SCALE is folded in here rather than in the shader, because that is
 /// what dragging a scale handle on a window light is expected to do — and doing
 /// it once per light per frame beats doing it once per light per fragment.
-fn emitter_lane(shape: floptle_core::LightShape, scale: Vec3) -> [f32; 4] {
+fn emitter_lane(shape: floptle_core::LightShape, scale: Vec3, shadows: bool) -> [f32; 4] {
     use floptle_core::LightShape as S;
     // A uniform-ish scale for the shapes that only have a radius: the largest
     // axis, so scaling a bulb up never makes it smaller in some direction.
     let s = scale.x.abs().max(scale.y.abs()).max(scale.z.abs());
+    // The `w` lane is a BITMASK — bit 0 two-sided, bit 1 casts shadows. It was a
+    // plain 0/1 for two-sidedness until a second flag needed a home; see
+    // `light_flag` in field.wgsl, where the matching read lives.
+    let two = |b: bool| if b { LIGHT_TWO_SIDED } else { 0.0 };
+    let sh = if shadows { LIGHT_SHADOWS } else { 0.0 };
     match shape {
-        S::Point => [0.0; 4],
-        S::Sphere { radius } => [1.0, (radius * s).max(0.0), 0.0, 0.0],
+        S::Point => [0.0, 0.0, 0.0, sh],
+        S::Sphere { radius } => [1.0, (radius * s).max(0.0), 0.0, sh],
         S::Rect { width, height, two_sided } => [
             2.0,
             (width * 0.5 * scale.x.abs()).max(1e-4),
             (height * 0.5 * scale.y.abs()).max(1e-4),
-            if two_sided { 1.0 } else { 0.0 },
+            two(two_sided) + sh,
         ],
         S::Disk { radius, two_sided } => {
-            [3.0, (radius * s).max(1e-4), 0.0, if two_sided { 1.0 } else { 0.0 }]
+            [3.0, (radius * s).max(1e-4), 0.0, two(two_sided) + sh]
         }
         S::Tube { length, radius } => {
-            [4.0, (length * 0.5 * scale.x.abs()).max(1e-4), (radius * s).max(1e-4), 0.0]
+            [4.0, (length * 0.5 * scale.x.abs()).max(1e-4), (radius * s).max(1e-4), sh]
         }
     }
 }
+
+/// The emitter lane's flag bits, matching `LIGHT_TWO_SIDED` / `LIGHT_SHADOWS` in
+/// field.wgsl. Spelled as floats because the lane is a `vec4<f32>`.
+const LIGHT_TWO_SIDED: f32 = 1.0;
+const LIGHT_SHADOWS: f32 = 2.0;
 
 /// One light that qualified, before the sixteen are chosen.
 struct Candidate {
@@ -440,6 +450,23 @@ pub(crate) fn contact_uniform(l: &Light) -> [f32; 4] {
         l.contact_length.clamp(0.01, 20.0),
         l.contact_steps.clamp(2, 32) as f32,
         l.contact_strength.clamp(0.0, 1.0),
+    ]
+}
+
+/// The screen-space-reflection lane, `[on, reach, steps, thickness]`.
+///
+/// **`primed` is what makes the first frame right.** With no stored picture the
+/// march has nothing to sample, and reporting "on" would have every mirror in
+/// the scene read a black texture and go dark for a frame — at a load, at a
+/// scene switch, at every window resize. Off until there is something to
+/// reflect, and the environment map covers the gap, which is the same answer
+/// the effect gives for a ray that leaves the screen.
+pub(crate) fn ssr_uniform(l: &Light, primed: bool) -> [f32; 4] {
+    [
+        if l.reflections && primed { 1.0 } else { 0.0 },
+        l.reflection_distance.clamp(0.1, 500.0),
+        l.reflection_steps.clamp(8, 64) as f32,
+        l.reflection_thickness.clamp(0.01, 20.0),
     ]
 }
 
@@ -977,7 +1004,7 @@ mod light_split_tests {
 
     fn light_at(world: &mut World, x: f64, mode: Option<Lighting2D>) -> floptle_core::Entity {
         let e = world.spawn();
-        world.insert(e, Matter::PointLight { color: [1.0, 0.5, 0.25], intensity: 2.0, range: 8.0, shape: Default::default() });
+        world.insert(e, Matter::PointLight { color: [1.0, 0.5, 0.25], intensity: 2.0, range: 8.0, shape: Default::default() , shadows: false});
         world.insert(
             e,
             floptle_core::transform::Transform {
@@ -1084,10 +1111,10 @@ mod light_split_tests {
         let dark = light_at(&mut world, 0.0, None);
         world.insert(
             dark,
-            Matter::PointLight { color: [1.0; 3], intensity: 0.0, range: 8.0, shape: Default::default() },
+            Matter::PointLight { color: [1.0; 3], intensity: 0.0, range: 8.0, shape: Default::default() , shadows: false},
         );
         let spent = light_at(&mut world, 1.0, None);
-        world.insert(spent, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 0.0, shape: Default::default() });
+        world.insert(spent, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 0.0, shape: Default::default() , shadows: false});
         light_at(&mut world, 2.0, None); // the only one actually lighting anything
 
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);

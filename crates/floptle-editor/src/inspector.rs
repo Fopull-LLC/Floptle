@@ -1094,6 +1094,71 @@ pub(crate) fn material_props_ui(
                     &mut m.metallic_map,
                 );
                 ui.end_row();
+                ui.label("reflections").on_hover_text(
+                    "How much of the SKY this surface reflects. 1 is the real \
+                     amount and the default.\n\nA mirror is metallic 1 with \
+                     roughness 0 — it shows the sky sharply. Raise the roughness \
+                     and the same reflection blurs, which is the difference \
+                     between chrome and brushed steel.\n\nTurn this down to take \
+                     the sheen off something reading too glassy; past 1 is a \
+                     deliberate cheat that flatters a hero prop.",
+                );
+                r.changed |=
+                    ui.add(egui::Slider::new(&mut m.reflectivity, 0.0..=2.0)).changed();
+                ui.end_row();
+
+                // ---- glass -------------------------------------------------
+                // Beside reflections rather than in a section of its own,
+                // because they are two halves of one question — what a surface
+                // does with the light that reaches it — and a crystal ball needs
+                // both turned up.
+                ui.label("see-through").on_hover_text(
+                    "GLASS: how much light passes THROUGH this surface instead of \
+                     stopping at it. 0 is solid, 1 is clear glass.\n\nDifferent from \
+                     opacity: opacity fades the surface away, and takes its highlight \
+                     and its reflection with it. This keeps the surface — its \
+                     reflection, its bright grazing edge — and lets the scene behind \
+                     come through it, bent.\n\nThe base colour tints what comes \
+                     through, so green glass makes what is behind it green.",
+                );
+                r.changed |=
+                    ui.add(egui::Slider::new(&mut m.transmission, 0.0..=1.0)).changed();
+                ui.end_row();
+                ui.label("  bend").on_hover_text(
+                    "Index of refraction — how sharply light bends on the way in.\n\n                     1.0 does not bend at all (the scene shows through undistorted), \
+                     1.33 water, 1.5 window glass, 1.8 heavy crystal, 2.4 diamond.\n\n                     This is the whole difference between a flat pane and a lens: a \
+                     solid ball at 1.5 or above turns what is behind it upside down.",
+                );
+                r.changed |= ui
+                    .add_enabled(
+                        m.transmission > 0.0,
+                        egui::Slider::new(&mut m.ior, 1.0..=2.5),
+                    )
+                    .changed();
+                ui.end_row();
+                ui.label("  thickness").on_hover_text(
+                    "How far light travels inside the material, in metres. Set it to \
+                     roughly the size of the object — a windowpane is thin, a paperweight \
+                     is not.\n\nHow far the distortion actually throws what is behind \
+                     ALSO depends on how far away that is: glass against a wall barely \
+                     shifts it, the same glass held up against a distant one throws it \
+                     right across. That part is the scene's doing, not this slider's.",
+                );
+                r.changed |= ui
+                    .add_enabled(
+                        m.transmission > 0.0,
+                        egui::Slider::new(&mut m.thickness, 0.0..=5.0),
+                    )
+                    .changed();
+                ui.end_row();
+                if m.transmission > 0.0 {
+                    ui.label("");
+                    ui.small(
+                        "roughness frosts it — the same slider that blurs a reflection \
+                         blurs what you see through",
+                    );
+                    ui.end_row();
+                }
             });
         });
     }
@@ -1804,6 +1869,51 @@ impl EditorTabViewer<'_> {
                             }
                             ui.small("only shadows what is ON SCREEN — nothing off the edge of the frame casts one");
                         });
+                        // Reflections of the SCENE. Sits with the shadow knobs
+                        // rather than with fog because it is the same kind of
+                        // thing: a scene-wide switch that costs a march, reads
+                        // the depth buffer, and only sees what is on screen.
+                        ui.separator();
+                        cmd.inspector_changed |= ui
+                            .checkbox(&mut l.reflections, "reflections (screen space)")
+                            .on_hover_text(
+                                "reflective surfaces show the SCENE, not only the sky — a floor shows the \
+                                 room standing on it. Every physical material with some reflectivity picks \
+                                 this up at once; how much and how sharply is each material's roughness \
+                                 and reflections. Only what is ON SCREEN can be reflected: anything behind \
+                                 the camera or hidden behind something nearer falls back to the sky.",
+                            )
+                            .changed();
+                        ui.add_enabled_ui(l.reflections, |ui| {
+                            cmd.inspector_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut l.reflection_distance, 1.0..=200.0)
+                                        .logarithmic(true)
+                                        .text("reach")
+                                        .suffix("m"),
+                                )
+                                .on_hover_text("how far a reflected ray travels before giving up. A puddle showing a building across the street needs more of this than a floor showing the table on it")
+                                .changed();
+                            let mut steps = l.reflection_steps as i32;
+                            if ui
+                                .add(egui::Slider::new(&mut steps, 8..=64).text("steps"))
+                                .on_hover_text("samples along that ray — raise it with the reach, or reflections start missing thin things")
+                                .changed()
+                            {
+                                l.reflection_steps = steps as u32;
+                                cmd.inspector_changed = true;
+                            }
+                            cmd.inspector_changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut l.reflection_thickness, 0.02..=5.0)
+                                        .logarithmic(true)
+                                        .text("thickness")
+                                        .suffix("m"),
+                                )
+                                .on_hover_text("how solid things are assumed to be. Too little and reflections come out speckled with holes; too much and railings and leaves smear over what is really behind them")
+                                .changed();
+                            ui.small("reflects the PREVIOUS frame, so a reflection is one frame behind — invisible except on a mirror under a whipping camera");
+                        });
                     });
                     // Fog — distance haze (depth ramp) or real marched media (volumetric).
                     ui.separator();
@@ -2487,7 +2597,7 @@ impl EditorTabViewer<'_> {
                                     cmd.camera_from_view = Some(e);
                                 }
                             }
-                            Matter::PointLight { color, intensity, range, shape } => {
+                            Matter::PointLight { color, intensity, range, shape, shadows } => {
                                 use floptle_core::LightShape as LS;
                                 ui.label("light");
                                 ui.small("position and facing come from the transform below");
@@ -2499,6 +2609,17 @@ impl EditorTabViewer<'_> {
                                     ui.add(egui::Slider::new(intensity, 0.0..=20.0).text("intensity")).changed();
                                 cmd.inspector_changed |=
                                     ui.add(egui::Slider::new(range, 0.1..=200.0).text("range")).changed();
+                                cmd.inspector_changed |= ui
+                                    .checkbox(shadows, "casts shadows")
+                                    .on_hover_text(
+                                        "stop this lamp at the walls between it and what it lights, instead \
+                                         of shining through them. Per lamp, because it costs a march per lit \
+                                         pixel and most lights in a level have nothing to be blocked by. \
+                                         Shadows from what is ON SCREEN: a wall casts while it is in frame \
+                                         and stops when you look away from it. Quality and darkness are on \
+                                         the Lighting node.",
+                                    )
+                                    .changed();
                                 // The EMITTER. Switching shape keeps whatever
                                 // size the old one had where the two agree, so
                                 // trying rect against disk is one click and not
@@ -6028,7 +6149,7 @@ mod tests {
     fn auto_shows_what_it_inferred_and_why() {
         let layers = vec!["Default".to_string(), "Background".to_string()];
 
-        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() }, true);
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false}, true);
         let (painted, _) = run_lighting_2d(&world, e, &layers);
         assert!(painted.contains("2D light"), "no row at all:\n{painted}");
         assert!(painted.contains("auto"), "the flag is not shown:\n{painted}");
@@ -6036,7 +6157,7 @@ mod tests {
         assert!(painted.contains("orthographic"), "…nor why:\n{painted}");
 
         // The same light in a 3D scene decides the other way, and says so.
-        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() }, false);
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false}, false);
         let (painted, _) = run_lighting_2d(&world, e, &layers);
         assert!(painted.contains("→ 3D"), "a light in a perspective scene must read 3D:\n{painted}");
     }
@@ -6077,7 +6198,7 @@ mod tests {
     #[test]
     fn unticking_a_layer_keeps_the_rest() {
         let layers = vec!["Default".to_string(), "Terrain".to_string(), "Background".to_string()];
-        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() }, true);
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false}, true);
         let (painted, _) = run_lighting_2d(&world, e, &layers);
         assert!(painted.contains("every layer"), "an untouched light must say it reaches all:\n{painted}");
 

@@ -325,6 +325,142 @@ field.wgsl's `key_light`: same star loop, same `star_shadow` / `sun_shadow`
 calls in the same places, so a Physical surface receives exactly the shadows a
 Classic one does and the two can only differ in the BRDF.
 
+### Reflections: the environment term
+
+A Physical surface also reflects the **sky**. For a long time it did not, and
+the absence was invisible in the code and glaring on screen: the GGX lobe was
+correct and had nothing to put in it but the sun and the placed point lights,
+so a metal at roughness 0 came out as a sun dot on black. Mirrors and crystal
+balls were not hard to make, they were not expressible.
+
+The sky is captured once per frame into an equirectangular map with a mip chain
+(`env.rs`) and reaches shading through the SHARED field bind group, the same
+route the baked GI takes. Capturing rather than calling the sky directly is what
+makes all three sky sources — the solid vault, a skybox image and a `stage sky`
+shader — arrive already resolved, and it produces the roughness chain a
+reflection needs anyway.
+
+`env_specular` in `raster.wgsl` reflects the view vector, samples the chain at a
+level chosen by `sqrt(roughness)` (which spends more of the chain on the
+polished end, where the eye reads the difference), and weights it with Karis'
+analytic split-sum approximation — the alternative to shipping a BRDF lookup
+table and a pass to bake it.
+
+Two things follow that are worth knowing:
+
+* **`Material::reflectivity` scales it**, defaulting to `1.0` — the honest
+  amount. It is Physical-only, because the Classic model has no `f0` to weight
+  an environment by.
+* **For a metal, albedo IS `f0`.** A black metal reflects nothing, by
+  definition and correctly. This is the trap `reflection_probe` was written
+  against: an early version measured a black sphere, saw the analytic BRDF's
+  grazing-sheen bias, and read as a passing test that proved nothing.
+
+The mip chain is a box filter, not a true GGX prefilter — an approximation, and
+a good one for skies, which are low-frequency. The case it gets exactly right is
+the one that matters most: at roughness 0 a mirror samples level 0, which IS the
+sky.
+
+### Reflections of the scene (screen space)
+
+The environment term above answers "what is the sky doing behind this surface".
+It cannot answer "what is standing in front of it", and a floor that shows the
+sky but not the table on it does not read as a floor. Screen-space reflections
+are the other half, switched on per scene by `Light::reflections` (the Lighting
+node — see [light](light.md)) rather than per material: whether a mirror
+shows the room is a fact about the renderer, and every Physical surface with
+some reflectivity picks it up at once.
+
+`ssr_trace` in `raster.wgsl` marches the reflected ray against the **opaque depth
+prepass**, uniformly in SCREEN space — equal world steps would crowd hundreds of
+samples into the few pixels nearest the surface and then leap whole objects in
+the distance, which is backwards for something read at screen resolution. The
+world position per sample is recovered perspective-correctly, by interpolating
+`1/w` alongside `position/w`. On a crossing it bisects five times, then reads the
+colour from the scene history.
+
+**It reads the PREVIOUS frame** (`ssr.rs`). Shading is forward: when a fragment
+runs, most other pixels' colours do not exist yet and many belong to draws not
+yet issued. So the choice is between a deferred renderer — a G-buffer written by
+every one of the raster pass's pipeline variants, with the specular term moved
+out of the forward shader entirely — and reflecting the frame that has finished.
+The cost is one frame of lag in a reflection's CONTENTS; its geometry is this
+frame's, because the march is against this frame's depth.
+
+The history is captured after the scene composites and before post, so it holds
+linear HDR with no tonemap, bloom or grade in it — a reflection is part of the
+scene and must go through the tonemap WITH it. It is half resolution with a mip
+chain, and roughness picks a level by `sqrt(roughness)`, the same index the sky
+chain uses, so a surface reflecting some sky and some scene blurs both equally.
+
+Three ways a screen-space hit is a lie, all faded rather than cut so the sky
+takes over without a seam: the frame edge (no data past it), rays pointing back
+at the camera (what they want is behind the viewer), and long rays (more scene
+crossed that the camera cannot see around). **A miss falls back to the
+environment map**, which is why the two features are complements rather than
+alternatives — and why the fallback must never be black.
+
+Because the world is camera-relative (ADR-0015) the stored view-projection is not
+usable as taken: a rock that has not moved has different coordinates in each
+frame. `SceneHistory::prev_view_proj` pre-translates by how far the camera went,
+the same correction motion blur makes. Left out, every reflection slides whenever
+the camera dollies.
+
+**Every view has its own history**, because a history carries the camera it was
+taken from and the resolution it was taken at. The window has one; a docked Game
+panel has its own; a thumbnail or a GI bake has none and reflects the sky, which
+is what it did before any of this existed. Sharing one would have each view
+reprojecting the other's frame, which reads as the reflection tearing.
+
+### Glass: seeing through, bent
+
+`Material::transmission` is how much light passes THROUGH a surface instead of
+stopping at it, and it is a different thing from `alpha`. Alpha fades a surface
+toward what is behind it — the surface gets weaker, and takes its highlight, its
+reflection and its bright grazing edge with it. Transmission keeps the surface at
+full strength and lets the scene behind arrive *refracted*: bent by `ior`,
+blurred by `roughness` (the same mip chain reflections use), and tinted by the
+material's own `color`. The diffuse term fades out as it rises, because light
+that passes through a surface is not also scattering off it.
+
+**Glass gets its own pass, and that is the whole design.** A surface cannot
+sample a picture it is already in. Drawn with the rest of the scene, the only
+picture available is the previous frame's — which has the glass composited into
+it, so a green bottle would deepen its own tint every frame it stayed on screen.
+So the renderer:
+
+1. runs the opaque depth prepass **without** glass (glass in it would kill the
+   fragments behind it by early-z, leaving a glass-shaped hole in the capture);
+2. draws the scene **without** glass;
+3. captures that into the scene-colour texture;
+4. draws glass, with the capture bound as "what is behind" and the reprojection
+   matrix set to the identity, because the picture is this frame's.
+
+None of it happens unless something in view actually asks: `Raster::any_transmissive`
+gates the capture and the extra pass, so a scene with no glass runs exactly the
+passes it always did.
+
+**The bend travels to the scene, not just through the material.** Refraction
+displaces what you see in proportion to how far the ray travels after bending, so
+the common approximation — march the material's own thickness and stop — gives a
+marble on a table and a ball held against a distant wall the same negligible
+shift. `refracted` in `raster.wgsl` reads the depth prepass for the distance to
+whatever is behind and marches that as well, which is what makes a solid ball
+behave as the lens it is and turn the background upside down. Glass being absent
+from the prepass is what makes that reading the scene behind rather than the
+glass itself.
+
+The limits are the ones screen space always has, plus one of its own: what is
+off-screen or hidden cannot be refracted (the sample falls back to the unbent
+view rather than smearing an edge pixel), and **only the nearest layer of glass
+refracts** — the pass writes depth, so two overlapping panes show the nearer
+one's distortion. A fish tank is one box, not six.
+
+Verified by `refraction_probe`, which puts a ball in front of two hard-edged
+colour cards and checks that the view through it MOVES, that it stops moving at
+`ior = 1`, that the ball is opaque at `transmission = 0`, and — the one that
+catches the compounding bug — that two identical frames come out byte-identical.
+
 ### The retro flags
 
 Four era-accurate artefacts, all off by default, each independent

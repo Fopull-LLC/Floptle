@@ -50,6 +50,7 @@ pub(crate) enum MapCmd {
     SelectConnected,
     SelectCoplanar,
     SelectLoop,
+    SelectRing,
     ToggleSelectHidden,
     // Transform
     GizmoCycle,
@@ -69,13 +70,15 @@ pub(crate) enum MapCmd {
     Weld,
     SnapToGrid,
     Knife,
+    LoopCut,
+    Bevel,
     CenterPivot,
     PivotToSelection,
     NewMaterialFromSelection,
 }
 
 impl MapCmd {
-    pub(crate) const ALL: [MapCmd; 43] = [
+    pub(crate) const ALL: [MapCmd; 46] = [
         MapCmd::DrawBox,
         MapCmd::DrawPlane,
         MapCmd::DrawWedge,
@@ -99,6 +102,7 @@ impl MapCmd {
         MapCmd::SelectConnected,
         MapCmd::SelectCoplanar,
         MapCmd::SelectLoop,
+        MapCmd::SelectRing,
         MapCmd::ToggleSelectHidden,
         MapCmd::GizmoCycle,
         MapCmd::GizmoMove,
@@ -116,6 +120,8 @@ impl MapCmd {
         MapCmd::Weld,
         MapCmd::SnapToGrid,
         MapCmd::Knife,
+        MapCmd::LoopCut,
+        MapCmd::Bevel,
         MapCmd::CenterPivot,
         MapCmd::PivotToSelection,
         MapCmd::NewMaterialFromSelection,
@@ -130,7 +136,8 @@ impl MapCmd {
                 "Draw"
             }
             ModeCycle | ModeVertex | ModeEdge | ModeFace | SelectAll | SelectNone | SelectInvert
-            | SelectGrow | SelectConnected | SelectCoplanar | SelectLoop | ToggleSelectHidden => {
+            | SelectGrow | SelectConnected | SelectCoplanar | SelectLoop | SelectRing
+            | ToggleSelectHidden => {
                 "Select"
             }
             GizmoCycle | GizmoMove | GizmoRotate | GizmoScale | OrientCycle => "Transform",
@@ -164,6 +171,7 @@ impl MapCmd {
             SelectConnected => "Select connected",
             SelectCoplanar => "Select coplanar",
             SelectLoop => "Select edge loop",
+            SelectRing => "Select edge ring",
             ToggleSelectHidden => "Select through surface",
             GizmoCycle => "Cycle move/rotate/scale",
             GizmoMove => "Gizmo: move",
@@ -181,6 +189,8 @@ impl MapCmd {
             Weld => "Weld",
             SnapToGrid => "Snap to grid",
             Knife => "Knife (cut a face)",
+            LoopCut => "Loop cut (insert an edge loop)",
+            Bevel => "Bevel selected edges",
             CenterPivot => "Center pivot",
             PivotToSelection => "Pivot to selection",
             NewMaterialFromSelection => "New material for selection",
@@ -214,6 +224,7 @@ impl MapCmd {
             SelectConnected => "select_connected",
             SelectCoplanar => "select_coplanar",
             SelectLoop => "select_loop",
+            SelectRing => "select_ring",
             ToggleSelectHidden => "select_hidden",
             GizmoCycle => "gizmo_cycle",
             GizmoMove => "gizmo_move",
@@ -231,6 +242,8 @@ impl MapCmd {
             Weld => "weld",
             SnapToGrid => "snap_to_grid",
             Knife => "knife",
+            LoopCut => "loop_cut",
+            Bevel => "bevel",
             CenterPivot => "center_pivot",
             PivotToSelection => "pivot_to_selection",
             NewMaterialFromSelection => "new_material",
@@ -433,6 +446,7 @@ impl Default for MapKeys {
                 b(SelectConnected, Chord::shifted(K::KeyP)),
                 b(SelectCoplanar, Chord::shifted(K::KeyO)),
                 b(SelectLoop, Chord::shifted(K::KeyL)),
+                b(SelectRing, Chord::shifted(K::Backslash)),
                 b(ToggleSelectHidden, Chord::shifted(K::KeyR)),
                 // Transform.
                 b(GizmoCycle, Chord::new(K::KeyX)),
@@ -453,6 +467,12 @@ impl Default for MapKeys {
                 b(SnapToGrid, Chord::shifted(K::KeyN)),
                 // The knife gets `/` — it looks like the cut it makes.
                 b(Knife, Chord::new(K::Slash)),
+                // The loop cut sits beside the knife: both cut, and Shift+/ is
+                // one finger away from /.
+                b(LoopCut, Chord::shifted(K::Slash)),
+                // ' is free, and sits beside / where the other cutting and
+                // shaping verbs live.
+                b(Bevel, Chord::shifted(K::Quote)),
                 b(CenterPivot, Chord::shifted(K::KeyT)),
                 b(PivotToSelection, Chord::shifted(K::KeyV)),
                 b(NewMaterialFromSelection, Chord::new(K::Semicolon)),
@@ -597,7 +617,7 @@ mod tests {
     #[test]
     fn every_command_is_bound() {
         let keys = MapKeys::default();
-        assert_eq!(MapCmd::ALL.len(), 43);
+        assert_eq!(MapCmd::ALL.len(), 46);
         assert!(MapCmd::ALL.into_iter().all(|c| keys.chord(c).is_some()));
     }
 

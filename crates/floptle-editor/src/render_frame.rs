@@ -39,6 +39,44 @@ use crate::viz::{CameraGizmo, EmitterViz, ForceViz, box_lines, camera_frustum_li
 use crate::export::EXPORT_TARGETS;
 use crate::{Editor, EditorCmd, EditorTabViewer, FOCUS_SECS, MeshAsset, ProjectAction, Snapshot, anim, anim_ui, grab_cursor, scene_hit};
 
+/// The extras an offscreen render needs to match what the window shows.
+///
+/// Bundled rather than passed as two more positional arguments because they
+/// belong together conceptually — both are "this view is a real view of the
+/// game, treat it like one" — and because the call already takes nine.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct OffscreenOpts<'a> {
+    /// The TEXTURE behind the depth view, which is what lets this render run the
+    /// opaque depth prepass. It cannot be derived from the view: a view cannot
+    /// be asked its size and cannot be copied out of.
+    ///
+    /// `None` means no prepass, and therefore no contact shadows, no
+    /// `surfaceGap`, no reflections and no lamp shadows — right for a thumbnail
+    /// and wrong for anything a player looks at.
+    pub depth_tex: Option<&'a wgpu::Texture>,
+    /// Which stored picture screen-space reflections read from and write to.
+    /// Each view needs its OWN: the history carries the camera it was taken
+    /// from, and two views sharing one would reproject each other's frames.
+    pub history: HistorySlot,
+}
+
+/// Which scene-colour history an offscreen render uses.
+///
+/// An enum rather than a borrow because the histories live on `Editor` and this
+/// call already holds `&mut self` — naming the slot lets the render reach its
+/// own without the caller having to hand out a second mutable borrow of the
+/// same struct.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum HistorySlot {
+    /// No reflections of the scene here. Thumbnails, the Inspector's camera
+    /// preview, a GI bake: none of them is a view a player sees, and each would
+    /// otherwise want a full-frame mip chain of its own.
+    #[default]
+    None,
+    /// The docked Game panel — the one offscreen view that IS the game.
+    GamePanel,
+}
+
 /// A node's sorting-layer rank if it takes part in 2D lighting, else `None`.
 ///
 /// A free function over the two fields it needs, not an `&self` method: the
@@ -419,6 +457,10 @@ impl Editor {
             .dock_state
             .as_mut()
             .and_then(|d| d.find_active_focused().map(|(_, t)| *t)));
+        // Cleared here, set again by the dopesheet if it draws this frame. A
+        // panel that is no longer on screen must not keep claiming Ctrl+C — the
+        // flag has to expire on its own rather than wait to be corrected.
+        self.anim_ui.sheet_hovered = false;
 
         let (dt, elapsed) = self.advance_clock(game_focused);
         // 🖼 Image tab: frame playback, toasts, external-change reload, and the
@@ -637,6 +679,10 @@ impl Editor {
             // Not `Some(...)`: a project with no screen shaders has no registry
             // yet, and that must not stop the frame from being drawn.
             post_shaders,
+            // Likewise: the scene colour history is allocated the first frame a
+            // scene asks for reflections and dropped when it stops asking, so
+            // "absent" is its ordinary state and not a reason to skip the frame.
+            scene_history,
         ) = (
             self.gpu.as_mut(),
             self.raster.as_mut(),
@@ -651,6 +697,7 @@ impl Editor {
             self.egui.as_mut(),
             self.window.as_ref(),
             self.post_shaders.as_ref(),
+            &mut self.scene_history,
         ) else {
             return;
         };
@@ -1268,6 +1315,29 @@ impl Editor {
         // reads too through the shared field bind group.
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
         let contact = crate::shading::contact_uniform(&light_node);
+        // Does any lamp in this frame cast? Local shadows march the depth
+        // prepass, so if none does there is nothing here to pay for — and if one
+        // does, the prepass has to RUN, which is decided far below. Reading the
+        // flag off the packed lanes (rather than the World a second time) keeps
+        // the answer tied to the sixteen lights that actually reached the
+        // shader: a lamp ranked out of the slots casts nothing, so it must not
+        // be able to switch a whole pass on either.
+        let point_shadows = lit3.shape[..lit3.count.min(16)]
+            .iter()
+            .any(|s| (s[3] as u32) & 2 != 0);
+        // Screen-space reflections read LAST frame's picture, so what the shader
+        // is told here depends on whether one was ever taken — see `ssr_uniform`.
+        // The matrix comes from the history itself, because only it knows which
+        // camera the stored frame belongs to.
+        let ssr = crate::shading::ssr_uniform(
+            &light_node,
+            scene_history.as_ref().is_some_and(|h| h.is_primed()),
+        );
+        let ssr_prev_vp = scene_history
+            .as_ref()
+            .and_then(|h| h.prev_view_proj(cam.world_position))
+            .unwrap_or(floptle_core::math::Mat4::IDENTITY)
+            .to_cols_array_2d();
         let ((fog_color, fog_params), particle_fog) =
             crate::shading::fog_uniforms_and_particles_at(&light_node, &self.world, cam.world_position);
         let (atmo_meta, atmo_color, atmo_body, atmo_params) =
@@ -1923,6 +1993,8 @@ impl Editor {
                 vol_fog_b,
                 vol_fog_c,
                 contact,
+                ssr,
+                ssr_prev_vp,
                 sky_meta,
                 sky_uniforms,
                 atmo_meta,
@@ -2218,6 +2290,7 @@ impl Editor {
         let map_orient = &mut self.map_orient;
         let map_xform = &mut self.map_xform;
         let map_select_hidden = &mut self.map_select_hidden;
+        let map_bevel = &mut self.map_bevel;
         let map_hud_open = &mut self.map_hud_open;
         let map_keys = &mut self.map_keys;
         let map_rebind = &mut self.map_rebind;
@@ -3344,6 +3417,7 @@ impl Editor {
                 map_orient,
                 map_xform,
                 map_select_hidden,
+                map_bevel,
                 map_tool_on,
                 map_playing,
                 map_hud_open,
@@ -4514,6 +4588,46 @@ impl Editor {
             if self.project.retro { retro.resolution() } else { (gpu.config.width, gpu.config.height) };
         post.configure(gpu, post_size.0, post_size.1, self.project.retro);
 
+        // Screen-space reflections need somewhere to keep last frame's picture.
+        // Allocated the first frame a scene asks for them and dropped again when
+        // it stops: this is a full-frame mip chain, and much the largest thing
+        // the renderer holds, so a project that never turns reflections on must
+        // not carry one. It follows the COMPOSITED size, which in retro mode is
+        // the internal resolution — reflecting a full-res picture into a 320×240
+        // scene would be sharper than anything else in the frame.
+        let ssr_on = light_node.reflections;
+        // Glass needs the same stored picture, for the opposite reason: not to
+        // reflect the scene but to see through it. So the texture is allocated
+        // when EITHER asks, and a scene with a single window in it gets one
+        // without having to switch reflections on as well.
+        let glass = raster.any_transmissive(&instances);
+        {
+            let fmt = gpu.scene_format();
+            let rebuilt = if ssr_on || glass {
+                match scene_history.as_mut() {
+                    Some(h) => h.resize_to(&gpu.device, post_size.0, post_size.1, fmt),
+                    None => {
+                        *scene_history = Some(floptle_render::SceneHistory::new(
+                            &gpu.device,
+                            post_size.0,
+                            post_size.1,
+                            fmt,
+                        ));
+                        true
+                    }
+                }
+            } else {
+                scene_history.take().is_some()
+            };
+            // A bind group is immutable, so it is rebuilt only when the texture
+            // behind it actually changed — not every frame, which would allocate
+            // a bind group per frame for as long as the editor was open.
+            if rebuilt {
+                let bind = scene_history.as_ref().map(|h| (h.view(), h.sampler()));
+                raymarch.set_scene_history(gpu, bind);
+            }
+        }
+
         // ---- draw: scene into the retro target, blit, then egui on top ----
         match gpu.acquire() {
             Some(frame) => {
@@ -4535,19 +4649,57 @@ impl Editor {
                 // pass's field group (shadows/AO/proxies) sees this frame's data.
                 // …and RENDER, second half: the passes themselves.
                 let draw_t = floptle_core::profile::Span::new();
-                let raster_clear = if rm_draw {
+                // The sky, into the environment map, so surfaces have something
+                // to reflect. Before every other pass and after the globals,
+                // because the capture evaluates the sky through the very
+                // uniforms `rm` carries — and every frame, because skies move:
+                // a cached one would be wrong exactly when someone was watching
+                // it change. It costs a 256×128 draw and eight tinier ones.
+                raymarch.upload_globals(gpu, rm);
+                raymarch.capture_env(gpu);
+                // A custom shader that measures the gap to the surface behind it
+                // (`surfaceGap` — shoreline foam, soft particles, contact glow)
+                // needs the prepass too, even with nothing to raymarch. Without
+                // this the effect works in a terrain scene and silently does
+                // nothing in a scene made of meshes, which is the only kind of
+                // scene most of these shaders are ever put in.
+                let depth_wanted = raster.flsl_draws_want_depth(&flsl_draws);
+                let raster_clear = if rm_draw || depth_wanted || ssr_on || point_shadows {
                     // Opaque depth prepass: primes the depth buffer (early-z kills
                     // hidden raster fragments before their shadow-marching shader
                     // runs) and caps the raymarch at the nearest mesh per pixel.
                     let depth_tex =
                         if self.project.retro { retro.depth_texture() } else { gpu.depth_texture() };
-                    if raster.depth_prepass_with(
+                    let primed = raster.depth_prepass_with(
                         gpu, globals, &instances, &flsl_draws, &skin_draws, depth_tex,
-                    ) {
-                        raymarch.set_depth_prime(gpu, raster.prepass_view());
+                    );
+                    // BIND it, whether or not anything is going to be
+                    // raymarched. Three things read this texture and only ONE of
+                    // them is the raymarch's own per-pixel march cap: contact
+                    // shadows, `surfaceGap` (shoreline foam, soft particles) and
+                    // the screen-space reflection march all live in the RASTER
+                    // pass, which draws in every scene there is.
+                    //
+                    // It used to be bound inside the `rm_draw` arm below, which
+                    // meant all three quietly did nothing in a scene made of
+                    // meshes and worked perfectly in a scene with terrain in it.
+                    // That is the exact shape of failure this prepass gate was
+                    // added to prevent, one level further down.
+                    if primed {
+                        let hist = scene_history.as_ref().map(|h| (h.view(), h.sampler()));
+                        raymarch.bind_frame_targets(gpu, raster.prepass_view(), hist);
                     }
-                    raymarch.draw_into_primed(gpu, color, depth, rm);
-                    None
+                    if rm_draw {
+                        raymarch.draw_into_primed(gpu, color, depth, rm);
+                        None
+                    } else {
+                        // Nothing to raymarch: the prepass ran purely so the
+                        // depth texture exists to be read. The raster pass still
+                        // owns the frame, so it clears as usual — `prime_tex` is
+                        // its own copy and survives that.
+                        raymarch.upload_globals(gpu, rm);
+                        Some(clear.map(|c| c as f64))
+                    }
                 } else {
                     raymarch.upload_globals(gpu, rm);
                     Some(clear.map(|c| c as f64))
@@ -4584,6 +4736,35 @@ impl Editor {
                     &lights_2d,
                     &flat2d,
                 );
+                // ---- glass ------------------------------------------------
+                // The scene is finished except for the things you can see
+                // through. Capture it, hand that capture to the shader as "what
+                // is behind", and draw them.
+                //
+                // The capture is what makes refraction possible at all: a
+                // surface cannot sample a picture it is already in, and the only
+                // picture that exists during the main pass is the previous
+                // frame's — which has the glass in it. Its tint would deepen
+                // every frame it stayed on screen.
+                if glass && let Some(h) = scene_history.as_mut() {
+                    h.capture(gpu, color, view_proj, cam.world_position);
+                    raymarch.bind_frame_targets(
+                        gpu,
+                        raster.prepass_view(),
+                        Some((h.view(), h.sampler())),
+                    );
+                    // The stored picture is THIS frame's, taken from THIS
+                    // camera, so the reprojection is the identity — say so, or
+                    // the reflections on the glass would look up last frame's
+                    // matrix against a texture that is not last frame's.
+                    let mut glass_rm = rm;
+                    glass_rm.ssr_prev_vp = view_proj.to_cols_array_2d();
+                    raymarch.upload_globals(gpu, glass_rm);
+                    raster.draw_transmissive(
+                        gpu, color, depth, globals, &instances, &skin_draws,
+                        Some(raymarch.field_bind()),
+                    );
+                }
                 // Script-drawn 3D lines (draw.line — the map's orbit conics).
                 if !self.script_lines.is_empty() {
                     let verts: Vec<floptle_render::LineVertex> = self
@@ -4618,21 +4799,6 @@ impl Editor {
                         .collect();
                     tri_layer.draw(gpu, color, depth, view_proj, &verts);
                 }
-                // The reference grid is an editor aid — Scene view only.
-                if self.grid.show && !game_view {
-                    let c = self.grid.color;
-                    grid_render.draw(
-                        gpu,
-                        color,
-                        depth,
-                        view_proj,
-                        cam.world_position,
-                        self.grid.size,
-                        self.grid.extent,
-                        self.grid.y_offset,
-                        [c[0], c[1], c[2], self.grid.alpha],
-                    );
-                }
                 // Live particles: after all opaque work (they depth-test against
                 // meshes AND raymarched matter), before post/retro — so they're
                 // AO'd/bloomed and pixelate with the scene.
@@ -4645,6 +4811,39 @@ impl Editor {
                         &vfx_instances,
                         &vfx_batches,
                         raster,
+                    );
+                }
+                // Keep this frame's picture, for the NEXT frame's reflections.
+                //
+                // Here and not later: everything that belongs to the scene has
+                // drawn — the raymarched world, the meshes, the palette
+                // quantise, the 2D light pass, the particles — and nothing that
+                // does not has started. Post is still to come, and reflecting a
+                // tonemapped, bloomed, vignetted frame would put the grade into
+                // the reflection and then grade it a second time on the way out.
+                //
+                // The editor's own furniture (the grid, gizmos, selection
+                // outlines) is deliberately on the far side of this line too: a
+                // mirror must not show the reference grid.
+                if let Some(h) = scene_history.as_mut() {
+                    h.capture(gpu, color, view_proj, cam.world_position);
+                }
+                // The reference grid is an editor aid — Scene view only, and
+                // deliberately AFTER the capture above: it is not part of the
+                // scene, and a mirror that reflected the editor's own graph
+                // paper would be showing something that does not exist.
+                if self.grid.show && !game_view {
+                    let c = self.grid.color;
+                    grid_render.draw(
+                        gpu,
+                        color,
+                        depth,
+                        view_proj,
+                        cam.world_position,
+                        self.grid.size,
+                        self.grid.extent,
+                        self.grid.y_offset,
+                        [c[0], c[1], c[2], self.grid.alpha],
                     );
                 }
                 // ---- Scene-view UI canvases: the layers as world planes at
@@ -7725,6 +7924,50 @@ impl Editor {
     /// layer i; `u32::MAX` = everything). `skip_tex` excludes one material
     /// texture from resolution — a target camera must not sample its OWN
     /// render target mid-pass (wgpu forbids attachment+sampled in one pass).
+    /// The scene-colour history a given slot owns, if it has one.
+    fn history_slot(&self, slot: HistorySlot) -> Option<&floptle_render::SceneHistory> {
+        match slot {
+            HistorySlot::None => None,
+            HistorySlot::GamePanel => self.game_scene_history.as_ref(),
+        }
+    }
+
+    /// Allocate, resize or drop an offscreen view's stored picture to match what
+    /// it is being asked for. Returns whether the texture behind it changed.
+    ///
+    /// Sized to the COMPOSITED resolution it is handed, so a docked Game panel
+    /// reflects at the resolution it is drawn at — and, in retro mode, at the
+    /// retro resolution, exactly as the window does. A reflection sharper than
+    /// the picture around it reads as a bug in the picture.
+    fn sync_offscreen_history(
+        &mut self,
+        slot: HistorySlot,
+        want: bool,
+        size: (u32, u32),
+    ) -> bool {
+        if slot == HistorySlot::None {
+            return false;
+        }
+        let Some(gpu) = self.gpu.as_ref() else { return false };
+        let fmt = gpu.scene_format();
+        let (pw, ph) = (size.0.max(1), size.1.max(1));
+        let dev = &gpu.device;
+        let hist = match slot {
+            HistorySlot::None => return false,
+            HistorySlot::GamePanel => &mut self.game_scene_history,
+        };
+        if !want {
+            return hist.take().is_some();
+        }
+        match hist.as_mut() {
+            Some(h) => h.resize_to(dev, pw, ph, fmt),
+            None => {
+                *hist = Some(floptle_render::SceneHistory::new(dev, pw, ph, fmt));
+                true
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_world_into(
         &mut self,
@@ -7739,6 +7982,7 @@ impl Editor {
         // view cannot be asked how big it is — and the 2D lighting G-buffer has
         // to match the frame exactly or the composite lands stretched.
         size: (u32, u32),
+        opts: OffscreenOpts<'_>,
     ) {
         let view_proj = cam.view_proj(aspect);
         // Layer names resolve to bits only when a mask actually culls.
@@ -7775,6 +8019,12 @@ impl Editor {
         let lit3 = off_split.three_d;
         let (pl_count, pl_pos, pl_col, pl_shape, pl_rot) =
             ([lit3.count as f32, 0.0, 0.0, 0.0], lit3.pos, lit3.color, lit3.shape, lit3.rot);
+        // Any lamp casting here? Same question and same answer as the window
+        // path — a local shadow marches the prepass, so this decides whether one
+        // has to run.
+        let point_shadows = lit3.shape[..lit3.count.min(16)]
+            .iter()
+            .any(|s| (s[3] as u32) & 2 != 0);
         let (sh_params, sh_tint, sh_extra) = shadow_uniforms(&light_node);
         let contact = crate::shading::contact_uniform(&light_node);
         let ((fog_color, fog_params), particle_fog) =
@@ -8113,6 +8363,35 @@ impl Editor {
             || sky_params[0] >= 0.5
             || self.sky_shader.is_some() // a procedural sky shader must run the raymarch (sky pass)
             || !self.flsl_shape_slots.is_empty();
+        // Reflections in an offscreen view, on exactly the terms the window gets
+        // them: this view's own stored picture, allocated the first frame it is
+        // asked for and dropped when it stops being. A view with no history slot
+        // (a thumbnail, a bake) reports off and reflects the sky, which is what
+        // it did before any of this existed.
+        let want_ssr = light_node.reflections
+            && opts.history != HistorySlot::None
+            && opts.depth_tex.is_some();
+        // Glass wants the same picture for the opposite reason — see the window
+        // path. Asked of the raster's material store, which is shared, so the
+        // answer is the same one the window path gets for the same scene.
+        let glass = opts.history != HistorySlot::None
+            && self.raster.as_ref().is_some_and(|r| r.any_transmissive(&instances));
+        let ssr_rebuilt = self.sync_offscreen_history(opts.history, want_ssr || glass, size);
+        let history = self.history_slot(opts.history);
+        let ssr = crate::shading::ssr_uniform(
+            &light_node,
+            want_ssr && history.is_some_and(|h| h.is_primed()),
+        );
+        let ssr_prev_vp = history
+            .and_then(|h| h.prev_view_proj(cam.world_position))
+            .unwrap_or(floptle_core::math::Mat4::IDENTITY)
+            .to_cols_array_2d();
+        // Cloned out here because the draw block below borrows `self.raster` and
+        // `self.raymarch` mutably, and the history lives on `self` too. A view
+        // and a sampler are both refcounted handles, so this is two bumps.
+        let history_bind =
+            history.map(|h| (h.view().clone(), h.sampler().clone()));
+        let _ = ssr_rebuilt;
         let rm = {
             let mut arr = [[0.0f32; 4]; 16];
             let n = blobs.len().min(16);
@@ -8184,6 +8463,8 @@ impl Editor {
                 vol_fog_b,
                 vol_fog_c,
                 contact,
+                ssr,
+                ssr_prev_vp,
                 atmo_meta,
                 atmo_color,
                 atmo_body,
@@ -8242,6 +8523,31 @@ impl Editor {
             self.line_layer.as_mut(),
             self.tri_layer.as_mut(),
         ) {
+            // The opaque depth prepass, HERE as well as on the window path.
+            // Contact shadows, `surfaceGap`, screen-space reflections and lamp
+            // shadows all read it, and without it every one of them silently
+            // does nothing — which is exactly how a docked Game panel came to
+            // look different from the same game fullscreen.
+            //
+            // It runs when something actually reads it, and needs the depth
+            // TEXTURE (a view cannot be copied into), so a caller that has none
+            // opts out by construction rather than by forgetting.
+            let wants_depth = raster.flsl_draws_want_depth(&flsl_draws)
+                || ssr[0] > 0.5
+                || point_shadows
+                || contact[0] > 0.5;
+            if let Some(dtex) = opts.depth_tex.filter(|_| wants_depth || rm_draw) {
+                raster.depth_prepass_with(
+                    gpu, globals, &instances, &flsl_draws, &skin_draws, dtex,
+                );
+                let hist = history_bind.as_ref().map(|(v, s)| (v, s));
+                raymarch.bind_frame_targets(gpu, raster.prepass_view(), hist);
+            } else {
+                // No prepass this view: unbind, or this render would march the
+                // LAST view's depth buffer — a different camera at a different
+                // size, which is worse than marching nothing.
+                raymarch.bind_frame_targets(gpu, None, None);
+            }
             let raster_clear = if rm_draw {
                 raymarch.draw_into(gpu, color, depth, rm);
                 None
@@ -8271,6 +8577,30 @@ impl Editor {
                 &lights_2d,
                 &flat2d,
             );
+            // Glass, on the same terms and in the same place as the window
+            // path: capture what is behind, then draw the things you can see
+            // through. `self.game_scene_history` is a different field from the
+            // ones this block borrows, so it is reachable from inside it.
+            if glass
+                && let Some(h) = match opts.history {
+                    HistorySlot::None => None,
+                    HistorySlot::GamePanel => self.game_scene_history.as_mut(),
+                }
+            {
+                h.capture(gpu, color, view_proj, cam.world_position);
+                raymarch.bind_frame_targets(
+                    gpu,
+                    raster.prepass_view(),
+                    Some((h.view(), h.sampler())),
+                );
+                let mut glass_rm = rm;
+                glass_rm.ssr_prev_vp = view_proj.to_cols_array_2d();
+                raymarch.upload_globals(gpu, glass_rm);
+                raster.draw_transmissive(
+                    gpu, color, depth, globals, &instances, &skin_draws,
+                    Some(raymarch.field_bind()),
+                );
+            }
             // Script-drawn 3D lines (draw.line — the map's orbit conics).
             if !self.script_lines.is_empty() {
                 let verts: Vec<floptle_render::LineVertex> = self
@@ -8316,6 +8646,14 @@ impl Editor {
                     raster,
                 );
             }
+        }
+        // Keep this view's picture, for its own next frame's reflections. Same
+        // place in the order as the window path: everything belonging to the
+        // scene has drawn and nothing that does not has started.
+        if let (Some(gpu), HistorySlot::GamePanel) = (self.gpu.as_ref(), opts.history)
+            && let Some(h) = self.game_scene_history.as_mut()
+        {
+            h.capture(gpu, color, view_proj, cam.world_position);
         }
     }
 }

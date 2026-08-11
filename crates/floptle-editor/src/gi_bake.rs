@@ -544,6 +544,9 @@ impl crate::Editor {
                     bake.cull_mask,
                     None,
                     (face, face),
+                    // A bake is not a view anybody looks at: no prepass and no
+                    // reflection history. Its whole job is to sample radiance.
+                    Default::default(),
                 );
             }
         }

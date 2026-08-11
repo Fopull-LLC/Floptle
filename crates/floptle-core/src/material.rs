@@ -228,6 +228,51 @@ pub struct Material {
     pub ao_map: Option<String>,
     /// How much of the AO map to apply (`0` = ignore it, `1` = as authored).
     pub occlusion_strength: f32,
+    /// How much of the environment this surface reflects — the sky, and
+    /// whatever else the renderer captures into the environment map.
+    ///
+    /// `1.0` is the physically honest amount and the default: a mirror is
+    /// `Shading::Physical` with `metallic = 1` and `roughness = 0`, and it
+    /// reflects what is actually there. Turn it down to take the sheen off a
+    /// surface that is reading too glassy; above 1 is a deliberate cheat that
+    /// flatters a hero prop.
+    ///
+    /// Read only by [`Shading::Physical`]. The classic model has no Fresnel
+    /// term to weight an environment by, so a project that never opted into
+    /// physical shading is untouched by this.
+    pub reflectivity: f32,
+    /// **Glass**: how much light passes THROUGH this surface instead of
+    /// stopping at it. `0` (the default) is a solid surface; `1` is clear glass.
+    ///
+    /// This is what a window, a bottle, a gem or a crystal ball is made of, and
+    /// it is a different thing from [`alpha`](Self::alpha). Alpha fades a
+    /// surface toward whatever is behind it — the surface gets weaker. This
+    /// keeps the surface at full strength and lets the scene behind it come
+    /// through *refracted*: bent by [`ior`](Self::ior), blurred by
+    /// [`roughness`](Self::roughness), and coloured by the material's own
+    /// `color`. A pane of glass still has its highlight, its reflection and its
+    /// bright grazing edge; a pane at `alpha = 0.2` has almost none of them.
+    ///
+    /// The diffuse term fades out as this rises — light that passes through a
+    /// surface is not also scattering off it.
+    ///
+    /// [`Shading::Physical`] only, and it needs the scene's **refraction** pass,
+    /// which the renderer runs only when something in view actually asks for it.
+    pub transmission: f32,
+    /// Index of refraction: how sharply light bends on the way in. `1.0` does
+    /// not bend at all (the scene behind shows through undistorted), `1.33` is
+    /// water, `1.5` window glass, `1.8` a heavy crystal, `2.4` diamond.
+    ///
+    /// Above 1 this is the entire difference between a flat pane and a lens.
+    pub ior: f32,
+    /// How thick the glass is, in world units — how far the bent ray travels
+    /// inside the material before it comes out the other side.
+    ///
+    /// It is what turns the index of refraction into an actual displacement:
+    /// the same `ior` through a windowpane barely shifts what is behind it and
+    /// through a solid ball throws it right across. Set it to roughly the size
+    /// of the object.
+    pub thickness: f32,
     /// Which lighting model this surface answers to.
     pub shading: Shading,
     /// Deliberate PS1/N64-era artefacts. All off by default.
@@ -290,6 +335,10 @@ impl Default for Material {
             metallic: 0.0,
             ao_map: None,
             occlusion_strength: 1.0,
+            reflectivity: 1.0,
+            transmission: 0.0,
+            ior: 1.5,
+            thickness: 0.5,
             shading: Shading::Classic,
             retro: Retro::default(),
             shader: None,

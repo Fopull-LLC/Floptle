@@ -121,6 +121,10 @@ field_diff!(Material {
     metallic,
     ao_map,
     occlusion_strength,
+    reflectivity,
+    transmission,
+    ior,
+    thickness,
     shading,
     retro,
     shader,
@@ -398,15 +402,16 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
             hit
         }
         (
-            Matter::PointLight { color, intensity, range, shape },
-            Matter::PointLight { color: bc, intensity: bi, range: br, shape: bsh },
-            Matter::PointLight { color: tc, intensity: ti, range: tr, shape: tsh },
+            Matter::PointLight { color, intensity, range, shape, shadows },
+            Matter::PointLight { color: bc, intensity: bi, range: br, shape: bsh, shadows: bsd },
+            Matter::PointLight { color: tc, intensity: ti, range: tr, shape: tsh, shadows: tsd },
         ) => {
             let mut hit = false;
             set(color, bc, tc, &mut hit);
             set(intensity, bi, ti, &mut hit);
             set(range, br, tr, &mut hit);
             set(shape, bsh, tsh, &mut hit);
+            set(shadows, bsd, tsd, &mut hit);
             hit
         }
         (
@@ -734,6 +739,7 @@ mod tests {
                 intensity: 1.0,
                 range: 5.0,
                 shape: floptle_core::LightShape::Point,
+                shadows: false,
             });
         }
         // b is last, so b is the primary.

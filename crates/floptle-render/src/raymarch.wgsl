@@ -800,3 +800,27 @@ fn fs_mask(in: VOut) -> @location(0) vec4<f32> {
     }
     return vec4<f32>(1.0, 0.0, 0.0, 1.0);
 }
+
+// ---- environment capture --------------------------------------------------
+//
+// The sky, written into an equirectangular texture so every OTHER pass has
+// something for surfaces to reflect (see `env.rs`). It runs through `sky_color`
+// rather than duplicating any of it, which is the point: the solid vault, a
+// skybox image and a `stage sky` shader all arrive here already resolved, and a
+// sky that animates animates in the reflection too.
+//
+// The direction below is the exact inverse of the mapping `sky_color` uses to
+// sample an equirectangular skybox, so capture and lookup share one formula.
+@fragment
+fn fs_env(in: VOut) -> @location(0) vec4<f32> {
+    let uv = vec2<f32>(in.ndc.x * 0.5 + 0.5, 0.5 - in.ndc.y * 0.5);
+    let phi = (uv.x - 0.5) * 2.0 * PI;
+    let theta = uv.y * PI;
+    let st = sin(theta);
+    let dir = vec3<f32>(st * cos(phi), cos(theta), st * sin(phi));
+    // A NaN out of a grazing atmosphere ray would poison every reflection in
+    // the scene, not just one pixel — the same guard the sky branch of `fs` has.
+    var c = sky_color(dir);
+    c = select(G.bg.rgb, c, c == c);
+    return vec4<f32>(max(c, vec3<f32>(0.0)), 1.0);
+}

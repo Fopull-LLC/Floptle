@@ -15,10 +15,40 @@ impl EditorTabViewer<'_> {
         // Game target to it) and, when split, paints that offscreen render over itself.
         let rect = ui.max_rect();
         if game {
+            // The Game panel is its picture, edge to edge — the tab body's own
+            // inner margin included.
+            //
+            // egui_dock insets every tab body by `spacing.window_margin`, which
+            // is right for a panel of widgets and wrong for a view: the Game tab
+            // is transparent so the 3D can show through, so a four-pixel band of
+            // the EDITOR's render of the scene was left showing all the way
+            // round the game. It read as an ugly border that moved with the
+            // editor camera, because that is exactly what it was.
+            //
+            // Taking the full body for the viewport rect (not merely painting
+            // over it) is what keeps this honest: the offscreen target is sized
+            // from this rect and the pointer is mapped through it, so the picture
+            // is RENDERED at the size it is shown at rather than stretched to
+            // cover the gap, and a click still lands where it looks like it did.
+            // The margin is read from the same `egui::Style` egui_dock derives it
+            // from, so the two cannot drift apart.
+            let m = ui.style().spacing.window_margin;
+            let rect = egui::Rect::from_min_max(
+                egui::pos2(rect.min.x - m.left as f32, rect.min.y - m.top as f32),
+                egui::pos2(rect.max.x + m.right as f32, rect.max.y + m.bottom as f32),
+            );
             *self.game_rect = Some(rect);
             if self.game_offscreen
                 && let Some(tex) = self.game_tex {
-                    egui::Image::new((tex, rect.size())).paint_at(ui, rect);
+                    // Painted through a painter with its OWN clip rect: the ui
+                    // clips to the inset body, so anything drawn through `ui`
+                    // would be trimmed back to the very margin this is covering.
+                    ui.painter().with_clip_rect(rect).image(
+                        tex,
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
                 }
         } else {
             *self.scene_rect = Some(rect);
@@ -301,7 +331,7 @@ impl EditorTabViewer<'_> {
                                 ui,
                                 "All",
                                 format!(
-                                    "select every {} in this mesh  ({})",
+                                    "select every {} in this mesh  (Ctrl+A, or {})",
                                     self.map_mode.label(),
                                     k(crate::map_keys::MapCmd::SelectAll)
                                 ),
@@ -907,14 +937,45 @@ impl EditorTabViewer<'_> {
             let joint_col = egui::Color32::from_rgb(180, 190, 210);
             let sel_col = egui::Color32::from_rgb(255, 190, 90);
             for r in self.rig_gizmos {
-                for (a, b) in &r.bones {
+                for b in &r.bones {
+                    // A Blender-style octahedron: four edges fanning from the
+                    // head out to a belt, the belt ring, and four more closing on
+                    // the tail. The belt is squared to the bone's OWN frame, so
+                    // the shape twists when the bone rolls — the thing a bare
+                    // line could never show.
+                    let (head, tail) = (pt(b.head), pt(b.tail));
+                    let belt: [egui::Pos2; 4] =
+                        [pt(b.belt[0]), pt(b.belt[1]), pt(b.belt[2]), pt(b.belt[3])];
+                    let sel = r.selected == Some(b.head_joint);
+                    let col = if sel { sel_col } else { bone_col };
+                    // A selected bone fills, so the one you are posing is
+                    // unmistakable in a thicket of white sticks.
+                    if sel {
+                        for k in 0..4 {
+                            let n = belt[(k + 1) % 4];
+                            for apex in [head, tail] {
+                                painter.add(egui::Shape::convex_polygon(
+                                    vec![apex, belt[k], n],
+                                    sel_col.gamma_multiply(0.22),
+                                    egui::Stroke::NONE,
+                                ));
+                            }
+                        }
+                    }
                     // A thin dark line under the light one, so the rig reads
                     // against a white wall as well as a dark floor.
-                    painter.line_segment(
-                        [pt(*a), pt(*b)],
-                        egui::Stroke::new(3.0, egui::Color32::from_black_alpha(90)),
-                    );
-                    painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(1.4, bone_col));
+                    let edge = |a: egui::Pos2, c: egui::Pos2| {
+                        painter.line_segment(
+                            [a, c],
+                            egui::Stroke::new(3.0, egui::Color32::from_black_alpha(90)),
+                        );
+                        painter.line_segment([a, c], egui::Stroke::new(if sel { 2.0 } else { 1.4 }, col));
+                    };
+                    for k in 0..4 {
+                        edge(head, belt[k]);
+                        edge(belt[k], belt[(k + 1) % 4]);
+                        edge(belt[k], tail);
+                    }
                 }
                 for (s, idx, _) in &r.joints {
                     let at = pt(*s);

@@ -151,6 +151,7 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
             intensity: 1.0,
             range: 10.0,
             shape: floptle_core::LightShape::Point,
+            shadows: false,
         }),
         ("⬇  Gravity Volume", Matter::GravityVolume { mode: GravityMode::Down, strength: 9.81, radius: 20.0 }),
         ("≈  Water Volume", Matter::default_water()),

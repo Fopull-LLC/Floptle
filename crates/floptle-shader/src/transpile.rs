@@ -1163,6 +1163,7 @@ fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return 
 fn sdf_ao(p: vec3<f32>, n: vec3<f32>) -> f32 { return 1.0; }
 fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { return color; }
 fn map_d(p: vec3<f32>) -> f32 { return 1e9; }
+fn flsl_surface_gap(p: vec3<f32>) -> f32 { return 1e9; }
 fn base_texel(in: VsOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); }
 fn facing_normal(n: vec3<f32>, front: bool) -> vec3<f32> { return select(-n, n, front); }
 "#;

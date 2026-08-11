@@ -929,6 +929,40 @@ pub struct Light {
     /// strength are applied on top.
     pub contact_strength: f32,
 
+    /// SCREEN-SPACE REFLECTIONS: reflective surfaces show the scene itself, and
+    /// not only the captured sky.
+    ///
+    /// Every physical material with some reflectivity picks this up at once —
+    /// there is no per-material switch, because "does a mirror show the room"
+    /// is a fact about the renderer rather than about one surface. What each
+    /// material still decides is how much it reflects
+    /// ([`Material::reflectivity`](crate::Material::reflectivity)) and how
+    /// sharply ([`Material::roughness`](crate::Material::roughness)).
+    ///
+    /// Off by default, and deliberately: it costs a march per reflective pixel
+    /// and a copy of the frame, and a scene that never wanted mirrors should not
+    /// pay for them. What it CANNOT do is show anything the camera cannot —
+    /// whatever is off-screen, behind the viewer or hidden behind something
+    /// nearer falls back to the sky, which is why this is a complement to the
+    /// environment map and not a replacement for it.
+    pub reflections: bool,
+    /// How far a reflected ray travels, in world units, before giving up. This
+    /// is the reflection's reach: a puddle showing a building across the street
+    /// needs more of it than a polished floor showing the table on it. Costs
+    /// nothing extra to raise — the step count is fixed — but a long reach
+    /// spreads the same samples thinner, so raise the steps with it.
+    pub reflection_distance: f32,
+    /// Samples along that ray (quality against cost).
+    pub reflection_steps: u32,
+    /// How thick the surfaces in the depth buffer are assumed to be, in world
+    /// units. The depth buffer records where each surface IS and says nothing
+    /// about how solid it is, so this is the window in which a ray that has gone
+    /// behind a surface counts as having HIT it rather than having passed by
+    /// somewhere behind it. Too small and reflections come out speckled with
+    /// holes; too large and thin objects — railings, leaves, grates — smear
+    /// their colour over whatever is truly behind them.
+    pub reflection_thickness: f32,
+
     /// Depth fog: blend everything toward `fog_color` between `fog_start` and
     /// `fog_end` world units from the camera. Dirt-cheap (one mix per fragment) and
     /// off by default. The skybox stays crisp, so match `fog_color` to the horizon
@@ -994,6 +1028,10 @@ impl Default for Light {
             contact_length: 0.35,
             contact_steps: 12,
             contact_strength: 0.9,
+            reflections: false,
+            reflection_distance: 30.0,
+            reflection_steps: 32,
+            reflection_thickness: 0.5,
             fog: false,
             fog_color: [0.6, 0.65, 0.72],
             fog_start: 40.0,
@@ -1152,7 +1190,26 @@ pub enum Matter {
     /// A placeable point/omni light. Its world position is the node's transform
     /// translation; `range` is the radius at which its contribution falls to ~zero.
     /// (The scene's single directional/ambient key stays the special `Light` node.)
-    PointLight { color: [f32; 3], intensity: f32, range: f32, shape: LightShape },
+    PointLight {
+        color: [f32; 3],
+        intensity: f32,
+        range: f32,
+        shape: LightShape,
+        /// Cast local shadows: this lamp stops at the walls between it and what
+        /// it is lighting, instead of shining through them.
+        ///
+        /// Per-lamp and off by default, because it costs a march per lit pixel
+        /// per casting light and most lamps in a level do not need it — a strip
+        /// under a counter, a glow inside a sign, a fill light placed exactly so
+        /// it has nothing to be blocked by. The ones that do are the ones a
+        /// player can walk around: a torch on a wall, a lamp in a doorway.
+        ///
+        /// It shadows from what is ON SCREEN. An occluder the camera cannot see
+        /// cannot cast, so a wall shadows correctly while it is in frame and
+        /// stops when you look away from it. The scene-wide quality and darkness
+        /// are on the Lighting node, not here.
+        shadows: bool,
+    },
     /// A gravity source for the physics sim — `Down` for normal-style level gravity,
     /// `Radial` for a planet (Mario-Galaxy) gravity well centered on the node.
     GravityVolume { mode: GravityMode, strength: f32, radius: f32 },

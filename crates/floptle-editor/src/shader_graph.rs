@@ -712,7 +712,8 @@ impl EditorTabViewer<'_> {
         // framerate for the sake of a picture that, in a shader with no `time`
         // in it, cannot change until you touch something.
         self.shader_graph.tab_visible = true;
-        let compile_pending = self.shader_preview.rev != Some(self.shader_graph.ir_rev);
+        let compile_pending = self.shader_preview.rev
+            != self.shader_graph.path.clone().map(|p| (p, self.shader_graph.ir_rev));
         if self.shader_preview.enabled && (self.shader_preview.animates || compile_pending) {
             ui.ctx().request_repaint();
         }

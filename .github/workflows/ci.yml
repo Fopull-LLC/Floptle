@@ -105,6 +105,11 @@ jobs:
           run motion_probe        motion_probe        -- "$P"
           run retro_fog_probe     retro_fog_probe     -- "$P"
           run ui_world_probe      ui_world_probe
+          run surface_gap_probe   surface_gap_probe   -- "$P"
+          run reflection_probe    reflection_probe    -- "$P"
+          run ssr_probe           ssr_probe           -- "$P"
+          run point_shadow_probe  point_shadow_probe  -- "$P"
+          run refraction_probe    refraction_probe    -- "$P"
 
       # On a failure the PNGs are the evidence — these probes exist because the
       # bugs they catch are visual, and a red X with no image to look at makes

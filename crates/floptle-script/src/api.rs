@@ -242,13 +242,14 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
                 "enabled" | "bloom" | "vignette" | "posterizeDither" | "posterizeChroma"
             )
             | ("LightProbes", "enabled")
-            | ("PointLight", "twoSided")
+            | ("PointLight", "twoSided" | "shadows")
             | (
                 "Light",
                 "stars"
                     | "shadows"
                     | "shadowDither"
                     | "contactShadows"
+                    | "reflections"
                     | "fog"
                     | "fogDither"
                     | "fogVolumetric"
@@ -305,7 +306,7 @@ fn light_shape_from_id(id: f64, size: f32) -> floptle_core::LightShape {
 /// more components / fields.
 pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<String, f64>> {
     let mut out: HashMap<String, HashMap<String, f64>> = HashMap::new();
-    if let Some(Matter::PointLight { color, intensity, range, shape }) = world.get::<Matter>(e) {
+    if let Some(Matter::PointLight { color, intensity, range, shape, shadows }) = world.get::<Matter>(e) {
         use floptle_core::LightShape as LS;
         // The emitter's dimensions, each reading 0 on a shape that has no such
         // dimension. One flat set rather than a nested table because every
@@ -337,6 +338,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("length".to_string(), len),
                 ("thickness".to_string(), thick),
                 ("twoSided".to_string(), two),
+                ("shadows".to_string(), f64::from(*shadows)),
             ]),
         );
     }
@@ -392,6 +394,10 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("contactLength".to_string(), l.contact_length as f64),
                 ("contactSteps".to_string(), l.contact_steps as f64),
                 ("contactStrength".to_string(), l.contact_strength as f64),
+                ("reflections".to_string(), f64::from(l.reflections)),
+                ("reflectionDistance".to_string(), l.reflection_distance as f64),
+                ("reflectionSteps".to_string(), l.reflection_steps as f64),
+                ("reflectionThickness".to_string(), l.reflection_thickness as f64),
                 ("fog".to_string(), f64::from(l.fog)),
                 ("fogColorR".to_string(), l.fog_color[0] as f64),
                 ("fogColorG".to_string(), l.fog_color[1] as f64),
@@ -994,13 +1000,17 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "metallic" => m.metallic = val as f32,
                     "normalStrength" => m.normal_strength = val as f32,
                     "occlusionStrength" => m.occlusion_strength = val as f32,
+                    "reflectivity" => m.reflectivity = val as f32,
+                    "transmission" => m.transmission = (val as f32).clamp(0.0, 1.0),
+                    "ior" => m.ior = (val as f32).clamp(1.0, 3.0),
+                    "thickness" => m.thickness = (val as f32).clamp(0.0, 100.0),
                     "jitter" => m.retro.jitter = val as f32,
                     _ => {}
                 }
             }
         }
         "PointLight" => {
-            if let Some(Matter::PointLight { color, intensity, range, shape }) =
+            if let Some(Matter::PointLight { color, intensity, range, shape, shadows }) =
                 world.get_mut::<Matter>(ent)
             {
                 use floptle_core::LightShape as LS;
@@ -1015,6 +1025,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     // one, so a script cross-fading a window into a bulb does
                     // not have to restate its dimensions to avoid a flash.
                     "shape" => *shape = light_shape_from_id(val, shape.extent()),
+                    "shadows" => *shadows = val != 0.0,
                     // A dimension write lands only on a shape that has it. A
                     // zero would collapse the emitter into a degenerate polygon,
                     // so every one of these has a floor.
@@ -1179,6 +1190,10 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "contactLength" => l.contact_length = v.clamp(0.01, 20.0),
                     "contactSteps" => l.contact_steps = (val.max(2.0) as u32).min(32),
                     "contactStrength" => l.contact_strength = v.clamp(0.0, 1.0),
+                    "reflections" => l.reflections = val != 0.0,
+                    "reflectionDistance" => l.reflection_distance = v.clamp(0.1, 500.0),
+                    "reflectionSteps" => l.reflection_steps = (val.max(8.0) as u32).min(64),
+                    "reflectionThickness" => l.reflection_thickness = v.clamp(0.01, 20.0),
                     "fog" => l.fog = val != 0.0,
                     "fogColorR" => l.fog_color[0] = v.max(0.0),
                     "fogColorG" => l.fog_color[1] = v.max(0.0),
@@ -1426,6 +1441,18 @@ pub(crate) fn apply_rich_sets(
                             m.occlusion_strength =
                                 num(v).map(|n| n as f32).unwrap_or(m.occlusion_strength)
                         }
+                        "reflectivity" => {
+                            m.reflectivity = num(v).map(|n| n as f32).unwrap_or(m.reflectivity)
+                        }
+                        "transmission" => {
+                            m.transmission =
+                                num(v).map(|n| (n as f32).clamp(0.0, 1.0)).unwrap_or(m.transmission)
+                        }
+                        "ior" => m.ior = num(v).map(|n| (n as f32).clamp(1.0, 3.0)).unwrap_or(m.ior),
+                        "thickness" => {
+                            m.thickness =
+                                num(v).map(|n| (n as f32).clamp(0.0, 100.0)).unwrap_or(m.thickness)
+                        }
                         // A bad name here would silently pick a lighting model,
                         // so an unparseable one leaves the material alone and the
                         // key check (`MATERIAL_KEYS`) is what reports the typo.
@@ -1658,11 +1685,12 @@ pub(crate) fn apply_rich_sets(
                 // The SHAPE is kept, never reset: a script retuning a window's
                 // colour must not quietly turn it back into a bare point.
                 let (mut c, mut i, mut r, shape) = match world.get::<Matter>(e) {
-                    Some(Matter::PointLight { color, intensity, range, shape }) => {
-                        (*color, *intensity, *range, *shape)
+                    Some(Matter::PointLight { color, intensity, range, shape, shadows }) => {
+                        (*color, *intensity, *range, (*shape, *shadows))
                     }
-                    _ => ([1.0, 1.0, 1.0], 1.0, 10.0, floptle_core::LightShape::default()),
+                    _ => ([1.0, 1.0, 1.0], 1.0, 10.0, (floptle_core::LightShape::default(), false)),
                 };
+                let (shape, shadows) = shape;
                 if let Some(v) = color {
                     c = v;
                 }
@@ -1675,7 +1703,7 @@ pub(crate) fn apply_rich_sets(
                 if let Some(v) = range {
                     r = v.max(0.0);
                 }
-                world.insert(e, Matter::PointLight { color: c, intensity: i, range: r, shape });
+                world.insert(e, Matter::PointLight { color: c, intensity: i, range: r, shape, shadows });
             }
             RichSet::TileCells(writes) => {
                 let Some(Matter::Tilemap { cols, rows, data, .. }) =
@@ -1810,7 +1838,8 @@ pub(crate) const MATERIAL_KEYS: &[&str] = &[
     "color", "emissive", "emissiveStrength", "specular", "shininess", "specularStrength", "rim",
     "rimStrength", "unlit", "fog", "ambient", "alpha", "texture", "cell", "sheetCols", "sheetRows",
     "normalMap", "normalStrength", "roughnessMap", "roughness", "metallicMap", "metallic",
-    "occlusionMap", "occlusionStrength", "shading", "jitter", "affineUv", "vertexLit",
+    "occlusionMap", "occlusionStrength", "reflectivity", "transmission", "ior", "thickness",
+    "shading", "jitter", "affineUv", "vertexLit",
     "ditherAlpha", "retroExempt",
 ];
 

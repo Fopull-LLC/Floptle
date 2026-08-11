@@ -23,6 +23,7 @@
 pub mod camera;
 pub mod cull;
 pub mod device;
+pub mod env;
 pub mod frame;
 pub mod gi;
 pub mod graph;
@@ -37,12 +38,14 @@ pub mod post;
 pub mod raster;
 pub mod raymarch;
 pub mod retro;
+pub mod ssr;
 pub mod tris;
 pub mod ui;
 
 pub use camera::{FlyCamera, Input, ViewLock};
 pub use cull::Frustum;
 pub use device::{take_gpu_errors, Gpu};
+pub use env::{EnvMap, ENV_H, ENV_W};
 pub use frame::{Projection, RenderCamera};
 pub use gi::GiVolume;
 pub use grid::Grid;
@@ -54,6 +57,7 @@ pub use mesh::{
     MeshId, TextureData, Vertex,
 };
 pub use outline::Outline;
+pub use ssr::SceneHistory;
 pub use palette::{Palette, PaletteQuantize};
 pub use particles::{ParticleBatch, ParticleBlend, ParticleGlobals, ParticleInstance, Particles};
 pub use post::{PostSettings, PostShaderId, PostShaders, PostStack, SsaoFrame, Tonemap};

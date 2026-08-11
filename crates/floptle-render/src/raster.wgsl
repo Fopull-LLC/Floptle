@@ -69,8 +69,9 @@ struct RasterGlobals {
 // The SURFACE EXTRAS store — the per-material properties that had no instance
 // attribute left to ride (the stream is FULL at 16/16). Two vec4s per entry,
 // indexed by `ext_index` (which arrives packed above the modulate bit in n1.w):
-//   mat_ext[i*2 + 0] = roughness, metallic, normal strength, occlusion strength
-//   mat_ext[i*2 + 1] = flag bits, retro jitter, 0, 0
+//   mat_ext[i*3 + 0] = roughness, metallic, normal strength, occlusion strength
+//   mat_ext[i*3 + 1] = flag bits, retro jitter, reflectivity, transmission
+//   mat_ext[i*3 + 2] = ior, thickness, 0, 0
 // Entry 0 is the reserved NEUTRAL: an instance that sets none of this reads it
 // and shades exactly as it did before these lanes existed.
 @group(0) @binding(10) var<storage, read> mat_ext: array<vec4<f32>>;
@@ -89,7 +90,11 @@ struct RasterGlobals {
 @group(1) @binding(8) var ao_tex: texture_2d<f32>;
 @group(1) @binding(9) var ao_samp: sampler;
 
-// Flag bits in `mat_ext[i*2 + 1].x`. Mirrored in raster.rs (`EXT_*`) — the two
+// vec4s per entry. Mirrored as `EXT_LANES` in raster.rs; the two are the same
+// number and the store is misread by exactly one material if they disagree.
+const EXT_LANES: u32 = 3u;
+
+// Flag bits in `mat_ext[i*3 + 1].x`. Mirrored in raster.rs (`EXT_*`) — the two
 // lists are the same list and must be edited together.
 const EXT_PHYSICAL: u32 = 1u;
 const EXT_AFFINE_UV: u32 = 2u;
@@ -107,16 +112,21 @@ struct Ext {
     ostr: f32,
     flags: u32,
     jitter: f32,
+    reflect: f32,
+    transmit: f32,
+    ior: f32,
+    thick: f32,
 };
 
 // Read entry `idx`, clamped into the store. The store always holds at least the
 // neutral entry, so the clamp always lands on something meaningful.
 fn ext_at(idx: u32) -> Ext {
-    let last = (arrayLength(&mat_ext) / 2u) - 1u;
-    let i = min(idx, last) * 2u;
+    let last = (arrayLength(&mat_ext) / EXT_LANES) - 1u;
+    let i = min(idx, last) * EXT_LANES;
     let a = mat_ext[i];
     let b = mat_ext[i + 1u];
-    return Ext(a.x, a.y, a.z, a.w, u32(b.x + 0.5), b.y);
+    let c = mat_ext[i + 2u];
+    return Ext(a.x, a.y, a.z, a.w, u32(b.x + 0.5), b.y, b.z, b.w, c.x, c.y);
 }
 
 fn ext_has(e: Ext, bit: u32) -> bool {
@@ -154,6 +164,338 @@ fn surface_fog(e: Ext, color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3
 // binding 7, where it caps the march instead.
 @group(2) @binding(5) var prime_tex: texture_2d<f32>;
 
+// `PI` itself lives in raymarch.wgsl, which this module is NOT concatenated
+// with — these are the raster pass's own.
+const INV_PI: f32 = 0.31830988618;
+const INV_TAU: f32 = 0.15915494309;
+
+// The captured sky (equirectangular, with a roughness mip chain) — see `env.rs`.
+// A 1x1 map means "no environment this frame": offscreen previews and probes
+// with no raymarch pass reflect nothing rather than reflecting a stale sky.
+@group(2) @binding(6) var env_tex: texture_2d<f32>;
+@group(2) @binding(7) var env_samp: sampler;
+
+// The scene colour history: last frame's composited picture with a mip chain,
+// in linear light and before any post — what a screen-space reflection reads.
+// 1×1 means there is no history (an offscreen preview, a probe, the first frame
+// after a load) and reflections fall back to the sky alone. See `ssr.rs`.
+@group(2) @binding(8) var scene_tex: texture_2d<f32>;
+@group(2) @binding(9) var scene_samp: sampler;
+
+// Karis' analytic stand-in for the split-sum environment BRDF, which is the
+// alternative to shipping a lookup table and a pass to bake it. It answers
+// "how much of the environment does a surface with this f0 and this roughness
+// return at this angle", and it is what puts the grazing sheen on a rough
+// surface — the thing that reads as a real reflection rather than a decal.
+fn env_brdf(f0: vec3<f32>, rough: f32, ndv: f32) -> vec3<f32> {
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let r = rough * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * ndv)) * r.x + r.y;
+    let ab = vec2<f32>(-1.04, 1.04) * a004 + r.zw;
+    return f0 * ab.x + vec3<f32>(ab.y);
+}
+
+// What this surface reflects of the sky. `n` and `v` are camera-relative but the
+// captured sky is in WORLD directions — which are the same thing here, because
+// the view matrix carries no translation and no rotation into the instance data
+// (ADR-0015): a camera-relative direction IS a world direction.
+fn env_radiance(r: vec3<f32>, rough: f32) -> vec3<f32> {
+    let dims = textureDimensions(env_tex, 0);
+    if (dims.x <= 1u || dims.y <= 1u) {
+        return vec3<f32>(0.0); // no sky captured this frame
+    }
+    // Direction -> equirectangular uv, the exact inverse of `fs_env`'s mapping.
+    let u = atan2(r.z, r.x) * INV_TAU + 0.5;
+    let t = acos(clamp(r.y, -1.0, 1.0)) * INV_PI;
+    // Roughness picks a level. Squaring it spends more of the chain on the
+    // polished end, where the difference between mirror and nearly-mirror is
+    // what the eye actually reads; the rough end is a blur either way.
+    let levels = f32(textureNumLevels(env_tex) - 1u);
+    let mip = sqrt(clamp(rough, 0.0, 1.0)) * levels;
+    return textureSampleLevel(env_tex, env_samp, vec2<f32>(u, t), mip).rgb;
+}
+
+// A screen-space reflection: `color` is what the ray found and `hit` is how much
+// to believe it, 0..1.
+struct Ssr {
+    color: vec3<f32>,
+    hit: f32,
+};
+
+// Camera-relative point -> the uv it lands on. `G.view_proj` carries no
+// translation (ADR-0015), so this is the same mapping the depth prepass wrote.
+fn ssr_uv(ndc: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+}
+
+// The camera-relative position the depth prepass recorded at `uv`, and whether
+// anything was drawn there at all.
+fn ssr_surface(uv: vec2<f32>, dims: vec2<u32>) -> vec4<f32> {
+    let fd = vec2<f32>(dims);
+    let texel = vec2<i32>(clamp(uv * fd, vec2<f32>(0.0), fd - vec2<f32>(1.0)));
+    let d = textureLoad(prime_tex, texel, 0).x;
+    if (d >= 1.0) {
+        return vec4<f32>(0.0); // sky: nothing to hit here
+    }
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let sp = G.inv_view_proj * vec4<f32>(ndc, d, 1.0);
+    return vec4<f32>(sp.xyz / sp.w, 1.0);
+}
+
+// March the depth prepass along the reflected ray and, on a hit, read the colour
+// the scene had there last frame.
+//
+// **Why the previous frame.** Shading is forward: when this fragment runs, most
+// of the other pixels' colours do not exist yet. There is no current picture to
+// sample, so the reflection reads the one that finished — see `ssr.rs` for why
+// that beats the deferred rewrite. The cost is a frame of lag in the CONTENTS of
+// a reflection; the geometry of it is this frame's, because the march is against
+// this frame's depth.
+//
+// **The march is uniform in SCREEN space, not in world space.** Equal world
+// steps crowd hundreds of samples into the few pixels near the surface and then
+// leap whole objects in the distance, which is exactly backwards: a reflection
+// is read at screen resolution. Stepping the uv line and recovering the world
+// position per sample (perspective-correct, by interpolating 1/w) spends the
+// budget where the pixels are.
+fn ssr_trace(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>, rough: f32, pix: vec2<u32>) -> Ssr {
+    var out: Ssr;
+    out.color = vec3<f32>(0.0);
+    out.hit = 0.0;
+    if (G.ssr.x < 0.5) {
+        return out; // off, or no stored picture yet
+    }
+    let sdims = textureDimensions(scene_tex, 0);
+    let ddims = textureDimensions(prime_tex, 0);
+    // Either stand-in being 1×1 means the piece it stands for is absent. No flag
+    // to keep in step: what is bound IS the answer.
+    if (sdims.x <= 1u || sdims.y <= 1u || ddims.x <= 1u || ddims.y <= 1u) {
+        return out;
+    }
+
+    let reach = max(G.ssr.y, 0.001);
+    let steps = i32(clamp(G.ssr.z, 8.0, 64.0));
+    let thickness = max(G.ssr.w, 0.001);
+    // Start off the surface along the normal, or the first sample reads the very
+    // texel this fragment is shading and every surface reflects itself. Scaled by
+    // distance because a texel covers more world the further away it is.
+    let bias = max(length(p) * 0.002, 0.005);
+    let p0 = p + n * bias;
+    let p1 = p0 + r * reach;
+
+    let c0 = G.view_proj * vec4<f32>(p0, 1.0);
+    let c1 = G.view_proj * vec4<f32>(p1, 1.0);
+    // A ray that ends behind the eye has no screen line to walk. Clipping it to
+    // the near plane would buy a sliver of extra reflection and a pile of
+    // special cases; the environment map answers these instead.
+    if (c0.w <= 1e-4 || c1.w <= 1e-4) {
+        return out;
+    }
+    let q0 = 1.0 / c0.w;
+    let q1 = 1.0 / c1.w;
+    let uv0 = ssr_uv(c0.xy * q0);
+    let uv1 = ssr_uv(c1.xy * q1);
+    // Perspective-correct interpolation: position/w and 1/w are BOTH linear in
+    // screen space, their ratio is the world point. Interpolating the position
+    // alone is the classic wrong version — it is linear in world space, so the
+    // samples bunch toward whichever end happens to be nearer the camera.
+    let pq0 = p0 * q0;
+    let pq1 = p1 * q1;
+
+    // Dither the phase so the march's own step size stops being visible. Without
+    // it a mirror shows concentric bands at the sample distances — a texture the
+    // scene does not have, which reads as the reflection being broken rather
+    // than as it being cheap.
+    let jitter = bayer4(pix);
+    var prev_f = 0.0;
+    let inv = 1.0 / f32(steps);
+
+    for (var i = 0; i < steps; i = i + 1) {
+        let f = (f32(i) + jitter) * inv;
+        let uv = mix(uv0, uv1, f);
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+            return out; // walked off the frame: no data, and the sky takes over
+        }
+        let q = mix(q0, q1, f);
+        if (q <= 1e-9) {
+            return out;
+        }
+        let sample_pos = mix(pq0, pq1, f) / q;
+        let surf = ssr_surface(uv, ddims);
+        if (surf.w < 0.5) {
+            prev_f = f;
+            continue; // sky in the depth buffer — nothing here to reflect
+        }
+        // Positive = the ray has gone BEHIND the surface the camera can see, so
+        // it crossed it somewhere between the last sample and this one.
+        let dz = length(sample_pos) - length(surf.xyz);
+        if (dz > 0.0) {
+            // …unless it went so far behind that it is out the other side. The
+            // depth buffer records one surface and says nothing about how solid
+            // it is; without this window a ray that passes a metre behind a
+            // railing reports the railing, and every thin object smears its
+            // colour across the reflection of whatever is really there.
+            if (dz > thickness + reach * inv) {
+                prev_f = f;
+                continue;
+            }
+            // Bisect between the last sample in front and this one behind. Five
+            // rounds turn a step-sized error into a thirty-second of one, which
+            // is what stops a reflected edge looking serrated.
+            var lo = prev_f;
+            var hi = f;
+            for (var b = 0; b < 5; b = b + 1) {
+                let mid = (lo + hi) * 0.5;
+                let muv = mix(uv0, uv1, mid);
+                let mq = mix(q0, q1, mid);
+                let mpos = mix(pq0, pq1, mid) / max(mq, 1e-9);
+                let ms = ssr_surface(muv, ddims);
+                if (ms.w > 0.5 && length(mpos) - length(ms.xyz) > 0.0) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            let hit_uv = mix(uv0, uv1, hi);
+            let hq = mix(q0, q1, hi);
+            let hit_pos = mix(pq0, pq1, hi) / max(hq, 1e-9);
+
+            // Where was that point in the stored picture? The world is
+            // camera-relative, so this matrix already carries how far the camera
+            // moved since — see `SceneHistory::prev_view_proj`.
+            let pc = G.ssr_prev_vp * vec4<f32>(hit_pos, 1.0);
+            if (pc.w <= 1e-4) {
+                return out; // behind the old camera: it had no picture of this
+            }
+            let puv = ssr_uv(pc.xy / pc.w);
+            if (puv.x < 0.0 || puv.x > 1.0 || puv.y < 0.0 || puv.y > 1.0) {
+                return out; // off the edge of the stored frame
+            }
+
+            // Confidence. Three ways a screen-space hit is a lie, faded rather
+            // than cut so the sky takes over smoothly instead of leaving a seam:
+            //
+            //  1. The frame edge. There is no data past it, and a hard stop
+            //     draws a bright line around the picture in every mirror.
+            let e = min(min(puv.x, 1.0 - puv.x), min(puv.y, 1.0 - puv.y));
+            var conf = smoothstep(0.0, 0.08, e);
+            //  2. Rays pointing back at the camera. What they want to show is
+            //     behind the viewer, and the screen has never held it.
+            conf = conf * (1.0 - smoothstep(0.25, 0.75, dot(r, -normalize(p))));
+            //  3. Distance. A long ray crosses more of the scene it cannot see
+            //     around, and its hit is the more likely to be the wrong surface.
+            conf = conf * (1.0 - smoothstep(0.7, 1.0, hi));
+
+            let levels = f32(textureNumLevels(scene_tex) - 1u);
+            let mip = sqrt(clamp(rough, 0.0, 1.0)) * levels;
+            out.color = textureSampleLevel(scene_tex, scene_samp, puv, mip).rgb;
+            out.hit = clamp(conf, 0.0, 1.0);
+            return out;
+        }
+        prev_f = f;
+    }
+    return out;
+}
+
+// What you can see THROUGH this surface: the scene behind it, bent.
+//
+// **Where the picture comes from.** `scene_tex` during the refraction pass holds
+// THIS frame's scene with the glass itself not yet drawn — see `ssr.rs` and the
+// pass split in `raster.rs`. That is the whole reason glass gets its own pass:
+// the previous frame's picture already has the glass composited into it, so
+// refracting that would sample the glass through the glass, and its tint would
+// deepen every frame it stayed on screen.
+//
+// **The bend is a real ray, not a uv nudge.** `refract` gives the direction the
+// view ray takes on entering the material; following it for `thick` world units
+// and projecting THAT point is what makes the effect scale correctly — a
+// windowpane barely shifts what is behind it, a solid ball throws it across, and
+// the difference is the thickness rather than a number tuned per material.
+//
+// At total internal reflection `refract` returns zero, and so does this: those
+// rays have nothing behind the surface to show, and the reflection term is
+// already what they return.
+fn refracted(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, rough: f32, ior: f32, thick: f32) -> vec3<f32> {
+    let dims = textureDimensions(scene_tex, 0);
+    if (dims.x <= 1u || dims.y <= 1u) {
+        return vec3<f32>(0.0); // no capture of what is behind: nothing to show
+    }
+    let t = refract(-v, n, 1.0 / max(ior, 1.0));
+    if (dot(t, t) < 1e-8) {
+        return vec3<f32>(0.0);
+    }
+    // How far the bent ray travels before we look along it: through the glass,
+    // and then ON to whatever is actually behind it.
+    //
+    // The second half is what makes this read as glass rather than as a slight
+    // smudge. A bend only displaces what you see in proportion to how far the
+    // ray travels afterwards, so marching the material's own thickness and
+    // stopping — the usual approximation — gives a marble on a table and a ball
+    // held against a distant wall exactly the same tiny shift, when the second
+    // should be throwing the wall around. The depth prepass already knows that
+    // distance, and glass is deliberately absent from it, so what it reports at
+    // this pixel IS the scene behind.
+    var travel = max(thick, 0.0);
+    let straight_clip = G.view_proj * vec4<f32>(p, 1.0);
+    if (straight_clip.w > 1e-4) {
+        let here = ssr_uv(straight_clip.xy / straight_clip.w);
+        let ddims = textureDimensions(prime_tex, 0);
+        if (ddims.x > 1u && ddims.y > 1u
+            && here.x >= 0.0 && here.x <= 1.0 && here.y >= 0.0 && here.y <= 1.0) {
+            let behind = ssr_surface(here, ddims);
+            if (behind.w > 0.5) {
+                travel = travel + max(length(behind.xyz) - length(p), 0.0);
+            }
+        }
+    }
+    let exit = p + t * travel;
+    let clip = G.view_proj * vec4<f32>(exit, 1.0);
+    if (clip.w <= 1e-4) {
+        return vec3<f32>(0.0);
+    }
+    var uv = ssr_uv(clip.xy / clip.w);
+    // Off the edge of the frame there is no picture of what is behind. Clamping
+    // back to the border smears the edge pixel across the whole rim of a glass
+    // object; falling back to the UNBENT sample keeps it showing the scene it is
+    // actually in, which is wrong by a few pixels instead of wrong by a streak.
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        let straight = G.view_proj * vec4<f32>(p, 1.0);
+        if (straight.w <= 1e-4) {
+            return vec3<f32>(0.0);
+        }
+        uv = clamp(ssr_uv(straight.xy / straight.w), vec2<f32>(0.0), vec2<f32>(1.0));
+    }
+    // Roughness frosts it, on the same chain and the same index the sky and the
+    // screen-space reflection use — so a frosted pane blurs what is behind it by
+    // as much as it blurs what it reflects.
+    let levels = f32(textureNumLevels(scene_tex) - 1u);
+    let mip = sqrt(clamp(rough, 0.0, 1.0)) * levels;
+    return textureSampleLevel(scene_tex, scene_samp, uv, mip).rgb;
+}
+
+// What this surface reflects: the scene where a screen-space ray found it, and
+// the sky everywhere else.
+//
+// `n` and `v` are camera-relative but the captured sky is in WORLD directions —
+// which are the same thing here, because the view matrix carries no translation
+// and no rotation into the instance data (ADR-0015): a camera-relative direction
+// IS a world direction.
+//
+// The two are mixed BEFORE the BRDF, not added after it. A reflection is one
+// lobe looking in one direction; whether the thing it lands on is a wall or the
+// horizon does not change how much light the surface returns, only what colour
+// it is. Adding them would make any surface with a partial screen-space hit
+// brighter than a mirror, which is the artefact that reads as "reflections glow".
+fn env_specular(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, rough: f32, pix: vec2<u32>) -> vec3<f32> {
+    let r = reflect(-v, n);
+    let sky = env_radiance(r, rough);
+    let s = ssr_trace(p, n, r, rough, pix);
+    let radiance = mix(sky, s.color, s.hit);
+    let ndv = max(dot(n, v), 1e-4);
+    return radiance * env_brdf(f0, rough, ndv);
+}
+
 // Accumulated diffuse from the point lights at camera-relative position `pos_rel`
 // (same space as point_pos) with surface normal `n`. Smooth falloff to 0 at range.
 fn point_diffuse(pos_rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
@@ -166,6 +508,27 @@ fn point_diffuse(pos_rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         let a = area_terms(g.point_shape[i], g.point_rot[i], lp.xyz - pos_rel, n, n);
         let x = clamp(1.0 - a.dist / max(lp.w, 0.0001), 0.0, 1.0);
         acc = acc + g.point_color[i].rgb * (a.ndl * x * x);
+    }
+    return acc;
+}
+
+// [`point_diffuse`] with local shadows — the FRAGMENT-stage version.
+//
+// Two functions rather than one with a flag, because the vertex stage calls the
+// one above. `point_vis` reads the depth prepass and the field globals, which
+// are bound for FRAGMENT only; reaching for them from `vs` does not fail at the
+// shading site, it fails at PIPELINE CREATION, for every raster draw in the
+// engine. (Per-vertex lighting has no per-pixel shadow to give anyway — the
+// retro path skips the sun's shadow march for the same reason.)
+fn point_diffuse_lit(pos_rel: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {
+    var acc = vec3<f32>(0.0);
+    let count = min(u32(g.point_count.x), 16u);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let lp = g.point_pos[i];
+        let a = area_terms(g.point_shape[i], g.point_rot[i], lp.xyz - pos_rel, n, n);
+        let x = clamp(1.0 - a.dist / max(lp.w, 0.0001), 0.0, 1.0);
+        if (x <= 0.0) { continue; }
+        acc = acc + g.point_color[i].rgb * (a.ndl * x * x) * point_vis(pos_rel, n, i, pix);
     }
     return acc;
 }
@@ -585,7 +948,7 @@ fn key_light_ggx(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, rough:
 /// difference is that the highlight now comes from the roughness rather than
 /// from a hand-set exponent. Returned split so the caller multiplies only the
 /// diffuse half by albedo.
-fn point_ggx(pos_rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, rough: f32) -> KeyLight {
+fn point_ggx(pos_rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, rough: f32, pix: vec2<u32>) -> KeyLight {
     var out: KeyLight;
     out.diffuse = vec3<f32>(0.0);
     out.spec = vec3<f32>(0.0);
@@ -614,8 +977,13 @@ fn point_ggx(pos_rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, roug
         // grows a Lambertian term it is not supposed to have.
         let fr = f_schlick(f0, max(dot(n, v), 1e-4));
         let kd = 1.0 - max(max(fr.r, fr.g), fr.b);
-        out.diffuse += col * (kd * a.ndl * 0.3183098862);
-        out.spec += col * r.xyz * min(norm, 1.0);
+        // Local shadows. One factor over BOTH halves: a lamp behind a wall
+        // stops lighting a surface and stops putting a highlight on it, and
+        // shadowing only the diffuse leaves a floating specular dot in the
+        // dark — the giveaway that a shadow is being faked.
+        let sh = point_vis(pos_rel, n, i, pix);
+        out.diffuse += col * (kd * a.ndl * 0.3183098862) * sh;
+        out.spec += col * r.xyz * min(norm, 1.0) * sh;
     }
     return out;
 }
@@ -944,11 +1312,31 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         // 4% normal-incidence reflectance is what every dielectric does; a metal
         // reflects its own colour and has no diffuse at all.
         let f0 = mix(vec3<f32>(0.04), albedo, metal);
-        let diffuse_albedo = albedo * (1.0 - metal);
+        // Light that passes THROUGH a surface is not also scattering off it, so
+        // the diffuse term fades out as transmission rises. Without this a glass
+        // ball is a lit ball with a picture of the room added on top, which
+        // reads as a glowing marble rather than as glass.
+        let trans = clamp(ext.transmit, 0.0, 1.0);
+        let diffuse_albedo = albedo * (1.0 - metal) * (1.0 - trans);
         let kl = key_light_ggx(in.view_pos, n, v, f0, rough, pix);
         lit = diffuse_albedo * (ambient + kl.diffuse) + kl.spec;
-        let pl = point_ggx(in.view_pos, n, v, f0, rough);
+        let pl = point_ggx(in.view_pos, n, v, f0, rough, pix);
         lit += diffuse_albedo * pl.diffuse + pl.spec;
+        // …and the sky. Without this a metal has a correct specular lobe and
+        // nothing to put in it: at roughness 0 it was a sun dot on black, which
+        // is exactly why a mirror could not be made. `ext.reflect` scales it,
+        // and the AO map damps it like any other ambient term.
+        lit += env_specular(in.view_pos, n, v, f0, rough, pix) * ext.reflect * gi_only_gate();
+        // …and what comes through from behind. Weighted by what the surface did
+        // NOT reflect: a pane seen face-on is mostly window, the same pane seen
+        // edge-on is mostly mirror, and that swap is Fresnel doing its job
+        // rather than a second slider. Tinted by the material's own colour, so
+        // green glass makes what is behind it green.
+        if (trans > 0.0) {
+            let fr = f_schlick(f0, max(dot(n, v), 1e-4));
+            let kt = (1.0 - max(max(fr.r, fr.g), fr.b)) * trans;
+            lit += refracted(in.view_pos, n, v, rough, ext.ior, ext.thick) * albedo * kt;
+        }
     } else {
         // --- Blinn-Phong, exactly as it was. ------------------------------
         // Key light(s): the shared multi-star model — Σ color·NdotL·shadow per
@@ -957,7 +1345,7 @@ fn fs(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
         let kl = key_light(in.view_pos, n, v, shininess, pix);
         lit = albedo * (ambient + kl.diffuse);
         // Placeable point lights (camera-relative; in.view_pos is in the same space).
-        lit += albedo * point_diffuse(in.view_pos, n) * gi_only_gate();
+        lit += albedo * point_diffuse_lit(in.view_pos, n, pix) * gi_only_gate();
         lit += in.specular.rgb * kl.spec * in.specular.a;
     }
 

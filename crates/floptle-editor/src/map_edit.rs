@@ -703,11 +703,33 @@ pub(crate) enum SelectMode {
     Replace,
     Add,
     Subtract,
+    /// Blender's "pick shortest path": take everything on the cheapest route
+    /// from the last thing picked to this one, and add the lot. A CLICK gesture
+    /// only — see [`SelectMode::of`].
+    Path,
 }
 
 impl SelectMode {
-    /// From the live modifier state.
+    /// From the live modifier state, for a CLICK.
+    ///
+    /// Ctrl+click is the shortest path, which is what it means in Blender and
+    /// what it is asked to mean here. Ctrl+DRAG still subtracts — see
+    /// [`SelectMode::of_drag`] — because a box that took a path would be
+    /// meaningless, and because subtracting a region is exactly what a box is
+    /// for. Shift+Ctrl+click subtracts, so dropping a single item without a box
+    /// keeps a chord of its own.
     pub(crate) fn of(shift: bool, ctrl: bool) -> Self {
+        match (shift, ctrl) {
+            (false, true) => SelectMode::Path,
+            (true, true) => SelectMode::Subtract,
+            (true, false) => SelectMode::Add,
+            _ => SelectMode::Replace,
+        }
+    }
+
+    /// From the live modifier state, for a BOX DRAG. Unchanged: Shift adds,
+    /// Ctrl subtracts.
+    pub(crate) fn of_drag(shift: bool, ctrl: bool) -> Self {
         match (shift, ctrl) {
             (_, true) => SelectMode::Subtract,
             (true, false) => SelectMode::Add,
@@ -879,6 +901,20 @@ impl MapDraw {
     }
 }
 
+/// How wide the Bevel takes a corner off, in the mesh's own local units.
+///
+/// A newtype purely so it can carry a sensible DEFAULT: `Editor` derives
+/// `Default`, and a bare `f32` would start at 0 — which `bevel_edges` correctly
+/// treats as "do nothing", so the button would have shipped inert.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BevelWidth(pub(crate) f32);
+
+impl Default for BevelWidth {
+    fn default() -> Self {
+        Self(0.1)
+    }
+}
+
 /// The active sub-object selection on one map-mesh node.
 #[derive(Clone, Debug)]
 pub(crate) struct MapSel {
@@ -888,17 +924,33 @@ pub(crate) struct MapSel {
     /// Canonical (a < b) vertex pairs.
     pub(crate) edges: BTreeSet<(u32, u32)>,
     pub(crate) faces: BTreeSet<u32>,
+    /// The last thing picked by hand — Blender's "active" element, and the
+    /// anchor a shortest-path pick measures from.
+    ///
+    /// A set has no order, so without this there is nothing for "the path
+    /// between the two selected things" to start at. Deliberately NOT updated by
+    /// box select, grow, loop or any other bulk verb: those select a region, and
+    /// which member of it the path should run from is not a question they answer.
+    pub(crate) anchor: Option<MapHover>,
 }
 
 impl MapSel {
     pub(crate) fn new(entity: floptle_core::Entity, id: u32) -> Self {
-        Self { entity, id, verts: BTreeSet::new(), edges: BTreeSet::new(), faces: BTreeSet::new() }
+        Self {
+            entity,
+            id,
+            verts: BTreeSet::new(),
+            edges: BTreeSet::new(),
+            faces: BTreeSet::new(),
+            anchor: None,
+        }
     }
 
     pub(crate) fn clear(&mut self) {
         self.verts.clear();
         self.edges.clear();
         self.faces.clear();
+        self.anchor = None;
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -1104,6 +1156,14 @@ pub(crate) enum MapOp {
     SelectSlot(u16),
     /// Extend an edge selection along its quad loops.
     SelectLoop,
+    /// Extend an edge selection across its quad RINGS — the edges a loop cut
+    /// would run through, which is the other half of "select along this strip".
+    SelectRing,
+    /// Insert a new edge loop across the ring through the selected edge, at
+    /// `t` along each edge it crosses (0.5 = the middle).
+    LoopCut(f32),
+    /// Chamfer the selected edges by this width.
+    Bevel(f32),
 }
 
 impl Editor {
@@ -1254,11 +1314,48 @@ impl Editor {
     /// Apply a click at `cursor` to the sub-object selection. Returns true when
     /// the click landed on a sub-object (so the caller doesn't fall through to
     /// node picking).
+    /// The run of sub-objects between the selection's anchor and `to`, for a
+    /// Ctrl+click path pick.
+    ///
+    /// Empty when there is nothing to run from (no anchor yet — a first
+    /// Ctrl+click just picks, and sets the anchor for the next one), when the
+    /// anchor is a different KIND of thing (you switched sub-object mode between
+    /// the two clicks, so "between them" has no meaning), or when the two lie on
+    /// separate shells. In every one of those cases the click degrades to an
+    /// ordinary pick rather than doing something surprising.
+    fn map_path_to(&self, to: MapHover) -> Vec<MapHover> {
+        let Some(sel) = self.map_sel.as_ref() else { return Vec::new() };
+        let Some(from) = sel.anchor else { return Vec::new() };
+        let Some(mesh) = self.maps.meshes.get(&sel.id) else { return Vec::new() };
+        match (from, to) {
+            (MapHover::Vert(a), MapHover::Vert(b)) => {
+                floptle_map::path_verts(mesh, a, b).into_iter().map(MapHover::Vert).collect()
+            }
+            (MapHover::Face(a), MapHover::Face(b)) => {
+                floptle_map::path_faces(mesh, a, b).into_iter().map(MapHover::Face).collect()
+            }
+            (MapHover::Edge(a0, a1), MapHover::Edge(b0, b1)) => {
+                floptle_map::path_edges(mesh, (a0, a1), (b0, b1))
+                    .into_iter()
+                    .map(|(a, b)| MapHover::Edge(a, b))
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) fn map_click(&mut self, cursor: floptle_core::math::Vec2, how: SelectMode) -> bool {
         if self.map_sync_sel().is_none() {
             return false;
         }
         let hit = self.map_pick(cursor);
+        // The path run, resolved before the selection is borrowed (it needs the
+        // mesh). Empty when there is no anchor, no route, or the two picks are
+        // different kinds of thing.
+        let path = match (how, hit) {
+            (SelectMode::Path, Some(h)) => self.map_path_to(h),
+            _ => Vec::new(),
+        };
         let Some(sel) = self.map_sel.as_mut() else { return false };
         let Some(hit) = hit else {
             // Clicked bare space: a plain click clears the sub-selection but
@@ -1271,6 +1368,24 @@ impl Editor {
         if !how.keeps_existing() {
             sel.clear();
         }
+        // A path pick adds its whole run and then falls through, so the element
+        // you actually clicked is selected and becomes the new anchor — chain
+        // Ctrl+clicks and the seam keeps growing from where you last left it,
+        // which is the gesture this exists for.
+        for step in &path {
+            match *step {
+                MapHover::Vert(v) => {
+                    sel.verts.insert(v);
+                }
+                MapHover::Edge(a, b) => {
+                    sel.edges.insert((a, b));
+                }
+                MapHover::Face(f) => {
+                    sel.faces.insert(f);
+                }
+            }
+        }
+        sel.anchor = Some(hit);
         // Shift ADDS, Ctrl SUBTRACTS — but a Shift-click on something already
         // in the selection still toggles it off, because that is the only way
         // to drop ONE item without a box, and every tool does it.
@@ -1369,7 +1484,9 @@ impl Editor {
                 sel.edges.extend(edges);
                 sel.faces.extend(faces);
             }
-            SelectMode::Add => {
+            // A box has no path in it — `of_drag` never produces `Path`, and if
+            // one ever reached here the honest reading is "add this region".
+            SelectMode::Add | SelectMode::Path => {
                 sel.verts.extend(verts);
                 sel.edges.extend(edges);
                 sel.faces.extend(faces);
@@ -2533,6 +2650,57 @@ impl Editor {
                 }
                 changed = false;
             }
+            MapOp::SelectRing => {
+                if sel.edges.is_empty() {
+                    declined = Some("select an EDGE first — a ring runs across a strip of quads".into());
+                } else {
+                    let seeds: Vec<(u32, u32)> = sel.edges.iter().copied().collect();
+                    for e in seeds {
+                        sel.edges.extend(floptle_map::edge_ring(mesh, e));
+                    }
+                }
+                changed = false;
+            }
+            MapOp::LoopCut(t) => {
+                // One seed edge: a loop cut is a cut through ONE strip, and
+                // taking "all of them at once" from a multi-edge selection would
+                // make a mesh nobody asked for.
+                match sel.edges.iter().next().copied() {
+                    None => {
+                        declined = Some(
+                            "select an EDGE to cut across — the new loop runs at right angles to it"
+                                .into(),
+                        );
+                        changed = false;
+                    }
+                    Some(seed) => {
+                        let made = floptle_map::loop_cut(mesh, seed, t);
+                        if made.is_empty() {
+                            declined = Some(
+                                "a loop cut needs a ring of QUADS — this one runs into a triangle or a border".into(),
+                            );
+                            changed = false;
+                        } else {
+                            sel.clear();
+                            sel.edges.extend(made);
+                        }
+                    }
+                }
+            }
+            MapOp::Bevel(amount) => {
+                if sel.edges.is_empty() {
+                    declined = Some("select the EDGES to round off first".into());
+                    changed = false;
+                } else {
+                    let edges: Vec<(u32, u32)> = sel.edges.iter().copied().collect();
+                    if floptle_map::bevel_edges(mesh, &edges, amount) == 0 {
+                        declined = Some("nothing to bevel there".into());
+                        changed = false;
+                    } else {
+                        sel.clear();
+                    }
+                }
+            }
         }
         if changed && declined.is_none() {
             sel.prune(mesh);
@@ -2688,6 +2856,9 @@ impl Editor {
             C::SelectConnected => self.apply_map_op(MapOp::SelectConnected),
             C::SelectCoplanar => self.apply_map_op(MapOp::SelectCoplanar),
             C::SelectLoop => self.apply_map_op(MapOp::SelectLoop),
+            C::SelectRing => self.apply_map_op(MapOp::SelectRing),
+            C::LoopCut => self.apply_map_op(MapOp::LoopCut(0.5)),
+            C::Bevel => self.apply_map_op(MapOp::Bevel(self.map_bevel.0)),
             C::ToggleSelectHidden => {
                 self.map_select_hidden = !self.map_select_hidden;
                 self.map_note(
@@ -3322,19 +3493,26 @@ mod tests {
         assert!(!s.faces.contains(&2));
     }
 
-    /// Shift adds, Ctrl removes — and a plain click replaces. The modifiers are
-    /// read in ONE place, so what a click does and what a box does can't drift
-    /// apart.
+    /// Shift adds, Ctrl+click takes the shortest path, Shift+Ctrl removes — and
+    /// a plain click replaces. A box reads the same modifiers differently, and
+    /// deliberately: there is no path in a rectangle.
     #[test]
-    fn shift_adds_and_ctrl_removes() {
+    fn the_modifiers_mean_what_they_do_in_blender() {
         assert_eq!(SelectMode::of(false, false), SelectMode::Replace);
         assert_eq!(SelectMode::of(true, false), SelectMode::Add);
-        assert_eq!(SelectMode::of(false, true), SelectMode::Subtract);
-        // Ctrl wins when both are held: "remove these" is the more specific ask.
+        assert_eq!(SelectMode::of(false, true), SelectMode::Path);
         assert_eq!(SelectMode::of(true, true), SelectMode::Subtract);
+        // A box never takes a path; Ctrl there still means "remove this region".
+        assert_eq!(SelectMode::of_drag(false, false), SelectMode::Replace);
+        assert_eq!(SelectMode::of_drag(true, false), SelectMode::Add);
+        assert_eq!(SelectMode::of_drag(false, true), SelectMode::Subtract);
+        assert_eq!(SelectMode::of_drag(true, true), SelectMode::Subtract);
         assert!(!SelectMode::Replace.keeps_existing());
         assert!(SelectMode::Add.keeps_existing());
         assert!(SelectMode::Subtract.keeps_existing());
+        // A path ADDS to what is there — it is a bigger selection, never a
+        // replacement for the one you built it from.
+        assert!(SelectMode::Path.keeps_existing());
     }
 
     /// Every sub-mode is reachable by its own key and says so — the direct

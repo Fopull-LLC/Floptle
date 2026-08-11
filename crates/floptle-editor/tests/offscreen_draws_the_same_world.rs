@@ -28,6 +28,14 @@
 //! check possible at all, and it is why `water_draw` and `primitive_draw` exist
 //! as functions rather than as two copies of the same twenty lines.
 //!
+//! A **fifth** time, and this one was not a gather at all: the offscreen path
+//! ran no opaque depth prepass. Nothing was missing from the picture, so none of
+//! the checks above could see it — instead four separate features (contact
+//! shadows, shoreline foam, screen-space reflections, lamp shadows) each read an
+//! empty depth texture, took their "nothing to report" branch, and drew nothing.
+//! A docked Game panel showed a different game from the same game fullscreen.
+//! Hence the last two entries below: a pass counts as a gather here.
+//!
 //! If this fails after a refactor that genuinely moved the gather somewhere
 //! better, move the check with it — don't delete it.
 
@@ -36,7 +44,7 @@ const SRC: &str = include_str!("../src/render_frame.rs");
 /// The calls that put world geometry into a frame. Each must appear on both
 /// paths; a call that exists on only one is a kind of object some views cannot
 /// see.
-const GATHERS: [(&str, &str); 7] = [
+const GATHERS: [(&str, &str); 9] = [
     ("push_mesh_instances", "imported models, map meshes, skinned characters"),
     ("tilemap_draws", "tilemaps — the 2D level itself"),
     ("sprite_draws", "sprite batches"),
@@ -53,6 +61,19 @@ const GATHERS: [(&str, &str); 7] = [
     // would render with no bounce at all while the Scene view looked right —
     // which is precisely the shape of failure this file exists for.
     (".gi().apply(", "the baked GI volume's camera-relative position"),
+    // Nor is this geometry, and it is the one that had drifted longest: the
+    // OPAQUE DEPTH PREPASS. Contact shadows, `surfaceGap` (shoreline foam, soft
+    // particles), screen-space reflections and lamp shadows all read it, and
+    // every one of them silently does nothing without it — no error, no warning,
+    // just a picture missing four features. It ran on the surface path only, so
+    // a docked Game panel showed a visibly different game from the same game
+    // fullscreen.
+    ("depth_prepass_with", "the opaque depth prepass"),
+    // …and RUNNING it is not BINDING it. The prepass writes its own sampleable
+    // copy, and until that copy is on the shared field group nothing can read
+    // it — which is the same bug one step later, and it has already happened
+    // once on the surface path.
+    ("bind_frame_targets", "binding the prepass so shaders can read it"),
 ];
 
 /// The body of `render_world_into`, from its signature to the end of the file.

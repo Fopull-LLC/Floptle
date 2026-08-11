@@ -354,11 +354,162 @@ pub fn edge_loop(mesh: &MapMesh, edge: (u32, u32)) -> Vec<(u32, u32)> {
     out.into_iter().collect()
 }
 
+/// The edge RING through `edge`: the parallel edges a strip of quads is
+/// crossed by, stepping across each quad to the edge opposite the one we came
+/// in on.
+///
+/// Not to be confused with [`edge_loop`], which is the chain of edges running
+/// END TO END. The two are perpendicular to each other and both are called a
+/// "loop" in casual speech; the ring is the one a loop CUT needs, because the
+/// cut runs across every edge in it.
+///
+/// Only steps through quads — a triangle has no "opposite" edge — so it stops
+/// cleanly at a fan, a pole or a border, and returns what it walked. Closes on
+/// itself around a cylinder without looping forever.
+pub fn edge_ring(mesh: &MapMesh, edge: (u32, u32)) -> Vec<(u32, u32)> {
+    let start = key(edge.0, edge.1);
+    let adj = edge_faces(mesh);
+    if !adj.contains_key(&start) {
+        return Vec::new();
+    }
+    // The edge opposite `e` in quad `f`, if `f` is a quad that has `e`.
+    let across = |f: u32, e: (u32, u32)| -> Option<(u32, u32)> {
+        let face = &mesh.faces[f as usize];
+        if face.verts.len() != 4 {
+            return None;
+        }
+        let i = (0..4).find(|&i| key(face.verts[i], face.verts[(i + 1) % 4]) == e)?;
+        let j = (i + 2) % 4;
+        Some(key(face.verts[j], face.verts[(j + 1) % 4]))
+    };
+    let mut seen: BTreeSet<(u32, u32)> = BTreeSet::new();
+    let mut out = vec![start];
+    seen.insert(start);
+    // Walk out through each of the starting edge's faces in turn. Two passes
+    // cover both directions along the strip; a closed ring simply runs into
+    // something already seen and stops.
+    for &f0 in adj.get(&start).into_iter().flatten() {
+        let (mut face, mut e) = (f0, start);
+        while let Some(next) = across(face, e) {
+            if !seen.insert(next) {
+                break;
+            }
+            out.push(next);
+            // Step to the OTHER face of the edge we just crossed onto.
+            let Some(fs) = adj.get(&next) else { break };
+            let Some(&nf) = fs.iter().find(|&&x| x != face) else { break };
+            face = nf;
+            e = next;
+        }
+    }
+    out.sort();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{box_mesh, cylinder, plane, subdivide_faces};
     use glam::{Vec2, Vec3};
+
+    /// A flat n×n grid of quads in the XZ plane, vertices row-major so the
+    /// topology is predictable: vertex (r,c) is `r*(n+1)+c`, face (r,c) is
+    /// `r*n+c`.
+    fn grid(n: u32) -> MapMesh {
+        let mut m = MapMesh::new();
+        for r in 0..=n {
+            for c in 0..=n {
+                m.verts.push(Vec3::new(c as f32, 0.0, r as f32));
+            }
+        }
+        let vid = |r: u32, c: u32| r * (n + 1) + c;
+        for r in 0..n {
+            for c in 0..n {
+                m.faces.push(crate::Face {
+                    verts: vec![vid(r, c), vid(r, c + 1), vid(r + 1, c + 1), vid(r + 1, c)],
+                    slot: 0,
+                });
+            }
+        }
+        m
+    }
+
+    /// Ctrl+click across a grid: the path is the straight run between the two
+    /// picks, both ends included, and nothing else.
+    #[test]
+    fn a_vertex_path_runs_straight_along_a_row() {
+        let m = grid(4);
+        let vid = |r: u32, c: u32| r * 5 + c;
+        let path = path_verts(&m, vid(0, 0), vid(0, 4));
+        assert_eq!(path, vec![vid(0, 0), vid(0, 1), vid(0, 2), vid(0, 3), vid(0, 4)]);
+    }
+
+    /// The route is the CHEAPEST one, not the first one found: a diagonal pick
+    /// takes 8 steps across a 4x4 grid however it staircases, and must start and
+    /// end exactly where it was told to.
+    #[test]
+    fn a_vertex_path_across_a_diagonal_is_a_shortest_staircase() {
+        let m = grid(4);
+        let vid = |r: u32, c: u32| r * 5 + c;
+        let path = path_verts(&m, vid(0, 0), vid(4, 4));
+        assert_eq!(path.first(), Some(&vid(0, 0)));
+        assert_eq!(path.last(), Some(&vid(4, 4)));
+        assert_eq!(path.len(), 9, "8 unit steps, 9 vertices: {path:?}");
+        // Every consecutive pair is one grid unit apart — a real walk, not a jump.
+        for w in path.windows(2) {
+            let d = (m.verts[w[1] as usize] - m.verts[w[0] as usize]).length();
+            assert!((d - 1.0).abs() < 1e-5, "step of {d} in {path:?}");
+        }
+    }
+
+    /// A strip of faces along a row — the "select this limb" gesture.
+    #[test]
+    fn a_face_path_walks_a_strip() {
+        let m = grid(4);
+        let path = path_faces(&m, 0, 3);
+        assert_eq!(path, vec![0, 1, 2, 3]);
+    }
+
+    /// Edges step through shared vertices.
+    #[test]
+    fn an_edge_path_runs_along_a_seam() {
+        let m = grid(4);
+        let vid = |r: u32, c: u32| r * 5 + c;
+        let path = path_edges(&m, (vid(0, 0), vid(0, 1)), (vid(0, 3), vid(0, 4)));
+        assert_eq!(path.first(), Some(&(vid(0, 0), vid(0, 1))));
+        assert_eq!(path.last(), Some(&(vid(0, 3), vid(0, 4))));
+        assert_eq!(path.len(), 4);
+    }
+
+    /// Clicking across a gap between two separate shells has no route. It must
+    /// answer "no path" rather than an arbitrary one, so the caller can fall
+    /// back to an ordinary pick.
+    #[test]
+    fn there_is_no_path_between_separate_shells() {
+        let mut m = box_mesh(Vec3::ONE);
+        let far = plane(Vec2::ONE);
+        crate::merge_into(&mut m, &far, &glam::Mat4::from_translation(Vec3::Y * 40.0));
+        assert!(path_faces(&m, 0, 6).is_empty());
+    }
+
+    /// Picking the same element twice is a path of one — never a crash, never
+    /// an empty answer that would read as "no route".
+    #[test]
+    fn a_path_to_itself_is_just_itself() {
+        let m = grid(2);
+        assert_eq!(path_verts(&m, 0, 0), vec![0]);
+        assert_eq!(path_faces(&m, 1, 1), vec![1]);
+    }
+
+    /// Out-of-range indices (a stale selection after an op reindexed the mesh)
+    /// answer "no path" instead of panicking.
+    #[test]
+    fn a_stale_index_is_refused_rather_than_indexed() {
+        let m = grid(2);
+        assert!(path_verts(&m, 0, 9999).is_empty());
+        assert!(path_faces(&m, 9999, 0).is_empty());
+        assert!(path_edges(&m, (0, 1), (900, 901)).is_empty());
+    }
 
     #[test]
     fn grow_reaches_the_four_neighbours_of_a_box_face() {
@@ -429,4 +580,144 @@ mod tests {
         assert_eq!(faces_with_slot(&m, 1), vec![1, 3]);
         assert_eq!(faces_with_slot(&m, 0).len(), 4);
     }
+}
+
+// ---- shortest path between two picked elements --------------------------------
+//
+// Blender's "pick shortest path": click one element, Ctrl+click another, and
+// everything on the cheapest route between them joins the selection. It is how
+// you select a seam around a shape, or a strip of faces along a limb, without
+// clicking each one — and it works in all three sub-object modes.
+//
+// Cost is the EUCLIDEAN distance between neighbouring element centres, not a hop
+// count. On an even grid the two agree; on anything irregular, hop count happily
+// routes the long way round through a dense patch of small faces because it can
+// do it in fewer steps, which is never what the eye expects.
+
+/// Dijkstra over a graph given as `neighbours(node) -> [(node, centre)]`, from
+/// `start` to `goal`, returning the nodes on the path INCLUSIVE of both ends.
+/// Empty when no route exists (separate shells) — the caller falls back to a
+/// plain pick, which is what a user who clicked across a gap meant anyway.
+fn dijkstra<N, F, C>(start: N, goal: N, centre: C, mut neighbours: F) -> Vec<N>
+where
+    N: Copy + Ord + std::hash::Hash,
+    F: FnMut(N, &mut Vec<N>),
+    C: Fn(N) -> Vec3,
+{
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    if start == goal {
+        return vec![start];
+    }
+    // f32 has no Ord, and the cost is always finite and non-negative here, so
+    // ordering by the bit pattern of the bits-as-u32 is exact for our purposes.
+    let bits = |x: f32| x.to_bits();
+    let mut dist: HashMap<N, f32> = HashMap::new();
+    let mut prev: HashMap<N, N> = HashMap::new();
+    let mut heap: BinaryHeap<Reverse<(u32, N)>> = BinaryHeap::new();
+    dist.insert(start, 0.0);
+    heap.push(Reverse((bits(0.0), start)));
+    let mut buf = Vec::new();
+    while let Some(Reverse((d, n))) = heap.pop() {
+        let d = f32::from_bits(d);
+        if n == goal {
+            break;
+        }
+        if dist.get(&n).is_some_and(|best| d > *best) {
+            continue;
+        }
+        let c = centre(n);
+        buf.clear();
+        neighbours(n, &mut buf);
+        for &m in &buf {
+            let nd = d + (centre(m) - c).length();
+            if dist.get(&m).is_none_or(|best| nd < *best) {
+                dist.insert(m, nd);
+                prev.insert(m, n);
+                heap.push(Reverse((bits(nd), m)));
+            }
+        }
+    }
+    if !dist.contains_key(&goal) {
+        return Vec::new();
+    }
+    let mut path = vec![goal];
+    let mut cur = goal;
+    while let Some(&p) = prev.get(&cur) {
+        path.push(p);
+        cur = p;
+        if cur == start {
+            break;
+        }
+    }
+    if cur != start {
+        return Vec::new();
+    }
+    path.reverse();
+    path
+}
+
+/// Every vertex on the cheapest edge route from `from` to `to`, both included.
+pub fn path_verts(mesh: &MapMesh, from: u32, to: u32) -> Vec<u32> {
+    let n = mesh.verts.len() as u32;
+    if from >= n || to >= n {
+        return Vec::new();
+    }
+    let mut adj: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (a, b) in mesh.edges() {
+        adj.entry(a).or_default().push(b);
+        adj.entry(b).or_default().push(a);
+    }
+    dijkstra(
+        from,
+        to,
+        |v| mesh.verts[v as usize],
+        |v, out| out.extend(adj.get(&v).into_iter().flatten().copied()),
+    )
+}
+
+/// Every face on the cheapest route from `from` to `to` across shared EDGES —
+/// a strip of faces, the way you would walk them.
+pub fn path_faces(mesh: &MapMesh, from: u32, to: u32) -> Vec<u32> {
+    let n = mesh.faces.len() as u32;
+    if from >= n || to >= n {
+        return Vec::new();
+    }
+    let shared = edge_faces(mesh);
+    let centre = |f: u32| {
+        let face = &mesh.faces[f as usize];
+        face.verts.iter().map(|&v| mesh.verts[v as usize]).sum::<Vec3>() / face.verts.len() as f32
+    };
+    dijkstra(from, to, centre, |f, out| {
+        let face = &mesh.faces[f as usize];
+        let k = face.verts.len();
+        for i in 0..k {
+            let Some(fs) = shared.get(&key(face.verts[i], face.verts[(i + 1) % k])) else {
+                continue;
+            };
+            out.extend(fs.iter().copied().filter(|&m| m != f));
+        }
+    })
+}
+
+/// Every edge on the cheapest route from `from` to `to`, stepping between edges
+/// that share a vertex. Edges are canonical `(a < b)` pairs, as everywhere else.
+pub fn path_edges(mesh: &MapMesh, from: (u32, u32), to: (u32, u32)) -> Vec<(u32, u32)> {
+    let all = mesh.edges();
+    let (from, to) = (key(from.0, from.1), key(to.0, to.1));
+    if !all.contains(&from) || !all.contains(&to) {
+        return Vec::new();
+    }
+    let mut at_vert: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+    for &e in &all {
+        at_vert.entry(e.0).or_default().push(e);
+        at_vert.entry(e.1).or_default().push(e);
+    }
+    let centre =
+        |e: (u32, u32)| (mesh.verts[e.0 as usize] + mesh.verts[e.1 as usize]) * 0.5;
+    dijkstra(from, to, centre, |e, out| {
+        for v in [e.0, e.1] {
+            out.extend(at_vert.get(&v).into_iter().flatten().copied().filter(|&m| m != e));
+        }
+    })
 }

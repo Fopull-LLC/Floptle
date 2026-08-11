@@ -857,6 +857,34 @@ pub(crate) fn particle_gizmo_lines(
 /// so this is the difference between "clickable" and "a game of darts".
 pub(crate) const BONE_PICK_PX: f32 = 12.0;
 
+/// The narrowest a bone's BODY is ever allowed to be for picking, in physical
+/// pixels. A bone drawn thinner than this on screen — a finger, a far-off rig —
+/// is still a thing you are entitled to click at.
+pub(crate) const BONE_BODY_PX: f32 = 7.0;
+
+/// One bone, as a Blender-style octahedron: a wide "belt" a tenth of the way
+/// along, tapering to a point at each end.
+///
+/// A bone used to be a bare line between two joints, and the only thing you
+/// could click was a 12-pixel disc on the joint itself. Two things follow from
+/// the octahedron that do not follow from a line. It has a WIDTH, so the whole
+/// body is a target rather than a dart-board dot. And its belt is a real square
+/// in the bone's own frame, so it shows the bone's roll — which way the elbow
+/// bends — where a line is the same picture whatever the rotation about it.
+pub(crate) struct BoneViz {
+    /// The joint that DRIVES this bone: its head, the end it pivots about.
+    /// Clicking the body selects this, because rotating it is what swings the
+    /// bone — the same joint whose dot sits at the wide end.
+    pub head_joint: usize,
+    pub head: Vec2,
+    pub tail: Vec2,
+    /// The belt's four corners, in ring order.
+    pub belt: [Vec2; 4],
+    /// Camera distance at the bone's midpoint — the tie-break for a click that
+    /// lands on two overlapping bones.
+    pub depth: f32,
+}
+
 /// One rigged mesh's skeleton, projected for the Scene view.
 ///
 /// A rig is only ever drawn for a mesh you have selected (or whose bone you have
@@ -865,8 +893,8 @@ pub(crate) const BONE_PICK_PX: f32 = 12.0;
 pub(crate) struct RigViz {
     /// The mesh node the rig hangs off.
     pub mesh: floptle_core::Entity,
-    /// Parent joint → joint, in screen space. A root bone contributes none.
-    pub bones: Vec<(Vec2, Vec2)>,
+    /// Parent joint → joint, as octahedra. A root bone contributes none.
+    pub bones: Vec<BoneViz>,
     /// Per joint: where it is on screen, its skeleton index, and how far it is
     /// from the camera (nearest wins a contested click).
     pub joints: Vec<(Vec2, usize, f32)>,
@@ -890,29 +918,109 @@ pub(crate) fn rig_viz(
     h: f32,
 ) -> RigViz {
     let node_world = pose.filter(|p| p.len() == rig.skeleton.nodes.len()).unwrap_or(&rig.rest_world);
-    // Every joint's absolute world position, in skeleton order (so a parent is
-    // always already resolved — `Skeleton::new` guarantees parent < child).
-    let mut world: Vec<DVec3> = Vec::with_capacity(rig.skeleton.nodes.len());
+    // Every joint's absolute world MATRIX, in skeleton order (so a parent is
+    // always already resolved — `Skeleton::new` guarantees parent < child). The
+    // full matrix, not just the position: a bone's belt is squared to its own
+    // frame, and that is where its roll comes from.
+    let mut mats: Vec<floptle_core::math::DMat4> = Vec::with_capacity(rig.skeleton.nodes.len());
     for (i, n) in rig.skeleton.nodes.iter().enumerate() {
         let local = node_world.get(i).copied().unwrap_or(Mat4::IDENTITY);
         // The joint, not the node origin: for a baked object model the origin is
         // at the model root (the feet), which is exactly the wrong place to put
         // a handle for the elbow.
-        let m = mesh_world * (local * Mat4::from_translation(n.pivot)).as_dmat4();
-        world.push(m.w_axis.truncate());
+        mats.push(mesh_world * (local * Mat4::from_translation(n.pivot)).as_dmat4());
     }
-    let mut out =
-        RigViz { mesh, bones: Vec::new(), joints: Vec::new(), selected };
+    let world: Vec<DVec3> = mats.iter().map(|m| m.w_axis.truncate()).collect();
+    let mut out = RigViz { mesh, bones: Vec::new(), joints: Vec::new(), selected };
     for (i, n) in rig.skeleton.nodes.iter().enumerate() {
         let Some(s) = project(world[i], cam_world, vp, w, h) else { continue };
         out.joints.push((s, i, (world[i] - cam_world).length() as f32));
         if let Some(p) = n.parent
-            && let Some(ps) = world.get(p).and_then(|wp| project(*wp, cam_world, vp, w, h))
+            && let Some(b) = octahedron(&mats, &world, p, i, cam_world, vp, w, h)
         {
-            out.bones.push((ps, s));
+            out.bones.push(b);
         }
     }
     out
+}
+
+/// Build one bone's octahedron: head at joint `p`, tail at joint `i`.
+///
+/// The belt is squared to the HEAD joint's own basis rather than to anything
+/// screen-derived, which is the whole reason the shape carries roll: turn the
+/// joint about its bone axis and the octahedron visibly twists, where a line
+/// would not move at all.
+#[allow(clippy::too_many_arguments)]
+fn octahedron(
+    mats: &[floptle_core::math::DMat4],
+    world: &[DVec3],
+    p: usize,
+    i: usize,
+    cam_world: DVec3,
+    vp: Mat4,
+    w: f32,
+    h: f32,
+) -> Option<BoneViz> {
+    let (head_w, tail_w) = (*world.get(p)?, *world.get(i)?);
+    let along = tail_w - head_w;
+    let len = along.length();
+    if len < 1e-6 {
+        return None;
+    }
+    let axis = along / len;
+    // Seed the belt from whichever of the head joint's own basis vectors lies
+    // furthest from the bone axis — using the closest one would collapse to zero
+    // the moment the bone happened to run down that axis.
+    let m = mats.get(p)?;
+    let basis = [m.x_axis.truncate(), m.y_axis.truncate(), m.z_axis.truncate()];
+    let seed = basis
+        .iter()
+        .filter_map(|b| b.try_normalize())
+        .min_by(|a, b| a.dot(axis).abs().total_cmp(&b.dot(axis).abs()))
+        .unwrap_or(if axis.x.abs() < 0.9 { DVec3::X } else { DVec3::Y });
+    let u = (seed - axis * seed.dot(axis)).try_normalize()?;
+    let v = axis.cross(u);
+
+    // Blender's proportions: the belt a tenth of the way along, and as wide.
+    let r = len * 0.1;
+    let belt_c = head_w + axis * r;
+    let corners = [belt_c + u * r, belt_c + v * r, belt_c - u * r, belt_c - v * r];
+    let head = project(head_w, cam_world, vp, w, h)?;
+    let tail = project(tail_w, cam_world, vp, w, h)?;
+    let mut belt = [Vec2::ZERO; 4];
+    for (slot, c) in belt.iter_mut().zip(corners) {
+        *slot = project(c, cam_world, vp, w, h)?;
+    }
+    Some(BoneViz {
+        head_joint: p,
+        head,
+        tail,
+        belt,
+        depth: ((head_w + tail_w) * 0.5 - cam_world).length() as f32,
+    })
+}
+
+/// The bone BODY nearest `cursor`, when the click missed every joint dot.
+///
+/// Answers with the bone's head joint — the one whose rotation swings it — so
+/// clicking a limb and clicking the dot at the top of that limb do the same
+/// thing. Ties go to the bone nearest the camera, as with joints.
+pub(crate) fn pick_bone(rigs: &[RigViz], cursor: Vec2) -> Option<(floptle_core::Entity, usize)> {
+    let mut best: Option<(floptle_core::Entity, usize, f32)> = None;
+    for r in rigs {
+        for b in &r.bones {
+            // How fat the bone actually looks from here, floored so a thin one
+            // is still a target. `seg_dist` measures to the head→tail spine.
+            let reach = ((b.belt[0] - b.belt[2]).length() * 0.5).max(BONE_BODY_PX);
+            if crate::gizmo::seg_dist(cursor, b.head, b.tail) > reach {
+                continue;
+            }
+            if best.is_none_or(|(_, _, bd)| b.depth < bd) {
+                best = Some((r.mesh, b.head_joint, b.depth));
+            }
+        }
+    }
+    best.map(|(e, i, _)| (e, i))
 }
 
 /// The joint nearest `cursor` across every drawn rig, within [`BONE_PICK_PX`].
@@ -981,5 +1089,75 @@ mod rig_pick_tests {
         let mesh = w.spawn();
         let rigs = [viz(mesh, &[(100.0, 100.0, 1, 9.0), (102.0, 101.0, 2, 3.0)])];
         assert_eq!(pick_joint(&rigs, Vec2::new(100.0, 100.0)), Some((mesh, 2)));
+    }
+
+    /// A horizontal bone from (100,100) to (300,100), belt 20 px across.
+    fn boned(mesh: Entity, head_joint: usize, depth: f32) -> RigViz {
+        RigViz {
+            mesh,
+            bones: vec![BoneViz {
+                head_joint,
+                head: Vec2::new(100.0, 100.0),
+                tail: Vec2::new(300.0, 100.0),
+                belt: [
+                    Vec2::new(120.0, 90.0),
+                    Vec2::new(120.0, 100.0),
+                    Vec2::new(120.0, 110.0),
+                    Vec2::new(120.0, 100.0),
+                ],
+                depth,
+            }],
+            joints: Vec::new(),
+            selected: None,
+        }
+    }
+
+    /// **The reported problem.** Clicking the middle of a bone — nowhere near
+    /// either joint — used to select nothing at all. It selects the bone now,
+    /// and answers with the joint that swings it.
+    #[test]
+    fn clicking_the_body_of_a_bone_selects_it() {
+        let mut w = World::new();
+        let mesh = w.spawn();
+        let rigs = [boned(mesh, 4, 5.0)];
+        assert_eq!(pick_bone(&rigs, Vec2::new(200.0, 100.0)), Some((mesh, 4)));
+        assert_eq!(pick_bone(&rigs, Vec2::new(200.0, 104.0)), Some((mesh, 4)));
+    }
+
+    /// Still a limit, not a nearest-bone search: well off the bone, the click
+    /// belongs to whatever is behind the rig.
+    #[test]
+    fn a_click_well_off_the_bone_still_misses() {
+        let mut w = World::new();
+        let mesh = w.spawn();
+        let rigs = [boned(mesh, 4, 5.0)];
+        assert_eq!(pick_bone(&rigs, Vec2::new(200.0, 160.0)), None);
+        assert_eq!(pick_bone(&rigs, Vec2::new(400.0, 100.0)), None);
+    }
+
+    /// A bone drawn edge-on has a belt of zero width; the floor is what keeps it
+    /// clickable rather than making it vanish as a target.
+    #[test]
+    fn an_edge_on_bone_is_still_wide_enough_to_click() {
+        let mut w = World::new();
+        let mesh = w.spawn();
+        let mut rig = boned(mesh, 2, 5.0);
+        rig.bones[0].belt = [Vec2::new(120.0, 100.0); 4];
+        let rigs = [rig];
+        assert_eq!(pick_bone(&rigs, Vec2::new(200.0, 100.0)), Some((mesh, 2)));
+        assert_eq!(
+            pick_bone(&rigs, Vec2::new(200.0, 100.0 + BONE_BODY_PX + 1.0)),
+            None,
+            "the floor is a floor, not a free-for-all"
+        );
+    }
+
+    /// Overlapping bones: the near one wins, as with joints.
+    #[test]
+    fn the_nearer_bone_wins_a_contested_click() {
+        let mut w = World::new();
+        let mesh = w.spawn();
+        let rigs = [boned(mesh, 1, 9.0), boned(mesh, 2, 3.0)];
+        assert_eq!(pick_bone(&rigs, Vec2::new(200.0, 100.0)), Some((mesh, 2)));
     }
 }

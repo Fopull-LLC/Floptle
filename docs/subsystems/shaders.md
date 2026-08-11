@@ -59,8 +59,11 @@
 > (intra-selection wires follow the copies). Positions are STABLE — layout
 > entries plus a session cache keyed by two reparse-stable identities mean a
 > node only ever moves when dragged. Eighteen commented example shaders
-> (`floptle-shader::examples`, incl. `water.flsl` with fieldDistance shoreline
-> foam) seed into `shaders/examples/` per project (missing ones fill in on
+> (`floptle-shader::examples`, incl. `water.flsl`, whose shoreline foam takes
+> whichever is nearer of `surfaceGap` (the MESH behind the surface, read from
+> the opaque depth prepass) and `fieldDistance` (terrain + SDF blobs), so
+> nothing in a scene is invisible to the waterline) seed into
+> `shaders/examples/` per project (missing ones fill in on
 > open; deleting the folder opts out) and are compile-tested against the REAL
 > pass sources. Eight of them are `stage sky` skyboxes — dayBreeze /
 > sunsetStreaks / stormNight (per-cycle randomized lightning) / starryNight
@@ -76,7 +79,8 @@
 > (`floptle-shader::preview`) renders every tile into a grid atlas in a single
 > pass — fragment values on a lit soft dome (floats grayscale, vec2/vec3 as
 > color, vec4 alpha-composited over a checker; engine hooks get neutral
-> stand-ins and `fieldDistance` a ground plane so foam/contact looks read),
+> stand-ins, and `fieldDistance`/`surfaceGap` a ground plane so foam/contact
+> looks read),
 > sdf values as the classic 2D distance cross-section (iso bands + zero
 > line). Literal numbers ride a uniform lane array instead of being baked in,
 > so DRAGGING any inline value or knob repaints thumbnails without a pipeline

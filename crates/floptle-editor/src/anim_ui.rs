@@ -110,14 +110,62 @@ pub struct AnimUiState {
     /// Multi-selected TRANSFORM keys: (channel index, time). Marquee-drag or a
     /// click populates it; copy/cut/paste/Delete act on the whole set.
     pub sel_keys: Vec<(usize, f32)>,
-    /// Copied transform keys: (node name, time, local pose) — pasted at the playhead.
-    pub key_clipboard: Vec<(String, f32, TransformTRS)>,
+    /// Copied keys, pasted at the playhead. See [`CopiedKey`].
+    pub key_clipboard: Vec<CopiedKey>,
+    /// The pointer is over the dopesheet body (set every frame it draws). Half
+    /// of the "who owns Ctrl+C/X/V" decision — see where it is assigned.
+    pub sheet_hovered: bool,
+    /// A short note beside the transport ("copied 3 keys"), and the seconds it
+    /// has left on screen.
+    ///
+    /// The clipboard's real failure mode was never that it did the wrong thing
+    /// — it was that a copy with nothing selected, and a paste with nothing
+    /// copied, both did *nothing at all and said nothing about it*, which is
+    /// indistinguishable from a broken shortcut. Every clipboard verb answers
+    /// now, including when the answer is "there was nothing to do".
+    pub status_note: Option<(String, f32)>,
     /// In-progress marquee box over the dopesheet (screen start, current).
     pub marquee: Option<(Pos2, Pos2)>,
     /// In-progress STRETCH of the selection: the previewed new time of the right
     /// edge (keys scale around the selection's left edge). `Some` while dragging
     /// the stretch grip that appears when ≥2 keys spanning a range are selected.
     pub stretch_drag: Option<f32>,
+}
+
+/// One key on the clipboard: the node it came from, the time it sat at, and
+/// **only the lanes that actually held a key there**.
+///
+/// The optionality is the whole point. A dopesheet key is the UNION of the
+/// translation, rotation and scale lanes, and most keys are not all three — a
+/// spinning prop is keyed on rotation alone. Reading the missing lanes back as
+/// their defaults and pasting all three writes position (0,0,0) and scale
+/// (1,1,1) onto a node that never asked for either, which lands it at the world
+/// origin. So a rotation-only key copies as rotation-only and pastes back the
+/// same way.
+///
+/// `props` carries the property-lane keys (opacity, light intensity, a UI image
+/// swap…) selected in the same gesture, which the clipboard used to drop on the
+/// floor without saying so.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CopiedKey {
+    pub node: String,
+    pub time: f32,
+    pub translation: Option<[f32; 3]>,
+    pub rotation: Option<[f32; 4]>,
+    pub scale: Option<[f32; 3]>,
+    /// `(component, field, step, value)` for each property lane keyed here.
+    pub props: Vec<(String, String, bool, AnimPropValueDoc)>,
+}
+
+impl CopiedKey {
+    /// Nothing was actually keyed at this time — a selection entry that a retime
+    /// or an undo left pointing at empty space.
+    fn is_empty(&self) -> bool {
+        self.translation.is_none()
+            && self.rotation.is_none()
+            && self.scale.is_none()
+            && self.props.is_empty()
+    }
 }
 
 impl Default for AnimUiState {
@@ -164,6 +212,8 @@ impl Default for AnimUiState {
             clip_redo: Vec::new(),
             sel_keys: Vec::new(),
             key_clipboard: Vec::new(),
+            sheet_hovered: false,
+            status_note: None,
             marquee: None,
             stretch_drag: None,
         }
@@ -2052,6 +2102,17 @@ impl EditorTabViewer<'_> {
         // Where a "key at playhead" lands, on the snap grid like record.
         let ph = crate::timeline::snap_time(st.playhead.min(dur), st.snap_fps);
 
+        // Age out the clipboard note. Decayed at the TOP of the frame so a note
+        // set by this frame's copy/paste gets its full time on screen.
+        if let Some((_, left)) = st.status_note.as_mut() {
+            *left -= ui.input(|i| i.stable_dt).min(0.1);
+            if *left <= 0.0 {
+                st.status_note = None;
+            } else {
+                ui.ctx().request_repaint();
+            }
+        }
+
         // Header row: duration + event add + selected-event editor.
         let mut kill_event: Option<usize> = None;
         ui.horizontal(|ui| {
@@ -2060,6 +2121,37 @@ impl EditorTabViewer<'_> {
                 .on_hover_text("Undo clip edit (Ctrl+Z)").clicked() { do_undo = true; }
             if ui.add_enabled(!st.clip_redo.is_empty(), egui::Button::new("↷"))
                 .on_hover_text("Redo clip edit (Ctrl+Y)").clicked() { do_redo = true; }
+            ui.separator();
+            // The clipboard, as BUTTONS. The shortcuts work, but a shortcut that
+            // silently does nothing is indistinguishable from a broken one, and
+            // that is exactly how this read. A button that is greyed out tells
+            // you *why* nothing is going to happen before you press it.
+            let has_sel = !st.sel_keys.is_empty() || st.sel_prop.is_some();
+            let n_sel = st.sel_keys.len() + usize::from(st.sel_prop.is_some());
+            if ui.add_enabled(has_sel, egui::Button::new("⎘"))
+                .on_hover_text(if has_sel {
+                    format!("Copy {} (Ctrl+C)", plural_keys(n_sel))
+                } else {
+                    "Copy keys (Ctrl+C) — select some keyframes first".into()
+                })
+                .clicked() { copy_keys = true; }
+            if ui.add_enabled(has_sel, egui::Button::new("✂"))
+                .on_hover_text(if has_sel {
+                    format!("Cut {} (Ctrl+X)", plural_keys(n_sel))
+                } else {
+                    "Cut keys (Ctrl+X) — select some keyframes first".into()
+                })
+                .clicked() { copy_keys = true; cut_keys = true; }
+            if ui.add_enabled(!st.key_clipboard.is_empty(), egui::Button::new("📋"))
+                .on_hover_text(if st.key_clipboard.is_empty() {
+                    "Paste keys (Ctrl+V) — nothing copied yet".into()
+                } else {
+                    format!("Paste {} at the playhead (Ctrl+V)", plural_keys(st.key_clipboard.len()))
+                })
+                .clicked() { paste_keys = true; }
+            if let Some((msg, _)) = st.status_note.as_ref() {
+                ui.label(egui::RichText::new(msg).weak());
+            }
             ui.separator();
             ui.label("duration");
             let mut d = doc.duration;
@@ -2844,12 +2936,18 @@ impl EditorTabViewer<'_> {
             // numeric entry) — `text_edit_focused` asks exactly that, and it is
             // the same predicate the window-level `typing` gate uses now.
             //
-            // `tab_focused` is the other half, and it is now load-bearing rather
-            // than accidental: the window handler routes Ctrl+C/V to the SCENE
-            // whenever the focused tab is not a timeline, so without this a
+            // The other half is OWNERSHIP, and it is load-bearing rather than
+            // accidental: the window handler routes Ctrl+C/V to the SCENE
+            // whenever the timeline doesn't own the chord, so without this a
             // paste aimed at the Hierarchy would also drop keyframes at the
-            // playhead. One chord, one owner, decided by which tab has focus.
-            if !playing && tab_focused && !ui.ctx().text_edit_focused() {
+            // playhead. One chord, one owner.
+            //
+            // The owner is the focused tab OR the panel under the pointer. Dock
+            // focus alone left a real hole (see where `sheet_hovered` is set),
+            // and both halves are read by `main.rs` too, so the two sides cannot
+            // disagree about who is about to act.
+            let owns_chord = tab_focused || st.sheet_hovered;
+            if !playing && owns_chord && !ui.ctx().text_edit_focused() {
                 // egui turns Ctrl+C/X/V into Copy/Cut/Paste EVENTS (the raw key is
                 // consumed), so those must be read from `events`, not key_pressed —
                 // that was why copy/paste "did nothing". Undo/redo have no such event.
@@ -3108,6 +3206,15 @@ impl EditorTabViewer<'_> {
         });
         // Remember the offset so next frame's cursor-anchored zoom has an anchor.
         st.scroll_off = out.state.offset;
+        // Is the pointer over the sheet? This is the OTHER half of "who owns
+        // Ctrl+C" (see the keyboard block below). Dock focus alone is not enough:
+        // egui_dock only focuses a tab from a body click when no other egui layer
+        // is over that point, so a click that lands under a tooltip, a popup or a
+        // context menu leaves the sheet unfocused while the artist is plainly
+        // working in it — and the chord silently goes to the Hierarchy instead.
+        // Hovering is what "which panel am I working in" means to everyone who
+        // has used Blender.
+        st.sheet_hovered = ui.rect_contains_pointer(out.inner_rect);
 
         // ---- clip undo/redo + clipboard (deferred: they swap/read clip_doc, which
         // `doc` borrowed for the whole draw above) ----
@@ -3120,17 +3227,31 @@ impl EditorTabViewer<'_> {
                 st.clip_dirty = true;
             }
         } else {
-            // Copy selected transform keys → clipboard (node name + time + pose).
+            // Copy the selection → clipboard. Transform keys AND the selected
+            // property key: a property lane is a keyframe row like any other, and
+            // Ctrl+C over one used to do nothing whatsoever.
+            //
             // Keep this selection-local value for Cut.  In particular, an empty Cut
             // must be a no-op — it must never delete whatever happened to be copied
             // previously (the old code read `key_clipboard` after a failed copy).
-            let mut copied_now = Vec::new();
+            let mut copied_now: Vec<CopiedKey> = Vec::new();
             if copy_keys {
                 let sel = st.sel_keys.clone();
+                let sel_prop = st.sel_prop;
                 if let Some((_, d)) = st.clip_doc.as_ref() {
                     copied_now = copy_transform_keys(d, &sel);
+                    if let Some(p) = sel_prop.and_then(|p| copy_property_key(d, p)) {
+                        copied_now.push(p);
+                    }
                     if !copied_now.is_empty() {
                         st.key_clipboard = copied_now.clone();
+                        st.status_note = Some((
+                            format!("copied {}", plural_keys(copied_now.len())),
+                            2.0,
+                        ));
+                    } else {
+                        st.status_note =
+                            Some(("nothing selected to copy — click a keyframe first".into(), 3.0));
                     }
                 }
             }
@@ -3140,66 +3261,46 @@ impl EditorTabViewer<'_> {
                 && !copied_now.is_empty()
                 && let Some((_, d)) = st.clip_doc.as_mut()
             {
-                for (node, t, _) in &copied_now {
-                    if let Some(ci) = d.channels.iter().position(|c| &c.node == node) {
-                        delete_channel_key(&mut d.channels[ci], *t);
+                for k in &copied_now {
+                    if let Some(ci) = d.channels.iter().position(|c| c.node == k.node) {
+                        cut_copied_key(&mut d.channels[ci], k);
                         drop_empty_channel(d, ci);
                     }
                 }
                 st.sel_keys.clear();
+                st.sel_prop = None;
                 st.clip_dirty = true;
             }
             // Paste at the playhead: the earliest copied key lands on the playhead,
             // the rest keep their relative offsets. Reselect the pasted keys.
-            if paste_keys && !st.key_clipboard.is_empty() {
-                let cb = st.key_clipboard.clone();
-                let min_t = cb.iter().map(|(_, t, _)| *t).fold(f32::INFINITY, f32::min);
-                let base = crate::timeline::snap_time(st.playhead.min(dur), st.snap_fps);
-                if let Some((_, d)) = st.clip_doc.as_mut() {
-                    for (node, t, trs) in &cb {
-                        write_key(d, node, base + (t - min_t), trs);
-                    }
+            if paste_keys {
+                if st.key_clipboard.is_empty() {
+                    st.status_note =
+                        Some(("nothing on the clipboard — copy some keys first".into(), 3.0));
+                } else {
+                    let cb = st.key_clipboard.clone();
+                    let base = crate::timeline::snap_time(st.playhead.min(dur), st.snap_fps);
+                    let ns = paste_keys_at(st.clip_doc.as_mut().map(|(_, d)| d), &cb, base);
+                    st.sel_keys = ns;
+                    st.clip_dirty = true;
+                    st.status_note =
+                        Some((format!("pasted {}", plural_keys(cb.len())), 2.0));
                 }
-                let mut ns = Vec::new();
-                if let Some((_, d)) = st.clip_doc.as_ref() {
-                    for (node, t, _) in &cb {
-                        let nt = base + (t - min_t);
-                        if let Some(ci) = d.channels.iter().position(|c| &c.node == node) {
-                            ns.push((ci, nt));
-                        }
-                    }
-                }
-                st.sel_keys = ns;
-                st.clip_dirty = true;
             }
             // Duplicate (Ctrl+D): copy the live selection to the playhead in one step.
             if dup_keys && !st.sel_keys.is_empty() {
                 let sel = st.sel_keys.clone();
-                let mut items: Vec<(String, f32, TransformTRS)> = Vec::new();
+                let sel_prop = st.sel_prop;
+                let mut items: Vec<CopiedKey> = Vec::new();
                 if let Some((_, d)) = st.clip_doc.as_ref() {
-                    for (ci, t) in &sel {
-                        if let Some(ch) = d.channels.get(*ci) {
-                            items.push((ch.node.clone(), *t, sample_channel_key(ch, *t)));
-                        }
+                    items = copy_transform_keys(d, &sel);
+                    if let Some(p) = sel_prop.and_then(|p| copy_property_key(d, p)) {
+                        items.push(p);
                     }
                 }
                 if !items.is_empty() {
-                    let min_t = items.iter().map(|(_, t, _)| *t).fold(f32::INFINITY, f32::min);
                     let base = crate::timeline::snap_time(st.playhead.min(dur), st.snap_fps);
-                    if let Some((_, d)) = st.clip_doc.as_mut() {
-                        for (node, t, trs) in &items {
-                            write_key(d, node, base + (t - min_t), trs);
-                        }
-                    }
-                    let mut ns = Vec::new();
-                    if let Some((_, d)) = st.clip_doc.as_ref() {
-                        for (node, t, _) in &items {
-                            let nt = base + (t - min_t);
-                            if let Some(ci) = d.channels.iter().position(|c| &c.node == node) {
-                                ns.push((ci, nt));
-                            }
-                        }
-                    }
+                    let ns = paste_keys_at(st.clip_doc.as_mut().map(|(_, d)| d), &items, base);
                     st.sel_keys = ns;
                     st.clip_dirty = true;
                 }
@@ -3497,43 +3598,219 @@ fn delete_channel_key(ch: &mut floptle_scene::AnimChannelDoc, t: f32) {
     }
 }
 
-/// Read the full TRS a channel stores at key time `t` (per-lane exact-time lookup;
-/// a lane with no key there contributes identity). The read counterpart to
-/// [`write_key`] — used to copy transform keys to the clipboard.
-fn sample_channel_key(ch: &floptle_scene::AnimChannelDoc, t: f32) -> TransformTRS {
-    use floptle_core::math::{Quat, Vec3};
-    let at3 = |l: &Option<AnimTrackDoc3>, def: [f32; 3]| {
-        l.as_ref()
-            .and_then(|l| l.times.iter().position(|&x| (x - t).abs() < 1e-4).map(|i| l.values[i]))
-            .unwrap_or(def)
-    };
-    let at4 = |l: &Option<AnimTrackDoc4>, def: [f32; 4]| {
-        l.as_ref()
-            .and_then(|l| l.times.iter().position(|&x| (x - t).abs() < 1e-4).map(|i| l.values[i]))
-            .unwrap_or(def)
-    };
-    TransformTRS {
-        t: Vec3::from_array(at3(&ch.translation, [0.0, 0.0, 0.0])),
-        r: Quat::from_array(at4(&ch.rotation, [0.0, 0.0, 0.0, 1.0])),
-        s: Vec3::from_array(at3(&ch.scale, [1.0, 1.0, 1.0])),
-    }
-}
+// (There used to be a `sample_channel_key` here: it read a channel's full TRS
+// at a key time, filling any lane with no key there from the IDENTITY pose.
+// That is what copy/cut/duplicate used, and it is what made pasting a
+// rotation-only key teleport the object to the world origin at unit scale.
+// `copy_transform_keys` reports the missing lanes as missing instead, and
+// nothing else wanted the lossy read.)
 
-/// Materialize a transform-key selection for copy/cut. Invalid channel indices are
+/// Materialize a key selection for copy/cut. Invalid channel indices are
 /// ignored, which makes a selection safely stale after an undo, retime, or channel
 /// cleanup rather than letting a later command target a different key.
-fn copy_transform_keys(
-    doc: &AnimClipDoc,
-    selection: &[(usize, f32)],
-) -> Vec<(String, f32, TransformTRS)> {
+///
+/// Each entry records only the lanes that genuinely hold a key at that time —
+/// see [`CopiedKey`] for why reading the rest as defaults is destructive. A
+/// selection entry that turns out to key nothing is dropped rather than pasted
+/// as an empty key.
+fn copy_transform_keys(doc: &AnimClipDoc, selection: &[(usize, f32)]) -> Vec<CopiedKey> {
     selection
         .iter()
         .filter_map(|&(ci, t)| {
-            doc.channels
-                .get(ci)
-                .map(|ch| (ch.node.clone(), t, sample_channel_key(ch, t)))
+            let ch = doc.channels.get(ci)?;
+            let find3 = |l: &Option<AnimTrackDoc3>| {
+                l.as_ref().and_then(|l| {
+                    l.times.iter().position(|&x| (x - t).abs() < 1e-4).map(|i| l.values[i])
+                })
+            };
+            let find4 = |l: &Option<AnimTrackDoc4>| {
+                l.as_ref().and_then(|l| {
+                    l.times.iter().position(|&x| (x - t).abs() < 1e-4).map(|i| l.values[i])
+                })
+            };
+            let key = CopiedKey {
+                node: ch.node.clone(),
+                time: t,
+                translation: find3(&ch.translation),
+                rotation: find4(&ch.rotation),
+                scale: find3(&ch.scale),
+                props: Vec::new(),
+            };
+            (!key.is_empty()).then_some(key)
         })
         .collect()
+}
+
+/// Materialize a PROPERTY-lane key for copy/cut: `(channel, track, key index)`,
+/// the shape `sel_prop` holds. Property keys used to be invisible to the
+/// clipboard — Ctrl+C on one did nothing at all and said nothing about it.
+fn copy_property_key(doc: &AnimClipDoc, sel: (usize, usize, usize)) -> Option<CopiedKey> {
+    let (ci, ti, ki) = sel;
+    let ch = doc.channels.get(ci)?;
+    let pt = ch.properties.get(ti)?;
+    let t = *pt.times.get(ki)?;
+    let v = pt.values.get(ki)?.clone();
+    Some(CopiedKey {
+        node: ch.node.clone(),
+        time: t,
+        translation: None,
+        rotation: None,
+        scale: None,
+        props: vec![(pt.component.clone(), pt.field.clone(), pt.step, v)],
+    })
+}
+
+fn plural_keys(n: usize) -> String {
+    if n == 1 { "1 key".into() } else { format!("{n} keys") }
+}
+
+/// Drop a clipboard key back into the clip: the earliest one lands on `base`
+/// and the rest keep their relative offsets, so a copied run of keys pastes as
+/// a run rather than collapsing onto one frame. Returns the pasted transform
+/// keys as a fresh `sel_keys`, so what you just pasted is what is selected.
+fn paste_keys_at(
+    doc: Option<&mut AnimClipDoc>,
+    keys: &[CopiedKey],
+    base: f32,
+) -> Vec<(usize, f32)> {
+    let Some(doc) = doc else { return Vec::new() };
+    let min_t = keys.iter().map(|k| k.time).fold(f32::INFINITY, f32::min);
+    if !min_t.is_finite() {
+        return Vec::new();
+    }
+    for k in keys {
+        write_copied_key(doc, k, base + (k.time - min_t));
+    }
+    keys.iter()
+        .filter(|k| k.translation.is_some() || k.rotation.is_some() || k.scale.is_some())
+        .filter_map(|k| {
+            let nt = base + (k.time - min_t);
+            doc.channels.iter().position(|c| c.node == k.node).map(|ci| (ci, nt))
+        })
+        .collect()
+}
+
+/// Remove exactly what a Cut copied — the same lanes, no more. Cutting a
+/// rotation-only key must not also take the translation key that happens to
+/// share its time.
+fn cut_copied_key(ch: &mut floptle_scene::AnimChannelDoc, key: &CopiedKey) {
+    let t = key.time;
+    fn del_at(times: &mut Vec<f32>, t: f32) -> Option<usize> {
+        let i = times.iter().position(|&x| (x - t).abs() < 1e-4)?;
+        times.remove(i);
+        Some(i)
+    }
+    if key.translation.is_some()
+        && let Some(l) = ch.translation.as_mut()
+        && let Some(i) = del_at(&mut l.times, t)
+    {
+        l.values.remove(i);
+    }
+    if key.rotation.is_some()
+        && let Some(l) = ch.rotation.as_mut()
+        && let Some(i) = del_at(&mut l.times, t)
+    {
+        l.values.remove(i);
+    }
+    if key.scale.is_some()
+        && let Some(l) = ch.scale.as_mut()
+        && let Some(i) = del_at(&mut l.times, t)
+    {
+        l.values.remove(i);
+    }
+    for (comp, field, _, _) in &key.props {
+        if let Some(pt) =
+            ch.properties.iter_mut().find(|p| &p.component == comp && &p.field == field)
+            && let Some(i) = del_at(&mut pt.times, t)
+        {
+            pt.values.remove(i);
+        }
+    }
+    if ch.translation.as_ref().is_some_and(|l| l.times.is_empty()) {
+        ch.translation = None;
+    }
+    if ch.rotation.as_ref().is_some_and(|l| l.times.is_empty()) {
+        ch.rotation = None;
+    }
+    if ch.scale.as_ref().is_some_and(|l| l.times.is_empty()) {
+        ch.scale = None;
+    }
+    ch.properties.retain(|p| !p.times.is_empty());
+}
+
+/// Paste one clipboard key at `t`, touching only the lanes it actually carries.
+/// The counterpart to [`write_key`], which is the RECORDER's path and quite
+/// rightly writes a whole pose.
+fn write_copied_key(doc: &mut AnimClipDoc, key: &CopiedKey, t: f32) {
+    let ci = match doc.channels.iter().position(|c| c.node == key.node) {
+        Some(i) => i,
+        None => {
+            doc.channels.push(floptle_scene::AnimChannelDoc {
+                node: key.node.clone(),
+                ..Default::default()
+            });
+            doc.channels.len() - 1
+        }
+    };
+    let ch = &mut doc.channels[ci];
+    if let Some(v) = key.translation {
+        put_lane3(&mut ch.translation, t, v);
+    }
+    if let Some(v) = key.rotation {
+        put_lane4(&mut ch.rotation, t, v);
+    }
+    if let Some(v) = key.scale {
+        put_lane3(&mut ch.scale, t, v);
+    }
+    for (comp, field, step, value) in &key.props {
+        let ti = match ch.properties.iter().position(|p| &p.component == comp && &p.field == field)
+        {
+            Some(i) => i,
+            None => {
+                ch.properties.push(AnimPropTrackDoc {
+                    component: comp.clone(),
+                    field: field.clone(),
+                    times: Vec::new(),
+                    values: Vec::new(),
+                    step: *step,
+                });
+                ch.properties.len() - 1
+            }
+        };
+        let pt = &mut ch.properties[ti];
+        if let Some(i) = pt.times.iter().position(|&x| (x - t).abs() < 1e-4) {
+            pt.values[i] = value.clone();
+        } else {
+            let at = pt.times.partition_point(|&x| x < t);
+            pt.times.insert(at, t);
+            pt.values.insert(at, value.clone());
+        }
+    }
+    if t > doc.duration {
+        doc.duration = t;
+    }
+}
+
+fn put_lane3(l: &mut Option<AnimTrackDoc3>, t: f32, v: [f32; 3]) {
+    let l = l.get_or_insert_with(Default::default);
+    if let Some(i) = l.times.iter().position(|&x| (x - t).abs() < 1e-4) {
+        l.values[i] = v;
+    } else {
+        let at = l.times.partition_point(|&x| x < t);
+        l.times.insert(at, t);
+        l.values.insert(at, v);
+    }
+}
+
+fn put_lane4(l: &mut Option<AnimTrackDoc4>, t: f32, v: [f32; 4]) {
+    let l = l.get_or_insert_with(Default::default);
+    if let Some(i) = l.times.iter().position(|&x| (x - t).abs() < 1e-4) {
+        l.values[i] = v;
+    } else {
+        let at = l.times.partition_point(|&x| x < t);
+        l.times.insert(at, t);
+        l.values.insert(at, v);
+    }
 }
 
 /// Write (or overwrite) a full TRS key for `chan_name` at time `t`.
@@ -3548,29 +3825,9 @@ pub(crate) fn write_key(doc: &mut AnimClipDoc, chan_name: &str, t: f32, trs: &Tr
             doc.channels.last_mut().unwrap()
         }
     };
-    fn put3(l: &mut Option<AnimTrackDoc3>, t: f32, v: [f32; 3]) {
-        let l = l.get_or_insert_with(Default::default);
-        if let Some(i) = l.times.iter().position(|&x| (x - t).abs() < 1e-4) {
-            l.values[i] = v;
-        } else {
-            let at = l.times.partition_point(|&x| x < t);
-            l.times.insert(at, t);
-            l.values.insert(at, v);
-        }
-    }
-    fn put4(l: &mut Option<AnimTrackDoc4>, t: f32, v: [f32; 4]) {
-        let l = l.get_or_insert_with(Default::default);
-        if let Some(i) = l.times.iter().position(|&x| (x - t).abs() < 1e-4) {
-            l.values[i] = v;
-        } else {
-            let at = l.times.partition_point(|&x| x < t);
-            l.times.insert(at, t);
-            l.values.insert(at, v);
-        }
-    }
-    put3(&mut ch.translation, t, trs.t.to_array());
-    put4(&mut ch.rotation, t, trs.r.to_array());
-    put3(&mut ch.scale, t, trs.s.to_array());
+    put_lane3(&mut ch.translation, t, trs.t.to_array());
+    put_lane4(&mut ch.rotation, t, trs.r.to_array());
+    put_lane3(&mut ch.scale, t, trs.s.to_array());
     if t > doc.duration {
         doc.duration = t;
     }
@@ -3757,11 +4014,11 @@ mod tests {
         }
     }
 
-    /// Copy fidelity: a written transform key samples back to the same TRS (the
-    /// clipboard's read path must mirror `write_key`), and pasting elsewhere
-    /// reproduces it — the backbone of copy/cut/paste + duplicate.
+    /// Copy fidelity: a written transform key copies back with every lane
+    /// intact, and pasting elsewhere reproduces it — the backbone of
+    /// copy/cut/paste + duplicate.
     #[test]
-    fn transform_key_write_sample_roundtrip() {
+    fn transform_key_copy_paste_roundtrip() {
         use floptle_core::math::{Quat, Vec3};
         let mut doc = empty_clip();
         let trs = TransformTRS {
@@ -3770,14 +4027,106 @@ mod tests {
             s: Vec3::new(1.0, 1.0, 1.0),
         };
         write_key(&mut doc, "Hip", 0.5, &trs);
-        let ci = doc.channels.iter().position(|c| c.node == "Hip").unwrap();
-        let got = sample_channel_key(&doc.channels[ci], 0.5);
-        assert!((got.t - trs.t).length() < 1e-5, "translation round-trips");
-        assert!(got.r.dot(trs.r).abs() > 0.9999, "rotation round-trips");
-        // Paste the sampled key at a new time — it lands there faithfully.
-        write_key(&mut doc, "Hip", 1.25, &got);
-        let again = sample_channel_key(&doc.channels[ci], 1.25);
-        assert!((again.t - trs.t).length() < 1e-5, "pasted copy matches");
+        let copied = copy_transform_keys(&doc, &[(0, 0.5)]);
+        assert_eq!(copied.len(), 1);
+        assert_eq!(copied[0].translation, Some(trs.t.to_array()));
+        paste_keys_at(Some(&mut doc), &copied, 1.25);
+        let l = doc.channels[0].translation.as_ref().unwrap();
+        let i = l.times.iter().position(|&x| (x - 1.25).abs() < 1e-4).expect("pasted key exists");
+        assert_eq!(l.values[i], trs.t.to_array(), "pasted copy matches");
+    }
+
+    /// **The reported bug.** A rotation-only key — a spinning prop, which is
+    /// most of what anyone keys — used to copy as a whole pose, reading the
+    /// translation and scale lanes it does not have as identity. Pasting it
+    /// then wrote all three, moving the object to the world origin at scale 1.
+    #[test]
+    fn copying_a_rotation_only_key_does_not_invent_a_position() {
+        use floptle_core::math::Quat;
+        let mut doc = empty_clip();
+        let ch = floptle_scene::AnimChannelDoc {
+            node: "Fan".into(),
+            rotation: Some(floptle_scene::AnimTrackDoc4 {
+                times: vec![0.0, 1.0],
+                values: vec![
+                    Quat::IDENTITY.to_array(),
+                    Quat::from_axis_angle(floptle_core::math::Vec3::Y, 1.5).to_array(),
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        doc.channels.push(ch);
+
+        let copied = copy_transform_keys(&doc, &[(0, 1.0)]);
+        assert_eq!(copied.len(), 1);
+        assert!(copied[0].rotation.is_some(), "the lane that IS keyed comes along");
+        assert_eq!(copied[0].translation, None, "a lane with no key here stays absent");
+        assert_eq!(copied[0].scale, None);
+
+        paste_keys_at(Some(&mut doc), &copied, 1.5);
+        assert!(
+            doc.channels[0].translation.is_none(),
+            "pasting must not conjure a translation track — that is what dropped the object at the origin"
+        );
+        assert!(doc.channels[0].scale.is_none());
+        assert_eq!(doc.channels[0].rotation.as_ref().unwrap().times, vec![0.0, 1.0, 1.5]);
+    }
+
+    /// A property-lane key (opacity, light intensity, a UI image swap) is a
+    /// keyframe like any other. Ctrl+C over one used to do nothing at all.
+    #[test]
+    fn a_property_key_copies_and_pastes() {
+        let mut doc = empty_clip();
+        write_property_key(&mut doc, "Lamp", "PointLight", "intensity", 0.5, 4.0);
+        let copied = copy_property_key(&doc, (0, 0, 0)).expect("a property key copies");
+        assert_eq!(copied.props.len(), 1);
+        paste_keys_at(Some(&mut doc), &[copied], 1.5);
+        let pt = &doc.channels[0].properties[0];
+        assert_eq!(pt.times, vec![0.5, 1.5]);
+        assert_eq!(pt.values[1], AnimPropValueDoc::Float(4.0));
+    }
+
+    /// Cut takes exactly what it copied. A rotation-only key sharing its time
+    /// with a translation key must not carry the translation key off with it.
+    #[test]
+    fn cutting_one_lane_leaves_the_others_alone() {
+        use floptle_core::math::{Quat, Vec3};
+        let mut doc = empty_clip();
+        write_key(&mut doc, "Arm", 0.5, &TransformTRS { t: Vec3::X, r: Quat::IDENTITY, s: Vec3::ONE });
+        // Copy only the rotation half of that key.
+        let key = CopiedKey {
+            node: "Arm".into(),
+            time: 0.5,
+            translation: None,
+            rotation: Some(Quat::IDENTITY.to_array()),
+            scale: None,
+            props: Vec::new(),
+        };
+        cut_copied_key(&mut doc.channels[0], &key);
+        assert!(doc.channels[0].rotation.is_none(), "the cut lane's only key is gone");
+        assert_eq!(
+            doc.channels[0].translation.as_ref().unwrap().times,
+            vec![0.5],
+            "the lane that was not cut is untouched"
+        );
+    }
+
+    /// A run of keys pastes as a run: the earliest lands on the playhead and
+    /// the rest keep their spacing, rather than collapsing onto one frame.
+    #[test]
+    fn a_run_of_keys_keeps_its_spacing() {
+        use floptle_core::math::{Quat, Vec3};
+        let mut doc = empty_clip();
+        for t in [0.25f32, 0.5, 1.0] {
+            write_key(&mut doc, "Hip", t, &TransformTRS { t: Vec3::X, r: Quat::IDENTITY, s: Vec3::ONE });
+        }
+        let copied = copy_transform_keys(&doc, &[(0, 0.25), (0, 0.5), (0, 1.0)]);
+        paste_keys_at(Some(&mut doc), &copied, 2.0);
+        let times = &doc.channels[0].translation.as_ref().unwrap().times;
+        for want in [2.0f32, 2.25, 2.75] {
+            assert!(times.iter().any(|&x| (x - want).abs() < 1e-4), "{want} pasted, got {times:?}");
+        }
     }
 
     #[test]

@@ -123,6 +123,25 @@ struct Globals {
     point_rot: array<vec4<f32>, 16>,   // world orientation (xyzw quaternion)
     // Contact shadows: x = on, y = reach in world units, z = steps, w = strength.
     contact: vec4<f32>,
+    // Screen-space reflections. Appended at the END so this struct stays
+    // byte-identical to the Rust `RaymarchGlobals`.
+    //
+    // `ssr_prev_vp` maps a point in THIS frame's camera-relative space into the
+    // stored scene-colour picture's clip space — the previous view-projection
+    // pre-translated by how far the camera moved, because the world is
+    // camera-relative and the raw matrix would be about the origin rather than
+    // about the scene. See `SceneHistory::prev_view_proj`.
+    ssr_prev_vp: mat4x4<f32>,
+    // x = on (0/1 — also 0 when there is no stored picture yet), y = how far a
+    // reflected ray reaches in world units, z = march steps, w = how thick a
+    // surface is assumed to be when deciding whether the ray went behind it or
+    // through it.
+    ssr: vec4<f32>,
+    // Local (point-light) shadows: x = march steps, y = how dark one gets.
+    // Whether a given lamp casts at all is its own flag in `point_shape[i].w` —
+    // these two are the scene-wide quality knob the Lighting node owns, so a
+    // project tunes cost in one place rather than on every lamp it ever places.
+    point_steps: vec4<f32>,
 };
 
 // A point mapped into Field Shape `i`'s local frame: un-translate (positions
@@ -695,6 +714,18 @@ fn closest_on_segment_to_ray(c: vec3<f32>, ax: vec3<f32>, half: f32, rd: vec3<f3
     return c + ax * clamp(t, -half, half);
 }
 
+// The emitter lane's `w` is a BITMASK, not a boolean: bit 0 = the emitter is
+// two-sided, bit 1 = this light casts shadows. It began as a plain 0/1 for
+// two-sidedness, and the moment a second flag joined it every `w > 0.5` test
+// became a test for "any flag at all" — which would have made every
+// shadow-casting disk silently two-sided.
+const LIGHT_TWO_SIDED: u32 = 1u;
+const LIGHT_SHADOWS: u32 = 2u;
+
+fn light_flag(shape: vec4<f32>, bit: u32) -> bool {
+    return (u32(max(shape.w, 0.0) + 0.5) & bit) != 0u;
+}
+
 fn area_terms(shape: vec4<f32>, rot: vec4<f32>, to: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> AreaTerms {
     var out: AreaTerms;
     let d0 = max(length(to), 1e-4);
@@ -721,7 +752,7 @@ fn area_terms(shape: vec4<f32>, rot: vec4<f32>, to: vec3<f32>, n: vec3<f32>, v: 
             // `to` points AT the light, so a point on the emitting side sees the
             // emitter's forward (-Z) running back toward it.
             let front = dot(quat_rot(rot, vec3<f32>(0.0, 0.0, -1.0)), -out.l);
-            vis = select(max(front, 0.0), abs(front), shape.w > 0.5);
+            vis = select(max(front, 0.0), abs(front), light_flag(shape, LIGHT_TWO_SIDED));
             if (vis <= 0.0) {
                 out.ndl = 0.0;
                 return out;
@@ -742,7 +773,7 @@ fn area_terms(shape: vec4<f32>, rot: vec4<f32>, to: vec3<f32>, n: vec3<f32>, v: 
         let ay = quat_rot(rot, vec3<f32>(0.0, 1.0, 0.0)) * max(shape.z, 1e-4);
         let face = normalize(cross(ax, ay)); // the node's +Z; forward is -Z
         let front = dot(face, out.l); // > 0 ⇒ the point is on the emitting side
-        if (front <= 0.0 && shape.w < 0.5) {
+        if (front <= 0.0 && !light_flag(shape, LIGHT_TWO_SIDED)) {
             out.ndl = 0.0;
             return out;
         }
@@ -1589,6 +1620,134 @@ fn contact_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>, pix: vec2<u32>) -> f32 
         }
     }
     return 1.0;
+}
+
+// Is point light `i` visible from `p`? 1 = lit, 0 = fully shadowed.
+//
+// **Why a screen-space trace and not the field march the sun uses.** The sun is
+// one light, infinitely far away, and its march is bounded by a distance the
+// scene sets. A lamp is one of sixteen, sits inside the level, and the thing
+// that has to block it is almost always ordinary polygon geometry — a wall, a
+// crate, a character — none of which exists in the SDF field at all. The field
+// knows terrain, blobs and collider proxies; a room does not.
+//
+// So this reads the same depth prepass contact shadows do, and it works on the
+// real silhouette of whatever is on screen. Its limitation is the honest one for
+// that method: **an occluder the camera cannot see cannot cast.** Turn to face a
+// wall with a lamp behind it and the wall is on screen and shadows correctly;
+// look away and the shadow it was casting stops existing. That is a real cost,
+// and it buys local shadows that cost a short march per lit pixel instead of a
+// cube-map render per lamp per frame.
+//
+// The march ends AT THE LIGHT rather than at a fixed reach — a lamp two metres
+// away and one twenty metres away need completely different distances, and a
+// single tuned number would be wrong for one of them. The step count is fixed,
+// so a distant lamp simply samples more coarsely.
+fn point_vis(p: vec3<f32>, n: vec3<f32>, i: u32, pix: vec2<u32>) -> f32 {
+    if (!light_flag(G.point_shape[i], LIGHT_SHADOWS)) {
+        return 1.0;
+    }
+    let dims = textureDimensions(prime_tex, 0);
+    if (dims.x <= 1u || dims.y <= 1u) {
+        return 1.0; // no prepass this frame: offscreen previews and probes
+    }
+    let to = G.point_pos[i].xyz - p;
+    let dist = length(to);
+    if (dist < 1e-4) {
+        return 1.0;
+    }
+    let l = to / dist;
+    // Never march past the light itself, and never past the light's own range —
+    // beyond it the lamp contributes nothing, so what is out there cannot matter.
+    let reach = min(dist, max(G.point_pos[i].w, 1e-4));
+    let steps = u32(clamp(G.point_steps.x, 4.0, 32.0));
+    let dt = reach / f32(steps);
+    // A FIXED lift, for the reason spelled out in `contact_vis`: scale it by the
+    // reach and a lamp further away starts its ray higher, so moving a light AWAY
+    // makes its shadows weaker rather than softer.
+    let ro = p + n * 0.02;
+    // Proportional to the step here, not to the reach. A lamp across a room takes
+    // long steps, and a window sized for the short trace would let the ray tunnel
+    // between two samples that both sit inside the same wall.
+    let thickness = max(dt * 2.0, 0.05) + reach * 0.02;
+    let jitter = ign(pix);
+    let fdims = vec2<f32>(dims);
+    for (var s = 0u; s < steps; s = s + 1u) {
+        // Stop short of the light: the last stretch is the lamp's own fixture and
+        // the surfaces right around it, and marching into them makes a bulb
+        // shadow the wall it is mounted on.
+        let t = (f32(s) + jitter) * dt;
+        if (t >= reach * 0.98) {
+            break;
+        }
+        let q = ro + l * t;
+        let clip = G.view_proj * vec4<f32>(q, 1.0);
+        if (clip.w <= 0.0) {
+            break; // behind the eye
+        }
+        let ndc = clip.xyz / clip.w;
+        if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0) {
+            break; // off screen: no evidence either way, and guessing is worse
+        }
+        let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        let texel = vec2<i32>(clamp(uv * fdims, vec2<f32>(0.0), fdims - vec2<f32>(1.0)));
+        let depth = textureLoad(prime_tex, texel, 0).x;
+        if (depth >= 1.0) {
+            continue; // nothing was drawn here
+        }
+        let sp = G.inv_view_proj * vec4<f32>(ndc.xy, depth, 1.0);
+        let surface = sp.xyz / sp.w;
+        let behind = length(q) - length(surface);
+        if (behind > 0.02 && behind < thickness) {
+            return 1.0 - clamp(G.point_steps.y, 0.0, 1.0);
+        }
+    }
+    return 1.0;
+}
+
+// How far it is from `p` to the SOLID surface drawn behind it, in world units.
+//
+// This is what a transparent surface needs and could never ask for: the SDF
+// field (`map_d`) knows about terrain and blobs, and nothing at all about the
+// ordinary polygon geometry most of a level is made of. Shoreline foam, soft
+// particles and contact glow are all the same measurement — "how much room is
+// there between me and whatever is behind me" — and all of them used to be
+// impossible against a mesh.
+//
+// Reads the opaque depth prepass, and reprojects `p` itself to find the texel
+// rather than taking a screen position, so it is exact for the fragment that
+// asks and needs no extra plumbing to reach a shader.
+//
+// A very large number means "nothing behind this at all": no prepass this frame
+// (offscreen previews, probes), off screen, or the sky. That is the value that
+// makes `saturate(gap / width)` come out as "wide open", which is the right
+// answer in every one of those cases.
+fn flsl_surface_gap(p: vec3<f32>) -> f32 {
+    let dims = textureDimensions(prime_tex, 0);
+    if (dims.x <= 1u || dims.y <= 1u) {
+        return 1e9;
+    }
+    let clip = G.view_proj * vec4<f32>(p, 1.0);
+    if (clip.w <= 0.0) {
+        return 1e9;
+    }
+    let ndc = clip.xyz / clip.w;
+    if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0) {
+        return 1e9;
+    }
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let fd = vec2<f32>(dims);
+    let texel = vec2<i32>(clamp(uv * fd, vec2<f32>(0.0), fd - vec2<f32>(1.0)));
+    let d = textureLoad(prime_tex, texel, 0).x;
+    if (d >= 1.0) {
+        return 1e9; // sky: nothing was drawn here
+    }
+    // World distance, not depth: the buffer's units are nonlinear, so a foam
+    // width expressed in them would mean a different number of metres at every
+    // distance — the shoreline would fatten as the camera backed away.
+    let sp = G.inv_view_proj * vec4<f32>(ndc.xy, d, 1.0);
+    let surface = sp.xyz / sp.w;
+    return max(length(surface) - length(p), 0.0);
 }
 
 fn sun_shadow(p: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f32> {

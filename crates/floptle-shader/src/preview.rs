@@ -427,6 +427,11 @@ fn apply_fog(color: vec3<f32>, pos: vec3<f32>, pix: vec2<u32>) -> vec3<f32> { re
 // A "ground" below the tile's lower third, so fieldDistance-driven looks
 // (shoreline foam, contact glows) show a gradient instead of a constant.
 fn map_d(p: vec3<f32>) -> f32 { return p.y + 0.55; }
+// The same ground for surfaceGap: a thumbnail has no scene behind it, and the
+// honest answer ("nothing is behind this") would draw every foam shader as a
+// flat swatch — which tells you nothing about the one thing you opened the
+// preview to look at.
+fn flsl_surface_gap(p: vec3<f32>) -> f32 { return max(p.y + 0.55, 0.0); }
 fn base_texel(in: VsOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); }
 fn facing_normal(n: vec3<f32>, front: bool) -> vec3<f32> { return select(-n, n, front); }
 "#;

@@ -170,6 +170,7 @@ pub static OPS: &[OpSpec] = &[
     OpSpec { name: "sdfAo", inputs: &[req("p", V3), req("n", V3)], output: F, stages: FRAG, emit: Emit::Fn("flsl_ao"), doc: "True SDF ambient occlusion at a point (1 = open sky).", category: "engine" },
     OpSpec { name: "applyFog", inputs: &[req("c", V3), req("p", V3)], output: V3, stages: FRAG, emit: Emit::Special, doc: "The scene's distance fog applied to a color.", category: "engine" },
     OpSpec { name: "fieldDistance", inputs: &[req("p", V3)], output: F, stages: FRAG, emit: Emit::Fn("map_d"), doc: "Distance from a point to the scene's SDF field (terrain + blobs) — glow near walls, darken in crevices…", category: "engine" },
+    OpSpec { name: "surfaceGap", inputs: &[req("p", V3)], output: F, stages: FRAG, emit: Emit::Fn("flsl_surface_gap"), doc: "How much room there is between this surface and the SOLID one drawn behind it, in world units. Unlike fieldDistance this sees ordinary MESH geometry, so it is what edge foam, soft particles and contact glow are made of. Huge where nothing is behind (the sky).", category: "engine" },
 
     // ---- screen (post shaders: the finished frame, readable anywhere) --------
     //

@@ -204,10 +204,64 @@ under it came from the trace. Control pairs on/off, strength 0 back to the
 control frame, and a longer reach giving a longer shadow — not merely a darker
 one.
 
+## 5c. Local shadows — one lamp at a time (v0.52.0)
+
+Everything above is about the SUN. Every placeable light in the engine was
+unshadowed fill: a torch in a doorway lit the room behind the door exactly as
+brightly as the one it was standing in, which is the most conspicuous way local
+lighting can be wrong.
+
+`point_vis` in `field.wgsl` is a screen-space trace, built on the same depth
+prepass contact shadows read — **not** the field march the sun uses, and for a
+concrete reason. The sun is one light, infinitely far away, bounded by a distance
+the scene sets. A lamp is one of sixteen, sits inside the level, and the thing
+that has to block it is almost always ordinary polygon geometry: a wall, a crate,
+a character. None of that is in the SDF field, which knows terrain, blobs and
+collider proxies. A room is not in the field at all.
+
+Two details that are not arbitrary:
+
+- **The march ends AT THE LIGHT**, not at a tuned reach. A lamp two metres away
+  and one twenty metres away need completely different distances, and any single
+  number would be wrong for one of them. The step count is fixed, so a distant
+  lamp simply samples more coarsely. It also stops at the light's own `range`:
+  past that the lamp contributes nothing, so what is out there cannot matter.
+- **The occluder-thickness window scales with the STEP**, not with the reach. A
+  lamp across a room takes long steps, and a window sized for contact shadows'
+  short trace would let the ray tunnel between two samples that both sit inside
+  the same wall.
+
+The visibility multiplies BOTH the diffuse and the specular halves. Shadowing
+only the diffuse leaves a highlight floating in the dark, which is the giveaway
+that a shadow is being faked.
+
+**Per lamp, off by default** (`PointLight::shadows`, the "casts shadows"
+checkbox, `shadows` in Lua). It costs a march per lit pixel per casting light,
+and most lamps in a level have nothing to be blocked by — a strip under a
+counter, a glow inside a sign, a fill light placed exactly so. The ones worth
+paying for are the ones a player can walk around.
+
+**What it cannot do** is the same honest limit contact shadows have: an occluder
+the camera cannot see cannot cast. A wall shadows correctly while it is in frame
+and stops when you look away from it.
+
+These work in **every** view of the game: the window, a fullscreen Game tab and a
+docked Game panel alike. That was not true when they landed — the offscreen
+render path ran no depth prepass, so a docked panel showed a visibly different
+picture from the same game fullscreen. Both paths run and bind it now, and
+`tests/offscreen_draws_the_same_world.rs` fails if either stops.
+
+Verified by `point_shadow_probe`: a floor, a wall, a lamp on one side, and no sun
+or ambient at all — so every lit pixel came from the lamp and the wall's shadow
+is the only thing that can take it away. It checks that the far side goes dark,
+that the near side does **not** (a lamp getting dimmer is not a lamp getting
+blocked), and that without the flag both sides are lit.
+
 ## 6. Not yet
 
-- **Point-light shadows** — same march per light is N× cost; rim/AO carries
-  interiors for now. Decide if a game needs it.
+- **Point-light shadows from OFF-SCREEN occluders** — §5c shadows from what the
+  camera can see. A shadow map per casting lamp would lift that and costs a
+  whole-scene render per light per frame; decide if a game needs it.
 - **Bent shadow rays** — arrives with light.md Tier 2 (the ray is already a
   field march, so nothing here blocks it).
 - **Cascaded shadow maps.** Considered and deliberately not taken. CSM buys one

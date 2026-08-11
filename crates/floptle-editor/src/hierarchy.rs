@@ -323,6 +323,7 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
                 intensity: 1.0,
                 range: 10.0,
                 shape: Default::default(),
+                shadows: false,
             });
             ui.close();
         }

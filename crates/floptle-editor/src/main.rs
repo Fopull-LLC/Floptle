@@ -659,6 +659,7 @@ struct EditorTabViewer<'a> {
     map_orient: &'a mut map_edit::MapOrient,
     map_xform: &'a mut map_edit::MapXform,
     map_select_hidden: &'a mut bool,
+    map_bevel: &'a mut map_edit::BevelWidth,
     /// True while the ▦ Map TOOL is active — every sub-object op needs it, so
     /// the tab offers to turn it on rather than silently greying out.
     map_tool_on: bool,
@@ -1359,6 +1360,17 @@ struct Editor {
     retro: Option<Retro>,
     /// Post-processing stack (bloom + vignette), full frame res.
     post: Option<floptle_render::PostStack>,
+    /// Last frame's composited scene, for screen-space reflections. Allocated
+    /// lazily on the first frame a scene actually asks for reflections, so a
+    /// project that never turns them on never pays the texture — and dropped
+    /// again when it stops, because this is a full-frame mip chain and it is
+    /// the largest thing in this list.
+    scene_history: Option<floptle_render::SceneHistory>,
+    /// The same, for the DOCKED Game panel. Its own and not shared: a history
+    /// carries the camera it was taken from and the size it was taken at, and
+    /// the panel has a different one of each. Sharing would have each view
+    /// reprojecting the other's frame, which looks like the reflection tearing.
+    game_scene_history: Option<floptle_render::SceneHistory>,
     /// Selection-outline post-process (silhouette mask + edge detect).
     outline: Option<Outline>,
     /// Editor reference-grid renderer.
@@ -1474,6 +1486,10 @@ struct Editor {
     map_xform: map_edit::MapXform,
     /// Let clicks and box-select reach sub-objects hidden behind the surface.
     map_select_hidden: bool,
+    /// How wide the ▦ Model tool's Bevel takes the corner off, in local units.
+    /// A setting rather than a drag because a bevel is a size you decide once
+    /// for a whole blockout and then apply everywhere.
+    map_bevel: map_edit::BevelWidth,
     /// Pre-Play map geometry, restored on Stop (the terrain-snapshot pattern).
     play_maps: Option<HashMap<u32, floptle_map::MapMesh>>,
     /// Material textures registered on the GPU, keyed by image path ⏵ handle.
@@ -2625,6 +2641,11 @@ impl Default for GizmoFilter {
 struct PreviewTarget {
     color_view: wgpu::TextureView,
     depth_view: wgpu::TextureView,
+    /// The texture behind `depth_view`. Kept because the opaque depth prepass
+    /// copies INTO it, and a view cannot be copied into — without this a docked
+    /// Game panel could not run the prepass, and every effect that reads it
+    /// would be missing from the one offscreen view that is actually the game.
+    depth_tex: wgpu::Texture,
     tex_id: egui::TextureId,
     /// Present when the SCENE is drawn into this target, rather than a finished
     /// picture being blitted into it.
@@ -3162,6 +3183,13 @@ impl ApplicationHandler for Editor {
                                 // keyframes/events — so suppress the scene versions here,
                                 // letting the panel's own egui handlers run. App-wide
                                 // controls (undo/redo/save) still fire everywhere.
+                                // …or, for the dopesheet, the pointer is simply
+                                // over it. Dock focus is not set by every click
+                                // that plainly means "I am working in here"
+                                // (egui_dock skips it when another layer is over
+                                // the point), and the panel's own handler reads
+                                // the same two flags — so exactly one of the two
+                                // acts on the chord, never both and never neither.
                                 let in_timeline = matches!(
                                     self.focused_tab,
                                     Some(
@@ -3171,7 +3199,7 @@ impl ApplicationHandler for Editor {
                                             | EditorTab::ShaderGraph
                                             | EditorTab::Image
                                     )
-                                );
+                                ) || self.anim_ui.sheet_hovered;
                                 // The 🖼 Image canvas keeps its OWN undo stack —
                                 // a scene snapshot per brush stroke would be
                                 // absurd, and image edits aren't scene edits
@@ -3254,6 +3282,24 @@ impl ApplicationHandler for Editor {
                                         KeyCode::KeyC if !in_timeline && !posing_bone => self.copy_selected(),
                                         KeyCode::KeyV if !in_timeline && !posing_bone => self.paste(),
                                         KeyCode::KeyD if !in_timeline && !posing_bone => self.duplicate_selected(),
+                                        // ▦ Model tool: Ctrl+A selects every
+                                        // vertex/edge/face of the mesh you are
+                                        // editing, not every node in the scene.
+                                        //
+                                        // The map's own bind list cannot express
+                                        // this: Ctrl chords are reserved for the
+                                        // application by design, and plain A is
+                                        // the fly camera. So "select all" ended up
+                                        // on U, which is the one key nobody
+                                        // guesses — the tool had the feature and
+                                        // no way to reach it. U still works.
+                                        KeyCode::KeyA
+                                            if !in_timeline
+                                                && !posing_bone
+                                                && self.tool == Tool::MapEdit
+                                                && self.run_map_command(
+                                                    crate::map_keys::MapCmd::SelectAll,
+                                                ) => {}
                                         KeyCode::KeyA if !in_timeline && !posing_bone => self.select_all(),
                                         _ => {}
                                     }
@@ -3496,8 +3542,13 @@ impl ApplicationHandler for Editor {
                             // rig is only on screen for a mesh you already
                             // selected, and it is drawn over the model, so a
                             // click that lands on a joint meant the joint.
+                            // …and when it missed every joint dot, the bone BODY
+                            // is still a target. A rig is mostly bone and very
+                            // little joint, so requiring the dot made posing a
+                            // game of darts.
                             if let Some((mesh, idx)) =
                                 crate::viz::pick_joint(&self.rig_gizmos, cursor)
+                                    .or_else(|| crate::viz::pick_bone(&self.rig_gizmos, cursor))
                             {
                                 // Same swap the Hierarchy makes: a bone and a
                                 // node selection are mutually exclusive, so the
@@ -3559,10 +3610,17 @@ impl ApplicationHandler for Editor {
                     if let (Some(anchor), Some(cursor)) = (self.map_box.take(), self.cursor)
                         && self.tool == Tool::MapEdit
                     {
-                        // Shift adds, Ctrl subtracts — for the box AND the click,
-                        // from the one place that reads the modifiers.
-                        let how = map_edit::SelectMode::of(self.shift, self.ctrl);
-                        if (cursor - anchor).length() > map_edit::MAP_DRAG_PX {
+                        // One place reads the modifiers, but a box and a click do
+                        // not mean the same thing by them: Ctrl+click takes the
+                        // shortest PATH (as it does in Blender), while Ctrl+box
+                        // keeps subtracting, which is what a box is for.
+                        let drag = (cursor - anchor).length() > map_edit::MAP_DRAG_PX;
+                        let how = if drag {
+                            map_edit::SelectMode::of_drag(self.shift, self.ctrl)
+                        } else {
+                            map_edit::SelectMode::of(self.shift, self.ctrl)
+                        };
+                        if drag {
                             self.map_box_apply(anchor, cursor, how);
                         } else if !self.map_click(cursor, how) {
                             // A click that hit no sub-object: re-pick the NODE, so

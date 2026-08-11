@@ -426,6 +426,23 @@ pub struct SurfaceExtras {
     pub fog: bool,
     /// The deliberate PS1/N64 artefacts.
     pub retro: floptle_core::Retro,
+    /// How much of the environment this surface reflects, 0..1+
+    /// ([`floptle_core::Material::reflectivity`]). 1 is the physically honest
+    /// answer and the default; below that is an art direction, above it is a
+    /// cheat that reads well on a hero prop.
+    ///
+    /// Only the metal-rough model reads it — the Blinn-Phong path has no `f0`
+    /// to weight an environment by, so a project that never opted into physical
+    /// shading looks exactly as it did.
+    pub reflectivity: f32,
+    /// Glass: how much light passes THROUGH rather than stopping here
+    /// ([`floptle_core::Material::transmission`]). `0` is a solid surface.
+    pub transmission: f32,
+    /// How sharply it bends on the way in ([`floptle_core::Material::ior`]).
+    pub ior: f32,
+    /// How far the bent ray travels inside the material — what turns an index of
+    /// refraction into an actual displacement on screen.
+    pub thickness: f32,
 }
 
 impl Default for SurfaceExtras {
@@ -438,9 +455,23 @@ impl Default for SurfaceExtras {
             physical: false,
             fog: true,
             retro: floptle_core::Retro::default(),
+            reflectivity: 1.0,
+            transmission: 0.0,
+            ior: 1.5,
+            thickness: 0.5,
         }
     }
 }
+
+/// `vec4`s per entry in the surface-extras store.
+///
+/// Named, and named on BOTH sides of the boundary (`EXT_LANES` in raster.wgsl),
+/// because the stride is written down in six places — the packer, the dedup key,
+/// the index arithmetic, the CPU-side snapshot the bucketing reads, the neutral
+/// entry, and the shader's own indexing. It went from two to three the first time
+/// a material needed a field that would not fit, and every one of those six is a
+/// silent wrong-material-read if it is missed.
+pub(crate) const EXT_LANES: usize = 3;
 
 /// Flag bits in `mat_ext[i*2 + 1].x`. Mirrored in `raster.wgsl` — the two lists
 /// are the same list and must be edited together.
@@ -465,7 +496,17 @@ impl SurfaceExtras {
             physical: matches!(m.shading, floptle_core::Shading::Physical),
             fog: m.fog,
             retro: m.retro,
+            reflectivity: m.reflectivity,
+            transmission: m.transmission,
+            ior: m.ior,
+            thickness: m.thickness,
         }
+    }
+
+    /// Does light pass through this surface? The renderer routes these into
+    /// their own pass, after the scene behind them has been captured.
+    pub fn is_transmissive(&self) -> bool {
+        self.physical && self.transmission > 0.0
     }
 
     /// Does this set nothing at all? Not the same question as "is this index 0"
@@ -495,20 +536,21 @@ impl SurfaceExtras {
         f
     }
 
-    fn lanes(&self) -> [[f32; 4]; 2] {
+    fn lanes(&self) -> [[f32; 4]; EXT_LANES] {
         [
             [self.roughness, self.metallic, self.normal_strength, self.occlusion_strength],
-            [self.flags() as f32, self.retro.jitter, 0.0, 0.0],
+            [self.flags() as f32, self.retro.jitter, self.reflectivity, self.transmission],
+            [self.ior, self.thickness, 0.0, 0.0],
         ]
     }
 
     /// The exact bit pattern of [`lanes`](Self::lanes) — the dedup key, so two
     /// materials that produce the same GPU bytes share one index no matter how
     /// they were spelled.
-    fn key(&self) -> [u32; 8] {
+    fn key(&self) -> [u32; EXT_LANES * 4] {
         let l = self.lanes();
-        let mut k = [0u32; 8];
-        for (i, v) in l[0].iter().chain(l[1].iter()).enumerate() {
+        let mut k = [0u32; EXT_LANES * 4];
+        for (i, v) in l.iter().flatten().enumerate() {
             k[i] = v.to_bits();
         }
         k
@@ -614,10 +656,22 @@ pub struct Raster {
     skin_transparent_pipeline: wgpu::RenderPipeline,
     skin_mask_pipeline: wgpu::RenderPipeline,
     skin_prepass_pipeline: wgpu::RenderPipeline,
-    /// The prepass's own sampleable depth target (recreated on size change):
-    /// bound by the raymarch as its per-pixel march cap, copied over the frame's
-    /// depth buffer to prime early-z for the color pass.
-    prepass_tex: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// The prepass's own sampleable depth targets, ONE PER TARGET SIZE, and
+    /// which of them the last prepass wrote.
+    ///
+    /// A cache and not a single slot, because a frame runs the prepass more than
+    /// once at more than one size: the window surface, a docked Game panel sized
+    /// to its tab, a camera's render target. A single slot keyed on "is the size
+    /// different" would find it different EVERY TIME and reallocate a full-frame
+    /// depth texture twice a frame, forever — which is not a cache miss, it is a
+    /// leak with extra steps.
+    prepass: Vec<PrepassSlot>,
+    /// Monotonic counter, doubling as the token source and the LRU clock.
+    prepass_seq: u64,
+    /// Index into `prepass` of the target the last [`depth_prepass_with`]
+    /// (Self::depth_prepass_with) wrote, so `prepass_view` answers about THAT
+    /// one rather than about whichever happened to be created last.
+    prepass_active: Option<usize>,
     globals_bind: wgpu::BindGroup,
     globals_buf: wgpu::Buffer,
     /// The vertex-paint block store: every painted mesh's RGBA8 colors, packed back
@@ -717,7 +771,7 @@ pub struct Raster {
     mat_ext_buf: wgpu::Buffer,
     mat_ext_cpu: Vec<[f32; 4]>,
     mat_ext_cap: u32,
-    mat_ext_index: HashMap<[u32; 8], u32>,
+    mat_ext_index: HashMap<[u32; EXT_LANES * 4], u32>,
     mat_ext_dirty: bool,
     /// The project's retro artefacts, folded into every pushed material.
     /// See [`Raster::set_retro_defaults`].
@@ -823,6 +877,20 @@ pub struct FlslBindingId(pub u32);
 
 /// How a Fragment-stage `.flsl` shader composites (mirror of the shader IR's
 /// blend declaration — kept local so floptle-render stays decoupled).
+/// One cached depth-prepass target: the size it serves, the texture, and the
+/// bookkeeping that lets a caller notice it changed.
+struct PrepassSlot {
+    size: wgpu::Extent3d,
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    /// Identifies this allocation. Handed out by `prepass_token` so a caller can
+    /// tell "same texture as last frame" from "a different one" — wgpu offers no
+    /// way to compare two texture views.
+    token: u64,
+    /// When it was last claimed, for the LRU eviction.
+    used: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlslBlend {
     Opaque,
@@ -841,6 +909,10 @@ struct FlslShader {
     /// this pipeline against the new field module.
     chunk: String,
     blend: FlslBlend,
+    /// The chunk calls `flsl_surface_gap`, so it needs the opaque depth prepass
+    /// to have run this frame. Recorded at compile time rather than asked of the
+    /// source later: this is the ONE place that knows what the chunk contains.
+    reads_scene_depth: bool,
 }
 
 struct FlslBinding {
@@ -1194,6 +1266,15 @@ impl Raster {
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default());
+        // …and a 1×1 environment, on the same principle as the prepass
+        // stand-in above: shading reads the map's DIMENSIONS to decide whether
+        // there is a sky to reflect, so an offscreen preview or a probe with no
+        // raymarch pass simply reflects nothing rather than needing a flag.
+        let (empty_env, empty_env_samp) = crate::env::EnvMap::empty(device);
+        // …and a 1×1 scene history, for the same reason again: with no previous
+        // frame there is nothing to reflect OF the scene, and the reflection
+        // falls back to the environment map on its own.
+        let (empty_scene, empty_scene_samp) = crate::ssr::SceneHistory::empty(device);
         let empty_field_bind = crate::raymarch::make_field_bind(
             device,
             &field_layout,
@@ -1203,6 +1284,10 @@ impl Raster {
             &empty_field_samp,
             &empty_gi,
             &empty_prime,
+            &empty_env,
+            &empty_env_samp,
+            &empty_scene,
+            &empty_scene_samp,
         );
 
         let instance_cap = 16;
@@ -1222,7 +1307,9 @@ impl Raster {
             skin_transparent_pipeline: core.skin_transparent_pipeline,
             skin_mask_pipeline: core.skin_mask_pipeline,
             skin_prepass_pipeline: core.skin_prepass_pipeline,
-            prepass_tex: None,
+            prepass: Vec::new(),
+            prepass_seq: 0,
+            prepass_active: None,
             globals_bind,
             globals_buf,
             vpaint_buf,
@@ -1593,6 +1680,9 @@ impl Raster {
             group3_layout,
             tex_slots,
             opaque,
+            // The transpiler emits this identifier and nothing else does, so
+            // its presence in the generated chunk IS the question being asked.
+            reads_scene_depth: chunk.contains("flsl_surface_gap"),
             chunk: chunk.to_string(),
             blend,
         };
@@ -1648,6 +1738,23 @@ impl Raster {
     /// — opaque flsl instances also join the depth prepass.
     pub fn flsl_shader_is_opaque(&self, id: FlslShaderId) -> bool {
         self.flsl_shaders.get(id.0 as usize).is_some_and(|s| s.opaque)
+    }
+
+    /// Does any of `draws` use a shader that reads the opaque depth prepass
+    /// (`surfaceGap` — shoreline foam, soft particles, contact glow)?
+    ///
+    /// The host has to ask, because the prepass is otherwise only run when
+    /// there is raymarched content to cap. Without this a water shader would
+    /// foam correctly against terrain and do NOTHING AT ALL in a scene built
+    /// out of meshes — working in the author's test level and silently failing
+    /// in the game, which is the worst shape a graphics feature can have.
+    pub fn flsl_draws_want_depth(&self, draws: &[FlslDraw]) -> bool {
+        draws.iter().any(|(_, _, binding, _)| {
+            self.flsl_bindings
+                .get(binding.0 as usize)
+                .and_then(|b| self.flsl_shaders.get(b.shader.0 as usize))
+                .is_some_and(|s| s.reads_scene_depth)
+        })
     }
 
     /// Create (or, with `replace`, rebuild in place) a material's live binding
@@ -1934,11 +2041,37 @@ impl Raster {
         if let Some(&i) = self.mat_ext_index.get(&key) {
             return i;
         }
-        let i = (self.mat_ext_cpu.len() / 2) as u32;
+        let i = (self.mat_ext_cpu.len() / EXT_LANES) as u32;
         self.mat_ext_cpu.extend_from_slice(&e.lanes());
         self.mat_ext_index.insert(key, i);
         self.mat_ext_dirty = true;
         i
+    }
+
+    /// Which surface-extras entries let light through, by index.
+    ///
+    /// Snapshotted into a `Vec` rather than read through `self` at each test,
+    /// because every caller of this is inside a closure that already borrows
+    /// `self` for something else.
+    fn transmissive_extras(&self) -> Vec<bool> {
+        self.mat_ext_cpu
+            .chunks_exact(EXT_LANES)
+            // lane 1 `.w` is transmission; lane 1 `.x` bit 0 is the physical
+            // flag, and only the metal-rough model has a refraction term.
+            .map(|c| c[1][3] > 0.0 && (c[1][0] as u32) & EXT_PHYSICAL != 0)
+            .collect()
+    }
+
+    /// Does anything in this draw list let light through it?
+    ///
+    /// The caller asks BEFORE drawing, because the answer decides whether the
+    /// frame pays for a refraction pass at all: a scene with no glass in it runs
+    /// exactly the passes it always did, with no capture and no second draw.
+    pub fn any_transmissive(&self, instances: &[(MeshId, Option<TexId>, InstanceRaw)]) -> bool {
+        let t = self.transmissive_extras();
+        instances
+            .iter()
+            .any(|(_, _, raw)| t.get(ext_index_of(raw) as usize).copied().unwrap_or(false))
     }
 
     /// Upload the surface-extras store if it grew since the last pass. Called
@@ -2902,7 +3035,7 @@ impl Raster {
         // `self` because the bucketing closures below borrow `raws` mutably.
         let dithers: Vec<bool> = self
             .mat_ext_cpu
-            .chunks_exact(2)
+            .chunks_exact(EXT_LANES)
             .map(|c| (c[1][0] as u32) & EXT_DITHER_ALPHA != 0)
             .collect();
         let is_opaque = |raw: &InstanceRaw| {
@@ -2910,12 +3043,20 @@ impl Raster {
                 || raw.color[3] >= OPAQUE_CUTOFF
                 || dithers.get(ext_index_of(raw) as usize).copied().unwrap_or(false)
         };
+        // Glass belongs to neither phase HERE. It is drawn by
+        // `draw_transmissive` once the scene behind it has been captured, and
+        // leaving it in this pass would both hide what it is supposed to refract
+        // and refract a picture taken before it existed.
+        let glassy = self.transmissive_extras();
+        let solid = |raw: &InstanceRaw| {
+            !glassy.get(ext_index_of(raw) as usize).copied().unwrap_or(false)
+        };
         let bucketize =
             |want_opaque: bool, raws: &mut Vec<InstanceRaw>| -> Vec<(usize, Option<u32>, u32, u32)> {
                 let groups = group_by_key(
                     instances
                         .iter()
-                        .filter(|(_, _, raw)| is_opaque(raw) == want_opaque)
+                        .filter(|(_, _, raw)| solid(raw) && is_opaque(raw) == want_opaque)
                         .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), *raw)),
                 );
                 let mut buckets = Vec::with_capacity(groups.len());
@@ -3042,10 +3183,187 @@ impl Raster {
         gpu.queue.submit([encoder.finish()]);
     }
 
-    /// The prepass depth target's view (valid after [`depth_prepass`](Self::depth_prepass)
-    /// ran at least once) — what `Raymarch::set_depth_prime` binds as the march cap.
+    /// **The refraction pass**: draw only the surfaces light passes through.
+    ///
+    /// Run it AFTER the scene behind them has been composited and captured, with
+    /// a `field` bind group whose scene texture is that capture. Everything about
+    /// the split is in service of one fact: a surface cannot sample a picture it
+    /// is already in. Draw glass with the rest of the scene and the only picture
+    /// available is the previous frame's — which has the glass in it, so its tint
+    /// compounds every frame it stays on screen and a green bottle goes black.
+    ///
+    /// Depth is LOADED and written: glass tests against the scene in front of it
+    /// and occludes glass behind it. That makes a single layer exact and two
+    /// overlapping panes show only the nearer one's refraction, which is the
+    /// usual trade and the reason a fish tank is one box rather than six.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_transmissive(
+        &mut self,
+        gpu: &Gpu,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        globals: Globals,
+        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
+        skins: &[SkinDraw],
+        field: Option<&wgpu::BindGroup>,
+    ) {
+        self.begin_pass(gpu, globals);
+        let glassy = self.transmissive_extras();
+        let is_glass =
+            |raw: &InstanceRaw| glassy.get(ext_index_of(raw) as usize).copied().unwrap_or(false);
+        let mut raws: Vec<InstanceRaw> = Vec::new();
+        let groups = group_by_key(
+            instances
+                .iter()
+                .filter(|(_, _, raw)| is_glass(raw))
+                .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), *raw)),
+        );
+        let mut buckets: Vec<(usize, Option<u32>, u32, u32)> = Vec::new();
+        for ((mesh_idx, tex_key), members) in groups {
+            let start = raws.len() as u32;
+            raws.extend_from_slice(&members);
+            buckets.push((mesh_idx, tex_key, start, members.len() as u32));
+        }
+        let skin_buckets = self.bucket_skins(skins, &mut raws, is_glass);
+        if buckets.is_empty() && skin_buckets.is_empty() {
+            return;
+        }
+        self.ensure_instances(gpu, raws.len() as u32);
+        gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-glass") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raster-glass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_bind_group(0, &self.globals_bind, &[]);
+            rp.set_bind_group(2, field.unwrap_or(&self.empty_field_bind), &[]);
+            rp.set_vertex_buffer(1, self.instance_buf.slice(..));
+            // The OPAQUE pipeline, deliberately: glass composites the scene
+            // behind it itself, through `transmission`. Blending it as well
+            // would mix the same background in twice and make every pane read as
+            // washed out — and would drop the depth write that lets one piece of
+            // glass sit in front of another.
+            rp.set_pipeline(&self.pipeline);
+            for &(mesh_idx, tex_key, start, count) in &buckets {
+                let mesh = &self.meshes[mesh_idx];
+                let bind = match tex_key {
+                    Some(t) => &self.textures[t as usize].bind,
+                    None => &mesh.tex_bind,
+                };
+                rp.set_bind_group(1, bind, &[]);
+                rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+            }
+            if !skin_buckets.is_empty() {
+                rp.set_pipeline(&self.skin_pipeline);
+                for &(mesh_idx, tex_key, start, count) in &skin_buckets {
+                    let mesh = &self.meshes[mesh_idx];
+                    let bind = match tex_key {
+                        Some(t) => &self.textures[t as usize].bind,
+                        None => &mesh.tex_bind,
+                    };
+                    rp.set_bind_group(1, bind, &[]);
+                    rp.set_vertex_buffer(0, mesh.gpu_mesh.vbuf.slice(..));
+                    rp.set_index_buffer(mesh.gpu_mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    rp.draw_indexed(0..mesh.gpu_mesh.index_count, 0, start..(start + count));
+                }
+            }
+        }
+        gpu.queue.submit([encoder.finish()]);
+    }
+
+    /// The depth target the LAST prepass wrote (valid once one has run) — what
+    /// `Raymarch::set_depth_prime` binds as the march cap.
+    ///
+    /// "The last one", not "the only one": a frame runs the prepass once per view
+    /// it draws, and each view has its own target. Reading whichever was created
+    /// most recently would hand a docked Game panel the window's depth buffer.
     pub fn prepass_view(&self) -> Option<&wgpu::TextureView> {
-        self.prepass_tex.as_ref().map(|(_, v)| v)
+        self.prepass.get(self.prepass_active?).map(|s| &s.view)
+    }
+
+    /// Find (or make) the prepass target for `size` and make it the active one.
+    /// Returns whether it had to be allocated, which is what tells the caller its
+    /// bind group is stale.
+    ///
+    /// The cache is small and evicts the least recently used, because the set of
+    /// sizes a frame asks for is small and stable — the window, a docked panel,
+    /// a render target or two — and each entry is a full-frame depth texture.
+    fn claim_prepass(&mut self, gpu: &Gpu, size: wgpu::Extent3d) -> bool {
+        /// Enough for the window, a docked Game panel and a couple of render
+        /// targets. Past that the least-used goes, which costs one reallocation
+        /// on the frame a view comes back — far better than holding depth
+        /// buffers for every panel size a window was ever dragged through.
+        const MAX_SLOTS: usize = 4;
+        self.prepass_seq += 1;
+        if let Some(i) = self.prepass.iter().position(|s| s.size == size) {
+            self.prepass[i].used = self.prepass_seq;
+            self.prepass_active = Some(i);
+            return false;
+        }
+        let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raster-prepass-depth"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: Gpu::DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let slot = PrepassSlot { size, tex, view, token: self.prepass_seq, used: self.prepass_seq };
+        let i = if self.prepass.len() < MAX_SLOTS {
+            self.prepass.push(slot);
+            self.prepass.len() - 1
+        } else {
+            let lru = self
+                .prepass
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, s)| s.used)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.prepass[lru] = slot;
+            lru
+        };
+        self.prepass_active = Some(i);
+        true
+    }
+
+    /// A token identifying the target [`prepass_view`](Self::prepass_view) is
+    /// currently answering with. It changes when that target is reallocated, and
+    /// differs between two views of different sizes — so a caller can tell "the
+    /// same texture as last time" from "a different one" without comparing
+    /// texture views, which wgpu gives no way to do.
+    pub fn prepass_token(&self) -> Option<u64> {
+        self.prepass.get(self.prepass_active?).map(|s| s.token)
     }
 
     /// Depth-only prepass over the OPAQUE instances (per-texel conservative alpha
@@ -3260,26 +3578,7 @@ impl Raster {
         main_depth: &wgpu::Texture,
     ) -> bool {
         let size = main_depth.size();
-        let recreated = match &self.prepass_tex {
-            Some((t, _)) => t.size() != size,
-            None => true,
-        };
-        if recreated {
-            let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("raster-prepass-depth"),
-                size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: Gpu::DEPTH_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-            self.prepass_tex = Some((tex, view));
-        }
+        let recreated = self.claim_prepass(gpu, size);
         self.begin_pass(gpu, globals);
 
         // Opaque instances only, bucketed by (mesh, texture) exactly like
@@ -3293,10 +3592,20 @@ impl Raster {
                 .and_then(|b| self.flsl_shaders.get(b.shader.0 as usize))
                 .is_some_and(|s| s.opaque)
         };
+        // Glass is deliberately absent from the prepass. It is drawn last, after
+        // the scene behind it has been captured — and if it primed depth here,
+        // the opaque fragments behind it would be killed by early-z, so the
+        // capture would hold a glass-shaped hole and the glass would refract it.
+        let glassy = self.transmissive_extras();
+        let solid = |raw: &InstanceRaw| {
+            !glassy.get(ext_index_of(raw) as usize).copied().unwrap_or(false)
+        };
         let groups = group_by_key(
             instances
                 .iter()
-                .filter(|(_, _, raw)| is_terrain(raw) || raw.color[3] >= OPAQUE_CUTOFF)
+                .filter(|(_, _, raw)| {
+                    solid(raw) && (is_terrain(raw) || raw.color[3] >= OPAQUE_CUTOFF)
+                })
                 .map(|(id, tex, raw)| ((id.0 as usize, tex.map(|t| t.0)), *raw))
                 .chain(
                     flsl.iter()
@@ -3322,7 +3631,8 @@ impl Raster {
         if !raws.is_empty() {
             gpu.queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&raws));
         }
-        let (prepass_tex, prepass_view) = self.prepass_tex.as_ref().expect("prepass target");
+        let slot = &self.prepass[self.prepass_active.expect("claim_prepass ran")];
+        let (prepass_tex, prepass_view) = (&slot.tex, &slot.view);
 
         let mut encoder = gpu
             .device

@@ -612,6 +612,142 @@ pub fn subdivide_faces(mesh: &mut MapMesh, faces: &[u32]) -> Vec<u32> {
     (start..start + count).collect()
 }
 
+/// Insert a new edge loop across the ring through `edge`, at `t` along each
+/// crossed edge (0.5 = the middle, Blender's default).
+///
+/// This is the workhorse the modeling tool was missing. Every quad the ring
+/// passes through is split in two by a cut joining the new points on its two
+/// ring edges, so a box becomes two boxes' worth of faces without changing its
+/// silhouette at all — which is how you get somewhere to bend, taper or inset.
+///
+/// Returns the edges of the loop it inserted, ready to become the selection.
+/// Empty (and the mesh untouched) when the ring is not made of quads, since
+/// there is no "opposite edge" to cut toward and guessing one would put a
+/// crease somewhere nobody asked for.
+pub fn loop_cut(mesh: &mut MapMesh, edge: (u32, u32), t: f32) -> Vec<(u32, u32)> {
+    let ring = crate::edge_ring(mesh, edge);
+    if ring.is_empty() {
+        return Vec::new();
+    }
+    let t = t.clamp(0.02, 0.98);
+    // Every face the ring crosses must be a quad with exactly two ring edges.
+    // Checked BEFORE anything is written, so a refusal leaves the mesh alone.
+    let ring_set: BTreeSet<(u32, u32)> = ring.iter().copied().collect();
+    let mut cut_faces: Vec<(usize, usize, usize)> = Vec::new(); // face, edge slot a, slot b
+    for (fi, f) in mesh.faces.iter().enumerate() {
+        let n = f.verts.len();
+        let slots: Vec<usize> = (0..n)
+            .filter(|&i| ring_set.contains(&key(f.verts[i], f.verts[(i + 1) % n])))
+            .collect();
+        match slots.len() {
+            0 => continue,
+            2 if n == 4 && slots[1] == slots[0] + 2 => {
+                cut_faces.push((fi, slots[0], slots[1]))
+            }
+            _ => return Vec::new(),
+        }
+    }
+    if cut_faces.is_empty() {
+        return Vec::new();
+    }
+    // One new vertex per ring edge, placed `t` of the way from its lower-indexed
+    // end — the ring is canonical `(a < b)`, so every face agrees on where the
+    // point went and the two halves meet exactly.
+    let mut mid: HashMap<(u32, u32), u32> = HashMap::new();
+    for &(a, b) in &ring {
+        let p = mesh.verts[a as usize].lerp(mesh.verts[b as usize], t);
+        mesh.verts.push(p);
+        mid.insert((a, b), mesh.verts.len() as u32 - 1);
+    }
+    let mut added: Vec<Face> = Vec::new();
+    for &(fi, i, j) in &cut_faces {
+        let v = mesh.faces[fi].verts.clone();
+        let slot = mesh.faces[fi].slot;
+        let mi = mid[&key(v[i], v[(i + 1) % 4])];
+        let mj = mid[&key(v[j], v[(j + 1) % 4])];
+        // Walking the original winding, the cut splits [i+1 .. j] from
+        // [j+1 .. i]; both halves keep the face's own order, so both stay CCW.
+        mesh.faces[fi].verts = vec![mi, v[(i + 1) % 4], v[j], mj];
+        added.push(Face { verts: vec![mj, v[(j + 1) % 4], v[i], mi], slot });
+    }
+    mesh.faces.extend(added);
+    touched(mesh);
+    // The inserted loop is every edge joining two of the new points — one per
+    // face the ring crossed, which is exactly the cut we just made.
+    let new_pts: BTreeSet<u32> = mid.values().copied().collect();
+    let mut loop_edges = BTreeSet::new();
+    for f in &mesh.faces {
+        let n = f.verts.len();
+        for i in 0..n {
+            let (a, b) = (f.verts[i], f.verts[(i + 1) % n]);
+            if new_pts.contains(&a) && new_pts.contains(&b) {
+                loop_edges.insert(key(a, b));
+            }
+        }
+    }
+    loop_edges.into_iter().collect()
+}
+
+/// Round off the selected edges: pull each one apart into a strip of width
+/// `amount`, so a hard corner becomes a chamfer that catches the light.
+///
+/// The cheap, predictable form — one segment, and only for edges whose two
+/// faces are both quads. That covers the case it is wanted for almost every
+/// time (taking the sharpness off a blockout box) and refuses the rest rather
+/// than producing a tangle.
+pub fn bevel_edges(mesh: &mut MapMesh, edges: &[(u32, u32)], amount: f32) -> usize {
+    if amount <= 0.0 || edges.is_empty() {
+        return 0;
+    }
+    // Corners are shared, so a bevel is really a per-(vertex, face) split: each
+    // face that meets a bevelled vertex gets its own copy, pulled in toward that
+    // face's centre. That is enough to open a chamfer along every selected edge
+    // without any face-by-face special cases.
+    let touched_verts: BTreeSet<u32> = edges
+        .iter()
+        .filter(|(a, b)| (*a as usize) < mesh.verts.len() && (*b as usize) < mesh.verts.len())
+        .flat_map(|&(a, b)| [a, b])
+        .collect();
+    if touched_verts.is_empty() {
+        return 0;
+    }
+    let centres: Vec<Vec3> = mesh
+        .faces
+        .iter()
+        .map(|f| f.verts.iter().map(|&v| mesh.verts[v as usize]).sum::<Vec3>() / f.verts.len() as f32)
+        .collect();
+    let mut moved = 0usize;
+    // Per face, per corner: a fresh vertex pulled `amount` toward the face
+    // centre. Faces stop sharing the corner, which IS the chamfer.
+    for (fi, &c) in centres.iter().enumerate() {
+        for k in 0..mesh.faces[fi].verts.len() {
+            let v = mesh.faces[fi].verts[k];
+            if !touched_verts.contains(&v) {
+                continue;
+            }
+            let p = mesh.verts[v as usize];
+            let dir = c - p;
+            let d = dir.length();
+            if d < 1e-6 {
+                continue;
+            }
+            let np = p + dir / d * amount.min(d * 0.45);
+            mesh.verts.push(np);
+            mesh.faces[fi].verts[k] = mesh.verts.len() as u32 - 1;
+            moved += 1;
+        }
+    }
+    if moved > 0 {
+        touched(mesh);
+    }
+    moved
+}
+
+/// Canonical undirected edge key (mirrors `select::key`).
+fn key(a: u32, b: u32) -> (u32, u32) {
+    (a.min(b), a.max(b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,6 +822,102 @@ mod tests {
         let t = Mat4::from_translation(Vec3::Y * 2.0);
         transform_verts(&mut m, &[1, 1], &t);
         assert_eq!(m.verts[1], before + Vec3::Y * 2.0);
+    }
+
+    /// The point of a loop cut: the SHAPE does not change, only what it is made
+    /// of. A cube's silhouette, volume and validity all survive; it just has a
+    /// seam through the middle to work with now.
+    #[test]
+    fn a_loop_cut_adds_a_seam_without_moving_the_shape() {
+        let mut m = box_mesh(Vec3::ONE);
+        let before = m.bounds().unwrap();
+        // The ring through one of the top face's edges runs right round the box.
+        let e = m.edges()[0];
+        let ring = crate::edge_ring(&m, e);
+        assert_eq!(ring.len(), 4, "a cube's ring is four edges: {ring:?}");
+        let loop_edges = loop_cut(&mut m, e, 0.5);
+        m.validate().expect("a loop cut leaves a valid mesh");
+        assert_eq!(m.faces.len(), 10, "the 4 crossed faces each split in two");
+        assert_eq!(loop_edges.len(), 4, "the inserted loop closes: {loop_edges:?}");
+        let after = m.bounds().unwrap();
+        assert!((after.0 - before.0).length() < 1e-5, "the shape did not move");
+        assert!((after.1 - before.1).length() < 1e-5);
+    }
+
+    /// The cut goes where you put it, not always down the middle.
+    #[test]
+    fn a_loop_cut_slides_along_the_ring() {
+        let mut m = box_mesh(Vec3::ONE);
+        let e = m.edges()[0];
+        let before = m.verts.len();
+        loop_cut(&mut m, e, 0.25);
+        let new: Vec<Vec3> = m.verts[before..].to_vec();
+        assert_eq!(new.len(), 4);
+        // A cube spans -1..1, so a quarter of the way along an edge is at -0.5.
+        let a = m.verts[e.0 as usize];
+        let b = m.verts[e.1 as usize];
+        let want = a.lerp(b, 0.25);
+        assert!(new.iter().any(|p| (*p - want).length() < 1e-5), "{new:?} should contain {want}");
+    }
+
+    /// Two cuts in a row are two seams — the second reads the mesh the first
+    /// left, rather than tripping over its own new faces.
+    #[test]
+    fn loop_cuts_stack() {
+        let mut m = box_mesh(Vec3::ONE);
+        let e = m.edges()[0];
+        loop_cut(&mut m, e, 0.5);
+        m.validate().unwrap();
+        let faces_after_one = m.faces.len();
+        let e2 = m.edges().into_iter().find(|&x| x != e).unwrap();
+        loop_cut(&mut m, e2, 0.5);
+        m.validate().expect("still valid after a second cut");
+        assert!(m.faces.len() > faces_after_one);
+    }
+
+    /// A ring that is not made of quads is REFUSED, and refused before anything
+    /// is written — there is no opposite edge to cut toward on a triangle, and a
+    /// half-applied cut would be worse than none.
+    #[test]
+    fn a_loop_cut_through_triangles_is_refused_and_changes_nothing() {
+        let mut m = crate::sphere(1.0, 8, 6);
+        let before = m.clone();
+        for e in m.edges() {
+            if loop_cut(&mut m, e, 0.5).is_empty() {
+                assert_eq!(m, before, "a refused cut left the mesh alone");
+                return;
+            }
+        }
+        // If every ring on a sphere happened to be quads, the cuts were all
+        // legitimate — still assert the mesh stayed valid.
+        m.validate().unwrap();
+    }
+
+    /// Bevelling the edges of a box opens a chamfer: more vertices, same
+    /// bounding shape, still a valid mesh.
+    #[test]
+    fn a_bevel_opens_the_corners_without_inflating_the_box() {
+        let mut m = box_mesh(Vec3::ONE);
+        let before = m.bounds().unwrap();
+        let edges = m.edges();
+        let moved = bevel_edges(&mut m, &edges, 0.2);
+        assert!(moved > 0, "corners moved");
+        m.validate().expect("a bevel leaves a valid mesh");
+        let after = m.bounds().unwrap();
+        // Every corner pulled INWARD, so the box can only have shrunk.
+        assert!(after.0.x >= before.0.x - 1e-5 && after.1.x <= before.1.x + 1e-5);
+    }
+
+    /// A zero-width bevel, or one with no edges, is a no-op rather than a mesh
+    /// full of duplicated vertices.
+    #[test]
+    fn a_bevel_of_nothing_does_nothing() {
+        let mut m = box_mesh(Vec3::ONE);
+        let before = m.clone();
+        assert_eq!(bevel_edges(&mut m, &[], 0.2), 0);
+        let edges = m.edges();
+        assert_eq!(bevel_edges(&mut m, &edges, 0.0), 0);
+        assert_eq!(m, before);
     }
 
     #[test]

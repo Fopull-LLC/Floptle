@@ -47,6 +47,30 @@ Each is an `egui_dock` tab over the shared `EditorState`:
 
 - **Scene View** — the live wgpu viewport; place, position, and **build geometry**
   (§3). The centerpiece.
+- **Game View** — the active camera's shot, exactly as a build shows it. It draws
+  through one of two paths depending on where it is: fullscreen (double-click the
+  tab) it renders straight to the window surface, docked it renders into an
+  offscreen target sized to its own panel and is blitted there.
+
+  **Those two must not look different**, and keeping them the same is a standing
+  hazard rather than a solved problem — the two gathers have drifted five times.
+  Four of those were geometry a docked panel never drew; the fifth was subtler,
+  and worth knowing about because it is the shape the next one will take: the
+  offscreen path ran no opaque depth prepass, so contact shadows, `surfaceGap`
+  (shoreline foam, soft particles), screen-space reflections and lamp shadows all
+  read an empty depth texture, each took its "nothing to report" branch, and drew
+  nothing. Nothing was missing from the picture — four features were simply
+  absent from it. `tests/offscreen_draws_the_same_world.rs` now covers passes as
+  well as gathers.
+
+  The panel takes its whole tab body, margin included. `egui_dock` insets every
+  body by `spacing.window_margin`, which is right for a panel of widgets and
+  wrong for a view: the Game tab is transparent so the 3D can show through, so
+  the inset left a band of the EDITOR's render of the scene visible all the way
+  round the game — a border that moved when you orbited, because that is what it
+  was. The viewport rect is expanded to the full body rather than merely painted
+  over it, so the picture is rendered at the size it is shown at and the pointer
+  still maps to where it looks like it does.
 - **Hierarchy** — the node tree (the Node facade over the ECS, [ADR-0005](../decisions/0005-scene-model-ecs-node-hybrid.md));
   reparent by drag, multi-select, rename.
 - **Inspector** — a **modular component stack** (Unity-style). The selection shows

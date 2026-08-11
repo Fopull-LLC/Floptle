@@ -197,6 +197,24 @@ pub struct RaymarchGlobals {
     /// and the start bias are derived from the reach rather than exposed —
     /// there is one number here somebody would ever want to drag.
     pub contact: [f32; 4],
+    /// Screen-space reflections: the matrix that maps a point in **this**
+    /// frame's camera-relative space into the stored scene-colour picture's clip
+    /// space. Built by [`SceneHistory::prev_view_proj`](crate::ssr::SceneHistory::prev_view_proj),
+    /// which folds in the camera's movement — the world is camera-relative, so
+    /// the previous view-projection alone would answer a question about the
+    /// origin rather than about the scene.
+    pub ssr_prev_vp: [[f32; 4]; 4],
+    /// x = on (0/1, and 0 whenever there is no stored picture — the first frame
+    /// after a load, a resize or a camera cut), y = how far a reflected ray
+    /// reaches in world units, z = march steps, w = the thickness a surface in
+    /// the depth buffer is assumed to have, which is what separates "the ray hit
+    /// this" from "the ray passed behind it".
+    pub ssr: [f32; 4],
+    /// Local (point-light) shadows: x = march steps, y = how dark a shadowed
+    /// pixel gets. Whether an individual lamp casts is a flag in its own
+    /// `point_shape` lane; these are the scene-wide quality knobs, so cost is
+    /// tuned in one place instead of on every lamp in the level.
+    pub point_steps: [f32; 4],
 }
 
 impl Default for RaymarchGlobals {
@@ -276,6 +294,13 @@ impl Default for RaymarchGlobals {
             point_shape: [[0.0; 4]; 16],
             point_rot: [[0.0, 0.0, 0.0, 1.0]; 16],
             contact: [0.0, 0.3, 12.0, 1.0],
+            ssr_prev_vp: [[0.0; 4]; 4],
+            // Off, and off is what a caller that never heard of this gets. The
+            // reach is metres of room rather than a scene-scale guess: past that
+            // the march's fixed step count spreads too thin to find anything and
+            // starts reporting the gaps between its own samples as sky.
+            ssr: [0.0, 30.0, 32.0, 0.5],
+            point_steps: [16.0, 1.0, 0.0, 0.0],
         }
     }
 }
@@ -411,6 +436,18 @@ pub struct Raymarch {
     field_code: Option<(String, String)>,
     sky_fn: Option<String>,
     custom_support: String,
+    /// The captured sky + its roughness chain. Owned here for the same reason
+    /// the baked GI is: it rides the SHARED field bind group, so one capture
+    /// reaches every raster mesh and every `.flsl` material at once.
+    env: crate::env::EnvMap,
+    env_pipeline: wgpu::RenderPipeline,
+    /// The scene colour history a screen-space reflection reads, and the 1×1
+    /// stand-in that stands for "no history" — bound the moment nobody has
+    /// called [`set_scene_history`](Self::set_scene_history), which is every
+    /// offscreen preview and every probe. The fallback's SIZE is the signal, so
+    /// there is no flag here that could disagree with what is actually bound.
+    scene_fallback: (wgpu::TextureView, wgpu::Sampler),
+    scene_view: Option<(wgpu::TextureView, wgpu::Sampler)>,
 }
 
 /// Layers in the terrain texture palette + the size each is stored at. 12 layers:
@@ -516,6 +553,8 @@ impl Raymarch {
         });
 
         let (pipeline, mask_pipeline) = Self::build_pipelines(gpu, &layout, &module);
+        let env = crate::env::EnvMap::new(device);
+        let env_pipeline = Self::build_env_pipeline(gpu, &layout, &module);
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raymarch-globals"),
@@ -574,9 +613,10 @@ impl Raymarch {
             &tile_sampler, &tile_sampler_nearest, &sky_tex, &prime_fallback, &gi.tex,
         );
         let field_layout = field_bind_layout(device);
+        let scene_fallback = crate::ssr::SceneHistory::empty(device);
         let field_bind = make_field_bind(
             device, &field_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &gi.tex,
-            &prime_fallback,
+            &prime_fallback, env.view(), env.sampler(), &scene_fallback.0, &scene_fallback.1,
         );
 
         Self {
@@ -603,6 +643,10 @@ impl Raymarch {
             field_code: None,
             sky_fn: None,
             custom_support: String::new(),
+            env,
+            env_pipeline,
+            scene_fallback,
+            scene_view: None,
         }
     }
 
@@ -657,6 +701,46 @@ impl Raymarch {
         let (pipeline, mask_pipeline) = Self::build_pipelines(gpu, &self.pipeline_layout, &module);
         self.pipeline = pipeline;
         self.mask_pipeline = mask_pipeline;
+        // …and the capture, from the SAME module: a spliced Sky shader that did
+        // not reach the environment map would leave every reflection showing
+        // the sky the scene used to have.
+        self.env_pipeline = Self::build_env_pipeline(gpu, &self.pipeline_layout, &module);
+    }
+
+    /// The sky-capture pipeline: the same module and the same bind group as the
+    /// march, drawing `fs_env` into the environment map's top level. Built here
+    /// so a spliced Sky shader rebuilds the capture along with everything else —
+    /// a reflection of last week's sky would be a very quiet bug.
+    fn build_env_pipeline(
+        gpu: &Gpu,
+        layout: &wgpu::PipelineLayout,
+        module: &wgpu::ShaderModule,
+    ) -> wgpu::RenderPipeline {
+        gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("env-capture"),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("vs"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("fs_env"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: crate::env::ENV_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
     }
 
     fn build_pipelines(
@@ -795,6 +879,10 @@ impl Raymarch {
             &self.sampler,
             &self.gi.tex,
             self.prime_view.as_ref().unwrap_or(&self.prime_fallback),
+            self.env.view(),
+            self.env.sampler(),
+            self.scene_view.as_ref().map_or(&self.scene_fallback.0, |s| &s.0),
+            self.scene_view.as_ref().map_or(&self.scene_fallback.1, |s| &s.1),
         );
         self.bind = make_bind(
             device,
@@ -837,6 +925,56 @@ impl Raymarch {
         &self.field_bind
     }
 
+    /// Capture the scene's sky into the environment map and build its roughness
+    /// chain, so surfaces have something to reflect this frame.
+    ///
+    /// Call it after [`upload_globals`](Self::upload_globals) (it reads the same
+    /// globals the sky does) and before the raster pass. It costs one 256×128
+    /// draw plus eight progressively tinier ones — a fraction of a full-screen
+    /// pass — which is why it simply runs every frame rather than trying to
+    /// detect whether the sky changed. Skies animate; a cached one would be
+    /// wrong exactly when it mattered.
+    ///
+    /// The environment map is bound into the SHARED field group, so the capture
+    /// reaches everything the moment it lands. Nothing needs rebinding: the
+    /// texture is created once at a fixed size and only its contents change.
+    pub fn capture_env(&self, gpu: &Gpu) {
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("env-capture") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("env-capture"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: self.env.top(),
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.env_pipeline);
+            // The unprimed bind: the sky does not care about the depth prepass,
+            // and using it here would tie the capture to the frame's draw order.
+            rp.set_bind_group(0, &self.bind, &[]);
+            rp.draw(0..3, 0..1);
+        }
+        self.env.build_chain(&mut encoder);
+        gpu.queue.submit([encoder.finish()]);
+    }
+
+    /// How many roughness levels the environment map carries — the shader needs
+    /// it to map roughness onto a mip.
+    pub fn env_mips(&self) -> u32 {
+        self.env.mips()
+    }
+
     /// Swap in a baked GI volume (or clear it back to none).
     ///
     /// This is an UPLOAD, not a bake: `leak`, `intensity` and the debug view are
@@ -870,6 +1008,43 @@ impl Raymarch {
     /// unprimed with their own cleared depth.
     pub fn set_depth_prime(&mut self, gpu: &Gpu, view: Option<&wgpu::TextureView>) {
         self.prime_view = view.cloned();
+        self.rebuild_binds(&gpu.device);
+    }
+
+    /// Bind BOTH per-view frame targets at once: the depth prepass and the scene
+    /// colour history.
+    ///
+    /// One call because a bind group is immutable and rebuilding it is the whole
+    /// cost here — setting the two separately rebuilds twice for one frame's
+    /// worth of change. A frame draws the scene from more than one view (the
+    /// window, a docked Game panel, a render target), and each of those swaps
+    /// both of these together.
+    pub fn bind_frame_targets(
+        &mut self,
+        gpu: &Gpu,
+        prime: Option<&wgpu::TextureView>,
+        scene: Option<(&wgpu::TextureView, &wgpu::Sampler)>,
+    ) {
+        self.prime_view = prime.cloned();
+        self.scene_view = scene.map(|(v, s)| (v.clone(), s.clone()));
+        self.rebuild_binds(&gpu.device);
+    }
+
+    /// Bind (or drop, with `None`) the scene colour history that screen-space
+    /// reflections read — see [`crate::ssr::SceneHistory`].
+    ///
+    /// Same shape and same rule as [`set_depth_prime`](Self::set_depth_prime):
+    /// call it when the texture is (re)created, not per frame, because a bind
+    /// group is immutable and rebuilding one every frame would allocate a bind
+    /// group per frame forever. Left unset — every offscreen preview, every
+    /// probe, every runtime that has not opted in — the 1×1 fallback stands and
+    /// shading reflects the sky alone.
+    pub fn set_scene_history(
+        &mut self,
+        gpu: &Gpu,
+        view: Option<(&wgpu::TextureView, &wgpu::Sampler)>,
+    ) {
+        self.scene_view = view.map(|(v, s)| (v.clone(), s.clone()));
         self.rebuild_binds(&gpu.device);
     }
 
@@ -1215,6 +1390,45 @@ pub(crate) fn field_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout 
             // binds as an unfilterable float; the 1×1 fallback is how the shader
             // knows there is no prepass this frame.
             prime_tex_entry(5),
+            // The captured sky + its roughness chain, so a surface has something
+            // to REFLECT. Same reasoning as the GI probes above: it belongs to
+            // the shared shading model, so one capture reaches raster meshes and
+            // `.flsl` materials in a single bind.
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // The scene colour history (last frame, with a mip chain) and its
+            // sampler — what a screen-space reflection reads. A 1×1 view here
+            // is the "no history" signal.
+            wgpu::BindGroupLayoutEntry {
+                binding: 8,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 9,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
         ],
     })
 }
@@ -1243,6 +1457,10 @@ pub(crate) fn make_field_bind(
     sampler: &wgpu::Sampler,
     gi: &wgpu::Texture,
     prime: &wgpu::TextureView,
+    env: &wgpu::TextureView,
+    env_samp: &wgpu::Sampler,
+    scene: &wgpu::TextureView,
+    scene_samp: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1257,6 +1475,10 @@ pub(crate) fn make_field_bind(
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&color_view) },
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&gi_view) },
             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(prime) },
+            wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(env) },
+            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(env_samp) },
+            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(scene) },
+            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(scene_samp) },
         ],
     })
 }

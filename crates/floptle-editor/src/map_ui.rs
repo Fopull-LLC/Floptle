@@ -310,7 +310,7 @@ impl EditorTabViewer<'_> {
                 true,
                 &format!("All {}", self.map_mode.plural()),
                 &format!(
-                    "select every {} in this mesh  ({})",
+                    "select every {} in this mesh  (Ctrl+A, or {})",
                     self.map_mode.label(),
                     self.map_keys.label(MapCmd::SelectAll)
                 ),
@@ -439,6 +439,54 @@ impl EditorTabViewer<'_> {
                 "join two selected faces with a tube of walls (they need the same corner count)",
             ) {
                 self.cmd.map_op = Some(MapOp::Bridge);
+            }
+        });
+        // Edge tools. A loop cut is the one thing every modeling tool has and
+        // this one did not: it gives a shape somewhere to bend without changing
+        // how it looks at all.
+        row(ui, "", |ui| {
+            if action(
+                ui,
+                edges > 0,
+                "▤ Loop cut",
+                &format!(
+                    "insert a new edge loop running at right angles to the selected edge, \
+                     halfway along  ({})",
+                    self.map_keys.label(MapCmd::LoopCut)
+                ),
+            ) {
+                self.cmd.map_op = Some(MapOp::LoopCut(0.5));
+            }
+            if action(
+                ui,
+                edges > 0,
+                "◠ Bevel",
+                &format!(
+                    "take the sharpness off the selected edges, so they catch the light  ({})",
+                    self.map_keys.label(MapCmd::Bevel)
+                ),
+            ) {
+                self.cmd.map_op = Some(MapOp::Bevel(self.map_bevel.0));
+            }
+            let mut w = self.map_bevel.0;
+            if ui
+                .add(egui::DragValue::new(&mut w).speed(0.005).range(0.005..=2.0).prefix("width "))
+                .on_hover_text("how wide the bevel takes the corner off, in the mesh's own units")
+                .changed()
+            {
+                self.map_bevel.0 = w;
+            }
+            if action(
+                ui,
+                edges > 0,
+                "⇉ Ring",
+                &format!(
+                    "extend the selection across the strip of quads — the edges a loop cut \
+                     would run through  ({})",
+                    self.map_keys.label(MapCmd::SelectRing)
+                ),
+            ) {
+                self.cmd.map_op = Some(MapOp::SelectRing);
             }
         });
         row(ui, "", |ui| {

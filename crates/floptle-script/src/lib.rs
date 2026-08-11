@@ -5771,6 +5771,7 @@ end
             intensity: 2.0,
             range: 10.0,
             shape: Default::default(),
+            shadows: false,
         });
         world.insert(
             e,

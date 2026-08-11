@@ -25,6 +25,19 @@ use crate::{Editor, Egui};
 /// Atlas tile resolution (thumbnails draw at ~150 px on the node).
 pub(crate) const TILE_PX: u32 = 128;
 
+/// Which compile the cached preview is: the document it came from, and that
+/// document's graph revision.
+///
+/// **Both halves are load-bearing.** `ShaderGraphState::ir_rev` counts edits
+/// within one open document and restarts at 0 every time the tab opens another
+/// file, so a bare revision number cannot tell two shaders apart: open any
+/// unedited shader (revision 1), then open any other one (also revision 1), and
+/// a preview keyed on the number alone concludes nothing changed and renders
+/// the NEW graph's IR through the OLD graph's compile. Every `dyn_slots` entry
+/// is then an index into the wrong arena — which is a panic the moment the new
+/// shader is the smaller of the two.
+pub(crate) type PreviewKey = (String, u64);
+
 pub(crate) struct ShaderGraphPreview {
     /// The header's 👁 toggle — previews render + reserve node space.
     pub(crate) enabled: bool,
@@ -43,7 +56,7 @@ pub(crate) struct ShaderGraphPreview {
     /// The last compile, and the graph revision it came from. Anything the
     /// shader didn't change cannot change the module.
     compiled: Option<CompiledPreview>,
-    pub(crate) rev: Option<u64>,
+    pub(crate) rev: Option<PreviewKey>,
     wgsl_hash: u64,
     stage: Option<Stage>,
     pipeline: Option<wgpu::RenderPipeline>,
@@ -98,6 +111,32 @@ fn f32_bytes(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
+/// Read every live literal's CURRENT value out of the graph and pack it into
+/// the `PV.nums` lane array — this is what lets dragging a number on a node
+/// repaint its thumbnail without recompiling anything.
+///
+/// `compiled.dyn_slots` holds arena indices, so it is only meaningful against
+/// the very IR it was compiled from ([`PreviewKey`] is what keeps that true).
+/// The lookup is still bounds-checked rather than indexed: a preview is a
+/// picture of a shader, and no disagreement about a thumbnail is worth taking
+/// the editor down with it. A slot that misses simply keeps the value it was
+/// compiled with.
+fn pack_live_lanes(ir: &floptle_shader::ShaderIr, compiled: &CompiledPreview, pv: &mut [f32]) {
+    let mut lane = 4usize;
+    for (id, lanes) in &compiled.dyn_slots {
+        let width = *lanes as usize;
+        if lane + width > pv.len() {
+            break;
+        }
+        match ir.exprs.get(id.0 as usize).map(|e| &e.kind) {
+            Some(ExprKind::Num(n)) if width == 1 => pv[lane] = *n as f32,
+            Some(ExprKind::ColorLit(c)) if width == 4 => pv[lane..lane + 4].copy_from_slice(c),
+            _ => {}
+        }
+        lane += width;
+    }
+}
+
 impl Editor {
     /// Per-frame driver (before the main GPU destructure): while the ◈
     /// Shaders tab is visible with a checked shader open, keep the preview
@@ -122,8 +161,8 @@ impl Editor {
         // that is a real per-frame bill, paid to produce a byte-identical
         // module: the live literal values it exists to stream ride the uniform
         // lane array uploaded further down, which costs nothing.
-        let rev = self.shader_graph.ir_rev;
-        let recompiled = self.shader_preview.rev != Some(rev);
+        let rev = (path.clone(), self.shader_graph.ir_rev);
+        let recompiled = self.shader_preview.rev.as_ref() != Some(&rev);
         if recompiled {
             let ir = self.shader_graph.ir.as_ref().expect("checked above");
             // Check afresh: live edits mutate the arena, so the reload-time
@@ -304,18 +343,7 @@ impl ShaderGraphPreview {
         pv[1] = compiled.rows as f32;
         pv[2] = compiled.tiles as f32;
         pv[3] = TILE_PX as f32;
-        let mut lane = 4usize;
-        for (id, lanes) in &compiled.dyn_slots {
-            match &ir.expr(*id).kind {
-                ExprKind::Num(n) if *lanes == 1 => pv[lane] = *n as f32,
-                ExprKind::ColorLit(c) if *lanes == 4 => pv[lane..lane + 4].copy_from_slice(c),
-                _ => {}
-            }
-            lane += *lanes as usize;
-            if lane >= pv.len() {
-                break;
-            }
-        }
+        pack_live_lanes(ir, compiled, &mut pv);
         gpu.queue.write_buffer(&bufs.pv, 0, &f32_bytes(&pv));
         // P: knob defaults + neutral tiling (fragment + sky stages both read it).
         if matches!(compiled.stage, Stage::Fragment | Stage::Sky | Stage::Ui) {
@@ -617,5 +645,69 @@ impl ShaderGraphPreview {
             egui::pos2((cx * t + 0.5) / w, (cy * t + 0.5) / h),
             egui::pos2(((cx + 1.0) * t - 0.5) / w, ((cy + 1.0) * t - 0.5) / h),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floptle_shader::examples::EXAMPLES;
+    use floptle_shader::{graph, preview, ShaderIr};
+
+    fn example(name: &str) -> &'static str {
+        EXAMPLES.iter().find(|(n, _)| *n == name).expect("example exists").1
+    }
+
+    fn compile(src: &str) -> (ShaderIr, CompiledPreview) {
+        let ir = floptle_shader::parse(src).expect("parses");
+        let ck = ir::check(&ir).expect("checks");
+        let view = graph::build_view(&ir, Some(&ck));
+        let targets: Vec<_> =
+            preview::preview_targets(&ir, &view).into_iter().map(|(_, t)| t).collect();
+        let compiled = preview::transpile_preview(&ir, &ck, &targets).expect("transpiles");
+        (ir, compiled)
+    }
+
+    /// The reported crash, exactly: open a big shader, then open a smaller one.
+    ///
+    /// `ir_rev` restarts at 0 per document, so both land on revision 1 and the
+    /// preview concluded its compile was still current — then read the new
+    /// graph's arena at the old graph's indices. Ink Outline has 130
+    /// expressions and the sky shaders have over 200, so the first live slot
+    /// past the end took the editor down.
+    #[test]
+    fn a_compile_from_another_shader_cannot_index_this_ones_arena() {
+        let (_, big) = compile(example("moonlitClouds.flsl"));
+        let (small_ir, _) = compile(example("inkOutline.flsl"));
+        assert!(
+            big.dyn_slots.iter().any(|(id, _)| id.0 as usize >= small_ir.exprs.len()),
+            "the pair has to actually straddle the end for this to be the crash"
+        );
+        let mut pv = [0f32; 260];
+        pack_live_lanes(&small_ir, &big, &mut pv);
+    }
+
+    /// …and the reason it can no longer arise: the cached compile is keyed on
+    /// the DOCUMENT as well as the revision, so two shaders that are both on
+    /// revision 1 are still two different compiles.
+    #[test]
+    fn two_shaders_on_the_same_revision_are_different_compiles() {
+        let a: PreviewKey = ("shaders/inkOutline.flsl".into(), 1);
+        let b: PreviewKey = ("shaders/moonlitClouds.flsl".into(), 1);
+        assert_ne!(a, b);
+    }
+
+    /// Live literals still reach their lanes — the guard must not have turned
+    /// the whole mechanism into a no-op.
+    #[test]
+    fn a_live_literal_still_rides_its_lane() {
+        let (ir, compiled) = compile(example("plasma.flsl"));
+        assert!(!compiled.dyn_slots.is_empty(), "plasma has literals to stream");
+        let mut pv = [0f32; 260];
+        pack_live_lanes(&ir, &compiled, &mut pv);
+        assert!(
+            pv[4..].iter().any(|v| *v != 0.0),
+            "at least one literal's value reached the lane array"
+        );
     }
 }

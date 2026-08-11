@@ -743,6 +743,10 @@ pub enum MatterDoc {
         /// before area lights existed round-trips byte-identically.
         #[serde(default, skip_serializing_if = "is_point_shape")]
         shape: LightShapeDoc,
+        /// Local shadows, off by default and skipped when off — so a lamp placed
+        /// before this existed round-trips byte-identically AND costs nothing.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        shadows: bool,
     },
     /// A physics gravity source (Down = level gravity, Radial = planet).
     GravityVolume {
@@ -1224,11 +1228,12 @@ impl From<&Matter> for MatterDoc {
                 ortho: *ortho,
                 ortho_height: *ortho_height,
             },
-            Matter::PointLight { color, intensity, range, shape } => MatterDoc::PointLight {
+            Matter::PointLight { color, intensity, range, shape, shadows } => MatterDoc::PointLight {
                 color: *color,
                 intensity: *intensity,
                 range: *range,
                 shape: LightShapeDoc::from(*shape),
+                shadows: *shadows,
             },
             Matter::GravityVolume { mode, strength, radius } => MatterDoc::GravityVolume {
                 radial: *mode == GravityMode::Radial,
@@ -1423,11 +1428,12 @@ impl MatterDoc {
                     ortho_height: Matter::clamp_ortho_height(*ortho_height),
                 }
             }
-            MatterDoc::PointLight { color, intensity, range, shape } => Matter::PointLight {
+            MatterDoc::PointLight { color, intensity, range, shape, shadows } => Matter::PointLight {
                 color: *color,
                 intensity: *intensity,
                 range: *range,
                 shape: shape.to_shape(),
+                shadows: *shadows,
             },
             MatterDoc::GravityVolume { radial, strength, radius } => Matter::GravityVolume {
                 mode: if *radial { GravityMode::Radial } else { GravityMode::Down },
@@ -1659,6 +1665,17 @@ pub struct LightDoc {
     pub contact_steps: u32,
     #[serde(default = "default_contact_strength")]
     pub contact_strength: f32,
+    /// Screen-space reflections default OFF, on the same principle contact
+    /// shadows do: they cost a march per reflective pixel and a copy of the
+    /// frame, so an existing scene must load doing exactly what it did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reflections: bool,
+    #[serde(default = "default_reflection_distance")]
+    pub reflection_distance: f32,
+    #[serde(default = "default_reflection_steps")]
+    pub reflection_steps: u32,
+    #[serde(default = "default_reflection_thickness")]
+    pub reflection_thickness: f32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fog: bool,
     #[serde(default = "default_fog_color")]
@@ -1742,6 +1759,15 @@ fn default_contact_steps() -> u32 {
 fn default_contact_strength() -> f32 {
     0.9
 }
+fn default_reflection_distance() -> f32 {
+    30.0
+}
+fn default_reflection_steps() -> u32 {
+    32
+}
+fn default_reflection_thickness() -> f32 {
+    0.5
+}
 fn default_fog_light() -> f32 {
     1.0
 }
@@ -1778,6 +1804,10 @@ impl From<&Light> for LightDoc {
             contact_length: l.contact_length,
             contact_steps: l.contact_steps,
             contact_strength: l.contact_strength,
+            reflections: l.reflections,
+            reflection_distance: l.reflection_distance,
+            reflection_steps: l.reflection_steps,
+            reflection_thickness: l.reflection_thickness,
             fog: l.fog,
             fog_color: l.fog_color,
             fog_start: l.fog_start,
@@ -1818,6 +1848,13 @@ impl LightDoc {
             contact_length: self.contact_length.clamp(0.01, 20.0),
             contact_steps: self.contact_steps.clamp(2, 32),
             contact_strength: self.contact_strength.clamp(0.0, 1.0),
+            reflections: self.reflections,
+            // Fenced for the same reason the contact trace is: these come off
+            // disk, and a hand-edited or hand-migrated scene must not be able to
+            // ask for a zero-step march or a reach that walks the whole level.
+            reflection_distance: self.reflection_distance.clamp(0.1, 500.0),
+            reflection_steps: self.reflection_steps.clamp(8, 64),
+            reflection_thickness: self.reflection_thickness.clamp(0.01, 20.0),
             fog: self.fog,
             fog_color: self.fog_color,
             fog_start: self.fog_start,
@@ -2310,6 +2347,21 @@ pub struct MaterialDoc {
     pub ao_map: Option<String>,
     #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
     pub occlusion_strength: f32,
+    /// How much of the environment (the sky) this surface reflects. `1` is the
+    /// physically honest amount and the default, so a file written before
+    /// reflections existed loads as a surface that reflects its sky properly.
+    #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
+    pub reflectivity: f32,
+    /// Glass: how much light passes THROUGH. `0` is a solid surface, and a file
+    /// written before glass existed says nothing and loads as one.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub transmission: f32,
+    /// Index of refraction. Only meaningful with `transmission`, so it is
+    /// skipped at its default rather than written beside every material.
+    #[serde(default = "default_ior", skip_serializing_if = "is_default_ior")]
+    pub ior: f32,
+    #[serde(default = "default_thickness", skip_serializing_if = "is_default_thickness")]
+    pub thickness: f32,
     #[serde(default, skip_serializing_if = "ShadingDoc::is_classic")]
     pub shading: ShadingDoc,
     #[serde(default, skip_serializing_if = "RetroDoc::is_off")]
@@ -2484,6 +2536,18 @@ fn default_retro_height() -> u32 {
     240
 }
 
+fn default_ior() -> f32 {
+    1.5
+}
+fn is_default_ior(v: &f32) -> bool {
+    (*v - 1.5).abs() < f32::EPSILON
+}
+fn default_thickness() -> f32 {
+    0.5
+}
+fn is_default_thickness(v: &f32) -> bool {
+    (*v - 0.5).abs() < f32::EPSILON
+}
 fn one_f32() -> f32 {
     1.0
 }
@@ -2533,6 +2597,12 @@ impl MaterialDoc {
             metallic: self.metallic,
             ao_map: self.ao_map.clone(),
             occlusion_strength: self.occlusion_strength,
+            reflectivity: self.reflectivity,
+            transmission: self.transmission.clamp(0.0, 1.0),
+            // Fenced: an ior below 1 inverts the bend into something no material
+            // does, and the maths behind it (`1/ior`) divides.
+            ior: self.ior.clamp(1.0, 3.0),
+            thickness: self.thickness.clamp(0.0, 100.0),
             shading: self.shading.to_shading(),
             retro: self.retro.to_retro(),
         }
@@ -2572,6 +2642,10 @@ impl MaterialDoc {
             metallic: m.metallic,
             ao_map: m.ao_map.clone(),
             occlusion_strength: m.occlusion_strength,
+            reflectivity: m.reflectivity,
+            transmission: m.transmission,
+            ior: m.ior,
+            thickness: m.thickness,
             shading: ShadingDoc::from_shading(m.shading),
             retro: RetroDoc::from_retro(m.retro),
         }
@@ -3575,7 +3649,7 @@ mod tests {
                     terrain_gen: None,
                     name: "lamp".into(),
                     transform: TransformDoc::default(),
-                    matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default() },
+                    matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default(), shadows: false },
                     object_materials: Default::default(),
                     scripts: Vec::new(),
                     material: None,
@@ -3665,7 +3739,7 @@ mod tests {
         let mut world = World::new();
         let e = world.spawn();
         world.insert(e, floptle_core::transform::Transform::IDENTITY);
-        world.insert(e, Matter::PointLight { color: [1.0, 0.86, 0.62], intensity: 3.0, range: 8.0, shape: Default::default() });
+        world.insert(e, Matter::PointLight { color: [1.0, 0.86, 0.62], intensity: 3.0, range: 8.0, shape: Default::default(), shadows: false });
         world.insert(
             e,
             floptle_core::Lighting2D {
@@ -3692,7 +3766,7 @@ mod tests {
         let mut plain = World::new();
         let p = plain.spawn();
         plain.insert(p, floptle_core::transform::Transform::IDENTITY);
-        plain.insert(p, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape: Default::default() });
+        plain.insert(p, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape: Default::default(), shadows: false });
         plain.insert(p, floptle_core::Lighting2D { mode: floptle_core::Lit2D::Yes, ..Default::default() });
         let text = to_ron(&to_doc("plain", &plain)).unwrap();
         for key in ["light_inner", "light_falloff", "light_shadows"] {
@@ -3759,7 +3833,7 @@ mod tests {
         let lamp = snap.nodes.iter().find(|n| n.name == "lamp").unwrap();
         assert_eq!(
             lamp.matter,
-            MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default() }
+            MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default(), shadows: false }
         );
         // the camera's fov/active round-trip
         let eye = snap.nodes.iter().find(|n| n.name == "eye").unwrap();
@@ -3889,7 +3963,7 @@ mod tests {
             world.insert(e, Transform::IDENTITY);
             world.insert(
                 e,
-                Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape },
+                Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape, shadows: false },
             );
         }
         let ron = to_ron(&to_doc("lights", &world)).expect("serializes");
@@ -3927,11 +4001,21 @@ mod tests {
                 intensity: 1.0,
                 range: 10.0,
                 shape: LS::Point,
+                shadows: false,
             });
             to_doc("one", &w)
         })
         .expect("serializes");
         assert!(!just_a_point.contains("shape"), "a point light writes no emitter: {just_a_point}");
+        // …and no shadow flag either, so a lamp placed before local shadows
+        // existed round-trips byte-identically. Matched against `shadows: false`
+        // rather than `shadows`, because the LIGHTING node in every scene writes
+        // a `shadows: true` of its own and a bare substring test passes on that
+        // whatever the lamp does.
+        assert!(
+            !just_a_point.contains("shadows: false"),
+            "a lamp that casts nothing must write nothing: {just_a_point}"
+        );
 
         // A hand-typed emitter with a zero dimension is a degenerate polygon
         // whose integral divides by zero. The scene file does not get to hand
