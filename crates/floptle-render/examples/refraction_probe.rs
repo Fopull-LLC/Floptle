@@ -251,6 +251,10 @@ fn shot(
             &instances,
             &[],
             Some(rmr.field_bind()),
+            // One layer, one capture: this probe has a single piece of glass in
+            // it, and depth layering is `glass_layers_probe`'s subject.
+            &[],
+            0,
         );
     }
 

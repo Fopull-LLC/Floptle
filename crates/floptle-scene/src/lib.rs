@@ -953,6 +953,22 @@ pub enum MatterDoc {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         exclude_layers: Vec<String>,
     },
+    /// A reflection probe ([`Matter::ReflectionProbe`]). Every knob defaults, so
+    /// a hand-written `ReflectionProbe()` is a room-sized box that captures on
+    /// load — which is a sensible thing to type and then stop thinking about.
+    ///
+    /// The capture is NOT here and is not anywhere: it is taken at runtime, so
+    /// there is no artefact to go stale and nothing added to a file people read.
+    ReflectionProbe {
+        #[serde(default = "default_probe_half")]
+        half_extents: [f32; 3],
+        #[serde(default = "on")]
+        enabled: bool,
+        #[serde(default = "one_f32")]
+        intensity: f32,
+        #[serde(default = "default_probe_fade")]
+        fade: f32,
+    },
 }
 
 /// Serializable [`ScreenShader`] — one authored full-screen pass.
@@ -1158,6 +1174,12 @@ fn default_probe_spacing() -> f32 {
 fn default_probe_quality() -> u32 {
     16
 }
+/// Two metres of crossover at a doorway: enough that walking out of a room does
+/// not switch environments in a single step, small enough that a probe does not
+/// quietly speak for the corridor outside it.
+fn default_probe_fade() -> f32 {
+    2.0
+}
 fn default_probe_normal_bias() -> f32 {
     0.5
 }
@@ -1282,6 +1304,14 @@ impl From<&Matter> for MatterDoc {
                 normal_bias: *normal_bias,
                 exclude_layers: exclude_layers.clone(),
             },
+            Matter::ReflectionProbe { half_extents, enabled, intensity, fade } => {
+                MatterDoc::ReflectionProbe {
+                    half_extents: *half_extents,
+                    enabled: *enabled,
+                    intensity: *intensity,
+                    fade: *fade,
+                }
+            }
             Matter::FieldShape { radius } => MatterDoc::FieldShape { radius: *radius },
             Matter::Tilemap { cols, rows, tile, data, tileset } => MatterDoc::Tilemap {
                 cols: *cols,
@@ -1486,6 +1516,16 @@ impl MatterDoc {
                 normal_bias: *normal_bias,
                 exclude_layers: exclude_layers.clone(),
             },
+            MatterDoc::ReflectionProbe { half_extents, enabled, intensity, fade } => {
+                Matter::ReflectionProbe {
+                    half_extents: *half_extents,
+                    enabled: *enabled,
+                    intensity: *intensity,
+                    // A zero box would cover nothing and read as a probe that
+                    // does not work; a negative one would invert the slab test.
+                    fade: fade.clamp(0.0, 1e4),
+                }
+            }
             MatterDoc::FieldShape { radius } => Matter::FieldShape { radius: *radius },
             MatterDoc::Tilemap { cols, rows, tile, data, tileset } => Matter::Tilemap {
                 cols: *cols,
@@ -1676,6 +1716,8 @@ pub struct LightDoc {
     pub reflection_steps: u32,
     #[serde(default = "default_reflection_thickness")]
     pub reflection_thickness: f32,
+    #[serde(default = "default_refraction_layers")]
+    pub refraction_layers: u32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fog: bool,
     #[serde(default = "default_fog_color")]
@@ -1768,6 +1810,9 @@ fn default_reflection_steps() -> u32 {
 fn default_reflection_thickness() -> f32 {
     0.5
 }
+fn default_refraction_layers() -> u32 {
+    2
+}
 fn default_fog_light() -> f32 {
     1.0
 }
@@ -1808,6 +1853,7 @@ impl From<&Light> for LightDoc {
             reflection_distance: l.reflection_distance,
             reflection_steps: l.reflection_steps,
             reflection_thickness: l.reflection_thickness,
+            refraction_layers: l.refraction_layers,
             fog: l.fog,
             fog_color: l.fog_color,
             fog_start: l.fog_start,
@@ -1855,6 +1901,9 @@ impl LightDoc {
             reflection_distance: self.reflection_distance.clamp(0.1, 500.0),
             reflection_steps: self.reflection_steps.clamp(8, 64),
             reflection_thickness: self.reflection_thickness.clamp(0.01, 20.0),
+            refraction_layers: self
+                .refraction_layers
+                .clamp(1, floptle_core::Light::MAX_REFRACTION_LAYERS),
             fog: self.fog,
             fog_color: self.fog_color,
             fog_start: self.fog_start,

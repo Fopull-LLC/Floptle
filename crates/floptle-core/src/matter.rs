@@ -963,6 +963,21 @@ pub struct Light {
     /// their colour over whatever is truly behind them.
     pub reflection_thickness: f32,
 
+    /// How many depth layers of **glass** a frame draws, 1..=4.
+    ///
+    /// A see-through surface refracts by sampling the picture of everything
+    /// behind it, and that picture has to be taken before the surface is drawn.
+    /// One picture therefore gives one correct layer — the nearest — and the
+    /// pane behind it shows nothing of what is behind *it*. Raising this takes
+    /// the picture again between groups of glass, working from the back
+    /// forwards, so a fish tank can be six panes and a window can have a bottle
+    /// standing behind it.
+    ///
+    /// Each extra layer costs one more capture of the scene and one more pass,
+    /// and only while something see-through is actually in view. 1 is the
+    /// cheapest and matches how the engine behaved before this existed.
+    pub refraction_layers: u32,
+
     /// Depth fog: blend everything toward `fog_color` between `fog_start` and
     /// `fog_end` world units from the camera. Dirt-cheap (one mix per fragment) and
     /// off by default. The skybox stays crisp, so match `fog_color` to the horizon
@@ -1008,6 +1023,17 @@ pub struct Light {
     pub fog_shafts: bool,
 }
 
+impl Light {
+    /// The ceiling on [`refraction_layers`](Self::refraction_layers).
+    ///
+    /// Lives here rather than in the renderer because the scene format clamps
+    /// against it while loading, and a second copy of the number over there is
+    /// how a `.ron` written by one version stops meaning the same thing in the
+    /// next. Past four, a scene wants a renderer that sorts glass per fragment,
+    /// which is a different technique rather than a bigger number.
+    pub const MAX_REFRACTION_LAYERS: u32 = 4;
+}
+
 impl Default for Light {
     fn default() -> Self {
         Self {
@@ -1032,6 +1058,11 @@ impl Default for Light {
             reflection_distance: 30.0,
             reflection_steps: 32,
             reflection_thickness: 0.5,
+            // Two, not one: a fish tank, a window with something behind it and a
+            // pair of doors are the ordinary cases, and all three are wrong at
+            // one. The second layer costs nothing in a scene with no glass in it
+            // and one extra capture in a scene that has some.
+            refraction_layers: 2,
             fog: false,
             fog_color: [0.6, 0.65, 0.72],
             fog_start: 40.0,
@@ -1557,6 +1588,42 @@ pub enum Matter {
         /// away.
         exclude_layers: Vec<String>,
     },
+    /// A **reflection probe**: what the surfaces in one room reflect.
+    ///
+    /// A reflective surface asks two things in turn — "is what I am reflecting
+    /// on screen?", and if not, "then what is out there?". Outdoors the second
+    /// answer is the sky and that is genuinely right. Indoors it is daylight
+    /// arriving through a sealed ceiling, which is the most conspicuous way an
+    /// interior can fail to look like one.
+    ///
+    /// This node is the other answer. It captures the view from its own
+    /// position, once, and every reflective surface inside its box uses that
+    /// instead of the sky. A polished floor shows the room it is in.
+    ///
+    /// **The box is the room, and it does two jobs.** It says which surfaces
+    /// this probe speaks for, and it is what makes a reflected wall land *on*
+    /// the wall: an environment map on its own is a picture at infinity and
+    /// slides as the camera moves. Sized to the room, reflections sit still.
+    ///
+    /// Nothing is written to disk. A capture is fast enough to take on load and
+    /// whenever the probe is moved, which is better than a bake that can go
+    /// stale without saying so — and it means a `.ron` stays a thing people read.
+    ReflectionProbe {
+        /// Half the box, in local units, before the node's scale.
+        half_extents: [f32; 3],
+        /// Master switch. Off keeps the node and its box and stops it reflecting
+        /// anything, which is the fastest way to see what it is actually doing.
+        enabled: bool,
+        /// How much of the capture to apply. 1 is as measured; this is the
+        /// artistic knob, for when a room reads too busy or too dim in the
+        /// reflections and the answer is not to relight the room.
+        intensity: f32,
+        /// How far outside the box the probe fades out before the sky takes
+        /// over, in world units. A doorway wants a metre or two of it so a
+        /// surface walking out of the room crosses over smoothly instead of
+        /// switching environments in one step.
+        fade: f32,
+    },
 }
 
 /// One authored full-screen pass on a [`Matter::PostProcess`] node.
@@ -1666,6 +1733,19 @@ impl Matter {
             leak: 1.0,
             normal_bias: 0.5,
             exclude_layers: Vec::new(),
+        }
+    }
+
+    /// A fresh reflection probe: a room-sized box, capturing at full strength.
+    ///
+    /// The same box a fresh light-probe volume gets, because they are sized for
+    /// the same thing — the room you just placed one in.
+    pub fn default_reflection_probe() -> Self {
+        Matter::ReflectionProbe {
+            half_extents: [8.0, 4.0, 8.0],
+            enabled: true,
+            intensity: 1.0,
+            fade: 2.0,
         }
     }
 

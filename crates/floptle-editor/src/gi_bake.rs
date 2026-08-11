@@ -246,6 +246,11 @@ impl crate::Editor {
     pub(crate) fn load_gi(&mut self) {
         self.gi_baked = std::fs::read(self.gi_path()).ok().and_then(|b| BakedGi::from_bytes(&b));
         self.gi_dirty = true;
+        // A new scene is a new room. Reflection captures are not stored, so
+        // there is nothing to load — but the ones in hand belong to the scene
+        // that just closed, and the entities they were keyed to are gone.
+        self.probe_slots.clear();
+        self.recapture_reflection_probes();
     }
 
     /// Push the current bake + the node's knobs at the renderer.

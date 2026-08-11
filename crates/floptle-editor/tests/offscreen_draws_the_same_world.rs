@@ -44,7 +44,7 @@ const SRC: &str = include_str!("../src/render_frame.rs");
 /// The calls that put world geometry into a frame. Each must appear on both
 /// paths; a call that exists on only one is a kind of object some views cannot
 /// see.
-const GATHERS: [(&str, &str); 9] = [
+const GATHERS: [(&str, &str); 10] = [
     ("push_mesh_instances", "imported models, map meshes, skinned characters"),
     ("tilemap_draws", "tilemaps — the 2D level itself"),
     ("sprite_draws", "sprite batches"),
@@ -74,6 +74,13 @@ const GATHERS: [(&str, &str); 9] = [
     // it — which is the same bug one step later, and it has already happened
     // once on the surface path.
     ("bind_frame_targets", "binding the prepass so shaders can read it"),
+    // Same shape as the GI volume above: the probe TEXTURE is shared, and the
+    // lanes that say where each probe's room is are camera-relative, so they
+    // have to be stamped per view. Stamped on one path only, a docked Game
+    // panel would reflect the sky indoors while the Scene view reflected the
+    // room — which is the exact failure this file exists for, in the exact
+    // feature that was added to fix it.
+    ("probe_uniforms", "where each reflection probe's room is, from this eye"),
 ];
 
 /// The body of `render_world_into`, from its signature to the end of the file.

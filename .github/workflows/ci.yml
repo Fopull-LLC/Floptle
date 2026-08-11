@@ -110,6 +110,9 @@ jobs:
           run ssr_probe           ssr_probe           -- "$P"
           run point_shadow_probe  point_shadow_probe  -- "$P"
           run refraction_probe    refraction_probe    -- "$P"
+          run interior_reflection_probe interior_reflection_probe -- "$P"
+          run offscreen_shadow_probe    offscreen_shadow_probe    -- "$P"
+          run glass_layers_probe        glass_layers_probe        -- "$P"
 
       # On a failure the PNGs are the evidence — these probes exist because the
       # bugs they catch are visual, and a red X with no image to look at makes

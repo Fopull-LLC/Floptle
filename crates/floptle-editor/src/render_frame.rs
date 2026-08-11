@@ -509,6 +509,10 @@ impl Editor {
         self.refresh_gi();
         self.step_gi_bake();
         self.drive_auto_bake();
+        // …and, on the same terms, one reflection probe's capture. Six renders
+        // of the scene, so it belongs here beside the bake rather than inside a
+        // gather, and at most one probe a frame.
+        self.step_reflection_probes();
         self.sync_field_shapes();
 
         // Edit-mode animation preview (Animating tab): pose the bound node at the
@@ -1338,14 +1342,30 @@ impl Editor {
             .and_then(|h| h.prev_view_proj(cam.world_position))
             .unwrap_or(floptle_core::math::Mat4::IDENTITY)
             .to_cols_array_2d();
+        // What a reflective surface sees when the screen-space march finds
+        // nothing: the room it is standing in, or the sky if it is not in one.
+        let (probe_meta, probe_pos, probe_half) = crate::reflect_capture::probe_uniforms(
+            &self.world,
+            &self.probe_slots,
+            self.capturing_probes,
+            cam.world_position,
+        );
         let ((fog_color, fog_params), particle_fog) =
             crate::shading::fog_uniforms_and_particles_at(&light_node, &self.world, cam.world_position);
         let (atmo_meta, atmo_color, atmo_body, atmo_params) =
             crate::shading::atmo_uniforms(&self.world, cam.world_position);
         let (star_meta, star_pos, star_color) =
             crate::shading::star_uniforms(&self.world, &light_node, cam.world_position);
-        let (prox_count, prox_a, prox_b, prox_rot) =
-            collect_shadow_proxies(&self.world, cam.world_position, light_node.shadows);
+        // Proxies are what lets a raster mesh cast at all, and a LAMP marches the
+        // same list now — so the sun's switch alone can no longer decide whether
+        // they are collected. A scene with the sun's shadows off and a torch
+        // casting would otherwise hand the shader an empty proxy list, and the
+        // torch would shine through every crate in the room.
+        let (prox_count, prox_a, prox_b, prox_rot) = collect_shadow_proxies(
+            &self.world,
+            cam.world_position,
+            light_node.shadows || point_shadows,
+        );
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             light_dir: sun,
@@ -1678,6 +1698,7 @@ impl Editor {
                 | Matter::GravityVolume { .. }
                 | Matter::FieldShape { .. }
                 | Matter::LightProbes { .. }
+                | Matter::ReflectionProbe { .. }
                 | Matter::Skybox { .. }
                 | Matter::PostProcess { .. } => {}
             }
@@ -1995,6 +2016,9 @@ impl Editor {
                 contact,
                 ssr,
                 ssr_prev_vp,
+                probe_meta,
+                probe_pos,
+                probe_half,
                 sky_meta,
                 sky_uniforms,
                 atmo_meta,
@@ -2141,6 +2165,7 @@ impl Editor {
                     | Matter::GravityVolume { .. }
                     | Matter::WaterVolume { .. }
                     | Matter::LightProbes { .. }
+                    | Matter::ReflectionProbe { .. }
                     | Matter::Skybox { .. }
                     | Matter::PostProcess { .. } => {}
                 }
@@ -4747,12 +4772,6 @@ impl Editor {
                 // frame's — which has the glass in it. Its tint would deepen
                 // every frame it stayed on screen.
                 if glass && let Some(h) = scene_history.as_mut() {
-                    h.capture(gpu, color, view_proj, cam.world_position);
-                    raymarch.bind_frame_targets(
-                        gpu,
-                        raster.prepass_view(),
-                        Some((h.view(), h.sampler())),
-                    );
                     // The stored picture is THIS frame's, taken from THIS
                     // camera, so the reprojection is the identity — say so, or
                     // the reflections on the glass would look up last frame's
@@ -4760,10 +4779,32 @@ impl Editor {
                     let mut glass_rm = rm;
                     glass_rm.ssr_prev_vp = view_proj.to_cols_array_2d();
                     raymarch.upload_globals(gpu, glass_rm);
-                    raster.draw_transmissive(
-                        gpu, color, depth, globals, &instances, &skin_draws,
-                        Some(raymarch.field_bind()),
+                    // Far to near, re-capturing between: each layer of glass
+                    // samples a picture holding the panes BEHIND it and none of
+                    // the panes in front. One layer is one capture and one pass,
+                    // exactly as before.
+                    let cuts = raster.transmissive_cuts(
+                        &instances,
+                        &skin_draws,
+                        light_node.refraction_layers,
                     );
+                    for layer in 0..=cuts.len() {
+                        h.capture(gpu, color, view_proj, cam.world_position);
+                        // The capture writes into the SAME texture every time, so
+                        // the bind group it belongs to stays valid — rebinding is
+                        // only for the frame that (re)created it.
+                        if layer == 0 {
+                            raymarch.bind_frame_targets(
+                                gpu,
+                                raster.prepass_view(),
+                                Some((h.view(), h.sampler())),
+                            );
+                        }
+                        raster.draw_transmissive(
+                            gpu, color, depth, globals, &instances, &skin_draws,
+                            Some(raymarch.field_bind()), &cuts, layer,
+                        );
+                    }
                 }
                 // Script-drawn 3D lines (draw.line — the map's orbit conics).
                 if !self.script_lines.is_empty() {
@@ -6586,6 +6627,7 @@ impl Editor {
                 MatterDoc::Skybox { .. } => "Skybox",
                 MatterDoc::PostProcess { .. } => "Post Processing",
                 MatterDoc::LightProbes { .. } => "Light Probes",
+                MatterDoc::ReflectionProbe { .. } => "Reflection Probe",
             };
             self.add_node(name, m);
         }
@@ -6799,6 +6841,9 @@ impl Editor {
         }
         if let Some(v) = cmd.gi_show_probes {
             self.gi_show_probes = v;
+        }
+        if cmd.recapture_probes {
+            self.recapture_reflection_probes();
         }
         if cmd.gi_bake && !self.start_gi_bake() {
             self.console.push(
@@ -8019,6 +8064,14 @@ impl Editor {
         let lit3 = off_split.three_d;
         let (pl_count, pl_pos, pl_col, pl_shape, pl_rot) =
             ([lit3.count as f32, 0.0, 0.0, 0.0], lit3.pos, lit3.color, lit3.shape, lit3.rot);
+        // Same question and same answer as the window path: what a reflective
+        // surface sees when the screen-space march finds nothing.
+        let (probe_meta, probe_pos, probe_half) = crate::reflect_capture::probe_uniforms(
+            &self.world,
+            &self.probe_slots,
+            self.capturing_probes,
+            cam.world_position,
+        );
         // Any lamp casting here? Same question and same answer as the window
         // path — a local shadow marches the prepass, so this decides whether one
         // has to run.
@@ -8033,8 +8086,16 @@ impl Editor {
             crate::shading::atmo_uniforms(&self.world, cam.world_position);
         let (star_meta, star_pos, star_color) =
             crate::shading::star_uniforms(&self.world, &light_node, cam.world_position);
-        let (prox_count, prox_a, prox_b, prox_rot) =
-            collect_shadow_proxies(&self.world, cam.world_position, light_node.shadows);
+        // Proxies are what lets a raster mesh cast at all, and a LAMP marches the
+        // same list now — so the sun's switch alone can no longer decide whether
+        // they are collected. A scene with the sun's shadows off and a torch
+        // casting would otherwise hand the shader an empty proxy list, and the
+        // torch would shine through every crate in the room.
+        let (prox_count, prox_a, prox_b, prox_rot) = collect_shadow_proxies(
+            &self.world,
+            cam.world_position,
+            light_node.shadows || point_shadows,
+        );
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             light_dir: sun,
@@ -8327,6 +8388,9 @@ impl Editor {
                 Matter::Camera { .. } => {}      // it is the eye, not a thing seen
                 Matter::PostProcess { .. } => {} // post_process_uniforms
                 Matter::LightProbes { .. } => {} // baked GI: uniforms + one texture
+                // The capture is six renders of its own, taken elsewhere; here
+                // it is four uniform lanes and one texture, like the GI above.
+                Matter::ReflectionProbe { .. } => {}
                 Matter::GravityVolume { .. } => {} // physics only; no visual
                 Matter::Empty => {}              // a transform with nothing on it
             }
@@ -8465,6 +8529,9 @@ impl Editor {
                 contact,
                 ssr,
                 ssr_prev_vp,
+                probe_meta,
+                probe_pos,
+                probe_half,
                 atmo_meta,
                 atmo_color,
                 atmo_body,
@@ -8587,19 +8654,28 @@ impl Editor {
                     HistorySlot::GamePanel => self.game_scene_history.as_mut(),
                 }
             {
-                h.capture(gpu, color, view_proj, cam.world_position);
-                raymarch.bind_frame_targets(
-                    gpu,
-                    raster.prepass_view(),
-                    Some((h.view(), h.sampler())),
-                );
                 let mut glass_rm = rm;
                 glass_rm.ssr_prev_vp = view_proj.to_cols_array_2d();
                 raymarch.upload_globals(gpu, glass_rm);
-                raster.draw_transmissive(
-                    gpu, color, depth, globals, &instances, &skin_draws,
-                    Some(raymarch.field_bind()),
+                let cuts = raster.transmissive_cuts(
+                    &instances,
+                    &skin_draws,
+                    light_node.refraction_layers,
                 );
+                for layer in 0..=cuts.len() {
+                    h.capture(gpu, color, view_proj, cam.world_position);
+                    if layer == 0 {
+                        raymarch.bind_frame_targets(
+                            gpu,
+                            raster.prepass_view(),
+                            Some((h.view(), h.sampler())),
+                        );
+                    }
+                    raster.draw_transmissive(
+                        gpu, color, depth, globals, &instances, &skin_draws,
+                        Some(raymarch.field_bind()), &cuts, layer,
+                    );
+                }
             }
             // Script-drawn 3D lines (draw.line — the map's orbit conics).
             if !self.script_lines.is_empty() {

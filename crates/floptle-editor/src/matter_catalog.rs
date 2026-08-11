@@ -58,6 +58,7 @@ pub(crate) fn matter_doc_name(m: &MatterDoc) -> &'static str {
         MatterDoc::GravityVolume { .. } => "Gravity Volume",
         MatterDoc::WaterVolume { .. } => "Water Volume",
         MatterDoc::LightProbes { .. } => "Light Probes",
+        MatterDoc::ReflectionProbe { .. } => "Reflection Probe",
         MatterDoc::FieldShape { .. } => "Field Shape",
         MatterDoc::Tilemap { .. } => "Tilemap",
         MatterDoc::SpriteBatch { .. } => "Sprite Batch",
@@ -90,6 +91,7 @@ pub(crate) fn matter_kind_label(m: &Matter) -> &'static str {
         Matter::WaterVolume { .. } => "Water Volume",
         Matter::FieldShape { .. } => "Field Shape",
         Matter::LightProbes { .. } => "Light Probes",
+        Matter::ReflectionProbe { .. } => "Reflection Probe",
         Matter::Tilemap { .. } => "Tilemap",
         Matter::SpriteBatch { .. } => "Sprite Batch",
         Matter::Skybox { .. } => "Skybox",
@@ -115,6 +117,7 @@ pub(crate) fn matter_icon(m: &Matter) -> &'static str {
         Matter::WaterVolume { .. } => "≈",
         Matter::FieldShape { .. } => "◈",
         Matter::LightProbes { .. } => "☀",
+        Matter::ReflectionProbe { .. } => "◐",
         Matter::Tilemap { .. } => "▦",
         Matter::SpriteBatch { .. } => "▪",
         Matter::Skybox { .. } => "◎",
@@ -157,6 +160,7 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
         ("≈  Water Volume", Matter::default_water()),
         ("◈  Field Shape", Matter::FieldShape { radius: 1.5 }),
         ("☀  Light Probes", Matter::default_light_probes()),
+        ("◐  Reflection Probe", Matter::default_reflection_probe()),
         ("◎  Skybox", Matter::default_skybox()),
     ]
 }

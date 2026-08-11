@@ -241,9 +241,56 @@ and most lamps in a level have nothing to be blocked by — a strip under a
 counter, a glow inside a sign, a fill light placed exactly so. The ones worth
 paying for are the ones a player can walk around.
 
-**What it cannot do** is the same honest limit contact shadows have: an occluder
-the camera cannot see cannot cast. A wall shadows correctly while it is in frame
-and stops when you look away from it.
+### The other half: occluders the camera cannot see (v0.53.0)
+
+A screen-space trace has one structural limit — it reads the depth prepass, so it
+only knows about surfaces that were *drawn*. Turn away from a wall and the shadow
+it was casting stops existing, which is the most alarming way a shadow can
+behave.
+
+So a lamp now marches the field as well, through `point_field_vis`, and
+`point_vis` is the `min` of the two. The division of labour is exact:
+
+| | sees | at the resolution of |
+|---|---|---|
+| screen-space trace | only what is in frame | the real silhouette, every railing and bolt |
+| field march | everything, in frame or not | a collider proxy or a baked occluder volume |
+
+Neither alone is a local shadow. Together, a wall blocks a torch whether you are
+looking at the wall or not.
+
+The march itself is `field_vis`, split out of `light_vis` so the sun and a lamp
+run **one** implementation over the same set — terrain, blobs, Field Shapes, the
+baked occluder volume a static collider mesh gets, and every collider proxy. Two
+copies of a 64-step SDF march would be two copies that drift.
+
+Three things that fall out of it rather than being chosen:
+
+- **Softness comes from the lamp's own size.** `k` in the k·d/t estimator IS the
+  reciprocal of the emitter's apparent half-angle, so `dist / radius` is the
+  physically correct value and needs no knob: a wide sphere lamp close up casts a
+  soft edge, a bare point casts a hard one.
+- **One steps knob drives both halves.** The field march gets twice the
+  screen-space trace's step count because it covers the whole distance to the
+  light rather than a short trace, but "how carefully does this lamp look" is
+  still one number.
+- **Proxies are now collected when the sun's shadows are OFF.** They were gated
+  on the sun's switch, which was correct when the sun was the only thing that
+  read them. A scene with sun shadows off and a torch casting would otherwise get
+  an empty proxy list and a torch that shines through every crate in the room —
+  precisely the silent-nothing shape this engine keeps finding in itself.
+
+**What it still cannot do**: shadow from geometry the *field* does not know
+about either. A mesh with no collider is in neither list, and a lamp will shine
+through it when it is off screen. Giving it a collider — or any `Collidable`
+primitive standing in for it — is the fix, and is the same rule the sun follows.
+
+Verified by `offscreen_shadow_probe`, whose occluder is **never drawn**: it
+exists only as a shadow proxy, well outside the frustum, so the depth buffer
+cannot know it is there and any darkness on the floor came from the field march.
+Both controls — the proxy without the flag, and the flag without the proxy —
+read identically lit, so the shadow needs both halves and neither alone can
+explain it.
 
 These work in **every** view of the game: the window, a fullscreen Game tab and a
 docked Game panel alike. That was not true when they landed — the offscreen
@@ -259,9 +306,11 @@ blocked), and that without the flag both sides are lit.
 
 ## 6. Not yet
 
-- **Point-light shadows from OFF-SCREEN occluders** — §5c shadows from what the
-  camera can see. A shadow map per casting lamp would lift that and costs a
-  whole-scene render per light per frame; decide if a game needs it.
+- **Point-light shadows from geometry with no collider.** §5c now covers
+  off-screen occluders through the field, but a mesh that is in neither the depth
+  buffer nor the proxy list is in nothing. A shadow map per casting lamp would
+  close it completely and costs a whole-scene render per light per frame; a
+  cheaper step is auto-proxying visible static meshes that have no collider.
 - **Bent shadow rays** — arrives with light.md Tier 2 (the ray is already a
   field march, so nothing here blocks it).
 - **Cascaded shadow maps.** Considered and deliberately not taken. CSM buys one

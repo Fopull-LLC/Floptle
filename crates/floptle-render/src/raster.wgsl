@@ -182,6 +182,12 @@ const INV_TAU: f32 = 0.15915494309;
 @group(2) @binding(8) var scene_tex: texture_2d<f32>;
 @group(2) @binding(9) var scene_samp: sampler;
 
+// Reflection probes: one equirectangular capture per probe, same projection and
+// same roughness chain as the sky above, plus the box each was captured in.
+// 1×1 means no probes, and every surface falls back to the sky. See `reflect.rs`.
+@group(2) @binding(10) var probe_tex: texture_2d_array<f32>;
+@group(2) @binding(11) var probe_samp: sampler;
+
 // Karis' analytic stand-in for the split-sum environment BRDF, which is the
 // alternative to shipping a lookup table and a pass to bake it. It answers
 // "how much of the environment does a surface with this f0 and this roughness
@@ -487,9 +493,87 @@ fn refracted(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, rough: f32, ior: f32, thi
 // horizon does not change how much light the surface returns, only what colour
 // it is. Adding them would make any surface with a partial screen-space hit
 // brighter than a mirror, which is the artefact that reads as "reflections glow".
+// How much probe `i` speaks for the point `p`.
+//
+// 1 anywhere inside its box and fading to 0 over `probe_half.w` OUTSIDE it. The
+// fade is on the outside deliberately: a surface standing against a wall is the
+// one that most needs the room's reflection, so a weight that tailed off as it
+// approached the wall would drop the probe exactly where it matters. Two
+// overlapping rooms cross-fade instead across the strip where one box has ended
+// and the other has not.
+fn probe_weight(i: u32, p: vec3<f32>) -> f32 {
+    let d = abs(p - G.probe_pos[i].xyz) - G.probe_half[i].xyz;
+    let outside = max(max(d.x, d.y), d.z); // negative inside the box
+    let fade = max(G.probe_half[i].w, 1e-3);
+    return clamp((fade - outside) / fade, 0.0, 1.0);
+}
+
+// What probe `i` shows along the reflected ray `r` from `p`.
+//
+// **The box intersection is the whole feature.** Sampled by direction alone, an
+// environment map is a picture at infinity: move the camera and every reflection
+// slides with it, so a reflected wall never sits on the wall. Meeting the ray
+// with the probe's box first, and then aiming from the PROBE at that meeting
+// point, puts the reflection where the geometry is. It is exact when the room
+// really is a box and gracefully approximate when it is not, which is why the
+// box is authored rather than derived.
+fn probe_radiance(i: u32, p: vec3<f32>, r: vec3<f32>, rough: f32) -> vec3<f32> {
+    let c = G.probe_pos[i].xyz;
+    let h = max(G.probe_half[i].xyz, vec3<f32>(1e-3));
+    // Slab test against the box, taking the FAR hit: the ray starts inside, so
+    // the near intersections are behind it.
+    let inv = 1.0 / select(r, vec3<f32>(1e-8), abs(r) < vec3<f32>(1e-8));
+    let t1 = (c + h - p) * inv;
+    let t2 = (c - h - p) * inv;
+    let tf = min(min(max(t1.x, t2.x), max(t1.y, t2.y)), max(t1.z, t2.z));
+    // A point outside the box can produce a negative or degenerate hit; fall
+    // back to the plain direction there, which is the picture-at-infinity answer
+    // and the right one once you are far enough away for the box not to matter.
+    let dir = select(r, normalize(p + r * tf - c), tf > 1e-4);
+    let u = atan2(dir.z, dir.x) * INV_TAU + 0.5;
+    let t = acos(clamp(dir.y, -1.0, 1.0)) * INV_PI;
+    let levels = f32(textureNumLevels(probe_tex) - 1u);
+    let mip = sqrt(clamp(rough, 0.0, 1.0)) * levels;
+    return textureSampleLevel(probe_tex, probe_samp, vec2<f32>(u, t), i32(i), mip).rgb
+        * max(G.probe_pos[i].w, 0.0);
+}
+
+// The environment this surface sits in: the probes whose rooms it stands in,
+// and the sky for whatever is left over.
+//
+// The sky is the FALLBACK rather than an addition. Indoors it is the wrong
+// answer entirely — a sealed room lit by daylight through its own ceiling — and
+// outdoors there are no probes, so the weights sum to zero and this returns the
+// sky exactly as it did before probes existed.
+fn env_radiance_probed(p: vec3<f32>, r: vec3<f32>, rough: f32) -> vec3<f32> {
+    let sky = env_radiance(r, rough);
+    let dims = textureDimensions(probe_tex, 0);
+    let count = min(u32(G.probe_meta.x), 4u);
+    if (count == 0u || dims.x <= 1u || dims.y <= 1u) {
+        return sky;
+    }
+    var acc = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let w = probe_weight(i, p);
+        if (w > 0.0) {
+            acc = acc + probe_radiance(i, p, r, rough) * w;
+            wsum = wsum + w;
+        }
+    }
+    if (wsum <= 0.0) {
+        return sky;
+    }
+    // Normalised, so one probe covering a room gives that room's picture at full
+    // strength and two overlapping ones average rather than double. The
+    // un-normalised total is what decides how much sky is left — which is how a
+    // surface walking out of a doorway crosses back to the sky smoothly.
+    return mix(sky, acc / wsum, min(wsum, 1.0));
+}
+
 fn env_specular(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, rough: f32, pix: vec2<u32>) -> vec3<f32> {
     let r = reflect(-v, n);
-    let sky = env_radiance(r, rough);
+    let sky = env_radiance_probed(p, r, rough);
     let s = ssr_trace(p, n, r, rough, pix);
     let radiance = mix(sky, s.color, s.hit);
     let ndv = max(dot(n, v), 1e-4);

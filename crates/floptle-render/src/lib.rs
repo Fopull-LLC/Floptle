@@ -38,6 +38,7 @@ pub mod post;
 pub mod raster;
 pub mod raymarch;
 pub mod retro;
+pub mod reflect;
 pub mod ssr;
 pub mod tris;
 pub mod ui;
@@ -57,6 +58,7 @@ pub use mesh::{
     MeshId, TextureData, Vertex,
 };
 pub use outline::Outline;
+pub use reflect::{MAX_PROBES, PROBE_FACE, PROBE_H, PROBE_W, ReflectionProbes};
 pub use ssr::SceneHistory;
 pub use palette::{Palette, PaletteQuantize};
 pub use particles::{ParticleBatch, ParticleBlend, ParticleGlobals, ParticleInstance, Particles};

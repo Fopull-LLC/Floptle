@@ -318,7 +318,8 @@ fn matter_propagates(m: &Matter) -> bool {
         | Matter::FieldShape { .. }
         | Matter::Tilemap { .. }
         | Matter::SpriteBatch { .. }
-        | Matter::LightProbes { .. } => true,
+        | Matter::LightProbes { .. }
+        | Matter::ReflectionProbe { .. } => true,
     }
 }
 

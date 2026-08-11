@@ -215,6 +215,15 @@ pub struct RaymarchGlobals {
     /// `point_shape` lane; these are the scene-wide quality knobs, so cost is
     /// tuned in one place instead of on every lamp in the level.
     pub point_steps: [f32; 4],
+    /// Reflection probes. x = how many are live; the rest is spare.
+    pub probe_meta: [f32; 4],
+    /// Per probe: xyz = the capture point, CAMERA-RELATIVE like everything else
+    /// in this struct (ADR-0015), w = how much of it to apply.
+    pub probe_pos: [[f32; 4]; crate::reflect::MAX_PROBES],
+    /// Per probe: xyz = the box half-extents that make the reflection land on
+    /// the walls and mark which surfaces the probe covers, w = how far outside
+    /// that box its influence fades before the sky takes over.
+    pub probe_half: [[f32; 4]; crate::reflect::MAX_PROBES],
 }
 
 impl Default for RaymarchGlobals {
@@ -301,6 +310,9 @@ impl Default for RaymarchGlobals {
             // starts reporting the gaps between its own samples as sky.
             ssr: [0.0, 30.0, 32.0, 0.5],
             point_steps: [16.0, 1.0, 0.0, 0.0],
+            probe_meta: [0.0; 4],
+            probe_pos: [[0.0; 4]; crate::reflect::MAX_PROBES],
+            probe_half: [[1.0; 4]; crate::reflect::MAX_PROBES],
         }
     }
 }
@@ -448,6 +460,12 @@ pub struct Raymarch {
     /// there is no flag here that could disagree with what is actually bound.
     scene_fallback: (wgpu::TextureView, wgpu::Sampler),
     scene_view: Option<(wgpu::TextureView, wgpu::Sampler)>,
+    /// The reflection probes' map, and the 1×1 stand-in for a scene with none.
+    /// Same shape and same reason as `scene_fallback` above: what is bound is
+    /// the only record of whether there is anything to read, so no flag can
+    /// disagree with it.
+    probe_fallback: (wgpu::TextureView, wgpu::Sampler),
+    probe_view: Option<(wgpu::TextureView, wgpu::Sampler)>,
 }
 
 /// Layers in the terrain texture palette + the size each is stored at. 12 layers:
@@ -614,9 +632,11 @@ impl Raymarch {
         );
         let field_layout = field_bind_layout(device);
         let scene_fallback = crate::ssr::SceneHistory::empty(device);
+        let probe_fallback = crate::reflect::ReflectionProbes::empty(device);
         let field_bind = make_field_bind(
             device, &field_layout, &globals_buf, &dist_tex, &color_tex, &sampler, &gi.tex,
             &prime_fallback, env.view(), env.sampler(), &scene_fallback.0, &scene_fallback.1,
+            &probe_fallback.0, &probe_fallback.1,
         );
 
         Self {
@@ -647,6 +667,8 @@ impl Raymarch {
             env_pipeline,
             scene_fallback,
             scene_view: None,
+            probe_fallback,
+            probe_view: None,
         }
     }
 
@@ -883,6 +905,8 @@ impl Raymarch {
             self.env.sampler(),
             self.scene_view.as_ref().map_or(&self.scene_fallback.0, |s| &s.0),
             self.scene_view.as_ref().map_or(&self.scene_fallback.1, |s| &s.1),
+            self.probe_view.as_ref().map_or(&self.probe_fallback.0, |s| &s.0),
+            self.probe_view.as_ref().map_or(&self.probe_fallback.1, |s| &s.1),
         );
         self.bind = make_bind(
             device,
@@ -1045,6 +1069,23 @@ impl Raymarch {
         view: Option<(&wgpu::TextureView, &wgpu::Sampler)>,
     ) {
         self.scene_view = view.map(|(v, s)| (v.clone(), s.clone()));
+        self.rebuild_binds(&gpu.device);
+    }
+
+    /// Bind (or drop, with `None`) the captured reflection probes.
+    ///
+    /// Same rule as the depth prepass and the scene history: call it when the
+    /// texture is created, not per frame — a bind group is immutable, and the
+    /// probe texture is allocated once and written into thereafter, so one call
+    /// covers every capture that follows. Left unset, the 1×1 stand-in holds and
+    /// every surface falls back to the sky, which is what the engine did before
+    /// probes existed.
+    pub fn set_reflection_probes(
+        &mut self,
+        gpu: &Gpu,
+        view: Option<(&wgpu::TextureView, &wgpu::Sampler)>,
+    ) {
+        self.probe_view = view.map(|(v, s)| (v.clone(), s.clone()));
         self.rebuild_binds(&gpu.device);
     }
 
@@ -1429,6 +1470,25 @@ pub(crate) fn field_bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout 
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
+            // Reflection probes: one equirectangular layer per probe, with the
+            // same roughness chain the sky has. A 1×1 layer here is the "no
+            // probes" signal, exactly as it is for the sky and the prepass.
+            wgpu::BindGroupLayoutEntry {
+                binding: 10,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 11,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
         ],
     })
 }
@@ -1461,6 +1521,8 @@ pub(crate) fn make_field_bind(
     env_samp: &wgpu::Sampler,
     scene: &wgpu::TextureView,
     scene_samp: &wgpu::Sampler,
+    probes: &wgpu::TextureView,
+    probes_samp: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     let dist_view = dist.create_view(&wgpu::TextureViewDescriptor::default());
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1479,6 +1541,8 @@ pub(crate) fn make_field_bind(
             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(env_samp) },
             wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(scene) },
             wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(scene_samp) },
+            wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(probes) },
+            wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(probes_samp) },
         ],
     })
 }

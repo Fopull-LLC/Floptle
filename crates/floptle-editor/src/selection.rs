@@ -296,6 +296,7 @@ impl Editor {
                 | Matter::GravityVolume { .. }
                 | Matter::WaterVolume { .. }
                 | Matter::LightProbes { .. }
+                | Matter::ReflectionProbe { .. }
                 | Matter::Skybox { .. }
                 | Matter::PostProcess { .. } => None,
             };

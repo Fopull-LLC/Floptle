@@ -46,6 +46,7 @@ mod dock;
 mod export;
 mod game_keys;
 mod gi_bake;
+mod reflect_capture;
 mod gizmo;
 mod hierarchy;
 mod history;
@@ -196,6 +197,10 @@ struct EditorCmd {
     /// The two GI view toggles (`Some` = the new state).
     gi_show_only: Option<bool>,
     gi_show_probes: Option<bool>,
+    /// Take every reflection probe's capture again. Moving or resizing one
+    /// re-captures on its own; this is for the changes a probe cannot see — the
+    /// room relit, the furniture moved.
+    recapture_probes: bool,
     /// Dismiss the viewport context menu.
     close_menu: bool,
     /// Toggle play mode (run scripts).
@@ -2350,6 +2355,19 @@ struct Editor {
     auto_bake_gi: Option<bool>,
     /// What the probe texture currently on the GPU was built from.
     gi_uploaded: Option<gi_bake::GiKey>,
+    /// The captured reflection probes, allocated on the frame a scene first
+    /// places one and dropped when the last one goes.
+    reflection_probes: Option<floptle_render::ReflectionProbes>,
+    /// Which probe is in which slot, and what its capture was taken from.
+    /// The index IS the array layer the shader samples.
+    probe_slots: Vec<(Entity, reflect_capture::ProbeKey)>,
+    /// Bumped to invalidate every capture at once — a scene load, or the
+    /// Inspector's recapture button.
+    probe_epoch: u64,
+    /// True only while the six face renders of a capture are running. A capture
+    /// must not contain its own reflections, or each one folds the last one in
+    /// and the room's reflections compound frame after frame.
+    capturing_probes: bool,
     /// The tuning view: show ONLY the baked bounce, with every direct light
     /// switched off. A view flag rather than a scene setting — like the ortho
     /// grid or the gizmo filter, it is about what you are looking at, not about

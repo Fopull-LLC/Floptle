@@ -142,6 +142,18 @@ struct Globals {
     // these two are the scene-wide quality knob the Lighting node owns, so a
     // project tunes cost in one place rather than on every lamp it ever places.
     point_steps: vec4<f32>,
+    // Reflection probes (Matter::ReflectionProbe). Appended at the END so this
+    // struct stays byte-identical to the Rust `RaymarchGlobals`.
+    //
+    // `probe_meta.x` is the live count. Each probe is a captured picture of its
+    // surroundings PLUS the box it was captured in: the box is what makes a
+    // reflected wall land on the wall — an environment map on its own is a
+    // picture at infinity and slides with the camera — and it is also the region
+    // the probe covers. `probe_pos.w` is intensity; `probe_half.w` is how far
+    // outside the box the probe fades before the sky takes over.
+    probe_meta: vec4<f32>,
+    probe_pos: array<vec4<f32>, 4>,
+    probe_half: array<vec4<f32>, 4>,
 };
 
 // A point mapped into Field Shape `i`'s local frame: un-translate (positions
@@ -1183,24 +1195,18 @@ fn shadow_field_d(p: vec3<f32>, vmask: u32, blobs: bool) -> f32 {
 // a ray that touches nothing returns lit with no march at all (the common case
 // for open ground / sky-facing walls), and the march stops at the LAST bound
 // exit instead of crawling to the full shadow distance.
-fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
-    let k = G.shadow_params.y;
-    let max_d = G.shadow_params.w;
-
-    // Lift off the surface along the normal (voxel-aware) so the ray doesn't
-    // immediately re-hit the surface it starts on (shadow acne on the noisy
-    // f16-sampled terrain field). When the sun GRAZES the surface (n·l → 0) the
-    // ray hugs that noisy shell for a long stretch and grazing walls stripe —
-    // boost the lift there, but leave ordinary sun angles alone so contact
-    // shadows stay tight. (Computed before the relevance sweep: the sweep must
-    // test the ACTUAL march ray, which starts at `ro`, not at the surface.)
-    let base = max(0.03, max(field_eps(p), shadow_vol_eps(p)) * 1.6);
-    // Absolute cap: the voxel-scaled grazing boost reached 6+ units on coarse
-    // planet proxies — far enough to START the ray past a cave roof or a whole
-    // terrain feature, which lit sealed caves from the inside (2026-07-20).
-    let lift = min(base * clamp(0.5 / max(dot(n, l), 0.125), 1.0, 4.0), 3.0);
-    let ro = p + n * lift;
-
+// How far a shadow ray gets before something in the FIELD stops it: terrain,
+// blobs, Field Shapes, baked mesh occluder volumes and collider proxies. 1 =
+// nothing in the way, 0 = fully blocked, in between = penumbra.
+//
+// Split out of `light_vis` so a LAMP can march the same set (`point_field_vis`).
+// The sun and a lamp differ in exactly four numbers — where the ray ends, how
+// soft the penumbra is, and the two lift constants — and in nothing else, so
+// two copies of this march would be two copies that drift. What it buys a lamp
+// is the half a screen-space trace structurally cannot do: **an occluder the
+// camera cannot see**. A wall behind you is not in the depth buffer and is very
+// much in the field.
+fn field_vis(ro: vec3<f32>, l: vec3<f32>, max_d: f32, k: f32, pen_t0: f32, lift: f32, steps: i32) -> f32 {
     // ---- Relevance sweep: which pieces can this ray possibly matter for?
     // "Matter" is wider than "hit": the k*d/t penumbra estimator dims for pieces
     // the ray merely passes NEAR — within t/k at range t — so every bound is
@@ -1276,8 +1282,7 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     // tested from the first step, but penumbra only accumulates once the ray has
     // cleared the start surface's own noise floor (keyed to the UNSCALED lift so
     // ordinary ground keeps tight contact shadows).
-    let pen_t0 = base * 3.0;
-    for (var s = 0; s < 64; s = s + 1) {
+    for (var s = 0; s < steps; s = s + 1) {
         let q = ro + l * t;
         var d = shadow_field_d(q, vmask, blobs);
         if (shapes) {
@@ -1304,11 +1309,69 @@ fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
     }
     if (t < t_end) {
         // Ran out of steps mid-span. With the growing cap that only happens when
-        // d stayed pinned small for all 64 steps — the ray spent its whole life
+        // d stayed pinned small for every step — the ray spent its whole life
         // hugging matter — so it's occluded, not lit-by-default.
         vis = 0.0;
     }
     return clamp(vis, 0.0, 1.0);
+}
+
+fn light_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>) -> f32 {
+    // Lift off the surface along the normal (voxel-aware) so the ray doesn't
+    // immediately re-hit the surface it starts on (shadow acne on the noisy
+    // f16-sampled terrain field). When the sun GRAZES the surface (n·l → 0) the
+    // ray hugs that noisy shell for a long stretch and grazing walls stripe —
+    // boost the lift there, but leave ordinary sun angles alone so contact
+    // shadows stay tight. (Computed before the relevance sweep: the sweep must
+    // test the ACTUAL march ray, which starts at `ro`, not at the surface.)
+    let base = max(0.03, max(field_eps(p), shadow_vol_eps(p)) * 1.6);
+    // Absolute cap: the voxel-scaled grazing boost reached 6+ units on coarse
+    // planet proxies — far enough to START the ray past a cave roof or a whole
+    // terrain feature, which lit sealed caves from the inside (2026-07-20).
+    let lift = min(base * clamp(0.5 / max(dot(n, l), 0.125), 1.0, 4.0), 3.0);
+    return field_vis(p + n * lift, l, G.shadow_params.w, G.shadow_params.y, base * 3.0, lift, 64);
+}
+
+// Is lamp `i` blocked by something the CAMERA CANNOT SEE?
+//
+// The screen-space half of `point_vis` reads the depth prepass, so it only
+// knows about surfaces that were drawn — turn away from a wall and the shadow
+// it was casting stops existing. This marches the field instead, which is where
+// the geometry the camera is not looking at lives: terrain, blobs, the baked
+// occluder volume a static collider mesh gets, and every collider proxy. The
+// two are combined with `min` in `point_vis`; between them a lamp is blocked by
+// what is in front of the camera AND by what is behind it.
+//
+// **Softness comes from the lamp's own size**, not from a knob. A shadow's
+// penumbra is set by how big the light looks from the surface — that is what
+// the `k` in the k·d/t estimator means — so a wide sphere lamp close up casts a
+// soft edge and a bare point casts a hard one, for free and correctly. The one
+// number a designer sets is how carefully to look, and that is the same steps
+// knob the screen-space march already uses.
+fn point_field_vis(p: vec3<f32>, n: vec3<f32>, i: u32) -> f32 {
+    let to = G.point_pos[i].xyz - p;
+    let dist = length(to);
+    if (dist < 1e-4) {
+        return 1.0;
+    }
+    let l = to / dist;
+    let base = max(0.03, max(field_eps(p), shadow_vol_eps(p)) * 1.6);
+    let lift = min(base * clamp(0.5 / max(dot(n, l), 0.125), 1.0, 4.0), 3.0);
+    // The emitter's radius over the distance to it IS its apparent half-size,
+    // and `k` is that reciprocal. A point emitter (radius 0) lands on the clamp
+    // and casts the hard edge it should.
+    let shape = G.point_shape[i];
+    let radius = select(0.0, max(shape.y, 0.0), shape.x > 0.5);
+    let k = clamp(dist / max(radius, 1e-3), 2.0, 128.0);
+    // Stop SHORT of the lamp. The last stretch is the fixture itself and the
+    // surfaces it is mounted on, and marching into them makes a bulb shadow its
+    // own bracket — the same reason the screen-space march stops at 98%.
+    let reach = min(dist, max(G.point_pos[i].w, 1e-4)) * 0.95;
+    // One knob, both halves: "how carefully does this lamp look". The field
+    // march wants more steps than the screen one because it covers the whole
+    // distance to the light rather than a short trace.
+    let steps = i32(clamp(G.point_steps.x * 2.0, 8.0, 64.0));
+    return field_vis(p + n * lift, l, reach, k, base * 3.0, lift, steps);
 }
 
 // Bayer 4×4 ordered-dither threshold for pixel `pix`, in (0,1) — the classic
@@ -1632,21 +1695,21 @@ fn contact_vis(p: vec3<f32>, n: vec3<f32>, l: vec3<f32>, pix: vec2<u32>) -> f32 
 // knows terrain, blobs and collider proxies; a room does not.
 //
 // So this reads the same depth prepass contact shadows do, and it works on the
-// real silhouette of whatever is on screen. Its limitation is the honest one for
-// that method: **an occluder the camera cannot see cannot cast.** Turn to face a
-// wall with a lamp behind it and the wall is on screen and shadows correctly;
-// look away and the shadow it was casting stops existing. That is a real cost,
-// and it buys local shadows that cost a short march per lit pixel instead of a
-// cube-map render per lamp per frame.
+// real silhouette of whatever is on screen — every bolt and railing of it, at no
+// authoring cost. What it cannot do is see an occluder the camera cannot: turn
+// away from a wall and the shadow it was casting stops existing.
+//
+// That half is [`point_field_vis`], which marches the field — where the geometry
+// off screen actually lives. The two are combined below with `min`, and the
+// division of labour is exact: the screen-space trace has the real silhouette
+// and only what is in frame; the field has everything, at the resolution of a
+// collider proxy or a baked occluder volume. Neither alone is a local shadow.
 //
 // The march ends AT THE LIGHT rather than at a fixed reach — a lamp two metres
 // away and one twenty metres away need completely different distances, and a
 // single tuned number would be wrong for one of them. The step count is fixed,
 // so a distant lamp simply samples more coarsely.
-fn point_vis(p: vec3<f32>, n: vec3<f32>, i: u32, pix: vec2<u32>) -> f32 {
-    if (!light_flag(G.point_shape[i], LIGHT_SHADOWS)) {
-        return 1.0;
-    }
+fn point_screen_vis(p: vec3<f32>, n: vec3<f32>, i: u32, pix: vec2<u32>) -> f32 {
     let dims = textureDimensions(prime_tex, 0);
     if (dims.x <= 1u || dims.y <= 1u) {
         return 1.0; // no prepass this frame: offscreen previews and probes
@@ -1699,10 +1762,29 @@ fn point_vis(p: vec3<f32>, n: vec3<f32>, i: u32, pix: vec2<u32>) -> f32 {
         let surface = sp.xyz / sp.w;
         let behind = length(q) - length(surface);
         if (behind > 0.02 && behind < thickness) {
-            return 1.0 - clamp(G.point_steps.y, 0.0, 1.0);
+            return 0.0;
         }
     }
     return 1.0;
+}
+
+// The lamp's visibility a shading point actually uses: blocked by what is in
+// front of the camera and by what is behind it, darkened by the scene's one
+// strength knob.
+//
+// `min`, and the strength applied ONCE at the end: two shadow terms scaled
+// separately and multiplied would make a surface both halves agree on twice as
+// dark as one either half found, which reads as a seam wherever a wall leaves
+// the frame.
+fn point_vis(p: vec3<f32>, n: vec3<f32>, i: u32, pix: vec2<u32>) -> f32 {
+    if (!light_flag(G.point_shape[i], LIGHT_SHADOWS)) {
+        return 1.0;
+    }
+    var vis = point_field_vis(p, n, i);
+    if (vis > 0.0) {
+        vis = min(vis, point_screen_vis(p, n, i, pix));
+    }
+    return mix(1.0, vis, clamp(G.point_steps.y, 0.0, 1.0));
 }
 
 // How far it is from `p` to the SOLID surface drawn behind it, in world units.

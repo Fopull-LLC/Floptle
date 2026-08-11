@@ -412,6 +412,80 @@ panel has its own; a thumbnail or a GI bake has none and reflects the sky, which
 is what it did before any of this existed. Sharing one would have each view
 reprojecting the other's frame, which reads as the reflection tearing.
 
+### Reflection probes: what a room reflects (v0.53.0)
+
+Screen-space reflections answer "is what I am reflecting on screen?". The
+environment map answers what is left, and until now it held the **sky**. Outdoors
+that pair is nearly complete: a ray that leaves the frame leaves toward the
+horizon, and the sky is genuinely what is out there. Indoors it is badly wrong —
+a polished floor in a corridor shows a strip of the visible scene and then
+daylight, through the ceiling, in a sealed room.
+
+`Matter::ReflectionProbe` is the third answer. It captures the view from its own
+position and every reflective surface inside its **box** falls back to that
+instead of the sky.
+
+**The capture is six 90° renders through `render_world_into`** — the same path
+every other offscreen view uses, and the same conclusion the GI bake reached: a
+probe is a camera. `reflect.rs` folds them into one equirectangular map per
+probe, in a texture array with the same box-filter roughness chain the sky's map
+has (`env::DOWN_WGSL`, shared).
+
+**Equirectangular rather than a hardware cube map**, for three specific reasons:
+`env_radiance`'s direction→uv formula is reused unchanged, the mip chain is the
+one that already exists, and there are no cube-face seams to show up as a cross
+on a mirror. The pole stretch an equirect map has instead is the one artefact no
+reflection has ever been troubled by. The conversion's `face_of` is written as
+the exact inverse of `floptle_gi::Face::texel_dir`, so the bake's cube
+orientations and the probe's are one table rather than two that drift — and
+`reflect.rs`'s unit tests check the round trip **without a GPU**, because a face
+table off by one flip does not crash or look broken, it puts the wall on the left
+onto the surfaces on the right.
+
+**Parallax is the whole difference between this and a second sky.** An
+environment map sampled by direction alone is a picture at infinity: it slides
+with the camera and a reflected wall never lands on the wall. The reflected ray
+is intersected with the probe's box first, and the sample direction taken from
+the *probe* to that intersection — exact when the room really is a box, and
+gracefully approximate when it is not, which is why the box is authored rather
+than derived. The same box is the probe's region of influence, so one rectangle
+says both "this is the room" and "these are its surfaces". Weights are 1 inside
+the box and fade over `fade` metres **outside** it: a surface against a wall is
+the one that most needs the room's reflection, so a weight tailing off toward the
+wall would drop the probe exactly where it matters.
+
+Up to `MAX_PROBES` (4) blend at once, normalised, with the leftover weight going
+to the sky — so walking out of a doorway crosses back to the sky smoothly. More
+probes than slots keeps the ones **nearest the camera**: dropping the one you are
+standing in because it was added last would be indefensible.
+
+**Nothing is written to disk.** A GI bake is minutes of work and hundreds of
+kilobytes, so it earns a file; six renders at 256² is a fraction of a frame, which
+makes a stored artefact all cost and no benefit — and a stored one has a failure
+mode a live one cannot have: a capture that no longer matches the room, in a file,
+with nothing to say so. Captures happen on load and whenever a probe is moved or
+resized, **one probe per frame**, and the ⟳ button covers the changes a probe
+cannot see (the room relit, the furniture moved).
+
+Two things worth knowing if you touch it:
+
+- A capture must not contain its **own** reflections, or each one folds the last
+  one in and a room's reflections compound frame after frame — the same trap
+  glass avoids by drawing into a capture that excludes it. `capturing_probes`
+  zeroes the probe count for the six face renders.
+- The targets are allocated in `Gpu::scene_format()`, **not** `config.format`.
+  Windowed rendering runs in HDR while the surface is 8-bit sRGB, so asking the
+  surface produces a raster pipeline that cannot be set and a validation error on
+  the first capture.
+
+Verified by `interior_reflection_probe`: a sealed box with a red wall, a blue
+wall and a mirror ball, under a **green** sky that appears nowhere in the room.
+Without a probe the ball is entirely green — the bug, reproduced. With one, the
+left of the ball reads blue and the right reads red, which is the check that
+catches a face table rotated or mirrored by one face. That the no-probe shot
+reads green in the same windows is also what proves those windows are on the ball
+and not on a wall.
+
 ### Glass: seeing through, bent
 
 `Material::transmission` is how much light passes THROUGH a surface instead of
@@ -450,11 +524,40 @@ behave as the lens it is and turn the background upside down. Glass being absent
 from the prepass is what makes that reading the scene behind rather than the
 glass itself.
 
-The limits are the ones screen space always has, plus one of its own: what is
-off-screen or hidden cannot be refracted (the sample falls back to the unbent
-view rather than smearing an edge pixel), and **only the nearest layer of glass
-refracts** — the pass writes depth, so two overlapping panes show the nearer
-one's distortion. A fish tank is one box, not six.
+#### Glass behind glass (v0.53.0)
+
+One capture gives exactly one correct layer — the nearest. Anything behind it was
+never in a picture anybody took, so a fish tank's back wall stopped existing the
+moment you looked through its front one.
+
+`Light::refraction_layers` (1..=4, default 2) is how many depths of glass a frame
+resolves. Above 1 the glass is drawn **far to near** with the scene re-captured
+between groups, so every pane samples a picture holding the panes behind it and
+none of the panes in front — the same rule the whole pass exists for, applied one
+level down. Each extra layer is one more capture and one more pass, and only
+while something see-through is in view.
+
+**Where the cuts go is the biggest gaps in the sorted depths**, not equal-sized
+groups. `Raster::transmissive_cuts` sorts the glass instances by distance and
+splits at the `layers - 1` largest jumps, which puts a tank's front and back
+panes on opposite sides of a cut and leaves a row of bottles standing together in
+one group, where their order does not matter anyway. Depth comes free from
+ADR-0015: the view matrix has no translation, so an instance's model translation
+already IS its position relative to the camera.
+
+Two pieces of glass in the *same* group still show only the nearer one, so 4 is a
+ceiling rather than a promise — past it a scene wants a renderer that sorts per
+fragment, which is a different technique rather than a bigger number.
+
+Verified by `glass_layers_probe`: a white card, a green pane, and a clear pane
+over half of it. At two layers the overlap reads green (2.41 green share); at one
+it reads white (1.00), because the pane behind vanished. Both controls — the
+green pane alone and the bare card — read identically in each, so the difference
+is the layering and nothing else.
+
+The remaining limits are the ones screen space always has: what is off-screen or
+hidden cannot be refracted (the sample falls back to the unbent view rather than
+smearing an edge pixel around the rim).
 
 Verified by `refraction_probe`, which puts a ball in front of two hard-edged
 colour cards and checks that the view through it MOVES, that it stops moving at

@@ -1275,6 +1275,10 @@ impl Raster {
         // frame there is nothing to reflect OF the scene, and the reflection
         // falls back to the environment map on its own.
         let (empty_scene, empty_scene_samp) = crate::ssr::SceneHistory::empty(device);
+        // …and 1×1 reflection probes, for the same reason a third time: no
+        // probes means every surface falls back to the sky, which is what the
+        // renderer did before probes existed.
+        let (empty_probes, empty_probes_samp) = crate::reflect::ReflectionProbes::empty(device);
         let empty_field_bind = crate::raymarch::make_field_bind(
             device,
             &field_layout,
@@ -1288,6 +1292,8 @@ impl Raster {
             &empty_env_samp,
             &empty_scene,
             &empty_scene_samp,
+            &empty_probes,
+            &empty_probes_samp,
         );
 
         let instance_cap = 16;
@@ -2072,6 +2078,64 @@ impl Raster {
         instances
             .iter()
             .any(|(_, _, raw)| t.get(ext_index_of(raw) as usize).copied().unwrap_or(false))
+    }
+
+    /// Where to cut the glass in this frame into depth layers, far first.
+    ///
+    /// **Why glass needs layers at all.** A pane refracts by sampling the picture
+    /// of everything behind it, and that picture has to be taken before the pane
+    /// is drawn. One capture and one pass therefore give exactly one correct
+    /// layer: the nearest. Anything behind it was never in a picture anybody
+    /// took, so a fish tank's back wall vanished behind its front one.
+    ///
+    /// The fix is to draw glass **far to near**, re-taking the picture between
+    /// each group — so every pane samples a scene containing the panes behind it
+    /// and none of the panes in front. That is the same rule the whole pass
+    /// exists for, applied one level down.
+    ///
+    /// **Where the cuts go: the biggest gaps in the sorted depths.** Splitting
+    /// into equal-sized groups would be arbitrary and would happily saw a row of
+    /// bottles standing together in half. Splitting where the depths jump puts
+    /// the front pane and the back pane of a tank on opposite sides of a cut,
+    /// which is the case that matters, and leaves things at the same depth
+    /// together, where their order does not matter anyway.
+    ///
+    /// Returns the cut distances, descending; `cuts.len() + 1` is the layer
+    /// count, and empty means one layer — exactly what a scene with a single
+    /// piece of glass in it did before.
+    pub fn transmissive_cuts(
+        &self,
+        instances: &[(MeshId, Option<TexId>, InstanceRaw)],
+        skins: &[SkinDraw],
+        max_layers: u32,
+    ) -> Vec<f32> {
+        let glassy = self.transmissive_extras();
+        let is_glass =
+            |raw: &InstanceRaw| glassy.get(ext_index_of(raw) as usize).copied().unwrap_or(false);
+        let mut depths: Vec<f32> = instances
+            .iter()
+            .map(|(_, _, raw)| raw)
+            .chain(skins.iter().map(|d| &d.instance))
+            .filter(|raw| is_glass(raw))
+            .map(instance_depth)
+            .collect();
+        let want = max_layers.clamp(1, MAX_GLASS_LAYERS) as usize;
+        if want <= 1 || depths.len() < 2 {
+            return Vec::new();
+        }
+        depths.sort_by(|a, b| b.total_cmp(a));
+        // The gap BELOW each sorted depth, paired with the midpoint that would
+        // split it. Descending order, so `d[i] - d[i + 1]` is the drop.
+        let mut gaps: Vec<(f32, f32)> = depths
+            .windows(2)
+            .map(|w| (w[0] - w[1], (w[0] + w[1]) * 0.5))
+            .filter(|(g, _)| *g > 1e-4)
+            .collect();
+        gaps.sort_by(|a, b| b.0.total_cmp(&a.0));
+        gaps.truncate(want - 1);
+        let mut cuts: Vec<f32> = gaps.into_iter().map(|(_, at)| at).collect();
+        cuts.sort_by(|a, b| b.total_cmp(a));
+        cuts
     }
 
     /// Upload the surface-extras store if it grew since the last pass. Called
@@ -3193,9 +3257,15 @@ impl Raster {
     /// compounds every frame it stays on screen and a green bottle goes black.
     ///
     /// Depth is LOADED and written: glass tests against the scene in front of it
-    /// and occludes glass behind it. That makes a single layer exact and two
-    /// overlapping panes show only the nearer one's refraction, which is the
-    /// usual trade and the reason a fish tank is one box rather than six.
+    /// and occludes glass behind it.
+    ///
+    /// `cuts` and `layer` draw one depth layer of the glass — see
+    /// [`transmissive_cuts`](Self::transmissive_cuts). Call this once per layer,
+    /// **from 0 upward** (farthest first), re-capturing the scene colour between
+    /// calls, and each pane samples a picture holding the glass behind it and
+    /// none of the glass in front. An empty `cuts` with `layer` 0 draws all the
+    /// glass in one pass, which is the cheapest setting and the one that shows
+    /// only the nearest pane.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_transmissive(
         &mut self,
@@ -3206,11 +3276,15 @@ impl Raster {
         instances: &[(MeshId, Option<TexId>, InstanceRaw)],
         skins: &[SkinDraw],
         field: Option<&wgpu::BindGroup>,
+        cuts: &[f32],
+        layer: usize,
     ) {
         self.begin_pass(gpu, globals);
         let glassy = self.transmissive_extras();
-        let is_glass =
-            |raw: &InstanceRaw| glassy.get(ext_index_of(raw) as usize).copied().unwrap_or(false);
+        let is_glass = |raw: &InstanceRaw| {
+            glassy.get(ext_index_of(raw) as usize).copied().unwrap_or(false)
+                && layer_of(instance_depth(raw), cuts) == layer
+        };
         let mut raws: Vec<InstanceRaw> = Vec::new();
         let groups = group_by_key(
             instances
@@ -3801,6 +3875,31 @@ pub fn is_terrain(raw: &InstanceRaw) -> bool {
 /// (which carries `modulate_bit | (ext_index << 1)`).
 pub fn ext_index_of(raw: &InstanceRaw) -> u32 {
     (raw.normal_mat[1][3] as u32) >> 1
+}
+
+/// The most depth layers glass will be split into, however high the scene asks.
+///
+/// Each layer costs one capture of the scene colour and one more draw pass, and
+/// the returns fall away fast: two covers a tank, a window with a bottle behind
+/// it, a pair of doors. The number itself lives with the scene field it bounds,
+/// so a `.ron` and a draw call cannot disagree about it.
+pub const MAX_GLASS_LAYERS: u32 = floptle_core::Light::MAX_REFRACTION_LAYERS;
+
+/// How far an instance's origin is from the eye.
+///
+/// Camera-relative rendering (ADR-0015) is what makes this a one-liner: the view
+/// matrix carries no translation, so an instance's model translation already IS
+/// its position relative to the camera and its length is the distance. No view
+/// matrix has to be threaded in to sort by depth.
+fn instance_depth(raw: &InstanceRaw) -> f32 {
+    let t = raw.model[3];
+    (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt()
+}
+
+/// Which layer a depth falls in, given [`Raster::transmissive_cuts`]' descending
+/// cuts. **0 is the farthest**, because that is the order glass draws in.
+fn layer_of(depth: f32, cuts: &[f32]) -> usize {
+    cuts.iter().filter(|c| depth < **c).count()
 }
 
 /// Set an already-built instance's [`SurfaceExtras`] index, leaving the

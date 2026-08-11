@@ -242,6 +242,7 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
                 "enabled" | "bloom" | "vignette" | "posterizeDither" | "posterizeChroma"
             )
             | ("LightProbes", "enabled")
+            | ("ReflectionProbe", "enabled")
             | ("PointLight", "twoSided" | "shadows")
             | (
                 "Light",
@@ -395,6 +396,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("contactSteps".to_string(), l.contact_steps as f64),
                 ("contactStrength".to_string(), l.contact_strength as f64),
                 ("reflections".to_string(), f64::from(l.reflections)),
+                ("refractionLayers".to_string(), l.refraction_layers as f64),
                 ("reflectionDistance".to_string(), l.reflection_distance as f64),
                 ("reflectionSteps".to_string(), l.reflection_steps as f64),
                 ("reflectionThickness".to_string(), l.reflection_thickness as f64),
@@ -520,6 +522,20 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 // bake, which a script cannot start. Exposed so a script can ASK
                 // what it is looking at.
                 ("bounces".to_string(), *bounces as f64),
+            ]),
+        );
+    }
+    // A reflection probe's LIVE half. `enabled` and `intensity` change what a
+    // room reflects without re-capturing anything, which is what a script wants
+    // — dimming the reflections as the lights go out. The box is not here: it is
+    // the node's own shape, and changing it re-captures.
+    if let Some(Matter::ReflectionProbe { enabled, intensity, fade, .. }) = world.get::<Matter>(e) {
+        out.insert(
+            "ReflectionProbe".to_string(),
+            HashMap::from([
+                ("enabled".to_string(), f64::from(*enabled)),
+                ("intensity".to_string(), *intensity as f64),
+                ("fade".to_string(), *fade as f64),
             ]),
         );
     }
@@ -1153,6 +1169,22 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 }
             }
         }
+        // A reflection probe, on the same terms as the volume above: the knobs
+        // that change what a captured room LOOKS like are here, and the box —
+        // which decides what was captured in the first place — is not.
+        "ReflectionProbe" => {
+            if let Some(Matter::ReflectionProbe { enabled, intensity, fade, .. }) =
+                world.get_mut::<Matter>(ent)
+            {
+                let v = val as f32;
+                match field {
+                    "enabled" => *enabled = val != 0.0,
+                    "intensity" => *intensity = v.max(0.0),
+                    "fade" => *fade = v.max(0.0),
+                    _ => {}
+                }
+            }
+        }
         // The Lighting node (`floptle/0123`). Clamped where a value has a range
         // and left alone where it does not: a colour channel above 1 is a
         // legitimate over-bright, and `ambient2d*` above 1 is how you blow a
@@ -1194,6 +1226,10 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "reflectionDistance" => l.reflection_distance = v.clamp(0.1, 500.0),
                     "reflectionSteps" => l.reflection_steps = (val.max(8.0) as u32).min(64),
                     "reflectionThickness" => l.reflection_thickness = v.clamp(0.01, 20.0),
+                    "refractionLayers" => {
+                        l.refraction_layers = (val.max(1.0) as u32)
+                            .min(floptle_core::Light::MAX_REFRACTION_LAYERS)
+                    }
                     "fog" => l.fog = val != 0.0,
                     "fogColorR" => l.fog_color[0] = v.max(0.0),
                     "fogColorG" => l.fog_color[1] = v.max(0.0),

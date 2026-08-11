@@ -1914,6 +1914,33 @@ impl EditorTabViewer<'_> {
                                 .changed();
                             ui.small("reflects the PREVIOUS frame, so a reflection is one frame behind — invisible except on a mirror under a whipping camera");
                         });
+                        ui.small("off screen, a reflection falls back to the SKY — place a ◐ Reflection Probe to give a room something else to show");
+                        // Glass, in the same place as reflections and for the
+                        // same reason: it is what a surface shows of the scene
+                        // when the light goes THROUGH it rather than off it, and
+                        // it is a scene-wide cost rather than a material one.
+                        ui.separator();
+                        let mut layers = l.refraction_layers as i32;
+                        if ui
+                            .add(
+                                egui::Slider::new(
+                                    &mut layers,
+                                    1..=floptle_core::Light::MAX_REFRACTION_LAYERS as i32,
+                                )
+                                .text("glass layers"),
+                            )
+                            .on_hover_text(
+                                "how many depths of see-through surface can be looked through at \
+                                 once. At 1 only the nearest pane shows what is behind it, so a \
+                                 fish tank has to be one box; raising it lets a window have a \
+                                 bottle standing behind it. Each layer costs one more pass, and \
+                                 only when something see-through is in view",
+                            )
+                            .changed()
+                        {
+                            l.refraction_layers = layers as u32;
+                            cmd.inspector_changed = true;
+                        }
                     });
                     // Fog — distance haze (depth ramp) or real marched media (volumetric).
                     ui.separator();
@@ -3189,6 +3216,82 @@ impl EditorTabViewer<'_> {
                                     .changed()
                                 {
                                     cmd.gi_show_probes = Some(show_probes);
+                                }
+                            }
+                            Matter::ReflectionProbe { half_extents, enabled, intensity, fade } => {
+                                if ui.checkbox(enabled, "reflect this room").changed() {
+                                    cmd.inspector_changed = true;
+                                }
+                                ui.small(
+                                    "What reflective surfaces inside this box show when what \
+                                     they are reflecting is not on screen. Without one they show \
+                                     the sky — daylight, indoors, through the ceiling.",
+                                );
+                                ui.separator();
+
+                                // ---- the box ------------------------------------
+                                ui.horizontal(|ui| {
+                                    ui.label("size");
+                                    for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+                                        let mut full = half_extents[i] * 2.0;
+                                        let r = ui.add(
+                                            egui::DragValue::new(&mut full)
+                                                .speed(0.25)
+                                                .range(0.5..=4000.0)
+                                                .prefix(format!("{axis} ")),
+                                        );
+                                        if r.changed() {
+                                            half_extents[i] = full * 0.5;
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "The room, in world units. This decides which surfaces the \
+                                     probe covers AND where the reflection lands: sized to the \
+                                     walls, a reflected wall sits on the wall instead of \
+                                     sliding as the camera moves.",
+                                );
+                                if ui
+                                    .add(egui::Slider::new(fade, 0.0..=20.0).text("edge fade"))
+                                    .on_hover_text(
+                                        "How far outside the box the room's reflection gives way \
+                                         to the sky, in world units. A doorway wants a metre or \
+                                         two so walking out does not switch in one step.",
+                                    )
+                                    .changed()
+                                {
+                                    cmd.inspector_changed = true;
+                                }
+                                if ui
+                                    .add(egui::Slider::new(intensity, 0.0..=4.0).text("strength"))
+                                    .on_hover_text(
+                                        "How much of the capture to apply. 1 is what was \
+                                         measured; this is the artistic knob for a room that \
+                                         reads too busy or too dim in the reflections.",
+                                    )
+                                    .changed()
+                                {
+                                    cmd.inspector_changed = true;
+                                }
+
+                                // ---- the capture --------------------------------
+                                ui.separator();
+                                ui.small(
+                                    "Captured when the scene loads and whenever the probe is \
+                                     moved or resized. Nothing is saved to disk, so a capture \
+                                     cannot go stale in a file.",
+                                );
+                                if ui
+                                    .button("recapture")
+                                    .on_hover_text(
+                                        "Take it again now — after relighting the room, or \
+                                         moving the furniture in it.",
+                                    )
+                                    .clicked()
+                                {
+                                    cmd.recapture_probes = true;
                                 }
                             }
                             Matter::PostProcess {
