@@ -1,5 +1,14 @@
 ## Just shipped
 
+**v0.53.1** — the Scene view and the Game view agree again: reflections, contact
+shadows, shoreline foam and lamp shadows could be missing from one while working
+in the other, and could start working on their own after a resize. And if a small
+scene has been running at a stubbornly round frame rate, that is the display
+accepting one frame in three rather than the engine struggling — **Project
+Settings ⏵ Rendering ⏵ Frame pacing** lets you escape it, and the window title
+now shows what a frame actually costs beside the rate, so the two are never
+confused again.
+
 **v0.53.0 "Inside The Room"** — three things the renderer could only do for what
 was on screen, now done for what is not. Drop a **◐ Reflection Probe** into a
 room, size its box to the walls, and every reflective surface inside it shows
