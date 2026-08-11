@@ -1,5 +1,16 @@
 ## Just shipped
 
+**v0.53.0 "Inside The Room"** — three things the renderer could only do for what
+was on screen, now done for what is not. Drop a **◐ Reflection Probe** into a
+room, size its box to the walls, and every reflective surface inside it shows
+that room instead of the sky — a mirror indoors used to reflect daylight through
+a sealed ceiling, and there was no setting that changed it. A casting lamp is now
+blocked by a wall whether you are facing the wall or facing away from it, with
+soft edges that come from how big the lamp is rather than from a knob. And
+**Lighting ⏵ glass layers** lets you see through more than one pane at a time, so
+a window can have a bottle standing behind it and a fish tank can be six panes
+rather than one box.
+
 **v0.52.0 "What You See"** — a polished floor shows the room standing on it, and
 a crystal ball shows the room *through* it, upside down. Turn **reflections** on
 in the Lighting node and every reflective surface picks up the scene rather than
