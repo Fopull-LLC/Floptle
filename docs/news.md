@@ -1,5 +1,20 @@
 ## Just shipped
 
+**v0.52.0 "What You See"** — a polished floor shows the room standing on it, and
+a crystal ball shows the room *through* it, upside down. Turn **reflections** on
+in the Lighting node and every reflective surface picks up the scene rather than
+only the sky; turn **see-through** up on a material and light passes through it,
+bent by the index of refraction, frosted by the roughness and tinted by the
+material's own colour. Lamps can cast shadows now, per light — a torch in a
+doorway used to light the room behind the door exactly as brightly, and there was
+no setting that changed it. And the docked Game panel finally shows the same game
+the window does: contact shadows, shoreline foam, reflections and lamp shadows
+were all simply missing from it, so the small panel you work in disagreed with
+the window you test in. The border of editor-view bleed around it is gone too.
+Copying a rotation keyframe no longer teleports the object to the world origin,
+bones are octahedra you can click anywhere along, and the Model tool grew loop
+cut, bevel, ring select, Ctrl+A and Blender-style Ctrl+click path selection.
+
 **v0.51.0 "Ask Once"** — the PS1-era look is a **project setting** now instead of
 four checkboxes on every material you own. Project Settings ⏵ Rendering ⏵ Era
 artefacts turns vertex jitter, affine textures, vertex lighting and screen-door
