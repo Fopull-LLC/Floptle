@@ -2473,6 +2473,12 @@ struct Editor {
     /// every frame.
     fps: f32,
     fps_timer: f32,
+    /// Smoothed milliseconds spent BLOCKED waiting for a display image, kept
+    /// apart from the frame's own cost so the title can report the two
+    /// separately. A frame that costs 8 ms and presents at 20 fps is a display
+    /// path pacing the engine, not an engine that is slow — and with only an fps
+    /// number to go on there is no way to tell those apart.
+    present_wait_ms: f32,
     /// Is the ⏱ frame-cost panel open? Opening it starts collecting and closing
     /// it stops, so the profiler costs nothing when nobody is looking
     /// (`floptle/0077`).

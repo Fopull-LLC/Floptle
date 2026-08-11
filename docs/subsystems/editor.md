@@ -264,6 +264,45 @@ enum PlayState { Editing, Playing, Paused }
   the edit-time scene. **Pause** + step for debugging. The Scene View becomes the
   game viewport while playing.
 
+## The depth prepass and the two render paths (v0.53.1)
+
+Everything that reads the opaque depth prepass — contact shadows, `surfaceGap`
+(shoreline foam, soft particles), screen-space reflections and lamp shadows —
+does nothing at all without it, and does it silently. That makes the prepass the
+single most drift-prone thing in the editor's two render paths, and it has now
+drifted three times:
+
+1. the bind lived inside the `if rm_draw` arm, so every one of those features
+   worked in a scene with terrain and silently did nothing in a scene made of
+   meshes;
+2. the offscreen path ran no prepass at all, so a docked Game panel showed a
+   different game from the same game fullscreen;
+3. the window path *bound* it only when `depth_prepass_with` reported having
+   ALLOCATED a target — which is permanently false once a frame draws two views,
+   because the size-keyed cache then finds both slots already there. From that
+   frame on the window drew with whatever the docked Game panel had bound last:
+   another camera's depth buffer at another resolution, and that panel's stored
+   picture. Reflections landed wrong or vanished, and any resize made them
+   briefly correct again.
+
+And the *condition* had drifted separately: the window's list was missing contact
+shadows, so a mesh scene with reflections and lamp shadows both off ran no
+prepass in the window while the Game panel ran one.
+
+Two functions now, both shared:
+
+- **`wants_prepass(...)`** — the one answer to "does this view need it". Adding a
+  feature that reads the prepass means adding a parameter, which is a compile
+  error at both call sites rather than a silent omission at one.
+- **`prepass_and_bind(...)`** — runs it and binds it, in one call. Running is not
+  binding; the two are not separable here, so they are not separable at the call
+  site either.
+
+`Raster::depth_prepass_with` returns **nothing** now. It used to answer "was the
+target reallocated?", which reads like "does the bind need refreshing?" and is a
+different question. `tests/offscreen_draws_the_same_world.rs` requires both
+functions by name in the offscreen path.
+
 ## 7. Out of scope
 
 This section has narrowed over time (texture painting and the embedded IDE both

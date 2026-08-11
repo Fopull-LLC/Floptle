@@ -971,6 +971,18 @@ pub enum MatterDoc {
     },
 }
 
+/// Serializable frame pacing — mirrors `floptle_render::Vsync`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VsyncDoc {
+    /// Every frame shown, in order, at the display's cadence.
+    #[default]
+    On,
+    /// Render freely; the display takes the newest frame each refresh.
+    Adaptive,
+    /// Present the instant a frame is ready, tearing and all.
+    Off,
+}
+
 /// Serializable [`ScreenShader`] — one authored full-screen pass.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ScreenShaderDoc {
@@ -1982,6 +1994,16 @@ pub struct ProjectConfigDoc {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retro_dither_alpha: bool,
 
+    /// How finished frames reach the display.
+    ///
+    /// `On` is classic vsync and the default. It is a setting because on some
+    /// compositors vsync presents at a FRACTION of the refresh rate — a window
+    /// doing nothing but clearing itself can sit at a flat 20 fps on a 60 Hz
+    /// display — and with the mode hardcoded a project had no way to tell that
+    /// apart from the engine being slow, let alone escape it.
+    #[serde(default)]
+    pub vsync: VsyncDoc,
+
     #[serde(default = "true_bool")]
     pub matter: bool,
     /// The game's title: names exported builds (their binary + window title).
@@ -2084,6 +2106,7 @@ impl ProjectConfigDoc {
             retro_affine_uv: false,
             retro_vertex_lit: false,
             retro_dither_alpha: false,
+            vsync: VsyncDoc::default(),
             matter: true,
             title: None,
             entry_scene: None,

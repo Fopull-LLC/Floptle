@@ -77,6 +77,53 @@ pub struct Gpu {
     /// grid and gizmo overlays, live render targets, and the post chain's own
     /// scratch. See [`Gpu::scene_format`].
     scene_format: wgpu::TextureFormat,
+    /// The present modes this surface actually supports, so a requested one can
+    /// fall back rather than fail.
+    present_modes: Vec<wgpu::PresentMode>,
+    vsync: Vsync,
+}
+
+/// How finished frames are handed to the display.
+///
+/// **This is a setting because `Fifo` is not always what it says it is.** Fifo
+/// means "present every frame in order at the monitor's cadence", and when a
+/// driver honours that it is the right default: the loop blocks in present, so
+/// frame times lock to the refresh and what the simulation sampled matches what
+/// reaches the glass. On some compositors it instead presents at a *fraction* of
+/// the refresh — a window that does nothing but clear itself blue can sit at a
+/// flat 20 fps on a 60 Hz display — and with the mode hardcoded there was
+/// nothing a project could do about it but conclude the engine was slow.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Vsync {
+    /// `Fifo`. Every frame shown, in order, at the display's cadence. The
+    /// default, and the one whose pacing is predictable.
+    #[default]
+    On,
+    /// `Mailbox`: render freely, and the display takes the newest frame at each
+    /// refresh. No tearing and no cap — but the frames that reach the glass
+    /// sampled the simulation at moments unrelated to when they are shown, which
+    /// reads as movement judder that comes and goes with the window mode. Worth
+    /// it when `On` is capping you far below what the scene actually costs.
+    Adaptive,
+    /// `Immediate`: present the instant a frame is ready, tearing and all. What
+    /// you want when the question is "how expensive is this frame, really".
+    Off,
+}
+
+/// The wgpu mode a [`Vsync`] asks for, before availability is considered.
+fn wanted_mode(v: Vsync) -> wgpu::PresentMode {
+    match v {
+        Vsync::On => wgpu::PresentMode::Fifo,
+        Vsync::Adaptive => wgpu::PresentMode::Mailbox,
+        Vsync::Off => wgpu::PresentMode::Immediate,
+    }
+}
+
+/// …and what the surface can actually do. `Fifo` is required of every surface by
+/// the spec, so it is always a valid answer.
+fn pick_present_mode(v: Vsync, available: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    let want = wanted_mode(v);
+    if available.contains(&want) { want } else { wgpu::PresentMode::Fifo }
 }
 
 /// A surface image acquired for one frame. Render into `view`, then `present()`.
@@ -143,17 +190,11 @@ impl Gpu {
         let caps = surface.get_capabilities(&adapter);
         let format =
             caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
-        // Fifo (classic vsync), DELIBERATELY — not Mailbox. Fifo presents every
-        // rendered frame in order at the monitor's cadence, so the loop blocks
-        // in present and frame times lock to the refresh: simulation sampling
-        // and screen time stay in step. Mailbox renders uncapped and the
-        // display grabs whichever frame is newest at each vsync — the frames
-        // that reach glass sample the simulation at points unrelated to when
-        // they're shown, which reads as speed-proportional movement judder.
-        // Worse, Mailbox availability varies by windowed/fullscreen/compositor/
-        // driver, so the judder came and went with window mode ("sometimes it
-        // jitters" — Ty's bug). Fifo is universally supported and predictable.
-        let present_mode = wgpu::PresentMode::Fifo;
+        // Fifo (classic vsync) is the DEFAULT, deliberately — see [`Vsync`] for
+        // why, and for why it is no longer the only choice.
+        let present_modes = caps.present_modes.clone();
+        let vsync = Vsync::default();
+        let present_mode = pick_present_mode(vsync, &present_modes);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -178,7 +219,41 @@ impl Gpu {
             depth_tex,
             depth_view,
             scene_format: Self::HDR_FORMAT,
+            present_modes,
+            vsync,
         }
+    }
+
+    /// How this GPU is presenting, and how to change it.
+    ///
+    /// Changing it reconfigures the surface, which is cheap and takes effect on
+    /// the next frame. A mode the surface does not support falls back to `Fifo`
+    /// rather than failing — every surface supports `Fifo`.
+    pub fn vsync(&self) -> Vsync {
+        self.vsync
+    }
+
+    /// Whether `mode` is actually available here. The Inspector greys out what
+    /// this says no to, rather than offering a choice that silently does nothing
+    /// — which is how "I turned it off and it did not change" happens.
+    pub fn supports_vsync(&self, mode: Vsync) -> bool {
+        self.surface.is_some() && self.present_modes.contains(&wanted_mode(mode))
+    }
+
+    /// Returns the wgpu mode actually applied — which is not always the one
+    /// asked for, since a surface need only support `Fifo`. The caller reports
+    /// it, so a setting that quietly did nothing is visible instead of being
+    /// mistaken for a setting that did not help.
+    pub fn set_vsync(&mut self, mode: Vsync) -> Option<wgpu::PresentMode> {
+        if self.vsync == mode || self.surface.is_none() {
+            return None;
+        }
+        self.vsync = mode;
+        self.config.present_mode = pick_present_mode(mode, &self.present_modes);
+        if let Some(surface) = self.surface.as_ref() {
+            surface.configure(&self.device, &self.config);
+        }
+        Some(self.config.present_mode)
     }
 
     /// Create a headless GPU (no window/surface) for offscreen rendering at
@@ -246,6 +321,9 @@ impl Gpu {
             depth_tex,
             depth_view,
             scene_format,
+            // Headless has no surface, so no presentation to configure.
+            present_modes: Vec::new(),
+            vsync: Vsync::On,
         }
     }
 

@@ -3450,16 +3450,16 @@ impl Raster {
     /// - the sampleable copy caps the raymarch per pixel (`set_depth_prime`), so
     ///   SDF rays stop at the nearest mesh instead of marching the field behind it.
     ///
-    /// Returns `true` when the prepass target was (re)created (size change) — the
-    /// caller must then re-bind it on the raymarch, whose bind group is immutable.
+    /// **Bind the result unconditionally afterwards** — see
+    /// [`depth_prepass_with`](Self::depth_prepass_with).
     pub fn depth_prepass(
         &mut self,
         gpu: &Gpu,
         globals: Globals,
         instances: &[(MeshId, Option<TexId>, InstanceRaw)],
         main_depth: &wgpu::Texture,
-    ) -> bool {
-        self.depth_prepass_with(gpu, globals, instances, &[], &[], main_depth)
+    ) {
+        self.depth_prepass_with(gpu, globals, instances, &[], &[], main_depth);
     }
 
     /// **The palette pass** (`floptle/0127`): quantize `color` in place to the
@@ -3642,6 +3642,15 @@ impl Raster {
         gpu.queue.submit([encoder.finish()]);
     }
 
+    /// **Returns nothing, deliberately.** It used to answer "was the target
+    /// (re)allocated?", which callers read as "does the bind group need
+    /// refreshing?" — and those are not the same question. A frame that draws
+    /// two views claims a different cached slot for each, so after the first few
+    /// frames neither is ever reallocated and the answer is permanently `false`
+    /// while the correct answer is "yes, every view, every frame". The window
+    /// path believed it and spent releases drawing with the docked Game panel's
+    /// depth buffer and stored picture. Run this, then bind
+    /// [`prepass_view`](Self::prepass_view) unconditionally.
     pub fn depth_prepass_with(
         &mut self,
         gpu: &Gpu,
@@ -3650,9 +3659,9 @@ impl Raster {
         flsl: &[FlslDraw],
         skins: &[SkinDraw],
         main_depth: &wgpu::Texture,
-    ) -> bool {
+    ) {
         let size = main_depth.size();
-        let recreated = self.claim_prepass(gpu, size);
+        self.claim_prepass(gpu, size);
         self.begin_pass(gpu, globals);
 
         // Opaque instances only, bucketed by (mesh, texture) exactly like
@@ -3766,7 +3775,6 @@ impl Raster {
             size,
         );
         gpu.queue.submit([encoder.finish()]);
-        recreated
     }
 }
 

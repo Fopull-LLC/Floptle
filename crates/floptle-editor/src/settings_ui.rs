@@ -452,6 +452,52 @@ impl<'a> SettingsCtx<'a> {
     // --- Rendering ------------------------------------------------------
     fn settings_rendering(&mut self, ui: &mut egui::Ui, project: &mut floptle_scene::ProjectConfigDoc, out: &mut SettingsOut) {
 
+        // Frame pacing, above the look settings: it is the one here that can
+        // make the engine appear slow when it is not.
+        row(
+            ui,
+            "Frame pacing",
+            Some(
+                "how finished frames reach the display. Smooth is classic vsync and the right \
+                 default — but on some machines vsync presents at a FRACTION of the refresh \
+                 rate, and a scene that costs 8 ms sits at 20 fps looking like an engine \
+                 problem. If the frame rate is pinned to a round number no matter what is in \
+                 the scene, that is this",
+            ),
+            |ui| {
+                use floptle_scene::VsyncDoc as V;
+                let mut v = project.vsync;
+                egui::ComboBox::from_id_salt("project-vsync")
+                    .selected_text(match v {
+                        V::On => "smooth (vsync)",
+                        V::Adaptive => "uncapped, no tearing",
+                        V::Off => "uncapped",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut v, V::On, "smooth (vsync)")
+                            .on_hover_text(
+                                "every frame shown, in order, at the display's cadence — what \
+                                 the simulation sampled matches what reaches the glass",
+                            );
+                        ui.selectable_value(&mut v, V::Adaptive, "uncapped, no tearing")
+                            .on_hover_text(
+                                "render freely; the display takes the newest frame each \
+                                 refresh. No cap and no tearing, but movement can judder, \
+                                 because the frames shown sampled the world at moments \
+                                 unrelated to when they appear",
+                            );
+                        ui.selectable_value(&mut v, V::Off, "uncapped")
+                            .on_hover_text(
+                                "present the instant a frame is ready, tearing and all. The \
+                                 setting for the question 'how expensive is this frame really'",
+                            );
+                    });
+                if v != project.vsync {
+                    project.vsync = v;
+                    out.save_project = true;
+                }
+            },
+        );
         row(ui, "Retro", Some("render at a low resolution and upscale"), |ui| {
             out.save_project |= ui.checkbox(&mut project.retro, "pixelization").changed();
         });

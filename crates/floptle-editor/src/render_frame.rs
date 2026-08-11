@@ -513,6 +513,22 @@ impl Editor {
         // of the scene, so it belongs here beside the bake rather than inside a
         // gather, and at most one probe a frame.
         self.step_reflection_probes();
+        // The project's frame pacing, applied before anything acquires a
+        // surface image. `set_vsync` early-outs when nothing changed, so this is
+        // free on every frame but the one where somebody changes the setting.
+        let want_vsync = match self.project.vsync {
+            floptle_scene::VsyncDoc::On => floptle_render::Vsync::On,
+            floptle_scene::VsyncDoc::Adaptive => floptle_render::Vsync::Adaptive,
+            floptle_scene::VsyncDoc::Off => floptle_render::Vsync::Off,
+        };
+        let applied = self.gpu.as_mut().and_then(|gpu| gpu.set_vsync(want_vsync));
+        if let Some(mode) = applied {
+            self.console.push(
+                floptle_script::LogLevel::Debug,
+                format!("frame pacing: {want_vsync:?} → {mode:?}"),
+                None,
+            );
+        }
         self.sync_field_shapes();
 
         // Edit-mode animation preview (Animating tab): pose the bound node at the
@@ -4654,7 +4670,17 @@ impl Editor {
         }
 
         // ---- draw: scene into the retro target, blit, then egui on top ----
-        match gpu.acquire() {
+        // Timed, because blocking here is not the same thing as being slow — see
+        // `present_wait_ms`.
+        let wait_t = std::time::Instant::now();
+        let acquired = gpu.acquire();
+        let wait_ms = wait_t.elapsed().as_secs_f32() * 1000.0;
+        self.present_wait_ms = if self.present_wait_ms > 0.0 {
+            self.present_wait_ms * 0.9 + wait_ms * 0.1
+        } else {
+            wait_ms
+        };
+        match acquired {
             Some(frame) => {
                 // The scene ALWAYS renders into the post input, whether or not
                 // any effect is switched on.
@@ -4689,31 +4715,19 @@ impl Editor {
                 // nothing in a scene made of meshes, which is the only kind of
                 // scene most of these shaders are ever put in.
                 let depth_wanted = raster.flsl_draws_want_depth(&flsl_draws);
-                let raster_clear = if rm_draw || depth_wanted || ssr_on || point_shadows {
+                let raster_clear = if rm_draw
+                    || wants_prepass(depth_wanted, ssr_on, point_shadows, contact[0] > 0.5)
+                {
                     // Opaque depth prepass: primes the depth buffer (early-z kills
                     // hidden raster fragments before their shadow-marching shader
                     // runs) and caps the raymarch at the nearest mesh per pixel.
                     let depth_tex =
                         if self.project.retro { retro.depth_texture() } else { gpu.depth_texture() };
-                    let primed = raster.depth_prepass_with(
-                        gpu, globals, &instances, &flsl_draws, &skin_draws, depth_tex,
+                    let hist = scene_history.as_ref().map(|h| (h.view(), h.sampler()));
+                    prepass_and_bind(
+                        gpu, raster, raymarch, globals, &instances, &flsl_draws, &skin_draws,
+                        depth_tex, hist,
                     );
-                    // BIND it, whether or not anything is going to be
-                    // raymarched. Three things read this texture and only ONE of
-                    // them is the raymarch's own per-pixel march cap: contact
-                    // shadows, `surfaceGap` (shoreline foam, soft particles) and
-                    // the screen-space reflection march all live in the RASTER
-                    // pass, which draws in every scene there is.
-                    //
-                    // It used to be bound inside the `rm_draw` arm below, which
-                    // meant all three quietly did nothing in a scene made of
-                    // meshes and worked perfectly in a scene with terrain in it.
-                    // That is the exact shape of failure this prepass gate was
-                    // added to prevent, one level further down.
-                    if primed {
-                        let hist = scene_history.as_ref().map(|h| (h.view(), h.sampler()));
-                        raymarch.bind_frame_targets(gpu, raster.prepass_view(), hist);
-                    }
                     if rm_draw {
                         raymarch.draw_into_primed(gpu, color, depth, rm);
                         None
@@ -5577,11 +5591,18 @@ impl Editor {
             if self.fps_timer >= 0.4 {
                 self.fps_timer = 0.0;
                 if let Some(window) = self.window.as_ref() {
+                    // The frame's OWN cost beside the rate, because they answer
+                    // different questions and an fps number alone cannot tell
+                    // "this scene is expensive" from "this display is pacing
+                    // us". A scene costing 8 ms and presenting at 20 fps is the
+                    // second, and used to be indistinguishable from the first.
+                    let cost = (1000.0 / self.fps.max(1e-3) - self.present_wait_ms).max(0.0);
                     window.set_title(&format!(
-                        "Floptle Editor — {}{} — {:.0} fps — {} nodes ({} off screen), {} instances",
+                        "Floptle Editor — {}{} — {:.0} fps ({:.1} ms/frame) — {} nodes ({} off screen), {} instances",
                         self.scene_name,
                         if self.scene_dirty { " •" } else { "" },
                         self.fps,
+                        cost,
                         self.render_counts.nodes,
                         self.render_counts.culled,
                         self.render_counts.instances
@@ -8599,16 +8620,18 @@ impl Editor {
             // It runs when something actually reads it, and needs the depth
             // TEXTURE (a view cannot be copied into), so a caller that has none
             // opts out by construction rather than by forgetting.
-            let wants_depth = raster.flsl_draws_want_depth(&flsl_draws)
-                || ssr[0] > 0.5
-                || point_shadows
-                || contact[0] > 0.5;
+            let wants_depth = wants_prepass(
+                raster.flsl_draws_want_depth(&flsl_draws),
+                ssr[0] > 0.5,
+                point_shadows,
+                contact[0] > 0.5,
+            );
             if let Some(dtex) = opts.depth_tex.filter(|_| wants_depth || rm_draw) {
-                raster.depth_prepass_with(
-                    gpu, globals, &instances, &flsl_draws, &skin_draws, dtex,
-                );
                 let hist = history_bind.as_ref().map(|(v, s)| (v, s));
-                raymarch.bind_frame_targets(gpu, raster.prepass_view(), hist);
+                prepass_and_bind(
+                    gpu, raster, raymarch, globals, &instances, &flsl_draws, &skin_draws,
+                    dtex, hist,
+                );
             } else {
                 // No prepass this view: unbind, or this render would march the
                 // LAST view's depth buffer — a different camera at a different
@@ -8741,6 +8764,51 @@ impl Editor {
 /// world matrices (falls back to the rig rest pose). Static (unrigged) meshes just
 /// draw every part at `model`.
 ///
+/// Does this view need the opaque depth prepass to run?
+///
+/// **One function, called from both render paths.** Every feature that reads the
+/// prepass silently does nothing without it — no error, no warning, just a
+/// picture missing something — so a view that forgets one term is a view where
+/// that feature quietly stops existing. The two paths had already drifted: the
+/// window's condition was missing CONTACT SHADOWS, so in a scene made of meshes
+/// with reflections and lamp shadows both off, contact shadows worked in a
+/// docked Game panel and did nothing in the window beside it.
+///
+/// Adding a feature that reads the prepass means adding a parameter here, which
+/// is a compile error at both call sites rather than a silent omission at one.
+fn wants_prepass(flsl_wants_depth: bool, ssr: bool, point_shadows: bool, contact: bool) -> bool {
+    flsl_wants_depth || ssr || point_shadows || contact
+}
+
+/// Run this view's opaque depth prepass **and bind it**, in one call.
+///
+/// One call because the two have to happen together and had twice been written
+/// apart: first the bind was inside the `if rm_draw` arm, so every feature that
+/// reads the prepass silently did nothing in a scene made of meshes; then it was
+/// guarded on "was the target reallocated?", which is permanently false once a
+/// frame draws two views, so the window drew with the docked Game panel's depth
+/// buffer and stored picture and reflections came and went.
+///
+/// Both are the same mistake — a per-view resource bound less often than per
+/// view — and neither errors. Running and binding cannot be separated here, so
+/// they are not separable at the call site either.
+#[allow(clippy::too_many_arguments)]
+fn prepass_and_bind(
+    gpu: &floptle_render::Gpu,
+    raster: &mut floptle_render::Raster,
+    raymarch: &mut floptle_render::Raymarch,
+    globals: floptle_render::Globals,
+    instances: &[(MeshId, Option<TexId>, floptle_render::InstanceRaw)],
+    flsl: &[floptle_render::FlslDraw],
+    skins: &[floptle_render::SkinDraw],
+    depth_tex: &wgpu::Texture,
+    history: Option<(&wgpu::TextureView, &wgpu::Sampler)>,
+) {
+    raster.depth_prepass_with(gpu, globals, instances, flsl, skins, depth_tex);
+    raymarch.bind_frame_targets(gpu, raster.prepass_view(), history);
+
+}
+
 /// Shared by the main surface gather AND the offscreen `render_world_into` so the
 /// fullscreen, docked, split, and camera-preview views all animate identically —
 /// previously the offscreen path drew every mesh rigidly at its root, so a character

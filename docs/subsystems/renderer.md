@@ -220,6 +220,46 @@ any order from a per-scene/per-camera post chain.
   workgroup-size and `Rgba16Float` storage-image support across backends; keep a
   half-res fallback for weaker GPUs.
 
+## 6b. Frame pacing, and telling it apart from being slow (v0.53.1)
+
+**A frame rate is two numbers pretending to be one.** How long a frame takes to
+build, and how often the display accepts one. They are usually close enough that
+nobody separates them — until they are not, and then every diagnosis goes wrong.
+
+The engine presented with `PresentMode::Fifo`, hardcoded. Fifo is the right
+default: every frame shown, in order, at the display's cadence, so what the
+simulation sampled matches what reaches the glass, and frame times are
+predictable. `Mailbox` was tried and rejected because the frames that reach the
+glass sampled the world at moments unrelated to when they appear, which reads as
+movement judder that comes and goes with the window mode.
+
+What that reasoning missed is that **Fifo does not always do what it says.** On
+at least one ordinary Wayland setup, a window that does nothing but clear itself
+blue presents at a flat **20.0 fps on a 60 Hz display** — every third refresh —
+while the same window under `Mailbox` or `Immediate` runs at thirteen thousand.
+That is not a load; it is the presentation path. With the mode hardcoded, a
+project on such a machine had no way to escape it and no way to tell it apart
+from an engine that was simply slow. A real scene measured 8 ms of work per frame
+and presented at 20 fps, which reads exactly like a renderer in trouble.
+
+So:
+
+- **`Vsync` is a project setting** (`ProjectConfigDoc::vsync`, Project Settings ⏵
+  Rendering ⏵ Frame pacing): `On` = Fifo and still the default, `Adaptive` =
+  Mailbox, `Off` = Immediate. A mode the surface does not support falls back to
+  Fifo — every surface supports Fifo — and `Gpu::set_vsync` **returns the mode it
+  actually applied**, which the editor prints, so a fallback is visible rather
+  than being mistaken for a setting that did not help.
+- **The window title reports the frame's own cost beside the rate**: `20 fps
+  (8.2 ms/frame)`. The two together answer the question an fps number alone
+  cannot. Blocking in `acquire()` is measured and excluded, because waiting for
+  the display is not the same thing as being slow.
+
+`examples/present_probe.rs` is the tool that settled it and is kept for the next
+time: forty lines of winit and wgpu that clear a window and report the rate. If
+it reads 60 and the editor reads 20, the editor is doing something; if both read
+20, the display path is.
+
 ## 7. Out of scope
 
 We are lightweight — **not Unreal, not photoreal**. Explicitly *not* doing:

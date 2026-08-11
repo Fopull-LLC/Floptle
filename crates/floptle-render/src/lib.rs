@@ -45,7 +45,7 @@ pub mod ui;
 
 pub use camera::{FlyCamera, Input, ViewLock};
 pub use cull::Frustum;
-pub use device::{take_gpu_errors, Gpu};
+pub use device::{Gpu, Vsync, take_gpu_errors};
 pub use env::{EnvMap, ENV_H, ENV_W};
 pub use frame::{Projection, RenderCamera};
 pub use gi::GiVolume;

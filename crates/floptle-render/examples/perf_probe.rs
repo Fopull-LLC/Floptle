@@ -187,9 +187,8 @@ fn main() {
         raster.draw_scene(&gpu, &color_view, gpu.depth_view(), rg, &instances, None, Some(raymarch.field_bind()));
     });
     time_pass("full      (depth prepass + raymarch + raster)", &mut || {
-        if raster.depth_prepass(&gpu, rg, &instances, gpu.depth_texture()) {
-            raymarch.set_depth_prime(&gpu, raster.prepass_view());
-        }
+        raster.depth_prepass(&gpu, rg, &instances, gpu.depth_texture());
+        raymarch.set_depth_prime(&gpu, raster.prepass_view());
         raymarch.draw_into_primed(&gpu, &color_view, gpu.depth_view(), rm);
         raster.draw_scene(&gpu, &color_view, gpu.depth_view(), rg, &instances, None, Some(raymarch.field_bind()));
     });
@@ -208,9 +207,8 @@ fn main() {
         raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rm_b);
     });
     time_pass("full      (depth prepass + raymarch + raster)", &mut || {
-        if raster.depth_prepass(&gpu, rg_b, &instances_b, gpu.depth_texture()) {
-            raymarch.set_depth_prime(&gpu, raster.prepass_view());
-        }
+        raster.depth_prepass(&gpu, rg_b, &instances_b, gpu.depth_texture());
+        raymarch.set_depth_prime(&gpu, raster.prepass_view());
         raymarch.draw_into_primed(&gpu, &color_view, gpu.depth_view(), rm_b);
         raster.draw_scene(&gpu, &color_view, gpu.depth_view(), rg_b, &instances_b, None, Some(raymarch.field_bind()));
     });

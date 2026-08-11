@@ -164,9 +164,10 @@ fn main() {
         // The editor's order: prime depth, let the raymarch paint the sky capped
         // by it, then shade. A prepass that did not dither would cap the raymarch
         // over the WHOLE hill and the dissolved-out pixels would come back empty.
-        if raster.depth_prepass(&gpu, globals, &instances, gpu.depth_texture()) {
-            raymarch.set_depth_prime(&gpu, raster.prepass_view());
-        }
+        raster.depth_prepass(&gpu, globals, &instances, gpu.depth_texture());
+        // Bind it every time. Guarding this on "was the target reallocated?" is
+        // what let the editor draw one view with another view's depth buffer.
+        raymarch.set_depth_prime(&gpu, raster.prepass_view());
         raymarch.draw_into(&gpu, &color_view, gpu.depth_view(), rg);
         raster.draw_scene(
             &gpu,

@@ -178,8 +178,14 @@ fn render(gpu: &Gpu, c: Contact, label: &str) -> Vec<[u8; 4]> {
     // The prepass. Without it the shader reads a 1×1 stand-in and every contact
     // shadow is a no-op — which is the correct behaviour offscreen, and would
     // also be a very quiet way for this probe to prove nothing.
-    let primed = raster.depth_prepass_with(gpu, globals, &instances, &[], &[], gpu.depth_texture());
-    assert!(primed, "the depth prepass has to run — the trace reads it and nothing else");
+    raster.depth_prepass_with(gpu, globals, &instances, &[], &[], gpu.depth_texture());
+    // …and it left a target to read. This used to assert the prepass's return
+    // value, which answered "was the target reallocated?" — true here only
+    // because this is the first call, and a claim that meant nothing.
+    assert!(
+        raster.prepass_view().is_some(),
+        "the depth prepass has to leave something to sample — the trace reads it and nothing else"
+    );
     raymarch.set_depth_prime(gpu, raster.prepass_view());
 
     // The field globals: no volumes, no blobs, NO PROXIES. The marched shadow

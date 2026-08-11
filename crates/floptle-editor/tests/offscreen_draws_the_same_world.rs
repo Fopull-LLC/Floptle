@@ -68,12 +68,15 @@ const GATHERS: [(&str, &str); 10] = [
     // just a picture missing four features. It ran on the surface path only, so
     // a docked Game panel showed a visibly different game from the same game
     // fullscreen.
-    ("depth_prepass_with", "the opaque depth prepass"),
+    ("prepass_and_bind", "the opaque depth prepass, run AND bound"),
     // …and RUNNING it is not BINDING it. The prepass writes its own sampleable
     // copy, and until that copy is on the shared field group nothing can read
-    // it — which is the same bug one step later, and it has already happened
-    // once on the surface path.
-    ("bind_frame_targets", "binding the prepass so shaders can read it"),
+    // it — the same bug one step later, and it has now happened twice on the
+    // surface path: once bound inside the `rm_draw` arm, once guarded on
+    // "was the target reallocated?" (permanently false once a frame draws two
+    // views, so the window drew with the Game panel's depth buffer). The two
+    // are one call now, which is why the name above covers both.
+    ("wants_prepass", "the shared answer to whether this view needs a prepass"),
     // Same shape as the GI volume above: the probe TEXTURE is shared, and the
     // lanes that say where each probe's room is are camera-relative, so they
     // have to be stamped per view. Stamped on one path only, a docked Game
