@@ -73,6 +73,10 @@ pub(crate) struct PackagesState {
     /// A package the user asked to remove, awaiting confirmation. Removing a
     /// package deletes files; that is not a single-click action.
     confirm_remove: Option<String>,
+    /// A package that arrived from somewhere else and asked for something. It is
+    /// installed but NOT enabled until the person who installed it has seen what
+    /// it wants — see `gate_remote_install`.
+    awaiting_consent: Option<String>,
 }
 
 impl PackagesState {
@@ -202,7 +206,16 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                                 &entry.id,
                                 on,
                             ) {
-                                Ok(()) => action.reload = true,
+                                Ok(()) => {
+                                    // Ticking the box IS the consent.
+                                    if on
+                                        && state.awaiting_consent.as_deref()
+                                            == Some(entry.id.as_str())
+                                    {
+                                        state.awaiting_consent = None;
+                                    }
+                                    action.reload = true;
+                                }
                                 Err(e) => state.error = Some(e.to_string()),
                             }
                         }
@@ -234,6 +247,24 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                         && let Some(err) = &p.failed
                     {
                         ui.colored_label(egui::Color32::from_rgb(230, 120, 110), err);
+                    }
+
+                    // Arrived from somewhere else and asked for something, so it
+                    // is sitting here NOT running. The manifest is read from
+                    // disk rather than from the host, because a package that is
+                    // not enabled was never loaded — and this has to say what it
+                    // wants precisely when it is not yet allowed to have it.
+                    if state.awaiting_consent.as_deref() == Some(entry.id.as_str()) {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(225, 195, 110),
+                            "⚠ Installed, but NOT running yet — it asked for the following. \
+                             Tick the box to let it run.",
+                        );
+                        if let Ok(m) =
+                            floptle_package::Manifest::load(&entry.root_in(ctx.project_root))
+                        {
+                            permissions_line(ui, &m.permissions);
+                        }
                     }
 
                     if !expanded {
@@ -444,7 +475,7 @@ fn add_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, actio
                     false,
                 ) {
                     Ok(e) => {
-                        state.note = Some(format!("installed {} {}", e.id, e.version));
+                        gate_remote_install(ctx.project_root, &e, state);
                         action.reload = true;
                     }
                     Err(e) => state.error = Some(e.to_string()),
@@ -625,8 +656,7 @@ fn browse_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, ac
                                     true,
                                 ) {
                                     Ok(e) => {
-                                        state.note =
-                                            Some(format!("installed {} {}", e.id, e.version));
+                                        gate_remote_install(ctx.project_root, &e, state);
                                         action.reload = true;
                                     }
                                     Err(e) => {
@@ -645,6 +675,45 @@ fn browse_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, ac
                 ui.add_space(4.0);
             }
         });
+}
+
+/// A package installed from a Git remote — the catalogue or a URL somebody was
+/// given — is code from a stranger, and enabling it runs that code. If it asks
+/// for anything beyond its own folder, it lands **installed but not enabled**
+/// with what it asked for on screen, and a person turns it on.
+///
+/// A package that declares no permissions is enabled as before: it can read its
+/// own folder and nothing else, which is the same standing every built-in tool
+/// already has, and a confirmation nobody can act on teaches people to click
+/// through the ones that matter.
+///
+/// Listing on fopull.com is automatic once a submission passes its checks, so
+/// this is the last point at which anybody looks. That is the whole reason it
+/// exists.
+fn gate_remote_install(
+    project_root: &std::path::Path,
+    entry: &floptle_package::Entry,
+    state: &mut PackagesState,
+) {
+    let asked = floptle_package::Manifest::load(&entry.root_in(project_root))
+        .map(|m| m.permissions)
+        .unwrap_or_default();
+    if asked.is_empty() {
+        state.note = Some(format!("installed {} {}", entry.id, entry.version));
+        return;
+    }
+    match floptle_package::install::set_enabled(project_root, &entry.id, false) {
+        Ok(()) => {
+            state.awaiting_consent = Some(entry.id.clone());
+            state.expanded = Some(entry.id.clone());
+            state.note = Some(format!(
+                "installed {} {} — not running yet, it asked for something",
+                entry.id, entry.version
+            ));
+        }
+        // Could not disable it, so do not pretend it is gated.
+        Err(e) => state.error = Some(e.to_string()),
+    }
 }
 
 /// What a package is allowed to do, in one line, in the words of somebody
@@ -702,5 +771,85 @@ mod tests {
     fn blank_boxes_read_as_absent_rather_than_as_empty_strings() {
         assert_eq!(non_empty("  "), None);
         assert_eq!(non_empty(" v1.0 "), Some("v1.0".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod consent_tests {
+    use super::*;
+
+    /// Install a package from a folder, exactly as the editor does, and hand
+    /// back what the gate was given.
+    fn install(tag: &str, id: &str, perms: &str) -> (PathBuf, floptle_package::Entry) {
+        let root = std::env::temp_dir().join(format!("flop-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("src");
+        let _ = std::fs::create_dir_all(src.join("editor"));
+        let _ = std::fs::create_dir_all(root.join("project"));
+        let _ = std::fs::write(
+            src.join("package.ron"),
+            format!(
+                "(\n  id: \"{id}\",\n  name: \"T\",\n  version: \"1.0.0\",{perms}\n)\n"
+            ),
+        );
+        let _ = std::fs::write(src.join("editor/main.lua"), "-- nothing\n");
+        let entry =
+            floptle_package::install::install_from_dir(&root.join("project"), &src, true).unwrap();
+        (root, entry)
+    }
+
+    /// Listing on the catalogue is automatic, so this is the last point at which
+    /// anybody looks at what a package wants. A package that asks for something
+    /// must not be running before somebody has been shown what it asked for.
+    #[test]
+    fn a_remote_package_that_asks_for_something_does_not_run_until_allowed() {
+        let (root, entry) = install("consent-asks", "com.test.asks", "\n  permissions: [Network, Files],");
+        let project = root.join("project");
+        let mut state = PackagesState::default();
+
+        // As installed, before the gate: enabled, and one reload away from
+        // running. That is the thing being prevented.
+        assert!(entry.enabled);
+
+        gate_remote_install(&project, &entry, &mut state);
+
+        let reg = Registry::load(&project).unwrap();
+        assert!(
+            !reg.find("com.test.asks").unwrap().enabled,
+            "a package that asked for something must not be left running"
+        );
+        assert_eq!(state.awaiting_consent.as_deref(), Some("com.test.asks"));
+        // The row is opened, because a warning about something you cannot see is
+        // not a warning.
+        assert_eq!(state.expanded.as_deref(), Some("com.test.asks"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A package that asks for nothing can only read its own folder, and a
+    /// confirmation nobody can act on teaches people to click through the ones
+    /// that matter.
+    #[test]
+    fn a_package_that_asks_for_nothing_is_not_gated() {
+        let (root, entry) = install("consent-none", "com.test.quiet", "");
+        let project = root.join("project");
+        let mut state = PackagesState::default();
+
+        gate_remote_install(&project, &entry, &mut state);
+
+        assert!(Registry::load(&project).unwrap().find("com.test.quiet").unwrap().enabled);
+        assert_eq!(state.awaiting_consent, None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The manifest has to be readable with the package switched OFF — a
+    /// disabled package is never loaded by the host, so the consent block cannot
+    /// ask the host what it wants.
+    #[test]
+    fn what_it_asks_for_is_readable_while_it_is_disabled() {
+        let (root, entry) = install("consent-read", "com.test.off", "\n  permissions: [Browser],");
+        let project = root.join("project");
+        let m = floptle_package::Manifest::load(&entry.root_in(&project)).unwrap();
+        assert_eq!(m.permissions, vec![Permission::Browser]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

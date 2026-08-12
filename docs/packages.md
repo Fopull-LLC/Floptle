@@ -104,9 +104,20 @@ quietly install `2.0.0-alpha`.
 
 ### Permissions
 
-A package declares what it may reach for, and the list is shown before it is
-installed. This is not decoration: an undeclared capability is **absent** from
-the package's Lua, not merely refused when it is called.
+A package declares what it may reach for. This is not decoration: an undeclared
+capability is **absent** from the package's Lua, not merely refused when it is
+called.
+
+**A package installed from a Git remote — the catalogue, or a URL somebody sent
+you — does not run until you allow it.** If it declares any permission it arrives
+installed but switched **off**, with what it asked for on its row in 📦 Packages,
+and it starts running when you tick the box. Enabling a package runs its code, so
+that tick is the decision, and it should be made having read the list.
+
+A package that declares nothing is enabled on arrival: it can read its own folder
+and nothing else, which is the standing every built-in tool already has. A
+confirmation nobody can act on only teaches people to click through the ones that
+matter.
 
 | Permission | Gives the package |
 | --- | --- |
@@ -114,7 +125,9 @@ the package's Lua, not merely refused when it is called.
 | `Files` | reading and writing anywhere in the project (its own folder it can always read) |
 | `Browser` | `ed.openUrl` / `sys.openUrl` — opening a page in your browser |
 
-Nothing declared means the package can read its own folder and nothing else.
+Listing on the catalogue is automatic once a submission passes its checks, so the
+moment you tick that box is the last point at which anybody looks at what a
+package wants. Read the list.
 
 ---
 
