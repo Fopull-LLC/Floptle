@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.55.1** — six additions to the editor API packages use, all found by writing
+a real package against it: `gui.helpBox`, `gui.flexibleSpace`, `gui.height`, a
+text field that can take the keyboard the frame it appears, a node's **oriented**
+extents on `scene.info` (so a tool can tell which way a thing is facing, and
+`scene.bounds` is tight rather than a sphere's box), and LuaJIT's `bit` library
+for packages that need to hash something.
+
 **v0.55.0 "Bring Your Own"** — Floptle has **packages**. A package is a folder of
 tools, scripts and art that anybody can write and share; install one from a
 folder, from a repository URL, or from the catalogue in **Window ⏵ 📦 Packages**,
