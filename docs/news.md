@@ -1,5 +1,16 @@
 ## Just shipped
 
+**v0.55.0 "Bring Your Own"** — Floptle has **packages**. A package is a folder of
+tools, scripts and art that anybody can write and share; install one from a
+folder, from a repository URL, or from the catalogue in **Window ⏵ 📦 Packages**,
+and switch it off again with one checkbox. Every package says up front what it may
+reach for — the network, your files, your browser — and you see that before you
+install it. Packages can also **add their own tools to the editor**: menus,
+panels, overlays pinned in the Scene view, and shapes drawn in the world, with the
+scene readable and editable and Ctrl+Z undoing what a tool did. **✚ New Package**
+scaffolds one that already runs, and **🔗 Link folder** reads it where you are
+writing it so an edit reaches every project at once.
+
 **v0.54.0 "Where The Time Goes"** — a polished surface can finally be a mirror.
 Roughness 0 was sharp and everything above it fell off a cliff, so the only crisp
 reflection available was the one at exactly zero; the blur now follows the
