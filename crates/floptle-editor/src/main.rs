@@ -44,6 +44,9 @@ mod console;
 mod curve_edit;
 mod dock;
 mod export;
+mod ext;
+mod ext_wire;
+mod packages_ui;
 mod game_keys;
 mod gi_bake;
 mod reflect_capture;
@@ -818,6 +821,11 @@ struct EditorTabViewer<'a> {
     contact_gizmos: &'a [(Vec2, Vec2)],
     /// Script `gizmo.*` debug lines (projected px + 0-1 color) — Scene view.
     script_gizmo_lines: &'a [(Vec2, Vec2, [f32; 3])],
+    /// The project's package extensions — their Scene-view overlays draw over
+    /// the viewport, so the host has to be reachable from the tab body.
+    ext: &'a mut crate::ext::ExtHost,
+    /// This frame's `handles.*`, already projected for the Scene view.
+    ext_painted: &'a [crate::ext::handles::Painted],
     /// The same, projected for the Game view's camera (drawn only when `game_gizmos`).
     game_gizmo_lines: &'a [(Vec2, Vec2, [f32; 3])],
     game_gizmos: &'a mut bool,
@@ -1411,6 +1419,24 @@ struct Editor {
     particles: Option<floptle_render::Particles>,
     egui: Option<Egui>,
     camera: FlyCamera,
+    /// The project's packages and the Lua they run in the editor. Present even
+    /// with nothing installed, where every entry point is a no-op.
+    ext: ext::ExtHost,
+    /// This frame's `handles.*`, projected for the Scene view.
+    ext_painted: Vec<ext::handles::Painted>,
+    /// Seconds since the editor started — what `ed.time()` answers.
+    ext_clock: f64,
+    /// The selection the extensions were last told about, so `onSelectionChange`
+    /// fires once per actual change rather than every frame.
+    ext_last_selection: Vec<u32>,
+    /// A package panel asking to be brought to the front next frame.
+    ext_focus_window: Option<usize>,
+    /// `ed.message(title, body)`, shown as a modal until dismissed.
+    ext_message: Option<(String, String)>,
+    /// Is the 📦 Packages window open?
+    show_packages: bool,
+    /// The 📦 Packages window's own state (search text, what is being installed).
+    packages_ui: packages_ui::PackagesState,
     input: Input,
     world: World,
     /// Mesh handles indexed by `Shape as usize` (Cube=0, Sphere=1).
@@ -3796,6 +3822,9 @@ impl ApplicationHandler for Editor {
         // inside the egui closure, which has no `event_loop`) is what makes the button close
         // the app for real.
         if self.pending_exit {
+            // Anything a package put in `ed.prefs` / `ed.store` is written
+            // here — the one place every exit path passes through.
+            self.ext.save_prefs();
             event_loop.exit();
             return;
         }

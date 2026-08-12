@@ -351,6 +351,12 @@ impl Editor {
         // the tab is actually visible, because it reads every script in the
         // project and a panel nobody has open is not worth a file walk.
         self.refresh_learn();
+        // The project's packages get their frame here — before the GPU state is
+        // borrowed for the rest of `render`, because an extension's hooks need
+        // the whole editor and the draw path holds pieces of it. What they
+        // DRAW is projected further down, where `view_proj` exists.
+        self.ext_clock += self.ui_frame_dt as f64;
+        self.ext_tick();
 
         // Inspector asset preview: render the spinning model/material (or load the
         // texture) before the GPU/egui destructure borrows below. `preview_dt` is a
@@ -860,6 +866,22 @@ impl Editor {
                     &mut self.game_gizmo_lines,
                 );
             }
+        }
+        // What the packages queued with `handles.*`, projected for the Scene
+        // view. Disjoint field borrows on purpose: the GPU state above is still
+        // held, and this touches neither.
+        {
+            let (gw, gh) = (gpu.config.width as f32, gpu.config.height.max(1) as f32);
+            let painted = &mut self.ext_painted;
+            painted.clear();
+            crate::ext::handles::project(
+                &self.ext.handles(),
+                cam.world_position,
+                view_proj,
+                gw,
+                gh,
+                painted,
+            );
         }
         // The GI probes, drawn where they actually are. Not behind `show_gizmos`:
         // this is a switch on the Light Probes node itself, and somebody who
@@ -2487,6 +2509,25 @@ impl Editor {
         let tag_edit = &mut self.tag_edit;
         let hier_scrolled = &mut self.hier_scrolled;
         let show_material_editor = &mut self.show_material_editor;
+        // The package extensions and their window. `ext_host` is handed to the
+        // dock (its Scene overlays draw in the viewport), and used again after
+        // for the floating panels — sequentially, so one `&mut` covers both.
+        let ext_host = &mut self.ext;
+        let ext_painted = self.ext_painted.as_slice();
+        let packages_state = &mut self.packages_ui;
+        let show_packages = &mut self.show_packages;
+        let ext_project_root = self.project_root.clone();
+        // Built before the closure: `ext_menu_tree` reads the whole editor, and
+        // inside the UI pass only disjoint field borrows exist.
+        let ext_menus = crate::ext_wire::menu_tree(ext_host);
+        let ext_focus_window = self.ext_focus_window.take();
+        let ext_message = &mut self.ext_message;
+        // What the packages' menu and panels decided this frame, applied after
+        // the UI pass — running a Lua callback while the host is drawing would
+        // be re-entering it.
+        let mut ext_menu_click: Option<usize> = None;
+        let mut ext_shortcut_click: Option<usize> = None;
+        let mut pkg_action = crate::packages_ui::PackagesAction::default();
         let ide = &mut self.ide;
         let learn = &mut self.learn;
         let script_errors = self.script_errors.as_slice();
@@ -2823,6 +2864,17 @@ impl Editor {
                             cmd.focus_image = true;
                             ui.close();
                         }
+                        if ui
+                            .button("📦 Packages")
+                            .on_hover_text(
+                                "install, switch off or write a package — editor tools, \
+                                 scripts and art anybody can make and share",
+                            )
+                            .clicked()
+                        {
+                            *show_packages = true;
+                            ui.close();
+                        }
                         ui.separator();
                         if ui
                             .button("⟲ Reset layout")
@@ -2873,6 +2925,19 @@ impl Editor {
                         ui.separator();
                         ui.label(egui::RichText::new(format!("Floptle {}", env!("CARGO_PKG_VERSION"))).small());
                     });
+                    // Whatever the project's packages registered, grouped by
+                    // the first segment of each path — so two packages both
+                    // filing under "Tools" build one menu, not two.
+                    for group in &ext_menus {
+                        ui.menu_button(&group.title, |ui| {
+                            for (label, idx) in &group.items {
+                                if ui.button(label).clicked() {
+                                    ext_menu_click = Some(*idx);
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
                     ui.separator();
                     let play_label = if playing { "⏹ Stop  (F1)" } else { "⏵ Play  (F1)" };
                     if ui.button(play_label).clicked() {
@@ -3591,6 +3656,8 @@ impl Editor {
                 body_gizmos,
                 contact_gizmos,
                 script_gizmo_lines,
+                ext: ext_host,
+                ext_painted,
                 game_gizmo_lines,
                 game_gizmos,
                 terrain_wire,
@@ -3707,6 +3774,89 @@ impl Editor {
             let (chosen_lock, chosen_ortho) = (*viewer.view_lock, *viewer.view_ortho);
             view_lock = chosen_lock;
             view_ortho = chosen_ortho;
+
+            // ---- the packages' own panels ----
+            // Floating windows, like every other tool window here: they can be
+            // moved and resized, they remember where they were put, and a
+            // package cannot take a docked slot away from the editor's own
+            // panels. Drawn AFTER the dock, so a panel is over the viewport it
+            // is about.
+            for i in 0..ext_host.windows.len() {
+                if !ext_host.windows[i].open {
+                    continue;
+                }
+                let title = ext_host.windows[i].title.clone();
+                let id = ext_host.windows[i].id;
+                let mut open = true;
+                let win = egui::Window::new(&title)
+                    .id(egui::Id::new(("ext_window", id)))
+                    .open(&mut open)
+                    .default_width(320.0)
+                    .resizable(true);
+                // `ed.window(...):focus()` brings the panel to the front. It
+                // does NOT move it: a window that jumps to the middle of the
+                // screen because a script mentioned it is a window somebody has
+                // to put back.
+                if ext_focus_window == Some(i) {
+                    ui.ctx().move_to_top(egui::LayerId::new(
+                        egui::Order::Middle,
+                        egui::Id::new(("ext_window", id)),
+                    ));
+                }
+                win.show(ui, |ui| ext_host.draw_window(i, ui));
+                if !open {
+                    ext_host.set_window_open(i, false);
+                }
+            }
+
+            // ---- 📦 Packages ----
+            if *show_packages {
+                let mut open = true;
+                egui::Window::new("📦 Packages")
+                    .open(&mut open)
+                    .default_width(520.0)
+                    .default_height(420.0)
+                    .resizable(true)
+                    .show(ui, |ui| {
+                        pkg_action = crate::packages_ui::window(
+                            ui,
+                            crate::packages_ui::PkgCtx {
+                                project_root: &ext_project_root,
+                                host: ext_host,
+                            },
+                            packages_state,
+                        );
+                    });
+                *show_packages = open;
+            }
+
+            // ---- what a package's `ed.message` asked to say ----
+            if let Some((title, body)) = ext_message.clone() {
+                let mut open = true;
+                let mut dismissed = false;
+                egui::Window::new(&title)
+                    .open(&mut open)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ui, |ui| {
+                        ui.label(&body);
+                        dismissed = ui.button("OK").clicked();
+                    });
+                if !open || dismissed {
+                    *ext_message = None;
+                }
+            }
+
+            // ---- a package's keyboard shortcut ----
+            // Read here rather than in the editor's own key handling so an
+            // extension cannot fire while a text field has the keyboard.
+            if !ext_host.shortcuts.is_empty() && !ui.ctx().egui_wants_keyboard_input() {
+                let pressed = crate::ext_wire::pressed_shortcut(ui.ctx());
+                if let Some(p) = pressed {
+                    ext_shortcut_click = ext_host.shortcuts.iter().position(|s| s.keys == p);
+                }
+            }
 
             // Viewport drop: spawn a model when an asset is released over the Scene
             // tab (panel drops — script-on-node — are consumed by those tabs first).
@@ -5369,6 +5519,26 @@ impl Editor {
         }
 
         self.apply_frame_commands(cmd, frame_pointer_down);
+        // ---- what the packages asked for this frame ----
+        // Menu items and shortcuts run their Lua HERE, not in the UI pass: a
+        // callback may open a panel, edit the scene or reload the package it
+        // belongs to, and none of that can happen while the host is drawing.
+        if let Some(i) = ext_menu_click {
+            self.ext.run_menu(i);
+        }
+        if let Some(i) = ext_shortcut_click {
+            self.ext.run_shortcut(i);
+        }
+        self.apply_ext_commands();
+        if let Some(dir) = pkg_action.open_folder {
+            crate::project::open_in_file_manager(&dir);
+        }
+        if pkg_action.reload {
+            self.ext_reload();
+        }
+        if self.ext.wants_repaint() {
+            ctx.request_repaint();
+        }
         // Collection on while the panel is shut can only be a script's doing, so
         // that is how ownership is known — no extra channel from Lua.
         self.perf_enabled_by_script =

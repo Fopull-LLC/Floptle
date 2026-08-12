@@ -374,6 +374,13 @@ struct Instance {
 /// Embeds Lua and runs the scripts attached to a world's nodes.
 pub struct ScriptHost {
     lua: Lua,
+    /// Extra folders a script name may resolve in, after the project's own
+    /// `scripts/`: the script folders of the project's installed **packages**,
+    /// in load order. Set by the editor when packages load.
+    ///
+    /// The project always wins, so installing a package can never change what
+    /// an existing script name means.
+    extra_script_dirs: Vec<std::path::PathBuf>,
     sources: HashMap<String, Source>,
     instances: HashMap<(u32, String), Instance>,
     errors: Vec<String>,

@@ -30,6 +30,7 @@ members = [
     "crates/floptle-script",   # Lua (LuaJIT/mlua) scripting host + hot reload
     "crates/floptle-net",      # networking (deferred; clean boundary stub for now)
     "crates/floptle-scene",    # data-driven scene/project model (RON) over the ECS
+    "crates/floptle-package",  # packages: package.ron manifests, install/link/remove, the registry index
     "crates/floptle-account",  # Foverse account: device-flow sign-in + Floptle Cloud client
     "crates/floptle-relay",    # open rendezvous relay: lobby codes, no port-forwarding (bin)
     "crates/floptle-dist",     # release manifest + bundle download/verify/unpack (Hub + export templates)
@@ -40,7 +41,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.54.0"
+version = "0.55.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"     # dual, Rust-ecosystem norm — docs/decisions/0009-license.md
 authors = ["Ty Johnston <tplordtp3@gmail.com>"]

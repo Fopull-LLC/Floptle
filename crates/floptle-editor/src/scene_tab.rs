@@ -1081,6 +1081,53 @@ impl EditorTabViewer<'_> {
             }
         }
 
+        // Package `handles.*`, painted over the Scene view. Not in the Game
+        // view: an authoring aid belongs where the author is working, and the
+        // Game tab is meant to show what a player would see.
+        if !game && !self.ext_painted.is_empty() {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("ext_handles")))
+                .with_clip_rect(rect);
+            crate::ext::handles::paint(&painter, self.ext_painted, self.ppp);
+        }
+
+        // Package Scene-view overlays: a panel of widgets pinned inside the
+        // viewport, the way an authoring tool's own toolbars are. Laid out down
+        // the RIGHT edge so they do not collide with the viewport toolbar, and
+        // each one carries its package's name so a stack of them can be told
+        // apart.
+        if !game && !self.ext.overlays.is_empty() {
+            let mut y = rect.top() + 8.0;
+            for i in 0..self.ext.overlays.len() {
+                if !self.ext.overlays[i].open || self.ext.overlays[i].error.is_some() {
+                    continue;
+                }
+                let name = self.ext.overlays[i].name.clone();
+                let area_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.right() - 268.0, y),
+                    egui::vec2(260.0, rect.bottom() - y - 8.0),
+                );
+                if area_rect.height() < 40.0 {
+                    break; // out of viewport; drawing them stacked off-screen helps nobody
+                }
+                let mut used = 0.0;
+                egui::Area::new(egui::Id::new(("ext_overlay", i)))
+                    .fixed_pos(area_rect.min)
+                    .constrain_to(rect)
+                    .show(ui.ctx(), |ui| {
+                        ui.set_max_width(260.0);
+                        let frame = egui::Frame::popup(ui.style());
+                        let r = frame.show(ui, |ui| {
+                            ui.label(egui::RichText::new(&name).small().strong());
+                            self.ext.draw_overlay(i, ui);
+                        });
+                        used = r.response.rect.height();
+                    });
+                y += used + 6.0;
+            }
+        }
+
         // Selected particle track's emitter/force gizmo — birth shape (warm), emit
         // direction (cyan-green), and force arrows (magenta), each carrying its color.
         if !game && !self.particle_gizmo.is_empty() {

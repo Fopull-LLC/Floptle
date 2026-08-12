@@ -1058,6 +1058,10 @@ impl Editor {
         self.check_autosave(); // offer crash recovery if an autosave is newer
         self.warn_about_shadowed_scenes();
         self.materials = self.load_materials();
+        // Packages last: an extension's first line may read the project's
+        // settings, its scenes or its assets, and all of those have to be
+        // loaded before it does.
+        self.ext_reload();
         // Re-scan the animation + particle registries against the NEW project
         // root. Without this they kept pointing at whatever was scanned at editor
         // startup (e.g. the workspace's `assets/`), so opening another project
@@ -1147,6 +1151,11 @@ impl Editor {
 
     /// Close the current project: empty world, no selection, clean history.
     pub(crate) fn close_project(&mut self) {
+        // Before anything else is torn down: an extension's `onUnload` may want
+        // to save what it was holding, and its stores are written here.
+        self.ext.save_prefs();
+        self.ext.teardown();
+        self.ext_painted.clear();
         self.reset_anim_bindings();
         self.world = World::new();
         floptle_scene::spawn_into(&empty_scene(), &mut self.world);
@@ -1586,6 +1595,14 @@ pub(crate) fn seed_example_shaders(project_root: &Path) {
 /// and the project dir as CWD, which broke every legacy ref ("everything
 /// dereferenced", 2026-07-20). Missing files fall back to the canonical join.
 pub(crate) fn resolve_asset_path(project_root: &Path, path: &str) -> PathBuf {
+    // `pkg://<id>/<rest>` — a package's own file, addressed by the package's
+    // IDENTITY rather than by where its folder happens to be. That is the whole
+    // point of the scheme: the same reference works whether the package was
+    // copied into the project, linked to a working copy on another disk, or
+    // renamed on the way in.
+    if let Some(p) = resolve_pkg_ref(project_root, path) {
+        return p;
+    }
     let p = PathBuf::from(path);
     if p.is_absolute() || p.exists() {
         return p;
@@ -1604,6 +1621,54 @@ pub(crate) fn resolve_asset_path(project_root: &Path, path: &str) -> PathBuf {
         }
     }
     joined
+}
+
+/// Resolve a `pkg://<id>/<rest>` reference, or `None` if it is not one.
+///
+/// Two answers, in order. A **linked** package is read where it is being
+/// written, so the editor keeps a small id → folder table filled in when
+/// packages load ([`set_package_roots`]). Everything else lives at the one
+/// place installed packages live, `<project>/packages/<id>/` — which is also
+/// where an exported build's copy lands, so a `pkg://` reference in a scene
+/// resolves in the player with no table at all.
+pub(crate) fn resolve_pkg_ref(project_root: &Path, path: &str) -> Option<PathBuf> {
+    let rest = path.strip_prefix(floptle_package::PKG_SCHEME)?;
+    let (id, rel) = rest.split_once('/')?;
+    if rel.is_empty() || id.is_empty() {
+        return None;
+    }
+    // A `..` here would let one package address another's files, or the
+    // project's. The manifest validator refuses them in folder lists for the
+    // same reason.
+    if Path::new(rel).components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return None;
+    }
+    let linked = PACKAGE_ROOTS.with(|m| m.borrow().get(id).cloned());
+    Some(match linked {
+        Some(root) => root.join(rel),
+        None => project_root.join(floptle_package::PACKAGES_DIR).join(id).join(rel),
+    })
+}
+
+thread_local! {
+    /// Where each loaded package's folder is, by id.
+    ///
+    /// Global rather than threaded through `resolve_asset_path` because that
+    /// function is called from around fifty places that have a project root and
+    /// nothing else, and this is written exactly once per package load and only
+    /// ever read. It exists for LINKED packages; every other kind resolves from
+    /// the project root alone.
+    static PACKAGE_ROOTS: std::cell::RefCell<std::collections::HashMap<String, PathBuf>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Tell `pkg://` where the loaded packages are. Called when they load.
+pub(crate) fn set_package_roots(roots: Vec<(String, PathBuf)>) {
+    PACKAGE_ROOTS.with(|m| {
+        let mut m = m.borrow_mut();
+        m.clear();
+        m.extend(roots);
+    });
 }
 
 /// An empty scene (just lighting) — used when a project is closed.

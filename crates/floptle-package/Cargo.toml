@@ -1,0 +1,14 @@
+[package]
+name = "floptle-package"
+description = "Packages: the `package.ron` manifest, semantic versions and ranges, the project's installed list, and install/link/remove from a folder, a Git URL or the registry."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true } # a manifest and the installed list are both RON documents
+ron = { workspace = true }
+serde_json = { workspace = true } # …but the registry CATALOGUE is a web file, so it is JSON

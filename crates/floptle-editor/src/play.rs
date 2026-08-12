@@ -683,6 +683,15 @@ impl Editor {
         // while editing must not read as a press the instant Play starts, and a
         // half-finished motion must not survive into (or out of) the session.
         self.reset_action_state();
+        // The packages hear about it before anything else moves: a tool that
+        // has to stand down for Play (an overlay, a pending edit) needs to do
+        // so while the scene is still the one it was reasoning about.
+        self.ext.fire(if self.playing {
+            crate::ext::HookKind::Stop
+        } else {
+            crate::ext::HookKind::Play
+        });
+        self.drain_ext_log();
         if self.playing {
             self.playing = false;
             self.paused = false;

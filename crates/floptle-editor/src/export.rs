@@ -476,6 +476,29 @@ pub(crate) fn resolve_entry_scene(project_root: &Path, entry: &str) -> Option<Pa
     [scenes.join(format!("{entry}.ron")), scenes.join(entry)].into_iter().find(|c| c.is_file())
 }
 
+/// Copy every LINKED package into the shipped project, under the same
+/// `packages/<id>/` a copied one occupies. Returns how many were bundled.
+///
+/// A link is a development convenience — read it where it is being written —
+/// and it is exactly the thing that would go missing from a build. Nothing is
+/// reported as an error: a link pointing at a folder that has since moved is
+/// worth a Console line, not a failed export.
+fn ship_linked_packages(proj: &Path, ship_assets: &Path) -> Result<usize, String> {
+    let Ok(reg) = floptle_package::Registry::load(proj) else { return Ok(0) };
+    let mut n = 0;
+    for entry in reg.packages.iter().filter(|e| e.enabled && e.source.is_linked()) {
+        let from = entry.root_in(proj);
+        if !from.is_dir() {
+            continue;
+        }
+        let to = ship_assets.join(floptle_package::PACKAGES_DIR).join(&entry.id);
+        floptle_package::install::copy_dir(&from, &to)
+            .map_err(|e| format!("copy linked package `{}`: {e}", entry.id))?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// Stamp out a runnable build: an engine binary + the project's assets + the
 /// `floptle-game.ron` manifest that flips it into player mode.
 pub(crate) fn export_game_with(
@@ -532,6 +555,13 @@ pub(crate) fn export_game_with(
     // LAST — a failed export must never leave a runnable-looking exe that,
     // missing its floptle-game.ron, silently boots as the EDITOR.
     let files = copy_tree(&proj, &ship_assets, true).map_err(|e| format!("copy assets: {e}"))?;
+    // A LINKED package is not inside the project, so the copy above missed it —
+    // it lives wherever the person writing it keeps it. A build has to carry
+    // what it needs, so linked packages are materialised into the shipped
+    // `packages/<id>/` here, exactly where a copied one already sits. That is
+    // also what makes `pkg://` resolve in a player with no package host: the
+    // scheme falls back to `<project>/packages/<id>/`.
+    let linked = ship_linked_packages(&proj, &ship_assets)?;
     let port = make_portable(&ship_assets, &proj);
     if let Some(tpl) = target.readme {
         std::fs::write(out_c.join("README.txt"), tpl.replace("{exe}", &exe_name))
@@ -549,6 +579,9 @@ pub(crate) fn export_game_with(
     floptle_dist::set_executable(&shipped);
 
     let mut msg = format!("exported {exe_name} + {files} asset file(s) to {}", out_c.display());
+    if linked > 0 {
+        msg.push_str(&format!(" — bundled {linked} linked package(s)"));
+    }
     if port.rewritten > 0 {
         msg.push_str(&format!(
             " — made {} file(s) portable (absolute paths into the project)",

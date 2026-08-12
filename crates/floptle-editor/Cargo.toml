@@ -33,6 +33,13 @@ floptle-ui = { path = "../floptle-ui" }
 floptle-assets = { path = "../floptle-assets" }
 floptle-image = { path = "../floptle-image" }   # image documents behind the 🖼 Image tab
 floptle-script = { path = "../floptle-script" }
+floptle-package = { path = "../floptle-package" }
+# The editor runs its OWN Lua state for package extensions — separate from the
+# game's, so a broken extension cannot land in a running game's host and a
+# reload can throw the whole state away.
+mlua = { version = "0.10", features = ["luajit", "vendored"] }
+serde_json = { workspace = true } # the registry catalogue + an extension's json.*
+ureq = { workspace = true }       # edit-time http.* for extensions that declared Network
 
 winit = { workspace = true }
 wgpu = { workspace = true }

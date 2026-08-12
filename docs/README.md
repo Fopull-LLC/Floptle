@@ -32,6 +32,8 @@ linked here, it isn't finished — a test enforces that.
 | Go multiplayer | [multiplayer.md](multiplayer.md) |
 | Ship a build | [export-builds.md](export-builds.md) |
 | Talk to a website / sell something | [web-api.md](web-api.md) |
+| Install a package, or write one to share | [packages.md](packages.md) |
+| Add my own tools to the editor | [editor-scripting.md](editor-scripting.md) |
 | Understand *why* it's built this way | [decisions/](decisions/README.md) |
 | Light a 2D scene | [2d.md](2d.md#2d-lighting) — and [2d-lighting-proposal.md](2d-lighting-proposal.md) for what is still to come |
 
@@ -80,6 +82,12 @@ The build-something guides. Each one is a path from nothing to a working result.
   testing on one desk, and shipping (relay, dedicated server, interest management).
 - [web-api.md](web-api.md) — talking to a **website or your own server**: the account
   flow, missions, and Fobucks.
+- [packages.md](packages.md) — **packages**: modular expansions anybody can write and
+  share — editor tools, scripts, art — installed from a folder, a repository or the
+  browser, and how to write and publish one of your own.
+- [editor-scripting.md](editor-scripting.md) — the **editor API** a package gets: menus,
+  panels, Scene-view overlays, world-space handles, scene edits with undo, preferences,
+  and talking to a server.
 - [export-builds.md](export-builds.md) — **shipping a build** players can run.
 - [updating-the-hub.md](updating-the-hub.md) — the one **manual Hub update**; from
   v0.21.2 onward the Hub updates itself.

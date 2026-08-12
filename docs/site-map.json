@@ -39,6 +39,12 @@
       ]
     },
     {
+      "id": "packages",
+      "title": "Packages",
+      "blurb": "Modular expansions anybody can write and share: editor tools, scripts, art. Install one, or publish your own.",
+      "pages": ["packages.md", "editor-scripting.md"]
+    },
+    {
       "id": "interface",
       "title": "Menus and HUDs",
       "blurb": "The UI layer, from the tab that draws it to the code that binds it.",

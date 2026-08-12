@@ -1926,6 +1926,7 @@ impl ScriptHost {
 
         Self {
             lua,
+            extra_script_dirs: Vec::new(),
             sources: HashMap::new(),
             instances: HashMap::new(),
             errors: Vec::new(),
@@ -2101,6 +2102,12 @@ impl ScriptHost {
     /// already shown must not be shown again next frame.
     pub fn take_captions(&self) -> Vec<crate::access_api::Caption> {
         std::mem::take(&mut *self.caption_queue.borrow_mut())
+    }
+
+    /// The package script folders a script name may also resolve in, after the
+    /// project's own. Set when the project's packages load; cleared with them.
+    pub fn set_extra_script_dirs(&mut self, dirs: Vec<std::path::PathBuf>) {
+        self.extra_script_dirs = dirs;
     }
 
     /// Feed the running scene's name (before `run`) — what `scene.current()` reads.
@@ -4670,7 +4677,7 @@ impl ScriptHost {
     /// script before ANY `update`, so a manager is reachable even by a script that ticks
     /// first.
     fn ensure_instance(&mut self, e: Entity, name: &str, scripts_dir: &Path) -> bool {
-        let path = resolve_script_path(scripts_dir, name);
+        let path = resolve_script_path(scripts_dir, &self.extra_script_dirs, name);
         let Some(generation) = self.ensure_source(name, &path) else {
             self.record_error(name, format!("{name}: script not found ({})", path.display()));
             return false;
@@ -5340,16 +5347,27 @@ impl ScriptHost {
     }
 }
 
-fn resolve_script_path(scripts_dir: &Path, name: &str) -> PathBuf {
-    let direct = scripts_dir.join(format!("{name}.lua"));
-    if direct.exists() {
-        return direct;
+/// Where a script name resolves to.
+///
+/// The project's own `scripts/` folder first, then any **package** script
+/// folders in load order. The project wins on purpose: a project that has a
+/// `player.lua` and installs a package that also ships one keeps its own, and a
+/// package cannot change what a game's scripts mean by being installed.
+///
+/// A name that resolves nowhere comes back as the project-relative path it
+/// would have had, so the error names the file somebody meant to write.
+fn resolve_script_path(scripts_dir: &Path, extra: &[PathBuf], name: &str) -> PathBuf {
+    for dir in std::iter::once(scripts_dir).chain(extra.iter().map(|p| p.as_path())) {
+        let direct = dir.join(format!("{name}.lua"));
+        if direct.exists() {
+            return direct;
+        }
+        let nested = dir.join(name).with_extension("lua");
+        if nested.exists() {
+            return nested;
+        }
     }
-    let path = scripts_dir.join(name).with_extension("lua");
-    if path.exists() {
-        return path;
-    }
-    direct
+    scripts_dir.join(format!("{name}.lua"))
 }
 
 #[cfg(test)]
@@ -5363,7 +5381,7 @@ mod host_tests {
         std::fs::create_dir_all(dir.join("scripts/fighterScripts")).unwrap();
         std::fs::write(dir.join("scripts/fighterScripts/attack.lua"), "return {}\n").unwrap();
 
-        let path = resolve_script_path(&dir.join("scripts"), "fighterScripts/attack");
+        let path = resolve_script_path(&dir.join("scripts"), &[], "fighterScripts/attack");
         assert_eq!(path, dir.join("scripts/fighterScripts/attack.lua"));
 
         let _ = std::fs::remove_dir_all(&dir);
