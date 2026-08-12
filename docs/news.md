@@ -1,5 +1,12 @@
 ## Just shipped
 
+**v0.55.3** — **installing a package is no longer the same as running it.** A
+package from the catalogue or a Git URL that asks for anything — the network, your
+project's files, your browser — now arrives installed but switched **off**, with
+what it asked for on its row, and runs when you tick the box. One that asks for
+nothing is enabled on arrival, as before. Listing on the catalogue is automatic, so
+that tick is the last point at which anybody looks.
+
 **v0.55.2** — **renaming a scene now takes its terrain with it.** Terrain, the
 blockout map, vertex paint and autosaves are all filed under the scene's name, so
 renaming the scene used to leave them behind and the scene reopened with an empty
