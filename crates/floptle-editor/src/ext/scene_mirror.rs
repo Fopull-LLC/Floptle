@@ -142,17 +142,39 @@ impl SceneMirror {
         mirror
     }
 
-    /// A conservative world-space box around a node, from its bounding sphere.
+    /// A world-space axis-aligned box around a node.
     ///
-    /// Stated plainly because it matters to anybody measuring a room: this is a
-    /// SPHERE's box, so it is loose on anything long and thin. It is the honest
-    /// answer available without loading and transforming the node's geometry,
-    /// which is not a thing a per-frame API should do.
+    /// Built from the node's ORIENTED half-extents where it has them — the box
+    /// is rotated by the node's rotation and the result is the smallest
+    /// axis-aligned box containing it, which is tight for anything square-on
+    /// and correct for anything turned. A node with no measurable geometry
+    /// falls back to its bounding sphere, which is loose on anything long and
+    /// thin and is said so plainly here because it changes what the number is
+    /// good for.
+    ///
+    /// The oriented box itself is on [`MirrorNode::half`] beside the rotation —
+    /// that is the pair to use when a box's ORIENTATION matters.
     pub(crate) fn aabb(&self, id: u32) -> Option<([f64; 3], [f64; 3])> {
         let n = self.get(id)?;
-        let r = n.radius.unwrap_or(0.0) as f64;
         let c = DVec3::from(n.world_pos);
-        let e = DVec3::splat(r);
+        let e = match n.half {
+            Some(half) => {
+                // The extent of a rotated box along each world axis is the sum
+                // of |axis · column| over the box's three axes — i.e. the
+                // absolute value of the rotation matrix times the half-extents.
+                let rot = floptle_core::math::Quat::from_xyzw(n.rot[0], n.rot[1], n.rot[2], n.rot[3]);
+                let rot = if rot.is_normalized() { rot } else { floptle_core::math::Quat::IDENTITY };
+                let m = floptle_core::math::Mat3::from_quat(rot);
+                let h = floptle_core::math::Vec3::from(half);
+                let e = floptle_core::math::Vec3::new(
+                    m.x_axis.x.abs() * h.x + m.y_axis.x.abs() * h.y + m.z_axis.x.abs() * h.z,
+                    m.x_axis.y.abs() * h.x + m.y_axis.y.abs() * h.y + m.z_axis.y.abs() * h.z,
+                    m.x_axis.z.abs() * h.x + m.y_axis.z.abs() * h.y + m.z_axis.z.abs() * h.z,
+                );
+                e.as_dvec3()
+            }
+            None => DVec3::splat(n.radius.unwrap_or(0.0) as f64),
+        };
         Some(((c - e).into(), (c + e).into()))
     }
 }
@@ -354,6 +376,41 @@ mod tests {
         assert_eq!(m.get(e.index()).unwrap().radius, Some(6.0));
     }
 
+    /// A box turned 45° about Y is wider on both world axes than its own
+    /// half-extents — the whole reason the oriented box is kept separately.
+    /// A node with no oriented box still answers `bounds`, from its sphere.
+    #[test]
+    fn a_node_with_only_a_radius_falls_back_to_its_sphere() {
+        let mut w = World::new();
+        let e = w.spawn();
+        w.insert(e, floptle_core::Name("Blob".into()));
+        w.insert(e, floptle_core::Matter::Empty);
+        w.insert(e, floptle_core::Transform::from_translation(DVec3::new(1.0, 0.0, 0.0)));
+        let m = SceneMirror::build(&w, &|_, _| Some(3.0), &|_, _| None);
+        let (min, max) = m.aabb(e.index()).unwrap();
+        assert_eq!(min, [-2.0, -3.0, -3.0]);
+        assert_eq!(max, [4.0, 3.0, 3.0]);
+        assert!(m.get(e.index()).unwrap().half.is_none());
+    }
+
+    #[test]
+    fn a_turned_box_widens_the_world_aligned_one() {
+        let mut w = World::new();
+        let e = w.spawn();
+        w.insert(e, floptle_core::Name("Crate".into()));
+        w.insert(e, floptle_core::Matter::Empty);
+        let mut t = floptle_core::Transform::IDENTITY;
+        t.rotation = floptle_core::math::Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
+        w.insert(e, t);
+        let m = SceneMirror::build(&w, &|_, _| Some(1.0), &|_, _| Some([1.0, 1.0, 1.0]));
+        let (min, max) = m.aabb(e.index()).unwrap();
+        // √2 on X and Z, untouched on Y.
+        assert!((max[0] - 2.0f64.sqrt()).abs() < 1e-5, "{}", max[0]);
+        assert!((max[2] - 2.0f64.sqrt()).abs() < 1e-5, "{}", max[2]);
+        assert!((max[1] - 1.0).abs() < 1e-6, "{}", max[1]);
+        assert!((min[0] + 2.0f64.sqrt()).abs() < 1e-5);
+    }
+
     #[test]
     fn a_ray_finds_the_nearest_box_and_reports_where_it_entered() {
         let mut w = World::new();
@@ -448,10 +505,8 @@ mod tests {
         assert!(m.find_all("Window").is_empty());
     }
 
-    /// Every `Matter` variant must have a stable name — a `_ =>` arm here would
-    /// mean a new node kind silently reads as something it is not.
     #[test]
-    fn the_box_derives_from_the_sphere_and_is_centred_on_the_node() {
+    fn a_square_on_box_is_its_own_extents_around_the_node() {
         let mut w = World::new();
         let e = w.spawn();
         w.insert(e, floptle_core::Name("Box".into()));

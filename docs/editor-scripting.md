@@ -127,7 +127,19 @@ local key = ed.prefs.get("apiKey", "")
 Nothing reaches outside the project, and nothing may climb out with `..`.
 
 `require("lib/helper")` loads another Lua file **from your own package**, once,
-into the same environment, and returns what it returned.
+into the same environment, and returns what it returned. Paths are relative to
+the package root, not to `editor/`.
+
+> **Keep your library files out of `editor/`.** Everything under `editor/` runs
+> on its own when the package loads — that is what `editor/` means — so a module
+> kept there is executed once as a script *and* again when something requires it.
+> Put them beside it and require them by path:
+>
+> ```text
+> my-package/
+>   editor/main.lua      runs
+>   lib/client.lua       required by main.lua as require("lib/client")
+> ```
 
 ---
 
@@ -147,14 +159,20 @@ one.
 | `scene.raycast(origin, dir [, maxDist])` | `{ node, point, normal, distance }`, or `nil` |
 
 `scene.info(id)` returns `{ id, name, kind, parent, children, pos, worldPos, rot,
-scale, radius, tags, layer, visible, scripts, asset }`. `pos` is local; `worldPos`
+scale, radius, extents, tags, layer, visible, scripts, asset }`. `pos` is local; `worldPos`
 has the parents applied. `kind` is a stable name — `"mesh"`, `"camera"`,
 `"pointLight"`, `"terrain"`, `"tilemap"`, `"empty"`… — that will not change
 because a node type gained a field.
 
-> `bounds` is a bounding **sphere's** box, so it is loose on anything long and
-> thin. It is the honest answer available without loading and transforming the
-> node's geometry.
+`extents` is the node's **oriented** half-extents in world units — read it with
+`rot` when which way a thing faces matters, which is most of the time for a
+placement or measurement tool. `bounds` is the world-aligned box around that same
+oriented box, so a crate turned 45° reports a wider `bounds` than its `extents`,
+correctly.
+
+> A node with no measurable geometry — a folder, a light, a camera — has no
+> `extents`, and its `bounds` falls back to its bounding sphere, which is loose
+> on anything long and thin.
 
 `scene.raycast` tests each node's oriented **box**, not its triangles — exact for
 the built-in shapes, right to within its import bounds for a model, and wrong for
@@ -229,14 +247,20 @@ if gui.button("Go", "starts the thing") then go() end
 `radio(selected, text) → clicked` · `selectable(selected, text) → clicked`
 
 **Values** — `slider(value, min, max [, label])` · `drag(value [, speed [, label]])` ·
-`textField(value [, hint])` · `passwordField(value)` · `textArea(value [, rows])` ·
+`textField(value [, hint [, grabKeyboard]])` · `passwordField(value)` ·
+`textArea(value [, rows])` ·
 `combo(label, options, index) → index` (1-based) · `colorEdit(r, g, b) → {r, g, b}`
 
 **Layout** — `horizontal(fn)` · `vertical(fn)` · `group(fn)` · `indent(fn)` ·
 `scroll(fn)` · `collapsing(title, fn)` · `enabled(on, fn)` · `width(px, fn)` ·
-`separator()` · `space([px])` · `available() → {w, h}`
+`height(px, fn)` · `separator()` · `space([px])` · `flexibleSpace()` (pushes
+what follows to the far end of a row) · `available() → {w, h}`
 
-**Feedback** — `progress(fraction [, text])` · `spinner()`
+**Feedback** — `progress(fraction [, text])` · `spinner()` ·
+`helpBox(text [, "info" | "warn" | "error"])`
+
+Pass `true` as `textField`'s third argument to take the keyboard this frame —
+what a panel opened by a shortcut wants, so it can be typed into straight away.
 
 **Painting**, for charts, heatmaps and anything there is no widget for.
 Coordinates are pixels from the panel's top-left.
@@ -305,7 +329,17 @@ one level deep rather than `table: 0x…`.
 Standard Lua: `assert` `error` `ipairs` `next` `pairs` `pcall` `xpcall` `select`
 `type` `tostring` `tonumber` `rawget` `rawset` `rawequal` `rawlen`
 `setmetatable` `getmetatable` `unpack`, plus `string`, `table`, `math`,
-`coroutine`, and `os.time` / `os.clock` / `os.date` / `os.difftime`.
+`coroutine`, `bit` (LuaJIT's, for hashing and packing), and `os.time` /
+`os.clock` / `os.date` / `os.difftime`.
+
+**There is no `_G`.** The environment is an allow-list, not a view of the real
+globals, so there is nothing to reach through. To probe for something optional,
+just read it — an unknown name is `nil`:
+
+```lua
+local bit = bit
+if not bit then … end
+```
 
 ---
 

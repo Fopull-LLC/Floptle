@@ -264,19 +264,27 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             })
         })?,
     )?;
+    // The third argument asks for the keyboard THIS frame. A panel that opens
+    // on a shortcut and cannot be typed into until you click it is a panel that
+    // gets clicked into every single time.
     t.set(
         "textField",
-        scope.create_function(move |_, (value, hint): (String, Option<String>)| {
-            with(slot, |ui| {
-                let mut v = value;
-                let mut w = egui::TextEdit::singleline(&mut v);
-                if let Some(h) = &hint {
-                    w = w.hint_text(h);
-                }
-                ui.add(w);
-                v
-            })
-        })?,
+        scope.create_function(
+            move |_, (value, hint, focus): (String, Option<String>, Option<bool>)| {
+                with(slot, |ui| {
+                    let mut v = value;
+                    let mut w = egui::TextEdit::singleline(&mut v);
+                    if let Some(h) = &hint {
+                        w = w.hint_text(h);
+                    }
+                    let r = ui.add(w);
+                    if focus.unwrap_or(false) {
+                        r.request_focus();
+                    }
+                    v
+                })
+            },
+        )?,
     )?;
     t.set(
         "passwordField",
@@ -396,6 +404,25 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
         })?,
     )?;
     t.set(
+        "height",
+        scope.create_function(move |_, (px, cb): (f32, Function)| {
+            nest(slot, &cb, move |ui, f| {
+                ui.allocate_ui(egui::vec2(ui.available_width(), px), |inner| f(inner));
+            })
+        })?,
+    )?;
+    // Push everything after this to the far end of the row. egui has no
+    // flexible spacer of its own, but claiming the remaining width is exactly
+    // what one is.
+    t.set(
+        "flexibleSpace",
+        scope.create_function(move |_, ()| {
+            with(slot, |ui| {
+                ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
+            })
+        })?,
+    )?;
+    t.set(
         "separator",
         scope.create_function(move |_, ()| with(slot, |ui| ui.separator()).map(|_| ()))?,
     )?;
@@ -433,6 +460,27 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
         })?,
     )?;
     t.set("spinner", scope.create_function(move |_, ()| with(slot, |ui| ui.spinner()).map(|_| ()))?)?;
+    // A boxed note: `"info"` (the default), `"warn"` or `"error"`. Its own
+    // widget rather than a coloured label, because a tool that has something to
+    // tell you should look like it is telling you something.
+    t.set(
+        "helpBox",
+        scope.create_function(move |_, (text, kind): (String, Option<String>)| {
+            with(slot, |ui| {
+                let (mark, col) = match kind.as_deref() {
+                    Some("error") => ("✖", egui::Color32::from_rgb(230, 120, 110)),
+                    Some("warn") => ("⚠", egui::Color32::from_rgb(228, 190, 105)),
+                    _ => ("ℹ", ui.visuals().weak_text_color()),
+                };
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(col, mark);
+                        ui.add(egui::Label::new(egui::RichText::new(text).color(col)).wrap());
+                    });
+                });
+            })
+        })?,
+    )?;
 
     // ---- painting ----------------------------------------------------------
     // Enough to draw a heatmap, a radar chart or a chat bubble without inventing

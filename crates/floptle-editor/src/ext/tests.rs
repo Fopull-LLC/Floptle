@@ -107,6 +107,32 @@ fn an_undeclared_capability_is_absent_not_refused() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
+/// A package must be able to hash something. `bit` is pure arithmetic with no
+/// route to the host, so it is on the allow-list — and this is also the check
+/// that the allow-list does not quietly lose an entry.
+#[test]
+fn the_environment_has_what_a_hash_needs() {
+    let proj = temp("bitlib");
+    install(
+        &proj,
+        "com.t.a",
+        "",
+        r#"
+        -- The sandbox has no `_G`, so a package probes for an optional global
+        -- by reading it: an unknown name is simply nil.
+        ed.log(type(bit), type(_G))
+        if bit then
+            ed.log(tostring(bit.band(0xF0, 0x3C)), tostring(bit.tobit(0xFFFFFFFF)))
+        end
+        "#,
+    );
+    let host = host_for(&proj);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert_eq!(log[0], "table\tnil");
+    assert_eq!(log[1], "48\t-1");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 #[test]
 fn a_declared_capability_is_there() {
     let proj = temp("perm2");

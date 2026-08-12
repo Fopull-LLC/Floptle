@@ -78,6 +78,12 @@ fn base_globals(lua: &Lua, env: &Table) -> mlua::Result<()> {
         "assert", "error", "ipairs", "next", "pairs", "pcall", "rawequal", "rawget", "rawlen",
         "rawset", "select", "setmetatable", "getmetatable", "tonumber", "tostring", "type",
         "unpack", "xpcall", "string", "table", "math", "coroutine",
+        // LuaJIT's bit library. Pure integer arithmetic with no route to the
+        // host — and the difference between a package being able to compute a
+        // hash and not. Hashing is not exotic: a tool that uploads a scene
+        // wants to know whether it has changed, and one that signs in wants a
+        // challenge.
+        "bit",
     ] {
         if let Ok(v) = g.get::<Value>(name) {
             env.set(name, v)?;
@@ -760,6 +766,19 @@ fn scene_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
                 rot.set("w", n.rot[3])?;
                 t.set("rot", rot)?;
                 t.set("radius", n.radius)?;
+                // The ORIENTED half-extents, in world units, beside the
+                // rotation that turns them. A tool that cares which way a thing
+                // is facing needs the pair, not a box that has forgotten.
+                t.set(
+                    "extents",
+                    match n.half {
+                        Some(h) => Value::Table(xyz(
+                            lua,
+                            [h[0] as f64, h[1] as f64, h[2] as f64],
+                        )?),
+                        None => Value::Nil,
+                    },
+                )?;
                 t.set("tags", n.tags.clone())?;
                 t.set("layer", n.layer.clone())?;
                 t.set("visible", n.visible)?;
