@@ -560,6 +560,40 @@ impl Editor {
     /// Rename a file/folder to `new_name` within its current parent directory. If the
     /// typed name has no extension, the original file's extension is kept (so naming a new
     /// `.lua` script "player" yields "player.lua", and a rename can't drop the extension).
+    /// The directories holding files keyed by a scene's STEM rather than by its
+    /// path — terrain fields, the blockout map, vertex paint, autosaves.
+    const SCENE_SIDECAR_DIRS: [&'static str; 4] = ["terrain", "maps", "paint", ".floptle/autosave"];
+
+    /// Every sidecar that belongs to `old_stem`, paired with where it has to go
+    /// for `new_stem` to find it.
+    ///
+    /// Matched by the `<stem>.` PREFIX rather than by a list of extensions, so
+    /// this keeps working when a new per-scene file is invented — the failure
+    /// mode of an extension list is that the file nobody remembered is the one
+    /// that goes missing, which is exactly the bug this exists to fix.
+    /// `Terrain 1.ron` and `Terrain 10.ron` do not collide, because the dot is
+    /// part of the prefix.
+    pub(crate) fn scene_sidecar_moves(&self, old_stem: &str, new_stem: &str) -> Vec<(PathBuf, PathBuf)> {
+        let mut out = Vec::new();
+        if old_stem.is_empty() || new_stem.is_empty() || old_stem == new_stem {
+            return out;
+        }
+        let prefix = format!("{old_stem}.");
+        for dir in Self::SCENE_SIDECAR_DIRS {
+            let d = self.project_root.join(dir);
+            let Ok(entries) = std::fs::read_dir(&d) else { continue };
+            for entry in entries.flatten() {
+                if !entry.file_type().is_ok_and(|t| t.is_file()) {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let Some(rest) = name.strip_prefix(&prefix) else { continue };
+                out.push((d.join(&name), d.join(format!("{new_stem}.{rest}"))));
+            }
+        }
+        out
+    }
+
     pub(crate) fn rename_asset(&mut self, from: &str, new_name: &str) {
         let typed = new_name.trim();
         if typed.is_empty() {
@@ -584,9 +618,68 @@ impl Editor {
             eprintln!("  rename: {} already exists", dst.display());
             return;
         }
+        // A SCENE carries files that are keyed by its stem — terrain fields, the
+        // map, vertex paint, autosaves. Renaming the `.ron` alone orphans every
+        // one of them, and the symptom is an empty terrain that looks exactly
+        // like work that was never done.
+        let is_scene = src.extension().is_some_and(|e| e == "ron")
+            && src.starts_with(self.project_root.join("scenes"));
+        let sidecars = if is_scene {
+            let old_stem = Self::scene_name_of(&src);
+            let new_stem = Self::scene_name_of(&dst);
+            self.scene_sidecar_moves(&old_stem, &new_stem)
+        } else {
+            Vec::new()
+        };
+        // Decided while `src` still exists — after the rename there is nothing
+        // left to compare against.
+        let was_open = is_scene && {
+            let open_abs = self.project_root.join(self.scene_rel_or_default());
+            open_abs == src
+                || open_abs.canonicalize().ok().zip(src.canonicalize().ok()).is_some_and(|(a, b)| a == b)
+        };
+        // Refuse the WHOLE rename if any sidecar would land on a file that is
+        // already there. Half a rename leaves a scene pointing at another
+        // scene's terrain, which is worse than not renaming at all.
+        if let Some((_, taken)) = sidecars.iter().find(|(_, to)| to.exists()) {
+            let msg = format!(
+                "rename refused: {} already exists — rename or move it first",
+                taken.display()
+            );
+            eprintln!("  {msg}");
+            self.console.push(floptle_script::LogLevel::Error, msg.clone(), None);
+            self.toast = Some((format!("⚠  {msg}"), 8.0));
+            return;
+        }
         if let Err(e) = std::fs::rename(&src, &dst) {
             eprintln!("  rename failed: {e}");
             return;
+        }
+        // The scene file has moved; bring its data with it. A sidecar that fails
+        // to move is reported rather than swallowed — the user needs to know
+        // which file to go and find.
+        let mut moved = 0usize;
+        for (from_p, to_p) in &sidecars {
+            match std::fs::rename(from_p, to_p) {
+                Ok(()) => moved += 1,
+                Err(e) => {
+                    let msg =
+                        format!("scene renamed, but {} did not follow: {e}", from_p.display());
+                    self.console.push(floptle_script::LogLevel::Error, msg, None);
+                }
+            }
+        }
+        if moved > 0 {
+            self.console.push(
+                floptle_script::LogLevel::Debug,
+                format!("renamed {moved} file(s) that belong to this scene"),
+                None,
+            );
+        }
+        // If the OPEN scene was the one renamed, follow it — otherwise the next
+        // save writes its terrain back under the old name and orphans it again.
+        if was_open {
+            self.set_scene_file(&dst);
         }
         let dst_str = dst.to_string_lossy().to_string();
         // Follow the file in any open IDE tab, the graph tab and the selection.
@@ -2033,4 +2126,104 @@ mod path_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Build a project whose scene owns one of every per-scene file.
+    fn project_with_sidecars(tag: &str, stem: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("flop-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["scenes/cutscenes", "terrain", "maps", "paint", ".floptle/autosave"] {
+            let _ = std::fs::create_dir_all(root.join(d));
+        }
+        let scene = root.join(format!("scenes/cutscenes/{stem}.ron"));
+        let _ = std::fs::write(&scene, "()");
+        let _ = std::fs::write(root.join(format!("terrain/{stem}.1.cfield")), b"field-1");
+        let _ = std::fs::write(root.join(format!("terrain/{stem}.2.cfield")), b"field-2");
+        let _ = std::fs::write(root.join(format!("terrain/{stem}.1.meta")), b"meta");
+        let _ = std::fs::write(root.join(format!("terrain/{stem}.palette")), b"palette");
+        let _ = std::fs::write(root.join(format!("maps/{stem}.map.ron")), b"map");
+        let _ = std::fs::write(root.join(format!("paint/{stem}.vpaint")), b"paint");
+        let _ = std::fs::write(root.join(format!(".floptle/autosave/{stem}.ron")), b"auto");
+        (root, scene)
+    }
+
+    /// The bug that presented as data loss: a scene rename moved the `.ron` and
+    /// orphaned everything keyed by its stem, so the terrain opened empty and
+    /// looked exactly like work that was never done.
+    #[test]
+    fn renaming_a_scene_takes_its_terrain_map_and_paint_with_it() {
+        let (root, scene) = project_with_sidecars("rename-carries", "TheVision");
+        let mut ed = Editor { project_root: root.clone(), ..Default::default() };
+        ed.set_scene_file(&scene);
+
+        ed.rename_asset(&scene.to_string_lossy(), "Part 1 Mission");
+
+        for rel in [
+            "terrain/Part 1 Mission.1.cfield",
+            "terrain/Part 1 Mission.2.cfield",
+            "terrain/Part 1 Mission.1.meta",
+            "terrain/Part 1 Mission.palette",
+            "maps/Part 1 Mission.map.ron",
+            "paint/Part 1 Mission.vpaint",
+            ".floptle/autosave/Part 1 Mission.ron",
+            "scenes/cutscenes/Part 1 Mission.ron",
+        ] {
+            assert!(root.join(rel).exists(), "{rel} did not follow the rename");
+        }
+        // Multi-volume terrain keeps its per-id data distinct rather than
+        // collapsing two fields onto one name.
+        assert_eq!(
+            std::fs::read(root.join("terrain/Part 1 Mission.1.cfield")).unwrap(),
+            b"field-1"
+        );
+        // Nothing is left behind under the old name to be found later and
+        // mistaken for the live data.
+        assert!(!root.join("terrain/TheVision.1.cfield").exists());
+        // The OPEN scene follows, or the next save writes its terrain back under
+        // the old name and orphans it all over again.
+        assert_eq!(ed.scene_name, "Part 1 Mission");
+        assert_eq!(ed.scene_path(), root.join("scenes/cutscenes/Part 1 Mission.ron"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Half a rename would leave a scene pointing at another scene's terrain,
+    /// which is worse than not renaming at all — so it is all or nothing.
+    #[test]
+    fn a_rename_that_would_clobber_a_sidecar_is_refused_whole() {
+        let (root, scene) = project_with_sidecars("rename-clobber", "TheVision");
+        // Something already owns the name being renamed to.
+        let _ = std::fs::write(root.join("terrain/Part 1 Mission.1.cfield"), b"someone-else");
+        let mut ed = Editor { project_root: root.clone(), ..Default::default() };
+        ed.set_scene_file(&scene);
+
+        ed.rename_asset(&scene.to_string_lossy(), "Part 1 Mission");
+
+        assert!(scene.exists(), "the scene must not move when its data cannot");
+        assert!(root.join("terrain/TheVision.1.cfield").exists());
+        assert_eq!(
+            std::fs::read(root.join("terrain/Part 1 Mission.1.cfield")).unwrap(),
+            b"someone-else",
+            "an existing file must never be overwritten by a rename"
+        );
+        assert_eq!(ed.scene_name, "TheVision");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A rename that already happened is diagnosable after the fact: the field
+    /// under the old stem is what turns "my terrain is gone" into "your terrain
+    /// is one rename away".
+    #[test]
+    fn a_field_left_under_the_old_scene_name_is_found_as_an_orphan() {
+        let (root, _scene) = project_with_sidecars("rename-orphan", "TheVision");
+        let mut ed = Editor { project_root: root.clone(), ..Default::default() };
+        ed.set_scene_file(&root.join("scenes/cutscenes/Part 1 Mission.ron"));
+
+        assert_eq!(ed.orphaned_field_stems(1), vec!["TheVision".to_string()]);
+        // Once the data is where this scene expects it, nothing is reported —
+        // this must not cry orphan at every project that has more than one scene.
+        let _ = std::fs::rename(
+            root.join("terrain/TheVision.1.cfield"),
+            root.join("terrain/Part 1 Mission.1.cfield"),
+        );
+        assert!(ed.orphaned_field_stems(1).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -1602,6 +1602,28 @@ impl Editor {
         self.project_root.join("terrain").join(format!("{}.{id}.cfield", self.scene_name))
     }
 
+    /// Stems of `.cfield` files carrying THIS terrain id under a DIFFERENT scene
+    /// name. Every per-scene file is keyed by the scene's stem, so a rename of
+    /// the `.ron` alone leaves the real data sitting here under the old name —
+    /// which is the difference between "your terrain is gone" and "your terrain
+    /// is one rename away".
+    pub(crate) fn orphaned_field_stems(&self, id: u32) -> Vec<String> {
+        let suffix = format!(".{id}.cfield");
+        let Ok(entries) = std::fs::read_dir(self.project_root.join("terrain")) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let stem = name.strip_suffix(&suffix)?;
+                (stem != self.scene_name).then(|| stem.to_string())
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
     /// The legacy DENSE field path for the same terrain — read-only migration source.
     pub(crate) fn terrain_tfield_path_id(&self, id: u32) -> PathBuf {
         self.project_root.join("terrain").join(format!("{}.{id}.tfield", self.scene_name))
@@ -2369,6 +2391,7 @@ impl Editor {
             })
             .collect();
         let mut max_id = 0u32;
+        let mut missing: Vec<(u32, String)> = Vec::new();
         let single = nodes.len() == 1;
         for (e, id) in nodes {
             max_id = max_id.max(id);
@@ -2424,10 +2447,22 @@ impl Editor {
                         )
                     })
             };
-            let field = std::fs::read(self.terrain_field_path_id(id))
+            let loaded = std::fs::read(self.terrain_field_path_id(id))
                 .ok()
                 .and_then(|b| floptle_field::ChunkField::from_bytes(&b))
-                .or_else(dense_migration)
+                .or_else(dense_migration);
+            // A terrain node in a SAVED scene that has no field on disk is the
+            // shape of lost work, not of a new terrain — say so rather than
+            // handing back a flat slab that looks identical to one.
+            if loaded.is_none() {
+                let name = self
+                    .world
+                    .get::<floptle_core::Name>(e)
+                    .map(|n| n.0.clone())
+                    .unwrap_or_else(|| format!("Terrain {id}"));
+                missing.push((id, name));
+            }
+            let field = loaded
                 // a terrain node with no/garbled field → start it flat.
                 .unwrap_or_else(|| {
                     let mut f =
@@ -2454,6 +2489,31 @@ impl Editor {
             self.terrains.insert(e, EditorTerrain::new(field));
         }
         self.next_terrain_id = max_id + 1;
+        for (id, name) in missing {
+            let want = self.terrain_field_path_id(id);
+            let rel = want
+                .strip_prefix(&self.project_root)
+                .unwrap_or(&want)
+                .to_string_lossy()
+                .replace('\\', "/");
+            // A field for this terrain id filed under ANOTHER scene's name is the
+            // fingerprint of a renamed scene: every per-scene file is keyed by the
+            // stem, so the data is sitting right there under the old one.
+            let orphans = self.orphaned_field_stems(id);
+            let msg = if orphans.is_empty() {
+                format!("Δ {name}: no terrain data at {rel} — starting flat")
+            } else {
+                let found: Vec<String> =
+                    orphans.iter().map(|s| format!("terrain/{s}.{id}.cfield")).collect();
+                format!(
+                    "Δ {name}: no terrain data at {rel}, but {} exists. If this scene was \
+                     renamed, its terrain did not follow — rename that file to match the \
+                     scene and reopen.",
+                    found.join(", ")
+                )
+            };
+            self.console.push(floptle_script::LogLevel::Warn, msg, None);
+        }
         self.terrain_gpu_dirty = !self.terrains.is_empty();
         // Restore the texture palette so painted-texture slots map to images again.
         // A slot line may end in `|glow` — that slot's texture is self-lit (the
