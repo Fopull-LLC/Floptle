@@ -1,5 +1,14 @@
 ## Just shipped
 
+**v0.55.2** — **renaming a scene now takes its terrain with it.** Terrain, the
+blockout map, vertex paint and autosaves are all filed under the scene's name, so
+renaming the scene used to leave them behind and the scene reopened with an empty
+terrain — which looks exactly like a terrain you never made. A rename now moves
+all of it, refuses outright if anything would be overwritten, and a terrain whose
+data is missing says so in the Console instead of quietly handing you a flat slab.
+If this already happened to you, your work is very likely still on disk under the
+old name; the release notes say how to get it back.
+
 **v0.55.1** — six additions to the editor API packages use, all found by writing
 a real package against it: `gui.helpBox`, `gui.flexibleSpace`, `gui.height`, a
 text field that can take the keyboard the frame it appears, a node's **oriented**
