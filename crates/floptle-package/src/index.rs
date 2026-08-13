@@ -23,7 +23,7 @@
 //! Fetching is the caller's job. This module parses, searches and sorts; it
 //! opens no sockets, which is what makes it testable.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::version::{Version, VersionReq};
 
@@ -83,7 +83,9 @@ pub struct Listing {
     /// Absent until somebody reviews it. Added after the reader shipped, which
     /// is safe because unknown fields are ignored and a missing one defaults —
     /// an older editor simply shows no score.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Read leniently on purpose: see [`lenient_rating`].
+    #[serde(default, deserialize_with = "lenient_rating", skip_serializing_if = "Option::is_none")]
     pub rating: Option<Rating>,
 }
 
@@ -156,6 +158,25 @@ impl Index {
     pub fn find(&self, id: &str) -> Option<&Listing> {
         self.packages.iter().find(|l| l.id == id)
     }
+}
+
+/// A rating that will not read is **no rating**, not a broken catalogue.
+///
+/// Without this, one malformed `rating` on one package fails the whole
+/// `Index::parse` and every package disappears from Browse — a cosmetic field
+/// taking down the entire catalogue. The shape that would do it is not
+/// hypothetical: the reviews document already serialises an unreviewed package
+/// as `"score": null`, and the same serialiser pointed at an index row would
+/// emit `{"score": null, "count": 0}`, which is not an `f32`.
+///
+/// A star rating is the least important thing on the row. It must never be able
+/// to hide the package it belongs to.
+fn lenient_rating<'de, D>(d: D) -> Result<Option<Rating>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(raw.and_then(|v| serde_json::from_value::<Rating>(v).ok()))
 }
 
 /// One person's word on a package they ran.
@@ -325,6 +346,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(future.packages.len(), 1);
+    }
+
+    /// A cosmetic field must never be able to empty the catalogue. The
+    /// `"score": null` shape is exactly what the reviews document already emits
+    /// for an unreviewed package, so this is one serialiser change away from
+    /// being real rather than a hypothetical.
+    #[test]
+    fn a_rating_that_will_not_read_costs_its_own_stars_and_nothing_else() {
+        for bad in [
+            r#""rating":{"score":null,"count":0}"#,
+            r#""rating":{"count":3}"#,
+            r#""rating":"4.5""#,
+            r#""rating":[]"#,
+            r#""rating":null"#,
+        ] {
+            let json = format!(
+                r#"{{"packages":[
+                     {{"id":"a.b","name":"A","versions":[],{bad}}},
+                     {{"id":"c.d","name":"C","versions":[],"rating":{{"score":4.5,"count":2}}}}
+                   ]}}"#
+            );
+            let idx = Index::parse(&json)
+                .unwrap_or_else(|e| panic!("a bad rating must not fail the catalogue ({bad}): {e}"));
+            assert_eq!(idx.packages.len(), 2, "{bad}");
+            assert!(idx.find("a.b").unwrap().rating.is_none(), "{bad}");
+            // …and the package beside it keeps its own perfectly good rating.
+            assert_eq!(idx.find("c.d").unwrap().rating.unwrap().count, 2, "{bad}");
+        }
     }
 
     #[test]
