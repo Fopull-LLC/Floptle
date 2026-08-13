@@ -49,6 +49,22 @@ pub struct Release {
     pub subdir: Option<String>,
 }
 
+/// What people who ran a package thought of it, in one number and a count.
+///
+/// **Absent means nobody has reviewed it**, which is why this is an `Option` and
+/// not a score of zero: a package nobody has got to yet must not render as one
+/// everybody hated.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Rating {
+    /// The plain mean, 1–5. Plain on purpose: a number the reader can
+    /// reconstruct from the reviews on screen is worth more than a
+    /// better-calibrated one they cannot.
+    pub score: f32,
+    /// How many reviews it is made of. A 5.0 from one person and a 4.6 from
+    /// ninety are different claims and the count is what tells them apart.
+    pub count: u32,
+}
+
 /// One package in the catalogue.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Listing {
@@ -64,6 +80,11 @@ pub struct Listing {
     pub keywords: Vec<String>,
     #[serde(default)]
     pub versions: Vec<Release>,
+    /// Absent until somebody reviews it. Added after the reader shipped, which
+    /// is safe because unknown fields are ignored and a missing one defaults —
+    /// an older editor simply shows no score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rating: Option<Rating>,
 }
 
 impl Listing {
@@ -135,6 +156,69 @@ impl Index {
     pub fn find(&self, id: &str) -> Option<&Listing> {
         self.packages.iter().find(|l| l.id == id)
     }
+}
+
+/// One person's word on a package they ran.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Review {
+    #[serde(default)]
+    pub author: String,
+    /// 1–5.
+    #[serde(default)]
+    pub rating: u32,
+    /// May be empty. A rating with no words is a perfectly good review, and
+    /// demanding prose gets you fewer and worse ones.
+    #[serde(default)]
+    pub body: String,
+    /// The version the reviewer actually had installed. The editor knows this
+    /// for certain, which makes it the most trustworthy field here — a review of
+    /// 1.0.0 should not silently read as a review of 3.0.0.
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub date: String,
+    #[serde(default)]
+    pub edited: bool,
+}
+
+/// Every review of one package — served as its own document so reading them
+/// needs no account and caches like the catalogue.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Reviews {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub reviews: Vec<Review>,
+}
+
+impl Reviews {
+    pub fn parse(json: &str) -> Result<Reviews, String> {
+        serde_json::from_str(json).map_err(|e| format!("the reviews would not read: {e}"))
+    }
+
+    /// The mean of what is actually here, for showing beside a list the reader
+    /// can count themselves. The catalogue's own `Rating` is authoritative —
+    /// this is for when only the document has been fetched.
+    pub fn mean(&self) -> Option<f32> {
+        let scored: Vec<u32> = self.reviews.iter().map(|r| r.rating).filter(|r| *r > 0).collect();
+        if scored.is_empty() {
+            return None;
+        }
+        Some(scored.iter().sum::<u32>() as f32 / scored.len() as f32)
+    }
+}
+
+/// Where a package's reviews live, derived from whichever catalogue is in use.
+///
+/// The last segment of the index URL is replaced, so a studio pointing at its
+/// own `index.json` gets its own reviews rather than fopull.com's — the same
+/// reason the index URL is a setting at all.
+pub fn reviews_url_for(index_url: &str, id: &str) -> String {
+    let base = index_url.trim_end_matches('/');
+    let cut = base.rfind('/').map(|i| &base[..i]).unwrap_or(base);
+    format!("{cut}/reviews/{id}.json")
 }
 
 #[cfg(test)]
@@ -211,6 +295,70 @@ mod tests {
     fn a_malformed_catalogue_says_so_in_words() {
         let err = Index::parse("{ nope").unwrap_err();
         assert!(err.contains("catalogue"), "{err}");
+    }
+
+    /// A package nobody has reviewed must not read as one everybody hated, so
+    /// the absence of a rating is a different thing from a score of zero.
+    #[test]
+    fn an_unreviewed_package_has_no_rating_rather_than_a_zero() {
+        let idx = Index::parse(SAMPLE).unwrap();
+        assert!(idx.find("com.other.audio").unwrap().rating.is_none());
+
+        let rated = Index::parse(
+            r#"{"packages":[{"id":"a.b","name":"A","rating":{"score":4.3,"count":12},"versions":[]}]}"#,
+        )
+        .unwrap();
+        let r = rated.find("a.b").unwrap().rating.unwrap();
+        assert_eq!((r.score, r.count), (4.3, 12));
+    }
+
+    /// The field was added after the reader shipped. Every already-published
+    /// catalogue must keep parsing, and a catalogue carrying it must not break
+    /// an editor that predates it — which is the same property, tested from
+    /// both ends.
+    #[test]
+    fn a_catalogue_without_ratings_still_parses_and_one_with_extra_fields_does_too() {
+        assert!(Index::parse(SAMPLE).is_ok());
+        let future = Index::parse(
+            r#"{"packages":[{"id":"a.b","name":"A","versions":[],
+                 "rating":{"score":5.0,"count":1},"somethingElse":{"x":1}}],"alsoNew":true}"#,
+        )
+        .unwrap();
+        assert_eq!(future.packages.len(), 1);
+    }
+
+    #[test]
+    fn reviews_read_and_average_what_is_actually_there() {
+        let r = Reviews::parse(
+            r#"{"id":"a.b","count":3,"reviews":[
+                {"author":"X","rating":5,"body":"good","version":"1.0.0","date":"2026-08-12"},
+                {"author":"Y","rating":4,"body":"","version":"1.1.0","date":"2026-08-12"},
+                {"author":"Z","rating":3,"body":"meh","version":"1.1.0","date":"2026-08-13","edited":true}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.reviews.len(), 3);
+        assert_eq!(r.mean(), Some(4.0));
+        // An empty body is a real review, not a malformed one.
+        assert_eq!(r.reviews[1].body, "");
+        assert!(r.reviews[2].edited);
+        // Nothing to average is None, not 0.0.
+        assert_eq!(Reviews::default().mean(), None);
+    }
+
+    /// Reviews follow whichever catalogue is in use, so a studio on its own
+    /// registry does not read fopull.com's reviews of a package it has never
+    /// heard of.
+    #[test]
+    fn reviews_live_beside_the_catalogue_they_belong_to() {
+        assert_eq!(
+            reviews_url_for(DEFAULT_INDEX_URL, "com.example.grass"),
+            "https://fopull.com/packages/reviews/com.example.grass.json"
+        );
+        assert_eq!(
+            reviews_url_for("https://studio.internal/floptle/catalogue.json", "a.b"),
+            "https://studio.internal/floptle/reviews/a.b.json"
+        );
     }
 
     #[test]

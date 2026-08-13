@@ -131,6 +131,41 @@ package wants. Read the list.
 
 ---
 
+## Who made this, and was it any good
+
+**Packages are made and managed by their authors, not by Fopull.** Listing on the
+catalogue is automatic: a submission that passes its structural checks goes live,
+and nobody has vouched for what the package does. A package is code that runs in
+your editor. Trust them at your own discretion — and read the reviews.
+
+Reviews are the thing that replaces an approval nobody gave. A package's row in
+**🌐 Browse** shows its score and how many reviews it is made of, or *no reviews
+yet* — which is a different statement from a bad score, and drawn differently.
+Open **reviews** on a row to read them. Each says which **version** it was written
+against, because a review of 1.0.0 is not a review of 3.0.0.
+
+### Writing one
+
+You can review a package once you have it **installed and enabled** in a project.
+That is the whole gate, and it is deliberate: a package sitting there switched off
+has not been tried, and since v0.55.3 that is exactly how a package that asks for
+a permission arrives.
+
+You need to be signed in. **It is the same account as the Hub** — one entry in
+your operating system's keyring, shared by the Hub, the editor and every game, so
+signing in anywhere signs you in everywhere. The Packages window shows who you
+are, and lets you sign out or sign in as somebody else.
+
+Pick a rating out of five; words are optional. The version you have installed goes
+with it. Posting again replaces your earlier review rather than adding a second
+one — you are allowed to change your mind.
+
+Pointing the catalogue at your own registry gets you that registry's reviews too.
+Posting is only ever to fopull.com, though: the editor will not send your access
+token to another host.
+
+---
+
 ## Addressing a package's files
 
 `pkg://<id>/<path>` finds a file in a package wherever that package happens to

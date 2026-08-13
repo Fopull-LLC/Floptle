@@ -34,6 +34,9 @@ floptle-assets = { path = "../floptle-assets" }
 floptle-image = { path = "../floptle-image" }   # image documents behind the 🖼 Image tab
 floptle-script = { path = "../floptle-script" }
 floptle-package = { path = "../floptle-package" }
+# The signed-in account, shared with the Hub through one keyring entry, so
+# somebody who signed in there is already signed in here.
+floptle-account = { path = "../floptle-account" }
 # The editor runs its OWN Lua state for package extensions — separate from the
 # game's, so a broken extension cannot land in a running game's host and a
 # reload can throw the whole state away.

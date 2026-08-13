@@ -1419,6 +1419,7 @@ dependencies = [
  "egui_dock",
  "env_logger",
  "flate2",
+ "floptle-account",
  "floptle-anim",
  "floptle-assets",
  "floptle-audio",

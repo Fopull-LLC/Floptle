@@ -1437,6 +1437,12 @@ struct Editor {
     show_packages: bool,
     /// The 📦 Packages window's own state (search text, what is being installed).
     packages_ui: packages_ui::PackagesState,
+    /// The signed-in Floptle account. Shares one keyring entry with the Hub and
+    /// with every game, so signing in anywhere signs you in everywhere — see
+    /// `floptle_account::auth::KeyringStore`. Built on first use because
+    /// constructing it reads the keyring, which is not a thing to do on every
+    /// `Editor::default()` in a test.
+    account: Option<floptle_account::Account>,
     input: Input,
     world: World,
     /// Mesh handles indexed by `Shape as usize` (Cube=0, Sphere=1).

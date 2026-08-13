@@ -357,6 +357,13 @@ impl Editor {
         // DRAW is projected further down, where `view_proj` exists.
         self.ext_clock += self.ui_frame_dt as f64;
         self.ext_tick();
+        // Built here rather than inside the UI pass, where only disjoint field
+        // borrows exist. Constructing it reads the keyring and restores whatever
+        // session the Hub already stored, off-thread — so by the time the
+        // Packages window draws, it usually already knows who you are.
+        if self.account.is_none() {
+            self.account = Some(floptle_account::Account::new(floptle_account::DEFAULT_BASE));
+        }
 
         // Inspector asset preview: render the spinning model/material (or load the
         // texture) before the GPU/egui destructure borrows below. `preview_dt` is a
@@ -2517,6 +2524,7 @@ impl Editor {
         let packages_state = &mut self.packages_ui;
         let show_packages = &mut self.show_packages;
         let ext_project_root = self.project_root.clone();
+        let ext_account = self.account.as_ref();
         // Built before the closure: `ext_menu_tree` reads the whole editor, and
         // inside the UI pass only disjoint field borrows exist.
         let ext_menus = crate::ext_wire::menu_tree(ext_host);
@@ -3823,6 +3831,7 @@ impl Editor {
                             crate::packages_ui::PkgCtx {
                                 project_root: &ext_project_root,
                                 host: ext_host,
+                                account: ext_account,
                             },
                             packages_state,
                         );
