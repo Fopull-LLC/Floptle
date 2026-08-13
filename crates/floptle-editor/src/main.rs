@@ -837,6 +837,7 @@ struct EditorTabViewer<'a> {
     game_gizmo_lines: &'a [(Vec2, Vec2, [f32; 3])],
     game_gizmos: &'a mut bool,
     terrain_wire: &'a [(Vec2, Vec2)],
+    nav_wire: &'a [(Vec2, Vec2, [f32; 3])],
     mesh_wire: &'a [(Vec2, Vec2)],
     /// Selected particle track's emitter/force gizmo (colored screen segments).
     particle_gizmo: &'a [(Vec2, Vec2, [f32; 3])],
@@ -1890,6 +1891,12 @@ struct Editor {
     terrain_wire_world: Vec<(Entity, Vec<(Vec3, Vec3)>)>,
     /// This frame's projected terrain-collider wireframe segments (screen space).
     terrain_wire_gizmo: Vec<(Vec2, Vec2)>,
+    /// The baked navmesh, projected to screen space — one coloured outline per
+    /// polygon. Rebuilt per frame like every other gizmo, because the camera
+    /// moves and the projection is what changes.
+    nav_gizmo: Vec<(Vec2, Vec2, [f32; 3])>,
+    /// Draw the navmesh even when its node is not selected.
+    show_navmesh: bool,
     /// MODEL-LOCAL deduped triangle edges per mesh asset path (built once on demand),
     /// transformed by each node's world matrix + projected per frame for collider wires.
     mesh_wire_cache: HashMap<String, Vec<(Vec3, Vec3)>>,

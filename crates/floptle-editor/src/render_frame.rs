@@ -1118,6 +1118,44 @@ impl Editor {
                     }
                 }
             }
+            // The baked navmesh. Drawn when its node is selected — the same rule
+            // the collider wireframes use, so verifying the thing you are
+            // editing costs nothing — or whenever the View toggle is on.
+            self.nav_gizmo.clear();
+            if let Some(mesh) = self.nav_baked.as_ref() {
+                let selected = crate::nav_bake::nav_node(&self.world)
+                    .is_some_and(|(e, _)| self.selection.contains(&e));
+                if (self.show_navmesh || selected) && filter.colliders {
+                    let anchor = DVec3::from_array(mesh.anchor);
+                    for poly in &mesh.polys {
+                        // A distinct hue per region, spun by the golden ratio so
+                        // neighbouring numbers never land on neighbouring colours.
+                        let h = (poly.region as f32 * 0.618_034).fract();
+                        let col = crate::viz::hue_rgb(h);
+                        let y = ((poly.y_min + poly.y_max) * 0.5) as f64;
+                        // A hair above the floor: drawn exactly on it, the outline
+                        // fights the ground it describes.
+                        let lift = (mesh.settings.cell_size * 0.5) as f64;
+                        let corner = |x: f32, z: f32| {
+                            anchor + DVec3::new(x as f64, y + lift, z as f64)
+                        };
+                        let c = [
+                            corner(poly.min[0], poly.min[1]),
+                            corner(poly.max[0], poly.min[1]),
+                            corner(poly.max[0], poly.max[1]),
+                            corner(poly.min[0], poly.max[1]),
+                        ];
+                        for i in 0..4 {
+                            if let (Some(pa), Some(pb)) = (
+                                project(c[i], cam.world_position, view_proj, gw, gh),
+                                project(c[(i + 1) % 4], cam.world_position, view_proj, gw, gh),
+                            ) {
+                                self.nav_gizmo.push((pa, pb, col));
+                            }
+                        }
+                    }
+                }
+            }
             // Mesh collider wireframes. Every Mesh node flagged Collidable OR (legacy)
             // MeshCollider when the global toggle is on, plus the SELECTED one always (so
             // you can verify it). Both markers build a static triangle-mesh collider, so
@@ -2450,6 +2488,7 @@ impl Editor {
             }
         }
         let show_terrain_collider = &mut self.show_terrain_collider;
+        let show_navmesh = &mut self.show_navmesh;
         let show_mesh_colliders = &mut self.show_mesh_colliders;
         let rename_target = &mut self.rename_target;
         let new_scene_buf = &mut self.new_scene_buf;
@@ -2571,6 +2610,7 @@ impl Editor {
         let game_gizmos_before = self.game_gizmos;
         let game_gizmos = &mut self.game_gizmos;
         let terrain_wire = self.terrain_wire_gizmo.as_slice();
+        let nav_wire = self.nav_gizmo.as_slice();
         let mesh_wire = self.mesh_wire_gizmo.as_slice();
         let particle_gizmo = self.particle_gizmo.as_slice();
         let show_gizmos = &mut self.show_gizmos;
@@ -2835,6 +2875,8 @@ impl Editor {
                             .on_hover_text("show the terrain's collision surface (what the player walks on)");
                         ui.checkbox(&mut *show_mesh_colliders, "Collider wireframes (mesh + shapes)")
                             .on_hover_text("show every static collider — walkable meshes and Collidable Cube/Sphere/Capsule shapes (the selected one always shows)");
+                        ui.checkbox(&mut *show_navmesh, "Navmesh")
+                            .on_hover_text("show where characters can walk, a colour per connected area (the Nav Mesh node always shows its own when selected)");
                     });
                     // Tool windows + panels live under Window (View = viewport display).
                     // Every entry opens/focuses its window (close them from the
@@ -3679,6 +3721,7 @@ impl Editor {
                 game_gizmo_lines,
                 game_gizmos,
                 terrain_wire,
+                nav_wire,
                 mesh_wire,
                 particle_gizmo,
                 show_gizmos,

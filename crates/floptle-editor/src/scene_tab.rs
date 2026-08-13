@@ -1059,6 +1059,28 @@ impl EditorTabViewer<'_> {
             }
         }
 
+        // The baked navmesh — where characters can walk. Coloured PER REGION,
+        // because the question people actually have is "why will it not walk
+        // over there", and two colours meeting at a doorway answers it on
+        // sight: that gap is too narrow for the character it was baked for.
+        if !game && !self.nav_wire.is_empty() {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("nav_wire")))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
+            for (a, b, c) in self.nav_wire {
+                let col = egui::Color32::from_rgba_unmultiplied(
+                    (c[0] * 255.0) as u8,
+                    (c[1] * 255.0) as u8,
+                    (c[2] * 255.0) as u8,
+                    150,
+                );
+                painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(1.0, col));
+            }
+        }
+
         // Script debug gizmos (`gizmo.*`). The Game view stays clean by default — it's
         // what the player would see — but "Also in Game view" opts in, because checking
         // whether a hitbox reaches is something you do with the controller in your hands.

@@ -546,6 +546,26 @@ pub(crate) fn probe_dots(
     }
 }
 
+/// A fully-saturated colour from a hue in 0..1.
+///
+/// For telling groups apart rather than for looking pretty: kept bright and
+/// even so no group reads as more important than another, and so a group never
+/// comes out near the background.
+pub(crate) fn hue_rgb(h: f32) -> [f32; 3] {
+    let h = h.rem_euclid(1.0) * 6.0;
+    let x = 1.0 - (h % 2.0 - 1.0).abs();
+    let (r, g, b) = match h as u32 {
+        0 => (1.0, x, 0.0),
+        1 => (x, 1.0, 0.0),
+        2 => (0.0, 1.0, x),
+        3 => (0.0, x, 1.0),
+        4 => (x, 0.0, 1.0),
+        _ => (1.0, 0.0, x),
+    };
+    // Lifted off pure saturation so a thin line stays legible over dark ground.
+    [r * 0.75 + 0.25, g * 0.75 + 0.25, b * 0.75 + 0.25]
+}
+
 pub(crate) fn box_lines(
     center: DVec3,
     half: Vec3,

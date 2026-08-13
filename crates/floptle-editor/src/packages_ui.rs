@@ -92,12 +92,6 @@ pub(crate) struct PackagesState {
     /// Whose reviews are open, and what they are doing.
     reviews_for: Option<String>,
     reviews: ReviewsState,
-    /// The review being written: a rating out of five and optional words.
-    draft_rating: u32,
-    draft_body: String,
-    /// An in-flight post, and whatever the server last said about one.
-    posting: Option<Receiver<(u64, floptle_account::CloudReply)>>,
-    post_note: Option<String>,
     /// A package that arrived from somewhere else and asked for something. It is
     /// installed but NOT enabled until the person who installed it has seen what
     /// it wants — see `gate_remote_install`.
@@ -570,33 +564,7 @@ fn browse_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, ac
             };
         }
 
-        // Land a review that finished posting.
-        if let Some(rx) = &state.posting
-            && let Ok((_, reply)) = rx.try_recv()
-        {
-            state.posting = None;
-            state.post_note = Some(match (&reply.error, reply.status) {
-                (Some(e), _) => format!("could not post the review: {e}"),
-                (None, s) if (200..300).contains(&s) => {
-                    state.draft_body.clear();
-                    state.draft_rating = 0;
-                    // Whatever is on screen predates this review.
-                    state.reviews = ReviewsState::Idle;
-                    "thanks — your review is posted".to_string()
-                }
-                // A token minted without the `cloud` scope is refused here and
-                // nowhere else the editor goes, so the status alone would send
-                // somebody hunting. Signing out and back in re-mints it.
-                (None, 401) | (None, 403) => format!(
-                    "the server would not accept that sign-in ({}). Sign out and back in, \
-                     which asks for a fresh token.",
-                    reply.status
-                ),
-                (None, s) => format!("the server said {s}: {}", reply.body),
-            });
-        }
-
-        account_line(ui, ctx, state);
+        account_line(ui, ctx);
         // Listing is automatic, so this is not a shop with a buyer. Said once,
         // plainly, where somebody is choosing — not as a banner on every row,
         // which is how a warning becomes wallpaper.
@@ -714,7 +682,6 @@ fn browse_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, ac
                             } else {
                                 state.reviews_for = Some(listing.id.clone());
                                 state.reviews = ReviewsState::Idle;
-                                state.post_note = None;
                             }
                         }
                     });
@@ -830,12 +797,6 @@ fn non_empty(s: &str) -> Option<String> {
     if t.is_empty() { None } else { Some(t.to_string()) }
 }
 
-/// Fetch the catalogue on a worker thread.
-/// How long a review's words may be. The server refuses past this and says so,
-/// but a refusal that arrives after someone has written three thousand
-/// characters costs them the three thousand characters. Enforced here first.
-const REVIEW_BODY_MAX: usize = 2000;
-
 /// The version you may review, or `None` if you may not.
 ///
 /// **Installed AND enabled.** Not installed is obvious; installed but switched
@@ -871,7 +832,7 @@ fn stars(score: f32) -> String {
 /// Who you are, shared with the Hub. Signing in anywhere signs you in
 /// everywhere, so most of the time this line just says your name and the
 /// account was never a step you had to think about.
-fn account_line(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState) {
+fn account_line(ui: &mut egui::Ui, ctx: &PkgCtx<'_>) {
     let Some(account) = ctx.account else { return };
     ui.horizontal(|ui| match account.phase() {
         floptle_account::Phase::SignedIn => {
@@ -882,7 +843,6 @@ fn account_line(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState) 
             ui.small(format!("signed in as {who}"));
             if ui.small_button("sign out").clicked() {
                 account.sign_out();
-                state.post_note = None;
             }
         }
         floptle_account::Phase::Waiting { user_code, url, .. } => {
@@ -971,102 +931,71 @@ fn reviews_section(
 
     ui.add_space(4.0);
     let Some(version) = installed_version else {
-        ui.small("Install and enable this package to review it.");
+        ui.small("Install and enable this package to review it, then the button appears here.");
         return;
     };
-    let Some(account) = ctx.account else { return };
-    if !account.is_signed_in() {
-        ui.small("Sign in to review it.");
-        return;
-    }
-    if state.posting.is_some() {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.small("posting…");
-        });
-        return;
-    }
-    if let Some(note) = &state.post_note {
-        ui.small(note);
-    }
 
+    // Whether one of the reviews on screen is yours. The reviews document
+    // already carries an author, so this costs nothing and needs no endpoint —
+    // but the server is the authority on whose review is whose, so this is a
+    // read of what is published rather than a claim about your account.
+    let me = ctx.account.and_then(|a| a.session()).and_then(|s| s.name.or(s.email));
+    let mine = match (&state.reviews, me) {
+        (ReviewsState::Ready(r), Some(name)) => {
+            r.reviews.iter().find(|v| v.author == name).cloned()
+        }
+        _ => None,
+    };
+
+    // Reviewing happens on the site, and the editor's job is to get you there
+    // with the package already picked. Writing a review means signing in,
+    // agreeing to what you are publishing under your name, and being told when
+    // something is refused — a browser does all three properly, and it is the
+    // one place the account already lives.
+    //
+    // Not gated on being signed in HERE: the site will ask if it has to, and a
+    // button that refuses to open until you sign in twice is the friction this
+    // replaced.
     ui.horizontal(|ui| {
-        ui.small("your rating");
-        for n in 1..=5u32 {
-            let picked = state.draft_rating >= n;
-            if ui.selectable_label(picked, if picked { "★" } else { "☆" }).clicked() {
-                state.draft_rating = n;
-            }
+        let (label, hint) = match &mine {
+            Some(_) => (
+                "★  Edit your review",
+                "opens fopull.com, where you can change or remove it",
+            ),
+            None => (
+                "★  Write a review",
+                "opens fopull.com to review this package — it appears here once it is posted",
+            ),
+        };
+        if ui.button(label).on_hover_text(hint).clicked() {
+            let _ = floptle_script::open_in_browser(&floptle_package::index::review_page_for(id));
+            // Whatever gets posted over there is not in the copy fetched over
+            // here, so the next look asks again rather than showing a document
+            // that predates the review someone just wrote.
+            state.reviews = ReviewsState::Idle;
         }
-        ui.small(format!("of v{version}"));
+        if ui
+            .small_button("open page ↗")
+            .on_hover_text("this package on fopull.com — every version and every review")
+            .clicked()
+        {
+            let _ = floptle_script::open_in_browser(&floptle_package::index::package_page_for(id));
+        }
     });
-    ui.add(
-        egui::TextEdit::multiline(&mut state.draft_body)
-            .desired_rows(2)
-            .hint_text("what was it like to use? (optional)"),
-    );
-    // Truncated on a character boundary — `truncate` on a byte index would
-    // panic mid-character, and people write reviews with accents in them.
-    if state.draft_body.chars().count() > REVIEW_BODY_MAX {
-        state.draft_body = state.draft_body.chars().take(REVIEW_BODY_MAX).collect();
-    }
-    let used = state.draft_body.chars().count();
-    // Only once it is close enough to matter — a counter on an empty box is
-    // noise, and on a two-word review it is nagging.
-    if used > REVIEW_BODY_MAX - 200 {
-        ui.small(format!("{used} / {REVIEW_BODY_MAX}"));
-    }
-    let ready = (1..=5).contains(&state.draft_rating);
-    if ui
-        .add_enabled(ready, egui::Button::new("Post review"))
-        .on_disabled_hover_text("pick a rating first")
-        .clicked()
-    {
-        let body = serde_json::json!({
-            "rating": state.draft_rating,
-            "body": state.draft_body,
-            "version": version,
-        })
-        .to_string();
-        let (tx, rx) = std::sync::mpsc::channel();
-        match account.request(
-            0,
-            "POST",
-            &format!("/api/floptle/v1/packages/{id}/reviews"),
-            Some(body),
-            std::time::Duration::from_secs(20),
-            tx,
-        ) {
-            Ok(()) => {
-                state.posting = Some(rx);
-                state.post_note = None;
-            }
-            Err(e) => state.post_note = Some(e),
+    match &mine {
+        Some(v) if v.version == version => {
+            ui.small(format!("you reviewed v{version}"));
         }
-    }
-
-    // Taking a review back. Offered when one of the reviews on screen looks like
-    // yours; the server is the authority on whose it is, so this is an
-    // affordance rather than a claim.
-    let mine_is_here = match (&state.reviews, account.session().and_then(|s| s.name)) {
-        (ReviewsState::Ready(r), Some(name)) => r.reviews.iter().any(|v| v.author == name),
-        _ => false,
-    };
-    if mine_is_here && ui.small_button("remove my review").clicked() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        match account.request(
-            1,
-            "DELETE",
-            &format!("/api/floptle/v1/packages/{id}/reviews"),
-            None,
-            std::time::Duration::from_secs(20),
-            tx,
-        ) {
-            Ok(()) => {
-                state.posting = Some(rx);
-                state.post_note = None;
-            }
-            Err(e) => state.post_note = Some(e),
+        // A review of 1.0.0 says very little about the 3.0.0 in the project,
+        // and that is worth saying to the person who wrote it too.
+        Some(v) if !v.version.is_empty() => {
+            ui.small(format!("you reviewed v{} — you have v{version} now", v.version));
+        }
+        Some(_) => {
+            ui.small("you reviewed this");
+        }
+        None => {
+            ui.small(format!("you have v{version} installed and enabled"));
         }
     }
 }
@@ -1088,6 +1017,7 @@ fn fetch_reviews(url: String) -> Receiver<Result<floptle_package::index::Reviews
     rx
 }
 
+/// Fetch the catalogue on a worker thread.
 fn fetch_index(url: String) -> Receiver<Result<Index, String>> {
     let (tx, rx): (Sender<Result<Index, String>>, _) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -1148,21 +1078,6 @@ mod consent_tests {
         // Nonsense from a server does not make a ragged row.
         assert_eq!(stars(-1.0).chars().count(), 5);
         assert_eq!(stars(99.0).chars().count(), 5);
-    }
-
-    /// The cap has to be enforced where the typing happens. The server refuses
-    /// past 2000 and says so, but a refusal that arrives after somebody has
-    /// written an essay costs them the essay.
-    #[test]
-    fn a_review_body_is_cut_to_the_cap_on_a_character_boundary() {
-        // Multi-byte on purpose: truncating by BYTE index would panic in the
-        // middle of one of these, and people write reviews with accents in them.
-        let long: String = "é".repeat(REVIEW_BODY_MAX + 500);
-        let cut: String = long.chars().take(REVIEW_BODY_MAX).collect();
-        assert_eq!(cut.chars().count(), REVIEW_BODY_MAX);
-        // Still valid UTF-8 with every character whole.
-        assert!(cut.ends_with('é'));
-        assert_eq!(cut.len(), REVIEW_BODY_MAX * 2, "each é is two bytes");
     }
 
     /// You may review what you have actually run. Installed-but-disabled is the

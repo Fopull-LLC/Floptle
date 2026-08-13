@@ -242,9 +242,42 @@ pub fn reviews_url_for(index_url: &str, id: &str) -> String {
     format!("{cut}/reviews/{id}.json")
 }
 
+/// Where a person goes to write a review of `id`, and where they go to read
+/// about the package at all.
+///
+/// **Always fopull.com**, whatever registry the catalogue points at. Writing a
+/// review means signing in, and the editor will not send an account anywhere
+/// but home — a private registry can serve its own listings and its own
+/// reviews, but it cannot collect one. Somebody running their own catalogue
+/// gets a link that goes to the public site, which is the honest outcome: there
+/// is nowhere else it could safely go.
+pub fn review_page_for(id: &str) -> String {
+    format!("https://fopull.com/packages/{id}/review")
+}
+
+/// The package's own page on fopull.com — what it is, its versions, and every
+/// review of it.
+pub fn package_page_for(id: &str) -> String {
+    format!("https://fopull.com/packages/{id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_review_link_goes_home_whatever_registry_is_set() {
+        // A private registry serves listings and reviews; it cannot take one,
+        // because the editor will not send an account token off fopull.com.
+        assert_eq!(
+            review_page_for("com.example.grass"),
+            "https://fopull.com/packages/com.example.grass/review"
+        );
+        assert_eq!(
+            package_page_for("com.example.grass"),
+            "https://fopull.com/packages/com.example.grass"
+        );
+    }
 
     const SAMPLE: &str = r#"{
         "packages": [
