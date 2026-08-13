@@ -249,6 +249,7 @@ pub use http_api::open_in_browser;
 mod input_api;
 pub mod load_error;
 mod math_api;
+pub mod nav_api;
 pub mod access_api;
 mod net_api;
 pub mod opts;
@@ -543,6 +544,8 @@ pub struct ScriptHost {
     sched: Rc<RefCell<sched_api::SchedState>>,
     /// This tick's celestial snapshot (`space.*` reads it; the editor feeds it).
     space_info: Rc<RefCell<space_api::SpaceInfo>>,
+    /// The scene's baked navmesh, if it has one — what `nav.*` answers from.
+    nav_mesh: nav_api::NavShared,
     /// This frame's active game camera + viewport (`camera.worldToScreen` reads
     /// it; the editor feeds it every frame). Powers map click-on-line picking.
     view_info: Rc<RefCell<view_api::ViewInfo>>,

@@ -369,6 +369,174 @@ pub(crate) fn load(path: &std::path::Path) -> Option<NavMesh> {
     postcard::from_bytes(&bytes).ok()
 }
 
+impl crate::Editor {
+    /// Where this navmesh's bake is saved.
+    ///
+    /// Keyed off the scene's real relative path, not its stem — two scenes
+    /// called `main.ron` in different folders are two scenes, and keying on the
+    /// stem is how the terrain store once had them overwrite each other
+    /// (`floptle/0111`). The node's `id` follows, so a scene can hold more than
+    /// one navmesh without them fighting over a file.
+    pub(crate) fn nav_path(&self, id: u32) -> std::path::PathBuf {
+        let mut p = self.scene_path();
+        p.set_extension(format!("{id}.fnav"));
+        p
+    }
+
+    /// Load this scene's navmesh, if it has one baked.
+    pub(crate) fn load_nav(&mut self) {
+        self.nav_baked = None;
+        self.nav_seconds = 0.0;
+        self.nav_triangles = 0;
+        let Some((_, Matter::NavMesh { id, .. })) = nav_node(&self.world) else {
+            self.script_host.set_nav_mesh(None);
+            return;
+        };
+        self.nav_baked = load(&self.nav_path(id));
+        self.script_host.set_nav_mesh(self.nav_baked.clone());
+    }
+
+    /// Bake the scene's navmesh, reporting what happened either way.
+    ///
+    /// Synchronous, unlike the light bake. A navmesh over a level takes a
+    /// fraction of a second where a GI bake takes minutes, and a progress bar
+    /// for something that is already finished is more machinery than it is
+    /// worth.
+    pub(crate) fn bake_nav(&mut self) {
+        use floptle_script::LogLevel;
+        let Some((e, matter)) = nav_node(&self.world) else {
+            self.console.push(
+                LogLevel::Warn,
+                "nothing to bake: the scene has no Nav Mesh node".into(),
+                None,
+            );
+            return;
+        };
+        let Matter::NavMesh { id, auto_bounds, layers, half_extents, .. } = matter.clone() else {
+            return;
+        };
+        let Some(settings) = settings_of(&matter) else { return };
+
+        let origin = floptle_core::world_transform(&self.world, e).translation;
+        let g = gather(&self.world, origin, &layers, &self.maps, &self.terrains);
+        if g.tris.is_empty() {
+            self.console.push(
+                LogLevel::Warn,
+                if g.sources == 0 {
+                    "navmesh: nothing to bake. A navmesh bakes what a character would collide \
+                     with — level geometry needs the collidable switch on it, and the layer \
+                     filter has to include it."
+                        .into()
+                } else {
+                    format!(
+                        "navmesh: {} object(s) matched but produced no geometry to bake",
+                        g.sources
+                    )
+                },
+                None,
+            );
+            return;
+        }
+        let triangles = g.tris.len();
+
+        // Auto bounds: measure what was found, put the node in the middle of it
+        // and size the box to fit. Moving the node is deliberate — the box IS
+        // the node, and a volume that claims to fit the level while sitting
+        // somewhere else would be lying about the one thing it is for.
+        let (tris, half, shift) = if auto_bounds {
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for t in &g.tris {
+                for v in [t.a, t.b, t.c] {
+                    for i in 0..3 {
+                        lo[i] = lo[i].min(v[i]);
+                        hi[i] = hi[i].max(v[i]);
+                    }
+                }
+            }
+            let centre = Vec3::new(
+                (lo[0] + hi[0]) * 0.5,
+                (lo[1] + hi[1]) * 0.5,
+                (lo[2] + hi[2]) * 0.5,
+            );
+            // A hair of margin so geometry sitting exactly on the boundary is
+            // inside the box rather than on its edge.
+            let half = Vec3::new(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.5
+                + Vec3::splat(settings.cell_size);
+            let moved = g
+                .tris
+                .into_iter()
+                .map(|t| {
+                    let s = |p: [f32; 3]| [p[0] - centre.x, p[1] - centre.y, p[2] - centre.z];
+                    Tri::new(s(t.a), s(t.b), s(t.c))
+                })
+                .collect();
+            (moved, half, Some(centre))
+        } else {
+            let half = Vec3::from(half_extents);
+            (clip(g.tris, half), half, None)
+        };
+
+        // The bake is measured around where the node ENDS UP — auto bounds may
+        // have just moved it — so a world-space question can be turned into a
+        // mesh-space one later without anybody having to remember the offset.
+        let anchor = match shift {
+            Some(c) => origin + DVec3::new(c.x as f64, c.y as f64, c.z as f64),
+            None => origin,
+        };
+        let (mesh, seconds) = bake(&tris, &settings);
+        let mesh = mesh.map(|m| m.anchored_at([anchor.x, anchor.y, anchor.z]));
+        let Some(mesh) = mesh else {
+            self.console.push(
+                LogLevel::Warn,
+                format!(
+                    "navmesh: no walkable ground in {triangles} triangles. Nothing was flat \
+                     enough, low enough or wide enough for a character {:.1} m wide and \
+                     {:.1} m tall.",
+                    settings.agent_radius * 2.0,
+                    settings.agent_height
+                ),
+                None,
+            );
+            return;
+        };
+
+        // Write the measured box (and the move) back onto the node, so what the
+        // Inspector shows is what was actually baked.
+        if let Some(centre) = shift
+            && let Some(t) = self.world.get_mut::<floptle_core::Transform>(e)
+        {
+            t.translation += DVec3::new(centre.x as f64, centre.y as f64, centre.z as f64);
+        }
+        if let Some(Matter::NavMesh { half_extents, .. }) = self.world.get_mut::<Matter>(e) {
+            *half_extents = [half.x, half.y, half.z];
+        }
+
+        let path = self.nav_path(id);
+        let polys = mesh.polys.len();
+        let area = mesh.area();
+        if let Err(err) = save(&path, &mesh) {
+            self.console.push(
+                LogLevel::Error,
+                format!("navmesh: baked, but could not save {}: {err}", path.display()),
+                None,
+            );
+        }
+        self.script_host.set_nav_mesh(Some(mesh.clone()));
+        self.nav_baked = Some(mesh);
+        self.nav_seconds = seconds;
+        self.nav_triangles = triangles;
+        self.scene_dirty = true;
+        self.console.push(
+            LogLevel::Debug,
+            format!(
+                "navmesh: {polys} polygons over {area:.0} m², from {triangles} triangles in \
+                 {seconds:.2}s"
+            ),
+            None,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,160 +647,5 @@ mod tests {
         std::fs::write(&junk, b"not a navmesh").unwrap();
         assert!(load(&junk).is_none());
         let _ = std::fs::remove_file(&junk);
-    }
-}
-
-impl crate::Editor {
-    /// Where this navmesh's bake is saved.
-    ///
-    /// Keyed off the scene's real relative path, not its stem — two scenes
-    /// called `main.ron` in different folders are two scenes, and keying on the
-    /// stem is how the terrain store once had them overwrite each other
-    /// (`floptle/0111`). The node's `id` follows, so a scene can hold more than
-    /// one navmesh without them fighting over a file.
-    pub(crate) fn nav_path(&self, id: u32) -> std::path::PathBuf {
-        let mut p = self.scene_path();
-        p.set_extension(format!("{id}.fnav"));
-        p
-    }
-
-    /// Load this scene's navmesh, if it has one baked.
-    pub(crate) fn load_nav(&mut self) {
-        self.nav_baked = None;
-        self.nav_seconds = 0.0;
-        self.nav_triangles = 0;
-        let Some((_, Matter::NavMesh { id, .. })) = nav_node(&self.world) else { return };
-        self.nav_baked = load(&self.nav_path(id));
-    }
-
-    /// Bake the scene's navmesh, reporting what happened either way.
-    ///
-    /// Synchronous, unlike the light bake. A navmesh over a level takes a
-    /// fraction of a second where a GI bake takes minutes, and a progress bar
-    /// for something that is already finished is more machinery than it is
-    /// worth.
-    pub(crate) fn bake_nav(&mut self) {
-        use floptle_script::LogLevel;
-        let Some((e, matter)) = nav_node(&self.world) else {
-            self.console.push(
-                LogLevel::Warn,
-                "nothing to bake: the scene has no Nav Mesh node".into(),
-                None,
-            );
-            return;
-        };
-        let Matter::NavMesh { id, auto_bounds, layers, half_extents, .. } = matter.clone() else {
-            return;
-        };
-        let Some(settings) = settings_of(&matter) else { return };
-
-        let origin = floptle_core::world_transform(&self.world, e).translation;
-        let g = gather(&self.world, origin, &layers, &self.maps, &self.terrains);
-        if g.tris.is_empty() {
-            self.console.push(
-                LogLevel::Warn,
-                if g.sources == 0 {
-                    "navmesh: nothing to bake. A navmesh bakes what a character would collide \
-                     with — level geometry needs the collidable switch on it, and the layer \
-                     filter has to include it."
-                        .into()
-                } else {
-                    format!(
-                        "navmesh: {} object(s) matched but produced no geometry to bake",
-                        g.sources
-                    )
-                },
-                None,
-            );
-            return;
-        }
-        let triangles = g.tris.len();
-
-        // Auto bounds: measure what was found, put the node in the middle of it
-        // and size the box to fit. Moving the node is deliberate — the box IS
-        // the node, and a volume that claims to fit the level while sitting
-        // somewhere else would be lying about the one thing it is for.
-        let (tris, half, shift) = if auto_bounds {
-            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-            for t in &g.tris {
-                for v in [t.a, t.b, t.c] {
-                    for i in 0..3 {
-                        lo[i] = lo[i].min(v[i]);
-                        hi[i] = hi[i].max(v[i]);
-                    }
-                }
-            }
-            let centre = Vec3::new(
-                (lo[0] + hi[0]) * 0.5,
-                (lo[1] + hi[1]) * 0.5,
-                (lo[2] + hi[2]) * 0.5,
-            );
-            // A hair of margin so geometry sitting exactly on the boundary is
-            // inside the box rather than on its edge.
-            let half = Vec3::new(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.5
-                + Vec3::splat(settings.cell_size);
-            let moved = g
-                .tris
-                .into_iter()
-                .map(|t| {
-                    let s = |p: [f32; 3]| [p[0] - centre.x, p[1] - centre.y, p[2] - centre.z];
-                    Tri::new(s(t.a), s(t.b), s(t.c))
-                })
-                .collect();
-            (moved, half, Some(centre))
-        } else {
-            let half = Vec3::from(half_extents);
-            (clip(g.tris, half), half, None)
-        };
-
-        let (mesh, seconds) = bake(&tris, &settings);
-        let Some(mesh) = mesh else {
-            self.console.push(
-                LogLevel::Warn,
-                format!(
-                    "navmesh: no walkable ground in {triangles} triangles. Nothing was flat \
-                     enough, low enough or wide enough for a character {:.1} m wide and \
-                     {:.1} m tall.",
-                    settings.agent_radius * 2.0,
-                    settings.agent_height
-                ),
-                None,
-            );
-            return;
-        };
-
-        // Write the measured box (and the move) back onto the node, so what the
-        // Inspector shows is what was actually baked.
-        if let Some(centre) = shift
-            && let Some(t) = self.world.get_mut::<floptle_core::Transform>(e)
-        {
-            t.translation += DVec3::new(centre.x as f64, centre.y as f64, centre.z as f64);
-        }
-        if let Some(Matter::NavMesh { half_extents, .. }) = self.world.get_mut::<Matter>(e) {
-            *half_extents = [half.x, half.y, half.z];
-        }
-
-        let path = self.nav_path(id);
-        let polys = mesh.polys.len();
-        let area = mesh.area();
-        if let Err(err) = save(&path, &mesh) {
-            self.console.push(
-                LogLevel::Error,
-                format!("navmesh: baked, but could not save {}: {err}", path.display()),
-                None,
-            );
-        }
-        self.nav_baked = Some(mesh);
-        self.nav_seconds = seconds;
-        self.nav_triangles = triangles;
-        self.scene_dirty = true;
-        self.console.push(
-            LogLevel::Debug,
-            format!(
-                "navmesh: {polys} polygons over {area:.0} m², from {triangles} triangles in \
-                 {seconds:.2}s"
-            ),
-            None,
-        );
     }
 }

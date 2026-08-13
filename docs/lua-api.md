@@ -28,6 +28,7 @@ each group, and meant to be searched.
 - [networking — net.*, synced](#networking--net-synced) — 31
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 14
+- [pathfinding — nav.*](#pathfinding--nav) — 4
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
 - [2D — tilemaps & sprite batches](#2d--tilemaps--sprite-batches) — 22
@@ -1767,6 +1768,24 @@ terrain.warm(bodyName) — keep that body's terrain RESIDENT this frame regardle
 ### `terrain.yields`
 
 terrain.yields() — drains what recent digs actually removed: { id, removed, added, untextured, slots }, with slots mapping palette slot to volume. This is how mining pays out by MATERIAL — you get ore because you cut rock that was painted as ore.
+
+## pathfinding — nav.*
+
+### `nav`
+
+Pathfinding over the scene's navmesh — where characters can walk, and how they get anywhere. Bake one first: add a Nav Mesh node and press Bake. Everything here is in world coordinates.
+
+### `nav.nearest`
+
+nav.nearest(point[, maxDistance]) — the closest walkable spot to a world point, or nil if there is none within range (default: the character's own height, so standing on top of the floor or half a step off a ledge is the ordinary case rather than a miss). Use it to drop a click, a spawn or a knocked-back character back onto the navmesh.
+
+### `nav.path`
+
+nav.path(from, to) — the corners to walk between two world points, as a list of vec3, plus a second return saying whether it REACHES the goal. Returns nil when an end is not on the navmesh at all (off the level, or inside a wall) — which is a different thing from a goal that is on the mesh but cut off, and that one comes back as a real route to the nearest reachable point with false alongside it. Walk it and stop is the right behaviour there; standing still because the answer was empty is not.
+
+### `nav.ready`
+
+nav.ready() — whether this scene has a baked navmesh to ask. False is the ordinary state of a project that has not made one, not an error.
 
 ## water — depth, buoyancy & ice
 

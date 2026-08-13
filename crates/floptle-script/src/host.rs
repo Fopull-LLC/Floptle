@@ -1866,6 +1866,11 @@ impl ScriptHost {
             Rc::new(RefCell::new(crate::space_api::SpaceInfo::default()));
         let warp_request: Rc<RefCell<Option<f64>>> = Rc::new(RefCell::new(None));
         crate::space_api::install_space_api(&lua, space_info.clone(), warp_request.clone());
+        // The `nav.*` pathfinding surface, reading whatever navmesh the open
+        // scene baked. Empty until one is loaded, which is the ordinary state
+        // of a project that has not made one.
+        let nav_mesh: crate::nav_api::NavShared = Rc::new(RefCell::new(None));
+        crate::nav_api::install_nav_api(&lua, nav_mesh.clone());
         // The `physics.*` sim controls: pause/resume the whole physics step
         // while scripts keep running (loading screens, cutscenes, pause menus).
         let physics_pause_request: Rc<RefCell<Option<bool>>> = Rc::new(RefCell::new(None));
@@ -1977,6 +1982,7 @@ impl ScriptHost {
             save_state,
             sched,
             space_info,
+            nav_mesh,
             view_info,
             warp_request,
             physics_pause_request,
@@ -2495,6 +2501,13 @@ impl ScriptHost {
     /// splits) — the driver applies them to the Sim, performing splits itself.
     pub fn take_assembly_cmds(&self) -> Vec<crate::assembly_api::AssemblyCmd> {
         std::mem::take(&mut *self.assembly_cmds.borrow_mut())
+    }
+
+    /// Hand the runtime the scene's baked navmesh, or `None` for a scene with
+    /// none. Called when a scene loads and after a bake, not per frame: a
+    /// navmesh changes when somebody bakes it and at no other time.
+    pub fn set_nav_mesh(&self, mesh: Option<floptle_nav::NavMesh>) {
+        *self.nav_mesh.borrow_mut() = mesh;
     }
 
     /// Feed this tick's celestial snapshot (`space.*` reads it — solar demo S2).

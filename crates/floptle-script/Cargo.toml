@@ -12,6 +12,7 @@ rust-version.workspace = true
 # Types only (PlayParams + enums for the audio command queue); no OS audio stack.
 floptle-audio = { path = "../floptle-audio", default-features = false }
 floptle-core = { path = "../floptle-core" }
+floptle-nav = { path = "../floptle-nav" }
 floptle-tiles = { path = "../floptle-tiles" } # tm:solid / tm:tags / tm:autotile read a TileSet
 # Types + resolution only; the gilrs device backend belongs to the driver.
 floptle-input = { path = "../floptle-input", default-features = false }

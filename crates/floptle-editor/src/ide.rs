@@ -2998,6 +2998,7 @@ const API_CATEGORIES: &[&str] = &[
     "networking — net.*, synced",
     "scenes — load, unload & persist",
     "terrain — runtime sculpt & queries",
+    "pathfinding — nav.*",
     "water — depth, buoyancy & ice",
     "scatter — instanced props",
     "2D — tilemaps & sprite batches",
@@ -3184,6 +3185,8 @@ fn api_category(label: &str) -> &'static str {
         "space — orbits & time-warp"
     } else if label.starts_with("terrain") {
         "terrain — runtime sculpt & queries"
+    } else if label == "nav" || label.starts_with("nav.") {
+        "pathfinding — nav.*"
     } else if label.starts_with("gizmo") {
         "debug gizmos"
     } else if label.starts_with("audio") || label == "node:sound" || label.starts_with("sound:") {
@@ -4065,6 +4068,10 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "physics.isPaused", insert: "physics.isPaused()", doc: "physics.isPaused() — whether the sim is currently frozen, including when the editor froze it rather than your script." },
     ApiEntry { label: "physics.pause", insert: "physics.pause(", doc: "physics.pause(true) — freeze the whole gameplay tick while scripts keep running. Pause menus, cutscenes and loading screens are this call: the world stops, your UI doesn't." },
     ApiEntry { label: "physics.step", insert: "physics.step([n])", doc: "physics.step([n]) — advance the frozen tick n times (default 1, max 600) — the same thing the editor's frame-step button does, so a game can build its own training mode. Call it from update: a fixedUpdate caller would never get a second turn, because the tick it is waiting for is the one it just stopped." },
+    ApiEntry { label: "nav", insert: "nav", doc: "Pathfinding over the scene's navmesh — where characters can walk, and how they get anywhere. Bake one first: add a Nav Mesh node and press Bake. Everything here is in world coordinates." },
+    ApiEntry { label: "nav.path", insert: "nav.path(", doc: "nav.path(from, to) — the corners to walk between two world points, as a list of vec3, plus a second return saying whether it REACHES the goal. Returns nil when an end is not on the navmesh at all (off the level, or inside a wall) — which is a different thing from a goal that is on the mesh but cut off, and that one comes back as a real route to the nearest reachable point with false alongside it. Walk it and stop is the right behaviour there; standing still because the answer was empty is not." },
+    ApiEntry { label: "nav.nearest", insert: "nav.nearest(", doc: "nav.nearest(point[, maxDistance]) — the closest walkable spot to a world point, or nil if there is none within range (default: the character's own height, so standing on top of the floor or half a step off a ledge is the ordinary case rather than a miss). Use it to drop a click, a spawn or a knocked-back character back onto the navmesh." },
+    ApiEntry { label: "nav.ready", insert: "nav.ready()", doc: "nav.ready() — whether this scene has a baked navmesh to ask. False is the ordinary state of a project that has not made one, not an error." },
     ApiEntry { label: "perf", insert: "perf", doc: "Where YOUR frame time goes — per subsystem and per script, readable from Lua so a game can assert its own budget in a smoke test rather than filing an engine ticket. Off by default and free while off: call perf.enable(true) first. Every getter RAISES while collection is off rather than answering 0, because a budget assertion that passes on no data is worse than no assertion." },
     ApiEntry { label: "perf.enable", insert: "perf.enable(", doc: "perf.enable(true) — start collecting; perf.enable(false) stops and CLEARS the history (a stale average from before a fix looks exactly like a fix that did not work). Off by default, because a profiler that costs a frame is one people turn off." },
     ApiEntry { label: "perf.enabled", insert: "perf.enabled()", doc: "perf.enabled() — is anything being measured? Safe to call while off, so a script can ask before reading." },

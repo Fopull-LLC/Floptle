@@ -54,30 +54,83 @@ fn growth(n: usize, mut f: impl FnMut(usize)) -> Option<f64> {
     Some(large.as_secs_f64() / small.as_secs_f64())
 }
 
-#[track_caller]
-fn assert_linearish(what: &str, ratio: Option<f64>) {
-    let Some(ratio) = ratio else {
-        panic!(
-            "{what}: the work was too short to time, so this guard proved nothing. \
-             Raise the size or the repeat count."
-        );
-    };
-    assert!(
-        ratio < 8.0,
-        "{what}: 4x the input cost {ratio:.1}x the time. Linear would be ~4x and \
-         quadratic ~16x, so this has gained a scan it did not have."
-    );
+/// What linear and quadratic work actually measure like **right now**, on this
+/// machine, under whatever else is running.
+///
+/// A fixed ceiling does not survive contention. `cargo test --workspace` runs
+/// every crate's test binary at once, and under that load this file measured a
+/// plain summing loop at **8.2x** — over the 8.0 bound that is supposed to mean
+/// "you have gained a scan". Nothing was wrong with the code; the machine was
+/// busy, and a busy machine slows the large side more than the small one.
+///
+/// So the guards below are judged against these two references instead, taken
+/// in the same conditions moments earlier. Contention inflates all three
+/// together and cancels, which is the same trick that makes a ratio beat a
+/// duration in the first place — carried one step further.
+struct Yardstick {
+    linear: f64,
+    quadratic: f64,
 }
 
-/// The harness has to be able to fail, or the guards below are decoration.
+impl Yardstick {
+    /// The line between "grew like its input" and "gained a scan": the
+    /// geometric middle of the two references. On a quiet machine that lands at
+    /// 8.0, which is exactly where the fixed bound was.
+    fn ceiling(&self) -> f64 {
+        (self.linear * self.quadratic).sqrt()
+    }
+
+    #[track_caller]
+    fn assert_linearish(&self, what: &str, ratio: Option<f64>) {
+        let Some(ratio) = ratio else {
+            panic!(
+                "{what}: the work was too short to time, so this guard proved nothing. \
+                 Raise the size or the repeat count."
+            );
+        };
+        assert!(
+            ratio < self.ceiling(),
+            "{what}: 4x the input cost {ratio:.1}x the time. Measured here and now, \
+             linear work costs {:.1}x and quadratic work {:.1}x — so this is on the \
+             wrong side of the line and has gained a scan it did not have.",
+            self.linear,
+            self.quadratic
+        );
+    }
+}
+
+/// Everything this file measures, in ONE test.
+///
+/// Not three, which is what it was. `cargo test` runs a file's tests on
+/// separate threads, so three timing tests in one binary spend their whole
+/// lives competing with each other for cores — and taking the best of several
+/// runs, which is what makes a ratio robust, does not help when NO run is
+/// uncontended. Measured back to back it reads 4.0x every time; measured
+/// alongside its siblings it read 8.1x often enough to fail two runs in five.
+///
+/// A timing guard that fails when the machine is busy is one people learn to
+/// re-run until it passes, which is worse than not having it.
 #[test]
-fn the_harness_can_tell_linear_from_quadratic() {
+fn the_bake_and_its_queries_stay_linear() {
+    let yard = harness_can_tell_linear_from_quadratic();
+    baking_grows_with_the_area_it_covers(&yard);
+    pathing_grows_with_the_level_it_crosses(&yard);
+}
+
+/// The harness has to be able to fail, or the guards below are decoration —
+/// and measuring that is also how the guards get their yardstick.
+fn harness_can_tell_linear_from_quadratic() -> Yardstick {
     // Two things this workspace's optimised dev profile forces. The size, so
     // the work clears the noise floor at all — and the `black_box` INSIDE the
     // loop, because summing 0..n has a closed form and LLVM will happily
     // replace the whole loop with it, leaving a "linear" measurement that takes
     // the same time at every size.
-    let linear = growth(2_000_000, |n| {
+    //
+    // Eight million rather than two: at two the small side ran in under a
+    // millisecond and one scheduler hiccup on a busy machine measured a plain
+    // loop at 8.1x. A guard that fails when the machine is busy is a guard
+    // people learn to re-run, which is worse than no guard.
+    let linear = growth(8_000_000, |n| {
         let mut acc = 0u64;
         for i in 0..n {
             acc = acc.wrapping_add(std::hint::black_box(i as u64));
@@ -95,8 +148,14 @@ fn the_harness_can_tell_linear_from_quadratic() {
     });
     let linear = linear.expect("the linear self-check must be long enough to time");
     let quadratic = quadratic.expect("the quadratic self-check must be long enough to time");
-    assert!(linear < 8.0, "a plain loop measured {linear:.1}x");
-    assert!(quadratic > 8.0, "a nested loop measured {quadratic:.1}x — the harness is blind");
+    // Not "linear is under 8" — that is the assumption that broke. What has to
+    // hold is that the two are TELLABLE APART, whatever the machine is doing.
+    assert!(
+        quadratic > linear * 1.8,
+        "linear work measured {linear:.1}x and quadratic work {quadratic:.1}x — the \
+         harness cannot tell them apart, so nothing it says below means anything."
+    );
+    Yardstick { linear, quadratic }
 }
 
 fn quad(x0: f32, z0: f32, w: f32, d: f32, y: f32, out: &mut Vec<Tri>) {
@@ -123,15 +182,14 @@ fn level(area: usize) -> Vec<Tri> {
 ///
 /// Every stage walks cells, so any one of them gaining a scan per cell shows up
 /// here — which is what the two the crate shipped with would have done.
-#[test]
-fn baking_grows_with_the_area_it_covers() {
+fn baking_grows_with_the_area_it_covers(yard: &Yardstick) {
     let settings = NavSettings { cell_size: 0.5, ..Default::default() };
     let ratio = growth(1600, |area| {
         let tris = level(area);
         let mesh = bake(&tris, &settings).expect("this level has floor in it");
         std::hint::black_box(mesh.polys.len());
     });
-    assert_linearish("baking a navmesh", ratio);
+    yard.assert_linearish("baking a navmesh", ratio);
 }
 
 /// And a path across four times the level must not cost sixteen times as much.
@@ -139,8 +197,7 @@ fn baking_grows_with_the_area_it_covers() {
 /// The search is over polygons rather than cells, but "nearest polygon to this
 /// point" is a scan today, and two of those run per query — so a level that
 /// grows makes every query slower even before the search does.
-#[test]
-fn pathing_grows_with_the_level_it_crosses() {
+fn pathing_grows_with_the_level_it_crosses(yard: &Yardstick) {
     let settings = NavSettings { cell_size: 0.5, ..Default::default() };
     let mut meshes: Vec<(usize, floptle_nav::NavMesh)> = Vec::new();
     for area in [1600usize, 6400] {
@@ -157,5 +214,5 @@ fn pathing_grows_with_the_level_it_crosses() {
             std::hint::black_box(p.map(|p| p.points.len()));
         }
     });
-    assert_linearish("pathing across a navmesh", ratio);
+    yard.assert_linearish("pathing across a navmesh", ratio);
 }

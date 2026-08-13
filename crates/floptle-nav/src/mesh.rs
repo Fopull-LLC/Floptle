@@ -110,6 +110,15 @@ pub struct NavMesh {
     pub links: Vec<Vec<Link>>,
     pub origin: [f32; 3],
     pub cell_size: f32,
+    /// The world position this bake was measured around. Everything else here
+    /// is **relative to it**, in `f32`, so a level sitting a million units from
+    /// the origin is still exact to the millimetre — the same trade the physics
+    /// sim makes.
+    ///
+    /// Zero for a bake nobody anchored, which is what the tests and any
+    /// straightforward triangles-in use gets.
+    #[serde(default)]
+    pub anchor: [f64; 3],
     /// What it was baked with. Kept so a mesh can answer questions about the
     /// character it was baked for — how far off it a point may be and still
     /// count as on it, how wide to draw it — without every caller having to
@@ -222,8 +231,34 @@ impl NavMesh {
             links,
             origin: grid.origin,
             cell_size: cell,
+            anchor: [0.0; 3],
             settings: *settings,
         })
+    }
+
+    /// Record where in the world this was baked, so world-space questions can
+    /// be asked of it later.
+    pub fn anchored_at(mut self, anchor: [f64; 3]) -> Self {
+        self.anchor = anchor;
+        self
+    }
+
+    /// A world point in this mesh's own frame.
+    pub fn to_local(&self, world: [f64; 3]) -> [f32; 3] {
+        [
+            (world[0] - self.anchor[0]) as f32,
+            (world[1] - self.anchor[1]) as f32,
+            (world[2] - self.anchor[2]) as f32,
+        ]
+    }
+
+    /// …and back out again.
+    pub fn to_world(&self, local: [f32; 3]) -> [f64; 3] {
+        [
+            local[0] as f64 + self.anchor[0],
+            local[1] as f64 + self.anchor[1],
+            local[2] as f64 + self.anchor[2],
+        ]
     }
 
     /// The polygon a point is on, or the nearest one within `max_distance`.

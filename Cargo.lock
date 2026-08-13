@@ -1675,6 +1675,7 @@ dependencies = [
  "floptle-core",
  "floptle-field",
  "floptle-input",
+ "floptle-nav",
  "floptle-net",
  "floptle-physics",
  "floptle-tiles",
