@@ -34,12 +34,14 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::walkable::WalkableGrid;
 use crate::NavSettings;
 
 /// One convex piece of the walkable surface: an axis-aligned rectangle in plan,
 /// with the height range of the ground inside it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Poly {
     /// Column coordinates of the corner, and the size in columns. Kept for
     /// debug drawing and tests; everything else works in world units.
@@ -78,7 +80,7 @@ impl Poly {
 }
 
 /// A way out of one polygon and into another.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Link {
     pub to: usize,
     /// The portal's endpoints, as seen by something walking from the polygon
@@ -98,7 +100,10 @@ impl Link {
 }
 
 /// The baked navmesh: convex polygons and the portals between them.
-#[derive(Clone, Debug)]
+///
+/// Serializable, because a bake is a build artefact that belongs beside the
+/// scene rather than something to redo on every load.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NavMesh {
     pub polys: Vec<Poly>,
     /// `links[i]` is everywhere you can go from `polys[i]`.

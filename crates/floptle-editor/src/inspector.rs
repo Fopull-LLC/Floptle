@@ -2977,6 +2977,224 @@ impl EditorTabViewer<'_> {
                                     .add(egui::Slider::new(size, 10.0..=5000.0).logarithmic(true).text("size (radius)"))
                                     .changed();
                             }
+                            Matter::NavMesh {
+                                id: _,
+                                half_extents,
+                                auto_bounds,
+                                layers,
+                                agent_radius,
+                                agent_height,
+                                max_slope,
+                                step_height,
+                                cell_size,
+                                enabled,
+                            } => {
+                                let nav = self.nav.clone();
+                                if ui.checkbox(enabled, "characters can path on this").changed() {
+                                    cmd.inspector_changed = true;
+                                }
+                                ui.small(
+                                    "Where characters can walk. Bakes what they would collide \
+                                     with — narrow it by layer, or drop one object with the \
+                                     Navmesh Exclude switch on it.",
+                                );
+                                ui.separator();
+
+                                // ---- what gets baked ----------------------------
+                                let label = if layers.is_empty() {
+                                    "layers: everything".to_string()
+                                } else {
+                                    format!("layers: {}", layers.join(", "))
+                                };
+                                ui.menu_button(label, |ui| {
+                                    for name in self.layer_names.iter() {
+                                        let mut on = layers.iter().any(|l| l == name);
+                                        if ui.checkbox(&mut on, name).changed() {
+                                            if on {
+                                                layers.push(name.clone());
+                                            } else {
+                                                layers.retain(|l| l != name);
+                                            }
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                    if ui.small_button("everything").clicked() {
+                                        layers.clear();
+                                        cmd.inspector_changed = true;
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Which layers count as level geometry. Nothing ticked means \
+                                     every layer.",
+                                );
+                                ui.small(format!(
+                                    "{} object{} would be baked",
+                                    nav.sources,
+                                    if nav.sources == 1 { "" } else { "s" }
+                                ));
+                                if nav.sources == 0 {
+                                    ui.small(
+                                        "— nothing matches. A navmesh bakes what a character \
+                                         would collide with, so level geometry needs the \
+                                         collidable switch on it.",
+                                    );
+                                }
+
+                                // ---- the box ------------------------------------
+                                ui.separator();
+                                if ui
+                                    .checkbox(auto_bounds, "fit the box to what it finds")
+                                    .on_hover_text(
+                                        "Work the volume out from the geometry instead of \
+                                         sizing it by hand. A box that is too small clips the \
+                                         level, and nothing about the result says which.",
+                                    )
+                                    .changed()
+                                {
+                                    cmd.inspector_changed = true;
+                                }
+                                if !*auto_bounds {
+                                    ui.horizontal(|ui| {
+                                        ui.label("size");
+                                        for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+                                            let mut full = half_extents[i] * 2.0;
+                                            let r = ui.add(
+                                                egui::DragValue::new(&mut full)
+                                                    .speed(0.25)
+                                                    .range(0.5..=100000.0)
+                                                    .prefix(format!("{axis} ")),
+                                            );
+                                            if r.changed() {
+                                                half_extents[i] = full * 0.5;
+                                                cmd.inspector_changed = true;
+                                            }
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "The volume's full size in world units, before the \
+                                         node's scale. Move the node to move the box.",
+                                    );
+                                }
+
+                                // ---- the character ------------------------------
+                                ui.separator();
+                                ui.small("the character this is for");
+                                let mut touched = false;
+                                touched |= ui
+                                    .add(
+                                        egui::Slider::new(agent_radius, 0.0..=5.0)
+                                            .text("radius"),
+                                    )
+                                    .on_hover_text(
+                                        "How wide it is. Ground closer than this to a wall or a \
+                                         drop is not walkable, so a path can be walked by \
+                                         something with a body rather than by a point.",
+                                    )
+                                    .changed();
+                                touched |= ui
+                                    .add(
+                                        egui::Slider::new(agent_height, 0.1..=10.0)
+                                            .text("height"),
+                                    )
+                                    .on_hover_text(
+                                        "How tall it is. Ground with less headroom than this is \
+                                         not walkable.",
+                                    )
+                                    .changed();
+                                touched |= ui
+                                    .add(
+                                        egui::Slider::new(max_slope, 0.0..=89.0)
+                                            .suffix("°")
+                                            .text("max slope"),
+                                    )
+                                    .on_hover_text("The steepest floor it will walk up.")
+                                    .changed();
+                                touched |= ui
+                                    .add(
+                                        egui::Slider::new(step_height, 0.0..=5.0)
+                                            .text("step height"),
+                                    )
+                                    .on_hover_text(
+                                        "The tallest lip it steps over rather than walks around. \
+                                         This is what makes a staircase one place and a ledge \
+                                         two.",
+                                    )
+                                    .changed();
+                                touched |= ui
+                                    .add(
+                                        egui::Slider::new(cell_size, 0.02..=2.0)
+                                            .logarithmic(true)
+                                            .text("cell size"),
+                                    )
+                                    .on_hover_text(
+                                        "How finely the level is sampled. The one performance \
+                                         knob: halving it quadruples the bake.",
+                                    )
+                                    .changed();
+                                if touched {
+                                    cmd.inspector_changed = true;
+                                }
+                                // The one setting that quietly does something other
+                                // than what it says, named with the number to use.
+                                if let Some(advice) = nav.advice.as_deref() {
+                                    ui.add_space(2.0);
+                                    ui.small(egui::RichText::new(advice).color(
+                                        egui::Color32::from_rgb(230, 180, 90),
+                                    ));
+                                }
+
+                                // ---- the bake -----------------------------------
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .button("⬚  Bake")
+                                        .on_hover_text(
+                                            "Work out where this character can walk. Saved next \
+                                             to the scene as a .fnav.",
+                                        )
+                                        .clicked()
+                                    {
+                                        cmd.nav_bake = true;
+                                    }
+                                    if nav.polys > 0
+                                        && ui
+                                            .button("🗑  Clear")
+                                            .on_hover_text("Throw the bake away.")
+                                            .clicked()
+                                    {
+                                        cmd.nav_clear = true;
+                                    }
+                                });
+                                if nav.polys == 0 {
+                                    ui.small("no bake yet — nothing can path here.");
+                                } else {
+                                    ui.small(format!(
+                                        "baked: {} polygons over {:.0} m², from {} triangles in \
+                                         {:.2}s",
+                                        nav.polys, nav.area, nav.triangles, nav.seconds
+                                    ));
+                                    // More than one island is worth seeing rather than
+                                    // finding out about when a character will not go
+                                    // somewhere: it is usually a door nobody fits through.
+                                    if nav.regions > 1 {
+                                        ui.small(format!(
+                                            "{} separate areas — a character cannot walk \
+                                             between them.",
+                                            nav.regions
+                                        ));
+                                    }
+                                    if nav.stale {
+                                        ui.small(
+                                            egui::RichText::new(
+                                                "the settings have changed since this was baked",
+                                            )
+                                            .color(egui::Color32::from_rgb(230, 180, 90)),
+                                        );
+                                    }
+                                }
+                            }
                             Matter::LightProbes {
                                 half_extents,
                                 spacing,
@@ -5129,6 +5347,21 @@ impl EditorTabViewer<'_> {
                     }
                 }
 
+                // ===== Navmesh Exclude =====
+                // A marker with nothing to configure, so the whole component is
+                // its own explanation and a remove button.
+                if world.get::<floptle_core::NavMeshExclude>(e).is_some() {
+                    ui.separator();
+                    if component_header_no_copy(ui, "⬚ Navmesh Exclude", true) {
+                        cmd.set_nav_exclude = Some((e, false));
+                        cmd.inspector_changed = true;
+                    }
+                    ui.small(
+                        "kept out of every navmesh bake. Characters will not path over this \
+                         node, whatever it collides with.",
+                    );
+                }
+
                 // ===== Scripts =====
                 ui.separator();
                 // Always-available drop target: drag a script here to attach it.
@@ -5569,6 +5802,7 @@ impl EditorTabViewer<'_> {
                         Rb,
                         Celestial,
                         Coll,
+                        NavExclude,
                         Mat,
                         Net,
                         Preset(String),
@@ -5596,6 +5830,13 @@ impl EditorTabViewer<'_> {
                         }
                     if !has_mat {
                         items.push(("Rendering", "◑  Material".into(), Add::Mat));
+                    }
+                    if world.get::<floptle_core::NavMeshExclude>(e).is_none() {
+                        items.push((
+                            "Physics",
+                            "⬚  Navmesh Exclude".into(),
+                            Add::NavExclude,
+                        ));
                     }
                     // Animation Controller: attach an existing controller asset, or
                     // create a fresh one (opens the graph editor).
@@ -5714,6 +5955,7 @@ impl EditorTabViewer<'_> {
                                         Add::Celestial => cmd.add_celestial = Some(e),
                                         Add::Net => cmd.add_networked = Some(e),
                                         Add::Coll => cmd.set_collidable = Some((e, true)),
+                                        Add::NavExclude => cmd.set_nav_exclude = Some((e, true)),
                                         Add::Mat => cmd.add_material = Some(e),
                                         Add::Preset(n) => cmd.apply_preset = Some((e, n.clone())),
                                         Add::Script(n) => cmd.attach_named = Some((n.clone(), e)),

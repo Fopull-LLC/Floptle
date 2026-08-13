@@ -49,6 +49,7 @@ mod ext_wire;
 mod packages_ui;
 mod game_keys;
 mod gi_bake;
+mod nav_bake;
 mod reflect_capture;
 mod gizmo;
 mod hierarchy;
@@ -193,6 +194,9 @@ struct EditorCmd {
     /// A light-probe setting that affects the UPLOAD changed (intensity, leak,
     /// the box) — re-push the probe texture without re-baking anything.
     gi_changed: bool,
+    /// Bake this scene's navmesh, or throw the bake away.
+    nav_bake: bool,
+    nav_clear: bool,
     /// Start / stop / throw away the GI bake.
     gi_bake: bool,
     gi_cancel: bool,
@@ -303,6 +307,8 @@ struct EditorCmd {
     set_mesh_collider: Option<(Entity, bool)>,
     /// Toggle the static Collidable marker on any node (`true` = add, `false` = remove).
     set_collidable: Option<(Entity, bool)>,
+    /// Add / remove the navmesh-exclude marker on a node.
+    set_nav_exclude: Option<(Entity, bool)>,
     /// Toggle the Trigger flag on a Collidable (sensor: events, no blocking).
     set_trigger: Option<(Entity, bool)>,
     /// A STRUCTURAL physics edit happened (e.g. the Rigidbody mode dropdown) —
@@ -729,6 +735,7 @@ struct EditorTabViewer<'a> {
     /// This frame's baked-GI summary — the Light Probes section's bake button,
     /// progress bar and probe counts.
     gi: crate::gi_bake::GiStatus,
+    nav: crate::nav_bake::NavStatus,
     materials: &'a [(String, floptle_scene::MaterialDoc)],
     mat_name_buf: &'a mut String,
     /// Compiled `.flsl` shaders — the Inspector's Material section reads the
@@ -2377,6 +2384,14 @@ struct Editor {
     /// until a volume is baked. Held here rather than in the renderer because
     /// the editor also draws it (the probe gizmo) and writes it (the bake).
     gi_baked: Option<floptle_gi::BakedGi>,
+    /// The scene's baked navmesh, loaded from its `.fnav` — `None` until the
+    /// volume is baked. Held here for the same reasons the GI bake is: the
+    /// editor draws it, writes it, and hands it to a running game.
+    nav_baked: Option<floptle_nav::NavMesh>,
+    /// How long the last navmesh bake took, and how many triangles went into
+    /// it, so the Inspector can say without gathering geometry every frame.
+    nav_seconds: f32,
+    nav_triangles: usize,
     /// A bake in progress, advanced a slice per frame.
     gi_bake: Option<gi_bake::GiBake>,
     /// Force the next `refresh_gi` to re-upload even if nothing looks changed

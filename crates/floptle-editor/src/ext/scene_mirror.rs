@@ -293,6 +293,7 @@ pub(crate) fn kind_name(m: &Matter) -> &'static str {
         Matter::Camera { .. } => "camera",
         Matter::PointLight { .. } => "pointLight",
         Matter::GravityVolume { .. } => "gravityVolume",
+        Matter::NavMesh { .. } => "navMesh",
         Matter::FieldShape { .. } => "fieldShape",
         Matter::LightProbes { .. } => "lightProbes",
         Matter::ReflectionProbe { .. } => "reflectionProbe",

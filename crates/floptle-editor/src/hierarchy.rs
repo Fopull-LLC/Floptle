@@ -382,6 +382,19 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             pick = Some(MatterDoc::from(&Matter::default_light_probes()));
             ui.close();
         }
+        if ui
+            .button("⬚ Nav Mesh")
+            .on_hover_text(
+                "where characters can walk. Bakes what a character would collide with, \
+                 filtered by layer, and works its own bounds out. Saved as a .fnav beside \
+                 the scene.",
+            )
+            .clicked()
+        {
+            // The id is replaced with a fresh one on the way in — see `cmd.add`.
+            pick = Some(MatterDoc::from(&Matter::default_nav_mesh(1)));
+            ui.close();
+        }
         if ui.button("◎ Skybox").on_hover_text("the scene environment background (solid color or equirect texture)").clicked() {
             pick = Some(MatterDoc::from(&Matter::default_skybox()));
             ui.close();

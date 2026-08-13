@@ -119,6 +119,10 @@ pub struct NodeDoc {
     /// `onTriggerEnter/Stay/Exit` hooks. See [`floptle_core::Trigger`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub trigger: bool,
+    /// Keeps this node out of every navmesh bake, whatever else it is. See
+    /// [`floptle_core::NavMeshExclude`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nav_exclude: bool,
     /// Whether the node's geometry is drawn (default true). See [`floptle_core::Visible`].
     /// Only the rare hidden node serializes this.
     #[serde(default = "true_bool", skip_serializing_if = "is_true")]
@@ -953,6 +957,34 @@ pub enum MatterDoc {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         exclude_layers: Vec<String>,
     },
+    /// A navmesh ([`Matter::NavMesh`]). Every knob defaults, so a hand-written
+    /// `NavMesh()` bakes every layer, works its own bounds out, and describes a
+    /// human-sized character — which is a sensible thing to type and then bake.
+    ///
+    /// The bake itself is NOT here: it lives in a `.fnav` beside the scene, for
+    /// the same reason the light bake is a `.fgi`.
+    NavMesh {
+        #[serde(default)]
+        id: u32,
+        #[serde(default = "default_nav_half")]
+        half_extents: [f32; 3],
+        #[serde(default = "on")]
+        auto_bounds: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        layers: Vec<String>,
+        #[serde(default = "default_agent_radius")]
+        agent_radius: f32,
+        #[serde(default = "default_agent_height")]
+        agent_height: f32,
+        #[serde(default = "default_max_slope")]
+        max_slope: f32,
+        #[serde(default = "default_step_height")]
+        step_height: f32,
+        #[serde(default = "default_nav_cell")]
+        cell_size: f32,
+        #[serde(default = "on")]
+        enabled: bool,
+    },
     /// A reflection probe ([`Matter::ReflectionProbe`]). Every knob defaults, so
     /// a hand-written `ReflectionProbe()` is a room-sized box that captures on
     /// load — which is a sensible thing to type and then stop thinking about.
@@ -1196,6 +1228,33 @@ fn default_probe_spacing() -> f32 {
 fn default_probe_quality() -> u32 {
     16
 }
+/// Twice a light probe volume's box — a navmesh covers a level rather than a
+/// room, and this is only what it starts at before `auto_bounds` measures the
+/// real thing.
+fn default_nav_half() -> [f32; 3] {
+    [16.0, 8.0, 16.0]
+}
+/// Unity's default character, in Unity's four numbers. A level baked there and
+/// baked here should come out the same shape, and a designer arriving from
+/// there should not have to learn a new vocabulary to get it.
+fn default_agent_radius() -> f32 {
+    0.5
+}
+fn default_agent_height() -> f32 {
+    2.0
+}
+fn default_max_slope() -> f32 {
+    45.0
+}
+fn default_step_height() -> f32 {
+    0.75
+}
+/// A third of the radius, which is Unity's rule and comfortably inside what the
+/// baker asks for — erosion works in whole cells, so a cell that is coarse next
+/// to the radius closes narrow gaps without saying so.
+fn default_nav_cell() -> f32 {
+    0.15
+}
 /// Two metres of crossover at a doorway: enough that walking out of a room does
 /// not switch environments in a single step, small enough that a probe does not
 /// quietly speak for the corridor outside it.
@@ -1325,6 +1384,29 @@ impl From<&Matter> for MatterDoc {
                 leak: *leak,
                 normal_bias: *normal_bias,
                 exclude_layers: exclude_layers.clone(),
+            },
+            Matter::NavMesh {
+                id,
+                half_extents,
+                auto_bounds,
+                layers,
+                agent_radius,
+                agent_height,
+                max_slope,
+                step_height,
+                cell_size,
+                enabled,
+            } => MatterDoc::NavMesh {
+                id: *id,
+                half_extents: *half_extents,
+                auto_bounds: *auto_bounds,
+                layers: layers.clone(),
+                agent_radius: *agent_radius,
+                agent_height: *agent_height,
+                max_slope: *max_slope,
+                step_height: *step_height,
+                cell_size: *cell_size,
+                enabled: *enabled,
             },
             Matter::ReflectionProbe { half_extents, enabled, intensity, fade } => {
                 MatterDoc::ReflectionProbe {
@@ -1537,6 +1619,33 @@ impl MatterDoc {
                 leak: *leak,
                 normal_bias: *normal_bias,
                 exclude_layers: exclude_layers.clone(),
+            },
+            MatterDoc::NavMesh {
+                id,
+                half_extents,
+                auto_bounds,
+                layers,
+                agent_radius,
+                agent_height,
+                max_slope,
+                step_height,
+                cell_size,
+                enabled,
+            } => Matter::NavMesh {
+                id: *id,
+                half_extents: *half_extents,
+                auto_bounds: *auto_bounds,
+                layers: layers.clone(),
+                // Clamped here rather than trusted, because these are hand-editable
+                // and every one of them has a value that makes the bake do nothing
+                // quietly. A zero cell size is an infinite grid; a zero height means
+                // no surface ever has headroom; a negative radius erodes inward.
+                agent_radius: agent_radius.max(0.0),
+                agent_height: agent_height.max(0.01),
+                max_slope: max_slope.clamp(0.0, 89.9),
+                step_height: step_height.max(0.0),
+                cell_size: cell_size.max(0.01),
+                enabled: *enabled,
             },
             MatterDoc::ReflectionProbe { half_extents, enabled, intensity, fade } => {
                 Matter::ReflectionProbe {
@@ -2972,6 +3081,9 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if node.collidable {
         world.insert(e, floptle_core::Collidable);
     }
+    if node.nav_exclude {
+        world.insert(e, floptle_core::NavMeshExclude);
+    }
     if let Some(id) = node.paint {
         world.insert(e, floptle_core::VertexPaint { id });
     }
@@ -3227,6 +3339,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
         let tex_paint = world.get::<floptle_core::TexturePaint>(e).map(|p| p.id);
         let terrain_gen = world.get::<floptle_core::TerrainGen>(e).map(|g| g.0.clone());
         let trigger = world.get::<floptle_core::Trigger>(e).is_some();
+        let nav_exclude = world.get::<floptle_core::NavMeshExclude>(e).is_some();
         let visible = world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
         let cast_shadow = world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
         let anim_controller =
@@ -3302,6 +3415,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             terrain_gen,
             collidable,
             trigger,
+            nav_exclude,
             visible,
             cast_shadow,
             anim_controller,
@@ -3630,6 +3744,7 @@ mod tests {
                     // exercise the genspec round-trip (G2 on-demand terrain)
                     terrain_gen: Some("(seed:99,radius:42.0)".into()),
                     collidable: true,    // exercise the collidable round-trip
+                    nav_exclude: false,
                     trigger: true,       // exercise the trigger round-trip
                     visible: false,      // exercise the visible round-trip
                     cast_shadow: false,  // exercise the cast-shadow opt-out round-trip
@@ -3720,6 +3835,7 @@ mod tests {
                     paint: None,
                     tex_paint: None,
                     collidable: false,
+                    nav_exclude: false,
                     trigger: false,
                     visible: true,
                     cast_shadow: true,
@@ -3761,6 +3877,7 @@ mod tests {
                     paint: None,
                     tex_paint: None,
                     collidable: false,
+                    nav_exclude: false,
                     trigger: false,
                     visible: true,
                     cast_shadow: true,
@@ -3799,6 +3916,7 @@ mod tests {
                     paint: None,
                     tex_paint: None,
                     collidable: false,
+                    nav_exclude: false,
                     trigger: false,
                     visible: true,
                     cast_shadow: true,

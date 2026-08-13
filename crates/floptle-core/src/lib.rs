@@ -49,7 +49,7 @@ pub use matter::{
     active_camera, is_disabled, is_persistent, world_transform, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, Cast2D,
     CastShadow,
     CelestialBody, Collidable, Disabled, GravityMode, Layer, Light, LightShape, Lighting2D, Lit2D, Lit2DFacts, Made, Matter,
-    MeshCollider, Name,
+    MeshCollider, Name, NavMeshExclude,
     Parent,
     ParticleSystem, Persistent, RepeatIndex, RigidBody, SceneTag, ScreenShader, Shadow2D, Shape, Sorting, Spin, Sprite, Sprites,
     Tags,

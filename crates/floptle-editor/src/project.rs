@@ -359,6 +359,7 @@ impl Editor {
         self.adopt_tex_paint();
         // A brand-new scene has no bake; clear whatever the last one had.
         self.load_gi();
+        self.load_nav();
         self.selection.clear();
         self.history = History::default();
         self.mesh_registry.clear();
@@ -417,6 +418,7 @@ impl Editor {
         // The scene's baked GI (its `.fgi`), if it has one. Absent = no bounce,
         // which is exactly how every scene rendered before v0.45.
         self.load_gi();
+        self.load_nav();
         self.register_scene_meshes();
         self.selection.clear();
         self.selected_asset = None;
@@ -1812,6 +1814,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         tex_paint: None,
         collidable: false,
         trigger: false,
+        nav_exclude: false,
         visible: true,
         cast_shadow: true,
         anim_controller: None,

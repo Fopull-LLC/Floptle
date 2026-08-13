@@ -3142,6 +3142,7 @@ mod tests {
             tex_paint: None,
             collidable: false,
             trigger: false,
+            nav_exclude: false,
             visible: true,
             cast_shadow: true,
             anim_controller: None,

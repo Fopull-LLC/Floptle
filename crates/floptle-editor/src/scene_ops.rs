@@ -130,6 +130,7 @@ impl Editor {
         let tex_paint = self.world.get::<floptle_core::TexturePaint>(e).map(|p| p.id);
         let collidable = self.world.get::<floptle_core::Collidable>(e).is_some();
         let trigger = self.world.get::<floptle_core::Trigger>(e).is_some();
+        let nav_exclude = self.world.get::<floptle_core::NavMeshExclude>(e).is_some();
         let visible = self.world.get::<floptle_core::Visible>(e).map(|v| v.0).unwrap_or(true);
         let cast_shadow =
             self.world.get::<floptle_core::CastShadow>(e).map(|c| c.0).unwrap_or(true);
@@ -186,6 +187,7 @@ impl Editor {
             tex_paint,
             collidable,
             trigger,
+            nav_exclude,
             visible,
             cast_shadow,
             anim_controller,
@@ -345,6 +347,7 @@ impl Editor {
             tex_paint: None,
             collidable: false,
             trigger: false,
+            nav_exclude: false,
             visible: true,
             cast_shadow: true,
             anim_controller: None,
@@ -406,6 +409,7 @@ impl Editor {
                 tex_paint: None,
                 collidable: false,
                 trigger: false,
+            nav_exclude: false,
                 visible: true,
                 cast_shadow: true,
                 anim_controller: None,

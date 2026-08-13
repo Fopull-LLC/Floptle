@@ -776,6 +776,20 @@ pub struct MeshCollider;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Collidable;
 
+/// Keeps this node out of every navmesh bake, whatever else it is.
+///
+/// A navmesh bakes what a character would collide with, which is the answer
+/// that stays right as a level changes — but it is not always the answer you
+/// want. A glass floor, a piece of set dressing a character should walk around
+/// rather than over, a ceiling that happens to be flat enough to stand on: all
+/// of them collide, and none of them is ground.
+///
+/// Presence = excluded. It overrides everything else, including a layer filter
+/// that would otherwise include the node, because "not this one" is the thing
+/// you reach for when the general rule is right and one object is not.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NavMeshExclude;
+
 /// On-demand terrain generation spec (G2 galaxy streaming): the RON-serialized
 /// `PlanetFill` recipe for this Terrain node's field. A body carrying this needs
 /// no `.cfield` on disk at all — when something first approaches, the engine
@@ -1605,6 +1619,62 @@ pub enum Matter {
         /// away.
         exclude_layers: Vec<String>,
     },
+    /// A **navmesh**: where characters can walk, and how they get anywhere.
+    ///
+    /// Baking samples the level's collision geometry into walkable ground and
+    /// cuts it into convex polygons, so "walk to that door" is a search over a
+    /// few hundred shapes rather than a march through the world. What comes out
+    /// is a `.fnav` file beside the scene, for the same reason a light bake is a
+    /// `.fgi`: it is a build artefact measured in hundreds of kilobytes, and a
+    /// `.ron` is a thing people read.
+    ///
+    /// **What gets baked is what a character would collide with.** That is the
+    /// answer that stays right as a level changes — a wall built yesterday
+    /// blocks a path today without anybody remembering to tag it. Narrow it with
+    /// `layers`, or drop one node with [`NavMeshExclude`].
+    ///
+    /// The four numbers that describe the character are Unity's four, in the
+    /// same words, because they are the four that actually describe walking.
+    NavMesh {
+        /// Stable key for this navmesh's baked file, so the bake can be matched
+        /// back on reload — `Entity` indices die on undo and reload, exactly as
+        /// for [`Matter::Terrain`] and [`Matter::MapMesh`].
+        id: u32,
+        /// Half the box to bake, in local units, before the node's scale.
+        /// Ignored while `auto_bounds` is set.
+        half_extents: [f32; 3],
+        /// Work the box out from the geometry instead of being told it.
+        ///
+        /// On by default, because sizing a box by hand is a chore with a wrong
+        /// answer: too small silently clips the level, and nothing about the
+        /// result says which. With this set you name the layers that matter and
+        /// the bake covers exactly what it found.
+        auto_bounds: bool,
+        /// Which layers count as level geometry. **Empty means every layer.**
+        ///
+        /// By name rather than by bit, so reordering the project's layer list
+        /// cannot quietly re-point a filter at a different layer.
+        layers: Vec<String>,
+        /// How wide the character is. Ground closer than this to a wall or a
+        /// drop is not walkable, so a path can be followed by something with a
+        /// body rather than by a point.
+        agent_radius: f32,
+        /// How tall the character is. Ground with less clearance above it is
+        /// not walkable — the character would not fit.
+        agent_height: f32,
+        /// The steepest floor it will walk up, in degrees from flat.
+        max_slope: f32,
+        /// The tallest lip it steps over rather than walks around.
+        step_height: f32,
+        /// How finely the level is sampled, in world units. **The one
+        /// performance knob**: halving it quadruples the bake. It also has to
+        /// stay small next to `agent_radius` — the bake says so when it does
+        /// not, because a coarse cell silently closes narrow gaps.
+        cell_size: f32,
+        /// Master switch. Off keeps the volume, its settings and its bake, and
+        /// stops anything pathing on it.
+        enabled: bool,
+    },
     /// A **reflection probe**: what the surfaces in one room reflect.
     ///
     /// A reflective surface asks two things in turn — "is what I am reflecting
@@ -1750,6 +1820,32 @@ impl Matter {
             leak: 1.0,
             normal_bias: 0.5,
             exclude_layers: Vec::new(),
+        }
+    }
+
+    /// A fresh navmesh: every layer, bounds worked out from what it finds, and a
+    /// human-sized character.
+    ///
+    /// Auto bounds and no layer filter because the first thing anyone does with
+    /// a new navmesh is bake it, and a bake that comes back empty because a box
+    /// was in the wrong place teaches the wrong lesson about the feature. Both
+    /// are there to narrow once there is something to narrow.
+    ///
+    /// The character is Unity's default character, and the cell is Unity's rule
+    /// of a third of the radius — small enough that a doorway survives, large
+    /// enough that a level bakes in a moment.
+    pub fn default_nav_mesh(id: u32) -> Self {
+        Matter::NavMesh {
+            id,
+            half_extents: [16.0, 8.0, 16.0],
+            auto_bounds: true,
+            layers: Vec::new(),
+            agent_radius: 0.5,
+            agent_height: 2.0,
+            max_slope: 45.0,
+            step_height: 0.75,
+            cell_size: 0.15,
+            enabled: true,
         }
     }
 

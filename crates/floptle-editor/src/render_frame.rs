@@ -1767,6 +1767,7 @@ impl Editor {
                 | Matter::GravityVolume { .. }
                 | Matter::FieldShape { .. }
                 | Matter::LightProbes { .. }
+                | Matter::NavMesh { .. }
                 | Matter::ReflectionProbe { .. }
                 | Matter::Skybox { .. }
                 | Matter::PostProcess { .. } => {}
@@ -2234,6 +2235,7 @@ impl Editor {
                     | Matter::GravityVolume { .. }
                     | Matter::WaterVolume { .. }
                     | Matter::LightProbes { .. }
+                    | Matter::NavMesh { .. }
                     | Matter::ReflectionProbe { .. }
                     | Matter::Skybox { .. }
                     | Matter::PostProcess { .. } => {}
@@ -2322,6 +2324,13 @@ impl Editor {
             self.gi_baked.as_ref(),
             self.gi_show_only,
             self.gi_show_probes,
+        );
+        let nav_status = crate::nav_bake::nav_status(
+            &self.world,
+            crate::nav_bake::nav_node(&self.world).as_ref().map(|(_, m)| m),
+            self.nav_baked.as_ref(),
+            self.nav_seconds,
+            self.nav_triangles,
         );
         let old_retro_h = self.project.retro_height;
         let old_retro_w = self.project.retro_width;
@@ -3617,6 +3626,7 @@ impl Editor {
                 preview_material,
                 entity_names: &entity_names,
                 gi: gi_status,
+                nav: nav_status.clone(),
                 materials,
                 mat_name_buf,
                 flsl_cache: &self.flsl_cache,
@@ -6948,6 +6958,7 @@ impl Editor {
                 MatterDoc::Empty => "Group",
                 MatterDoc::MapMesh { .. } => "Model Mesh",
                 MatterDoc::Terrain { .. } => "Terrain",
+                MatterDoc::NavMesh { .. } => "Nav Mesh",
                 MatterDoc::Camera { .. } => "Camera",
                 MatterDoc::PointLight { .. } => "Point Light",
                 MatterDoc::GravityVolume { .. } => "Gravity Volume",
@@ -6959,6 +6970,23 @@ impl Editor {
                 MatterDoc::PostProcess { .. } => "Post Processing",
                 MatterDoc::LightProbes { .. } => "Light Probes",
                 MatterDoc::ReflectionProbe { .. } => "Reflection Probe",
+            };
+            // A navmesh's id keys its baked file, so a second one in the same
+            // scene must not arrive holding the first one's. The menu cannot
+            // know what is already here, so the id is assigned on the way in.
+            let m = if let MatterDoc::NavMesh { .. } = &m {
+                let next = self
+                    .world
+                    .query::<floptle_core::Matter>()
+                    .filter_map(|(_, m)| match m {
+                        floptle_core::Matter::NavMesh { id, .. } => Some(*id),
+                        _ => None,
+                    })
+                    .max()
+                    .map_or(1, |n| n + 1);
+                MatterDoc::from(&floptle_core::Matter::default_nav_mesh(next))
+            } else {
+                m
             };
             self.add_node(name, m);
         }
@@ -7182,6 +7210,19 @@ impl Editor {
                 "nothing to bake: the scene has no enabled Light Probes node".into(),
                 None,
             );
+        }
+        if cmd.nav_bake {
+            self.bake_nav();
+        }
+        if cmd.nav_clear {
+            if let Some((_, floptle_core::Matter::NavMesh { id, .. })) =
+                crate::nav_bake::nav_node(&self.world)
+            {
+                let _ = std::fs::remove_file(self.nav_path(id));
+            }
+            self.nav_baked = None;
+            self.nav_seconds = 0.0;
+            self.nav_triangles = 0;
         }
         if cmd.gi_cancel {
             self.cancel_gi_bake();
@@ -7478,6 +7519,16 @@ impl Editor {
                 }
             }
             self.rebuild_sim();
+        }
+        if let Some((e, on)) = cmd.set_nav_exclude {
+            self.record();
+            for e in self.selected_group(e) {
+                if on {
+                    self.world.insert(e, floptle_core::NavMeshExclude);
+                } else {
+                    self.world.remove::<floptle_core::NavMeshExclude>(e);
+                }
+            }
         }
         if cmd.rebuild_physics {
             self.rebuild_sim();
@@ -8720,6 +8771,9 @@ impl Editor {
                 Matter::Camera { .. } => {}      // it is the eye, not a thing seen
                 Matter::PostProcess { .. } => {} // post_process_uniforms
                 Matter::LightProbes { .. } => {} // baked GI: uniforms + one texture
+                // Drawn as an outline in the Scene view, and nothing at all in
+                // the game: a navmesh is a thing to path on, not to look at.
+                Matter::NavMesh { .. } => {}
                 // The capture is six renders of its own, taken elsewhere; here
                 // it is four uniform lanes and one texture, like the GI above.
                 Matter::ReflectionProbe { .. } => {}

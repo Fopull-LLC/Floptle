@@ -303,7 +303,9 @@ fn matter_propagates(m: &Matter) -> bool {
     match m {
         // The id IS the data: two nodes sharing a terrain or map-mesh id both
         // point at one field, and the second node's geometry is gone.
-        Matter::Terrain { .. } | Matter::MapMesh { .. } => false,
+        // A navmesh id is the same kind of data: two nodes sharing one point
+        // at a single baked file, and the second node's bake is gone.
+        Matter::Terrain { .. } | Matter::MapMesh { .. } | Matter::NavMesh { .. } => false,
         // One per scene. There is nothing to propagate to.
         Matter::Skybox { .. } | Matter::PostProcess { .. } => false,
         // Nothing to edit.
