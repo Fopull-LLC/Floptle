@@ -1537,6 +1537,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "floptle-nav"
+version = "0.56.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "floptle-net"
 version = "0.56.0"
 dependencies = [

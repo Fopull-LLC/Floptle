@@ -1,0 +1,12 @@
+[package]
+name = "floptle-nav"
+description = "Navigation: bakes walkable surfaces out of level geometry into a polygon navmesh, and finds paths across it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true } # a baked navmesh is saved beside the scene

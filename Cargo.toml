@@ -13,6 +13,7 @@ members = [
     "crates/floptle-core",     # math, ECS, scene-graph facade, events, time, allocator/pools
     "crates/floptle-field",    # implicit geometry: SDFs + CSG/blend ops (shared substrate)
     "crates/floptle-map",      # editable polygon-mesh kernel (map-building suite)
+    "crates/floptle-nav",      # navigation: bake walkable surfaces into a polygon navmesh, path across it
     "crates/floptle-tiles",    # tilemap kernel: tilesets, autotile rules, grid tools, collision merge
     "crates/floptle-rules",    # Lawset/Realm meta-spine + field-interaction graph
     "crates/floptle-gi",       # baked global illumination: irradiance probe grid + SH bake math
