@@ -1,5 +1,18 @@
 ## Just shipped
 
+**v0.56.0 "Word Of Mouth"** — anybody can publish a package and nobody vetted it,
+so **🌐 Browse now says so** — packages are made and managed by their authors, not
+by Fopull — and shows you what people who actually ran one thought. Every row
+carries a score and a review count, or **no reviews yet**, which is drawn as its
+own thing because a package nobody has got to is not one everybody disliked. Open
+**reviews** on a row to read them; each says which **version** it was written
+against, because a glowing review of 1.0.0 tells you little about the 3.0.0 you
+are installing. **You can review a package once you have it installed and
+enabled** — that is the whole gate, and it is the point. The editor now knows your
+Floptle account too, because it is **the same account as the Hub**: one keyring
+entry shared by the Hub, the editor and every game, so signing in anywhere signs
+you in everywhere.
+
 **v0.55.3** — **installing a package is no longer the same as running it.** A
 package from the catalogue or a Git URL that asks for anything — the network, your
 project's files, your browser — now arrives installed but switched **off**, with
