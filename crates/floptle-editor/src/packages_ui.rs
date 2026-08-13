@@ -584,6 +584,14 @@ fn browse_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, ac
                     state.reviews = ReviewsState::Idle;
                     "thanks — your review is posted".to_string()
                 }
+                // A token minted without the `cloud` scope is refused here and
+                // nowhere else the editor goes, so the status alone would send
+                // somebody hunting. Signing out and back in re-mints it.
+                (None, 401) | (None, 403) => format!(
+                    "the server would not accept that sign-in ({}). Sign out and back in, \
+                     which asks for a fresh token.",
+                    reply.status
+                ),
                 (None, s) => format!("the server said {s}: {}", reply.body),
             });
         }
@@ -823,6 +831,11 @@ fn non_empty(s: &str) -> Option<String> {
 }
 
 /// Fetch the catalogue on a worker thread.
+/// How long a review's words may be. The server refuses past this and says so,
+/// but a refusal that arrives after someone has written three thousand
+/// characters costs them the three thousand characters. Enforced here first.
+const REVIEW_BODY_MAX: usize = 2000;
+
 /// The version you may review, or `None` if you may not.
 ///
 /// **Installed AND enabled.** Not installed is obvious; installed but switched
@@ -992,6 +1005,17 @@ fn reviews_section(
             .desired_rows(2)
             .hint_text("what was it like to use? (optional)"),
     );
+    // Truncated on a character boundary — `truncate` on a byte index would
+    // panic mid-character, and people write reviews with accents in them.
+    if state.draft_body.chars().count() > REVIEW_BODY_MAX {
+        state.draft_body = state.draft_body.chars().take(REVIEW_BODY_MAX).collect();
+    }
+    let used = state.draft_body.chars().count();
+    // Only once it is close enough to matter — a counter on an empty box is
+    // noise, and on a two-word review it is nagging.
+    if used > REVIEW_BODY_MAX - 200 {
+        ui.small(format!("{used} / {REVIEW_BODY_MAX}"));
+    }
     let ready = (1..=5).contains(&state.draft_rating);
     if ui
         .add_enabled(ready, egui::Button::new("Post review"))
@@ -1010,6 +1034,31 @@ fn reviews_section(
             "POST",
             &format!("/api/floptle/v1/packages/{id}/reviews"),
             Some(body),
+            std::time::Duration::from_secs(20),
+            tx,
+        ) {
+            Ok(()) => {
+                state.posting = Some(rx);
+                state.post_note = None;
+            }
+            Err(e) => state.post_note = Some(e),
+        }
+    }
+
+    // Taking a review back. Offered when one of the reviews on screen looks like
+    // yours; the server is the authority on whose it is, so this is an
+    // affordance rather than a claim.
+    let mine_is_here = match (&state.reviews, account.session().and_then(|s| s.name)) {
+        (ReviewsState::Ready(r), Some(name)) => r.reviews.iter().any(|v| v.author == name),
+        _ => false,
+    };
+    if mine_is_here && ui.small_button("remove my review").clicked() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        match account.request(
+            1,
+            "DELETE",
+            &format!("/api/floptle/v1/packages/{id}/reviews"),
+            None,
             std::time::Duration::from_secs(20),
             tx,
         ) {
@@ -1099,6 +1148,21 @@ mod consent_tests {
         // Nonsense from a server does not make a ragged row.
         assert_eq!(stars(-1.0).chars().count(), 5);
         assert_eq!(stars(99.0).chars().count(), 5);
+    }
+
+    /// The cap has to be enforced where the typing happens. The server refuses
+    /// past 2000 and says so, but a refusal that arrives after somebody has
+    /// written an essay costs them the essay.
+    #[test]
+    fn a_review_body_is_cut_to_the_cap_on_a_character_boundary() {
+        // Multi-byte on purpose: truncating by BYTE index would panic in the
+        // middle of one of these, and people write reviews with accents in them.
+        let long: String = "é".repeat(REVIEW_BODY_MAX + 500);
+        let cut: String = long.chars().take(REVIEW_BODY_MAX).collect();
+        assert_eq!(cut.chars().count(), REVIEW_BODY_MAX);
+        // Still valid UTF-8 with every character whole.
+        assert!(cut.ends_with('é'));
+        assert_eq!(cut.len(), REVIEW_BODY_MAX * 2, "each é is two bytes");
     }
 
     /// You may review what you have actually run. Installed-but-disabled is the

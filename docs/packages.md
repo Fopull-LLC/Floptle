@@ -156,9 +156,10 @@ your operating system's keyring, shared by the Hub, the editor and every game, s
 signing in anywhere signs you in everywhere. The Packages window shows who you
 are, and lets you sign out or sign in as somebody else.
 
-Pick a rating out of five; words are optional. The version you have installed goes
-with it. Posting again replaces your earlier review rather than adding a second
-one — you are allowed to change your mind.
+Pick a rating out of five; words are optional, up to 2000 characters. The version
+you have installed goes with it. Posting again replaces your earlier review rather
+than adding a second one — you are allowed to change your mind — and **remove my
+review** takes it back.
 
 Pointing the catalogue at your own registry gets you that registry's reviews too.
 Posting is only ever to fopull.com, though: the editor will not send your access
