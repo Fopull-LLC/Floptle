@@ -1,5 +1,22 @@
 ## Just shipped
 
+**v0.58.1 "Solid Ground"** — a wall you built is a wall the navmesh knows about.
+Baking a level made of rooms used to lose walls: some sections blocked, some
+blocked in patches, and some were walked straight through, with no pattern you
+could act on. A wall has no height — seen from above it is a line — and the bake
+worked by asking geometry how high it was over each square of ground, which is
+the right question for a floor and a meaningless one for a wall. It now reads
+what a piece of geometry **occupies** rather than what it is over, so a wall
+records the solid it fills, foot to top, in every square it touches. Walls block
+along their whole length at any thickness, including thinner than the cell size;
+where they sit against the grid stops mattering; a doorway is a doorway; and the
+middle of a thick wall or pillar is filled in rather than left as a patch of
+floor stranded inside it. The same for the **Model** tool, imported meshes,
+primitives and terrain alike. Ground *thinner* than a cell — a catwalk, a kerb, a
+narrow ledge — used to fall between the squares and vanish, and is baked now too.
+**Re-bake to pick it up.** Also: the viewport toolbar says **model** rather than
+`map`, to agree with the ▦ Model tab.
+
 **v0.58.0 "Plain To See"** — the navmesh now looks like the ground your
 characters walk on. It used to draw every rectangle the bake had cut the floor
 into, so one continuous room came out as dozens of floating outlines and the
