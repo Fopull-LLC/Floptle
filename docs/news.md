@@ -1,5 +1,24 @@
 ## Just shipped
 
+**v0.58.0 "Plain To See"** — the navmesh now looks like the ground your
+characters walk on. It used to draw every rectangle the bake had cut the floor
+into, so one continuous room came out as dozens of floating outlines and the
+question you were actually asking — *are these two pieces of ground joined?* —
+was the one it could not answer. It draws the walkable **surface** now, outlined
+only where the ground really ends, with the joins between elevations drawn where
+a character can actually take them. Drag **max slope** below a ramp's angle and
+you watch the mezzanine come away from the floor it was part of. `nav.*` grew the
+rest of the questions: `nav.raycast` (can I just walk straight at it — the
+walker's answer, not the collider's), `nav.reachable`, `nav.distance` for how far
+it is to *walk*, `nav.onMesh`, `nav.regionOf` and `nav.random`. Packages became a
+catalogue that can hold art: a package declares its **categories**, a
+**thumbnail** and a gallery, and 🌐 Browse is a filterable grid you can narrow by
+what a package holds — has models, has audio, has editor tools — worked out from
+the files it ships rather than from anything it claims. 📦 Packages is a dock tab
+now rather than a floating window, and the editor remembers your panel layout and
+window place between sessions, with **Window ▸ Reset layout** when you want the
+default back.
+
 **v0.57.1** — a navmesh could quietly miss the floor: with *fit the box to what
 it finds* off, a bake kept geometry only when one of its CORNERS was inside the
 volume, so a floor made of two large triangles was thrown away for being too big
