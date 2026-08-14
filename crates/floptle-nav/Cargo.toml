@@ -10,3 +10,6 @@ rust-version.workspace = true
 
 [dependencies]
 serde = { workspace = true } # a baked navmesh is saved beside the scene
+
+[dev-dependencies]
+postcard = { workspace = true }

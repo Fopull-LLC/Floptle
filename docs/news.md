@@ -1,6 +1,10 @@
 ## Just shipped
 
-**v0.57.1** — a reflection probe, a light probe volume and a navmesh all decide
+**v0.57.1** — a navmesh could quietly miss the floor: with *fit the box to what
+it finds* off, a bake kept geometry only when one of its CORNERS was inside the
+volume, so a floor made of two large triangles was thrown away for being too big
+while everything standing on it was kept. Re-bake if yours came out patchy. Also,
+a reflection probe, a light probe volume and a navmesh all decide
 where they apply from a box you could not see, so the only way to size one was to
 type a number and reload to find out whether it reached. They draw now, under
 **Areas of effect** in the gizmo menu — and a reflection probe draws its fade as a

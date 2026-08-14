@@ -331,15 +331,31 @@ pub(crate) fn settings_of(m: &Matter) -> Option<NavSettings> {
 
 /// Cut the gathered triangles down to the volume's box.
 ///
-/// A triangle is kept when any vertex is inside, which keeps the floor under a
-/// wall that straddles the edge rather than leaving a notch there. Nothing is
-/// clipped: the baker's own bounds grow to what it is given, and a metre of
-/// overhang costs a metre of grid.
+/// A triangle is kept when its own bounds OVERLAP the box — not when one of its
+/// corners is inside it. That distinction is the whole of this function, and
+/// getting it wrong ate a level: a floor is often two enormous triangles whose
+/// corners are far outside any box you would draw around a room, and testing
+/// corners threw the floor away while keeping every small object standing on
+/// it. What came back was the tops of the furniture.
+///
+/// Overlapping bounds keeps a few triangles that only come near the box. That
+/// costs a little grid and nothing else. The opposite mistake is silent, and
+/// looks like a level that is somehow not walkable.
+///
+/// Nothing is actually cut: the baker's own bounds grow to whatever it is
+/// given, so a triangle that straddles the edge keeps its far half.
 pub(crate) fn clip(tris: Vec<Tri>, half: Vec3) -> Vec<Tri> {
-    let inside = |p: [f32; 3]| {
-        p[0].abs() <= half.x && p[1].abs() <= half.y && p[2].abs() <= half.z
-    };
-    tris.into_iter().filter(|t| inside(t.a) || inside(t.b) || inside(t.c)).collect()
+    tris.into_iter()
+        .filter(|t| {
+            let (lo, hi) = t.bounds();
+            lo[0] <= half.x
+                && hi[0] >= -half.x
+                && lo[1] <= half.y
+                && hi[1] >= -half.y
+                && lo[2] <= half.z
+                && hi[2] >= -half.z
+        })
+        .collect()
 }
 
 /// Bake, and say how long it took.
@@ -637,6 +653,34 @@ mod tests {
         let a = mesh.path([-3.0, 0.5, -3.0], [3.0, 0.5, 3.0]).unwrap();
         let b = back.path([-3.0, 0.5, -3.0], [3.0, 0.5, 3.0]).unwrap();
         assert_eq!(a, b, "the reloaded mesh must answer the same question the same way");
+    }
+
+    /// The bug that ate a level. A floor is usually a couple of enormous
+    /// triangles, and its corners are nowhere near the box you draw around a
+    /// room — so a corner test throws the floor away and keeps the furniture,
+    /// which bakes into the tops of things and nothing to walk on between them.
+    #[test]
+    fn a_floor_bigger_than_the_box_survives_being_clipped_to_it() {
+        // 80 m of floor as two triangles, and a 24 x 16 x 32 volume inside it.
+        let floor = vec![
+            Tri::new([-40.0, 0.0, -40.0], [40.0, 0.0, -40.0], [-40.0, 0.0, 40.0]),
+            Tri::new([40.0, 0.0, -40.0], [40.0, 0.0, 40.0], [-40.0, 0.0, 40.0]),
+        ];
+        let half = Vec3::new(12.0, 8.0, 16.0);
+        assert_eq!(clip(floor.clone(), half).len(), 2, "the floor covers the box");
+
+        // And something genuinely elsewhere is still dropped.
+        let far = vec![Tri::new(
+            [500.0, 0.0, 500.0],
+            [504.0, 0.0, 500.0],
+            [500.0, 0.0, 504.0],
+        )];
+        assert!(clip(far, half).is_empty());
+
+        // A wall straddling the edge keeps its far half rather than a notch.
+        let straddle =
+            vec![Tri::new([10.0, 0.0, 0.0], [20.0, 0.0, 0.0], [10.0, 6.0, 0.0])];
+        assert_eq!(clip(straddle, half).len(), 1);
     }
 
     /// Nothing to read is not an error to decide about — it is "bake again".
