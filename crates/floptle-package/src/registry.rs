@@ -91,9 +91,18 @@ fn yes() -> bool {
 
 impl Entry {
     /// Where this package's files are, given the project root.
+    ///
+    /// A **relative** `Linked` path is relative to the project, not to wherever
+    /// the editor happens to have been started from. Reading it as a working-
+    /// directory path meant a link that worked when the editor was launched from
+    /// a terminal in the project and silently found nothing when it was launched
+    /// any other way — the same package, the same file, two answers.
     pub fn root_in(&self, project_root: &Path) -> PathBuf {
         match &self.source {
-            Source::Linked(p) => PathBuf::from(p),
+            Source::Linked(p) => {
+                let p = Path::new(p);
+                if p.is_absolute() { p.to_path_buf() } else { project_root.join(p) }
+            }
             _ => project_root.join(PACKAGES_DIR).join(&self.id),
         }
     }
@@ -282,5 +291,39 @@ mod tests {
         .unwrap();
         assert!(Registry::load(&root).unwrap().packages[0].enabled);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::*;
+
+    /// A linked package is the mode somebody develops a package in, so "where
+    /// are its files" has to answer the same way however the editor was started.
+    #[test]
+    fn a_relative_link_is_relative_to_the_project() {
+        let project = Path::new("/home/me/MyGame");
+        let rel = Entry {
+            id: "com.me.kit".into(),
+            version: Version::new(1, 0, 0),
+            source: Source::Linked("packages/kit".into()),
+            enabled: true,
+        };
+        assert_eq!(rel.root_in(project), PathBuf::from("/home/me/MyGame/packages/kit"));
+
+        // An absolute link is left exactly as written — it is the whole point of
+        // linking to somewhere else on the disk.
+        let abs = Entry {
+            source: Source::Linked("/work/shared/kit".into()),
+            ..rel.clone()
+        };
+        assert_eq!(abs.root_in(project), PathBuf::from("/work/shared/kit"));
+
+        // Everything else lives under the project's own packages folder.
+        let installed = Entry { source: Source::Registry, ..rel };
+        assert_eq!(
+            installed.root_in(project),
+            PathBuf::from("/home/me/MyGame").join(PACKAGES_DIR).join("com.me.kit")
+        );
     }
 }

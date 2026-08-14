@@ -33,15 +33,49 @@ use std::sync::mpsc::{Receiver, Sender};
 /// of a package and far below anything that could hurt.
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 
-/// The longest edge a decoded thumbnail is kept at. A grid cell is 128px; a
-/// 4000px hero image held at full size for forty rows is half a gigabyte for
-/// nothing.
-const MAX_EDGE: u32 = 256;
+/// What a picture is being asked for, which decides how big it is kept.
+///
+/// The same file is wanted at two very different sizes and the difference
+/// matters both ways: a grid cell held at gallery size is memory spent on
+/// something 128px wide, and a gallery image held at grid size is a screenshot
+/// nobody can read. A sky rendered across five phases at 1600px is exactly the
+/// case — at 256 it is five smudges.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Detail {
+    /// A cell in the browse grid.
+    Grid,
+    /// A gallery still, or one opened full size.
+    Gallery,
+}
 
-/// How many decoded thumbnails are held. Past this, new ones stop being fetched
-/// rather than evicting something on screen — a catalogue big enough to hit this
-/// is one being scrolled, and thrashing is worse than a few placeholders.
-const MAX_HELD: usize = 400;
+impl Detail {
+    /// The longest edge it is kept at. A 4000px hero image held at full size for
+    /// forty rows is half a gigabyte for nothing.
+    fn max_edge(self) -> u32 {
+        match self {
+            Detail::Grid => 256,
+            Detail::Gallery => 1600,
+        }
+    }
+
+    /// How many are held at once. Past this, new ones stop being fetched rather
+    /// than evicting something on screen — thrashing is worse than a few
+    /// placeholders. Gallery images are ~25x the pixels, and only one package's
+    /// gallery is ever on screen, so it is allowed far fewer.
+    fn max_held(self) -> usize {
+        match self {
+            Detail::Grid => 400,
+            Detail::Gallery => 32,
+        }
+    }
+
+    fn slot(self) -> usize {
+        match self {
+            Detail::Grid => 0,
+            Detail::Gallery => 1,
+        }
+    }
+}
 
 /// What one thumbnail is doing.
 enum Thumb {
@@ -55,7 +89,9 @@ enum Thumb {
 
 #[derive(Default)]
 pub(crate) struct Thumbs {
-    by_url: HashMap<String, Thumb>,
+    /// One map per [`Detail`], because the same URL is a different picture in
+    /// each and they must not evict one another.
+    by_url: [HashMap<String, Thumb>; 2],
 }
 
 impl Thumbs {
@@ -71,31 +107,33 @@ impl Thumbs {
         ctx: &egui::Context,
         src: &str,
         base: Option<&Path>,
+        detail: Detail,
     ) -> Option<&egui::TextureHandle> {
         let key = resolve(src, base)?;
+        let held = &mut self.by_url[detail.slot()];
 
         // Collect anything that has arrived since the last frame.
-        if let Some(Thumb::Fetching(rx)) = self.by_url.get(&key)
+        if let Some(Thumb::Fetching(rx)) = held.get(&key)
             && let Ok(result) = rx.try_recv()
         {
             let next = match result {
                 Ok(img) => Thumb::Ready(ctx.load_texture(
-                    format!("pkgthumb:{key}"),
+                    format!("pkgthumb:{}:{key}", detail.slot()),
                     img,
                     egui::TextureOptions::LINEAR,
                 )),
                 Err(e) => Thumb::Failed(e),
             };
-            self.by_url.insert(key.clone(), next);
+            held.insert(key.clone(), next);
         }
 
-        if !self.by_url.contains_key(&key) {
-            if self.by_url.len() >= MAX_HELD {
+        if !held.contains_key(&key) {
+            if held.len() >= detail.max_held() {
                 return None;
             }
-            self.by_url.insert(key.clone(), Thumb::Fetching(load(key.clone())));
+            held.insert(key.clone(), Thumb::Fetching(load(key.clone(), detail.max_edge())));
         }
-        match self.by_url.get(&key) {
+        match held.get(&key) {
             Some(Thumb::Ready(t)) => Some(t),
             _ => None,
         }
@@ -106,7 +144,7 @@ impl Thumbs {
     /// they can see rather than guess at.
     pub(crate) fn failure(&self, src: &str, base: Option<&Path>) -> Option<&str> {
         let key = resolve(src, base)?;
-        match self.by_url.get(&key) {
+        match self.by_url[Detail::Grid.slot()].get(&key) {
             Some(Thumb::Failed(e)) => Some(e),
             _ => None,
         }
@@ -149,10 +187,10 @@ fn resolve(src: &str, base: Option<&Path>) -> Option<String> {
 }
 
 /// Fetch and decode one thumbnail on its own thread.
-fn load(key: String) -> Receiver<Result<egui::ColorImage, String>> {
+fn load(key: String, max_edge: u32) -> Receiver<Result<egui::ColorImage, String>> {
     let (tx, rx): (Sender<Result<egui::ColorImage, String>>, _) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(read_bytes(&key).and_then(|b| decode(&b)));
+        let _ = tx.send(read_bytes(&key).and_then(|b| decode(&b, max_edge)));
     });
     rx
 }
@@ -187,10 +225,10 @@ fn read_bytes(key: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-fn decode(bytes: &[u8]) -> Result<egui::ColorImage, String> {
+fn decode(bytes: &[u8], max_edge: u32) -> Result<egui::ColorImage, String> {
     let img = image::load_from_memory(bytes).map_err(|e| format!("not an image: {e}"))?;
-    let img = if img.width().max(img.height()) > MAX_EDGE {
-        img.thumbnail(MAX_EDGE, MAX_EDGE)
+    let img = if img.width().max(img.height()) > max_edge {
+        img.thumbnail(max_edge, max_edge)
     } else {
         img
     };
@@ -246,23 +284,31 @@ mod tests {
     /// on the worker thread.
     #[test]
     fn a_file_that_is_not_an_image_fails_in_words() {
-        let err = decode(b"this is not a png").unwrap_err();
+        let err = decode(b"this is not a png", Detail::Grid.max_edge()).unwrap_err();
         assert!(err.contains("not an image"), "{err}");
     }
 
     /// The ceiling is what stops a stranger's manifest costing an unbounded
-    /// amount of memory per row.
+    /// amount of memory per row — and there are two of them, because a gallery
+    /// still kept at grid size is a screenshot nobody can read.
     #[test]
-    fn a_large_image_is_kept_small() {
-        let big = image::RgbaImage::from_pixel(1024, 512, image::Rgba([9, 9, 9, 255]));
+    fn a_large_image_is_kept_small_at_the_size_it_was_asked_for() {
+        let big = image::RgbaImage::from_pixel(4000, 2000, image::Rgba([9, 9, 9, 255]));
         let mut png = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(big)
             .write_to(&mut png, image::ImageFormat::Png)
             .unwrap();
-        let out = decode(png.get_ref()).unwrap();
-        assert!(out.size[0] <= MAX_EDGE as usize, "{:?}", out.size);
-        assert!(out.size[1] <= MAX_EDGE as usize, "{:?}", out.size);
-        // …and the aspect ratio is kept, so nothing is squashed into the cell.
-        assert!(out.size[0] > out.size[1]);
+        for detail in [Detail::Grid, Detail::Gallery] {
+            let out = decode(png.get_ref(), detail.max_edge()).unwrap();
+            assert!(out.size[0] <= detail.max_edge() as usize, "{:?}", out.size);
+            assert!(out.size[1] <= detail.max_edge() as usize, "{:?}", out.size);
+            // …and the aspect ratio is kept, so nothing is squashed into the cell.
+            assert!(out.size[0] > out.size[1]);
+        }
+        // The gallery really is bigger — a shared ceiling would make this whole
+        // distinction a no-op that nothing would notice.
+        let grid = decode(png.get_ref(), Detail::Grid.max_edge()).unwrap();
+        let gallery = decode(png.get_ref(), Detail::Gallery.max_edge()).unwrap();
+        assert!(gallery.size[0] > grid.size[0] * 2, "{:?} vs {:?}", gallery.size, grid.size);
     }
 }

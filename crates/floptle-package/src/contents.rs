@@ -440,3 +440,48 @@ mod tests {
         assert_eq!(Facet::from_key("nonsense"), None);
     }
 }
+
+#[cfg(test)]
+mod kit_tests {
+    use super::*;
+    use crate::Manifest;
+
+    /// The sample kit that ships in this repo, checked as the thing it claims to
+    /// be. It is the catalogue's first multi-category listing and the fixture
+    /// the site derives its own facets against, so "what does this package
+    /// actually contain" is worth being an assertion rather than a belief.
+    #[test]
+    fn the_fofighter_kit_contains_what_its_manifest_claims() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/fofighter-kit");
+        if !root.exists() {
+            return; // Packaged crate without the repo around it.
+        }
+        let m = Manifest::load(&root).expect("the kit's manifest parses");
+        m.validate().expect("…and is valid");
+
+        let held = Contents::scan(&m, &root);
+        let facets: Vec<Facet> = held.facets().into_iter().map(|(f, _)| f).collect();
+        assert_eq!(
+            facets,
+            vec![Facet::Models, Facet::Audio, Facet::Shaders, Facet::Fonts],
+            "the kit should hold exactly these, in `Facet::ALL` order — which is \
+             part of the interface, so a listing and a site agree on it"
+        );
+        assert_eq!(held.count(Facet::Models), 5);
+        assert_eq!(held.count(Facet::Audio), 4);
+        assert_eq!(held.count(Facet::Fonts), 1);
+        assert_eq!(held.count(Facet::Shaders), 1);
+
+        // Nine gallery images, a thumbnail and a banner — and not one of them
+        // counted as content. A package whose marketing art filtered it as an
+        // art package would be the exact bug `media/` is excluded to avoid,
+        // and this kit is the first listing with enough of it to notice.
+        assert_eq!(held.count(Facet::Textures), 0, "media/ is not content");
+
+        // It ships no code at all, which is the claim the README makes to
+        // anybody nervous about installing it.
+        assert_eq!(held.count(Facet::Scripts), 0);
+        assert_eq!(held.count(Facet::Editor), 0);
+    }
+}

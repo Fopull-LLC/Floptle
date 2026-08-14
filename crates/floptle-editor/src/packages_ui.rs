@@ -151,6 +151,10 @@ pub(crate) struct PackagesState {
     /// installed but NOT enabled until the person who installed it has seen what
     /// it wants — see `gate_remote_install`.
     awaiting_consent: Option<String>,
+    /// A gallery image opened full size: its source, its caption, and the folder
+    /// to resolve it against. A screenshot shrunk into a 220px strip is a
+    /// screenshot nobody can read, and the whole point of a gallery is looking.
+    lightbox: Option<(String, String, Option<std::path::PathBuf>)>,
 }
 
 impl PackagesState {
@@ -919,7 +923,7 @@ fn thumbnail(ui: &mut egui::Ui, state: &mut PackagesState, listing: &Listing) {
     let tex = listing
         .thumbnail
         .as_deref()
-        .and_then(|src| state.thumbs.get(ui.ctx(), src, None))
+        .and_then(|src| state.thumbs.get(ui.ctx(), src, None, crate::pkg_thumbs::Detail::Grid))
         .cloned();
     match tex {
         Some(tex) => {
@@ -1003,16 +1007,42 @@ fn detail_panel(
     if !listing.description.is_empty() {
         ui.label(&listing.description);
     }
-    if !listing.contains.is_empty() {
-        ui.small(
-            listing
-                .contains
-                .iter()
-                .map(|f| f.label())
-                .collect::<Vec<_>>()
-                .join(" · "),
-        );
+    // What it holds. For an installed package this is counted off the files on
+    // this disk — "5 models · 4 audio" says something a list of shelf names
+    // does not, and it is the answer to "what did I actually just install".
+    // For one that is only listed, the catalogue reports which facets are
+    // present but not how many, so the labels stand alone rather than inventing
+    // a number.
+    let held = have
+        .map(|e| e.root_in(ctx.project_root))
+        .and_then(|root| {
+            floptle_package::Manifest::load(&root)
+                .ok()
+                .map(|m| floptle_package::contents::Contents::scan(&m, &root))
+        })
+        .filter(|c| !c.is_empty());
+    match &held {
+        Some(c) => {
+            ui.small(
+                c.facets()
+                    .into_iter()
+                    .map(|(f, n)| format!("{n} {}", f.label().to_lowercase()))
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            );
+        }
+        None if !listing.contains.is_empty() => {
+            ui.small(
+                listing.contains.iter().map(|f| f.label()).collect::<Vec<_>>().join(" · "),
+            );
+        }
+        None => {}
     }
+
+    // An installed package's pictures are on this disk, so they are read from
+    // there rather than fetched: it is faster, it works with no network, and it
+    // is the only way an author sees their own gallery before it is published.
+    let media_base = have.map(|e| e.root_in(ctx.project_root));
 
     // The gallery. Videos are a link out — the editor is not a video player and
     // pretending otherwise is a worse experience than a browser tab.
@@ -1022,18 +1052,53 @@ fn detail_panel(
             ui.horizontal(|ui| {
                 for m in &listing.media {
                     ui.vertical(|ui| {
-                        let tex =
-                            m.still().and_then(|s| state.thumbs.get(ui.ctx(), s, None)).cloned();
+                        let tex = m
+                            .still()
+                            .and_then(|s| {
+                                state.thumbs.get(
+                                    ui.ctx(),
+                                    s,
+                                    media_base.as_deref(),
+                                    crate::pkg_thumbs::Detail::Gallery,
+                                )
+                            })
+                            .cloned();
                         match tex {
                             Some(tex) => {
                                 let r = ui.add(
                                     egui::Image::new(&tex)
                                         .fit_to_exact_size(egui::vec2(220.0, 124.0))
-                                        .corner_radius(4.0),
+                                        .corner_radius(4.0)
+                                        .sense(egui::Sense::click()),
                                 );
-                                if m.is_video() && r.hovered() {
+                                if r.hovered() {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                 }
+                                // A gallery is for looking at, and a 220px strip
+                                // is not looking at anything. Clicking a still
+                                // opens it as big as the window allows; a video
+                                // goes to a browser, which is where video lives.
+                                if r.clicked() {
+                                    match &m.video {
+                                        Some(url) => {
+                                            let _ = floptle_script::open_in_browser(url);
+                                        }
+                                        None => {
+                                            if let Some(src) = m.still() {
+                                                state.lightbox = Some((
+                                                    src.to_string(),
+                                                    m.caption.clone(),
+                                                    media_base.clone(),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                                r.on_hover_text(if m.is_video() {
+                                    "watch in your browser"
+                                } else {
+                                    "click to see it full size"
+                                });
                             }
                             None => {
                                 ui.allocate_exact_size(
@@ -1114,6 +1179,60 @@ fn detail_panel(
         state.reviews = ReviewsState::Idle;
     }
     reviews_section(ui, ctx, state, &listing.id, mine);
+
+    lightbox(ui, state);
+}
+
+/// One gallery image, as big as the window allows.
+///
+/// Drawn as a window rather than inline because it has to sit over the panel it
+/// was opened from — the alternative is a strip that grows and shoves the rest
+/// of the page around, which is the thing the layout is not allowed to do.
+fn lightbox(ui: &mut egui::Ui, state: &mut PackagesState) {
+    let Some((src, caption, base)) = state.lightbox.clone() else { return };
+    let screen = ui.ctx().input(|i| i.content_rect());
+    let mut open = true;
+    egui::Window::new("gallery")
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ui.ctx(), |ui| {
+            let tex = state
+                .thumbs
+                .get(ui.ctx(), &src, base.as_deref(), crate::pkg_thumbs::Detail::Gallery)
+                .cloned();
+            match tex {
+                Some(tex) => {
+                    // Fit inside the window, never past it, and never enlarged
+                    // past its own pixels — an upscaled screenshot looks worse
+                    // than a small one.
+                    let size = tex.size_vec2();
+                    let room = egui::vec2(screen.width() * 0.86, screen.height() * 0.8);
+                    let k = (room.x / size.x).min(room.y / size.y).min(1.0);
+                    ui.add(egui::Image::new(&tex).fit_to_exact_size(size * k).corner_radius(4.0));
+                }
+                None => {
+                    ui.spinner();
+                }
+            }
+            ui.horizontal(|ui| {
+                if !caption.is_empty() {
+                    ui.small(&caption);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("✖ close").clicked() {
+                        open = false;
+                    }
+                });
+            });
+        });
+    // Escape as well as the button, because a picture filling the screen with
+    // one small ✖ on it is a thing people press Escape at.
+    let escaped = ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
+    if !open || escaped {
+        state.lightbox = None;
+    }
 }
 
 /// Install / Update / why neither is offered.

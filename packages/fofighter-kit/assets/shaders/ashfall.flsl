@@ -1,0 +1,389 @@
+// ASHFALL — the prologue sky.
+//
+// The whole opening sequence in one file: a dark surreal void that catches,
+// burns, reveals a gothic skyline in its own firelight, swallows it, and ends
+// with the sky itself on fire.
+//
+// EVERYTHING IS DRIVEN BY ONE NUMBER, `burn`, from 0 to 1. `time` only does
+// local churn — flicker, drift, the roll of the smoke — so a paused story
+// leaves the sky alive but stops it PROGRESSING. Five phases, and they
+// cross-fade rather than cut:
+//
+//   burn 0.00  VOID       near-black, a cold violet drift, no fire at all
+//   burn 0.25  EMBERS     a dull red bloom low down, motes lifting out of it
+//   burn 0.45  THE TOWN   the skyline appears as a silhouette IN that glow
+//   burn 0.70  THE FIRE   flame tongues climb over the roofs and take them
+//   burn 1.00  ENGULFED   whole sky alight, smoke rolling across the top
+//
+// The scene's Skybox node holds the knobs. Drag `burn` in the Inspector to see
+// any phase instantly — it is a uniform, so there is no recompile.
+//
+// ---------------------------------------------------------------------------
+// A NOTE ON BLACK SILHOUETTES, because it is the reason for `floor` below.
+// ---------------------------------------------------------------------------
+// The models in front of this are black silhouettes too, and a black model on a
+// black sky is not a silhouette, it is nothing. So the void phase is NOT pure
+// black: it keeps a faint cold floor of light that the shapes read against, and
+// the whole sky brightens monotonically with `burn` so they only ever get
+// easier to see. Do not take `floor` to 0 to make the opening "darker" — you
+// will make the actors invisible instead.
+//
+// ---------------------------------------------------------------------------
+// AZIMUTH WITHOUT ATAN
+// ---------------------------------------------------------------------------
+// FLSL's stdlib has no `atan`/`atan2`, and the skyline needs a coordinate that
+// runs once around the horizon so buildings can be cells in it. The diamond
+// angle does it with arithmetic only: x/(|x|+|z|) is monotonic across each half
+// of the circle, and folding the far half around gives a continuous 0..1 sweep.
+// Its spacing is not exactly proportional to angle — buildings come out a bit
+// wider on the diagonals — which on a skyline reads as variety, not as error.
+//
+// Elevation is `y / |xz|` (the tangent), NOT `skyDir.y`: it is linear in height
+// at a fixed distance, so a flat roof is a flat line instead of bowing.
+shader ashfall {
+  stage sky
+
+  // ---- the story knob ----------------------------------------------------
+  uniform burn: float = 0 range(0, 1)
+  // A self-winding clock. LEAVE THIS AT 0 in anything the story drives.
+  //
+  // It exists for previewing a scene on its own, and it was the stopgap while a
+  // script could not write a sky uniform at all (floptle/0118, fixed in
+  // 0.39.1). `time` is the ENGINE's clock and does not reset on a scene load,
+  // so a non-zero value here means REPLAYING the prologue starts wherever the
+  // session happens to have got to — five minutes in, that is a finished fire
+  // on the first line. `cutsceneHost.driveSky` writes `burn` from the timeline
+  // now, which resets by construction; set this and the two will fight.
+  uniform autoRate: float = 0 range(0, 0.02)
+
+  // ---- the look ----------------------------------------------------------
+  uniform voidTint: color = #0b0a16
+  uniform fireTint: color = #ff5a1e
+  uniform smokeTint: color = #221a1c
+  uniform nightFloor: float = 0.04 range(0, 0.2)
+  uniform exposure: float = 1 range(0.4, 2)
+  uniform towers: float = 26 range(8, 60)
+  uniform skyline: float = 0.34 range(0.05, 0.9)
+  uniform embers: float = 1 range(0, 2)
+  uniform churn: float = 1 range(0, 3)
+
+  // =========================================================================
+  // WHERE ARE WE LOOKING
+  // =========================================================================
+  let flat = max(length(vec2(skyDir.x, skyDir.z)), 0.001)
+  // Tangent of the elevation. 0 is the horizon, 1 is 45 degrees up.
+  let el = skyDir.y / flat
+  // A BOUNDED elevation, for sampling noise with — and it is not optional.
+  //
+  // `el` is a TANGENT: looking down it runs away to minus infinity, and the
+  // bottom of a 62-degree frame is already past -3. Multiply that by a noise
+  // frequency and consecutive pixels land many periods apart, so the noise
+  // aliases into its own average and the whole lower half of the sky renders
+  // as ONE FLAT COLOUR. That is exactly what it did — a featureless orange
+  // slab under a nicely textured horizon, which reads as "the fire has no
+  // detail" rather than as a sampling fault.
+  //
+  // Geometry (rooflines, the flame front) still uses `el`, because a roof has
+  // to be straight. Only noise reads this.
+  let ev = el / (1 + abs(el) * 0.55)
+  // TRUE AZIMUTH. This was the diamond angle — `x/(|x|+|z|)` folded — because
+  // FLSL had no inverse trig at all. `atan2` landed in 0.39.1 (floptle/0119),
+  // and the difference is real: the diamond angle's spacing is not proportional
+  // to the angle, so buildings came out visibly wider on the diagonals than on
+  // the axes. `fract` wraps the negative half without a branch.
+  let az = fract(atan2(skyDir.x, skyDir.z) * 0.15915494 + 1)
+
+  // The master clock, and the fallback ramp. `saturate` so a long scene does
+  // not walk past the end of the sequence into whatever is beyond 1.
+  let b = saturate(burn + autoRate * time)
+  let t = time * churn
+
+  // =========================================================================
+  // PHASE WEIGHTS — every one of these is a cross-fade, never a switch
+  // =========================================================================
+  // How high the fire has climbed, in elevation units. It starts well below
+  // the horizon (a glow you cannot see the source of) and ends overhead.
+  //
+  // THE TOP OF THIS RANGE IS A COMPOSITION NUMBER, NOT A BIG-IS-BETTER ONE. A
+  // 62-degree camera looking near the horizon sees roughly el -0.6 to +0.6, so
+  // a front that travels to 2.6 spends most of the sequence off the top of the
+  // screen: the fire crossed the whole frame by burn 0.4 and the last half of
+  // the story played against a flat white sky. 1.45 puts the front just past
+  // the top of frame at burn 1, which is what "engulfed" should look like.
+  // TWO MOVES, NOT ONE RAMP. A single ramp swept the flame front past the
+  // roofline within a few seconds of the town appearing — the reveal and the
+  // destruction landed on top of each other and the middle of the story had
+  // nothing to look at. So the front CREEPS while the town is being revealed
+  // (it is the glow doing the revealing, and the fire is still below the
+  // skyline) and only then climbs.
+  let creep = mix(-0.42, -0.03, smoothstep(0, 0.46, b))
+  // THE FRONT STOPS INSIDE THE FRAME, and that is the difference between an
+  // ending and a fade to orange. Taken to 1.5 the flame edge climbs off the top
+  // of the screen well before the end, so the last third of the story played
+  // against a flat orange field with nothing happening in it. Stopping around
+  // half a frame up leaves fire below, smoke above, and the boundary between
+  // them roiling — which is what "engulfed in flames and smoke" looks like.
+  let climb = mix(0, 0.55, smoothstep(0.5, 1, b))
+  let front = creep + climb
+  let glow = smoothstep(0.02, 0.42, b)
+  let town = smoothstep(0.16, 0.44, b)
+  let smoke = smoothstep(0.42, 1, b)
+  let rage = smoothstep(0.62, 1, b)
+
+  // =========================================================================
+  // THE VOID — what is there before anything happens
+  // =========================================================================
+  // Domain-warped fbm at a very low frequency: it reads as depth rather than
+  // as cloud, which is what makes it feel like a void and not weather.
+  let vp = domainWarp(skyDir * 1.15, scale: 0.9, time: t * 0.015, strength: 1.6)
+  let vfog = fbm(vp, octaves: 5) * 0.5 + 0.5
+  // Pushed hard so most of the sky is empty and only the thickest parts show.
+  let vmass = pow(saturate(vfog), 3.2)
+  // Colder toward the top: the void has a direction, so the eye has somewhere
+  // to fall from when the fire starts at the bottom.
+  //
+  // THESE COEFFICIENTS ARE SMALL ON PURPOSE. A `color` uniform arrives as its
+  // raw byte fractions — `#0b0a16` is (0.043, 0.039, 0.086) — and the shader
+  // writes into an sRGB target, so the ENCODE runs on the way out and a value
+  // of 0.043 leaves as about 0.22 on screen. Using the tint at face value
+  // therefore paints a "very dark violet" as a flat mid-grey-brown, which is
+  // what the first draft of this did: the void phase came out lighter than the
+  // ember phase was supposed to be. Scale down by roughly 5x to get what the
+  // hex actually looks like.
+  // DARKER THAN IT LOOKS LIKE IT SHOULD BE. The whole sequence is a climb, and
+  // a climb is worth exactly as much as its starting point is low — the first
+  // pass began at a comfortable dusk and had nowhere to go, so the fire read as
+  // "the sky changed colour" rather than as anything catching.
+  let vcold = voidTint.rgb * (0.03 + 0.10 * saturate(el * 0.7 + 0.35))
+  let voidCol = vcold + vcold * vmass * 1.9
+
+  // =========================================================================
+  // THE SKYLINE
+  // =========================================================================
+  // Two ranks. The far one is smaller, denser and slightly hazed by the air in
+  // front of it; the near one is taller, sparser and pure black. Two is enough
+  // for depth — a third reads as noise at this size.
+  //
+  // A rank is: cell the azimuth, give each cell a random body height, put a
+  // pitched gable on top of it, and stand a needle spire somewhere across it.
+  // The result is compared against elevation, so it is a hard black mask with
+  // no lighting of any kind. That is the point: it is revealed BY the fire.
+
+  // ---- far rank ----
+  let fN = towers * 1.7
+  let fc = floor(az * fN)
+  let ff = fract(az * fN)
+  let fr1 = valueNoise(vec2(fc * 0.37, 11.3))
+  let fr2 = valueNoise(vec2(fc * 0.73, 4.9))
+  let fbody = skyline * (0.28 + 0.42 * fr1)
+  // The gable: a triangle across the cell, so roofs come to a ridge instead of
+  // sitting flat. `1 - abs(ff*2 - 1)` is a tent from 0 up to 1 and back.
+  let fgable = fbody + skyline * 0.16 * fr2 * (1 - abs(ff * 2 - 1))
+  // The spire: a needle at a per-building position. `pow` on the falloff is
+  // what makes it a needle rather than a hill — a smoothstep alone gives you a
+  // cooling tower.
+  let fspx = abs(fract(ff - fr2 + 0.5) - 0.5)
+  let fspire = fbody + skyline * 0.75 * fr1 * pow(saturate(1 - fspx * 9), 5)
+  let fRoof = max(fgable, fspire)
+  let farMask = 1 - smoothstep(-0.004, 0.004, el - fRoof)
+
+  // ---- near rank ----
+  let nN = towers
+  let nc = floor(az * nN + 0.5)
+  let nf = fract(az * nN + 0.5)
+  let nr1 = valueNoise(vec2(nc * 0.53, 27.1))
+  let nr2 = valueNoise(vec2(nc * 0.91, 33.7))
+  let nbody = skyline * (0.42 + 0.66 * nr1)
+  let ngable = nbody + skyline * 0.22 * nr2 * (1 - abs(nf * 2 - 1))
+  let nspx = abs(fract(nf - nr2 + 0.5) - 0.5)
+  let nspire = nbody + skyline * 1.05 * nr2 * pow(saturate(1 - nspx * 12), 6)
+  let nRoof = max(ngable, nspire)
+  let nearMask = 1 - smoothstep(-0.003, 0.003, el - nRoof)
+
+  // The cathedral. One landmark with twin spires, so the city has a subject
+  // and the eye has somewhere to go. Three cells around the whole ring, so it
+  // is unmissable and never repeats on screen.
+  let cc = floor(az * 3)
+  let cf = fract(az * 3)
+  let cr = valueNoise(vec2(cc * 1.7, 61.3))
+  let ctwin = abs(abs(cf - 0.5) - 0.11)
+  let cbody = skyline * (0.5 + 0.5 * cr) * (1 - smoothstep(0.16, 0.3, abs(cf - 0.5)))
+  let cspire = skyline * 1.9 * cr * pow(saturate(1 - ctwin * 13), 6)
+  let cRoof = max(cbody, cspire)
+  let cathMask = 1 - smoothstep(-0.003, 0.003, el - cRoof)
+
+  // Everything standing on the ground, as one mask. The far rank is kept a
+  // touch transparent so it sits BEHIND the near one in the haze.
+  let cityFar = farMask * 0.82
+  let city = saturate(max(cityFar, max(nearMask, cathMask)))
+  // ...but only once there is light behind it to see it against. Before that
+  // the town is not hidden, it simply has not been revealed yet.
+  let cityVis = city * town
+
+  // =========================================================================
+  // FIRE
+  // =========================================================================
+  // Vertical scrolling fbm. Two octprint scales beaten together: the coarse one
+  // is the body of the flame, the fine one is the tearing at its edge.
+  let fq = vec2(az * 17, ev * 6.5 - t * 0.75)
+  let fcoarse = fbm(fq, octaves: 4) * 0.5 + 0.5
+  let ffine = fbm(fq * 2.7 + vec2(3.1, -t * 0.9), octaves: 3) * 0.5 + 0.5
+  let froll = fbm(vec2(az * 5.5, ev * 1.9 - t * 0.22), octaves: 3) * 0.5 + 0.5
+  let fnoise = fcoarse * 0.55 + ffine * 0.22 + froll * 0.23
+  // The flame front: everything under `front` burns, and the noise makes the
+  // boundary a set of tongues instead of a line. Widening the transition with
+  // `rage` is what turns neat licks into a wall late on.
+  let soft = mix(0.20, 0.62, rage)
+  let height = (front - el) / soft
+  let flame = saturate(height * 0.9 + (fnoise - 0.5) * 2.6)
+  // THE HEAT IS AT THE FRONT, NOT EVERYWHERE UNDER IT — and getting this
+  // backwards is what turned the second half of the sequence into a white
+  // screen. `flame` is a REGION (1 anywhere below the front), so using it as
+  // the brightness made every pixel below the front maximally bright, which
+  // clips, which is featureless.
+  //
+  // A fire is dark where it has already burnt through, blinding at its edge,
+  // and dark again above. So brightness is a BAND around the front, and the
+  // region only says where the colour applies at all.
+  let edge = pow(saturate(1 - abs(el - front) * 3.4), 3.2)
+  // How far below the front we are. Deep down the fire has already been
+  // through and is dulling to red — without this the whole lower half of the
+  // frame is one flat orange slab, which is what the first render was.
+  let depth = saturate((front - el) * 0.85)
+  let burnt = (0.02 + 0.46 * fnoise * fnoise) * (1 - depth * 0.72)
+  // HEAT, as distinct from extent. `rage` pushes the whole fire up the ember
+  // ramp toward yellow-white instead of only moving the front, which is what
+  // makes the last third read as an escalation rather than as more of the same
+  // orange. The flicker is global and grows with it: firelight is not steady,
+  // and a steady one reads as a gradient.
+  let flick = 1 + rage * 0.10 * sin(t * 5.3) + rage * 0.06 * sin(t * 11.7 + 1.3)
+  let core = (edge * (0.4 + 1.5 * glow) + flame * burnt) * (1 + rage * 0.45) * flick
+  // HUE AND BRIGHTNESS ARE SEPARATE, and this is what stopped the ending being
+  // white.
+  //
+  // Both used to come off `core`. The ember ramp tops out at yellow-white, so
+  // the moment `core` was boosted for the late phases EVERY lit pixel walked to
+  // the top of the ramp at once and the whole sky went pale cream — which is
+  // less dramatic than a deep orange one, because there is no colour left in it
+  // to read. Brightness can climb as far as it likes; the hue must not follow.
+  //
+  // So the ramp is driven by the FRONT (`edge`), which is genuinely the hottest
+  // part, plus a small push from `rage`. Deep in the burnt region it stays red
+  // no matter how bright the fire gets.
+  let hueT = saturate(0.08 + edge * 0.5 + rage * 0.14)
+  let fireRamp = palette(hueT, "ember")
+  let fireCol = mix(fireRamp, fireTint.rgb, 0.35) * (0.14 + 1.7 * core)
+  // Under-lighting: the glow that reveals the town BEFORE any flame reaches
+  // it. Strongest at the horizon, falling off upward, and it is the only thing
+  // lighting the sky during the ember phase.
+  // Squared on `glow` so almost nothing happens for the first few lines and
+  // then it comes up fast. A linear ramp spends half the prologue at a level
+  // nobody can tell from the level before it.
+  let underGlow = glow * glow * pow(saturate(1 - abs(el - 0.02) * 2.6), 3) * 0.78
+
+  // =========================================================================
+  // SMOKE
+  // =========================================================================
+  // Rolls sideways as well as up, because smoke that only rises reads as
+  // steam. Sits above the flame front and thickens with `smoke`.
+  let sp = domainWarp(vec3(az * 4.5, ev * 2.1 - t * 0.09, t * 0.05),
+                      scale: 1.3, time: t * 0.05, strength: 1.9)
+  let sden = saturate(fbm(sp, octaves: 5) * 0.5 + 0.5)
+  // ABOVE THE FRONT, tracking it. Anchored to a fixed elevation instead, the
+  // smoke sat on the horizon from the first frame and read as a brown fogbank
+  // in the middle of the void phase, before anything had caught.
+  let sband = smoothstep(front - 0.05 - rage * 1.5, front + 1.1, el)
+  let smokeMass = saturate(pow(sden, 1.6) * sband * smoke * (1.5 + 3.6 * rage))
+  // Lit from below by the fire under it, which is the whole reason smoke reads
+  // as fire and not as cloud.
+  // DARK, and only underlit near the fire. Lit evenly it comes out the same
+  // orange as the flames and disappears into them — the whole point of the
+  // smoke is that it is the dark half of the last shot.
+  let smokeLit = smokeTint.rgb * (0.30 + 0.55 * smokeMass) * (1 + rage * 0.35)
+              + fireTint.rgb * pow(saturate(1 - (el - front) * 1.6), 3)
+                * smokeMass * 0.22 * glow
+
+  // =========================================================================
+  // EMBERS AND ASH
+  // =========================================================================
+  // Sparse rising points. `worley` gives the cells, `step` on a per-cell random
+  // throws most of them away, and the coordinate scrolls upward so the survivors
+  // travel. Two banks at different speeds so they do not move as a sheet.
+  let e1p = vec2(az * 46, ev * 19 - t * 0.85)
+  let e1r = valueNoise(floor(e1p) + 0.5)
+  let e1 = (1 - smoothstep(0, 0.075, worley(e1p))) * step(0.86, e1r)
+  let e2p = vec2(az * 31 + 7.3, ev * 14 - t * 0.52)
+  let e2r = valueNoise(floor(e2p) + 0.5)
+  let e2 = (1 - smoothstep(0, 0.09, worley(e2p))) * step(0.9, e2r)
+  // They die out as they climb, and they only exist where there is fire below.
+  let eLife = saturate(1.25 - el * 0.75) * glow * (0.35 + 1.5 * glow)
+  let emberMass = (e1 * (0.7 + 0.5 * sin(t * 6 + e1r * 40)) + e2 * 0.75)
+                * eLife * embers * 0.55
+  let emberCol = mix(fireTint.rgb, vec3(1, 0.86, 0.6), 0.45) * emberMass * 1.15
+
+  // Ash drifting the other way — down and across, grey, and it survives into
+  // the late phases when the embers have blown out.
+  let ap = vec2(az * 60 - t * 0.06, ev * 26 + t * 0.3)
+  let ar = valueNoise(floor(ap) + 0.5)
+  let ash = (1 - smoothstep(0, 0.06, worley(ap))) * step(0.93, ar) * (0.35 + 0.65 * smoke)
+  let ashCol = vec3(0.42, 0.39, 0.4) * ash * 0.22
+
+  // =========================================================================
+  // COMPOSITE
+  // =========================================================================
+  // Order matters and it is the order of the fiction:
+  //   the void, then the glow that wakes in it, then the town standing in that
+  //   glow, then the fire climbing OVER the town, then smoke over the fire,
+  //   then the sparks in front of everything.
+  let lit = voidCol + fireTint.rgb * underGlow * 0.85
+  // The town is a hole punched in the light, not a thing drawn on top of it.
+  let withTown = mix(lit, lit * 0.03, cityVis)
+  // Flame goes over the town — this is what "the flames rise up and cover the
+  // town" is, mechanically: the same mask, composited after it.
+  // ...and the town does not simply stop existing when the fire reaches it.
+  // Holding a little of the silhouette back keeps it readable THROUGH the
+  // flames for a few beats, which is the difference between "the town burned"
+  // and "the town was replaced by orange".
+  let cover = saturate(flame * (0.35 + 0.65 * glow)) * (1 - cityVis * 0.4 * (1 - rage))
+  let withFire = mix(withTown, fireCol, cover)
+  let withSmoke = mix(withFire, smokeLit, smokeMass * (0.6 + 0.35 * rage))
+  // THE FURNACE. Deep in the burnt region, late, the fire is white-hot rather
+  // than orange — one more step up the ramp with nowhere left to go, which is
+  // what stops the ending reading as "the same fire, for longer".
+  let furnace = pow(saturate((front - el) * 0.7), 1.6) * rage * rage
+  let sparks = withSmoke + emberCol + ashCol
+             + mix(fireTint.rgb, vec3(1, 0.93, 0.72), 0.3) * furnace * 0.34
+
+  // THE FLOOR, and the rise. See the note at the top: the sky never goes fully
+  // black, and its overall level climbs with `burn` so a black silhouette in
+  // front of it separates further as the sequence goes on.
+  // THE WHOLE FRAME BRIGHTENS. This is the one number the silhouettes in front
+  // of the sky depend on: they are black, so every bit of this is contrast they
+  // gain. It was 1.22 at the end, which is a 22% climb across a four-minute
+  // sequence — not something anybody notices happening.
+  // ENOUGH TO SEE, NOT ENOUGH TO BLEACH. Pushed to +1.05 the ending came out
+  // at 0.90 mean luma — a white screen with a hint of pink, which is LESS
+  // dramatic than a deep orange one because it has no colour left to read. The
+  // silhouettes need contrast, and contrast is the gap between them and the
+  // sky, not the sky's absolute level.
+  let lift = 1 + glow * 0.22 + rage * 0.12
+  let base = voidTint.rgb * nightFloor * (1.4 - 0.9 * glow)
+  let raw = sparks * lift + base
+
+  // ---- THE INTENSITY IS IN THE SATURATION, NOT THE LEVEL --------------------
+  //
+  // Everything here is written in LINEAR and lands in an sRGB target, so the
+  // encode lifts the midtones hard: a linear 0.5 leaves as 0.74. Push the level
+  // to make the ending feel hotter and what you actually get is a pale wash —
+  // the channels converge, the colour drains out, and a white sky reads as
+  // LESS intense than a deep orange one because there is nothing left in it to
+  // read. Three separate attempts at "brighter" ended at cream.
+  //
+  // So the last move is a saturation push instead. Same hue, same brightness,
+  // more colour — the fire goes from smouldering to molten without the frame
+  // getting any lighter, and the black silhouettes in front of it keep their
+  // contrast instead of being washed out along with everything else.
+  let hsv = toHsv(raw)
+  let punch = fromHsv(vec3(hsv.x, saturate(hsv.y * (1 + glow * 0.35 + rage * 1.15)), hsv.z))
+  output color = punch * exposure
+}
