@@ -834,6 +834,7 @@ impl Editor {
         // the game view, where you're seeing the game, not the editor overlays).
         self.camera_gizmos.clear();
         self.light_gizmos.clear();
+        self.volume_gizmos.clear();
         self.rig_gizmos.clear();
         self.gi_probe_dots.clear();
         self.body_gizmos.clear();
@@ -919,6 +920,11 @@ impl Editor {
                 Cam(f32, bool, Option<f32>),
                 Light(f32, floptle_core::LightShape),
                 Gravity(bool, f32), // radial?, radius
+                /// A box whose size decides where something applies, and an
+                /// optional inner box for the part that fades.
+                Volume([f32; 3], Option<f32>),
+                /// Full volume out to the first, silent by the second.
+                Audio(f32, f32),
             }
             let filter = self.gizmo_filter;
             let gizmos: Vec<(Entity, Giz)> = self
@@ -936,8 +942,40 @@ impl Editor {
                     Matter::GravityVolume { mode, radius, .. } if filter.lights => {
                         Some((e, Giz::Gravity(*mode == floptle_core::GravityMode::Radial, *radius)))
                     }
+                    // The three boxes you would otherwise size by typing a
+                    // number and reloading to see whether it reached.
+                    Matter::ReflectionProbe { half_extents, fade, .. } if filter.volumes => {
+                        Some((e, Giz::Volume(*half_extents, Some(*fade))))
+                    }
+                    Matter::LightProbes { half_extents, .. } if filter.volumes => {
+                        Some((e, Giz::Volume(*half_extents, None)))
+                    }
+                    Matter::NavMesh { half_extents, .. } if filter.volumes => {
+                        Some((e, Giz::Volume(*half_extents, None)))
+                    }
                     _ => None,
                 })
+                .collect();
+            // Audio sources carry their reach as two numbers on a component
+            // rather than as a `Matter` variant, so they are gathered
+            // separately — the query above is over `Matter` and would never see
+            // one.
+            let gizmos: Vec<(Entity, Giz)> = gizmos
+                .into_iter()
+                // `Flat` ignores position entirely, so it has no reach to draw
+                // — a ring around a music track would be a lie.
+                .chain(
+                    self.world
+                        .query::<floptle_audio::AudioSource>()
+                        .filter(|(_, a)| {
+                            filter.audio
+                                && a.params.mode != floptle_audio::SpatialMode::Flat
+                                && a.params.max_distance > 0.0
+                        })
+                        .map(|(e, a)| {
+                            (e, Giz::Audio(a.params.min_distance, a.params.max_distance))
+                        }),
+                )
                 .collect();
             for (e, g) in gizmos {
                 let wt = floptle_core::world_transform(&self.world, e);
@@ -966,6 +1004,48 @@ impl Editor {
                         );
                         if !lines.is_empty() {
                             self.light_gizmos.push(lines);
+                        }
+                    }
+                    Giz::Volume(half, fade) => {
+                        // The node's transform positions AND scales the box, so
+                        // the drawn outline has to be scaled the same way or it
+                        // would describe a volume nothing uses.
+                        let half = floptle_core::math::Vec3::from(half) * wt.scale;
+                        let lines = box_lines(
+                            wt.translation, half, cam.world_position, view_proj, gw, gh,
+                        );
+                        if !lines.is_empty() {
+                            self.volume_gizmos.push(lines);
+                        }
+                        // The inner box is where the effect is at full strength;
+                        // between the two it blends out. Drawn only when it is
+                        // actually inside, so a fade wider than the box does not
+                        // draw a second outline on top of the first.
+                        if let Some(f) = fade
+                            && f > 0.0
+                        {
+                            let inner = half - floptle_core::math::Vec3::splat(f);
+                            if inner.min_element() > 0.05 {
+                                let lines = box_lines(
+                                    wt.translation, inner, cam.world_position, view_proj, gw, gh,
+                                );
+                                if !lines.is_empty() {
+                                    self.volume_gizmos.push(lines);
+                                }
+                            }
+                        }
+                    }
+                    Giz::Audio(min_d, max_d) => {
+                        // Two rings: full volume inside the first, silent at the
+                        // second. Both, because the gap between them IS the
+                        // fade, and one ring cannot show a gap.
+                        for r in [min_d, max_d] {
+                            let lines = crate::viz::radius_rings(
+                                wt.translation, r, cam.world_position, view_proj, gw, gh,
+                            );
+                            if !lines.is_empty() {
+                                self.volume_gizmos.push(lines);
+                            }
                         }
                     }
                 }
@@ -2599,6 +2679,7 @@ impl Editor {
         let paint_viz = self.paint_viz.as_ref();
         let camera_gizmos = self.camera_gizmos.as_slice();
         let light_gizmos = self.light_gizmos.as_slice();
+        let volume_gizmos = self.volume_gizmos.as_slice();
         let rig_gizmos = self.rig_gizmos.as_slice();
         let gi_probe_dots = self.gi_probe_dots.as_slice();
         let body_gizmos = self.body_gizmos.as_slice();
@@ -3711,6 +3792,7 @@ impl Editor {
                 paint_viz,
                 camera_gizmos,
                 light_gizmos,
+                volume_gizmos,
                 rig_gizmos,
                 gi_probe_dots,
                 body_gizmos,

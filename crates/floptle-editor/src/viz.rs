@@ -463,6 +463,52 @@ pub(crate) fn light_dir_lines(
 
 /// Build a gravity-volume gizmo: a radial well is a 3-ring sphere wireframe at its
 /// `radius`; a Down volume is a downward arrow. Empty if it doesn't project.
+/// Three great circles around a point — the shape of "this reaches that far".
+///
+/// For the radii nobody can see: how far a sound carries, where it starts to
+/// fade. Those are numbers in a panel, and a number in a panel is a guess until
+/// you can see where it lands in the room you are standing in.
+pub(crate) fn radius_rings(
+    pos: DVec3,
+    radius: f32,
+    cam_world: DVec3,
+    vp: Mat4,
+    w: f32,
+    h: f32,
+) -> Vec<(Vec2, Vec2)> {
+    let mut lines = Vec::new();
+    if !radius.is_finite() || radius <= 0.0 {
+        return lines;
+    }
+    let r = radius.min(100_000.0) as f64;
+    const SEGS: usize = 32;
+    for plane in 0..3 {
+        let ring = |a: f64| -> DVec3 {
+            let (c, s) = (a.cos() * r, a.sin() * r);
+            match plane {
+                0 => DVec3::new(c, 0.0, s),
+                1 => DVec3::new(c, s, 0.0),
+                _ => DVec3::new(0.0, c, s),
+            }
+        };
+        let mut prev = project(pos + ring(0.0), cam_world, vp, w, h);
+        for i in 1..=SEGS {
+            let p = project(
+                pos + ring((i as f64 / SEGS as f64) * std::f64::consts::TAU),
+                cam_world,
+                vp,
+                w,
+                h,
+            );
+            if let (Some(pp), Some(cp)) = (prev, p) {
+                lines.push((pp, cp));
+            }
+            prev = p;
+        }
+    }
+    lines
+}
+
 pub(crate) fn gravity_volume_lines(
     pos: DVec3,
     radial: bool,

@@ -586,6 +586,18 @@ impl EditorTabViewer<'_> {
                                     ui.checkbox(&mut f.physics, "Rigidbodies & contacts");
                                     ui.checkbox(&mut f.colliders, "Collider wireframes");
                                     ui.checkbox(&mut f.particles, "Particle emitters");
+                                    ui.checkbox(&mut f.volumes, "Areas of effect").on_hover_text(
+                                        "the boxes that decide where something applies — \
+                                         reflection probes (with their fade), light probes, \
+                                         navmesh bounds. Sizes you would otherwise type in \
+                                         and reload to find out whether they reached.",
+                                    );
+                                    ui.checkbox(&mut f.audio, "Sound range").on_hover_text(
+                                        "how far each sound carries and where it starts to \
+                                         fade — the inner ring is full volume, the outer one \
+                                         is silence. Sounds set to play flat have no reach \
+                                         and draw nothing.",
+                                    );
                                     ui.checkbox(&mut f.bones, "Rig bones").on_hover_text(
                                         "draw the skeleton of a selected rigged mesh, and let \
                                          you click a joint to pose it. Only the selected \
@@ -901,6 +913,24 @@ impl EditorTabViewer<'_> {
                 };
                 for (a, b) in &g.lines {
                     painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(1.5, col));
+                }
+            }
+        }
+
+        // Areas of effect — probe boxes, navmesh bounds, audio ranges. A cool
+        // blue so they read as "where this applies" rather than as geometry,
+        // and thin, because several can overlap in one room.
+        if !game && !self.volume_gizmos.is_empty() {
+            let painter = ui
+                .ctx()
+                .layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("volume_gizmos")))
+                .with_clip_rect(rect);
+            let ppp = self.ppp;
+            let pt = |v: Vec2| egui::pos2(v.x / ppp, v.y / ppp);
+            let col = egui::Color32::from_rgba_unmultiplied(120, 190, 240, 170);
+            for lines in self.volume_gizmos {
+                for (a, b) in lines {
+                    painter.line_segment([pt(*a), pt(*b)], egui::Stroke::new(1.0, col));
                 }
             }
         }

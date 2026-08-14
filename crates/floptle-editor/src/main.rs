@@ -819,6 +819,7 @@ struct EditorTabViewer<'a> {
     paint_viz: Option<&'a PaintViz>,
     camera_gizmos: &'a [CameraGizmo],
     light_gizmos: &'a [Vec<(Vec2, Vec2)>],
+    volume_gizmos: &'a [Vec<(Vec2, Vec2)>],
     /// The selected rigged meshes' skeletons, projected for this frame.
     rig_gizmos: &'a [crate::viz::RigViz],
     /// Baked-GI probes projected to screen: position, baked colour, and whether
@@ -1848,6 +1849,9 @@ struct Editor {
     camera_gizmos: Vec<CameraGizmo>,
     /// Projected point-light gizmos (cross + range ring) for this frame.
     light_gizmos: Vec<Vec<(Vec2, Vec2)>>,
+    /// The areas of effect nothing else draws: probe boxes, navmesh bounds,
+    /// audio ranges.
+    volume_gizmos: Vec<Vec<(Vec2, Vec2)>>,
     /// The projected skeletons of the selected rigged meshes — drawn, and the
     /// thing a viewport click tests against to select a bone.
     rig_gizmos: Vec<crate::viz::RigViz>,
@@ -2706,6 +2710,12 @@ pub(crate) struct GizmoFilter {
     pub(crate) script: bool,
     /// The skeleton of a selected rigged mesh.
     pub(crate) bones: bool,
+    /// The boxes that decide where an effect applies — reflection probes, light
+    /// probes, navmesh bounds. Every one of them is a size you would otherwise
+    /// type into a panel and hope about.
+    pub(crate) volumes: bool,
+    /// How far a sound carries, and where it starts to fade.
+    pub(crate) audio: bool,
 }
 
 impl Default for GizmoFilter {
@@ -2718,6 +2728,8 @@ impl Default for GizmoFilter {
             particles: true,
             script: true,
             bones: true,
+            volumes: true,
+            audio: true,
         }
     }
 }
