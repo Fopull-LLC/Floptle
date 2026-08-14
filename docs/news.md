@@ -1,5 +1,23 @@
 ## Just shipped
 
+**v0.59.0 "Show And Tell"** — there is a gap between installing an engine and
+having anything on screen, and it is usually filled by a grey capsule. The
+**Fofighter Sample Kit** is the other thing you could put there: four stylised
+characters and a prop, four music tracks, a display face, and a procedural sky
+driven entirely by one number — drag `burn` from 0 to 1 and go from a cold void
+to a skyline burning. All lifted out of a real game and released **public
+domain**, no attribution, commercial use fine. It is in **📦 Packages ▸ 🌐
+Browse**, and it contains no code of any kind. Alongside it, the package browser
+learned to show a package properly: gallery images are kept at full detail
+instead of being shrunk to thumbnail size, **clicking one opens it as large as
+your window allows**, an installed package draws its pictures from your own disk
+(so a gallery works offline — and you can see your own before you publish it),
+and what a package holds is now **counted** — *5 models · 4 audio · 1 shaders ·
+1 fonts*, worked out from the files rather than from what it claims. Also fixed:
+a package linked from a relative path resolved against wherever the editor was
+started from rather than against your project, so the same link worked from a
+terminal and silently found nothing otherwise.
+
 **v0.58.1 "Solid Ground"** — a wall you built is a wall the navmesh knows about.
 Baking a level made of rooms used to lose walls: some sections blocked, some
 blocked in patches, and some were walked straight through, with no pattern you
