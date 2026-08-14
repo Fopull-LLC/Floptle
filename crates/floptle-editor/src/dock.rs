@@ -165,7 +165,7 @@ pub(crate) fn scene_and_game_split(dock: &egui_dock::DockState<EditorTab>) -> bo
 /// The default layout, grouped by what each dock is FOR:
 ///
 /// - **left** — what the scene contains and what you build it out of:
-///   Hierarchy, ▦ Map.
+///   Hierarchy, ▦ Model.
 /// - **centre** — the viewports and the full-canvas editors that replace them:
 ///   Scene / Game, Scripting, ◈ Shaders, ◎ Controller.
 /// - **right** — properties of whatever is selected: Inspector, Δ Terrain,

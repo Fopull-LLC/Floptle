@@ -807,10 +807,21 @@ mod tests {
 
     /// Area is the number people will sanity-check a bake against, so it has to
     /// be the area of the floor rather than of its bounding box.
+    ///
+    /// Never *less* than the floor and never more than a column's worth around
+    /// it: geometry is rasterised outward to the grid, so a 6 m floor is at
+    /// least 6 m and at most 6 m plus a cell on each side. Erosion by the agent
+    /// radius takes that back and more in any bake with a body in it.
     #[test]
     fn area_measures_the_floor_it_found() {
-        let mesh = bake(&slab(0.0, 0.0, 6.0, 6.0, 0.0), &open(0.25));
-        assert!((mesh.area() - 36.0).abs() < 2.0, "a 6x6 floor is 36 m²: {}", mesh.area());
+        let cell = 0.25;
+        let mesh = bake(&slab(0.0, 0.0, 6.0, 6.0, 0.0), &open(cell));
+        let most = (6.0 + 2.0 * cell) * (6.0 + 2.0 * cell);
+        assert!(
+            (36.0 - 1e-3..=most).contains(&mesh.area()),
+            "a 6x6 floor is 36 m² and at most {most} m²: {}",
+            mesh.area()
+        );
     }
 
     // ---- the questions a script asks ---------------------------------------

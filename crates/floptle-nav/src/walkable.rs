@@ -390,6 +390,126 @@ mod tests {
         assert_eq!(g2.region_count, 1, "a 0.5 m corridor fits a 0.3 m-wide character");
     }
 
+    /// A box, wound outward — a wall as the modelling tool, the mesh importer
+    /// and the box primitive all hand one over.
+    fn wall(lo: [f32; 3], hi: [f32; 3]) -> Vec<Tri> {
+        let v = |i: usize| {
+            [
+                if i & 1 == 0 { lo[0] } else { hi[0] },
+                if i & 2 == 0 { lo[1] } else { hi[1] },
+                if i & 4 == 0 { lo[2] } else { hi[2] },
+            ]
+        };
+        const QUADS: [[usize; 4]; 6] = [
+            [0, 1, 3, 2],
+            [4, 5, 7, 6],
+            [0, 1, 5, 4], // -y, looking down
+            [2, 6, 7, 3], // +y, looking up
+            [0, 2, 6, 4],
+            [1, 3, 7, 5],
+        ];
+        let mut out = Vec::new();
+        for q in QUADS {
+            out.push(Tri::new(v(q[0]), v(q[1]), v(q[2])));
+            out.push(Tri::new(v(q[0]), v(q[2]), v(q[3])));
+        }
+        out
+    }
+
+    /// Which region the floor belongs to at a spot, or `None` if there is no
+    /// floor there at all.
+    fn floor_region(g: &WalkableGrid, x: f32, z: f32) -> Option<u32> {
+        let cx = ((x - g.origin[0]) / g.cell_size) as usize;
+        let cz = ((z - g.origin[2]) / g.cell_size) as usize;
+        g.column_range(cx, cz).find(|i| g.cells[*i].y < 1.0).map(|i| g.region[i])
+    }
+
+    /// **The report this was rewritten for.** A wall built across a room has to
+    /// separate the room, wherever it happens to sit against the bake grid and
+    /// however thin it is. A wall that blocks at some offsets and not others is
+    /// "it noticed part of it and skipped the rest".
+    #[test]
+    fn a_wall_across_a_room_separates_it_at_any_thickness_or_offset() {
+        let s = NavSettings {
+            cell_size: 0.15,
+            agent_radius: 0.0,
+            agent_height: 1.8,
+            step_height: 0.4,
+            ..Default::default()
+        };
+        for thickness in [0.04, 0.1, 0.3, 1.0] {
+            for offset in [0.0, 0.037, 0.075, 0.11] {
+                let x0 = 3.0 + offset;
+                let mut tris = slab(0.0, 0.0, 6.0, 6.0, 0.0);
+                tris.extend(wall([x0, 0.0, 0.0], [x0 + thickness, 2.5, 6.0]));
+                let g = grid(&tris, &s).unwrap();
+                let here = floor_region(&g, 1.5, 3.0);
+                let there = floor_region(&g, 5.0, 3.0);
+                assert!(here.is_some() && there.is_some(), "the room must survive: {x0}");
+                assert_ne!(
+                    here, there,
+                    "a {thickness} m wall at x = {x0} left both sides of the room joined"
+                );
+            }
+        }
+    }
+
+    /// …and a doorway in that wall joins it back up, so blocking is the geometry
+    /// talking rather than a wall-shaped region being deleted.
+    #[test]
+    fn a_doorway_in_the_wall_joins_the_room_back_up() {
+        let s = NavSettings {
+            cell_size: 0.15,
+            agent_radius: 0.3,
+            agent_height: 1.8,
+            step_height: 0.4,
+            ..Default::default()
+        };
+        let mut tris = slab(0.0, 0.0, 6.0, 6.0, 0.0);
+        // The same wall in two pieces, with 1.4 m of air between them.
+        tris.extend(wall([3.0, 0.0, 0.0], [3.2, 2.5, 2.3]));
+        tris.extend(wall([3.0, 0.0, 3.7], [3.2, 2.5, 6.0]));
+        let g = grid(&tris, &s).unwrap();
+        assert_eq!(
+            floor_region(&g, 1.5, 3.0),
+            floor_region(&g, 5.0, 3.0),
+            "a 1.4 m doorway fits a 0.6 m-wide character"
+        );
+
+        // Brick it up and the room is two rooms again.
+        let mut shut = slab(0.0, 0.0, 6.0, 6.0, 0.0);
+        shut.extend(wall([3.0, 0.0, 0.0], [3.2, 2.5, 6.0]));
+        let g = grid(&shut, &s).unwrap();
+        assert_ne!(floor_region(&g, 1.5, 3.0), floor_region(&g, 5.0, 3.0));
+    }
+
+    /// A wall you can see over is still a wall you cannot walk through, and a
+    /// kerb is still a kerb — the same geometry an inch apart has to answer
+    /// differently, or `step_height` means nothing.
+    #[test]
+    fn a_lip_is_stepped_over_and_a_wall_is_not() {
+        let s = NavSettings {
+            cell_size: 0.15,
+            agent_radius: 0.0,
+            agent_height: 1.8,
+            step_height: 0.4,
+            ..Default::default()
+        };
+        let mut kerb = slab(0.0, 0.0, 6.0, 6.0, 0.0);
+        kerb.extend(wall([3.0, 0.0, 0.0], [3.3, 0.3, 6.0]));
+        let g = grid(&kerb, &s).unwrap();
+        assert_eq!(
+            floor_region(&g, 1.5, 3.0),
+            floor_region(&g, 5.0, 3.0),
+            "a 30 cm kerb under a 40 cm step height is walked over"
+        );
+
+        let mut low_wall = slab(0.0, 0.0, 6.0, 6.0, 0.0);
+        low_wall.extend(wall([3.0, 0.0, 0.0], [3.3, 0.6, 6.0]));
+        let g = grid(&low_wall, &s).unwrap();
+        assert_ne!(floor_region(&g, 1.5, 3.0), floor_region(&g, 5.0, 3.0), "a 60 cm wall is not");
+    }
+
     #[test]
     fn region_sizes_come_back_largest_first() {
         let s = NavSettings {

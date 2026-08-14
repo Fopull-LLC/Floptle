@@ -53,28 +53,95 @@ fn level() -> Vec<Tri> {
     t
 }
 
+/// A solid box, wound outward — what the modelling tool, the mesh importer and
+/// the box primitive all hand the baker.
+fn solid(lo: [f32; 3], hi: [f32; 3], out: &mut Vec<Tri>) {
+    let v = |i: usize| {
+        [
+            if i & 1 == 0 { lo[0] } else { hi[0] },
+            if i & 2 == 0 { lo[1] } else { hi[1] },
+            if i & 4 == 0 { lo[2] } else { hi[2] },
+        ]
+    };
+    const QUADS: [[usize; 4]; 6] = [
+        [0, 1, 3, 2],
+        [4, 5, 7, 6],
+        [0, 1, 5, 4], // -y, looking down
+        [2, 6, 7, 3], // +y, looking up
+        [0, 2, 6, 4],
+        [1, 3, 7, 5],
+    ];
+    for q in QUADS {
+        out.push(Tri::new(v(q[0]), v(q[1]), v(q[2])));
+        out.push(Tri::new(v(q[0]), v(q[2]), v(q[3])));
+    }
+}
+
+/// Rooms, built out of boxes — the way a level actually gets made.
+///
+/// Every wall is a different thickness and **none of them line up with the bake
+/// grid**, which is the whole test: a wall that blocks at some offsets and not
+/// others reads as "it noticed part of my wall and skipped the rest". The
+/// 6 cm partition is thinner than a column and used to be invisible to the bake
+/// entirely; the 1.2 m pillar is thicker than two columns, so nothing but its
+/// own faces says its middle is solid.
+fn rooms() -> Vec<Tri> {
+    let mut t = Vec::new();
+    solid([0.0, -0.2, 0.0], [16.0, 0.0, 12.0], &mut t); // floor slab
+    // Outer walls, 25 cm.
+    solid([0.0, 0.0, 0.0], [0.25, 3.0, 12.0], &mut t);
+    solid([15.75, 0.0, 0.0], [16.0, 3.0, 12.0], &mut t);
+    solid([0.0, 0.0, 0.0], [16.0, 3.0, 0.25], &mut t);
+    solid([0.0, 0.0, 11.75], [16.0, 3.0, 12.0], &mut t);
+    // A dividing wall with a doorway in it, 18 cm and off the grid.
+    solid([7.91, 0.0, 0.25], [8.09, 3.0, 5.0], &mut t);
+    solid([7.91, 0.0, 7.0], [8.09, 3.0, 11.75], &mut t);
+    // A pillar far thicker than a column.
+    solid([3.0, 0.0, 3.0], [4.2, 3.0, 4.2], &mut t);
+    // A partition thinner than a column.
+    solid([11.37, 0.0, 2.0], [11.43, 3.0, 9.0], &mut t);
+    // A kerb: low enough to walk over, so blocking must not be the answer.
+    solid([4.6, 0.0, 7.3], [7.0, 0.25, 10.1], &mut t);
+    t
+}
+
 fn main() {
     let gpu = Gpu::headless(W, H);
     let mut raster = Raster::new(&gpu);
     let mut lines = Lines::new(&gpu);
     let mut tris = Tris::new(&gpu);
 
-    let geometry = level();
+    let open = level();
+    let built = rooms();
     // Looking down the length of the level from above and to one side — the
-    // angle somebody actually judges a navmesh from.
-    let eye = Vec3::new(-14.0, 22.0, -22.0);
-    let view = Mat4::look_at_rh(Vec3::ZERO, Vec3::new(19.0, 1.0, 7.0) - eye, Vec3::Y);
-    let proj = Mat4::perspective_rh(0.9, W as f32 / H as f32, 0.1, 500.0);
-    let view_proj = proj * view;
-    let rel = |p: [f32; 3]| [p[0] - eye.x, p[1] - eye.y, p[2] - eye.z];
+    // angle somebody actually judges a navmesh from. The room set is looked at
+    // from more directly overhead, because what is being judged there is a plan:
+    // where the ground stops.
+    let over_level = (Vec3::new(-14.0, 22.0, -22.0), Vec3::new(19.0, 1.0, 7.0));
+    let over_rooms = (Vec3::new(6.0, 15.0, -5.0), Vec3::new(8.4, 0.0, 6.4));
 
-    for (name, settings, cells) in [
-        ("nav_overlay_old", NavSettings::default(), true),
-        ("nav_overlay_new", NavSettings::default(), false),
+    for (name, geometry, settings, cells, (eye, at)) in [
+        ("nav_overlay_old", &open, NavSettings::default(), true, over_level),
+        ("nav_overlay_new", &open, NavSettings::default(), false, over_level),
         // Below the ramp's 25°, so the mezzanine comes off the ground floor.
-        ("nav_overlay_slope", NavSettings { max_slope: 15.0, ..Default::default() }, false),
+        (
+            "nav_overlay_slope",
+            &open,
+            NavSettings { max_slope: 15.0, ..Default::default() },
+            false,
+            over_level,
+        ),
+        // A level built the way most levels are built: out of boxes. Walls of
+        // four different thicknesses, none of them lined up with the bake grid.
+        ("nav_walls", &built, NavSettings { agent_radius: 0.3, ..Default::default() }, false, over_rooms),
+        ("nav_walls_cells", &built, NavSettings { agent_radius: 0.3, ..Default::default() }, true, over_rooms),
     ] {
-        let mesh = bake(&geometry, &settings).expect("this level bakes");
+        let view = Mat4::look_at_rh(Vec3::ZERO, at - eye, Vec3::Y);
+        let proj = Mat4::perspective_rh(0.9, W as f32 / H as f32, 0.1, 500.0);
+        let view_proj = proj * view;
+        let rel = |p: [f32; 3]| [p[0] - eye.x, p[1] - eye.y, p[2] - eye.z];
+
+        let mesh = bake(geometry, &settings).expect("this level bakes");
         let overlay = Overlay::build(&mesh, settings.cell_size * 0.5);
         let hue = |r: u32| hue_rgb((r as f32 * 0.618_034).fract());
 
@@ -104,7 +171,7 @@ fn main() {
         // The level itself, as a faint wireframe, so the overlay can be judged
         // against the ground it claims to describe.
         let mut wire: Vec<LineVertex> = Vec::new();
-        for t in &geometry {
+        for t in geometry {
             for (a, b) in [(t.a, t.b), (t.b, t.c), (t.c, t.a)] {
                 let c = [0.30, 0.32, 0.35, 1.0];
                 wire.push(LineVertex { pos: rel(a), color: c });
@@ -173,7 +240,10 @@ fn main() {
         );
         write_png(&gpu, &color_tex, &format!("{name}.png"));
     }
-    println!("look at nav_overlay_old.png, nav_overlay_new.png and nav_overlay_slope.png");
+    println!(
+        "look at nav_overlay_old.png, nav_overlay_new.png, nav_overlay_slope.png, \
+         nav_walls.png and nav_walls_cells.png"
+    );
 }
 
 /// The editor's own per-region hue, so the probe and the Scene view agree.

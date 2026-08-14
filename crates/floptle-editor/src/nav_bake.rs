@@ -162,12 +162,14 @@ fn push_box(out: &mut Vec<Tri>, centre: Vec3, half: Vec3, rot: floptle_core::mat
         c(1.0, 1.0, 1.0),
         c(-1.0, 1.0, 1.0),
     ];
-    // Winding does not matter here: the baker takes |normal.y|, because a floor
-    // whose triangles face down is still a floor and a level with one flipped
-    // face should not have a hole in its navmesh.
+    // Slope is judged on |normal.y|, so winding cannot cost a floor: a face that
+    // points the wrong way is still a floor. It is worth getting right anyway —
+    // the baker fills the inside of a solid by reading which way its top and
+    // bottom look, so a box wound outward is a box a character cannot walk
+    // through, and one wound inward is merely a box with an untidy middle.
     const FACES: [[usize; 4]; 6] = [
-        [0, 1, 2, 3],
-        [4, 5, 6, 7],
+        [0, 1, 2, 3], // -y, looking down
+        [4, 7, 6, 5], // +y, looking up
         [0, 1, 5, 4],
         [2, 3, 7, 6],
         [1, 2, 6, 5],

@@ -89,7 +89,10 @@ impl Tool {
             Tool::Tiles => "tiles",
             Tool::Rect => "rect",
             Tool::Paint => "paint",
-            Tool::MapEdit => "map",
+            // "model", to agree with the ▦ Model tab. `MapEdit` and the
+            // `floptle-map` crate keep their old names internally; renaming a
+            // tool is a change to what it is called, not to what it is.
+            Tool::MapEdit => "model",
         }
     }
 }

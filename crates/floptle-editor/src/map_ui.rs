@@ -76,7 +76,7 @@ impl EditorTabViewer<'_> {
     pub(crate) fn map_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         if self.map_playing {
-            ui.colored_label(ACCENT, "⏹  Stop the scene to edit map geometry");
+            ui.colored_label(ACCENT, "⏹  Stop the scene to edit model geometry");
             ui.small(
                 "edits during Play would not be undoable and the physics collider \
                  would not rebuild, so the tool stays out of the way until you stop.",
@@ -279,7 +279,7 @@ impl EditorTabViewer<'_> {
         row(ui, "", |ui| {
             match counts {
                 None => {
-                    ui.label(RichText::new("no map node selected").weak());
+                    ui.label(RichText::new("no model node selected").weak());
                 }
                 Some(_) if total == 0 => {
                     ui.label(RichText::new("nothing selected").weak());
@@ -497,7 +497,7 @@ impl EditorTabViewer<'_> {
                 ui,
                 faces > 0,
                 "✂ Split off",
-                "move the selected faces into their own map node",
+                "move the selected faces into their own model node",
             ) {
                 self.cmd.map_detach = true;
             }
@@ -1016,7 +1016,7 @@ impl EditorTabViewer<'_> {
             .show(ui, |ui| {
                 ui.label(
                     RichText::new(
-                        "these answer whatever modifiers are held, so the Map tool won't take                          them:",
+                        "these answer whatever modifiers are held, so the Model tool won't take                          them:",
                     )
                     .weak()
                     .small(),
