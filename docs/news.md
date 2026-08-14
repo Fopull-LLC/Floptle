@@ -1,5 +1,19 @@
 ## Just shipped
 
+**v0.57.0 "Find The Way"** — characters can be told to walk somewhere and they
+work out how to get there. Add a **Nav Mesh** node, press **Bake**, and
+`nav.path(from, to)` hands back the corners to walk — a straight line across an
+open room, one turn around a corner, hugging the inside of the bend the way a
+person would. It bakes whatever your character would collide with, so a wall you
+build today blocks a path today; narrow it by **layer**, or drop one object with
+**Navmesh Exclude**. The bounds size themselves to what they find, so you never
+measure a volume by hand. It draws in the Scene view with **a colour per
+connected area**, which answers "why won't it walk over there" on sight: two
+colours meeting at a doorway means that gap is too narrow for the character it
+was baked for. Reviewing a package is now a **button** that opens its page with
+the package already picked, and **fopull.com/packages** is a proper catalogue you
+can search and sort.
+
 **v0.56.0 "Word Of Mouth"** — anybody can publish a package and nobody vetted it,
 so **🌐 Browse now says so** — packages are made and managed by their authors, not
 by Fopull — and shows you what people who actually ran one thought. Every row
