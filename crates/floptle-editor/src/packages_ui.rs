@@ -684,11 +684,26 @@ fn browse_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, ac
         }
         ui.separator();
         ui.label("sort");
+        // A registry that does not count downloads is entitled not to, and the
+        // catalogue is careful to leave the field absent rather than publish a
+        // zero for everything. Offering "most downloaded" against that is a
+        // control that appears to work and reorders nothing — so it is offered
+        // only when something in the catalogue actually carries a count.
+        let counts_downloads = match &state.catalogue {
+            Catalogue::Ready(i) => i.packages.iter().any(|p| p.downloads.is_some()),
+            _ => false,
+        };
+        if !counts_downloads && state.sort == floptle_package::Sort::Downloads {
+            state.sort = floptle_package::Sort::default();
+        }
         egui::ComboBox::from_id_salt("pkg-sort")
             .selected_text(state.sort.label())
             .width(150.0)
             .show_ui(ui, |ui| {
                 for s in floptle_package::Sort::ALL {
+                    if *s == floptle_package::Sort::Downloads && !counts_downloads {
+                        continue;
+                    }
                     ui.selectable_value(&mut state.sort, *s, s.label());
                 }
             });
