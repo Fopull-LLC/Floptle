@@ -42,6 +42,7 @@
 //! builds an extension's Lua environment — an undeclared capability is *absent*,
 //! not merely refused at the call.
 
+pub mod contents;
 pub mod index;
 pub mod install;
 pub mod manifest;
@@ -49,10 +50,12 @@ pub mod registry;
 pub mod resolve;
 pub mod version;
 
-pub use index::{Index, Listing, Release};
+pub use contents::{Contents, Facet};
+pub use index::{Index, Listing, Query, Release, Sort};
 pub use install::InstallError;
 pub use manifest::{
-    Author, Dependency, DirKind, Manifest, ManifestError, Permission, Sample, MANIFEST_FILE,
+    Author, Category, Dependency, DirKind, Manifest, ManifestError, Media, Permission, Sample,
+    MANIFEST_FILE,
 };
 pub use registry::{Entry, Registry, Source, PACKAGES_DIR, REGISTRY_FILE};
 pub use resolve::{resolve, resolve_pkg_url, LoadReport, Loaded, Problem, Severity, PKG_SCHEME};

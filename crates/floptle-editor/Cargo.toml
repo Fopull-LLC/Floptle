@@ -45,6 +45,8 @@ floptle-account = { path = "../floptle-account" }
 mlua = { version = "0.10", features = ["luajit", "vendored"] }
 serde_json = { workspace = true } # the registry catalogue + an extension's json.*
 ureq = { workspace = true }       # edit-time http.* for extensions that declared Network
+# Decoding package thumbnails for the 📦 catalogue grid (crates/.../pkg_thumbs.rs).
+image = { workspace = true }
 
 winit = { workspace = true }
 wgpu = { workspace = true }

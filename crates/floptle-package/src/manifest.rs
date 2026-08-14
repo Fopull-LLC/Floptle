@@ -89,6 +89,152 @@ impl Permission {
         &[Permission::Network, Permission::Files, Permission::Browser];
 }
 
+/// What a package **is**, as its author shelves it.
+///
+/// A closed list on purpose. Free-text categories are how a catalogue ends up
+/// with `3d`, `3D`, `three-d` and `models` as four different shelves, none of
+/// which can be filtered on. The long tail — "low-poly", "pixel", "sci-fi",
+/// "PBR" — is what [`Manifest::keywords`] is for, and it is already searched.
+///
+/// Multi-valued, because a package can honestly be two things: an environment
+/// kit and the tool that places it is one package, not two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Category {
+    /// Extends the editor itself — panels, tools, importers.
+    EditorTool,
+    /// Runtime Lua a game attaches to nodes.
+    Scripts,
+    /// Models, materials, environment kits.
+    Art3D,
+    /// Sprites, tilesets, textures, UI art.
+    Art2D,
+    /// Music, SFX, impulse responses.
+    Audio,
+    /// `.flsl` shaders and material presets.
+    Shaders,
+    /// Particle effects.
+    Vfx,
+    /// UI kits and themes.
+    Ui,
+    /// Typefaces.
+    Fonts,
+    /// Starter projects and example scenes.
+    Template,
+    /// Tables, configs, rule sets.
+    Data,
+}
+
+impl Category {
+    /// What a person browsing calls this shelf.
+    pub fn label(self) -> &'static str {
+        match self {
+            Category::EditorTool => "Editor tools",
+            Category::Scripts => "Scripts",
+            Category::Art3D => "3D art",
+            Category::Art2D => "2D art",
+            Category::Audio => "Audio",
+            Category::Shaders => "Shaders",
+            Category::Vfx => "VFX",
+            Category::Ui => "UI",
+            Category::Fonts => "Fonts",
+            Category::Template => "Templates",
+            Category::Data => "Data",
+        }
+    }
+
+    /// One line, for the author choosing between them.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Category::EditorTool => "extends the editor itself — panels, tools, importers",
+            Category::Scripts => "runtime Lua a game attaches to nodes",
+            Category::Art3D => "models, materials, environment kits",
+            Category::Art2D => "sprites, tilesets, textures, UI art",
+            Category::Audio => "music, sound effects, impulse responses",
+            Category::Shaders => "shaders and material presets",
+            Category::Vfx => "particle effects",
+            Category::Ui => "UI kits and themes",
+            Category::Fonts => "typefaces",
+            Category::Template => "starter projects and example scenes",
+            Category::Data => "tables, configs, rule sets",
+        }
+    }
+
+    /// A small glyph, so a grid cell can say what it is without a word.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Category::EditorTool => "⚒",
+            Category::Scripts => "¶",
+            Category::Art3D => "⬣",
+            Category::Art2D => "🖼",
+            Category::Audio => "♪",
+            Category::Shaders => "◈",
+            Category::Vfx => "✨",
+            Category::Ui => "◫",
+            Category::Fonts => "A",
+            Category::Template => "⎙",
+            Category::Data => "▤",
+        }
+    }
+
+    pub const ALL: &'static [Category] = &[
+        Category::EditorTool,
+        Category::Scripts,
+        Category::Art3D,
+        Category::Art2D,
+        Category::Audio,
+        Category::Shaders,
+        Category::Vfx,
+        Category::Ui,
+        Category::Fonts,
+        Category::Template,
+        Category::Data,
+    ];
+}
+
+/// One picture or video showing what a package is.
+///
+/// **Exactly one** of `image` / `video` is set — a media entry that is both, or
+/// neither, is a manifest mistake rather than something to render half of.
+///
+/// `image` and `poster` are **package-relative paths** in a `package.ron`, which
+/// is what makes them work offline and while an author is still writing the
+/// package. An absolute `http(s)` URL is accepted too — that is what the web
+/// catalogue's `index.json` carries, resolved to the published revision, and it
+/// means one type serves both files.
+///
+/// `video` is always an absolute URL. A repository should not carry video, and a
+/// catalogue that clones one to show a thumbnail is a catalogue nobody browses.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Media {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<String>,
+    /// The still shown before a video plays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poster: Option<String>,
+    /// May be empty — a screenshot that speaks for itself needs no caption.
+    #[serde(default)]
+    pub caption: String,
+}
+
+impl Media {
+    /// The path or URL to draw for this entry: the image, or a video's poster.
+    /// `None` for a video with no poster, which is a play button and a caption.
+    pub fn still(&self) -> Option<&str> {
+        self.image.as_deref().or(self.poster.as_deref())
+    }
+
+    pub fn is_video(&self) -> bool {
+        self.video.is_some()
+    }
+}
+
+/// Is this an absolute `http(s)` address rather than a package-relative path?
+pub fn is_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
 /// A parsed `package.ron`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -108,6 +254,22 @@ pub struct Manifest {
     pub homepage: Option<String>,
     #[serde(default)]
     pub keywords: Vec<String>,
+    /// Which shelves this belongs on. Empty is legal and means uncategorised —
+    /// the catalogue has somewhere to put those rather than hiding them.
+    #[serde(default)]
+    pub categories: Vec<Category>,
+    /// The square image that IS this package in a grid — in the editor's browser
+    /// and on the site both. Package-relative, or an absolute URL. It has to
+    /// survive being drawn at 128px.
+    #[serde(default)]
+    pub thumbnail: Option<String>,
+    /// A wide image for the top of the package's own page. Optional; a package
+    /// without one uses its thumbnail.
+    #[serde(default)]
+    pub banner: Option<String>,
+    /// Screenshots and videos, in the order the author wants them seen.
+    #[serde(default)]
+    pub media: Vec<Media>,
     /// Which engine versions this works with, e.g. `">=0.55.0"`. Absent = any,
     /// which is a claim worth making deliberately.
     #[serde(default)]
@@ -160,6 +322,10 @@ impl Manifest {
             license: None,
             homepage: None,
             keywords: Vec::new(),
+            categories: Vec::new(),
+            thumbnail: None,
+            banner: None,
+            media: Vec::new(),
             engine: None,
             dependencies: Vec::new(),
             editor: default_editor_dirs(),
@@ -245,6 +411,49 @@ impl Manifest {
         perms.dedup();
         if perms.len() != self.permissions.len() {
             problems.push("`permissions` names the same capability twice".into());
+        }
+        let mut cats = self.categories.clone();
+        cats.sort();
+        cats.dedup();
+        if cats.len() != self.categories.len() {
+            problems.push("`categories` names the same shelf twice".into());
+        }
+        // Media paths are checked the same way content folders are: an image
+        // path that could climb out of the package would make "show me this
+        // package" mean "show me a file on your disk".
+        for (label, p) in [("thumbnail", &self.thumbnail), ("banner", &self.banner)] {
+            if let Some(p) = p
+                && let Err(e) = validate_media_ref(p)
+            {
+                problems.push(format!("`{label}`: {e}"));
+            }
+        }
+        for (i, m) in self.media.iter().enumerate() {
+            match (&m.image, &m.video) {
+                (Some(_), Some(_)) => problems.push(format!(
+                    "media entry {} is both an `image` and a `video` — one entry shows one thing",
+                    i + 1
+                )),
+                (None, None) => problems.push(format!(
+                    "media entry {} has neither an `image` nor a `video`",
+                    i + 1
+                )),
+                _ => {}
+            }
+            if let Some(v) = &m.video
+                && !is_url(v)
+            {
+                problems.push(format!(
+                    "media entry {}: `video` must be a full https:// address — a repository \
+                     should not carry video",
+                    i + 1
+                ));
+            }
+            for p in [m.image.as_deref(), m.poster.as_deref()].into_iter().flatten() {
+                if let Err(e) = validate_media_ref(p) {
+                    problems.push(format!("media entry {}: {e}", i + 1));
+                }
+            }
         }
         if problems.is_empty() {
             Ok(())
@@ -332,6 +541,19 @@ pub fn validate_id(id: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// A media reference is either an absolute `http(s)` URL or a package-relative
+/// path that stays inside the package — the same rule as a content folder, for
+/// the same reason.
+fn validate_media_ref(p: &str) -> Result<(), String> {
+    if is_url(p) {
+        return Ok(());
+    }
+    if p.trim().is_empty() {
+        return Err("an image path is empty".into());
+    }
+    validate_rel(p)
 }
 
 /// A content folder is package-relative and may not climb out of the package.
@@ -500,5 +722,131 @@ mod tests {
         for p in Permission::ALL {
             assert!(!p.describe().is_empty(), "{p:?}");
         }
+    }
+
+    // ---- what an art package needs to say about itself (0134) --------------
+
+    #[test]
+    fn an_art_package_declares_its_shelves_and_its_pictures() {
+        let m = Manifest::parse(
+            r#"(
+                id: "com.fopull.brutalistkit",
+                name: "Brutalist Kit",
+                version: "1.0.0",
+                categories: [Art3D, EditorTool],
+                thumbnail: "media/icon.png",
+                banner: "media/wide.png",
+                media: [
+                    (image: "media/overview.png", caption: "Every piece in the kit"),
+                    (image: "media/detail.png"),
+                    (video: "https://youtu.be/xxxx", poster: "media/poster.png",
+                     caption: "60 seconds"),
+                ],
+            )"#,
+        )
+        .unwrap();
+        assert_eq!(m.categories, vec![Category::Art3D, Category::EditorTool]);
+        assert_eq!(m.thumbnail.as_deref(), Some("media/icon.png"));
+        assert_eq!(m.media.len(), 3);
+        assert!(!m.media[0].is_video());
+        assert_eq!(m.media[1].caption, "", "a screenshot may speak for itself");
+        assert!(m.media[2].is_video());
+        assert_eq!(m.media[2].still(), Some("media/poster.png"));
+
+        // The smallest manifest still has none of it.
+        let bare = Manifest::new("com.e.g", "G", Version::new(1, 0, 0));
+        assert!(bare.categories.is_empty());
+        assert!(bare.thumbnail.is_none());
+        assert!(bare.media.is_empty());
+    }
+
+    /// A media path that could climb out of the package would make "show me
+    /// this package" mean "show me a file on your disk" — the same rule, and the
+    /// same reason, as a content folder.
+    #[test]
+    fn a_media_path_may_not_climb_out_of_the_package() {
+        let err = Manifest::parse(
+            r#"( id: "com.e.g", name: "G", version: "1.0.0",
+                 thumbnail: "../../.ssh/id_rsa" )"#,
+        )
+        .unwrap_err();
+        assert!(err.contains(".."), "{err}");
+        assert!(Manifest::parse(
+            r#"( id: "com.e.g", name: "G", version: "1.0.0",
+                 media: [(image: "/etc/passwd")] )"#
+        )
+        .is_err());
+        // An absolute URL is fine — that is what the web catalogue carries.
+        assert!(Manifest::parse(
+            r#"( id: "com.e.g", name: "G", version: "1.0.0",
+                 thumbnail: "https://example.com/icon.png" )"#
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_media_entry_shows_exactly_one_thing() {
+        let both = Manifest::parse(
+            r#"( id: "com.e.g", name: "G", version: "1.0.0",
+                 media: [(image: "a.png", video: "https://y/z")] )"#,
+        )
+        .unwrap_err();
+        assert!(both.contains("both"), "{both}");
+
+        let neither = Manifest::parse(
+            r#"( id: "com.e.g", name: "G", version: "1.0.0",
+                 media: [(caption: "nothing here")] )"#,
+        )
+        .unwrap_err();
+        assert!(neither.contains("neither"), "{neither}");
+
+        // A repository should not carry video, so a relative one is a mistake
+        // worth naming rather than a file nobody can play.
+        let local = Manifest::parse(
+            r#"( id: "com.e.g", name: "G", version: "1.0.0",
+                 media: [(video: "media/tour.mp4")] )"#,
+        )
+        .unwrap_err();
+        assert!(local.contains("https://"), "{local}");
+    }
+
+    #[test]
+    fn a_shelf_named_twice_is_a_mistake() {
+        let err = Manifest::parse(
+            r#"( id: "com.e.g", name: "G", version: "1.0.0",
+                 categories: [Audio, Audio] )"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("twice"), "{err}");
+    }
+
+    #[test]
+    fn the_new_fields_survive_save_and_load() {
+        let dir = std::env::temp_dir().join(format!("flpkg-media-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut m = Manifest::new("com.example.kit", "Kit", Version::new(1, 0, 0));
+        m.categories = vec![Category::Art2D, Category::Ui];
+        m.thumbnail = Some("media/icon.png".into());
+        m.media = vec![Media {
+            image: Some("media/a.png".into()),
+            caption: "A".into(),
+            ..Default::default()
+        }];
+        m.save(&dir).unwrap();
+        assert_eq!(Manifest::load(&dir).unwrap(), m);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_shelf_names_and_describes_itself() {
+        for c in Category::ALL {
+            assert!(!c.label().is_empty(), "{c:?}");
+            assert!(!c.describe().is_empty(), "{c:?}");
+            assert!(!c.glyph().is_empty(), "{c:?}");
+        }
+        // The JSON spelling is the enum's own name, so package.ron and
+        // index.json read alike — the site was told PascalCase.
+        assert_eq!(serde_json::to_string(&Category::Art3D).unwrap(), "\"Art3D\"");
+        assert_eq!(serde_json::to_string(&Category::EditorTool).unwrap(), "\"EditorTool\"");
     }
 }

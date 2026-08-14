@@ -25,6 +25,8 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::contents::Facet;
+use crate::manifest::{Category, Media};
 use crate::version::{Version, VersionReq};
 
 /// Where the catalogue lives. Overridable per install for a private registry.
@@ -65,6 +67,35 @@ pub struct Rating {
     pub count: u32,
 }
 
+/// The neutral score an unproven package is pulled towards, and how many
+/// reviews of pull it takes to escape it.
+///
+/// `PRIOR_WEIGHT` reviews at `PRIOR_SCORE` are added to everybody's tally before
+/// ranking. Five is deliberately small — it is enough that one enthusiastic
+/// friend cannot top the catalogue, and few enough that a genuinely good
+/// package with a dozen reviews still gets there.
+const PRIOR_SCORE: f32 = 3.5;
+const PRIOR_WEIGHT: f32 = 5.0;
+
+impl Rating {
+    /// The score to **rank** by, which is not the score to **show**.
+    ///
+    /// The displayed number stays the plain mean, for the reason [`Rating`]
+    /// gives: a reader can reconstruct it from the reviews in front of them. But
+    /// ranking a catalogue on a plain mean puts every package with a single
+    /// five-star review above every package with a track record, and a store
+    /// whose top row is unproven is a store nobody trusts twice.
+    ///
+    /// So the mean is shown and a shrunk mean is sorted — which is the honest
+    /// pairing, because the question "how good is this" and the question "how
+    /// sure are we" have different answers and only one of them belongs on a
+    /// star row.
+    pub fn confidence(&self) -> f32 {
+        let n = self.count as f32;
+        (PRIOR_SCORE * PRIOR_WEIGHT + self.score * n) / (PRIOR_WEIGHT + n)
+    }
+}
+
 /// One package in the catalogue.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Listing {
@@ -78,6 +109,37 @@ pub struct Listing {
     pub homepage: Option<String>,
     #[serde(default)]
     pub keywords: Vec<String>,
+    /// Which shelves the author put it on. Read **leniently**: a category this
+    /// build has never heard of is dropped rather than failing the catalogue,
+    /// which is what lets the list grow without stranding older editors.
+    #[serde(default, deserialize_with = "lenient_categories", skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<Category>,
+    /// What it demonstrably holds, derived by the publisher from the files
+    /// themselves — see [`crate::contents`]. Unknown facet names are dropped for
+    /// the same reason as unknown categories.
+    #[serde(default, deserialize_with = "lenient_facets", skip_serializing_if = "Vec::is_empty")]
+    pub contains: Vec<Facet>,
+    /// The square image that IS this row in a grid. An absolute URL here — the
+    /// catalogue is read by things that cannot clone the repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
+    /// A wide image for the package's own page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banner: Option<String>,
+    /// Screenshots and videos, in the author's order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media: Vec<Media>,
+    /// ISO date of the newest published version — what "recently updated" sorts
+    /// on. A catalogue cannot be ordered by liveliness without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<String>,
+    /// How many times it has been installed, if anybody is counting.
+    ///
+    /// **Absent is not zero.** A registry that does not count downloads must not
+    /// make every package on it look like one nobody has ever installed — the
+    /// same rule as [`Rating`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downloads: Option<u64>,
     #[serde(default)]
     pub versions: Vec<Release>,
     /// Absent until somebody reviews it. Added after the reader shipped, which
@@ -115,14 +177,81 @@ impl Listing {
             return true;
         }
         let hay = format!(
-            "{} {} {} {}",
+            "{} {} {} {} {} {}",
             self.id.to_lowercase(),
             self.name.to_lowercase(),
+            self.author.to_lowercase(),
             self.description.to_lowercase(),
-            self.keywords.join(" ").to_lowercase()
+            self.keywords.join(" ").to_lowercase(),
+            // Searching "audio" should find the Audio shelf, and "3d art" the
+            // 3D one — the labels are what a person types, not `Art3D`.
+            self.categories
+                .iter()
+                .map(|c| c.label().to_lowercase())
+                .collect::<Vec<_>>()
+                .join(" "),
         );
         q.split_whitespace().all(|w| hay.contains(w))
     }
+
+    /// Does this row belong on **every** shelf in `wanted`? An empty `wanted`
+    /// asks nothing and matches everything.
+    pub fn in_categories(&self, wanted: &[Category]) -> bool {
+        wanted.iter().all(|c| self.categories.contains(c))
+    }
+
+    /// Does this row hold **all** of `wanted`? Empty asks nothing.
+    pub fn holds(&self, wanted: &[Facet]) -> bool {
+        wanted.iter().all(|f| self.contains.contains(f))
+    }
+}
+
+/// How a catalogue is ordered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Sort {
+    /// Newest published version first. The default, because it is the order that
+    /// makes a catalogue read as a place where things are happening.
+    #[default]
+    Updated,
+    /// Highest rated, then most-reviewed as the tie-break — a lone 5.0 does not
+    /// outrank a 4.8 from ninety people.
+    Rated,
+    /// Most reviews.
+    Reviewed,
+    Name,
+    Downloads,
+}
+
+impl Sort {
+    pub const ALL: &'static [Sort] =
+        &[Sort::Updated, Sort::Rated, Sort::Reviewed, Sort::Name, Sort::Downloads];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Sort::Updated => "recently updated",
+            Sort::Rated => "highest rated",
+            Sort::Reviewed => "most reviewed",
+            Sort::Name => "name",
+            Sort::Downloads => "most installed",
+        }
+    }
+}
+
+/// Everything a browser asks the catalogue at once: what to look for, which
+/// shelves, what it must hold, whether it has to run here, and in what order.
+///
+/// One struct rather than five arguments so the same question can be asked by
+/// the editor's browser and by a test, and answered identically.
+#[derive(Clone, Debug, Default)]
+pub struct Query {
+    pub search: String,
+    pub categories: Vec<Category>,
+    pub contains: Vec<Facet>,
+    /// Drop rows with no version this engine can run. Off by default: a person
+    /// browsing should be able to see what exists and learn that they need a
+    /// newer engine, rather than have it silently withheld.
+    pub compatible_only: Option<Version>,
+    pub sort: Sort,
 }
 
 /// The whole catalogue.
@@ -158,6 +287,102 @@ impl Index {
     pub fn find(&self, id: &str) -> Option<&Listing> {
         self.packages.iter().find(|l| l.id == id)
     }
+
+    /// The rows a browser should draw, filtered and ordered by `q`.
+    ///
+    /// Search relevance still wins when there is a search: somebody who typed
+    /// "grass" wants the grass package first, whatever the sort says. The sort
+    /// orders everything the search did not already rank.
+    pub fn query(&self, q: &Query) -> Vec<&Listing> {
+        let needle = q.search.trim().to_lowercase();
+        let mut hits: Vec<&Listing> = self
+            .packages
+            .iter()
+            .filter(|l| l.matches(&needle))
+            .filter(|l| l.in_categories(&q.categories))
+            .filter(|l| l.holds(&q.contains))
+            .filter(|l| match &q.compatible_only {
+                Some(engine) => l.best_for(engine).is_some(),
+                None => true,
+            })
+            .collect();
+
+        // Rank first (0 = the query is a prefix of the name or id), then the
+        // chosen order inside each rank.
+        // 0 = the query is a prefix of the name or id. With no query nothing
+        // outranks anything, so everything is rank 0 and the sort decides.
+        let rank = |l: &Listing| -> u8 {
+            let prefix = l.name.to_lowercase().starts_with(&needle)
+                || l.id.to_lowercase().starts_with(&needle);
+            u8::from(!(needle.is_empty() || prefix))
+        };
+        hits.sort_by(|a, b| {
+            rank(a).cmp(&rank(b)).then_with(|| match q.sort {
+                // Reverse ISO dates sort as reverse chronological, which is why
+                // the field is a string and not parsed. A row with no date sorts
+                // last rather than first — an unknown date is not "just now".
+                Sort::Updated => b
+                    .updated
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(a.updated.as_deref().unwrap_or("")),
+                Sort::Rated => {
+                    let key = |l: &Listing| l.rating.map(|r| (r.confidence(), r.count));
+                    match (key(b), key(a)) {
+                        (Some(x), Some(y)) => x
+                            .0
+                            .partial_cmp(&y.0)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(x.1.cmp(&y.1)),
+                        // Unrated sorts after rated, never as a zero. (`a` is
+                        // the second of the pair here — the match is flipped to
+                        // make the whole comparison descending.)
+                        (Some(_), None) => std::cmp::Ordering::Greater,
+                        (None, Some(_)) => std::cmp::Ordering::Less,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                }
+                Sort::Reviewed => b
+                    .rating
+                    .map(|r| r.count)
+                    .unwrap_or(0)
+                    .cmp(&a.rating.map(|r| r.count).unwrap_or(0)),
+                Sort::Name => std::cmp::Ordering::Equal,
+                Sort::Downloads => b.downloads.unwrap_or(0).cmp(&a.downloads.unwrap_or(0)),
+            })
+            // Name is always the final tie-break, so the same catalogue always
+            // draws in the same order rather than in hash order.
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        hits
+    }
+
+    /// How many rows would land on each shelf, given everything in `q` **except**
+    /// the category filter itself.
+    ///
+    /// Counting with the other filters applied is the whole point: a count that
+    /// ignores the search box tells you there are 40 audio packages and then
+    /// shows you none.
+    pub fn category_counts(&self, q: &Query) -> Vec<(Category, usize)> {
+        let mut base = q.clone();
+        base.categories = Vec::new();
+        let rows = self.query(&base);
+        Category::ALL
+            .iter()
+            .map(|c| (*c, rows.iter().filter(|l| l.categories.contains(c)).count()))
+            .collect()
+    }
+
+    /// The same, for the derived facets.
+    pub fn facet_counts(&self, q: &Query) -> Vec<(Facet, usize)> {
+        let mut base = q.clone();
+        base.contains = Vec::new();
+        let rows = self.query(&base);
+        Facet::ALL
+            .iter()
+            .map(|f| (*f, rows.iter().filter(|l| l.contains.contains(f)).count()))
+            .collect()
+    }
 }
 
 /// A rating that will not read is **no rating**, not a broken catalogue.
@@ -177,6 +402,37 @@ where
 {
     let raw = Option::<serde_json::Value>::deserialize(d)?;
     Ok(raw.and_then(|v| serde_json::from_value::<Rating>(v).ok()))
+}
+
+/// A vocabulary this build does not know is a **word dropped**, never a
+/// catalogue refused.
+///
+/// Both `categories` and `contains` are closed lists that will grow: the site
+/// and the editor ship on different days, so there is always a window where the
+/// catalogue names a shelf the reader has not heard of. The only acceptable
+/// behaviour in that window is to render the package without that one chip.
+/// Anything stricter means adding a category takes every older editor's Browse
+/// tab down with it.
+/// The value is read as an untyped `Value` first, not as a `Vec` of them: a
+/// field that is not a list at all — `"categories": "Art3D"`, or `null` — must
+/// also cost only itself, and deserializing straight into a `Vec` fails the
+/// whole document on exactly that shape.
+fn lenient_list<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let raw = Option::<serde_json::Value>::deserialize(d)?;
+    let Some(serde_json::Value::Array(items)) = raw else { return Ok(Vec::new()) };
+    Ok(items.into_iter().filter_map(|v| serde_json::from_value::<T>(v).ok()).collect())
+}
+
+fn lenient_categories<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Category>, D::Error> {
+    lenient_list(d)
+}
+
+fn lenient_facets<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Facet>, D::Error> {
+    lenient_list(d)
 }
 
 /// One person's word on a package they ran.
@@ -448,5 +704,201 @@ mod tests {
         let idx = Index::parse(SAMPLE).unwrap();
         let text = serde_json::to_string(&idx).unwrap();
         assert_eq!(Index::parse(&text).unwrap(), idx);
+    }
+
+    // ---- the catalogue an art package needs (0134) -------------------------
+
+    const RICH: &str = r#"{"packages":[
+        {"id":"com.fopull.brutalist","name":"Brutalist Kit","author":"Fopull",
+         "description":"Concrete blocks","categories":["Art3D"],
+         "contains":["models","textures","prefabs"],
+         "thumbnail":"https://x/icon.png","banner":"https://x/wide.png",
+         "media":[{"image":"https://x/a.png","caption":"Overview"},
+                  {"video":"https://youtu.be/z","poster":"https://x/p.png"}],
+         "updated":"2026-08-14","downloads":1284,
+         "rating":{"score":4.8,"count":90},
+         "versions":[{"version":"1.0.0","git":"https://x/b.git","rev":"v1.0.0"}]},
+        {"id":"com.other.sfx","name":"Field SFX","author":"Other",
+         "categories":["Audio"],"contains":["audio"],"updated":"2026-08-01",
+         "rating":{"score":5.0,"count":1},
+         "versions":[{"version":"0.2.0","git":"https://x/s.git"}]},
+        {"id":"com.third.tool","name":"Alpha Tool","author":"Third",
+         "categories":["EditorTool","Scripts"],"contains":["editor","scripts"],
+         "updated":"2026-07-02",
+         "versions":[{"version":"1.0.0","engine":">=9.0.0","git":"https://x/t.git"}]}
+    ]}"#;
+
+    #[test]
+    fn a_listing_carries_everything_an_art_package_needs_to_show_itself() {
+        let idx = Index::parse(RICH).unwrap();
+        let kit = idx.find("com.fopull.brutalist").unwrap();
+        assert_eq!(kit.categories, vec![Category::Art3D]);
+        assert_eq!(kit.contains, vec![Facet::Models, Facet::Textures, Facet::Prefabs]);
+        assert_eq!(kit.thumbnail.as_deref(), Some("https://x/icon.png"));
+        assert_eq!(kit.media.len(), 2);
+        assert_eq!(kit.media[0].caption, "Overview");
+        assert!(kit.media[1].is_video());
+        assert_eq!(kit.media[1].still(), Some("https://x/p.png"));
+        assert_eq!(kit.updated.as_deref(), Some("2026-08-14"));
+        assert_eq!(kit.downloads, Some(1284));
+        // …and a listing with none of it still reads, which is every listing
+        // published before this shipped.
+        assert!(Index::parse(SAMPLE).unwrap().find("com.other.audio").unwrap().categories.is_empty());
+    }
+
+    /// The window where the site knows a shelf the editor does not is
+    /// permanent — they ship on different days. It must cost one chip, never
+    /// the catalogue.
+    #[test]
+    fn a_category_this_build_has_never_heard_of_is_dropped_not_fatal() {
+        let idx = Index::parse(
+            r#"{"packages":[{"id":"a.b","name":"A","versions":[],
+                 "categories":["Art3D","Holograms","Audio"],
+                 "contains":["models","neuralnets"]}]}"#,
+        )
+        .expect("an unknown category must not fail the catalogue");
+        let row = idx.find("a.b").unwrap();
+        assert_eq!(row.categories, vec![Category::Art3D, Category::Audio]);
+        assert_eq!(row.contains, vec![Facet::Models]);
+
+        // The same for shapes that are not lists of strings at all.
+        for bad in [r#""categories":"Art3D""#, r#""categories":null"#, r#""contains":{}"#] {
+            let json = format!(r#"{{"packages":[{{"id":"a.b","name":"A","versions":[],{bad}}}]}}"#);
+            assert_eq!(Index::parse(&json).unwrap().packages.len(), 1, "{bad}");
+        }
+    }
+
+    #[test]
+    fn filters_are_and_not_or() {
+        let idx = Index::parse(RICH).unwrap();
+        let q = |c: Vec<Category>, f: Vec<Facet>| Query {
+            categories: c,
+            contains: f,
+            ..Default::default()
+        };
+        // One shelf.
+        assert_eq!(idx.query(&q(vec![Category::Art3D], vec![])).len(), 1);
+        // Two shelves means BOTH, which only the tool is on.
+        let both = idx.query(&q(vec![Category::EditorTool, Category::Scripts], vec![]));
+        assert_eq!(both.len(), 1);
+        assert_eq!(both[0].id, "com.third.tool");
+        // A shelf nobody is on.
+        assert!(idx.query(&q(vec![Category::Fonts], vec![])).is_empty());
+        // "I need SFX" is a contains question, not a shelf question.
+        let audio = idx.query(&q(vec![], vec![Facet::Audio]));
+        assert_eq!(audio.len(), 1);
+        assert_eq!(audio[0].id, "com.other.sfx");
+        // Nothing asked, everything back.
+        assert_eq!(idx.query(&Query::default()).len(), 3);
+    }
+
+    #[test]
+    fn every_sort_orders_what_it_says_and_puts_the_unknown_last() {
+        let idx = Index::parse(RICH).unwrap();
+        let by = |s: Sort| -> Vec<String> {
+            idx.query(&Query { sort: s, ..Default::default() })
+                .iter()
+                .map(|l| l.id.clone())
+                .collect()
+        };
+        assert_eq!(by(Sort::Updated)[0], "com.fopull.brutalist");
+        assert_eq!(by(Sort::Updated)[2], "com.third.tool");
+        assert_eq!(by(Sort::Name)[0], "com.third.tool", "Alpha Tool sorts first by name");
+        assert_eq!(by(Sort::Downloads)[0], "com.fopull.brutalist");
+        assert_eq!(by(Sort::Reviewed)[0], "com.fopull.brutalist", "90 reviews beats 1");
+
+        // A 5.0 from one person must not outrank a 4.8 from ninety.
+        let rated = by(Sort::Rated);
+        assert_eq!(rated[0], "com.fopull.brutalist", "4.8 from ninety beats 5.0 from one");
+        assert_eq!(rated[1], "com.other.sfx");
+        // …and the unrated package sorts last rather than as a zero.
+        assert_eq!(rated[2], "com.third.tool");
+    }
+
+    /// The number on the star row and the number the catalogue is ordered by
+    /// are deliberately not the same number.
+    #[test]
+    fn the_shown_score_is_plain_and_the_ranked_one_is_not() {
+        let lone = Rating { score: 5.0, count: 1 };
+        let proven = Rating { score: 4.8, count: 90 };
+        assert_eq!(lone.score, 5.0, "what is shown stays the plain mean");
+        assert!(
+            proven.confidence() > lone.confidence(),
+            "{} vs {}",
+            proven.confidence(),
+            lone.confidence()
+        );
+        // A package with enough reviews sits essentially at its own mean.
+        assert!((proven.confidence() - 4.8).abs() < 0.1, "{}", proven.confidence());
+        // Nobody is dragged below the prior by having few reviews and a good
+        // score — shrinkage pulls towards neutral, it does not punish.
+        assert!(lone.confidence() > PRIOR_SCORE);
+        // …and a bad package with one review is not flattered up to neutral.
+        assert!(Rating { score: 1.0, count: 1 }.confidence() < PRIOR_SCORE);
+    }
+
+    /// Somebody who typed "brutalist" wants the brutalist package first, even
+    /// when the sort would have put something else there.
+    #[test]
+    fn a_search_still_ranks_ahead_of_the_sort() {
+        let idx = Index::parse(RICH).unwrap();
+        let hits = idx.query(&Query {
+            search: "field".into(),
+            sort: Sort::Updated,
+            ..Default::default()
+        });
+        assert_eq!(hits[0].id, "com.other.sfx");
+        // Search reaches the author and the category label too.
+        assert_eq!(idx.query(&Query { search: "fopull".into(), ..Default::default() }).len(), 1);
+        assert_eq!(idx.query(&Query { search: "audio".into(), ..Default::default() })[0].id,
+                   "com.other.sfx");
+    }
+
+    /// Withholding a package because this engine is too old is a decision a
+    /// person should make, so it is off unless asked for.
+    #[test]
+    fn engine_compatibility_is_a_filter_you_turn_on() {
+        let idx = Index::parse(RICH).unwrap();
+        assert_eq!(idx.query(&Query::default()).len(), 3);
+        let only = idx.query(&Query {
+            compatible_only: Some(Version::new(0, 57, 0)),
+            ..Default::default()
+        });
+        assert_eq!(only.len(), 2, "the >=9.0.0 tool is the one that cannot run here");
+        assert!(only.iter().all(|l| l.id != "com.third.tool"));
+    }
+
+    /// A count that ignores the search box promises rows it will not show.
+    #[test]
+    fn shelf_counts_respect_every_filter_except_their_own() {
+        let idx = Index::parse(RICH).unwrap();
+        let q = Query { search: "kit".into(), ..Default::default() };
+        let counts = idx.category_counts(&q);
+        let of = |c: Category| counts.iter().find(|(k, _)| *k == c).unwrap().1;
+        assert_eq!(of(Category::Art3D), 1);
+        assert_eq!(of(Category::Audio), 0, "the SFX pack does not match 'kit'");
+
+        // Picking a shelf must not zero out the other shelves' counts, or the
+        // filter becomes a one-way door.
+        let picked = Query { categories: vec![Category::Art3D], ..Default::default() };
+        let counts = idx.category_counts(&picked);
+        assert_eq!(counts.iter().find(|(k, _)| *k == Category::Audio).unwrap().1, 1);
+
+        let facets = idx.facet_counts(&Query::default());
+        assert_eq!(facets.iter().find(|(k, _)| *k == Facet::Models).unwrap().1, 1);
+        assert_eq!(facets.iter().find(|(k, _)| *k == Facet::Editor).unwrap().1, 1);
+    }
+
+    #[test]
+    fn a_rich_listing_round_trips_and_omits_what_it_does_not_have() {
+        let idx = Index::parse(RICH).unwrap();
+        let text = serde_json::to_string(&idx).unwrap();
+        assert_eq!(Index::parse(&text).unwrap(), idx);
+        // Absent stays absent — a registry that does not count installs must not
+        // publish "0 downloads" for every package on it.
+        assert!(!text.contains(r#""downloads":null"#));
+        let bare = serde_json::to_string(&Index::parse(SAMPLE).unwrap()).unwrap();
+        assert!(!bare.contains("categories"), "{bare}");
+        assert!(!bare.contains("thumbnail"), "{bare}");
     }
 }

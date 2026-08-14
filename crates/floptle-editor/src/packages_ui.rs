@@ -20,15 +20,59 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use floptle_package::{Index, Listing, Permission, Registry, Severity, Source};
 
-/// What the window needs from the editor: where the project is, and what the
-/// last package load found. Passed in rather than reached for, because this
-/// draws inside the editor's UI pass, where `&mut Editor` does not exist.
+/// What the last package load found, in the shape this tab reads it.
+///
+/// A snapshot rather than a borrow of the extension host. The tab draws from
+/// inside the dock's tab viewer, which already holds the host mutably so a
+/// package's own panels can run — and one `&mut` and one `&` to the same host
+/// cannot both be alive. It is a handful of strings per installed package,
+/// rebuilt per frame, which is cheaper than the per-row `.cloned()` it replaces.
+#[derive(Default)]
+pub(crate) struct PkgLoad {
+    /// Everything the load pass had to say: `(package id, how bad, what)`.
+    pub(crate) problems: Vec<(Option<String>, Severity, String)>,
+    /// Each package that loaded, by id.
+    pub(crate) loaded: Vec<(String, floptle_package::Loaded)>,
+    /// Each package that raised while running, and what it said.
+    pub(crate) failed: Vec<(String, String)>,
+}
+
+impl PkgLoad {
+    pub(crate) fn of(host: &crate::ext::ExtHost) -> PkgLoad {
+        PkgLoad {
+            problems: host
+                .report
+                .problems
+                .iter()
+                .map(|p| (p.id.clone(), p.severity, p.message.clone()))
+                .collect(),
+            loaded: host.report.loaded.iter().map(|l| (l.manifest.id.clone(), l.clone())).collect(),
+            failed: host
+                .packages
+                .iter()
+                .filter_map(|p| p.failed.as_ref().map(|e| (p.id.clone(), e.clone())))
+                .collect(),
+        }
+    }
+
+    fn find(&self, id: &str) -> Option<&floptle_package::Loaded> {
+        self.loaded.iter().find(|(k, _)| k == id).map(|(_, l)| l)
+    }
+
+    fn failure(&self, id: &str) -> Option<&str> {
+        self.failed.iter().find(|(k, _)| k == id).map(|(_, e)| e.as_str())
+    }
+}
+
+/// What the tab needs from the editor: where the project is, and what the last
+/// package load found. Passed in rather than reached for, because this draws
+/// inside the editor's UI pass, where `&mut Editor` does not exist.
 pub(crate) struct PkgCtx<'a> {
     pub(crate) project_root: &'a std::path::Path,
-    pub(crate) host: &'a crate::ext::ExtHost,
+    pub(crate) load: &'a PkgLoad,
     /// The signed-in account, shared with the Hub. `None` only before it has
-    /// been built — the window degrades to "cannot review right now" rather
-    /// than hiding the reviews it can still read.
+    /// been built — the tab degrades to "cannot review right now" rather than
+    /// hiding the reviews it can still read.
     pub(crate) account: Option<&'a floptle_account::Account>,
 }
 
@@ -77,6 +121,17 @@ pub(crate) struct PackagesState {
     new_name: String,
     /// Browse's search box.
     search: String,
+    /// Which shelves are being asked for, and what a package must hold. Both
+    /// are AND: picking two narrows, it does not widen.
+    categories: Vec<floptle_package::Category>,
+    contains: Vec<floptle_package::Facet>,
+    sort: floptle_package::Sort,
+    /// Hide anything with no release for this engine. **Off by default**:
+    /// knowing something exists and wants a newer engine is more useful than
+    /// silently not being shown it.
+    compatible_only: bool,
+    /// Decoded thumbnails, fetched once per session — see [`crate::pkg_thumbs`].
+    thumbs: crate::pkg_thumbs::Thumbs,
     catalogue: Catalogue,
     /// The registry to read. Editable, so a studio can point at its own.
     index_url: String,
@@ -99,6 +154,35 @@ pub(crate) struct PackagesState {
 }
 
 impl PackagesState {
+    /// The question the browser is currently asking the catalogue.
+    ///
+    /// Built here rather than inline so the filters, the counts and the rows all
+    /// come from one description — a count computed from a different query than
+    /// the rows is a shelf that says 12 and shows 3.
+    fn query(&self, engine: &floptle_package::Version) -> floptle_package::Query {
+        floptle_package::Query {
+            search: self.search.clone(),
+            categories: self.categories.clone(),
+            contains: self.contains.clone(),
+            compatible_only: self.compatible_only.then(|| engine.clone()),
+            sort: self.sort,
+        }
+    }
+
+    fn has_filters(&self) -> bool {
+        !self.categories.is_empty()
+            || !self.contains.is_empty()
+            || self.compatible_only
+            || !self.search.trim().is_empty()
+    }
+
+    fn clear_filters(&mut self) {
+        self.categories.clear();
+        self.contains.clear();
+        self.compatible_only = false;
+        self.search.clear();
+    }
+
     fn index_url(&self) -> &str {
         if self.index_url.trim().is_empty() {
             floptle_package::index::DEFAULT_INDEX_URL
@@ -119,8 +203,8 @@ pub(crate) struct PackagesAction {
     pub(crate) open_folder: Option<PathBuf>,
 }
 
-/// Draw the 📦 Packages window. Returns what the editor should do next.
-pub(crate) fn window(
+/// Draw the 📦 Packages tab. Returns what the editor should do next.
+pub(crate) fn body(
     ui: &mut egui::Ui,
     ctx: PkgCtx<'_>,
     state: &mut PackagesState,
@@ -195,17 +279,11 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
 
         // Everything the load pass has to say, indexed so a row can show its own
         // problem next to itself rather than in a list at the top.
-        let problems: Vec<(Option<String>, Severity, String)> = ctx
-            .host
-            .report
-            .problems
-            .iter()
-            .map(|p| (p.id.clone(), p.severity, p.message.clone()))
-            .collect();
+        let problems = &ctx.load.problems;
 
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             for entry in &reg.packages {
-                let loaded = ctx.host.report.find(&entry.id).cloned();
+                let loaded = ctx.load.find(&entry.id).cloned();
                 let name = loaded
                     .as_ref()
                     .map(|l| l.manifest.name.clone())
@@ -253,7 +331,7 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                     });
 
                     // A package that did not load says so on its own row.
-                    for (id, sev, msg) in &problems {
+                    for (id, sev, msg) in problems {
                         if id.as_deref() == Some(entry.id.as_str()) {
                             let col = match sev {
                                 Severity::Error => egui::Color32::from_rgb(230, 120, 110),
@@ -262,9 +340,7 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                             ui.colored_label(col, msg);
                         }
                     }
-                    if let Some(p) = ctx.host.packages.iter().find(|p| p.id == entry.id)
-                        && let Some(err) = &p.failed
-                    {
+                    if let Some(err) = ctx.load.failure(&entry.id) {
                         ui.colored_label(egui::Color32::from_rgb(230, 120, 110), err);
                     }
 
@@ -551,193 +627,534 @@ fn add_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, actio
     }
 
 // ---- Browse ----------------------------------------------------------------
+//
+// A **catalogue**, not a list. The registry started as editor extensions, where
+// a name and a paragraph is a fair description of a package; it now has to hold
+// texture kits, SFX libraries and model packs, and a texture kit described in
+// words is a texture kit nobody installs.
+//
+// So: a grid of thumbnails, filtered by what a package *is* (the author's
+// declared categories) and by what it demonstrably *holds* (facets derived from
+// the files themselves — see `floptle_package::contents`). The second is the one
+// people actually reach for: *I need SFX* is a different question from *show me
+// what somebody filed under Audio*.
+//
+// Every counter respects the other filters, so a shelf that says 12 shows 12.
+
+/// One grid cell's side, in points. Big enough that a piece of art is
+/// recognisable, small enough that a screenful is a screenful.
+const CELL: f32 = 168.0;
 
 fn browse_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, action: &mut PackagesAction) {
-        // Poll the fetch before drawing, so a catalogue that arrived this frame
-        // is shown this frame.
-        if let Catalogue::Fetching(rx) = &state.catalogue
-            && let Ok(result) = rx.try_recv()
-        {
-            state.catalogue = match result {
-                Ok(i) => Catalogue::Ready(i),
-                Err(e) => Catalogue::Failed(e),
-            };
-        }
+    // Poll the fetch before drawing, so a catalogue that arrived this frame
+    // is shown this frame.
+    if let Catalogue::Fetching(rx) = &state.catalogue
+        && let Ok(result) = rx.try_recv()
+    {
+        state.catalogue = match result {
+            Ok(i) => Catalogue::Ready(i),
+            Err(e) => Catalogue::Failed(e),
+        };
+    }
 
-        account_line(ui, ctx);
-        // Listing is automatic, so this is not a shop with a buyer. Said once,
-        // plainly, where somebody is choosing — not as a banner on every row,
-        // which is how a warning becomes wallpaper.
-        ui.small(
-            "Packages here are made and managed by their authors, not by Fopull. Listing is              automatic and the checks are structural — nobody has vouched for what a package              does. A package is code that runs in your editor, so trust them at your own              discretion, and read the reviews.",
+    account_line(ui, ctx);
+    // Listing is automatic, so this is not a shop with a buyer. Said once,
+    // plainly, where somebody is choosing — not as a banner on every row,
+    // which is how a warning becomes wallpaper.
+    ui.small(
+        "Packages here are made and managed by their authors, not by Fopull. Listing is \
+         automatic and the checks are structural — nobody has vouched for what a package \
+         does. A package is code that runs in your editor, so trust them at your own \
+         discretion, and read the reviews.",
+    );
+    ui.add_space(4.0);
+
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut state.search)
+                .hint_text("search packages")
+                .desired_width(220.0),
         );
-        ui.add_space(4.0);
-
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut state.search)
-                    .hint_text("search packages")
-                    .desired_width(240.0),
+        let fetching = matches!(state.catalogue, Catalogue::Fetching(_));
+        if fetching {
+            ui.spinner();
+        } else if ui.button("⟲ Refresh").clicked() {
+            let url = state.index_url().to_string();
+            state.catalogue = Catalogue::Fetching(fetch_index(url));
+        }
+        ui.separator();
+        ui.label("sort");
+        egui::ComboBox::from_id_salt("pkg-sort")
+            .selected_text(state.sort.label())
+            .width(150.0)
+            .show_ui(ui, |ui| {
+                for s in floptle_package::Sort::ALL {
+                    ui.selectable_value(&mut state.sort, *s, s.label());
+                }
+            });
+        ui.checkbox(&mut state.compatible_only, "runs on this engine")
+            .on_hover_text(
+                "hide packages with no release for Floptle as it is here. Off by default: \
+                 knowing something exists and needs a newer engine is more useful than not \
+                 being shown it",
             );
-            let fetching = matches!(state.catalogue, Catalogue::Fetching(_));
-            if fetching {
-                ui.spinner();
-            } else if ui.button("⟲ Refresh").clicked() {
+    });
+
+    ui.collapsing("Registry", |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Catalogue");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.index_url)
+                    .hint_text(floptle_package::index::DEFAULT_INDEX_URL)
+                    .desired_width(360.0),
+            );
+        });
+        ui.small("Point this at your own catalogue to browse a private registry.");
+    });
+    ui.separator();
+
+    match &state.catalogue {
+        Catalogue::Idle => {
+            ui.add_space(8.0);
+            ui.label("Nothing fetched yet.");
+            if ui.button("🌐 Load the catalogue").clicked() {
                 let url = state.index_url().to_string();
                 state.catalogue = Catalogue::Fetching(fetch_index(url));
             }
-        });
-        ui.collapsing("Registry", |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Catalogue");
-                ui.add(
-                    egui::TextEdit::singleline(&mut state.index_url)
-                        .hint_text(floptle_package::index::DEFAULT_INDEX_URL)
-                        .desired_width(360.0),
-                );
-            });
-            ui.small("Point this at your own catalogue to browse a private registry.");
-        });
-        ui.separator();
-
-        match &state.catalogue {
-            Catalogue::Idle => {
-                ui.add_space(8.0);
-                ui.label("Nothing fetched yet.");
-                if ui.button("🌐 Load the catalogue").clicked() {
-                    let url = state.index_url().to_string();
-                    state.catalogue = Catalogue::Fetching(fetch_index(url));
-                }
-                return;
-            }
-            Catalogue::Fetching(_) => {
-                ui.label("Fetching…");
-                return;
-            }
-            Catalogue::Failed(e) => {
-                ui.colored_label(egui::Color32::from_rgb(230, 120, 110), e.clone());
-                ui.small(
-                    "Installing from a folder or a Git URL does not need the catalogue — the \
-                     ✚ Add tab still works.",
-                );
-                return;
-            }
-            Catalogue::Ready(_) => {}
-        }
-
-        let engine = crate::Editor::engine_version();
-        let installed = Registry::load(ctx.project_root).unwrap_or_default();
-        // Cloned out so the rows can borrow `self` mutably while drawing.
-        let rows: Vec<(Listing, Option<floptle_package::Release>)> =
-            match &state.catalogue {
-                Catalogue::Ready(idx) => idx
-                    .search(&state.search)
-                    .into_iter()
-                    .map(|l| (l.clone(), l.best_for(&engine).cloned()))
-                    .collect(),
-                _ => Vec::new(),
-            };
-        if rows.is_empty() {
-            ui.label("Nothing matches.");
             return;
         }
+        Catalogue::Fetching(_) => {
+            ui.label("Fetching…");
+            return;
+        }
+        Catalogue::Failed(e) => {
+            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), e.clone());
+            ui.small(
+                "Installing from a folder or a Git URL does not need the catalogue — the \
+                 ✚ Add tab still works.",
+            );
+            return;
+        }
+        Catalogue::Ready(_) => {}
+    }
 
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            for (listing, best) in rows {
-                let have = installed.find(&listing.id);
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.strong(&listing.name);
-                        if let Some(r) = &best {
-                            ui.small(r.version.to_string());
-                        }
-                        if !listing.author.is_empty() {
-                            ui.small(format!("by {}", listing.author));
-                        }
-                    });
-                    if !listing.description.is_empty() {
-                        ui.label(&listing.description);
-                    }
-                    ui.horizontal(|ui| {
-                        match &listing.rating {
-                            Some(r) => {
-                                ui.label(stars(r.score));
-                                ui.small(format!(
-                                    "{:.1} · {} review{}",
-                                    r.score,
-                                    r.count,
-                                    if r.count == 1 { "" } else { "s" }
-                                ));
-                            }
-                            // Not an empty star row: "nobody has said yet" and
-                            // "everybody hated it" must not look alike.
-                            None => {
-                                ui.small("no reviews yet");
-                            }
-                        }
-                        let open = state.reviews_for.as_deref() == Some(listing.id.as_str());
-                        if ui.small_button(if open { "▾ reviews" } else { "▸ reviews" }).clicked() {
-                            if open {
-                                state.reviews_for = None;
-                            } else {
-                                state.reviews_for = Some(listing.id.clone());
-                                state.reviews = ReviewsState::Idle;
-                            }
-                        }
-                    });
-                    ui.horizontal(|ui| match (&best, have) {
-                        (None, _) => {
-                            // Said plainly, because "why is the button greyed
-                            // out" is a question nobody should have to ask.
-                            ui.small(format!(
-                                "no release of this works with Floptle {engine} yet"
-                            ));
-                        }
-                        (Some(r), Some(entry)) if entry.version >= r.version => {
-                            ui.small(format!("installed ({})", entry.version));
-                        }
-                        (Some(r), have) => {
-                            let label =
-                                if have.is_some() { "⟳ Update" } else { "⬇ Install" };
-                            if ui.button(label).clicked() {
-                                let scratch =
-                                    std::env::temp_dir().join("floptle-package-clone");
-                                match floptle_package::install::install_from_git(
-                                    ctx.project_root,
-                                    &scratch,
-                                    &r.git,
-                                    r.rev.as_deref(),
-                                    r.subdir.as_deref(),
-                                    true,
-                                ) {
-                                    Ok(e) => {
-                                        gate_remote_install(ctx.project_root, &e, state);
-                                        action.reload = true;
-                                    }
-                                    Err(e) => {
-                                        state.error = Some(e.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    });
-                    if state.reviews_for.as_deref() == Some(listing.id.as_str()) {
-                        ui.separator();
-                        // The gate Ty asked for: you may review what you have
-                        // actually run. Installed AND enabled — a package sitting
-                        // there switched off has not been tried.
-                        let mine = reviewable_version(have);
-                        reviews_section(ui, ctx, state, &listing.id, mine);
-                    }
-                    if let Some(home) = &listing.homepage
-                        && ui.link(home).clicked()
-                    {
-                        let _ = floptle_script::open_in_browser(home);
+    let engine = crate::Editor::engine_version();
+    let query = state.query(&engine);
+    // Cloned out of the catalogue so the grid can borrow `state` mutably while
+    // drawing. A catalogue is small and this is once per frame.
+    let (rows, cat_counts, facet_counts, total) = match &state.catalogue {
+        Catalogue::Ready(idx) => (
+            idx.query(&query)
+                .into_iter()
+                .map(|l| (l.clone(), l.best_for(&engine).cloned()))
+                .collect::<Vec<_>>(),
+            idx.category_counts(&query),
+            idx.facet_counts(&query),
+            idx.packages.len(),
+        ),
+        _ => (Vec::new(), Vec::new(), Vec::new(), 0),
+    };
+
+    filter_bar(ui, state, &cat_counts, &facet_counts);
+    ui.horizontal(|ui| {
+        ui.small(format!("{} of {total}", rows.len()));
+        if state.has_filters() && ui.small_button("clear filters").clicked() {
+            state.clear_filters();
+        }
+    });
+    ui.add_space(2.0);
+
+    if rows.is_empty() {
+        ui.add_space(12.0);
+        ui.label("Nothing matches.");
+        if state.has_filters() {
+            ui.small("Try clearing a filter — the counts above show what each one would leave.");
+        }
+        return;
+    }
+
+    let installed = Registry::load(ctx.project_root).unwrap_or_default();
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        // A grid that reflows: as many columns as fit, recomputed per frame, so
+        // the browser works docked narrow beside the viewport and wide across
+        // the window without a setting for it.
+        let per_row = ((ui.available_width() / (CELL + 8.0)).floor() as usize).max(1);
+        for chunk in rows.chunks(per_row) {
+            ui.horizontal_top(|ui| {
+                for (listing, best) in chunk {
+                    grid_cell(ui, ctx, state, action, listing, best, &installed, &engine);
+                }
+            });
+            ui.add_space(6.0);
+        }
+        // The detail panel for whichever cell is open, under the grid rather
+        // than in a window — the grid stays visible, so comparing two packages
+        // does not mean closing one to see the other.
+        if let Some(id) = state.expanded.clone()
+            && let Some((listing, best)) = rows.iter().find(|(l, _)| l.id == id)
+        {
+            ui.separator();
+            detail_panel(ui, ctx, state, action, listing, best, &installed, &engine);
+        }
+    });
+}
+
+/// The category and contains chips, each carrying how many rows it would leave.
+fn filter_bar(
+    ui: &mut egui::Ui,
+    state: &mut PackagesState,
+    cats: &[(floptle_package::Category, usize)],
+    facets: &[(floptle_package::Facet, usize)],
+) {
+    let chip = |ui: &mut egui::Ui, label: String, on: bool, n: usize| -> bool {
+        // A shelf nobody is on is shown greyed rather than hidden: a filter row
+        // that changes shape as you type is a filter row you cannot aim at.
+        ui.add_enabled_ui(n > 0 || on, |ui| ui.selectable_label(on, label).clicked()).inner
+    };
+    ui.horizontal_wrapped(|ui| {
+        for (c, n) in cats {
+            let on = state.categories.contains(c);
+            if chip(ui, format!("{} {} {n}", c.glyph(), c.label()), on, *n) {
+                toggle(&mut state.categories, *c);
+            }
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.small("has");
+        for (f, n) in facets {
+            let on = state.contains.contains(f);
+            if chip(ui, format!("{} {n}", f.label()), on, *n) {
+                toggle(&mut state.contains, *f);
+            }
+        }
+    });
+}
+
+fn toggle<T: PartialEq + Copy>(list: &mut Vec<T>, v: T) {
+    match list.iter().position(|x| *x == v) {
+        Some(i) => {
+            list.remove(i);
+        }
+        None => list.push(v),
+    }
+}
+
+/// One package, as a picture with a name under it.
+#[allow(clippy::too_many_arguments)]
+fn grid_cell(
+    ui: &mut egui::Ui,
+    ctx: &PkgCtx<'_>,
+    state: &mut PackagesState,
+    action: &mut PackagesAction,
+    listing: &Listing,
+    best: &Option<floptle_package::Release>,
+    installed: &Registry,
+    engine: &floptle_package::Version,
+) {
+    let open = state.expanded.as_deref() == Some(listing.id.as_str());
+    let have = installed.find(&listing.id);
+    ui.allocate_ui(egui::vec2(CELL, CELL + 76.0), |ui| {
+        egui::Frame::group(ui.style())
+            .fill(if open {
+                ui.style().visuals.selection.bg_fill.gamma_multiply(0.35)
+            } else {
+                ui.style().visuals.faint_bg_color
+            })
+            .show(ui, |ui| {
+                ui.set_width(CELL);
+                thumbnail(ui, state, listing);
+                ui.horizontal(|ui| {
+                    ui.strong(crate::assets::truncate_label(&listing.name, 20));
+                    if have.is_some() {
+                        ui.small("✔").on_hover_text("installed in this project");
                     }
                 });
-                ui.add_space(4.0);
+                if !listing.author.is_empty() {
+                    ui.small(format!("by {}", listing.author));
+                }
+                ui.horizontal(|ui| match &listing.rating {
+                    Some(r) => {
+                        ui.small(stars(r.score));
+                        ui.small(format!("{}", r.count));
+                    }
+                    // Not an empty star row: "nobody has said yet" and
+                    // "everybody hated it" must not look alike.
+                    None => {
+                        ui.small(egui::RichText::new("no reviews yet").weak());
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.small_button(if open { "▾ close" } else { "▸ details" }).clicked() {
+                        state.expanded = if open { None } else { Some(listing.id.clone()) };
+                        state.reviews_for = None;
+                    }
+                    install_button(ui, ctx, state, action, best, have, engine, true);
+                });
+            });
+    });
+}
+
+/// The picture, or an honest placeholder.
+///
+/// A package with no thumbnail gets its category's glyph on a flat tile rather
+/// than a broken-image frame — it reads as "this one has no picture", which is
+/// true, instead of as "something went wrong", which is not.
+fn thumbnail(ui: &mut egui::Ui, state: &mut PackagesState, listing: &Listing) {
+    let side = CELL - 12.0;
+    let tex = listing
+        .thumbnail
+        .as_deref()
+        .and_then(|src| state.thumbs.get(ui.ctx(), src, None))
+        .cloned();
+    match tex {
+        Some(tex) => {
+            ui.add(
+                egui::Image::new(&tex)
+                    .fit_to_exact_size(egui::vec2(side, side))
+                    .corner_radius(4.0),
+            );
+        }
+        None => {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 4.0, ui.style().visuals.extreme_bg_color);
+            let glyph = listing
+                .categories
+                .first()
+                .map(|c| c.glyph())
+                .unwrap_or("▣");
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                glyph,
+                egui::FontId::proportional(side * 0.35),
+                ui.style().visuals.weak_text_color(),
+            );
+            // Still coming, or never coming — and which of those it is matters
+            // most to the author of the package, who is the one person who can
+            // fix a `thumbnail:` that points at nothing.
+            if let Some(src) = listing.thumbnail.as_deref() {
+                let failed = state.thumbs.failure(src, None).map(str::to_string);
+                let (mark, hint) = match &failed {
+                    Some(why) => ("✖", format!("this package's picture could not be shown — {why}")),
+                    None => ("…", "fetching this package's picture".into()),
+                };
+                ui.painter().text(
+                    rect.center_bottom() - egui::vec2(0.0, 10.0),
+                    egui::Align2::CENTER_CENTER,
+                    mark,
+                    egui::FontId::proportional(12.0),
+                    ui.style().visuals.weak_text_color(),
+                );
+                ui.interact(rect, ui.id().with(("thumb", &listing.id)), egui::Sense::hover())
+                    .on_hover_text(hint);
+            }
+        }
+    }
+}
+
+/// Everything about one package, under the grid.
+#[allow(clippy::too_many_arguments)]
+fn detail_panel(
+    ui: &mut egui::Ui,
+    ctx: &PkgCtx<'_>,
+    state: &mut PackagesState,
+    action: &mut PackagesAction,
+    listing: &Listing,
+    best: &Option<floptle_package::Release>,
+    installed: &Registry,
+    engine: &floptle_package::Version,
+) {
+    let have = installed.find(&listing.id);
+    ui.horizontal(|ui| {
+        ui.heading(&listing.name);
+        ui.small(egui::RichText::new(&listing.id).monospace());
+    });
+    ui.horizontal_wrapped(|ui| {
+        if !listing.author.is_empty() {
+            ui.small(format!("by {}", listing.author));
+        }
+        for c in &listing.categories {
+            ui.small(format!("{} {}", c.glyph(), c.label()));
+        }
+        if let Some(d) = &listing.updated {
+            ui.small(format!("updated {d}"));
+        }
+        // Absent is not zero — a registry that does not count installs must not
+        // make every package on it look like one nobody has ever installed.
+        if let Some(n) = listing.downloads {
+            ui.small(format!("{n} installs"));
+        }
+    });
+    if !listing.description.is_empty() {
+        ui.label(&listing.description);
+    }
+    if !listing.contains.is_empty() {
+        ui.small(
+            listing
+                .contains
+                .iter()
+                .map(|f| f.label())
+                .collect::<Vec<_>>()
+                .join(" · "),
+        );
+    }
+
+    // The gallery. Videos are a link out — the editor is not a video player and
+    // pretending otherwise is a worse experience than a browser tab.
+    if !listing.media.is_empty() {
+        ui.add_space(4.0);
+        egui::ScrollArea::horizontal().id_salt("pkg-media").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for m in &listing.media {
+                    ui.vertical(|ui| {
+                        let tex =
+                            m.still().and_then(|s| state.thumbs.get(ui.ctx(), s, None)).cloned();
+                        match tex {
+                            Some(tex) => {
+                                let r = ui.add(
+                                    egui::Image::new(&tex)
+                                        .fit_to_exact_size(egui::vec2(220.0, 124.0))
+                                        .corner_radius(4.0),
+                                );
+                                if m.is_video() && r.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                            }
+                            None => {
+                                ui.allocate_exact_size(
+                                    egui::vec2(220.0, 124.0),
+                                    egui::Sense::hover(),
+                                );
+                            }
+                        }
+                        if let Some(url) = &m.video
+                            && ui.small_button("▶ watch").clicked()
+                        {
+                            let _ = floptle_script::open_in_browser(url);
+                        }
+                        if !m.caption.is_empty() {
+                            ui.small(crate::assets::truncate_label(&m.caption, 34));
+                        }
+                    });
+                }
+            });
+        });
+    }
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        install_button(ui, ctx, state, action, best, have, engine, false);
+        if ui.small_button("open page ↗").clicked() {
+            let _ = floptle_script::open_in_browser(
+                &floptle_package::index::package_page_for(&listing.id),
+            );
+        }
+        if let Some(home) = &listing.homepage
+            && ui.small_button("repository ↗").clicked()
+        {
+            let _ = floptle_script::open_in_browser(home);
+        }
+    });
+
+    // Which versions exist, and which one this engine would take. A row that
+    // offers a version the editor will refuse on install wastes an afternoon.
+    if !listing.versions.is_empty() {
+        ui.collapsing("Versions", |ui| {
+            for r in {
+                let mut v = listing.versions.clone();
+                v.sort_by(|a, b| b.version.cmp(&a.version));
+                v
+            } {
+                ui.horizontal(|ui| {
+                    ui.small(egui::RichText::new(r.version.to_string()).monospace());
+                    match &r.engine {
+                        Some(req) if !req.matches(engine) => {
+                            ui.small(
+                                egui::RichText::new(format!("needs {}", req.as_str()))
+                                    .color(egui::Color32::from_rgb(225, 195, 110)),
+                            );
+                        }
+                        Some(req) => {
+                            ui.small(format!("needs {}", req.as_str()));
+                        }
+                        None => {
+                            ui.small("any engine");
+                        }
+                    }
+                    if let Some(rev) = &r.rev {
+                        ui.small(egui::RichText::new(rev).monospace().weak());
+                    }
+                });
             }
         });
+    }
+
+    ui.separator();
+    // The gate Ty asked for: you may review what you have actually run.
+    // Installed AND enabled — a package sitting there switched off has not been
+    // tried.
+    let mine = reviewable_version(have);
+    if state.reviews_for.as_deref() != Some(listing.id.as_str()) {
+        state.reviews_for = Some(listing.id.clone());
+        state.reviews = ReviewsState::Idle;
+    }
+    reviews_section(ui, ctx, state, &listing.id, mine);
+}
+
+/// Install / Update / why neither is offered.
+#[allow(clippy::too_many_arguments)]
+fn install_button(
+    ui: &mut egui::Ui,
+    ctx: &PkgCtx<'_>,
+    state: &mut PackagesState,
+    action: &mut PackagesAction,
+    best: &Option<floptle_package::Release>,
+    have: Option<&floptle_package::Entry>,
+    engine: &floptle_package::Version,
+    small: bool,
+) {
+    match (best, have) {
+        (None, _) => {
+            // Said plainly, because "why is the button greyed out" is a
+            // question nobody should have to ask.
+            let msg = format!("nothing for Floptle {engine} yet");
+            if small {
+                ui.small(egui::RichText::new("—").weak()).on_hover_text(msg);
+            } else {
+                ui.small(msg);
+            }
+        }
+        (Some(r), Some(entry)) if entry.version >= r.version => {
+            ui.small(format!("installed ({})", entry.version));
+        }
+        (Some(r), have) => {
+            let label = if have.is_some() { "⟳ Update" } else { "⬇ Install" };
+            let hit = if small {
+                ui.small_button(label).clicked()
+            } else {
+                ui.button(label).clicked()
+            };
+            if hit {
+                let scratch = std::env::temp_dir().join("floptle-package-clone");
+                match floptle_package::install::install_from_git(
+                    ctx.project_root,
+                    &scratch,
+                    &r.git,
+                    r.rev.as_deref(),
+                    r.subdir.as_deref(),
+                    true,
+                ) {
+                    Ok(e) => {
+                        gate_remote_install(ctx.project_root, &e, state);
+                        action.reload = true;
+                    }
+                    Err(e) => {
+                        state.error = Some(e.to_string());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// A package installed from a Git remote — the catalogue or a URL somebody was

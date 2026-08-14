@@ -47,11 +47,13 @@ use serde::{Deserialize, Serialize};
 
 pub mod heightfield;
 pub mod mesh;
+pub mod overlay;
 pub mod path;
 pub mod walkable;
 
 pub use heightfield::{Column, Heightfield, Surface};
 pub use mesh::{Link, NavMesh, Poly};
+pub use overlay::{Edge, Overlay, Step, SurfaceTri};
 pub use path::Path;
 pub use walkable::{Cell, WalkableGrid};
 

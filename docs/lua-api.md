@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [networking — net.*, synced](#networking--net-synced) — 31
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 14
-- [pathfinding — nav.*](#pathfinding--nav) — 4
+- [pathfinding — nav.*](#pathfinding--nav) — 15
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
 - [2D — tilemaps & sprite batches](#2d--tilemaps--sprite-batches) — 22
@@ -1775,17 +1775,61 @@ terrain.yields() — drains what recent digs actually removed: { id, removed, ad
 
 Pathfinding over the scene's navmesh — where characters can walk, and how they get anywhere. Bake one first: add a Nav Mesh node and press Bake. Everything here is in world coordinates.
 
+### `nav.AREA_STRIDE`
+
+How many numbers nav.areas() uses per area (10). Read it rather than writing the number, so a future field costs nothing.
+
+### `nav.LINK_STRIDE`
+
+How many numbers nav.links() uses per link (8).
+
+### `nav.areas`
+
+nav.areas() — every walkable area, as ONE FLAT ARRAY of numbers plus a count. Ten numbers each, in nav.AREA_STRIDE steps: minX, minZ, maxX, maxZ, yMin, yMax, region, centreX, centreY, centreZ — all world space. Flat rather than a table per area on purpose: a real bake is thousands of areas, and a held Lua table costs one of a few thousand mlua slots, so a table each exhausts them and panics the editor rather than raising something a script could catch. One array costs one slot however big the level is. Read it as: local a, n = nav.areas(); for i = 0, n - 1 do local o = i * nav.AREA_STRIDE ... end
+
+### `nav.distance`
+
+nav.distance(from, to) — how far it is to WALK, in metres, or nil if there is no complete route. This is the number a decision should be made on: the straight-line distance to something on the far side of a wall is a lie, and "chase the nearest one" built on it picks the wrong one every time.
+
+### `nav.links`
+
+nav.links() — every portal between two areas, as one flat array plus a count. Eight numbers each, in nav.LINK_STRIDE steps: from, to, leftX, leftY, leftZ, rightX, rightY, rightZ. from and to are ONE-BASED indices into nav.areas(); left and right are the portal's endpoints as somebody walking from `from` into `to` sees them, so a smoother never has to work out which side of itself it is on. Each portal appears once per direction.
+
 ### `nav.nearest`
 
 nav.nearest(point[, maxDistance]) — the closest walkable spot to a world point, or nil if there is none within range (default: the character's own height, so standing on top of the floor or half a step off a ledge is the ordinary case rather than a miss). Use it to drop a click, a spawn or a knocked-back character back onto the navmesh.
+
+### `nav.onMesh`
+
+nav.onMesh(point[, tolerance]) — is this point on the walkable surface? The allocation-free version of nav.nearest, for the per-frame "am I still on the floor" check that does not want the point back. False when there is no navmesh at all, so it never raises.
 
 ### `nav.path`
 
 nav.path(from, to) — the corners to walk between two world points, as a list of vec3, plus a second return saying whether it REACHES the goal. Returns nil when an end is not on the navmesh at all (off the level, or inside a wall) — which is a different thing from a goal that is on the mesh but cut off, and that one comes back as a real route to the nearest reachable point with false alongside it. Walk it and stop is the right behaviour there; standing still because the answer was empty is not.
 
+### `nav.random`
+
+nav.random(u, v[, near, radius]) — a point somewhere on the walkable surface, weighted by area so a big room is likelier than a corridor. The two numbers 0..1 are YOURS — call it as nav.random(math.random(), math.random()). That is deliberate: the engine rolls back and re-simulates, so a wander destination has to come from the same seeded stream as everything else the tick decided, and a navmesh that reached for its own randomness would desync every rollback that touched it. near and radius restrict it to a square neighbourhood (a square, not a circle — sampling a circle needs a re-draw, and there is no stream here to re-draw from).
+
+### `nav.raycast`
+
+nav.raycast(from, to) — walk a straight line across the surface and get back where it stops, or nil if the whole line is walkable. The walker's answer rather than the collider's: a ledge this character would fall off is empty air to a physics ray and a wall to this. Use it to decide "can I just walk at it" before asking for a full path.
+
+### `nav.reachable`
+
+nav.reachable(from, to) — can something actually walk from here to there? Different from nav.path(...) ~= nil: a path that exists but only gets partway comes back with false alongside it, and this is that flag. Cheaper than a path when the yes-or-no is all you wanted.
+
 ### `nav.ready`
 
 nav.ready() — whether this scene has a baked navmesh to ask. False is the ordinary state of a project that has not made one, not an error.
+
+### `nav.regionOf`
+
+nav.regionOf(point[, tolerance]) — which walkable island a point is on, or nil if it is not on the navmesh. Two points in different regions can never be walked between, so comparing two ids rules out a search that was never going to succeed. The number itself means nothing beyond "the same one is the same island".
+
+### `nav.settings`
+
+nav.settings() — the character the mesh was baked for: radius, height, maxSlope, stepHeight, cellSize, plus areaCount and area (square metres of walkable ground). A script moving a body along a path needs the radius the mesh was eroded by; guessing it is how a character ends up scraping the wall the erosion existed to avoid.
 
 ## water — depth, buoyancy & ice
 

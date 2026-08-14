@@ -402,6 +402,7 @@ impl crate::Editor {
     /// Load this scene's navmesh, if it has one baked.
     pub(crate) fn load_nav(&mut self) {
         self.nav_baked = None;
+        self.nav_overlay = None;
         self.nav_seconds = 0.0;
         self.nav_triangles = 0;
         let Some((_, Matter::NavMesh { id, .. })) = nav_node(&self.world) else {
@@ -409,6 +410,7 @@ impl crate::Editor {
             return;
         };
         self.nav_baked = load(&self.nav_path(id));
+        self.nav_overlay = None;
         self.script_host.set_nav_mesh(self.nav_baked.clone());
     }
 
@@ -539,6 +541,7 @@ impl crate::Editor {
         }
         self.script_host.set_nav_mesh(Some(mesh.clone()));
         self.nav_baked = Some(mesh);
+        self.nav_overlay = None;
         self.nav_seconds = seconds;
         self.nav_triangles = triangles;
         self.scene_dirty = true;

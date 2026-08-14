@@ -46,7 +46,6 @@ mod dock;
 mod export;
 mod ext;
 mod ext_wire;
-mod packages_ui;
 mod game_keys;
 mod gi_bake;
 mod nav_bake;
@@ -56,6 +55,7 @@ mod hierarchy;
 mod history;
 mod icons;
 mod ide;
+mod layout;
 mod image_edit;
 mod image_icons;
 mod image_io;
@@ -83,7 +83,9 @@ mod paint_io;
 mod paint_mesh;
 mod paint_tex;
 mod paint_tex_io;
+mod packages_ui;
 mod paint_ui;
+mod pkg_thumbs;
 mod play;
 mod prefab;
 mod report;
@@ -431,6 +433,11 @@ struct EditorCmd {
     focus_learn: bool,
     /// Put every dock panel back to the shipped layout (Window menu).
     reset_layout: bool,
+    /// Put the window back to a size that is definitely on screen, and forget
+    /// where it was — the escape hatch for a restored place that went wrong.
+    reset_window: bool,
+    /// Bring the 📦 Packages tab to the front, opening it if it is closed.
+    focus_packages: bool,
     /// Save the current scene.
     save_scene: bool,
     /// Rescan the project asset tree.
@@ -907,6 +914,13 @@ struct EditorTabViewer<'a> {
     playing: bool,
     /// ⚙ Settings tab state (borrows; changes report through `cmd`).
     settings: crate::settings_ui::SettingsCtx<'a>,
+    /// 📦 Packages tab state (which sub-tab, the search, the catalogue).
+    packages: &'a mut packages_ui::PackagesState,
+    /// What the 📦 Packages tab needs to know about the project it is in.
+    packages_ctx: packages_ui::PkgCtx<'a>,
+    /// What the 📦 Packages tab asked the editor to do afterwards — reloading
+    /// the extension host cannot happen while the host is drawing.
+    packages_action: &'a mut packages_ui::PackagesAction,
     cmd: &'a mut EditorCmd,
 }
 
@@ -1011,6 +1025,13 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
                 if out.access.is_some() {
                     self.cmd.access = out.access;
                 }
+            }
+            EditorTab::Packages => {
+                *self.packages_action = packages_ui::body(
+                    ui,
+                    packages_ui::PkgCtx { ..self.packages_ctx },
+                    self.packages,
+                );
             }
         }
     }
@@ -1442,9 +1463,9 @@ struct Editor {
     ext_focus_window: Option<usize>,
     /// `ed.message(title, body)`, shown as a modal until dismissed.
     ext_message: Option<(String, String)>,
-    /// Is the 📦 Packages window open?
-    show_packages: bool,
-    /// The 📦 Packages window's own state (search text, what is being installed).
+    /// The 📦 Packages TAB's own state (which sub-tab, the search, the
+    /// catalogue and its thumbnails). Whether it is open is the dock's
+    /// business, like every other tab.
     packages_ui: packages_ui::PackagesState,
     /// The signed-in Floptle account. Shares one keyring entry with the Hub and
     /// with every game, so signing in anywhere signs you in everywhere — see
@@ -1899,6 +1920,19 @@ struct Editor {
     /// polygon. Rebuilt per frame like every other gizmo, because the camera
     /// moves and the projection is what changes.
     nav_gizmo: Vec<(Vec2, Vec2, [f32; 3])>,
+    /// The navmesh's FILLED surface for this frame — world-space triangles,
+    /// camera-relative, handed to the `Tris` layer. A wireframe alone reads as
+    /// scaffolding; the fill is what makes a room look like a floor.
+    nav_surface: Vec<floptle_render::TriVertex>,
+    /// The drawable form of the current bake, built once and kept until the
+    /// bake changes. Rebuilding it per frame would walk every polygon and every
+    /// link sixty times a second to produce the same answer.
+    nav_overlay: Option<std::rc::Rc<floptle_nav::Overlay>>,
+    /// Draw every rectangle the bake cut, faintly, under the surface — the
+    /// bake's working rather than its result. Off by default: it is the view
+    /// that made the navmesh unreadable in the first place, and it is a
+    /// debugging question, not the everyday one.
+    nav_cells: bool,
     /// Draw the navmesh even when its node is not selected.
     show_navmesh: bool,
     /// MODEL-LOCAL deduped triangle edges per mesh asset path (built once on demand),
@@ -2791,7 +2825,9 @@ impl ApplicationHandler for Editor {
         if self.project_root.as_os_str().is_empty() {
             self.project_root = PathBuf::from("assets");
         }
-        self.dock_state = Some(default_dock());
+        // Where you left it, not where it starts. A layout that will not read
+        // falls back to the default without saying anything — see `layout`.
+        self.dock_state = Some(crate::layout::load_dock());
         self.viewport_zoom = 0.9;
         self.terrain_voxel = 1.5;
         self.terrain_textures = vec![String::new(); floptle_render::TERRAIN_SLOTS as usize];
@@ -2821,9 +2857,26 @@ impl ApplicationHandler for Editor {
         } else {
             "Floptle Editor".into()
         };
-        let attrs = Window::default_attributes()
+        // The size and place it was closed at. A position that no longer lands
+        // on a monitor is dropped rather than restored — see `layout` — because
+        // a window opening off-screen reads as an editor that will not start.
+        let monitors: Vec<(f64, f64, f64, f64)> = event_loop
+            .available_monitors()
+            .map(|m| {
+                let scale = m.scale_factor();
+                let pos = m.position().to_logical::<f64>(scale);
+                let size = m.size().to_logical::<f64>(scale);
+                (pos.x, pos.y, size.width, size.height)
+            })
+            .collect();
+        let place = crate::layout::load_window().sane_on(&monitors);
+        let mut attrs = Window::default_attributes()
             .with_title(&title)
-            .with_inner_size(LogicalSize::new(1280.0, 720.0));
+            .with_inner_size(LogicalSize::new(place.width, place.height))
+            .with_maximized(place.maximized);
+        if let (Some(x), Some(y)) = (place.x, place.y) {
+            attrs = attrs.with_position(winit::dpi::LogicalPosition::new(x, y));
+        }
         let window = Arc::new(event_loop.create_window(attrs).expect("window"));
         let gpu = Gpu::new(window.clone());
         let mut raster = Raster::new(&gpu);
@@ -3833,6 +3886,43 @@ impl ApplicationHandler for Editor {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Remember how the editor was arranged, on the way out.
+    ///
+    /// Here rather than at any of the three places that call `exit()`, because
+    /// this is the one winit guarantees runs whichever of them did — and a
+    /// workspace that is only saved when you quit *the right way* is a workspace
+    /// people quietly stop trusting.
+    ///
+    /// Nothing here may fail loudly: this runs while the editor is closing, and
+    /// there is no useful way to report a preference that would not write.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(dock) = self.dock_state.as_ref() {
+            crate::layout::save_dock(dock);
+        }
+        if let Some(window) = self.window.as_ref() {
+            let scale = window.scale_factor();
+            let size = window.inner_size().to_logical::<f64>(scale);
+            // A maximised or minimised window reports the size it is on screen,
+            // not the size to restore it to — so the *place* is only taken from
+            // a window that is actually in its normal state, while the flag is
+            // taken always. Otherwise maximising once permanently overwrites the
+            // size you had.
+            let maximized = window.is_maximized();
+            let mut place = crate::layout::load_window();
+            place.maximized = maximized;
+            if !maximized && size.width >= 320.0 && size.height >= 240.0 {
+                place.width = size.width;
+                place.height = size.height;
+                if let Ok(pos) = window.outer_position() {
+                    let pos = pos.to_logical::<f64>(scale);
+                    place.x = Some(pos.x);
+                    place.y = Some(pos.y);
+                }
+            }
+            crate::layout::save_window(&place);
         }
     }
 

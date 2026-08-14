@@ -298,6 +298,160 @@ impl NavMesh {
             .map(|p| (p.max[0] - p.min[0]) * (p.max[1] - p.min[1]))
             .sum()
     }
+
+    /// Which walkable island a point is on, or `None` if it is not on the mesh.
+    ///
+    /// Two points in different regions can never be walked between, and that is
+    /// one comparison rather than a search — which makes it the cheap way to
+    /// answer "is this even worth pathing to" before asking for a route.
+    pub fn region_at(&self, p: [f32; 3], snap: f32) -> Option<u32> {
+        self.nearest(p, snap).map(|(i, _)| self.polys[i].region)
+    }
+
+    /// Can something walk from `from` to `to` at all?
+    ///
+    /// Cheaper than a path when the answer is all you wanted, and it is a
+    /// different question from `path(...).is_some()`: a path that exists but
+    /// does not reach is [`Path::complete`] false, and this is that flag.
+    pub fn reachable(&self, from: [f32; 3], to: [f32; 3], snap: f32) -> bool {
+        // Same region is necessary but not sufficient — regions are the coarse
+        // filter and the search is the answer.
+        match (self.region_at(from, snap), self.region_at(to, snap)) {
+            (Some(a), Some(b)) if a == b => {
+                self.path_within(from, to, snap).is_some_and(|p| p.complete)
+            }
+            _ => false,
+        }
+    }
+
+    /// Walk a straight line across the surface and report **where it stops**.
+    ///
+    /// `None` means the whole line is walkable — you can go straight there. Some
+    /// point means the walk leaves the navmesh there, and that point is the last
+    /// place still on it.
+    ///
+    /// This is the question a character asks constantly and that a collider
+    /// sweep answers badly: *can I just walk at it?* A physics ray hits the
+    /// geometry, which says nothing about whether the ground beyond is somewhere
+    /// this character could stand — a ledge it would fall off is empty air to a
+    /// ray and a wall to a walker. Asking the navmesh gets the walker's answer.
+    ///
+    /// Marched rather than solved through the portals: a march is a few dozen
+    /// point lookups over a step the bake already chose, and it cannot disagree
+    /// with the polygons the way an edge-crossing solver can when a portal is
+    /// degenerate.
+    pub fn raycast(&self, from: [f32; 3], to: [f32; 3], snap: f32) -> Option<[f32; 3]> {
+        let Some((mut cur, start)) = self.nearest(from, snap) else { return Some(from) };
+        let (dx, dz) = (to[0] - from[0], to[2] - from[2]);
+        let plan = (dx * dx + dz * dz).sqrt();
+        if plan <= f32::EPSILON {
+            return None;
+        }
+        // Half a cell: fine enough that it cannot step over a gap the bake was
+        // able to resolve, coarse enough that a long line is still cheap.
+        let stride = (self.cell_size * 0.5).max(1e-3);
+        let steps = (plan / stride).ceil().max(1.0) as usize;
+        let step = self.settings.step_height.max(0.0);
+        let mut last = start;
+
+        for k in 1..=steps {
+            let t = k as f32 / steps as f32;
+            let at = [from[0] + dx * t, 0.0, from[2] + dz * t];
+            let mut found = None;
+            for (j, poly) in self.polys.iter().enumerate() {
+                if !poly.contains_xz(at) {
+                    continue;
+                }
+                // Only ground this walk could actually get onto from where it
+                // is: the same polygon, a linked one, or one within a step.
+                let reachable = j == cur
+                    || self.links[cur].iter().any(|l| l.to == j)
+                    || (poly.centre[1] - last[1]).abs() <= step;
+                if !reachable {
+                    continue;
+                }
+                // Where a column offers two floors, take the one nearest the
+                // height we are already walking at — a bridge must not steal a
+                // walk that is happening underneath it.
+                let d = (poly.centre[1] - last[1]).abs();
+                if found.is_none_or(|(_, bd)| d < bd) {
+                    found = Some((j, d));
+                }
+            }
+            let Some((j, _)) = found else { return Some(last) };
+            cur = j;
+            last = self.polys[j].clamp([at[0], last[1], at[2]]);
+        }
+        None
+    }
+
+    /// A point somewhere on the walkable surface, optionally near somewhere.
+    ///
+    /// `u` and `v` are two uniform numbers in `0..1` supplied by the caller
+    /// rather than drawn here. That is deliberate: this engine rolls back and
+    /// re-simulates, so a wander destination has to come from the same seeded
+    /// stream as everything else the tick decided. A navmesh that reached for
+    /// its own randomness would desync every rollback that touched it.
+    ///
+    /// Weighted by area, so a big room is more likely than a corridor — an
+    /// unweighted pick over polygons puts a crowd in whichever part of the level
+    /// the greedy cut happened to fragment most.
+    ///
+    /// `near` is `(centre, radius)`, and the neighbourhood it describes is a
+    /// **square** of side `2 * radius` rather than a circle. Sampling a circle
+    /// uniformly means rejecting and re-drawing, and re-drawing means a random
+    /// stream this deliberately does not have. A square is the shape that can be
+    /// sampled in one pass from two numbers, so a square is what it is — said
+    /// here rather than approximated silently.
+    pub fn random_point(
+        &self,
+        near: Option<([f32; 3], f32)>,
+        u: f32,
+        v: f32,
+    ) -> Option<[f32; 3]> {
+        let (u, v) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
+        // The window to sample inside, in plan. Unbounded when nothing was asked.
+        let window = near.map(|(c, r)| {
+            let r = r.abs();
+            ([c[0] - r, c[2] - r], [c[0] + r, c[2] + r])
+        });
+        // Each eligible polygon, cut down to the part of it inside the window.
+        let mut parts: Vec<(&Poly, [f32; 2], [f32; 2])> = Vec::new();
+        for p in &self.polys {
+            let (mut lo, mut hi) = (p.min, p.max);
+            if let Some((wlo, whi)) = window {
+                lo = [lo[0].max(wlo[0]), lo[1].max(wlo[1])];
+                hi = [hi[0].min(whi[0]), hi[1].min(whi[1])];
+                if lo[0] > hi[0] || lo[1] > hi[1] {
+                    continue;
+                }
+            }
+            parts.push((p, lo, hi));
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        // Weighted by the area actually available, not by the whole polygon's:
+        // a room the window clips a corner off must not win as if all of it
+        // counted.
+        let areas: Vec<f32> =
+            parts.iter().map(|(_, lo, hi)| ((hi[0] - lo[0]) * (hi[1] - lo[1])).max(1e-6)).collect();
+        let total: f32 = areas.iter().sum();
+        let mut want = u * total;
+        let mut pick = parts.len() - 1;
+        for (i, a) in areas.iter().enumerate() {
+            if want <= *a {
+                pick = i;
+                break;
+            }
+            want -= a;
+        }
+        let (p, lo, hi) = parts[pick];
+        // `v` places the point in one axis; the leftover of `u` places it in the
+        // other, so one polygon does not always get the same line across it.
+        let frac = (want / areas[pick]).clamp(0.0, 1.0);
+        Some([lo[0] + (hi[0] - lo[0]) * frac, p.centre[1], lo[1] + (hi[1] - lo[1]) * v])
+    }
 }
 
 /// The best cell in one column to add to a rectangle, or `None` if there is not
@@ -657,5 +811,81 @@ mod tests {
     fn area_measures_the_floor_it_found() {
         let mesh = bake(&slab(0.0, 0.0, 6.0, 6.0, 0.0), &open(0.25));
         assert!((mesh.area() - 36.0).abs() < 2.0, "a 6x6 floor is 36 m²: {}", mesh.area());
+    }
+
+    // ---- the questions a script asks ---------------------------------------
+
+    /// Two floors with a gap between them: on the same one you can walk
+    /// straight across, and off the edge the walk stops at the edge.
+    #[test]
+    fn a_raycast_stops_where_the_ground_does() {
+        let s = open(0.25);
+        let mut tris = slab(0.0, 0.0, 6.0, 6.0, 0.0);
+        tris.extend(slab(10.0, 0.0, 16.0, 6.0, 0.0));
+        let mesh = bake(&tris, &s);
+
+        // Across one floor: nothing in the way.
+        assert_eq!(mesh.raycast([1.0, 0.0, 3.0], [5.0, 0.0, 3.0], 1.0), None);
+
+        // Out over the gap: it stops, and it stops ON the floor rather than in
+        // the air over it.
+        let hit = mesh
+            .raycast([1.0, 0.0, 3.0], [14.0, 0.0, 3.0], 1.0)
+            .expect("a walk across a hole must not succeed");
+        assert!((5.0..7.0).contains(&hit[0]), "it should stop at the near edge: {hit:?}");
+        assert!(mesh.nearest(hit, 0.5).is_some(), "the stopping point must be on the mesh");
+
+        // Asking from somewhere that is not on the mesh at all stops instantly
+        // rather than pretending the first stretch was walkable.
+        assert!(mesh.raycast([100.0, 0.0, 100.0], [1.0, 0.0, 3.0], 1.0).is_some());
+        // A zero-length walk is not blocked.
+        assert_eq!(mesh.raycast([1.0, 0.0, 3.0], [1.0, 0.0, 3.0], 1.0), None);
+    }
+
+    #[test]
+    fn regions_and_reachability_agree_about_two_islands() {
+        let s = open(0.25);
+        let mut tris = slab(0.0, 0.0, 6.0, 6.0, 0.0);
+        tris.extend(slab(20.0, 0.0, 26.0, 6.0, 0.0));
+        let mesh = bake(&tris, &s);
+
+        let here = [3.0, 0.0, 3.0];
+        let there = [23.0, 0.0, 3.0];
+        let (a, b) = (mesh.region_at(here, 1.0), mesh.region_at(there, 1.0));
+        assert!(a.is_some() && b.is_some());
+        assert_ne!(a, b, "two islands are two regions");
+
+        assert!(mesh.reachable(here, [5.0, 0.0, 5.0], 1.0));
+        assert!(!mesh.reachable(here, there, 1.0), "there is no way across");
+        // Somewhere that is not on the mesh is not reachable and has no region.
+        assert!(!mesh.reachable(here, [500.0, 0.0, 0.0], 1.0));
+        assert_eq!(mesh.region_at([500.0, 0.0, 0.0], 1.0), None);
+    }
+
+    /// A wander destination has to come from the caller's own random stream, or
+    /// it desyncs every rollback that touched it — so the same two numbers must
+    /// always give the same point.
+    #[test]
+    fn a_random_point_is_on_the_mesh_and_is_the_callers_randomness() {
+        let mesh = bake(&slab(0.0, 0.0, 6.0, 6.0, 0.0), &open(0.25));
+        let p = mesh.random_point(None, 0.37, 0.62).unwrap();
+        assert_eq!(mesh.random_point(None, 0.37, 0.62), Some(p), "same input, same point");
+        assert!(mesh.nearest(p, 0.5).is_some(), "{p:?} is not on the mesh");
+
+        // It ranges over the floor rather than answering one spot.
+        let spread: Vec<[f32; 3]> = (0..10)
+            .map(|i| mesh.random_point(None, i as f32 / 10.0, (9 - i) as f32 / 10.0).unwrap())
+            .collect();
+        assert!(spread.windows(2).any(|w| w[0] != w[1]));
+
+        // Near a corner, everything comes back near that corner.
+        for i in 0..8 {
+            let p = mesh
+                .random_point(Some(([0.5, 0.0, 0.5], 1.5)), i as f32 / 8.0, 0.5)
+                .expect("there is floor by the corner");
+            assert!(p[0] < 4.0 && p[2] < 4.0, "{p:?} is not near the corner");
+        }
+        // Nowhere near anything is None, not a point somewhere else entirely.
+        assert_eq!(mesh.random_point(Some(([500.0, 0.0, 500.0], 1.0)), 0.5, 0.5), None);
     }
 }

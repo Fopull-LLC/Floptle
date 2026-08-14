@@ -3,7 +3,11 @@
 //! viewport's aspect-ratio modes.
 
 /// Which dockable panel a tab shows.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// `Serialize`/`Deserialize` because the whole `DockState` is persisted — see
+/// [`crate::layout`]. Variants are named in the file, so **renaming one drops
+/// that tab out of everybody's saved layout**; adding one is free.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum EditorTab {
     Hierarchy,
     Inspector,
@@ -45,6 +49,14 @@ pub(crate) enum EditorTab {
     /// Opened from Edit ⏵ Project Settings; a real dock tab, so it can be
     /// dragged anywhere, split beside the viewport, or left closed.
     Settings,
+    /// 📦 Packages: what this project has installed, how to add one, and the
+    /// catalogue to browse.
+    ///
+    /// A tab rather than the floating window it started as. Browsing a
+    /// catalogue is not a modal errand — you look at a package, look at the
+    /// scene, look back — and a window that floats over the scene you are
+    /// judging it against is a window you close to think and reopen to act.
+    Packages,
 }
 
 impl EditorTab {
@@ -70,6 +82,7 @@ impl EditorTab {
             EditorTab::UiDesign => "◫ UI",
             EditorTab::Learn => "🎓 Learn",
             EditorTab::Settings => "⚙ Settings",
+            EditorTab::Packages => "📦 Packages",
         }
     }
 
@@ -96,7 +109,22 @@ impl EditorTab {
         EditorTab::UiDesign,
         EditorTab::Learn,
         EditorTab::Settings,
+        EditorTab::Packages,
     ];
+}
+
+/// Bring `tab` to the front, **re-adding it if it is not open**.
+///
+/// The second half is the part that matters. Tabs arrive after layouts do:
+/// anybody upgrading has a saved dock with no 📦 Packages in it, and a menu item
+/// that silently does nothing because the tab was closed once, six months ago,
+/// is indistinguishable from a broken menu item.
+pub(crate) fn focus(dock: &mut egui_dock::DockState<EditorTab>, tab: EditorTab) {
+    if let Some(path) = dock.find_tab(&tab) {
+        let _ = dock.set_active_tab(path);
+    } else {
+        dock.push_to_focused_leaf(tab);
+    }
 }
 
 /// Focus the ⚙ Settings dock tab — creating it if it isn't open. Project
@@ -104,11 +132,13 @@ impl EditorTab {
 /// split beside the viewport, or closed like anything else. It is deliberately
 /// absent from the default layout — you open it when you need it.
 pub(crate) fn focus_settings_tab(dock: &mut egui_dock::DockState<EditorTab>) {
-    if let Some(path) = dock.find_tab(&EditorTab::Settings) {
-        let _ = dock.set_active_tab(path);
-    } else {
-        dock.push_to_focused_leaf(EditorTab::Settings);
-    }
+    focus(dock, EditorTab::Settings);
+}
+
+/// Focus the 📦 Packages dock tab. Like ⚙ Settings it is absent from the
+/// default layout and appears where you are working when you ask for it.
+pub(crate) fn focus_packages_tab(dock: &mut egui_dock::DockState<EditorTab>) {
+    focus(dock, EditorTab::Packages);
 }
 
 /// True when the Game tab is the front (active) tab of its dock leaf — i.e. the game
@@ -192,11 +222,7 @@ pub(crate) fn default_dock() -> egui_dock::DockState<EditorTab> {
 /// saved dock with no Learn in it, and a tutorial nobody can find teaches
 /// nothing. Help ▸ 🎓 Learn comes here.
 pub(crate) fn focus_learn_tab(dock: &mut egui_dock::DockState<EditorTab>) {
-    if let Some(path) = dock.find_tab(&EditorTab::Learn) {
-        let _ = dock.set_active_tab(path);
-    } else {
-        dock.push_to_focused_leaf(EditorTab::Learn);
-    }
+    focus(dock, EditorTab::Learn);
 }
 
 /// Focus the Scripting tab (used after double-click-to-open-a-script).
@@ -210,70 +236,42 @@ pub(crate) fn focus_scripting_tab(dock: &mut egui_dock::DockState<EditorTab>) {
 /// Focus the ◈ Shaders (graph) tab — re-adding it if the user closed it. Used
 /// by double-clicking a `.flsl` asset and the Inspector's shader row.
 pub(crate) fn focus_shader_graph_tab(dock: &mut egui_dock::DockState<EditorTab>) {
-    if let Some(path) = dock.find_tab(&EditorTab::ShaderGraph) {
-        let _ = dock.set_active_tab(path);
-    } else {
-        dock.push_to_focused_leaf(EditorTab::ShaderGraph);
-    }
+    focus(dock, EditorTab::ShaderGraph);
 }
 
 /// Focus the Terrain dock tab — re-adding it if the user closed it. Used when the
 /// Sculpt tool is selected or "Open Terrain tools" is clicked.
 pub(crate) fn focus_terrain_tab(dock: &mut egui_dock::DockState<EditorTab>) {
-    if let Some(path) = dock.find_tab(&EditorTab::Terrain) {
-        let _ = dock.set_active_tab(path);
-    } else {
-        dock.push_to_focused_leaf(EditorTab::Terrain);
-    }
+    focus(dock, EditorTab::Terrain);
 }
 
 /// Focus the ◫ Tiles dock tab, re-adding it if it was closed.
 pub(crate) fn focus_tiles_tab(dock: &mut egui_dock::DockState<EditorTab>) {
-    if let Some(path) = dock.find_tab(&EditorTab::Tiles) {
-        let _ = dock.set_active_tab(path);
-    } else {
-        dock.push_to_focused_leaf(EditorTab::Tiles);
-    }
+    focus(dock, EditorTab::Tiles);
 }
 
 /// Focus the Paint dock tab — re-adding it if the user closed it. Used when the
 /// Paint tool is selected, so the brush settings are never a tab-hunt away.
 pub(crate) fn focus_paint_tab(dock: &mut egui_dock::DockState<EditorTab>) {
-    if let Some(path) = dock.find_tab(&EditorTab::Paint) {
-        let _ = dock.set_active_tab(path);
-    } else {
-        dock.push_to_focused_leaf(EditorTab::Paint);
-    }
+    focus(dock, EditorTab::Paint);
 }
 
 /// Focus the 🖼 Image dock tab — re-adding it if the user closed it. Used when
 /// an image asset is opened, so the canvas is never a tab-hunt away.
 pub(crate) fn focus_image_tab(dock: &mut egui_dock::DockState<EditorTab>) {
-    if let Some(path) = dock.find_tab(&EditorTab::Image) {
-        let _ = dock.set_active_tab(path);
-    } else {
-        dock.push_to_focused_leaf(EditorTab::Image);
-    }
+    focus(dock, EditorTab::Image);
 }
 
 /// Focus the ◫ UI dock tab — re-adding it if the user closed it. Used by
 /// Add ⏵ UI and the Inspector, so building a screen never means hunting tabs.
 pub(crate) fn focus_ui_tab(dock: &mut egui_dock::DockState<EditorTab>) {
-    if let Some(path) = dock.find_tab(&EditorTab::UiDesign) {
-        let _ = dock.set_active_tab(path);
-    } else {
-        dock.push_to_focused_leaf(EditorTab::UiDesign);
-    }
+    focus(dock, EditorTab::UiDesign);
 }
 
 /// Focus the ▦ Model dock tab — re-adding it if the user closed it. Used when the
 /// Map tool is selected, so the shape/op controls are never a tab-hunt away.
 pub(crate) fn focus_map_tab(dock: &mut egui_dock::DockState<EditorTab>) {
-    if let Some(path) = dock.find_tab(&EditorTab::Map) {
-        let _ = dock.set_active_tab(path);
-    } else {
-        dock.push_to_focused_leaf(EditorTab::Map);
-    }
+    focus(dock, EditorTab::Map);
 }
 
 /// Viewport framing presets for the in-Scene resolution simulator.

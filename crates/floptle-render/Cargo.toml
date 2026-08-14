@@ -32,6 +32,9 @@ floptle-shader = { path = "../floptle-shader" }
 # examples/ui_demo_probe.rs renders a real .ron scene's UI layer, so the demo
 # is checked as the FILE the editor loads rather than as a Rust rebuild of it.
 floptle-scene = { path = "../floptle-scene" }
+# examples/nav_overlay_probe.rs draws a real bake, because "is this navmesh
+# readable" is a question about a picture and only a picture answers it.
+floptle-nav = { path = "../floptle-nav" }
 # …and the same example runs the demo's OWN Lua, so the `ui.make` panel in the
 # picture is the one the game builds rather than a Rust restatement of it.
 floptle-script = { path = "../floptle-script" }

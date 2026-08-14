@@ -1201,37 +1201,103 @@ impl Editor {
             // The baked navmesh. Drawn when its node is selected — the same rule
             // the collider wireframes use, so verifying the thing you are
             // editing costs nothing — or whenever the View toggle is on.
+            //
+            // What is drawn is a **surface**, not a field of rectangles. The
+            // bake cuts the walkable ground into rectangles because that is the
+            // shape to search; outlining each of them turned one floor into
+            // scattered boxes and could not answer the only question the picture
+            // is for — *are these two pieces of ground joined?*
+            //
+            // `Overlay` (floptle-nav) decides that from the LINKS, so the
+            // outline is drawn only where the walkable surface actually ends and
+            // the seams of the cut are invisible. `⊞ Cells` puts the old
+            // per-rectangle wireframe back when the bake's working is the
+            // question.
+            // How solid the walkable surface is drawn. Low enough that the
+            // level under it stays legible — the overlay is drawn over
+            // everything, so an opaque one would hide the geometry it is
+            // describing — and high enough to read as a surface rather than a
+            // tint. A step's ribbon is stronger because it is the answer to a
+            // question somebody is deliberately asking.
+            const NAV_FILL_ALPHA: f32 = 0.22;
+            const NAV_STEP_ALPHA: f32 = 0.40;
             self.nav_gizmo.clear();
+            self.nav_surface.clear();
             if let Some(mesh) = self.nav_baked.as_ref() {
                 let selected = crate::nav_bake::nav_node(&self.world)
                     .is_some_and(|(e, _)| self.selection.contains(&e));
                 if (self.show_navmesh || selected) && filter.colliders {
                     let anchor = DVec3::from_array(mesh.anchor);
-                    for poly in &mesh.polys {
-                        // A distinct hue per region, spun by the golden ratio so
-                        // neighbouring numbers never land on neighbouring colours.
-                        let h = (poly.region as f32 * 0.618_034).fract();
-                        let col = crate::viz::hue_rgb(h);
-                        let y = ((poly.y_min + poly.y_max) * 0.5) as f64;
-                        // A hair above the floor: drawn exactly on it, the outline
-                        // fights the ground it describes.
-                        let lift = (mesh.settings.cell_size * 0.5) as f64;
-                        let corner = |x: f32, z: f32| {
-                            anchor + DVec3::new(x as f64, y + lift, z as f64)
-                        };
-                        let c = [
-                            corner(poly.min[0], poly.min[1]),
-                            corner(poly.max[0], poly.min[1]),
-                            corner(poly.max[0], poly.max[1]),
-                            corner(poly.min[0], poly.max[1]),
-                        ];
-                        for i in 0..4 {
-                            if let (Some(pa), Some(pb)) = (
-                                project(c[i], cam.world_position, view_proj, gw, gh),
-                                project(c[(i + 1) % 4], cam.world_position, view_proj, gw, gh),
-                            ) {
-                                self.nav_gizmo.push((pa, pb, col));
-                            }
+                    // A hair above the floor: drawn exactly on it, the overlay
+                    // fights the ground it describes.
+                    let lift = mesh.settings.cell_size * 0.5;
+                    let overlay = self.nav_overlay.get_or_insert_with(|| {
+                        std::rc::Rc::new(floptle_nav::Overlay::build(mesh, lift))
+                    });
+                    // A distinct hue per region, spun by the golden ratio so
+                    // neighbouring numbers never land on neighbouring colours.
+                    let hue = |region: u32| crate::viz::hue_rgb((region as f32 * 0.618_034).fract());
+                    let world = |p: [f32; 3]| {
+                        anchor + DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)
+                    };
+                    let mut line = |a: [f32; 3], b: [f32; 3], col: [f32; 3]| {
+                        if let (Some(pa), Some(pb)) = (
+                            project(world(a), cam.world_position, view_proj, gw, gh),
+                            project(world(b), cam.world_position, view_proj, gw, gh),
+                        ) {
+                            self.nav_gizmo.push((pa, pb, col));
+                        }
+                    };
+
+                    if self.nav_cells {
+                        // Every rectangle, faintly — the bake's working.
+                        for e in &overlay.cells {
+                            let c = hue(e.region);
+                            line(e.a, e.b, [c[0] * 0.45, c[1] * 0.45, c[2] * 0.45]);
+                        }
+                    }
+                    // The edge of the walkable surface, bright.
+                    for e in &overlay.boundary {
+                        line(e.a, e.b, hue(e.region));
+                    }
+                    // Where two heights are genuinely joined — the picture of
+                    // what `max slope` and `step height` just did.
+                    for s in &overlay.steps {
+                        let c = hue(s.region);
+                        for (a, b) in [
+                            (s.low[0], s.high[0]),
+                            (s.low[1], s.high[1]),
+                            (s.low[0], s.low[1]),
+                            (s.high[0], s.high[1]),
+                        ] {
+                            line(a, b, c);
+                        }
+                    }
+
+                    // The filled surface, in real world space so it sits on the
+                    // ground rather than being painted over the window.
+                    let cam_rel = |p: [f32; 3]| {
+                        let w = world(p) - cam.world_position;
+                        [w.x as f32, w.y as f32, w.z as f32]
+                    };
+                    let fill = |c: [f32; 3]| [c[0], c[1], c[2], NAV_FILL_ALPHA];
+                    let strip = |c: [f32; 3]| [c[0], c[1], c[2], NAV_STEP_ALPHA];
+                    for t in &overlay.tris {
+                        let col = fill(hue(t.region));
+                        for p in [t.a, t.b, t.c] {
+                            self.nav_surface
+                                .push(floptle_render::TriVertex { pos: cam_rel(p), color: col });
+                        }
+                    }
+                    // A step's ribbon is filled too, and more strongly: it is
+                    // the answer to a question somebody is actively asking.
+                    for s in &overlay.steps {
+                        let col = strip(hue(s.region));
+                        for p in [
+                            s.low[0], s.low[1], s.high[1], s.low[0], s.high[1], s.high[0],
+                        ] {
+                            self.nav_surface
+                                .push(floptle_render::TriVertex { pos: cam_rel(p), color: col });
                         }
                     }
                 }
@@ -2569,6 +2635,7 @@ impl Editor {
         }
         let show_terrain_collider = &mut self.show_terrain_collider;
         let show_navmesh = &mut self.show_navmesh;
+        let nav_cells = &mut self.nav_cells;
         let show_mesh_colliders = &mut self.show_mesh_colliders;
         let rename_target = &mut self.rename_target;
         let new_scene_buf = &mut self.new_scene_buf;
@@ -2647,10 +2714,13 @@ impl Editor {
         // The package extensions and their window. `ext_host` is handed to the
         // dock (its Scene overlays draw in the viewport), and used again after
         // for the floating panels — sequentially, so one `&mut` covers both.
+        // What the last load found, read off the host BEFORE it is borrowed
+        // mutably for the tab viewer — the 📦 Packages tab draws from inside
+        // that viewer and cannot hold a second borrow of the host itself.
+        let pkg_load = crate::packages_ui::PkgLoad::of(&self.ext);
         let ext_host = &mut self.ext;
         let ext_painted = self.ext_painted.as_slice();
         let packages_state = &mut self.packages_ui;
-        let show_packages = &mut self.show_packages;
         let ext_project_root = self.project_root.clone();
         let ext_account = self.account.as_ref();
         // Built before the closure: `ext_menu_tree` reads the whole editor, and
@@ -2957,7 +3027,20 @@ impl Editor {
                         ui.checkbox(&mut *show_mesh_colliders, "Collider wireframes (mesh + shapes)")
                             .on_hover_text("show every static collider — walkable meshes and Collidable Cube/Sphere/Capsule shapes (the selected one always shows)");
                         ui.checkbox(&mut *show_navmesh, "Navmesh")
-                            .on_hover_text("show where characters can walk, a colour per connected area (the Nav Mesh node always shows its own when selected)");
+                            .on_hover_text(
+                                "show where characters can walk as one filled surface, a colour \
+                                 per connected area, with the joins between elevations drawn \
+                                 where a character can actually take them (the Nav Mesh node \
+                                 always shows its own when selected)",
+                            );
+                        ui.add_enabled_ui(*show_navmesh, |ui| {
+                            ui.checkbox(&mut *nav_cells, "    ⊞ …and the rectangles it was cut into")
+                                .on_hover_text(
+                                    "the bake's working: every convex rectangle the walkable \
+                                     surface was divided into. Useful for judging cell size; \
+                                     it is not what the ground looks like",
+                                );
+                        });
                     });
                     // Tool windows + panels live under Window (View = viewport display).
                     // Every entry opens/focuses its window (close them from the
@@ -3012,20 +3095,37 @@ impl Editor {
                             )
                             .clicked()
                         {
-                            *show_packages = true;
+                            cmd.focus_packages = true;
                             ui.close();
                         }
                         ui.separator();
+                        ui.label(
+                            egui::RichText::new("your layout is saved when you close the editor")
+                                .small()
+                                .weak(),
+                        );
                         if ui
                             .button("⟲ Reset layout")
                             .on_hover_text(
                                 "put every panel back where it starts: Hierarchy + Map left, \
                                  viewports and graph editors centre, Inspector right, \
-                                 project and timelines below",
+                                 project and timelines below — and forget the saved one, so \
+                                 it stays reset",
                             )
                             .clicked()
                         {
                             cmd.reset_layout = true;
+                            ui.close();
+                        }
+                        if ui
+                            .button("⟲ Reset window size")
+                            .on_hover_text(
+                                "back to 1280×720 where it can be seen, and forget where this \
+                                 window was — what to press if it opened somewhere awkward",
+                            )
+                            .clicked()
+                        {
+                            cmd.reset_window = true;
                             ui.close();
                         }
                     });
@@ -3850,6 +3950,13 @@ impl Editor {
                     input_new_action,
                     access,
                 },
+                packages: packages_state,
+                packages_ctx: crate::packages_ui::PkgCtx {
+                    project_root: &ext_project_root,
+                    load: &pkg_load,
+                    account: ext_account,
+                },
+                packages_action: &mut pkg_action,
                 cmd: &mut cmd,
             };
             // Fullscreen: one tab maximized over the whole window (double-click a tab to
@@ -3952,27 +4059,8 @@ impl Editor {
                 }
             }
 
-            // ---- 📦 Packages ----
-            if *show_packages {
-                let mut open = true;
-                egui::Window::new("📦 Packages")
-                    .open(&mut open)
-                    .default_width(520.0)
-                    .default_height(420.0)
-                    .resizable(true)
-                    .show(ui, |ui| {
-                        pkg_action = crate::packages_ui::window(
-                            ui,
-                            crate::packages_ui::PkgCtx {
-                                project_root: &ext_project_root,
-                                host: ext_host,
-                                account: ext_account,
-                            },
-                            packages_state,
-                        );
-                    });
-                *show_packages = open;
-            }
+            // 📦 Packages is a dock tab now, drawn with the other tabs — see
+            // `EditorTab::Packages`. Nothing to draw here.
 
             // ---- what a package's `ed.message` asked to say ----
             if let Some((title, body)) = ext_message.clone() {
@@ -5252,6 +5340,13 @@ impl Editor {
                         })
                         .collect();
                     line_layer.draw(gpu, color, depth, view_proj, &verts);
+                }
+                // The navmesh's walkable surface, filled. Before the script
+                // triangles so a game's own gizmos draw on top of it rather
+                // than under a translucent floor. Already camera-relative —
+                // `nav_surface` was built that way in the gather pass.
+                if !self.nav_surface.is_empty() {
+                    tri_layer.draw(gpu, color, depth, view_proj, &self.nav_surface);
                 }
                 // Script-drawn FILLED triangles (draw.tri/cone/disc — solid gizmos).
                 if !self.script_tris.is_empty() {
@@ -7346,6 +7441,7 @@ impl Editor {
                 let _ = std::fs::remove_file(self.nav_path(id));
             }
             self.nav_baked = None;
+            self.nav_overlay = None;
             self.nav_seconds = 0.0;
             self.nav_triangles = 0;
             self.script_host.set_nav_mesh(None);
@@ -8228,8 +8324,26 @@ impl Editor {
         if cmd.focus_map {
             self.focus_map();
         }
+        if cmd.focus_packages
+            && let Some(dock) = self.dock_state.as_mut()
+        {
+            crate::dock::focus_packages_tab(dock);
+        }
         if cmd.reset_layout {
             self.dock_state = Some(crate::dock::default_dock());
+            // Throw the saved file away too, not just this session's state. A
+            // reset that only lasts until the next crash is not a reset — and
+            // "reset the layout" is the thing somebody reaches for precisely
+            // when the editor is misbehaving.
+            crate::layout::forget_dock();
+        }
+        if cmd.reset_window {
+            crate::layout::forget_window();
+            if let Some(window) = self.window.as_ref() {
+                let d = crate::layout::WindowPlace::default();
+                window.set_maximized(false);
+                let _ = window.request_inner_size(winit::dpi::LogicalSize::new(d.width, d.height));
+            }
         }
         if let Some(path) = cmd.open_scene {
             // Opening a scene ends any play session FIRST — Stop restores the
