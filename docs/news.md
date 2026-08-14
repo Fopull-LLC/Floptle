@@ -1,5 +1,13 @@
 ## Just shipped
 
+**v0.57.1** — a reflection probe, a light probe volume and a navmesh all decide
+where they apply from a box you could not see, so the only way to size one was to
+type a number and reload to find out whether it reached. They draw now, under
+**Areas of effect** in the gizmo menu — and a reflection probe draws its fade as a
+second box inside the first, because the gap between them is the crossover.
+**Sound range** draws too: an inner ring for full volume, an outer one for
+silence, and the gap between them is the fade.
+
 **v0.57.0 "Find The Way"** — characters can be told to walk somewhere and they
 work out how to get there. Add a **Nav Mesh** node, press **Bake**, and
 `nav.path(from, to)` hands back the corners to walk — a straight line across an
