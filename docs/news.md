@@ -1,5 +1,15 @@
 ## Just shipped
 
+**v0.62.1** — sun shadows over a plain floor. Turn them on in a scene made of
+meshes — a plane, a character standing on it — and the ground came out crawling
+with dark bands: not the shadow of anything, just stripes ruled across open
+floor, with no clean edge where the real shadow ended. The shadow ray could not
+tell *nothing is in the way* from *I ran out of road*, and both were read as
+blocked. It only happened in a scene with **no terrain and no baked level
+geometry**, so putting a hill in made it vanish — which is the worst kind of
+clue. Fixed; open your project and your floor is even. Nothing to change on your
+side, and if you turned shadows down to disguise it, you can put them back.
+
 **v0.62.0 "Out Of The Way"** — drop a crate in a corridor and your characters
 walk round it. `nav.obstacle(position, size)` cuts the ground out from under a
 box right now, every route through that space is worked out again in the same
