@@ -1,0 +1,21 @@
+// A package that exists ONLY to be installed by a test.
+//
+// It is not shipped, not listed, and not installable by anybody — the catalogue
+// entry it used to be came off the shelf (ledger 0136, Ty's call: the Fofighter
+// kit is the real first package, and a half-finished editor addition beside it
+// helps nobody). What survives is its CODE, because it is the one thing in the
+// repo that drives the whole extension API end to end: a panel, a menu item, a
+// shortcut, a Scene-view overlay, world-space handles, reading the scene,
+// editing it with undo, and a preference remembered between sessions.
+//
+// `ext::tests::the_example_package_loads_draws_and_survives_every_hook`
+// installs this into a temp project and fires every hook at it. Deleting it
+// would leave the package API with no end-to-end test at all.
+(
+    id: "com.floptle.example",
+    name: "Example Package",
+    version: "1.1.0",
+    description: "Test fixture: exercises every editor-extension hook.",
+    license: "MIT OR Apache-2.0",
+    engine: ">=0.55.0",
+)

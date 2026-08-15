@@ -732,12 +732,21 @@ fn every_gui_widget_is_in_the_reference() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
-/// The example package in `packages/scene-report/` must actually work: it is
-/// what somebody reads to learn the API, and an example that raises teaches the
-/// wrong thing. Installed into a temp project, drawn, and every hook fired.
+/// One real package, driven end to end — the only test that proves a folder on
+/// disk becomes a working extension with every hook wired up.
+///
+/// The fixture is a complete extension rather than a stub on purpose: it
+/// registers a panel, a Scene-view overlay with world-space handles, two menu
+/// items and a shortcut, reads the scene, edits it with undo, and keeps a
+/// preference. A stub would still pass `reload` and would prove none of that.
+///
+/// It used to be a package we shipped; that came off the shelf, and the code
+/// stayed here because deleting it would have left the whole extension API
+/// with no end-to-end coverage at all.
 #[test]
 fn the_example_package_loads_draws_and_survives_every_hook() {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/scene-report");
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/example-package");
     assert!(src.join("package.ron").exists(), "{}", src.display());
     let proj = temp("example");
     floptle_package::install::install_from_dir(&proj, &src, false).unwrap();
