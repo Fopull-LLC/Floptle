@@ -102,6 +102,7 @@ jobs:
           run fog_probe           fog_probe           -- "$P"
           run area_light_probe    area_light_probe    -- "$P"
           run contact_shadow_probe contact_shadow_probe -- "$P"
+          run mesh_only_shadow_probe mesh_only_shadow_probe -- "$P"
           run motion_probe        motion_probe        -- "$P"
           run retro_fog_probe     retro_fog_probe     -- "$P"
           run ui_world_probe      ui_world_probe

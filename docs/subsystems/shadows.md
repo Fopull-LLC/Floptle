@@ -90,6 +90,19 @@ skips, zero cost.
    blob-shadow look. A proxy containing the ray start is skipped, so a mesh
    never blanket-shadows itself from inside its own capsule.
 
+**How the march ENDS is half the answer**, and the two endings mean opposite
+things. A ray that runs out of steps mid-span spent its whole life hugging
+matter, so it is occluded rather than lit-by-default; a ray that breaks out
+because the field went empty has nothing in the way and is lit. Both leave the
+march short of the last relevant bound, so *how far it got* cannot tell them
+apart — `field_vis` records **why** it stopped instead. Reading the distance
+alone painted scanlines of full shadow across open ground in a scene with no
+terrain, no blobs and no baked volumes, which is to say across the floor of an
+ordinary game scene (fixed in v0.62.1). The same case has a second exit: when
+the only occluder the relevance sweep found is the fragment's *own* proxy, the
+march is skipped entirely and the ray is lit, because there is nothing left in
+it to march.
+
 Blobs/terrain never need either — they're in the field itself. Both paths are
 folded into the shadow march only (never the drawn surface or AO), hidden
 (`Visible(false)`) nodes don't cast, and every collider node has a
@@ -139,7 +152,13 @@ scenes load with the defaults above and just start casting).
   tint / full-with-AO) over a hill + shadowed cube (receive) + capsule (proxy
   cast) + blob + an invisible occluder slab with a cube "indoors" beneath it
   (the level-mesh path); `terrain_far_probe` stays bit-identical with shadows
-  off.
+  off. **`mesh_only_shadow_probe` is the one with NO field at all** — a plane
+  and a character, both casting through proxies — because every other probe
+  here builds a terrain first, and a scene whose field is empty took a
+  different path through the march that nothing rendered. It asserts in both
+  directions: open ground is evenly lit **row by row** (a whole-region average
+  would pass a striped floor), and the caster is still casting (or deleting the
+  shadow pass would pass the first check perfectly).
 
 ## 5. Performance posture
 

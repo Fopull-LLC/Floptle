@@ -1407,8 +1407,23 @@ fn field_vis(ro: vec3<f32>, l: vec3<f32>, max_d: f32, k: f32, pen_t0: f32, lift:
         if ((pmask & (1u << i)) != 0u && prox_d(i, ro) < lift) { skip = skip | (1u << i); }
     }
     let march = pmask & ~skip;
+    // Everything the sweep found was this fragment's OWN proxy, and the field
+    // holds nothing else — so there is genuinely nothing to march and the ray
+    // is lit. Without this the march below runs with no occluder in it, the
+    // field answers "empty" on the first sample, and the out-of-steps rule at
+    // the bottom reads that as fully shadowed. It only bites in a scene with no
+    // terrain, no blobs and no baked volumes — a plane and a character, which
+    // is what an ordinary game scene is and what every probe here had a hill in
+    // front of.
+    if (vmask == 0u && !blobs && !shapes && march == 0u) {
+        return 1.0;
+    }
     var t = lift;
     var vis = 1.0;
+    // Why the march ended, because the two endings mean opposite things and the
+    // rule at the bottom cannot tell them apart from `t` alone.
+    var escaped = false; // left everything that could have occluded it — lit
+    var reached = false; // marched past the last relevant bound — keep `vis`
     // The k·d/t penumbra estimator is hypersensitive while t is tiny: right at the
     // start surface, sub-voxel noise in the f16-sampled field (worst on the tapered
     // slab walls) reads as near-occluders and stripes the penumbra. Hard hits are
@@ -1427,7 +1442,7 @@ fn field_vis(ro: vec3<f32>, l: vec3<f32>, max_d: f32, k: f32, pen_t0: f32, lift:
             }
         }
         if (d < 0.001) { return 0.0; }   // hard hit — fully occluded
-        if (d > 1e8) { break; }          // nothing along this ray — fully lit
+        if (d > 1e8) { escaped = true; break; } // nothing along this ray — fully lit
         if (t > pen_t0) {
             vis = min(vis, clamp(k * d / t, 0.0, 1.0));
         }
@@ -1438,12 +1453,18 @@ fn field_vis(ro: vec3<f32>, l: vec3<f32>, max_d: f32, k: f32, pen_t0: f32, lift:
         // The k·d/t penumbra needs no dense sampling far out (its scale ~t/k
         // grows too), so geometric growth loses nothing.
         t = t + clamp(d, 0.02, max(4.0, t * 0.12));
-        if (vis < 0.01 || t > t_end) { break; }
+        if (vis < 0.01) { break; }
+        if (t > t_end) { reached = true; break; }
     }
-    if (t < t_end) {
+    if (!escaped && !reached) {
         // Ran out of steps mid-span. With the growing cap that only happens when
         // d stayed pinned small for every step — the ray spent its whole life
         // hugging matter — so it's occluded, not lit-by-default.
+        //
+        // Keyed to WHY the loop ended, not to `t < t_end`. A ray that broke out
+        // because the field went empty had also not reached `t_end`, so the old
+        // test caught it too and turned "nothing in the way" into full shadow —
+        // scanlines of black across an open floor.
         vis = 0.0;
     }
     return clamp(vis, 0.0, 1.0);
