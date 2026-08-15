@@ -2532,6 +2532,22 @@ impl ScriptHost {
         agents.resolve_filters(guard.as_ref());
     }
 
+    /// How many times runtime obstacles have been cut or removed on the live
+    /// navmesh, and the mesh itself if anything wants to draw it.
+    ///
+    /// The editor's navmesh overlay is built from the bake, and while a game is
+    /// running the mesh it is actually walking on is the bake with holes in it.
+    /// Comparing this number is how the overlay notices; `nav_mesh_snapshot`
+    /// is what it then draws.
+    pub fn nav_obstacle_rev(&self) -> u64 {
+        self.nav_mesh.borrow().as_ref().map_or(0, |m| m.obstacle_rev())
+    }
+
+    /// A copy of the navmesh the game is walking on right now, holes included.
+    pub fn nav_mesh_snapshot(&self) -> Option<floptle_nav::NavMesh> {
+        self.nav_mesh.borrow().clone()
+    }
+
     /// Walk every `nav.agent` one frame.
     ///
     /// Runs after the scripts, so an order given this frame is acted on this

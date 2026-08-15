@@ -316,6 +316,15 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field corners fun(self: NavAgentHandle): table The corners still to walk, as a list of vec3.
 ---@field destroy fun(self: NavAgentHandle) Take it out of the crowd.
 
+---A hole cut in the navmesh at runtime by `nav.obstacle(centre, size)` — the
+---crate in the corridor. Keep the handle; `remove()` gives the ground back.
+---@class NavObstacleHandle
+---@field id number Its id in the mesh. Opaque; compare it, do not compute with it.
+---@field active boolean Still cut out? False once removed, or after the scene reloaded.
+---@field position Vec3|nil The middle of the hole ACTUALLY cut, in world space, or nil once removed.
+---@field size Vec3|nil How big the hole actually is — the box you asked for, grown outward to whole navmesh cells. Draw this rather than what you passed in.
+---@field remove fun(self: NavObstacleHandle): boolean Give the ground back. False if it was already gone — calling it twice is not an error.
+
 ---A playing sound returned by `audio.play(...)`. Handles stay valid until the
 ---sound finishes; calls on a finished sound are ignored.
 ---@class SoundHandle

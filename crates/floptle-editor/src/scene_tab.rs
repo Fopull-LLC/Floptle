@@ -234,37 +234,48 @@ impl EditorTabViewer<'_> {
                 });
         }
 
-        // Overlay toolbar: tools (left) + resolution simulator (right). Editor view only.
+        // Overlay toolbar: tools + resolution simulator. Editor view only.
+        //
+        // A `viewport_panel`, not a bare Area: it is placed against THIS tab's
+        // rect, it can be dragged anywhere in the view, docked to any corner,
+        // and folded down to a tab when it is in the way of the thing it exists
+        // to edit. Its rect comes back so the ▦ Model strip can stack under it
+        // wherever it has been put.
+        let mut tools_rect = egui::Rect::from_min_size(
+            rect.left_top() + egui::vec2(8.0, 8.0),
+            egui::vec2(0.0, 0.0),
+        );
         if !game {
-            egui::Area::new(egui::Id::new("scene_toolbar"))
-                .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
-                .show(ui.ctx(), |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            // Ordered by Tool::ALL — i.e. by keybind, so what you see
-                            // left-to-right is what 1..7 select.
-                            for t in Tool::ALL {
-                                let hit = ui.selectable_label(self.tool == t, t.label());
-                                if hit.on_hover_text(format!("{} ({})", t.label(), t.digit())).clicked() {
-                                    self.cmd.set_tool = Some(t);
+            tools_rect = crate::viewport_panel::show(
+                ui.ctx(),
+                rect,
+                "scene_toolbar",
+                "Tools",
+                &mut self.panels.tools,
+                |ui| {
+                    // Ordered by Tool::ALL — i.e. by keybind, so what you see
+                    // left-to-right is what 1..7 select.
+                    for t in Tool::ALL {
+                        let hit = ui.selectable_label(self.tool == t, t.label());
+                        if hit.on_hover_text(format!("{} ({})", t.label(), t.digit())).clicked() {
+                            self.cmd.set_tool = Some(t);
+                        }
+                    }
+                    ui.separator();
+                    egui::ComboBox::from_id_salt("aspect_mode")
+                        .selected_text(self.aspect.label())
+                        .show_ui(ui, |ui| {
+                            for m in AspectMode::ALL {
+                                if ui.selectable_label(*self.aspect == m, m.label()).clicked() {
+                                    *self.aspect = m;
                                 }
                             }
-                            ui.separator();
-                            egui::ComboBox::from_id_salt("aspect_mode")
-                                .selected_text(self.aspect.label())
-                                .show_ui(ui, |ui| {
-                                    for m in AspectMode::ALL {
-                                        if ui.selectable_label(*self.aspect == m, m.label()).clicked() {
-                                            *self.aspect = m;
-                                        }
-                                    }
-                                });
-                            if self.aspect.ratio().is_some() {
-                                ui.add(egui::Slider::new(self.zoom, 0.4..=1.0).text("fit").show_value(false));
-                            }
                         });
-                    });
-                });
+                    if self.aspect.ratio().is_some() {
+                        ui.add(egui::Slider::new(self.zoom, 0.4..=1.0).text("fit").show_value(false));
+                    }
+                },
+            );
         }
 
         // ▦ Model tool HUD. The Map PANEL is the control surface; this is a
@@ -272,10 +283,25 @@ impl EditorTabViewer<'_> {
         // line, so it states the tool's mode without duplicating the panel or
         // covering the scene. `⏷` opens the same chips for anyone who would
         // rather switch from here.
+        //
+        // It rides UNDER the tool strip wherever that has been put, rather than
+        // at a fixed 46 points down the left edge — a strip docked bottom-right
+        // would otherwise leave this stranded on its own in the corner it used
+        // to share. Below normally; above when the strip is near the floor and
+        // there is no room under it, which the `LEFT_BOTTOM` pivot handles
+        // without needing to know this panel's height in advance.
         if !game && self.tool == Tool::MapEdit && !self.map_playing {
             let accent = egui::Color32::from_rgb(120, 220, 255);
+            let below = tools_rect.bottom() + 160.0 < rect.bottom();
+            let (hud_pos, hud_pivot) = if below {
+                (tools_rect.left_bottom() + egui::vec2(0.0, 6.0), egui::Align2::LEFT_TOP)
+            } else {
+                (tools_rect.left_top() - egui::vec2(0.0, 6.0), egui::Align2::LEFT_BOTTOM)
+            };
             egui::Area::new(egui::Id::new("map_hud"))
-                .fixed_pos(rect.left_top() + egui::vec2(8.0, 46.0))
+                .fixed_pos(hud_pos)
+                .pivot(hud_pivot)
+                .constrain_to(rect)
                 .order(egui::Order::Middle)
                 .show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -492,15 +518,24 @@ impl EditorTabViewer<'_> {
                 });
         }
 
-        // Gizmos master toggle — top-right of the viewport (editor view only). Off hides
+        // Gizmos master toggle — top-right of the VIEWPORT (editor view only). Off hides
         // every overlay (colliders, camera/light/gravity gizmos, contacts), including the
         // selected node's.
+        //
+        // It used to be `.anchor(RIGHT_TOP)`, which is the top-right of the
+        // whole egui screen — so in any layout where the Scene view is not
+        // flush with the window's right edge it sat over the Inspector, over
+        // the tab strip, over whatever else lived up there, covering panels it
+        // had nothing to do with. It is placed against this tab's rect now, and
+        // like the tool strip it drags, docks and folds away.
         if !game {
-            egui::Area::new(egui::Id::new("gizmo_toggle"))
-                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
-                .show(ui.ctx(), |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.horizontal(|ui| {
+            crate::viewport_panel::show(
+                ui.ctx(),
+                rect,
+                "gizmo_toggle",
+                "Gizmos",
+                &mut self.panels.gizmos,
+                |ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             ui.toggle_value(self.show_gizmos, "◎ Gizmos")
                                 .on_hover_text("show viewport gizmos/overlays (H)");
@@ -623,9 +658,8 @@ impl EditorTabViewer<'_> {
                             })
                             .response
                             .on_hover_text("filter which gizmo types draw");
-                        });
-                    });
-                });
+                },
+            );
         }
 
         // Resolution simulator: a centered device frame for the chosen aspect.

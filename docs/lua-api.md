@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 45
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 47
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 23
 - [vectors, directions & easing](#vectors-directions--easing) — 47
@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [networking — net.*, synced](#networking--net-synced) — 31
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 14
-- [pathfinding — nav.*](#pathfinding--nav) — 19
+- [pathfinding — nav.*](#pathfinding--nav) — 22
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
 - [2D — tilemaps & sprite batches](#2d--tilemaps--sprite-batches) — 22
@@ -212,6 +212,14 @@ log("message") — print to the engine console.
 ### `node`
 
 The node's transform: x/y/z, scale, scale_x/y/z, yaw/pitch/roll.
+
+### `obstacle`
+
+A navmesh obstacle handle, from nav.obstacle(centre, size). Fields: id, active, position, size (the hole ACTUALLY cut, grown out to whole cells). One method: ob:remove(), which gives the ground back and returns false if it had already gone.
+
+### `obstacle:remove`
+
+obstacle:remove() — give the ground back where this obstacle was, and return whether it was still there. Everything that gave up on a route through it is un-blocked, so a unit that stopped beside the crate starts walking again. Calling it twice is false, not an error.
 
 ### `onCollisionEnter`
 
@@ -1883,6 +1891,10 @@ nav.areas() — every walkable area, as ONE FLAT ARRAY of numbers plus a count. 
 
 nav.budget([n]) — how many path searches the whole crowd may run per frame (default 8); returns the current value, and sets it when given a number. A hundred units given one order do not all think on the same frame: they queue, oldest first, and keep walking their old route while they wait. Raise it for a game where a burst of orders should be acted on at once, lower it if the searches show up in a frame graph.
 
+### `nav.clearObstacles`
+
+nav.clearObstacles() — take every runtime obstacle away at once and give the whole level back, returning how many there were. For a wave ending or a level resetting, so nothing has to have kept a list of every crate.
+
 ### `nav.distance`
 
 nav.distance(from, to) — how far it is to WALK, in metres, or nil if there is no complete route. This is the number a decision should be made on: the straight-line distance to something on the far side of a wall is a lie, and "chase the nearest one" built on it picks the wrong one every time.
@@ -1898,6 +1910,14 @@ nav.links() — every portal between two areas, as one flat array plus a count. 
 ### `nav.nearest`
 
 nav.nearest(point[, maxDistance]) — the closest walkable spot to a world point, or nil if there is none within range (default: the character's own height, so standing on top of the floor or half a step off a ledge is the ordinary case rather than a miss). Use it to drop a click, a spawn or a knocked-back character back onto the navmesh.
+
+### `nav.obstacle`
+
+nav.obstacle(centre, size) — cut a box out of the baked navmesh, right now, and get a handle back. The crate dropped in a corridor: routes through that space stop existing, everything walking one repaths, and the level is not measured again. Hundreds of times cheaper than a rebake for a small thing on a big level — a 256 m level rebakes in ~460 ms and carves in ~0.6 ms. It is an OPTION and not a replacement: where the level genuinely changed shape (a building came down) the background rebake is the honest answer and this is not. The hole is grown outward to whole navmesh cells, so read ob.size rather than assuming you got the box you asked for. nil when the scene has no bake. There is deliberately no moving obstacle: carving every frame is rebuilding every frame, which is the cost this exists to avoid.
+
+### `nav.obstacles`
+
+nav.obstacles() — how many holes nav.obstacle has cut in the navmesh right now. Zero with no bake.
 
 ### `nav.onMesh`
 

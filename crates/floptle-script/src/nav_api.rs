@@ -216,6 +216,74 @@ impl LuaAgent {
     }
 }
 
+/// A script's handle on one hole cut in the navmesh.
+///
+/// Holds an id for the same reason [`LuaAgent`] does: a handle kept after the
+/// obstacle was taken away answers "no" rather than removing whatever was cut
+/// next. `remove()` twice is `false` the second time, not an error — a
+/// destructor that has to be called exactly once is a destructor that gets
+/// called twice.
+pub struct LuaObstacle {
+    id: u32,
+    mesh: NavShared,
+    world: AgentsShared,
+}
+
+impl UserData for LuaObstacle {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_field_method_get("id", |_, o| Ok(o.id));
+        // Still cut out of the mesh?
+        fields.add_field_method_get("active", |_, o| {
+            Ok(o.mesh.borrow().as_ref().is_some_and(|m| m.obstacles().iter().any(|x| x.id == o.id)))
+        });
+        // What was ACTUALLY cut, which is the asked-for box grown outward to the
+        // bake's grid. Read rather than assumed: a crate blocks up to one cell
+        // more per side than its own footprint, and a script drawing a debug box
+        // round it should draw the hole, not the wish.
+        fields.add_field_method_get("size", |_, o| {
+            let guard = o.mesh.borrow();
+            let Some(mesh) = guard.as_ref() else { return Ok(None) };
+            let Some(b) = mesh.obstacles().iter().find(|x| x.id == o.id) else { return Ok(None) };
+            Ok(Some(LuaVec3(glam::DVec3::new(
+                (b.max[0] - b.min[0]) as f64,
+                (b.y_max - b.y_min) as f64,
+                (b.max[1] - b.min[1]) as f64,
+            ))))
+        });
+        fields.add_field_method_get("position", |_, o| {
+            let guard = o.mesh.borrow();
+            let Some(mesh) = guard.as_ref() else { return Ok(None) };
+            let Some(b) = mesh.obstacles().iter().find(|x| x.id == o.id) else { return Ok(None) };
+            Ok(Some(world_vec(
+                mesh,
+                [
+                    (b.min[0] + b.max[0]) * 0.5,
+                    (b.y_min + b.y_max) * 0.5,
+                    (b.min[1] + b.max[1]) * 0.5,
+                ],
+            )))
+        });
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        // obstacle:remove() -> was it still there
+        methods.add_method("remove", |_, o, ()| {
+            let mut guard = o.mesh.borrow_mut();
+            let Some(mesh) = guard.as_mut() else { return Ok(false) };
+            let gone = mesh.remove_obstacle(o.id);
+            drop(guard);
+            if gone {
+                // The ground came back, so a route that gave up on it may now
+                // work — `navmesh_changed` un-blocks the agents that had, which
+                // is the half of this nobody remembers until a unit stands
+                // still beside an open door.
+                o.world.borrow_mut().crowd.navmesh_changed();
+            }
+            Ok(gone)
+        });
+    }
+}
+
 fn state_name(s: AgentState) -> &'static str {
     match s {
         AgentState::Idle => "idle",
@@ -596,6 +664,75 @@ pub(crate) fn install_nav_api(
         let _ = t.set("link", f);
     }
 
+    // nav.obstacle(centre, size) -> obstacle handle, or nil with no navmesh
+    //
+    // The crate. Cuts a box out of the baked surface in place, so a route
+    // through that space stops existing and everything walking one repaths —
+    // without the whole level being measured again.
+    //
+    // It is an OPTION and not the only answer. The editor's background rebake
+    // is still there and is still the thing that is always right; this is the
+    // cheap way to say "something is standing here now", and it is cheap by a
+    // factor of hundreds on a big level (`examples/carve_probe.rs` prints it).
+    // Where a level has genuinely changed shape — a building came down — the
+    // rebake is the honest answer and this is not.
+    //
+    // A handle, not an id, so taking it away is `ob:remove()` and there is
+    // nothing to write down. A moving obstacle is deliberately NOT offered:
+    // carving per frame is a rebuild per frame, which is the trade this exists
+    // to avoid.
+    let m = mesh.clone();
+    let w = agents.clone();
+    if let Ok(f) = lua.create_function(move |lua, (centre, size): (Value, Value)| {
+        let (Some(c), Some(s)) = (vec3_of(&centre), vec3_of(&size)) else {
+            return Err(mlua::Error::RuntimeError(
+                "nav.obstacle(centre, size) takes two vec3s — the middle of the box and how \
+                 big it is"
+                    .into(),
+            ));
+        };
+        let mut guard = m.borrow_mut();
+        let Some(mesh) = guard.as_mut() else { return Ok(None) };
+        let local = mesh.to_local([c.x, c.y, c.z]);
+        // Size is a span, not a place, so it is NOT put through `to_local` —
+        // that would subtract the anchor from it and make every box on an
+        // anchored level enormous.
+        let id = mesh.carve(local, [s.x as f32, s.y as f32, s.z as f32]);
+        drop(guard);
+        w.borrow_mut().crowd.navmesh_changed();
+        lua.create_userdata(LuaObstacle { id, mesh: m.clone(), world: w.clone() }).map(Some)
+    }) {
+        let _ = t.set("obstacle", f);
+    }
+
+    // nav.obstacles() -> how many holes are cut right now.
+    //
+    // Clearing them is one call rather than a list to keep: a level reloading,
+    // or a wave ending, wants the ground back and does not want to have
+    // remembered every crate to do it.
+    let m = mesh.clone();
+    if let Ok(f) = lua.create_function(move |_, ()| {
+        Ok(m.borrow().as_ref().map_or(0, |mesh| mesh.obstacles().len()))
+    }) {
+        let _ = t.set("obstacles", f);
+    }
+
+    // nav.clearObstacles() -> how many were taken away
+    let m = mesh.clone();
+    let w = agents.clone();
+    if let Ok(f) = lua.create_function(move |_, ()| {
+        let mut guard = m.borrow_mut();
+        let Some(mesh) = guard.as_mut() else { return Ok(0) };
+        let n = mesh.clear_obstacles();
+        drop(guard);
+        if n > 0 {
+            w.borrow_mut().crowd.navmesh_changed();
+        }
+        Ok(n)
+    }) {
+        let _ = t.set("clearObstacles", f);
+    }
+
     let _ = t.set("AREA_STRIDE", AREA_STRIDE);
     let _ = t.set("LINK_STRIDE", LINK_STRIDE);
 
@@ -963,6 +1100,57 @@ mod tests {
         );
         let z = blocked.expect("walking through the hole must stop");
         assert!((2.0..6.0).contains(&z), "it should stop at the near lip of the hole: {z}");
+    }
+
+    /// The crate. Everything here is world space against an anchor a million
+    /// units out, which is where "the size went through `to_local` too" would
+    /// show up as a box the size of a continent.
+    #[test]
+    fn an_obstacle_cuts_the_floor_where_it_is_put_and_gives_it_back() {
+        let (lua, shared) = scene();
+        let a = shared.borrow().as_ref().unwrap().anchor;
+        lua.globals().set("ax", a[0]).unwrap();
+        lua.globals().set("az", a[2]).unwrap();
+        // In the top corridor of the ring, well clear of the hole in the middle.
+        let here = "vec3(ax + 6, 0, az + 2)";
+
+        assert!(eval::<bool>(&lua, &format!("return nav.onMesh({here}, 0.3)")));
+        assert_eq!(eval::<usize>(&lua, "return nav.obstacles()"), 0);
+
+        assert!(eval::<bool>(
+            &lua,
+            &format!("ob = nav.obstacle({here}, vec3(3, 2, 3)) return ob ~= nil")
+        ));
+        assert_eq!(eval::<usize>(&lua, "return nav.obstacles()"), 1);
+        assert!(eval::<bool>(&lua, "return ob.active"));
+        assert!(
+            !eval::<bool>(&lua, &format!("return nav.onMesh({here}, 0.3)")),
+            "there is a crate standing there"
+        );
+
+        // The handle answers where the hole IS, in world space, and how big it
+        // actually came out — grown to whole cells, never shrunk.
+        let (x, z): (f64, f64) = eval(&lua, "return ob.position.x, ob.position.z");
+        assert!((x - (a[0] + 6.0)).abs() < 0.5, "{x}");
+        assert!((z - (a[2] + 2.0)).abs() < 0.5, "{z}");
+        let (sx, sz): (f64, f64) = eval(&lua, "return ob.size.x, ob.size.z");
+        assert!((3.0..3.4).contains(&sx), "a 3 m box grown to whole cells is {sx} m");
+        assert!((3.0..3.4).contains(&sz), "{sz}");
+
+        assert!(eval::<bool>(&lua, "return ob:remove()"));
+        assert!(!eval::<bool>(&lua, "return ob:remove()"), "twice is false, not an error");
+        assert!(!eval::<bool>(&lua, "return ob.active"));
+        assert!(
+            eval::<bool>(&lua, &format!("return nav.onMesh({here}, 0.3)")),
+            "removing it has to give the ground back"
+        );
+        assert_eq!(eval::<usize>(&lua, "return nav.obstacles()"), 0);
+
+        // …and the bulk way out, for a level resetting.
+        let _: bool = eval(&lua, &format!("nav.obstacle({here}, vec3(2, 2, 2)) return true"));
+        let _: bool = eval(&lua, &format!("nav.obstacle({here}, vec3(1, 2, 1)) return true"));
+        assert_eq!(eval::<usize>(&lua, "return nav.clearObstacles()"), 2);
+        assert!(eval::<bool>(&lua, &format!("return nav.onMesh({here}, 0.3)")));
     }
 
     #[test]

@@ -46,6 +46,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod agent;
+pub mod carve;
 pub mod filter;
 pub mod heightfield;
 pub mod index;
@@ -56,6 +57,7 @@ pub mod path;
 pub mod walkable;
 
 pub use agent::{Agent, AgentId, AgentParams, AgentState, Crowd, Ride};
+pub use carve::Obstacle;
 pub use filter::{Area, AreaVolume, QueryFilter, MAX_AREAS, WALKABLE};
 pub use heightfield::{Column, Heightfield, Surface};
 pub use index::PolyIndex;

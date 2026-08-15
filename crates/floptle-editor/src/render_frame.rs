@@ -1250,7 +1250,26 @@ impl Editor {
             const NAV_STEP_ALPHA: f32 = 0.40;
             self.nav_gizmo.clear();
             self.nav_surface.clear();
-            if let Some(mesh) = self.nav_baked.as_ref() {
+            // While a game is running, the mesh it is walking on is the bake
+            // with this session's `nav.obstacle` holes cut into it. Drawing the
+            // bake instead would show a clear corridor beside a unit that just
+            // went round one — a tool lying about the thing it exists to
+            // explain. The rev counter is compared rather than the polygons, so
+            // a frame with nothing carved costs one integer.
+            if self.playing {
+                let rev = self.script_host.nav_obstacle_rev();
+                if rev != self.nav_carved_rev {
+                    self.nav_carved_rev = rev;
+                    self.nav_carved = (rev > 0).then(|| self.script_host.nav_mesh_snapshot()).flatten();
+                    self.nav_overlay = None;
+                }
+            } else if self.nav_carved.is_some() {
+                // Stop gives the level back, and that includes the picture.
+                self.nav_carved = None;
+                self.nav_carved_rev = 0;
+                self.nav_overlay = None;
+            }
+            if let Some(mesh) = self.nav_carved.as_ref().or(self.nav_baked.as_ref()) {
                 let selected = crate::nav_bake::nav_node(&self.world)
                     .is_some_and(|(e, _)| self.selection.contains(&e));
                 if (self.show_navmesh || selected) && filter.colliders {
@@ -2843,6 +2862,8 @@ impl Editor {
         let mesh_wire = self.mesh_wire_gizmo.as_slice();
         let particle_gizmo = self.particle_gizmo.as_slice();
         let show_gizmos = &mut self.show_gizmos;
+        let panels = &mut self.panels;
+        let panels_saved = &mut self.panels_saved;
         let mut view_lock = self.camera.lock;
         let mut view_ortho = self.camera.ortho;
         let gizmo_filter = &mut self.gizmo_filter;
@@ -4039,6 +4060,7 @@ impl Editor {
                 mesh_wire,
                 particle_gizmo,
                 show_gizmos,
+                panels,
                 view_lock: &mut view_lock,
                 view_ortho: &mut view_ortho,
                 gizmo_filter,
@@ -4148,6 +4170,15 @@ impl Editor {
 
             if *viewer.game_gizmos != game_gizmos_before {
                 crate::prefs::save_game_gizmos(*viewer.game_gizmos);
+            }
+            // Where the Scene view's floating panels ended up. Compared against
+            // what is on disk rather than written on every change, because a
+            // drag is a change per frame and that would be a file write per
+            // frame of it.
+            let panels_now = *viewer.panels;
+            if panels_now != *panels_saved {
+                crate::prefs::save_viewport_panels(&panels_now);
+                *panels_saved = panels_now;
             }
             // The Scene view's plane lock, chosen in the viewport toolbar.
             // `set_lock` snaps the camera square without moving it.

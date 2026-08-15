@@ -40,6 +40,119 @@ pub(crate) mod signal {
     pub(crate) const BAD: Color32 = Color32::from_rgb(0xe6, 0x78, 0x6e);
 }
 
+/// The type scale, and the one panel treatment, that the package browser is
+/// built from (`floptle/0135`).
+///
+/// **Four steps and no more** — title, section, body, fine — with weight and
+/// colour doing everything else. The browser had `heading`, `strong`, `small`
+/// and a bare `label` used ad hoc at forty-odd call sites, which is not a scale
+/// but four unrelated decisions repeated; a reader gets no help from it about
+/// what to read first.
+///
+/// Sizes are derived from the theme's own body text rather than written down,
+/// so somebody who has turned the editor's font size up gets a scale that goes
+/// up with it instead of a title that ends up smaller than its own body.
+///
+/// **Nothing here names a colour that is not `ui.visuals()`.** Ground, surface,
+/// text and hairline are the user's theme — the editor ships Floptle Dark,
+/// Midnight, Slate, Carbon and Light, and hardcoding a hex is exactly how the
+/// browser came to look like a stranger inside all five. The three [`signal`]
+/// colours above are the only pinned values, because good, warn and bad are
+/// facts about the thing rather than about the chrome.
+pub(crate) mod look {
+    use egui::{Color32, RichText, Stroke, Ui};
+
+    /// The theme's body size — every step is a multiple of it.
+    fn base(ui: &Ui) -> f32 {
+        ui.style()
+            .text_styles
+            .get(&egui::TextStyle::Body)
+            .map(|f| f.size)
+            .unwrap_or(12.5)
+    }
+
+    /// The one biggest thing in a view, and there is one. A package's name.
+    pub(crate) fn title(ui: &Ui, s: impl Into<String>) -> RichText {
+        RichText::new(s).size((base(ui) * 1.5).round()).strong()
+    }
+
+    /// What a group of rows is. Sits above a run of body text and stops.
+    pub(crate) fn section(ui: &Ui, s: impl Into<String>) -> RichText {
+        RichText::new(s).size((base(ui) * 1.15).round()).strong()
+    }
+
+    /// The words. The default, and the step that needs no helper — it is here
+    /// so the four steps can be named in one place and counted.
+    pub(crate) fn body(s: impl Into<String>) -> RichText {
+        RichText::new(s)
+    }
+
+    /// Labels, counts, timestamps, the quiet half of a row. Dimmed by default:
+    /// fine print that is the same colour as the text is not fine print.
+    pub(crate) fn fine(ui: &Ui, s: impl Into<String>) -> RichText {
+        RichText::new(s).size((base(ui) * 0.85).round()).color(ui.visuals().weak_text_color())
+    }
+
+    /// …in the full text colour, for fine print that is the point rather than
+    /// the aside — a refusal, a permission, the line under a primary action.
+    pub(crate) fn fine_strong(ui: &Ui, s: impl Into<String>) -> RichText {
+        RichText::new(s).size((base(ui) * 0.85).round()).strong()
+    }
+
+    /// **Identity and data**: package ids, versions, engine ranges, revisions,
+    /// file paths, URLs. Monospace, at the fine size, in the ordinary text
+    /// colour — an id is content, not an aside, and it is the thing somebody
+    /// copies, compares character by character, or reads out loud.
+    pub(crate) fn data(ui: &Ui, s: impl Into<String>) -> RichText {
+        RichText::new(s).size((base(ui) * 0.85).round()).monospace()
+    }
+
+    /// The accent, which stays the user's. "Switched on", focus, and the one
+    /// primary action all read it, so a GitHub Light user gets GitHub Light's
+    /// accent rather than a fixed teal sitting in a pale panel.
+    pub(crate) fn accent(ui: &Ui) -> Color32 {
+        ui.visuals().selection.stroke.color
+    }
+
+    /// One hairline. How two surfaces are separated — not a shadow, and not a
+    /// widget stroke that changes width with the theme's widget styling.
+    pub(crate) fn hairline(ui: &Ui) -> Stroke {
+        Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
+    }
+
+    /// A panel: one small fill step up from the ground it sits on, separated by
+    /// a hairline. **The** panel — every card, row group and callout in the
+    /// browser is this, so there is one treatment to change rather than one per
+    /// call site.
+    pub(crate) fn panel(ui: &Ui) -> egui::Frame {
+        egui::Frame::new()
+            .inner_margin(8)
+            .corner_radius(3.0)
+            .fill(ui.visuals().faint_bg_color)
+            .stroke(hairline(ui))
+    }
+
+    /// …the one you have chosen, marked by the accent rather than by a
+    /// different treatment.
+    pub(crate) fn panel_selected(ui: &Ui) -> egui::Frame {
+        panel(ui)
+            .fill(accent(ui).gamma_multiply(0.10))
+            .stroke(Stroke::new(1.0, accent(ui)))
+    }
+
+    /// **The one primary action in a view.** Accent-outlined over a wash of it,
+    /// rather than accent-filled: a solid fill has to pick its own text colour,
+    /// and the colour that reads on one of five themes reads as a bruise on
+    /// another. Everything else in the view is an ordinary button, and a view
+    /// with two of these has a design problem rather than a styling one.
+    pub(crate) fn primary(ui: &Ui, label: impl Into<String>) -> egui::Button<'static> {
+        let a = accent(ui);
+        egui::Button::new(RichText::new(label).strong())
+            .fill(a.gamma_multiply(0.22))
+            .stroke(Stroke::new(1.0, a))
+    }
+}
+
 /// Build a colored layout for Lua source (keywords, strings, numbers, comments,
 /// engine API). A simple single-pass tokenizer — good enough for an in-engine IDE.
 /// A code-editor color theme: the syntax token colors plus the editor background, gutter
@@ -392,4 +505,111 @@ pub(crate) fn flsl_highlight(
         }
     }
     job
+}
+#[cfg(test)]
+mod look_tests {
+    use super::*;
+
+    /// Four steps, and each one genuinely a step. A "scale" whose title and
+    /// body come out the same height is four names for one size, which is what
+    /// the browser had.
+    #[test]
+    fn the_type_scale_is_four_steps_in_descending_order() {
+        let ctx = crate::icons::test_context();
+        let mut h = [0.0f32; 4];
+        let _ = ctx.run_ui(crate::icons::test_input(), |ui| {
+            for (i, t) in [
+                look::title(ui, "Ag"),
+                look::section(ui, "Ag"),
+                look::body("Ag"),
+                look::fine(ui, "Ag"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                h[i] = ui.label(t).rect.height();
+            }
+        });
+        assert!(
+            h[0] > h[1] && h[1] > h[2] && h[2] > h[3],
+            "title/section/body/fine must be four sizes, largest first: {h:?}",
+        );
+    }
+
+    /// Chrome comes from the user's theme and nowhere else. The editor ships
+    /// five, and a panel fill written down as a hex is one that looks borrowed
+    /// in four of them — which is how the browser came to ignore the theme in
+    /// the first place.
+    ///
+    /// The accent is checked by *varying*: it is the one a theme actually
+    /// chooses, so two themes must not answer the same. The panel is checked
+    /// against `visuals` directly, because its fill is egui's own additive
+    /// lift — deliberately the same value on every theme, since "one step
+    /// brighter than whatever is underneath" is the same instruction
+    /// everywhere. What the assertion catches is somebody replacing it with a
+    /// number.
+    #[test]
+    fn the_panel_and_the_accent_follow_the_users_theme() {
+        let read = |v: egui::Visuals| {
+            let ctx = egui::Context::default();
+            ctx.set_visuals(v);
+            let mut out = None;
+            let _ = ctx.run_ui(crate::icons::test_input(), |ui| {
+                let p = look::panel(ui);
+                assert_eq!(p.fill, ui.visuals().faint_bg_color, "the panel fill is written down");
+                assert_eq!(
+                    p.stroke.color,
+                    ui.visuals().widgets.noninteractive.bg_stroke.color,
+                    "the hairline is written down",
+                );
+                assert_eq!(p.shadow, egui::epaint::Shadow::NONE, "hairlines, not shadows");
+                out = Some(look::accent(ui));
+            });
+            out.expect("a frame ran")
+        };
+        let seen: Vec<_> = ENGINE_THEMES.iter().map(|t| read(t.visuals())).collect();
+        assert!(
+            seen.iter().any(|a| *a != seen[0]),
+            "every theme got the same accent — it is not being read from one: {seen:?}",
+        );
+    }
+
+    /// The three signals are the exception, and they are pinned *because* they
+    /// are facts about the thing rather than about the chrome. Shared with
+    /// fopull.com — change one here and the two surfaces drift.
+    #[test]
+    fn the_three_signals_are_the_values_the_site_uses() {
+        assert_eq!(signal::GOOD, egui::Color32::from_rgb(0x82, 0xd2, 0x96));
+        assert_eq!(signal::WARN, egui::Color32::from_rgb(0xe0, 0xb0, 0x50));
+        assert_eq!(signal::BAD, egui::Color32::from_rgb(0xe6, 0x78, 0x6e));
+    }
+
+    /// The package browser makes no type or surface decision of its own.
+    ///
+    /// A source scan rather than a review, for the same reason the glyph
+    /// coverage test is one: the ad-hoc `strong` that creeps back in is always
+    /// the one nobody remembered to look at. `floptle/0135`.
+    #[test]
+    fn the_package_browser_makes_no_type_decisions_of_its_own() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/packages_ui.rs"
+        ))
+        .expect("the browser's source");
+        for banned in [
+            "ui.heading(",
+            "ui.strong(",
+            "ui.small(",
+            "RichText::new(",
+            "Frame::group(",
+            "ui.group(",
+            "FontId::monospace(",
+        ] {
+            assert!(
+                !src.contains(banned),
+                "packages_ui.rs uses {banned}…) directly — every type and surface decision \
+                 goes through theme::look, so there is one place the browser's look lives",
+            );
+        }
+    }
 }

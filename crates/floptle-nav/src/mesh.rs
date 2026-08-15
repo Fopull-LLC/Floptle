@@ -143,10 +143,32 @@ pub struct NavMesh {
     /// Built on first use and thrown away by a clone or a save, because it is
     /// derived from the polygons and rebuilding it costs a fraction of what
     /// carrying it costs.
+    ///
+    /// **Both must be cleared by anything that mutates the polygons or the
+    /// links** — a `OnceLock` will otherwise keep serving the answer it
+    /// computed for the mesh that used to be here. [`NavMesh::carve`] does;
+    /// see [`crate::carve`].
     #[serde(skip)]
-    index: OnceLock<PolyIndex>,
+    pub(crate) index: OnceLock<PolyIndex>,
     #[serde(skip)]
-    link_index: OnceLock<HashMap<usize, Vec<(u32, bool)>>>,
+    pub(crate) link_index: OnceLock<HashMap<usize, Vec<(u32, bool)>>>,
+    /// What is currently cut out of this mesh at runtime, and the bake it was
+    /// cut out of. `serde(skip)` on both, deliberately: a carve is a fact about
+    /// this play session and must never reach the `.fnav` on disk, for the same
+    /// reason a bake taken during Play does not. See [`crate::carve`].
+    #[serde(skip)]
+    pub(crate) obstacles: Vec<crate::carve::Obstacle>,
+    #[serde(skip)]
+    pub(crate) next_obstacle: u32,
+    /// Counted up by every carve and every removal, so anything holding a
+    /// picture of this mesh — the editor's overlay, most of all — can tell that
+    /// the picture is out of date without diffing the polygons. A stale
+    /// navmesh overlay drawn beside a unit walking round a hole it does not
+    /// show is exactly the silent-failure shape this engine keeps finding.
+    #[serde(skip)]
+    pub(crate) obstacle_rev: u64,
+    #[serde(skip)]
+    pub(crate) baked: Option<Box<crate::carve::Baked>>,
 }
 
 fn default_areas() -> Vec<Area> {
@@ -266,6 +288,10 @@ impl NavMesh {
             off_links: Vec::new(),
             index: OnceLock::new(),
             link_index: OnceLock::new(),
+            obstacles: Vec::new(),
+            next_obstacle: 0,
+            baked: None,
+            obstacle_rev: 0,
         })
     }
 
@@ -819,7 +845,7 @@ fn link_polys(
 }
 
 /// Label a portal's ends left and right for something walking `from` → `to`.
-fn oriented(from: [f32; 3], to: [f32; 3], to_poly: usize, p: [f32; 3], q: [f32; 3]) -> Link {
+pub(crate) fn oriented(from: [f32; 3], to: [f32; 3], to_poly: usize, p: [f32; 3], q: [f32; 3]) -> Link {
     let d = [to[0] - from[0], to[2] - from[2]];
     let side = |v: [f32; 3]| d[0] * (v[2] - from[2]) - d[1] * (v[0] - from[0]);
     if side(p) >= side(q) {

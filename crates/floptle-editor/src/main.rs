@@ -124,6 +124,7 @@ mod ui_shader_lib;
 mod ui_widgets;
 mod timeline;
 mod vertex_paint;
+mod viewport_panel;
 mod vfx;
 mod vfx_inspector;
 mod vfx_ui;
@@ -856,6 +857,9 @@ struct EditorTabViewer<'a> {
     /// Selected particle track's emitter/force gizmo (colored screen segments).
     particle_gizmo: &'a [(Vec2, Vec2, [f32; 3])],
     show_gizmos: &'a mut bool,
+    /// Where the Scene view's floating panels sit — the tool strip and the
+    /// gizmo bar. Theirs to move, collapse and dock; see `viewport_panel`.
+    panels: &'a mut viewport_panel::ViewportPanels,
     /// Which plane the Scene view is locked to (2D authoring).
     view_lock: &'a mut floptle_render::ViewLock,
     /// Scene-view orthographic height, or `None` for perspective.
@@ -1910,6 +1914,13 @@ struct Editor {
     /// Per-category gizmo visibility (the ⏷ menu beside the master toggle) —
     /// tune what draws without giving up the rest.
     gizmo_filter: GizmoFilter,
+    /// Where the Scene view's two floating panels sit, and whether they are
+    /// folded away. Loaded from prefs at startup and written back whenever it
+    /// changes, so a layout somebody arranged survives the session.
+    panels: viewport_panel::ViewportPanels,
+    /// The last placement written to disk, so the save only happens on a real
+    /// change rather than every frame of a drag.
+    panels_saved: viewport_panel::ViewportPanels,
     /// Show the terrain's collision surface as a wireframe overlay (View menu toggle).
     show_terrain_collider: bool,
     /// Show EVERY mesh collider's wireframe (View menu). The selected mesh-collider node
@@ -2450,6 +2461,13 @@ struct Editor {
     /// volume is baked. Held here for the same reasons the GI bake is: the
     /// editor draws it, writes it, and hands it to a running game.
     nav_baked: Option<floptle_nav::NavMesh>,
+    /// The running game's navmesh, with its `nav.obstacle` holes in it — what
+    /// the overlay draws while playing, so it shows the surface the units are
+    /// actually using rather than the bake they started from. `None` when
+    /// nothing is carved, and dropped on Stop along with the holes themselves.
+    nav_carved: Option<floptle_nav::NavMesh>,
+    /// The carve count the snapshot above was taken at.
+    nav_carved_rev: u64,
     /// How long the last navmesh bake took, and how many triangles went into
     /// it, so the Inspector can say without gathering geometry every frame.
     nav_seconds: f32,
@@ -2892,6 +2910,8 @@ impl ApplicationHandler for Editor {
         self.play_tint = tint_rgb;
         self.grid = load_grid();
         self.game_gizmos = prefs::load_game_gizmos();
+        self.panels = prefs::load_viewport_panels();
+        self.panels_saved = self.panels;
         self.map_keys = map_keys::load_map_keys();
         self.engine_theme = load_theme_index(engine_theme_path(), ENGINE_THEMES.len());
         self.code_theme = load_theme_index(code_theme_path(), CODE_THEMES.len());

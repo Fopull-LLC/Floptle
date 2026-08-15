@@ -203,6 +203,63 @@ and the bake names it in the Console. A door that quietly does nothing is exactl
 the silent-failure shape this engine's own audit found again and again: the level
 looks right, the route goes the long way, and nothing anywhere says why.
 
+## Runtime obstacles
+
+```lua
+local crate = nav.obstacle(node.position, vec3(1, 2, 1))
+-- …later
+crate:remove()
+```
+
+A crate put down in a corridor blocks it. `nav.obstacle(centre, size)` cuts that
+box out of the baked surface in place: the polygons it covers are split around
+it, the portals through them are re-derived, and everything walking a route that
+went that way repaths. `remove()` gives the ground back.
+
+**It is an option, not a replacement.** The background rebake below is still
+what is always right, and it is the honest answer when a level has genuinely
+changed shape — a building came down, a bridge extended. Carving answers the
+narrower question, *something is standing here now*, and it earns its place by
+being much cheaper at it:
+
+| level  | polygons | full rebake | carve   | remove  |
+| ------ | -------- | ----------- | ------- | ------- |
+| 32 m   |      186 |    6.5 ms   | 0.011 ms | 0.005 ms |
+| 64 m   |      686 |   25.0 ms   | 0.037 ms | 0.017 ms |
+| 128 m  |    2 646 |  108.3 ms   | 0.159 ms | 0.059 ms |
+| 256 m  |   10 406 |  459.7 ms   | 0.618 ms | 0.238 ms |
+
+`cargo run --release -p floptle-nav --example carve_probe` prints that table, and
+it is the acceptance test rather than a nice-to-have: if the gap ever closes,
+carving should go and the rebake should do the work.
+
+**Every change re-derives the whole carved mesh from a pristine copy of the
+bake.** That sounds wasteful and is what makes it trustworthy. Removal is exact
+— taking the last obstacle away hands back the bake itself, so the same query
+answers what it answered before, to the bit — and two crates in one doorway are
+two boxes subtracted from one rectangle in one pass, with no order to get wrong.
+The expensive half of a bake, voxelising the world and flood-filling it, never
+runs.
+
+**A hole is snapped outward to whole navmesh cells.** Polygons carry grid
+columns as well as world bounds, and an arbitrary box would leave the two
+disagreeing. Outward is the direction to be wrong in: a crate blocking slightly
+more than its footprint is a crate, one blocking slightly less is a character
+walking through it. Read `obstacle.size` for what was actually cut.
+
+**Regions are recomputed where a carve bit.** A wall dropped across the only
+corridor splits an island in two, and `nav.reachable` answers from the region
+ids before it searches — so ids a carve has invalidated would be a lie it
+repeats. Only the islands that were touched are renumbered, so nothing else in
+the level changes colour in the overlay.
+
+**Nothing here is written to disk**, for the same reason a bake taken during
+Play is not: pressing Stop has to give the level back.
+
+There is deliberately no *moving* obstacle. Carving every frame is rebuilding
+every frame, which is the cost this exists to avoid — something that moves
+wants an agent, or an area filter, or a rebake.
+
 ## Keeping it
 
 A bake is written to `<scene>.<id>.fnav` beside the scene and loaded with it. It
@@ -325,10 +382,13 @@ finds out the hard way.
 - **No tiling.** A bake is one grid over the whole level, so a rebake is the
   whole level. That is fine at room and building scale and it is what streaming
   and parallel bakes would need first.
-- **No runtime obstacle carving.** Nothing carves a hole in an existing bake in
-  place. What exists instead is a whole rebake, in the background, which is a
-  fair answer at room and building scale and a wasteful one for a single crate
-  dropped on a big level.
+- **A carved obstacle is a box, and it does not move.** `nav.obstacle` cuts an
+  axis-aligned box out of the bake and `remove()` puts it back; there is no
+  rotated or shaped obstacle, and nothing follows a node. A thing that moves
+  wants an agent or a rebake, because carving per frame is rebuilding per frame.
+- **A carve does not survive a rebake.** The two are independent: a background
+  rebake replaces the mesh, and the holes cut in the one it replaced go with it.
+  A game that does both has to cut its obstacles again afterwards.
 - **Agents are not rolled back.** They step on the frame clock, not the tick
   clock, so a rollback-netcode game should drive movement itself and use the
   queries rather than the agent layer.

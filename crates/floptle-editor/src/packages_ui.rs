@@ -20,6 +20,12 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use floptle_package::{Index, Listing, Permission, Registry, Severity, Source};
 
+/// The browser's whole visual vocabulary: four type steps, one panel, one
+/// primary action, and the accent read from the user's theme (`floptle/0135`).
+/// Nothing in this file spells out a size, a weight or a chrome colour — that
+/// is the point of it living in [`crate::theme`].
+use crate::theme::look;
+
 /// What the last package load found, in the shape this tab reads it.
 ///
 /// A snapshot rather than a borrow of the extension host. The tab draws from
@@ -273,11 +279,12 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
         };
         if reg.packages.is_empty() {
             ui.add_space(8.0);
-            ui.label("No packages in this project yet.");
-            ui.small(
+            ui.label(look::section(ui, "No packages in this project yet."));
+            ui.label(look::fine(
+                ui,
                 "A package can hold editor tools, scripts your game can use, art — or all \
                  three. Add one from the ✚ Add tab, or write your own.",
-            );
+            ));
             return;
         }
 
@@ -294,7 +301,7 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                     .unwrap_or_else(|| entry.id.clone());
                 let expanded = state.expanded.as_deref() == Some(entry.id.as_str());
 
-                ui.group(|ui| {
+                look::panel(ui).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let mut on = entry.enabled;
                         if ui
@@ -320,10 +327,10 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                                 Err(e) => state.error = Some(e.to_string()),
                             }
                         }
-                        ui.strong(&name);
-                        ui.small(entry.version.to_string());
+                        ui.label(look::section(ui, name.as_str()));
+                        ui.label(look::data(ui, entry.version.to_string()));
                         if entry.source.is_linked() {
-                            ui.small("🔗 linked")
+                            ui.label(look::fine(ui, "🔗 linked"))
                                 .on_hover_text("read in place — edits show up on Reload");
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -370,14 +377,14 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                         return;
                     }
                     ui.separator();
-                    ui.small(&entry.id);
-                    ui.small(entry.source.describe());
+                    ui.label(look::data(ui, entry.id.as_str()));
+                    ui.label(look::fine(ui, entry.source.describe()));
                     if let Some(l) = &loaded {
                         if !l.manifest.description.is_empty() {
                             ui.label(&l.manifest.description);
                         }
                         if let Some(a) = &l.manifest.author {
-                            ui.small(format!("by {}", a.name));
+                            ui.label(look::fine(ui, format!("by {}", a.name)));
                         }
                         permissions_line(ui, &l.manifest.permissions);
                         let counts = (
@@ -389,9 +396,12 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                                 .dirs_that_exist(&l.root, floptle_package::DirKind::Assets)
                                 .len(),
                         );
-                        ui.small(format!(
-                            "{} editor script(s) · {} script folder(s) · {} asset folder(s)",
-                            counts.0, counts.1, counts.2
+                        ui.label(look::fine(
+                            ui,
+                            format!(
+                                "{} editor script(s) · {} script folder(s) · {} asset folder(s)",
+                                counts.0, counts.1, counts.2
+                            ),
                         ));
                         for sample in &l.manifest.samples {
                             ui.horizontal(|ui| {
@@ -419,12 +429,12 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                                     }
                                 }
                                 if !sample.description.is_empty() {
-                                    ui.small(&sample.description);
+                                    ui.label(look::fine(ui, sample.description.as_str()));
                                 }
                             });
                         }
                         if let Some(home) = &l.manifest.homepage
-                            && ui.link(home).clicked()
+                            && ui.link(look::data(ui, home.as_str())).clicked()
                         {
                             let _ = floptle_script::open_in_browser(home);
                         }
@@ -493,11 +503,12 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
 
 fn add_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, action: &mut PackagesAction) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            ui.heading("From a folder");
-            ui.small(
+            ui.label(look::section(ui, "From a folder"));
+            ui.label(look::fine(
+                ui,
                 "Copies the package into this project, so a teammate who clones the project \
                  gets it too.",
-            );
+            ));
             ui.horizontal(|ui| {
                 if ui.button("📂 Choose folder…").clicked()
                     && let Some(dir) = rfd::FileDialog::new().pick_folder()
@@ -534,8 +545,11 @@ fn add_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, actio
             });
 
             ui.add_space(12.0);
-            ui.heading("From a repository");
-            ui.small("Needs Git on your PATH. The revision can be a branch, a tag or a commit.");
+            ui.label(look::section(ui, "From a repository"));
+            ui.label(look::fine(
+                ui,
+                "Needs Git on your PATH. The revision can be a branch, a tag or a commit.",
+            ));
             egui::Grid::new("pkg_git").num_columns(2).show(ui, |ui| {
                 ui.label("URL");
                 ui.add(
@@ -582,11 +596,12 @@ fn add_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, actio
             }
 
             ui.add_space(12.0);
-            ui.heading("Write one");
-            ui.small(
+            ui.label(look::section(ui, "Write one"));
+            ui.label(look::fine(
+                ui,
                 "Scaffolds a package inside this project with a manifest and an editor script \
                  that already draws something.",
-            );
+            ));
             egui::Grid::new("pkg_new").num_columns(2).show(ui, |ui| {
                 ui.label("Id");
                 ui.add(
@@ -610,7 +625,7 @@ fn add_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, actio
             if !id.is_empty()
                 && let Err(e) = floptle_package::manifest::validate_id(&id)
             {
-                ui.small(egui::RichText::new(e).color(crate::theme::signal::WARN));
+                ui.label(look::fine_strong(ui, e).color(crate::theme::signal::WARN));
             }
             let ok = !id.is_empty()
                 && !name.is_empty()
@@ -665,12 +680,13 @@ fn browse_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, ac
     // Listing is automatic, so this is not a shop with a buyer. Said once,
     // plainly, where somebody is choosing — not as a banner on every row,
     // which is how a warning becomes wallpaper.
-    ui.small(
+    ui.label(look::fine(
+        ui,
         "Packages here are made and managed by their authors, not by Fopull. Listing is \
          automatic and the checks are structural — nobody has vouched for what a package \
          does. A package is code that runs in your editor, so trust them at your own \
          discretion, and read the reviews.",
-    );
+    ));
     ui.add_space(4.0);
 
     ui.horizontal(|ui| {
@@ -687,7 +703,7 @@ fn browse_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, ac
             state.catalogue = Catalogue::Fetching(fetch_index(url));
         }
         ui.separator();
-        ui.label("sort");
+        ui.label(look::fine(ui, "sort"));
         // A registry that does not count downloads is entitled not to, and the
         // catalogue is careful to leave the field absent rather than publish a
         // zero for everything. Offering "most downloaded" against that is a
@@ -721,37 +737,41 @@ fn browse_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, ac
 
     ui.collapsing("Registry", |ui| {
         ui.horizontal(|ui| {
-            ui.label("Catalogue");
+            ui.label(look::fine(ui, "Catalogue"));
             ui.add(
                 egui::TextEdit::singleline(&mut state.index_url)
+                    .font(egui::TextStyle::Monospace)
                     .hint_text(floptle_package::index::DEFAULT_INDEX_URL)
                     .desired_width(360.0),
             );
         });
-        ui.small("Point this at your own catalogue to browse a private registry.");
+        ui.label(look::fine(ui, "Point this at your own catalogue to browse a private registry."));
     });
     ui.separator();
 
     match &state.catalogue {
         Catalogue::Idle => {
             ui.add_space(8.0);
-            ui.label("Nothing fetched yet.");
-            if ui.button("🌐 Load the catalogue").clicked() {
+            ui.label(look::section(ui, "Nothing fetched yet."));
+            // The one primary action in an empty Browse tab: there is nothing
+            // else to do here until the catalogue arrives.
+            if ui.add(look::primary(ui, "🌐 Load the catalogue")).clicked() {
                 let url = state.index_url().to_string();
                 state.catalogue = Catalogue::Fetching(fetch_index(url));
             }
             return;
         }
         Catalogue::Fetching(_) => {
-            ui.label("Fetching…");
+            ui.label(look::fine(ui, "Fetching…"));
             return;
         }
         Catalogue::Failed(e) => {
-            ui.colored_label(crate::theme::signal::BAD, e.clone());
-            ui.small(
+            ui.label(look::body(e.clone()).color(crate::theme::signal::BAD));
+            ui.label(look::fine(
+                ui,
                 "Installing from a folder or a Git URL does not need the catalogue — the \
                  ✚ Add tab still works.",
-            );
+            ));
             return;
         }
         Catalogue::Ready(_) => {}
@@ -776,7 +796,7 @@ fn browse_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, ac
 
     filter_bar(ui, state, &cat_counts, &facet_counts);
     ui.horizontal(|ui| {
-        ui.small(format!("{} of {total}", rows.len()));
+        ui.label(look::fine(ui, format!("{} of {total}", rows.len())));
         if state.has_filters() && ui.small_button("clear filters").clicked() {
             state.clear_filters();
         }
@@ -785,9 +805,12 @@ fn browse_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, ac
 
     if rows.is_empty() {
         ui.add_space(12.0);
-        ui.label("Nothing matches.");
+        ui.label(look::section(ui, "Nothing matches."));
         if state.has_filters() {
-            ui.small("Try clearing a filter — the counts above show what each one would leave.");
+            ui.label(look::fine(
+                ui,
+                "Try clearing a filter — the counts above show what each one would leave.",
+            ));
         }
         return;
     }
@@ -839,7 +862,7 @@ fn filter_bar(
         }
     });
     ui.horizontal_wrapped(|ui| {
-        ui.small("has");
+        ui.label(look::fine(ui, "has"));
         for (f, n) in facets {
             let on = state.contains.contains(f);
             if chip(ui, format!("{} {n}", f.label()), on, *n) {
@@ -873,33 +896,35 @@ fn grid_cell(
     let open = state.expanded.as_deref() == Some(listing.id.as_str());
     let have = installed.find(&listing.id);
     ui.allocate_ui(egui::vec2(CELL, CELL + 76.0), |ui| {
-        egui::Frame::group(ui.style())
-            .fill(if open {
-                ui.style().visuals.selection.bg_fill.gamma_multiply(0.35)
-            } else {
-                ui.style().visuals.faint_bg_color
-            })
+        // The one panel treatment, and the accent marking the one that is
+        // open — rather than a second, different card for "selected".
+        let frame = if open { look::panel_selected(ui) } else { look::panel(ui) };
+        frame
             .show(ui, |ui| {
                 ui.set_width(CELL);
                 thumbnail(ui, state, listing);
                 ui.horizontal(|ui| {
-                    ui.strong(crate::assets::truncate_label(&listing.name, 20));
+                    ui.label(look::section(ui, crate::assets::truncate_label(&listing.name, 20)));
                     if have.is_some() {
-                        ui.small("✔").on_hover_text("installed in this project");
+                        ui.label(look::fine(ui, "✔").color(crate::theme::signal::GOOD))
+                            .on_hover_text("installed in this project");
                     }
                 });
                 if !listing.author.is_empty() {
-                    ui.small(format!("by {}", listing.author));
+                    ui.label(look::fine(ui, format!("by {}", listing.author)));
                 }
                 ui.horizontal(|ui| match &listing.rating {
                     Some(r) => {
-                        ui.small(stars(r.score));
-                        ui.small(format!("{}", r.count));
+                        // A rating is one of the four things colour is FOR, and
+                        // the count beside it is not — so the stars carry it
+                        // and the number stays quiet.
+                        ui.label(look::fine(ui, stars(r.score)).color(crate::theme::signal::GOOD));
+                        ui.label(look::fine(ui, format!("{}", r.count)));
                     }
                     // Not an empty star row: "nobody has said yet" and
                     // "everybody hated it" must not look alike.
                     None => {
-                        ui.small(egui::RichText::new("no reviews yet").weak());
+                        ui.label(look::fine(ui, "no reviews yet"));
                     }
                 });
                 ui.horizontal(|ui| {
@@ -985,27 +1010,27 @@ fn detail_panel(
 ) {
     let have = installed.find(&listing.id);
     ui.horizontal(|ui| {
-        ui.heading(&listing.name);
-        ui.small(egui::RichText::new(&listing.id).monospace());
+        ui.label(look::title(ui, listing.name.as_str()));
+        ui.label(look::data(ui, listing.id.as_str()));
     });
     ui.horizontal_wrapped(|ui| {
         if !listing.author.is_empty() {
-            ui.small(format!("by {}", listing.author));
+            ui.label(look::fine(ui, format!("by {}", listing.author)));
         }
         for c in &listing.categories {
-            ui.small(format!("{} {}", c.glyph(), c.label()));
+            ui.label(look::fine(ui, format!("{} {}", c.glyph(), c.label())));
         }
         if let Some(d) = &listing.updated {
-            ui.small(format!("updated {d}"));
+            ui.label(look::fine(ui, format!("updated {d}")));
         }
         // Absent is not zero — a registry that does not count installs must not
         // make every package on it look like one nobody has ever installed.
         if let Some(n) = listing.downloads {
-            ui.small(format!("{n} installs"));
+            ui.label(look::fine(ui, format!("{n} installs")));
         }
     });
     if !listing.description.is_empty() {
-        ui.label(&listing.description);
+        ui.label(look::body(listing.description.as_str()));
     }
     // What it holds. For an installed package this is counted off the files on
     // this disk — "5 models · 4 audio" says something a list of shelf names
@@ -1023,18 +1048,20 @@ fn detail_panel(
         .filter(|c| !c.is_empty());
     match &held {
         Some(c) => {
-            ui.small(
+            ui.label(look::fine(
+                ui,
                 c.facets()
                     .into_iter()
                     .map(|(f, n)| format!("{n} {}", f.label().to_lowercase()))
                     .collect::<Vec<_>>()
                     .join(" · "),
-            );
+            ));
         }
         None if !listing.contains.is_empty() => {
-            ui.small(
+            ui.label(look::fine(
+                ui,
                 listing.contains.iter().map(|f| f.label()).collect::<Vec<_>>().join(" · "),
-            );
+            ));
         }
         None => {}
     }
@@ -1113,7 +1140,10 @@ fn detail_panel(
                             let _ = floptle_script::open_in_browser(url);
                         }
                         if !m.caption.is_empty() {
-                            ui.small(crate::assets::truncate_label(&m.caption, 34));
+                            ui.label(look::fine(
+                                ui,
+                                crate::assets::truncate_label(&m.caption, 34),
+                            ));
                         }
                     });
                 }
@@ -1146,23 +1176,25 @@ fn detail_panel(
                 v
             } {
                 ui.horizontal(|ui| {
-                    ui.small(egui::RichText::new(r.version.to_string()).monospace());
+                    ui.label(look::data(ui, r.version.to_string()));
                     match &r.engine {
+                        // A compatibility warning is one of the four things
+                        // colour is for; a version that fits is not.
                         Some(req) if !req.matches(engine) => {
-                            ui.small(
-                                egui::RichText::new(format!("needs {}", req.as_str()))
+                            ui.label(
+                                look::data(ui, format!("needs {}", req.as_str()))
                                     .color(crate::theme::signal::WARN),
                             );
                         }
                         Some(req) => {
-                            ui.small(format!("needs {}", req.as_str()));
+                            ui.label(look::data(ui, format!("needs {}", req.as_str())));
                         }
                         None => {
-                            ui.small("any engine");
+                            ui.label(look::fine(ui, "any engine"));
                         }
                     }
                     if let Some(rev) = &r.rev {
-                        ui.small(egui::RichText::new(rev).monospace().weak());
+                        ui.label(look::data(ui, rev.as_str()).weak());
                     }
                 });
             }
@@ -1218,7 +1250,7 @@ fn lightbox(ui: &mut egui::Ui, state: &mut PackagesState) {
             }
             ui.horizontal(|ui| {
                 if !caption.is_empty() {
-                    ui.small(&caption);
+                    ui.label(look::fine(ui, caption.as_str()));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("✖ close").clicked() {
@@ -1253,20 +1285,26 @@ fn install_button(
             // question nobody should have to ask.
             let msg = format!("nothing for Floptle {engine} yet");
             if small {
-                ui.small(egui::RichText::new("—").weak()).on_hover_text(msg);
+                ui.label(look::fine(ui, "—")).on_hover_text(msg);
             } else {
-                ui.small(msg);
+                ui.label(look::fine(ui, msg));
             }
         }
         (Some(r), Some(entry)) if entry.version >= r.version => {
-            ui.small(format!("installed ({})", entry.version));
+            ui.label(look::fine(ui, "installed"));
+            ui.label(look::data(ui, entry.version.to_string()));
         }
         (Some(r), have) => {
             let label = if have.is_some() { "⟳ Update" } else { "⬇ Install" };
+            // **The** primary action on a package, and the reason the type and
+            // colour work exists: it was competing with a solid button for
+            // editing a review you had already written. In the grid it stays an
+            // ordinary small button — a screenful of cells cannot each hold the
+            // one loudest control on the page.
             let hit = if small {
                 ui.small_button(label).clicked()
             } else {
-                ui.button(label).clicked()
+                ui.add(look::primary(ui, label)).clicked()
             };
             if hit {
                 let scratch = std::env::temp_dir().join("floptle-package-clone");
@@ -1334,12 +1372,14 @@ fn gate_remote_install(
 /// deciding whether to trust it.
 fn permissions_line(ui: &mut egui::Ui, perms: &[Permission]) {
     if perms.is_empty() {
-        ui.small("Asks for nothing: no network, no files outside its own folder.");
+        ui.label(look::fine(ui, "Asks for nothing: no network, no files outside its own folder."));
         return;
     }
-    ui.small(egui::RichText::new("This package can:").strong());
+    // A permission is one of the four things colour is for — this is the line
+    // somebody decides on.
+    ui.label(look::fine_strong(ui, "This package can:").color(crate::theme::signal::WARN));
     for p in perms {
-        ui.small(format!("• {}", p.describe()));
+        ui.label(look::fine_strong(ui, format!("• {}", p.describe())));
     }
 }
 
@@ -1391,14 +1431,16 @@ fn account_line(ui: &mut egui::Ui, ctx: &PkgCtx<'_>) {
                 .session()
                 .and_then(|s| s.name.or(s.email))
                 .unwrap_or_else(|| "your account".into());
-            ui.small(format!("signed in as {who}"));
+            ui.label(look::fine(ui, format!("signed in as {who}")));
             if ui.small_button("sign out").clicked() {
                 account.sign_out();
             }
         }
         floptle_account::Phase::Waiting { user_code, url, .. } => {
-            ui.small(format!("enter {user_code} at"));
-            if ui.link(&url).clicked() {
+            ui.label(look::fine(ui, "enter"));
+            ui.label(look::data(ui, user_code.clone()));
+            ui.label(look::fine(ui, "at"));
+            if ui.link(look::data(ui, url.clone())).clicked() {
                 let _ = floptle_script::open_in_browser(&url);
             }
             if ui.small_button("cancel").clicked() {
@@ -1407,10 +1449,10 @@ fn account_line(ui: &mut egui::Ui, ctx: &PkgCtx<'_>) {
         }
         floptle_account::Phase::Starting => {
             ui.spinner();
-            ui.small("signing in…");
+            ui.label(look::fine(ui, "signing in…"));
         }
         floptle_account::Phase::SignedOut | floptle_account::Phase::Failed(_) => {
-            ui.small("not signed in");
+            ui.label(look::fine(ui, "not signed in"));
             if ui.small_button("sign in").on_hover_text(
                 "the same account as the Hub — signing in here signs you in there too",
             ).clicked() {
@@ -1442,36 +1484,43 @@ fn reviews_section(
         state.reviews = ReviewsState::Fetching(fetch_reviews(url));
     }
 
+    ui.label(look::section(ui, "Reviews"));
     match &state.reviews {
         ReviewsState::Fetching(_) => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.small("reading reviews…");
+                ui.label(look::fine(ui, "reading reviews…"));
             });
         }
         ReviewsState::Failed(e) => {
-            ui.small(format!("no reviews to show — {e}"));
+            ui.label(look::fine(ui, format!("no reviews to show — {e}")));
         }
+        // Its own state, never an empty star row: "nobody has said yet" and
+        // "everybody hated it" must not look alike.
         ReviewsState::Ready(r) if r.reviews.is_empty() => {
-            ui.small("Nobody has reviewed this yet.");
+            ui.label(look::fine(ui, "Nobody has reviewed this yet."));
         }
         ReviewsState::Ready(r) => {
             egui::ScrollArea::vertical().max_height(160.0).id_salt(("reviews", id)).show(ui, |ui| {
                 for review in &r.reviews {
                     ui.horizontal(|ui| {
-                        ui.small(stars(review.rating as f32));
-                        ui.small(&review.author);
+                        ui.label(
+                            look::fine(ui, stars(review.rating as f32))
+                                .color(crate::theme::signal::GOOD),
+                        );
+                        ui.label(look::fine(ui, review.author.as_str()));
                         // The version is the part the editor knew for certain,
                         // and a review of 1.0.0 is not a review of 3.0.0.
                         if !review.version.is_empty() {
-                            ui.small(format!("· v{}", review.version));
+                            ui.label(look::fine(ui, "·"));
+                            ui.label(look::data(ui, format!("v{}", review.version)));
                         }
                         if review.edited {
-                            ui.small("· edited");
+                            ui.label(look::fine(ui, "· edited"));
                         }
                     });
                     if !review.body.is_empty() {
-                        ui.label(&review.body);
+                        ui.label(look::body(review.body.as_str()));
                     }
                     ui.add_space(4.0);
                 }
@@ -1482,7 +1531,10 @@ fn reviews_section(
 
     ui.add_space(4.0);
     let Some(version) = installed_version else {
-        ui.small("Install and enable this package to review it, then the button appears here.");
+        ui.label(look::fine(
+            ui,
+            "Install and enable this package to review it, then the button appears here.",
+        ));
         return;
     };
 
@@ -1518,6 +1570,14 @@ fn reviews_section(
                 "opens fopull.com to review this package — it appears here once it is posted",
             ),
         };
+        // An ORDINARY button. It was the loudest control on a package — a
+        // solid accent slab for editing a review you had already written, next
+        // to an outlined Install — which is precisely backwards. There is one
+        // primary action here and it is Install, further up.
+        //
+        // The "open page ↗" that used to sit beside this went with it: the same
+        // link, to the same page, is already in the action row under the
+        // gallery, and two identical controls in one view is one too many.
         if ui.button(label).on_hover_text(hint).clicked() {
             let _ = floptle_script::open_in_browser(&floptle_package::index::review_page_for(id));
             // Whatever gets posted over there is not in the copy fetched over
@@ -1525,28 +1585,24 @@ fn reviews_section(
             // that predates the review someone just wrote.
             state.reviews = ReviewsState::Idle;
         }
-        if ui
-            .small_button("open page ↗")
-            .on_hover_text("this package on fopull.com — every version and every review")
-            .clicked()
-        {
-            let _ = floptle_script::open_in_browser(&floptle_package::index::package_page_for(id));
-        }
     });
     match &mine {
         Some(v) if v.version == version => {
-            ui.small(format!("you reviewed v{version}"));
+            ui.label(look::fine(ui, format!("you reviewed v{version}")));
         }
         // A review of 1.0.0 says very little about the 3.0.0 in the project,
         // and that is worth saying to the person who wrote it too.
         Some(v) if !v.version.is_empty() => {
-            ui.small(format!("you reviewed v{} — you have v{version} now", v.version));
+            ui.label(look::fine(
+                ui,
+                format!("you reviewed v{} — you have v{version} now", v.version),
+            ));
         }
         Some(_) => {
-            ui.small("you reviewed this");
+            ui.label(look::fine(ui, "you reviewed this"));
         }
         None => {
-            ui.small(format!("you have v{version} installed and enabled"));
+            ui.label(look::fine(ui, format!("you have v{version} installed and enabled")));
         }
     }
 }

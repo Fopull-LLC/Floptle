@@ -277,6 +277,32 @@ pub(crate) fn open_external_editor(cmd: &str, project_root: &Path, file: &str, l
     }
 }
 
+// --- the Scene view's floating panels ---------------------------------------
+
+pub(crate) fn viewport_panels_path() -> Option<PathBuf> {
+    floptle_config_dir().map(|d| d.join("viewport_panels.ron"))
+}
+
+/// Where the Scene view's overlay panels sit. Per-user, because it is a fact
+/// about how somebody likes to work, and persisted because moving your tool
+/// palette every session is worse than it being in the wrong place once.
+pub(crate) fn load_viewport_panels() -> crate::viewport_panel::ViewportPanels {
+    viewport_panels_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| ron::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn save_viewport_panels(p: &crate::viewport_panel::ViewportPanels) {
+    let Some(path) = viewport_panels_path() else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(s) = ron::ser::to_string_pretty(p, ron::ser::PrettyConfig::default()) {
+        let _ = std::fs::write(path, s);
+    }
+}
+
 // --- the 🖼 image canvas's overlays ----------------------------------------
 
 /// How the image canvas draws everything that is **not** your art: the
