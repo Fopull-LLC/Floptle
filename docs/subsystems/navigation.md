@@ -154,6 +154,18 @@ is the animation a script plays while an agent reports crossing it. `agent.link`
 is the link's name for the whole traversal and `agent.linkProgress` runs 0 to 1,
 so an animation driven from it cannot disagree with the movement.
 
+**`duration` is how long crossing takes, in seconds.** Zero means "at walking
+speed", which is right for a vault and wrong for a lift — a slow platform wants
+its own number, and `linkProgress` then runs at that rate rather than at the
+speed the character walks. The pace is fixed when the crossing starts, so a
+`speed` change mid-climb cannot make an animation drift out of step with it.
+
+**Cost and duration are different questions.** Cost is what the *router* pays to
+consider the link, in metres of ordinary walking; duration is what the
+*character* spends crossing it. A teleporter is cheap and instant, a long ladder
+is cheap to choose and slow to climb, and a guarded door can be made expensive
+without becoming slow.
+
 `nav.link(name, false)` shuts one. Every route that used it repaths, in the same
 frame, with nothing rebaked — and anybody already halfway across finishes
 crossing, because halfway up a ladder is the one state nothing downstream can
