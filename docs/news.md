@@ -5,13 +5,13 @@ lines: `nav.agent(node, { speed = 6 })`, then `unit:moveTo(point)`. It finds its
 own route, walks it smoothly rather than corner to corner, goes around the units
 beside it, slows down at the end, and says what it is doing — and there is no
 step function to call, because the whole crowd is advanced for you each frame.
-Sixty units through one two-metre doorway all get through. Under **✚ Add ▸
-Navigation** there are three new nodes: a **Nav Mesh** that bakes what a
-character would collide with (tick auto bounds and it measures the level for
-you), **Nav Links** for ladders, jumps, doors and lifts — `nav.link("front
-door", false)` shuts one and everybody walking to it finds another way, nothing
-rebaked — and **Nav Areas** that paint ground as `mud`, `water` or `road` so one
-bake serves a guard who takes the road and a zombie who wades the river. A
+Sixty units through one two-metre doorway all get through. The **✚ Add** menu
+has three new nodes: a **Nav Mesh** that bakes what a character would collide
+with (tick auto bounds and it measures the level for you), **Nav Links** for
+ladders, jumps, doors and lifts — `nav.link("front door", false)` shuts one and
+everybody walking to it finds another way, nothing rebaked — and **Nav Areas**
+that paint ground as `mud`, `water` or `road` so one bake serves a guard who
+takes the road and a zombie who wades the river. A
 building placed *during* play still needs a rebake; that is the next piece.
 Alongside it: **undo hands you back the node you were editing** instead of
 deselecting it, and selecting is now an undo step of its own, so Ctrl+Z retraces
