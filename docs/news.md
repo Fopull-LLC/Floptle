@@ -1,5 +1,27 @@
 ## Just shipped
 
+**v0.61.0 "Once Is Enough"** — bake a navmesh once and it stays baked. It was
+always saved beside the scene, but v0.60 changed what that file holds, so every
+bake made before it stopped being readable — and the editor reported that as *no
+bake yet*, which is what a scene nobody has baked looks like. Now a bake file
+says which version wrote it, the Nav Mesh node names the file the bake in hand
+came from, and **a bake the engine cannot read is simply made again, in the
+background**, because a bake is a function of the level and the level is right
+there. Alongside it, a switch for **bake again when the level changes** — off by
+default, since a finished level's bake never needs doing twice, and on it watches
+what it would bake, waits for it to stop moving, and bakes on another thread, so
+a building placed *during* play turns up in the navmesh without a hitch in the
+frame rate. A bake made while your game runs never touches your project: press
+Stop and your level's own navmesh is back. There is one more silent failure gone
+with them — **a Nav Mesh box smaller than your level** bakes perfectly and gives
+you a navmesh of one corner of the map, so the bake now says *the volume covers
+24 × 32 m of a level that spans 846 × 538 m*, and `agent.offMesh` tells a script
+the difference between "it cannot get there" and "there is no navmesh there".
+**View ▸ Navmesh** draws your Nav Links where the bake resolved them — cyan for
+working, grey for shut, **red for one whose end missed the floor** — and paints
+your areas in their own colour. The RTS example scripts pathfind now, and still
+work in a scene with no navmesh at all.
+
 **v0.60.0 "Find Your Way"** — your units walk the level themselves now, in three
 lines: `nav.agent(node, { speed = 6 })`, then `unit:moveTo(point)`. It finds its
 own route, walks it smoothly rather than corner to corner, goes around the units
