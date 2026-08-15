@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 44
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 45
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 23
 - [vectors, directions & easing](#vectors-directions--easing) — 47
@@ -85,6 +85,10 @@ How far across a link it is, 0 to 1 — nil when it is not on one. What a vault 
 ### `agent.moving`
 
 True while it still has somewhere to be — walking or crossing a link.
+
+### `agent.offMesh`
+
+True when the order named a place the navmesh does not cover — as opposed to a place it cannot reach. Nearly always a Nav Mesh volume smaller than the level; ordering it somewhere else nearby will not help.
 
 ### `agent.pos`
 

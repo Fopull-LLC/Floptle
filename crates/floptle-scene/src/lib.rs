@@ -984,6 +984,8 @@ pub enum MatterDoc {
         cell_size: f32,
         #[serde(default = "on")]
         enabled: bool,
+        #[serde(default)]
+        auto_rebake: bool,
     },
     /// A nav link ([`Matter::NavLink`]) — a ladder, a jump, a door. A
     /// hand-written `NavLink()` is a one-way step two metres forward.
@@ -1445,6 +1447,7 @@ impl From<&Matter> for MatterDoc {
                 step_height,
                 cell_size,
                 enabled,
+                auto_rebake,
             } => MatterDoc::NavMesh {
                 id: *id,
                 half_extents: *half_extents,
@@ -1456,6 +1459,7 @@ impl From<&Matter> for MatterDoc {
                 step_height: *step_height,
                 cell_size: *cell_size,
                 enabled: *enabled,
+                auto_rebake: *auto_rebake,
             },
             Matter::NavLink { id, to, bidirectional, cost, area, duration, enabled } => {
                 MatterDoc::NavLink {
@@ -1698,6 +1702,7 @@ impl MatterDoc {
                 step_height,
                 cell_size,
                 enabled,
+                auto_rebake,
             } => Matter::NavMesh {
                 id: *id,
                 half_extents: *half_extents,
@@ -1713,6 +1718,7 @@ impl MatterDoc {
                 step_height: step_height.max(0.0),
                 cell_size: cell_size.max(0.01),
                 enabled: *enabled,
+                auto_rebake: *auto_rebake,
             },
             MatterDoc::NavLink { id, to, bidirectional, cost, area, duration, enabled } => {
                 Matter::NavLink {

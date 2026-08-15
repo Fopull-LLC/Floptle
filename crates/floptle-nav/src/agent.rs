@@ -220,6 +220,16 @@ pub struct Agent {
     /// doorway is progress that hasn't happened YET, not a unit that is stuck —
     /// the watchdog counts it at a fraction of the rate.
     yielding: bool,
+    /// The last search could not find one end of the order on the navmesh.
+    ///
+    /// Separate from [`AgentState::Blocked`] because it is a different problem
+    /// with a different fix. Blocked is a level question — a shut door, a wall,
+    /// a crowd — and the answer is somewhere else to walk. This is a question
+    /// about the navmesh itself: the order names a place the bake does not
+    /// cover, which is usually a volume smaller than the level rather than
+    /// anything to do with the character. Both look identical from outside (a
+    /// character standing still), so the difference has to be readable.
+    off_mesh: bool,
 }
 
 impl Agent {
@@ -240,6 +250,7 @@ impl Agent {
             stalled: 0.0,
             since_cut: 0.0,
             yielding: false,
+            off_mesh: false,
         }
     }
 
@@ -309,6 +320,16 @@ impl Agent {
     /// Where it was told to go, if anywhere.
     pub fn target(&self) -> Option<[f32; 3]> {
         self.target
+    }
+
+    /// Whether the last search found both ends of the order on the navmesh.
+    ///
+    /// True is not "somewhere hard to reach" — it is "somewhere the navmesh does
+    /// not describe", which is nearly always a bake that covers less than the
+    /// level. Worth telling apart from an ordinary block: no amount of walking
+    /// fixes it, and no amount of re-ordering will either.
+    pub fn target_off_mesh(&self) -> bool {
+        self.off_mesh
     }
 
     /// Whether the route it is walking actually reaches the target. False means
@@ -592,6 +613,7 @@ impl Crowd {
             let snap = mesh.settings.agent_height.max(agent.params.radius).max(0.5);
             match mesh.path_with(agent.pos, target, snap, &agent.params.filter) {
                 Some(path) => {
+                    agent.off_mesh = false;
                     agent.complete = path.complete;
                     agent.crossings = path.crossings;
                     agent.path = path.points;
@@ -613,9 +635,13 @@ impl Crowd {
                     }
                 }
                 None => {
-                    // Neither end is on the navmesh at all: nothing to walk, and
+                    // An end is not on the navmesh at all: nothing to walk, and
                     // saying so beats walking towards it in a straight line
-                    // through the scenery.
+                    // through the scenery. Which end, and why, is a question
+                    // about the bake rather than the character — so it is
+                    // recorded rather than folded into "blocked", where it would
+                    // read as a level that is merely hard to cross.
+                    agent.off_mesh = true;
                     agent.path.clear();
                     agent.crossings.clear();
                     agent.complete = false;
@@ -1243,6 +1269,39 @@ mod tests {
         assert!(!a.route_complete(), "the far island is not reachable");
         assert_eq!(a.state(), AgentState::Blocked, "at {:?}", a.pos);
         assert!(a.pos[0] > 2.5, "it should have walked to the near edge first: {:?}", a.pos);
+    }
+
+    /// "Nowhere to walk" and "nowhere near the navmesh" are the same picture — a
+    /// character standing still — and completely different problems. One is the
+    /// level; the other is a bake that covers less than the level, which is what
+    /// a hand-sized volume on a big floor produces.
+    #[test]
+    fn an_order_off_the_navmesh_is_told_apart_from_one_it_merely_cannot_reach() {
+        let mut tris = slab(0.0, 0.0, 4.0, 4.0, 0.0);
+        tris.extend(slab(20.0, 0.0, 4.0, 4.0, 0.0));
+        let mesh = bake(&tris, &settings()).unwrap();
+        let mut crowd = Crowd::default();
+
+        // Another island: real ground, no way there.
+        let cut_off = crowd.add(AgentParams::default(), [1.5, 0.0, 2.0]);
+        crowd.agent_mut(cut_off).unwrap().move_to([22.0, 0.0, 2.0]);
+        // Open country a long way from anything baked.
+        let nowhere = crowd.add(AgentParams::default(), [1.5, 0.0, 2.0]);
+        crowd.agent_mut(nowhere).unwrap().move_to([400.0, 0.0, 400.0]);
+
+        run(&mut crowd, &mesh, 15.0);
+        let a = crowd.agent(cut_off).unwrap();
+        assert_eq!(a.state(), AgentState::Blocked);
+        assert!(!a.target_off_mesh(), "that island is baked ground, just unreachable");
+        let b = crowd.agent(nowhere).unwrap();
+        assert_eq!(b.state(), AgentState::Blocked);
+        assert!(b.target_off_mesh(), "there is no navmesh anywhere near where it was sent");
+
+        // And it clears the moment an order it can answer arrives — this is a
+        // fact about the last search, not a state to get stuck in.
+        crowd.agent_mut(nowhere).unwrap().move_to([2.5, 0.0, 2.5]);
+        run(&mut crowd, &mesh, 2.0);
+        assert!(!crowd.agent(nowhere).unwrap().target_off_mesh());
     }
 
     /// Two dozen units sent to one spot must end up standing around it, not

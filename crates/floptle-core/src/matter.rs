@@ -1674,6 +1674,16 @@ pub enum Matter {
         /// Master switch. Off keeps the volume, its settings and its bake, and
         /// stops anything pathing on it.
         enabled: bool,
+        /// Bake again by itself when the level under it changes.
+        ///
+        /// **Off by default, and that is the common case**: a bake is a file
+        /// saved beside the scene and loaded with it, so a level that is not
+        /// being edited never needs baking twice. Turn this on while building —
+        /// or in a game that puts buildings down while it runs — and the volume
+        /// notices what it would bake changing, waits for it to settle, and
+        /// bakes **on another thread** so the editor and the game keep their
+        /// frame rate.
+        auto_rebake: bool,
     },
     /// A **nav link**: a way across that is not walking.
     ///
@@ -1905,6 +1915,10 @@ impl Matter {
             step_height: 0.75,
             cell_size: 0.15,
             enabled: true,
+            // A static bake, because that is what most levels are. Somebody
+            // building a level turns this on; nobody should have to turn it off
+            // to stop their machine baking a finished level over and over.
+            auto_rebake: false,
         }
     }
 

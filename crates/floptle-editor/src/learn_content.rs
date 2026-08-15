@@ -739,10 +739,29 @@ level is being measured for:
 Press **⬚ Bake**. The Console says how many polygons over how many square
 metres, and the Scene view draws the walkable surface over your level.
 
+## You only do this once
+
+The bake is saved beside the scene and loaded with it — the Inspector names the
+file. Reopening the project does not need another bake, and if you ever see one
+go missing the Console will say which file and why rather than leaving you to
+guess.
+
+While you are still building the level, tick **bake again when the level
+changes**: the volume watches what it would bake, waits for it to stop moving,
+and bakes on another thread, so the editor keeps its frame rate. Leave it off
+for a finished level.
+
 ## Read the result before you trust it
 
 - **The shape should look like the floor you can actually stand on** — pulled
   back from every wall by the radius, and absent under things you can't walk on.
+- **It should cover the whole level.** A new Nav Mesh node has **fit the box to
+  what it finds** ticked, which measures your geometry instead of trusting a
+  number — leave it that way unless you deliberately want one region baked. A
+  box smaller than the level bakes perfectly and produces a navmesh of one
+  corner of the map, and characters walk to its invisible edge and stop. If you
+  size it by hand and it misses anything, the Console and the Inspector say so
+  with both measurements.
 - **\"N separate areas\"** in the Inspector means the level is in islands: a
   character cannot walk between them. Usually that's a doorway narrower than
   the character, and it's better to find out here than to find out from a unit
@@ -825,10 +844,15 @@ walks it.
 
 - **It doesn't move at all.** Either there's no bake (`nav.ready()` is false),
   or the click landed somewhere off the mesh. `nav.nearest` returning nil is
-  the tell.
+  the tell, and so is `agent.offMesh`.
 - **It walks a bit and stops.** That's `blocked`, and it's a real answer: the
   goal is on another island, or it's made no progress for a few seconds.
   `agent.state` says which.
+- **`blocked` everywhere past a certain point on the map.** Check
+  `agent.offMesh`: true means you're ordering it somewhere the navmesh doesn't
+  describe, which is a bake that covers less than the level rather than
+  anything about the unit. Widen the Nav Mesh box (or tick **fit the box to
+  what it finds**) and bake again.
 - **It walks into a wall you built.** That wall isn't collidable, so the bake
   never saw it. Tick the box and bake again.
 
@@ -838,6 +862,8 @@ walks it.
 - `moving` — walking.
 - `arrived` — got there. This is the flag to hang \"and then attack\" off.
 - `blocked` — gave up, and it will tell you rather than standing there silently.
+  `agent.offMesh` beside it separates \"can't get there\" from \"there is no
+  navmesh there\".
 - `crossing` — on a link. The next step is about those.
 ",
             code: None,

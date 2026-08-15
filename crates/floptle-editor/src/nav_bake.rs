@@ -69,6 +69,20 @@ pub(crate) struct NavStatus {
     pub triangles: usize,
     /// Settings that will quietly do something other than what they say.
     pub advice: Option<String>,
+    /// The file this bake came off disk from, shown as a plain relative path.
+    ///
+    /// "My bake vanished when I reopened the project" is a report nobody can act
+    /// on — not the person making it and not whoever reads it — until the panel
+    /// says whether a file was found and which one. It is one line and it turns
+    /// a mystery into a fact.
+    pub file: Option<String>,
+    /// A bake is running on another thread right now.
+    pub baking: bool,
+    /// The last bake's box left part of the level out — see
+    /// [`coverage_warning`]. Carried to the Inspector as well as the Console
+    /// because it is a fact about the bake you are looking at, and the panel is
+    /// where somebody looks when a character will not walk somewhere.
+    pub coverage: Option<String>,
 }
 
 /// What the Inspector should say about the navmesh this frame.
@@ -80,11 +94,15 @@ pub(crate) struct NavStatus {
 pub(crate) fn nav_status(
     world: &World,
     node: Option<&Matter>,
-    baked: Option<&NavMesh>,
-    seconds: f32,
-    triangles: usize,
+    held: NavHeld<'_>,
+    project_root: &std::path::Path,
 ) -> NavStatus {
-    let mut st = NavStatus { seconds, triangles, ..Default::default() };
+    let NavHeld { mesh: baked, seconds, triangles, file, baking, coverage } = held;
+    let mut st =
+        NavStatus { seconds, triangles, baking, coverage: coverage.cloned(), ..Default::default() };
+    st.file = file.map(|p| {
+        p.strip_prefix(project_root).unwrap_or(p).to_string_lossy().replace('\\', "/")
+    });
     let Some(m) = node else { return st };
     let Matter::NavMesh { layers, .. } = m else { return st };
 
@@ -112,10 +130,65 @@ pub(crate) fn nav_status(
     st
 }
 
+/// What the editor is holding, as opposed to what the world says.
+///
+/// One argument rather than five, because they travel together and always will:
+/// they are all facts about the bake in hand.
+pub(crate) struct NavHeld<'a> {
+    pub mesh: Option<&'a NavMesh>,
+    pub seconds: f32,
+    pub triangles: usize,
+    /// Where it came from on disk, if it was loaded or saved.
+    pub file: Option<&'a std::path::Path>,
+    /// One is running on another thread right now.
+    pub baking: bool,
+    /// What the last bake's box left out, if anything.
+    pub coverage: Option<&'a String>,
+}
+
 /// Everything a bake needs from the scene, gathered before anything is built.
 pub(crate) struct Gathered {
     pub tris: Vec<Tri>,
     pub sources: usize,
+}
+
+/// Why a bake is running, which is the whole of what it says when it finishes.
+///
+/// Three different silences are wanted here, so this is an enum rather than a
+/// `quiet` flag: a bake somebody asked for reports what it made, a bake the
+/// watcher started says nothing at all, and a bake that replaces a file this
+/// engine could not read says so once — because that one happened without
+/// anybody asking, and unexplained work is indistinguishable from a bug.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum BakeReason {
+    /// Somebody pressed Bake.
+    Asked,
+    /// The level changed and stopped changing, with `auto_rebake` on.
+    Watched,
+    /// The `.fnav` beside the scene could not be read, so it is being made
+    /// again from the level it describes.
+    Reread,
+}
+
+/// A bake running on another thread, and everything needed to put it in when it
+/// lands.
+///
+/// The measurements are carried rather than re-read, because the world moves on
+/// while a bake runs: applying the box that *this* bake measured, to the node it
+/// was measured for, is the only version of this that stays true.
+pub(crate) struct NavJob {
+    rx: std::sync::mpsc::Receiver<(Option<NavMesh>, f32)>,
+    entity: Entity,
+    id: u32,
+    triangles: usize,
+    half: Vec3,
+    shift: Option<Vec3>,
+    areas: usize,
+    settings: NavSettings,
+    /// What the level hashed to when this started — see
+    /// [`crate::Editor::nav_inputs_stamp`].
+    stamp: u64,
+    reason: BakeReason,
 }
 
 /// Whether `e` is level geometry for this volume's purposes.
@@ -540,6 +613,73 @@ pub(crate) fn clip(tris: Vec<Tri>, half: Vec3) -> Vec<Tri> {
         .collect()
 }
 
+/// What a hand-sized box leaves out of the level it was pointed at, if enough
+/// to matter.
+///
+/// **A navmesh that covers one corner of the map looks exactly like a navmesh.**
+/// It bakes cleanly, reports a healthy polygon count, draws a convincing
+/// overlay, and characters walk on it — right up to the invisible edge, where
+/// they stop, because off the bake there is nowhere to go and nothing anywhere
+/// says why. That is the shape of failure this engine keeps meeting: not a
+/// crash, a plausible result that answers a smaller question than the one asked.
+///
+/// So the bake measures what it was given, against the box it was told to use,
+/// and says the two numbers out loud. Only when the gap is real: a level always
+/// spills a little past a box drawn round it, and a warning that cries at 2%
+/// gets turned off in a week.
+///
+/// `None` when the box covers the level, and when there is nothing to compare.
+pub(crate) fn coverage_warning(tris: &[Tri], half: Vec3) -> Option<String> {
+    if tris.is_empty() {
+        return None;
+    }
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for t in tris {
+        for v in [t.a, t.b, t.c] {
+            for i in 0..3 {
+                lo[i] = lo[i].min(v[i]);
+                hi[i] = hi[i].max(v[i]);
+            }
+        }
+    }
+    // Triangles arrive in the volume's own space, so the box is centred on the
+    // origin and its corners are ±half.
+    let outside = tris
+        .iter()
+        .filter(|t| {
+            let (l, h) = t.bounds();
+            !(l[0] <= half.x
+                && h[0] >= -half.x
+                && l[1] <= half.y
+                && h[1] >= -half.y
+                && l[2] <= half.z
+                && h[2] >= -half.z)
+        })
+        .count();
+    if outside == 0 {
+        return None;
+    }
+    // The floor plan is what people mean by "the level" — a box that is short is
+    // a different mistake with a different fix (its own advice, below), and
+    // mixing them into one warning makes both easier to ignore.
+    let (span_x, span_z) = (hi[0] - lo[0], hi[2] - lo[2]);
+    let (box_x, box_z) = (half.x * 2.0, half.z * 2.0);
+    let short = span_x > box_x * 1.1 || span_z > box_z * 1.1;
+    let mostly = outside * 4 >= tris.len(); // a quarter of the level or more
+    if !short && !mostly {
+        return None;
+    }
+    let tall = hi[1] - lo[1] > half.y * 2.0 * 1.1;
+    Some(format!(
+        "the volume covers {box_x:.0} × {box_z:.0} m of a level that spans {span_x:.0} × \
+         {span_z:.0} m{}, so {outside} of {} triangles were left out of it. Characters cannot path \
+         where there is no bake — they walk to the edge of it and stop. Tick “fit the box to what \
+         it finds” on the Nav Mesh node, or size the box to cover the ground you want walkable.",
+        if tall { " and stands taller than the box" } else { "" },
+        tris.len(),
+    ))
+}
+
 /// Bake, and say how long it took — with the volumes that paint or carve the
 /// ground, the links that join it up, and the names for the areas the volumes
 /// used.
@@ -556,24 +696,99 @@ pub(crate) fn bake_with(
     (mesh, t.elapsed().as_secs_f32())
 }
 
-/// Write a bake.
+/// What a `.fnav` starts with, so a file can say what it is before it says
+/// anything else.
+const MAGIC: &[u8; 4] = b"FNAV";
+
+/// The format this engine writes.
+///
+/// **Postcard is not self-describing**, so `#[serde(default)]` buys nothing
+/// here: adding one field to [`NavMesh`] changes the byte layout, and every file
+/// written before it becomes unreadable. That is not hypothetical — v0.60 added
+/// areas and links, and every bake made before it stopped loading. Silently,
+/// because the reader swallowed the error and answered "there is no bake", which
+/// is indistinguishable from never having baked at all. A whole level's bake
+/// disappearing on reopen with the editor reporting nothing is the worst failure
+/// this file has.
+///
+/// So a bake carries its version, and a reader that does not recognise one
+/// **says so, by name, with what to do about it**. Bump this whenever
+/// `NavMesh`'s serialized shape changes.
+const VERSION: u32 = 2;
+
+/// Why a bake could not be read. Every variant is something somebody can act on,
+/// which is the whole reason this is not an `Option`.
+#[derive(Debug)]
+pub(crate) enum LoadError {
+    /// No file. The ordinary state of a scene nobody has baked.
+    Missing,
+    /// Written by a different version of the engine.
+    Version { found: Option<u32> },
+    /// There, recognised, and damaged.
+    Corrupt(String),
+    Io(String),
+}
+
+impl LoadError {
+    /// What to tell somebody who was expecting their bake to be there — or
+    /// `None` when there is genuinely nothing to say.
+    pub(crate) fn message(&self, path: &std::path::Path) -> Option<String> {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match self {
+            // Not an event: a scene with no navmesh is most scenes.
+            LoadError::Missing => None,
+            LoadError::Version { found } => Some(format!(
+                "navmesh: {name} was baked by {} and cannot be read by this one. Nothing is wrong \
+                 with your level — press Bake on the Nav Mesh node to make it again.",
+                match found {
+                    Some(v) => format!("format {v} of the engine"),
+                    None => "an older version of the engine".into(),
+                }
+            )),
+            LoadError::Corrupt(why) => Some(format!(
+                "navmesh: {name} is damaged and could not be read ({why}). Press Bake to make it \
+                 again."
+            )),
+            LoadError::Io(why) => Some(format!("navmesh: could not read {name}: {why}")),
+        }
+    }
+}
+
+/// Write a bake, version first.
 pub(crate) fn save(path: &std::path::Path, mesh: &NavMesh) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let bytes = postcard::to_stdvec(mesh)
+    let mut bytes = Vec::with_capacity(1 << 16);
+    bytes.extend_from_slice(MAGIC);
+    bytes.extend_from_slice(&VERSION.to_le_bytes());
+    let body = postcard::to_stdvec(mesh)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    bytes.extend_from_slice(&body);
     std::fs::write(path, bytes)
 }
 
-/// Read a bake back.
-///
-/// A file that will not parse comes back as `None` rather than an error the
-/// caller has to decide about: a stale or truncated build artefact means "there
-/// is no bake", and the answer to that is to bake again.
-pub(crate) fn load(path: &std::path::Path) -> Option<NavMesh> {
-    let bytes = std::fs::read(path).ok()?;
-    postcard::from_bytes(&bytes).ok()
+/// Read a bake back, or say why not.
+pub(crate) fn load(path: &std::path::Path) -> Result<NavMesh, LoadError> {
+    if !path.exists() {
+        return Err(LoadError::Missing);
+    }
+    let bytes = std::fs::read(path).map_err(|e| LoadError::Io(e.to_string()))?;
+    // No header at all is a bake from before this file had one. There is
+    // nothing to migrate — the fields it lacks were never written — so the only
+    // honest thing to do is say which file and why.
+    let Some(rest) = bytes.strip_prefix(MAGIC.as_slice()) else {
+        return Err(LoadError::Version { found: None });
+    };
+    if rest.len() < 4 {
+        return Err(LoadError::Corrupt("the file ends in its own header".into()));
+    }
+    let (version, body) = rest.split_at(4);
+    let version = u32::from_le_bytes(version.try_into().unwrap_or_default());
+    if version != VERSION {
+        return Err(LoadError::Version { found: Some(version) });
+    }
+    postcard::from_bytes(body).map_err(|e| LoadError::Corrupt(e.to_string()))
 }
 
 impl crate::Editor {
@@ -596,45 +811,193 @@ impl crate::Editor {
         self.nav_overlay = None;
         self.nav_seconds = 0.0;
         self.nav_triangles = 0;
+        self.nav_coverage = None;
         let Some((_, Matter::NavMesh { id, .. })) = nav_node(&self.world) else {
             self.script_host.set_nav_mesh(None);
             return;
         };
         let path = self.nav_path(id);
-        self.nav_baked = load(&path);
-        // A bake that exists but will not read is USUALLY one written by an
-        // older Floptle (the format is compact, not self-describing). Silence
-        // here looks exactly like "the AI is broken": no outline, nil paths,
-        // units standing still — so say what happened and what fixes it.
-        if self.nav_baked.is_none() && path.exists() {
-            self.console.push(
-                floptle_script::LogLevel::Warn,
-                format!(
-                    "navmesh: {} could not be read — usually a bake from an older engine \
-                     version. Select the Nav Mesh node and press Bake to rebuild it.",
-                    path.display()
-                ),
-                None,
-            );
+        // Silence here looks exactly like "the AI is broken": no outline, nil
+        // paths, units standing still. Every way this can fail names the file
+        // and what fixes it.
+        match load(&path) {
+            Ok(mesh) => {
+                self.nav_loaded_from = Some(path);
+                self.nav_baked = Some(mesh);
+            }
+            Err(err) => {
+                self.nav_loaded_from = None;
+                if let Some(msg) = err.message(&path) {
+                    self.console.push(floptle_script::LogLevel::Warn, msg, None);
+                }
+                // **A bake this engine cannot read is not lost work — it is work
+                // it can do again.** The level that produced it is open right
+                // here, and baking is a function of that level. Telling somebody
+                // to press a button to recompute something the editor could
+                // recompute itself is the difference between a format change
+                // costing an evening and costing nothing.
+                //
+                // Not for `Missing`: a scene nobody has ever baked must stay
+                // unbaked. That is a choice, and making it for people would put
+                // a bake in a project that never asked for one.
+                self.nav_heal = matches!(err, LoadError::Version { .. } | LoadError::Corrupt(_));
+            }
         }
         self.nav_overlay = None;
         self.script_host.set_nav_mesh(self.nav_baked.clone());
     }
 
-    /// Bake the scene's navmesh, reporting what happened either way.
+    /// What the level currently looks like to a bake, as one number.
     ///
-    /// Synchronous, unlike the light bake. A navmesh over a level takes a
-    /// fraction of a second where a GI bake takes minutes, and a progress bar
-    /// for something that is already finished is more machinery than it is
-    /// worth.
+    /// Everything that would change the result and nothing that would not: the
+    /// character's settings, and every node the filter selects with the pose it
+    /// is in. Moving a wall changes it; moving the camera does not.
+    ///
+    /// It is a hash rather than a dirty flag because the question being asked is
+    /// "does the bake in hand still describe this level", and a flag can only
+    /// answer "something happened". Undo, a scene reload and a nudge that ends
+    /// where it started all leave a flag set and this number unchanged.
+    pub(crate) fn nav_inputs_stamp(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let Some((_, matter)) = nav_node(&self.world) else { return 0 };
+        let Matter::NavMesh { layers, .. } = &matter else { return 0 };
+        if let Some(s) = settings_of(&matter) {
+            for f in [s.agent_radius, s.agent_height, s.max_slope, s.step_height, s.cell_size] {
+                f.to_bits().hash(&mut h);
+            }
+        }
+        let mut count = 0u64;
+        for (e, m) in self.world.query::<Matter>() {
+            // A link or an area volume is an input too, and neither is
+            // collidable — a door moved two metres has to be noticed.
+            let is_nav_extra = matches!(m, Matter::NavLink { .. } | Matter::NavArea { .. });
+            if !is_nav_extra && !counts(&self.world, e, layers) {
+                continue;
+            }
+            count += 1;
+            e.index().hash(&mut h);
+            let t = floptle_core::world_transform(&self.world, e);
+            for f in [t.translation.x, t.translation.y, t.translation.z] {
+                f.to_bits().hash(&mut h);
+            }
+            for f in [
+                t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w, t.scale.x, t.scale.y,
+                t.scale.z,
+            ] {
+                f.to_bits().hash(&mut h);
+            }
+            crate::matter_catalog::matter_kind_label(m).hash(&mut h);
+            match m {
+                Matter::NavLink { to, bidirectional, cost, area, duration, enabled, .. } => {
+                    for f in to {
+                        f.to_bits().hash(&mut h);
+                    }
+                    (*bidirectional, *enabled, area).hash(&mut h);
+                    (cost.to_bits(), duration.to_bits()).hash(&mut h);
+                }
+                Matter::NavArea { half_extents, area, cost, blocks, enabled } => {
+                    for f in half_extents {
+                        f.to_bits().hash(&mut h);
+                    }
+                    (area, *blocks, *enabled, cost.to_bits()).hash(&mut h);
+                }
+                _ => {}
+            }
+        }
+        count.hash(&mut h);
+        h.finish()
+    }
+
+    /// Start a bake if the level has changed and stopped changing.
+    ///
+    /// Called every frame while a Nav Mesh node has `auto_rebake` on. The wait
+    /// is the point: dragging a wall across a room would otherwise start a bake
+    /// on every frame of the drag, and every one of them would be wrong by the
+    /// time it finished.
+    pub(crate) fn tick_nav_autobake(&mut self, dt: f32) {
+        // A file that would not read, remade. This runs a frame after the load
+        // rather than during it because a bake gathers geometry — models come
+        // off disk, terrain is meshed — and the scene has to have finished
+        // arriving before any of that answers correctly.
+        if self.nav_heal {
+            self.nav_heal = false;
+            if self.nav_job.is_none() {
+                self.start_nav_bake(BakeReason::Reread);
+            }
+        }
+        let auto = matches!(
+            nav_node(&self.world),
+            Some((_, Matter::NavMesh { auto_rebake: true, enabled: true, .. }))
+        );
+        if !auto || self.nav_job.is_some() {
+            return;
+        }
+        let now = self.nav_inputs_stamp();
+        if now != self.nav_watch_stamp {
+            self.nav_watch_stamp = now;
+            self.nav_watch_settled = 0.0;
+            return;
+        }
+        if now == self.nav_baked_stamp {
+            return; // the bake in hand already describes this level
+        }
+        self.nav_watch_settled += dt;
+        // Long enough that a drag is one bake, short enough that it feels like
+        // the editor noticed.
+        if self.nav_watch_settled >= 0.4 {
+            self.start_nav_bake(BakeReason::Watched);
+        }
+    }
+
+    /// Take a finished background bake and put it in.
+    ///
+    /// Called every frame. The apply half runs here rather than on the worker
+    /// because it writes the scene — the node's measured box, the file, the
+    /// script host's copy — and none of that belongs on another thread.
+    pub(crate) fn poll_nav_bake(&mut self) {
+        let Some(job) = self.nav_job.as_ref() else { return };
+        let Ok((mesh, seconds)) = job.rx.try_recv() else { return };
+        let job = self.nav_job.take().expect("checked above");
+        self.finish_nav_bake(job, mesh, seconds);
+    }
+
+    /// Bake the scene's navmesh, reporting what happened either way.
     pub(crate) fn bake_nav(&mut self) {
+        self.start_nav_bake(BakeReason::Asked);
+    }
+
+    /// Gather everything a bake needs, then hand it to a worker thread.
+    ///
+    /// The gather stays here: it reads the world and imports models off disk,
+    /// and neither of those can leave the main thread. What goes over the wall
+    /// is the part that costs — voxelising, eroding and cutting a level into
+    /// polygons — so the editor keeps drawing and a running game keeps its
+    /// frame rate while its level is re-measured underneath it.
+    ///
+    /// See [`BakeReason`] for what each kind of bake says when it lands.
+    fn start_nav_bake(&mut self, reason: BakeReason) {
         use floptle_script::LogLevel;
+        let quiet = reason != BakeReason::Asked;
+        if self.nav_job.is_some() {
+            if !quiet {
+                self.console.push(
+                    LogLevel::Debug,
+                    "navmesh: a bake is already running".into(),
+                    None,
+                );
+            }
+            return;
+        }
+        let stamp = self.nav_inputs_stamp();
         let Some((e, matter)) = nav_node(&self.world) else {
-            self.console.push(
-                LogLevel::Warn,
-                "nothing to bake: the scene has no Nav Mesh node".into(),
-                None,
-            );
+            if !quiet {
+                self.console.push(
+                    LogLevel::Warn,
+                    "nothing to bake: the scene has no Nav Mesh node".into(),
+                    None,
+                );
+            }
             return;
         };
         let Matter::NavMesh { id, auto_bounds, layers, half_extents, .. } = matter.clone() else {
@@ -695,9 +1058,18 @@ impl crate::Editor {
                     Tri::new(s(t.a), s(t.b), s(t.c))
                 })
                 .collect();
+            self.nav_coverage = None;
             (moved, half, Some(centre))
         } else {
             let half = Vec3::from(half_extents);
+            // Measured BEFORE the cut, because afterwards there is nothing left
+            // to compare against — and "the box is smaller than the level" is
+            // invisible from the result. What comes back is a perfectly good
+            // navmesh of one corner of the map.
+            self.nav_coverage = coverage_warning(&g.tris, half);
+            if let Some(msg) = self.nav_coverage.clone() {
+                self.console.push(LogLevel::Warn, format!("navmesh: {msg}"), None);
+            }
             (clip(g.tris, half), half, None)
         };
 
@@ -716,8 +1088,45 @@ impl crate::Editor {
         for w in area_warnings.into_iter().chain(link_warnings) {
             self.console.push(LogLevel::Warn, format!("navmesh: {w}"), None);
         }
-        let (mesh, seconds) = bake_with(&tris, &settings, &volumes, links, &areas);
-        let mesh = mesh.map(|m| m.anchored_at([anchor.x, anchor.y, anchor.z]));
+
+        // Over the wall. Everything from here is arithmetic on numbers that have
+        // already been read out of the world, so nothing the main thread does
+        // next can change the answer underneath it.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let named = areas.clone();
+        std::thread::Builder::new()
+            .name("nav-bake".into())
+            .spawn(move || {
+                let (mesh, seconds) = bake_with(&tris, &settings, &volumes, links, &named);
+                let mesh = mesh.map(|m| m.anchored_at([anchor.x, anchor.y, anchor.z]));
+                // A send that fails means the editor moved on — a scene change,
+                // a second bake, a close. Dropping the result is correct.
+                let _ = tx.send((mesh, seconds));
+            })
+            .ok();
+        self.nav_job = Some(NavJob {
+            rx,
+            entity: e,
+            id,
+            triangles,
+            half,
+            shift,
+            areas: areas.len(),
+            settings,
+            stamp,
+            reason,
+        });
+    }
+
+    /// Put a finished bake in: the measured box, the file, the running game.
+    fn finish_nav_bake(&mut self, job: NavJob, mesh: Option<NavMesh>, seconds: f32) {
+        use floptle_script::LogLevel;
+        let NavJob { entity: e, id, triangles, half, shift, areas, settings, stamp, reason, .. } =
+            job;
+        // Whatever came back describes this level, right or wrong — so the
+        // watcher stops asking for the same bake again either way. An empty
+        // result that kept re-queueing would bake a hopeless level forever.
+        self.nav_baked_stamp = stamp;
         let Some(mesh) = mesh else {
             self.console.push(
                 LogLevel::Warn,
@@ -733,6 +1142,22 @@ impl crate::Editor {
             return;
         };
 
+        // **A bake made while the game is running is not the level's bake.** It
+        // describes whatever the game has spawned, knocked down or moved this
+        // session, and writing that over the authored file — or over the node's
+        // measured box — would leave the project holding a navmesh nobody made
+        // and nobody can reproduce. Pressing Stop has to give the level back
+        // exactly as it was. So a play-time bake reaches the running game and
+        // goes no further.
+        if self.playing {
+            self.script_host.set_nav_mesh(Some(mesh.clone()));
+            self.nav_baked = Some(mesh);
+            self.nav_overlay = None;
+            self.nav_seconds = seconds;
+            self.nav_triangles = triangles;
+            return;
+        }
+
         // Write the measured box (and the move) back onto the node, so what the
         // Inspector shows is what was actually baked.
         if let Some(centre) = shift
@@ -747,12 +1172,23 @@ impl crate::Editor {
         let path = self.nav_path(id);
         let polys = mesh.polys.len();
         let area = mesh.area();
-        if let Err(err) = save(&path, &mesh) {
-            self.console.push(
-                LogLevel::Error,
-                format!("navmesh: baked, but could not save {}: {err}", path.display()),
-                None,
-            );
+        match save(&path, &mesh) {
+            Ok(()) => self.nav_loaded_from = Some(path.clone()),
+            Err(err) => {
+                // A bake that cannot be written is a bake that is gone the
+                // moment the scene is closed, so this is an error rather than a
+                // note — the work is real and it is about to be lost.
+                self.nav_loaded_from = None;
+                self.console.push(
+                    LogLevel::Error,
+                    format!(
+                        "navmesh: baked, but could not save {}: {err}. It will be gone when this \
+                         scene is closed.",
+                        path.display()
+                    ),
+                    None,
+                );
+            }
         }
         // A link whose end missed the ground does nothing, for ever, and looks
         // exactly like a route that simply preferred the long way. Naming the
@@ -781,13 +1217,35 @@ impl crate::Editor {
         self.nav_seconds = seconds;
         self.nav_triangles = triangles;
         self.scene_dirty = true;
+        match reason {
+            // An automatic bake says nothing when it worked. A line every time
+            // you nudge a wall is a Console nobody reads, and the failures above
+            // still speak — those are the ones worth interrupting for.
+            BakeReason::Watched => return,
+            // Work nobody asked for explains itself, once. This bake happened
+            // because opening the scene found a bake it could not read, and a
+            // thread quietly using the machine is exactly the sort of thing that
+            // should never be a mystery.
+            BakeReason::Reread => {
+                self.console.push(
+                    LogLevel::Debug,
+                    format!(
+                        "navmesh: made again for this version of the engine — {polys} polygons \
+                         over {area:.0} m². A one-off: it loads with the scene from here on."
+                    ),
+                    None,
+                );
+                return;
+            }
+            BakeReason::Asked => {}
+        }
         // Independent appends — each count says its piece when it has one.
         let mut extras = String::new();
         if crossings > 0 {
             extras.push_str(&format!(", {crossings} link(s)"));
         }
-        if areas.len() > 1 {
-            extras.push_str(&format!(", {} area(s)", areas.len() - 1));
+        if areas > 1 {
+            extras.push_str(&format!(", {} area(s)", areas - 1));
         }
         self.console.push(
             LogLevel::Debug,
@@ -930,13 +1388,226 @@ mod tests {
         assert_eq!(clip(straddle, half).len(), 1);
     }
 
-    /// Nothing to read is not an error to decide about — it is "bake again".
+    /// Every way a bake can fail to load has to be tellable apart, because each
+    /// one has a different thing to say to the person whose level it is.
     #[test]
-    fn an_unreadable_bake_reads_as_no_bake() {
-        assert!(load(std::path::Path::new("/nonexistent/never.fnav")).is_none());
-        let junk = std::env::temp_dir().join("floptle-nav-junk.fnav");
-        std::fs::write(&junk, b"not a navmesh").unwrap();
-        assert!(load(&junk).is_none());
-        let _ = std::fs::remove_file(&junk);
+    fn a_bake_that_will_not_load_says_which_kind_of_not_loading_it_is() {
+        // Absent is not an event: most scenes have no navmesh.
+        let missing = std::path::Path::new("/nonexistent/never.fnav");
+        assert!(matches!(load(missing), Err(LoadError::Missing)));
+        assert!(load(missing).unwrap_err().message(missing).is_none());
+
+        let dir = std::env::temp_dir().join("floptle-nav-load-kinds");
+        let _ = std::fs::create_dir_all(&dir);
+
+        // A bake from before the header existed — which is every bake made
+        // before v0.60, and the reason this whole mechanism is here.
+        let old = dir.join("old.1.fnav");
+        std::fs::write(&old, b"\x01\x02postcard-ish bytes with no header").unwrap();
+        let err = load(&old).unwrap_err();
+        assert!(matches!(err, LoadError::Version { found: None }));
+        let said = err.message(&old).expect("this one must be said out loud");
+        assert!(said.contains("old.1.fnav"), "it has to name the file: {said}");
+        assert!(said.contains("Bake"), "and say what fixes it: {said}");
+
+        // A header this engine does not know.
+        let future = dir.join("future.1.fnav");
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(&99u32.to_le_bytes());
+        bytes.extend_from_slice(b"whatever comes next");
+        std::fs::write(&future, &bytes).unwrap();
+        assert!(matches!(load(&future), Err(LoadError::Version { found: Some(99) })));
+
+        // The right header over damaged contents is a different sentence again.
+        let torn = dir.join("torn.1.fnav");
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(&VERSION.to_le_bytes());
+        bytes.extend_from_slice(b"\x7f\x7f\x7f");
+        std::fs::write(&torn, &bytes).unwrap();
+        assert!(matches!(load(&torn), Err(LoadError::Corrupt(_))));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A bake this engine cannot read is work it can do again, and doing it is
+    /// better than asking. The flag is the whole of that decision, and the
+    /// distinction it has to keep is between "unreadable" and "absent" — a scene
+    /// nobody has baked must stay unbaked.
+    #[test]
+    fn a_bake_it_cannot_read_is_made_again_rather_than_left_to_the_person() {
+        use floptle_core::Transform;
+        let dir = std::env::temp_dir().join("floptle-nav-heal");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+
+        let mut ed = crate::Editor {
+            project_root: dir.clone(),
+            scene_rel: "scenes/level.ron".into(),
+            ..Default::default()
+        };
+        let nav = ed.world.spawn();
+        ed.world.insert(nav, Transform::IDENTITY);
+        ed.world.insert(nav, Matter::default_nav_mesh(1));
+
+        // Nothing on disk: the ordinary state of a scene nobody has baked, and
+        // baking one unasked would put a file in a project that never wanted it.
+        ed.load_nav();
+        assert!(!ed.nav_heal, "a scene with no bake must not be baked behind your back");
+
+        // A bake from an older engine — the one that cost Ty a rebake every time
+        // he opened the project.
+        std::fs::write(ed.nav_path(1), b"postcard bytes from before the header").unwrap();
+        ed.load_nav();
+        assert!(ed.nav_baked.is_none(), "it genuinely could not be read");
+        assert!(ed.nav_heal, "and the level that made it is open right here");
+
+        // Damaged reads the same way: the fix is identical.
+        let mut torn = MAGIC.to_vec();
+        torn.extend_from_slice(&VERSION.to_le_bytes());
+        torn.extend_from_slice(b"\x7f\x7f\x7f");
+        std::fs::write(ed.nav_path(1), &torn).unwrap();
+        ed.load_nav();
+        assert!(ed.nav_heal);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A navmesh of one corner of the map looks exactly like a navmesh of the
+    /// map: it bakes, it counts polygons, it draws. The only place the
+    /// difference exists is between the box and the geometry, and this is the
+    /// one moment anything can compare them.
+    #[test]
+    fn a_box_smaller_than_the_level_says_so_with_both_numbers() {
+        // 800 m of floor, a 24 x 32 m volume, and a scattering of props over
+        // the whole thing — the shape of a real level, and of the report.
+        let mut level = vec![
+            Tri::new([-400.0, 0.0, -400.0], [400.0, 0.0, -400.0], [-400.0, 0.0, 400.0]),
+            Tri::new([400.0, 0.0, -400.0], [400.0, 0.0, 400.0], [-400.0, 0.0, 400.0]),
+        ];
+        for i in 0..40 {
+            let x = -380.0 + i as f32 * 19.0;
+            level.push(Tri::new([x, 0.0, 100.0], [x + 2.0, 0.0, 100.0], [x, 2.0, 100.0]));
+        }
+        let said = coverage_warning(&level, Vec3::new(12.0, 8.0, 16.0))
+            .expect("a box this much smaller than its level has to say so");
+        assert!(said.contains("24 × 32 m"), "the box, in metres: {said}");
+        assert!(said.contains("800 × 800 m"), "and the level: {said}");
+        assert!(said.contains("fit the box"), "and the one tick that fixes it: {said}");
+
+        // A box that covers the level says nothing, and neither does one that
+        // the level merely spills over the edge of — a warning that fires on
+        // every bake is a warning nobody reads by the second week.
+        let room = vec![
+            Tri::new([-10.0, 0.0, -10.0], [10.0, 0.0, -10.0], [-10.0, 0.0, 10.0]),
+            Tri::new([10.0, 0.0, -10.0], [10.0, 0.0, 10.0], [-10.0, 0.0, 10.0]),
+        ];
+        assert!(coverage_warning(&room, Vec3::new(12.0, 8.0, 16.0)).is_none());
+        let overhang =
+            vec![Tri::new([-10.0, 0.0, -10.0], [12.4, 0.0, -10.0], [-10.0, 0.0, 10.0])];
+        assert!(
+            coverage_warning(&overhang, Vec3::new(12.0, 8.0, 16.0)).is_none(),
+            "a hair over the edge is not worth a warning"
+        );
+        assert!(coverage_warning(&[], Vec3::splat(4.0)).is_none());
+    }
+
+    /// The watcher has to see a wall move and ignore everything else, or an
+    /// automatic rebake is either useless or a machine that never stops baking.
+    #[test]
+    fn the_level_stamp_notices_geometry_and_ignores_everything_else() {
+        use floptle_core::Transform;
+        let mut ed = crate::Editor::default();
+        let nav = ed.world.spawn();
+        ed.world.insert(nav, Transform::IDENTITY);
+        ed.world.insert(nav, Matter::default_nav_mesh(1));
+
+        let wall = ed.world.spawn();
+        ed.world.insert(wall, Transform::IDENTITY);
+        ed.world.insert(
+            wall,
+            Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0; 3] },
+        );
+        ed.world.insert(wall, floptle_core::Collidable);
+        let before = ed.nav_inputs_stamp();
+
+        // Something with no collider is not level geometry, so moving it cannot
+        // change what a bake would produce.
+        let prop = ed.world.spawn();
+        ed.world.insert(prop, Transform::from_translation(DVec3::new(4.0, 2.0, 4.0)));
+        ed.world.insert(
+            prop,
+            Matter::Primitive { shape: floptle_core::Shape::Sphere, color: [1.0; 3] },
+        );
+        assert_eq!(before, ed.nav_inputs_stamp(), "a node with no collider is not the level");
+
+        // Moving the wall is exactly what this exists to catch.
+        if let Some(t) = ed.world.get_mut::<Transform>(wall) {
+            t.translation.x += 1.0;
+        }
+        let moved = ed.nav_inputs_stamp();
+        assert_ne!(before, moved, "a wall moved and the stamp did not");
+
+        // …and putting it back is the same level again, which a dirty flag
+        // could never say.
+        if let Some(t) = ed.world.get_mut::<Transform>(wall) {
+            t.translation.x -= 1.0;
+        }
+        assert_eq!(before, ed.nav_inputs_stamp(), "the same level must hash the same");
+
+        // A link counts too, though it is not collidable and bakes into no
+        // geometry at all.
+        let link = ed.world.spawn();
+        ed.world.insert(link, Transform::IDENTITY);
+        ed.world.insert(link, Matter::default_nav_link(1));
+        let with_link = ed.nav_inputs_stamp();
+        assert_ne!(before, with_link, "a new link changes what a bake would produce");
+        if let Some(Matter::NavLink { to, .. }) = ed.world.get_mut::<Matter>(link) {
+            to[2] = 9.0;
+        }
+        assert_ne!(with_link, ed.nav_inputs_stamp(), "a link's far end moved");
+    }
+
+    /// The failure this cost a user: bake, close, reopen, and the bake is gone
+    /// with nothing on screen saying so.
+    ///
+    /// A round trip through the real save and load, asserting the reloaded mesh
+    /// answers the same question — which is the only definition of "the bake
+    /// survived" that matters.
+    #[test]
+    fn a_bake_survives_being_saved_and_opened_again() {
+        let floor = vec![
+            Tri::new([-8.0, 0.0, -8.0], [8.0, 0.0, -8.0], [-8.0, 0.0, 8.0]),
+            Tri::new([8.0, 0.0, -8.0], [8.0, 0.0, 8.0], [-8.0, 0.0, 8.0]),
+        ];
+        let settings = NavSettings { cell_size: 0.25, ..Default::default() };
+        let ladder = OffLink::new(4, "ladder", [-6.0, 0.0, 0.0], [6.0, 0.0, 0.0]);
+        let (mesh, _) = bake_with(
+            &floor,
+            &settings,
+            &[],
+            vec![ladder],
+            &[floptle_nav::Area::walkable(), floptle_nav::Area::new("mud", 4.0)],
+        );
+        let mesh = mesh.expect("this floor bakes");
+
+        let dir = std::env::temp_dir().join("floptle-nav-roundtrip");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("scene.1.fnav");
+        save(&path, &mesh).expect("write");
+        let back = load(&path).expect("a bake written by this engine must read back");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Everything v0.60 added has to come back too — those are exactly the
+        // fields whose addition broke the format in the first place.
+        assert_eq!(back.polys.len(), mesh.polys.len());
+        assert_eq!(back.settings, mesh.settings);
+        assert_eq!(back.areas, mesh.areas, "the area names have to survive");
+        assert_eq!(back.off_links, mesh.off_links, "and so do the links");
+        let question = ([-6.0, 0.5, -6.0], [6.0, 0.5, 6.0]);
+        assert_eq!(
+            mesh.path(question.0, question.1),
+            back.path(question.0, question.1),
+            "the reloaded mesh must answer the same question the same way"
+        );
     }
 }

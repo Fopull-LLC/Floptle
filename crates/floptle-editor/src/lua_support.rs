@@ -299,6 +299,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field arrived boolean True once it got there — the flag to hang \"and then attack\" off.
 ---@field moving boolean True while it still has somewhere to be.
 ---@field blocked boolean True when it cannot get there right now: unreachable, or no progress for giveUpAfter seconds. A crowd pin clears itself; a cut-off goal does not.
+---@field offMesh boolean True when the order named a place the navmesh does not cover, rather than one it cannot reach.
 ---@field complete boolean Whether the route it is walking actually reaches the order.
 ---@field remaining number How far there is left to walk, ALONG THE ROUTE rather than through the walls.
 ---@field velocity Vec3 How fast it is going. With drive = 'none' this is the whole output.

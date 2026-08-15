@@ -519,6 +519,12 @@ impl Editor {
         self.refresh_gi();
         self.step_gi_bake();
         self.drive_auto_bake();
+        // The navmesh's own two: take a finished background bake, then decide
+        // whether the level has changed enough to want another. In that order,
+        // so a bake that has just landed is the one the watcher compares
+        // against rather than the one before it.
+        self.poll_nav_bake();
+        self.tick_nav_autobake(dt);
         // …and, on the same terms, one reflection probe's capture. Six renders
         // of the scene, so it belongs here beside the bake rather than inside a
         // gather, and at most one probe a frame.
@@ -1304,10 +1310,43 @@ impl Editor {
                     let fill = |c: [f32; 3]| [c[0], c[1], c[2], NAV_FILL_ALPHA];
                     let strip = |c: [f32; 3]| [c[0], c[1], c[2], NAV_STEP_ALPHA];
                     for t in &overlay.tris {
-                        let col = fill(hue(t.region));
+                        // Painted ground reads as painted: its own hue, and
+                        // brighter, because a volume that did nothing and a
+                        // volume that worked have to be tellable apart at a
+                        // glance rather than by baking again and squinting.
+                        let col = if t.area == floptle_nav::WALKABLE {
+                            fill(hue(t.region))
+                        } else {
+                            let c = crate::viz::hue_rgb(
+                                (0.12 + t.area as f32 * 0.17).fract(),
+                            );
+                            [c[0], c[1], c[2], NAV_FILL_ALPHA * 1.9]
+                        };
                         for p in [t.a, t.b, t.c] {
                             self.nav_surface
                                 .push(floptle_render::TriVertex { pos: cam_rel(p), color: col });
+                        }
+                    }
+                    // The links, as the bake resolved them — not as they were
+                    // placed. An end that missed the floor is drawn in red, and
+                    // that is the whole point: the node's own gizmo can only
+                    // show where you put it, which is the thing that was wrong.
+                    for l in &overlay.links {
+                        let col = if !l.resolved {
+                            [1.0, 0.35, 0.3]
+                        } else if !l.enabled {
+                            [0.45, 0.45, 0.5]
+                        } else {
+                            [0.45, 0.95, 1.0]
+                        };
+                        line(l.from, l.to, col);
+                        // A tick at each end you can enter from, so a one-way
+                        // drop and a two-way ladder are not the same picture.
+                        let rise = mesh.settings.step_height.max(0.25);
+                        for (at, draw_it) in [(l.to, true), (l.from, l.bidirectional)] {
+                            if draw_it {
+                                line(at, [at[0], at[1] + rise, at[2]], col);
+                            }
                         }
                     }
                     // A step's ribbon is filled too, and more strongly: it is
@@ -2537,9 +2576,15 @@ impl Editor {
         let nav_status = crate::nav_bake::nav_status(
             &self.world,
             crate::nav_bake::nav_node(&self.world).as_ref().map(|(_, m)| m),
-            self.nav_baked.as_ref(),
-            self.nav_seconds,
-            self.nav_triangles,
+            crate::nav_bake::NavHeld {
+                mesh: self.nav_baked.as_ref(),
+                seconds: self.nav_seconds,
+                triangles: self.nav_triangles,
+                file: self.nav_loaded_from.as_deref(),
+                baking: self.nav_job.is_some(),
+                coverage: self.nav_coverage.as_ref(),
+            },
+            &self.project_root,
         );
         let old_retro_h = self.project.retro_height;
         let old_retro_w = self.project.retro_width;

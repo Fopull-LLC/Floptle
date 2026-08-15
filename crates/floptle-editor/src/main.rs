@@ -2454,6 +2454,27 @@ struct Editor {
     /// it, so the Inspector can say without gathering geometry every frame.
     nav_seconds: f32,
     nav_triangles: usize,
+    /// Which file the bake in hand came off disk from, if it was loaded rather
+    /// than just made. Shown in the Inspector: "my bake vanished" is a report
+    /// nobody can act on until they can see whether one was found and where it
+    /// was looked for.
+    nav_loaded_from: Option<std::path::PathBuf>,
+    /// A navmesh bake running on another thread.
+    nav_job: Option<nav_bake::NavJob>,
+    /// The level's shape as of the last time it was looked at, and how long it
+    /// has held still — the two halves of "changed, and stopped changing".
+    nav_watch_stamp: u64,
+    nav_watch_settled: f32,
+    /// What the bake in hand was made from, so an automatic rebake asks for a
+    /// bake that would be different rather than one it already has.
+    nav_baked_stamp: u64,
+    /// The `.fnav` beside this scene could not be read, so it wants making
+    /// again. Set when the scene loads and acted on a frame later, once the
+    /// scene has finished arriving.
+    nav_heal: bool,
+    /// What the last bake's box left out of the level, if anything — see
+    /// [`nav_bake::coverage_warning`].
+    nav_coverage: Option<String>,
     /// A bake in progress, advanced a slice per frame.
     gi_bake: Option<gi_bake::GiBake>,
     /// Force the next `refresh_gi` to re-upload even if nothing looks changed

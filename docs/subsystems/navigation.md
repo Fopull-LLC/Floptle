@@ -66,6 +66,26 @@ in whole columns and rounds **up** — at a 0.25 cell and a 0.1 radius every edg
 loses 0.25 m rather than 0.1, and a corridor two cells wide vanishes. The bake
 says so, in the Inspector, with the number to use.
 
+### The box has to cover the level
+
+The volume's box is the bake's extent, and a box smaller than the level produces
+**a navmesh of one corner of the map that looks exactly like a navmesh of the
+map**: it bakes cleanly, reports a healthy polygon count, draws a convincing
+overlay, and characters walk on it right up to an invisible edge where they stop.
+Nothing downstream can tell the difference — this is the same silent-plausible-
+result shape as the unreadable `.fnav`, and it is worse, because the result is
+not even wrong.
+
+Two things answer it. `auto_bounds` ("fit the box to what it finds") is on for a
+new volume and measures the geometry rather than trusting a number, which is why
+it is the default. And when the box *is* sized by hand, the bake compares it
+against what it was given and says both figures out loud — "the volume covers
+24 × 32 m of a level that spans 846 × 538 m, so 12,300 of 12,900 triangles were
+left out of it" — in the Console and in the Inspector, where somebody looks when
+a character will not walk somewhere. It only speaks when the gap is real: a level
+always spills a little past a box drawn round it, and a warning that fires on
+every bake is off by the second week.
+
 ### What counts as ground
 
 Anything a character would **collide** with: the collidable switch, a static
@@ -118,6 +138,13 @@ about a place this mesh does not cover. A goal that is on the mesh but **cut off
 answers a real route to the closest reachable point, with `complete: false`
 beside it. A character that walks to the near side of a chasm and stops is
 behaving; one that stands still because the answer was empty looks broken.
+
+The agent layer keeps the two apart rather than folding both into "blocked":
+`agent.offMesh` is true when the order named a place the navmesh does not
+describe. They look identical from outside — a character standing still — and
+have nothing in common. One is a level question answered by walking somewhere
+else; the other is a bake question answered by a volume that covers the ground
+you are pointing at, and no amount of re-ordering will touch it.
 
 ## Areas and filters
 
@@ -175,6 +202,55 @@ recover from.
 and the bake names it in the Console. A door that quietly does nothing is exactly
 the silent-failure shape this engine's own audit found again and again: the level
 looks right, the route goes the long way, and nothing anywhere says why.
+
+## Keeping it
+
+A bake is written to `<scene>.<id>.fnav` beside the scene and loaded with it. It
+is a build artefact measured in hundreds of kilobytes, so it does not go in the
+`.ron` — a scene file is a thing people read and diff.
+
+**The file carries a format version, and a reader that does not recognise one
+says so by name.** Postcard is compact and not self-describing, which means
+`#[serde(default)]` buys nothing: adding one field to the mesh changes the byte
+layout and every older file stops parsing. That happened — v0.60 added areas and
+links — and the reader of the day swallowed the error and reported "no bake",
+which is indistinguishable from never having baked. A level's bake vanishing on
+reopen while the editor says nothing is the worst failure this file has, so now
+it names the file and says what happened to it. The Inspector shows which file
+the bake in hand came from, so the question is answerable without reading a log.
+
+**And then it makes it again.** A bake is a function of the level, the level is
+open, and telling somebody to press a button to recompute something the editor
+could recompute itself turns a format change into an evening. So an unreadable
+or damaged `.fnav` starts a background bake a frame after the scene loads, saves
+it, and says so once — work nobody asked for has to explain itself. Not a
+*missing* file: a scene nobody has ever baked stays unbaked, because putting a
+navmesh in a project that never asked for one is a decision that is not the
+engine's to make.
+
+### Static by default, automatic on request
+
+`auto_rebake` is **off** by default, because most levels are finished: the bake
+is on disk, it loads with the scene, and baking it again every session is work
+nobody asked for.
+
+Turn it on — while building a level, or in a game that puts buildings down as it
+runs — and the volume hashes what a bake would see (the character's settings,
+and every node the filter selects, in the pose it is in), waits for that to stop
+changing, and bakes **on a worker thread**. The wait matters: dragging a wall
+across a room would otherwise start a bake per frame, each wrong by the time it
+landed. A hash rather than a dirty flag, because the question is "does the bake
+in hand still describe this level" — undo, a reload and a nudge that ends where
+it started all leave a flag set and the answer unchanged.
+
+The gather stays on the main thread (it reads the world and imports models off
+disk); what crosses the wall is voxelising, eroding and cutting, which is where
+the time goes.
+
+**A bake made while the game is running is not written to disk and does not
+touch the node.** It describes what that session spawned or knocked down, and
+persisting it would leave the project holding a navmesh nobody authored. Stop
+gives the level back exactly as it was.
 
 ## The agent layer
 
@@ -249,11 +325,10 @@ finds out the hard way.
 - **No tiling.** A bake is one grid over the whole level, so a rebake is the
   whole level. That is fine at room and building scale and it is what streaming
   and parallel bakes would need first.
-- **No runtime obstacle carving.** A building placed during play does not appear
-  in the navmesh until it is baked again. Links can be switched, areas cannot,
-  and geometry cannot. For an RTS this is the gap worth knowing about.
-- **The bake is synchronous.** Fractions of a second at the scales tested, and
-  still a stall you would notice on a very large level.
+- **No runtime obstacle carving.** Nothing carves a hole in an existing bake in
+  place. What exists instead is a whole rebake, in the background, which is a
+  fair answer at room and building scale and a wasteful one for a single crate
+  dropped on a big level.
 - **Agents are not rolled back.** They step on the frame clock, not the tick
   clock, so a rollback-netcode game should drive movement itself and use the
   queries rather than the agent layer.

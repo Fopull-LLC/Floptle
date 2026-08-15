@@ -119,12 +119,26 @@ function update(node, dt)
       end
       -- A loose square grid centred on the click, so a group arrives spread out
       -- instead of fighting over one square metre.
+      --
+      -- Each slot is dropped onto the navmesh before it is ordered. Without
+      -- that, a formation centred near a wall hands half the group a
+      -- destination inside it — and a unit sent somewhere it cannot stand walks
+      -- as close as it can and then reports blocked, which looks like the order
+      -- was ignored. `nav.nearest` turns those slots into the walkable ground
+      -- beside them. With no navmesh in the scene it answers nil and the raw
+      -- slot is used, which is what this did before pathfinding existed.
       local side = math.max(1, math.ceil(math.sqrt(#sel)))
       local step = params.formation_spacing
       for i, u in ipairs(sel) do
         local col = (i - 1) % side - (side - 1) * 0.5
         local row = math.floor((i - 1) / side) - (side - 1) * 0.5
-        u.moveTo(x + col * step, y, z + row * step)
+        local sx, sy, sz = x + col * step, y, z + row * step
+        local on = nav.ready() and nav.nearest(vec3(sx, sy, sz), step * 2 + 2) or nil
+        if on then
+          u.moveTo(on.x, on.y, on.z)
+        else
+          u.moveTo(sx, sy, sz)
+        end
       end
       if #sel > 0 then
         marker = { x = x, y = y, z = z, t = params.marker_time }

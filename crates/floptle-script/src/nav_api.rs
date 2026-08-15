@@ -244,6 +244,14 @@ impl UserData for LuaAgent {
         fields.add_field_method_get("blocked", |_, a| {
             Ok(a.with(|ag, _| ag.state() == AgentState::Blocked).unwrap_or(false))
         });
+        // Blocked because there is no navmesh where you sent it — as opposed to
+        // blocked by the level. The two look the same (a character standing
+        // still) and have nothing in common: this one is answered by baking a
+        // volume that covers the ground you are pointing at, and no amount of
+        // ordering it somewhere else nearby will help.
+        fields.add_field_method_get("offMesh", |_, a| {
+            Ok(a.with(|ag, _| ag.target_off_mesh()).unwrap_or(false))
+        });
         // Whether the route in hand actually reaches the order. False while
         // walking to the nearest reachable point instead.
         fields.add_field_method_get("complete", |_, a| {

@@ -2990,6 +2990,7 @@ impl EditorTabViewer<'_> {
                                 step_height,
                                 cell_size,
                                 enabled,
+                                auto_rebake,
                             } => {
                                 let nav = self.nav.clone();
                                 if ui.checkbox(enabled, "characters can path on this").changed() {
@@ -3169,14 +3170,55 @@ impl EditorTabViewer<'_> {
                                         cmd.nav_clear = true;
                                     }
                                 });
+                                if ui
+                                    .checkbox(auto_rebake, "bake again when the level changes")
+                                    .on_hover_text(
+                                        "Off is right for a finished level: the bake is a file \
+                                         saved beside the scene and loaded with it, so it never \
+                                         needs doing twice.\n\nOn, the volume watches what it \
+                                         would bake, waits for it to stop moving, and bakes on \
+                                         another thread — so the editor keeps its frame rate, \
+                                         and a game that puts buildings down while it runs gets \
+                                         a navmesh that knows about them.",
+                                    )
+                                    .changed()
+                                {
+                                    cmd.inspector_changed = true;
+                                }
+                                if nav.baking {
+                                    ui.small("baking…");
+                                }
                                 if nav.polys == 0 {
                                     ui.small("no bake yet — nothing can path here.");
+                                    ui.small(
+                                        "A bake is saved beside the scene and loaded with it, so \
+                                         this is a one-off — not something to do again each time \
+                                         you open the project.",
+                                    );
                                 } else {
                                     ui.small(format!(
                                         "baked: {} polygons over {:.0} m², from {} triangles in \
                                          {:.2}s",
                                         nav.polys, nav.area, nav.triangles, nav.seconds
                                     ));
+                                    // Where it lives. A bake is a file, it is
+                                    // loaded with the scene, and saying so is
+                                    // the difference between trusting that and
+                                    // pressing Bake every time out of habit.
+                                    match nav.file.as_deref() {
+                                        Some(f) => {
+                                            ui.small(format!("saved in {f} — it loads with the scene"));
+                                        }
+                                        None => {
+                                            ui.small(
+                                                egui::RichText::new(
+                                                    "not saved to disk — this bake will be gone \
+                                                     when the scene is closed",
+                                                )
+                                                .color(egui::Color32::from_rgb(230, 180, 90)),
+                                            );
+                                        }
+                                    }
                                     // More than one island is worth seeing rather than
                                     // finding out about when a character will not go
                                     // somewhere: it is usually a door nobody fits through.
@@ -3193,6 +3235,19 @@ impl EditorTabViewer<'_> {
                                                 "the settings have changed since this was baked",
                                             )
                                             .color(egui::Color32::from_rgb(230, 180, 90)),
+                                        );
+                                    }
+                                    // The box was smaller than the level. Said
+                                    // here as well as in the Console, because
+                                    // this is the panel somebody opens when a
+                                    // character will not walk somewhere, and a
+                                    // bake of one corner of the map looks
+                                    // exactly like a bake of the map.
+                                    if let Some(missed) = nav.coverage.as_deref() {
+                                        ui.add_space(2.0);
+                                        ui.small(
+                                            egui::RichText::new(missed)
+                                                .color(egui::Color32::from_rgb(230, 180, 90)),
                                         );
                                     }
                                 }

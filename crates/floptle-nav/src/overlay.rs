@@ -62,6 +62,10 @@ pub struct SurfaceTri {
     pub b: [f32; 3],
     pub c: [f32; 3],
     pub region: u32,
+    /// Which kind of ground this is. Painted ground has to *look* painted, or
+    /// "did my mud volume do anything" is a question the picture cannot answer
+    /// and everyone answers by baking again and squinting.
+    pub area: u8,
 }
 
 /// Two pieces of ground at different heights that a character can move between.
@@ -81,6 +85,26 @@ pub struct Step {
     pub rise: f32,
 }
 
+/// A link, as the bake resolved it.
+///
+/// Drawn from the overlay rather than from the node, because these are the ends
+/// the bake actually *found* — snapped onto the floor, or nowhere. A link whose
+/// mouth missed the ground is the failure worth seeing, and the node's own gizmo
+/// cannot show it: the node draws where you put it, which is exactly the thing
+/// that turned out to be wrong.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkArc {
+    pub from: [f32; 3],
+    pub to: [f32; 3],
+    pub bidirectional: bool,
+    /// Both ends landed on walkable ground. False means this link does nothing.
+    pub resolved: bool,
+    /// Off — a shut door. Still drawn, because a door you cannot see is a level
+    /// nobody can debug.
+    pub enabled: bool,
+    pub name: String,
+}
+
 /// Everything needed to draw one baked navmesh.
 #[derive(Clone, Debug, Default)]
 pub struct Overlay {
@@ -90,6 +114,8 @@ pub struct Overlay {
     /// Every polygon's own rectangle — the bake's working, for when that is the
     /// question. Not drawn by default.
     pub cells: Vec<Edge>,
+    /// The level's links, where the bake put them.
+    pub links: Vec<LinkArc>,
 }
 
 /// A height difference below which two linked polygons are the same floor.
@@ -148,12 +174,14 @@ impl Overlay {
                 b: corner(x1, z0),
                 c: corner(x1, z1),
                 region: p.region,
+                area: p.area,
             });
             out.tris.push(SurfaceTri {
                 a: corner(x0, z0),
                 b: corner(x1, z1),
                 c: corner(x0, z1),
                 region: p.region,
+                area: p.area,
             });
 
             // --- the rectangle, for the cells view ------------------------
@@ -241,6 +269,22 @@ impl Overlay {
                 });
             }
         }
+
+        // --- the links, where the bake actually put them ---------------------
+        //
+        // Lifted like everything else, so an arc drawn along the floor is not
+        // fighting the floor for the same pixels.
+        for l in &mesh.off_links {
+            let up = |p: [f32; 3]| [p[0], p[1] + lift, p[2]];
+            out.links.push(LinkArc {
+                from: up(l.from),
+                to: up(l.to),
+                bidirectional: l.bidirectional,
+                resolved: l.resolved(),
+                enabled: l.enabled,
+                name: l.name.clone(),
+            });
+        }
         out
     }
 
@@ -260,6 +304,55 @@ mod tests {
     /// A flat square floor, `size` metres on a side.
     fn floor(size: f32, y: f32) -> Vec<Tri> {
         quad(0.0, size, 0.0, size, y)
+    }
+
+    /// A link is drawn where the BAKE put it, and an end that missed the floor
+    /// has to look different from one that landed — that difference is the only
+    /// thing that says why a door does nothing.
+    #[test]
+    fn links_are_drawn_as_resolved_rather_than_as_placed() {
+        let mut tris = quad(0.0, 4.0, 0.0, 4.0, 0.0);
+        tris.extend(quad(9.0, 13.0, 0.0, 4.0, 0.0));
+        let s = NavSettings { agent_radius: 0.0, cell_size: 0.25, ..Default::default() };
+        // One good ladder, and one whose far end is out in space.
+        let good = crate::OffLink::new(1, "ladder", [3.5, 0.0, 2.0], [9.5, 0.0, 2.0]);
+        let lost = crate::OffLink::new(2, "nowhere", [3.5, 0.0, 3.0], [400.0, 0.0, 400.0]);
+        let mesh = crate::bake_with(&tris, &s, &[], vec![good, lost]).unwrap();
+
+        let overlay = Overlay::build(&mesh, 0.05);
+        assert_eq!(overlay.links.len(), 2, "both are drawn — the broken one most of all");
+        let ladder = overlay.links.iter().find(|l| l.name == "ladder").unwrap();
+        assert!(ladder.resolved && ladder.enabled);
+        assert!(ladder.to[0] >= 9.0, "snapped onto the far floor: {:?}", ladder.to);
+        let broken = overlay.links.iter().find(|l| l.name == "nowhere").unwrap();
+        assert!(!broken.resolved, "an end 400 m off the mesh has not resolved");
+    }
+
+    /// Painted ground carries its area onto the picture, or a volume that did
+    /// nothing looks exactly like one that worked.
+    #[test]
+    fn painted_ground_is_drawn_as_its_own_kind() {
+        let s = NavSettings { agent_radius: 0.0, cell_size: 0.25, ..Default::default() };
+        let tris = quad(0.0, 8.0, 0.0, 8.0, 0.0);
+        // A band of something over the far half of the floor.
+        let (centre, half) = ([4.0f32, 0.0, 6.0], [4.0f32, 2.0, 2.0]);
+        let mut m = [0.0f32; 16];
+        for i in 0..3 {
+            m[i * 5] = 1.0 / half[i];
+            m[12 + i] = -centre[i] / half[i];
+        }
+        m[15] = 1.0;
+        let vol = crate::AreaVolume { inverse: m, area: 1, blocks: false };
+        let mesh = crate::bake_with(&tris, &s, &[vol], Vec::new())
+            .unwrap()
+            .with_areas(vec![crate::Area::walkable(), crate::Area::new("mud", 4.0)]);
+
+        let overlay = Overlay::build(&mesh, 0.05);
+        assert!(
+            overlay.tris.iter().any(|t| t.area == 1),
+            "the painted half is not drawn as painted"
+        );
+        assert!(overlay.tris.iter().any(|t| t.area == 0), "and the rest is still plain ground");
     }
 
     /// One axis-aligned slab of ground, as two triangles.
