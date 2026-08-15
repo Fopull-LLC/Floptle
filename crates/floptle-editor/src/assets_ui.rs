@@ -698,6 +698,15 @@ impl<'a> EditorTabViewer<'a> {
             return;
         }
         ui.label("map geometry — the blockout shapes a scene's Map tool built");
+        // Nothing to place. Say THAT, rather than falling through to "no scene
+        // was found" — which is true of an empty file and is not the reason.
+        if p.shapes.is_empty() {
+            ui.small(
+                "there is nothing in this file — either it holds no shapes, or the ones it \
+                 holds belong to nodes their scene has since deleted",
+            );
+            return;
+        }
         match &p.scene {
             Some(s) => {
                 ui.small(format!("belongs to {s} — double-click the file to open that scene"));
