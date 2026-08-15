@@ -1,5 +1,26 @@
 ## Just shipped
 
+**v0.62.0 "Out Of The Way"** — drop a crate in a corridor and your characters
+walk round it. `nav.obstacle(position, size)` cuts the ground out from under a
+box right now, every route through that space is worked out again in the same
+frame, and `crate:remove()` gives the ground back exactly as it was. It is for
+the job a rebake was never going to be good at: on a 256 m level a full rebake
+takes about 460 ms and a crate takes about **0.6 ms**. Both are still here and
+they are for different things — put a building down, rebake; put a barrel down,
+carve. Nothing is written to your project, so pressing Stop gives your level
+back, and **View ▸ Navmesh** draws the holes while your game runs, so a unit that
+went the long way round is explained by the picture. In the Scene view, the
+little gizmo strip that used to sit in the corner of the *window* — on top of
+your Inspector, or your tab strip, or whatever else lived there — is inside the
+viewport where it belongs, and **both floating strips can now be dragged
+anywhere, docked to any corner, or folded away to a small tab** when they are
+covering the thing you are editing. Where you put them is remembered, and neither
+ever moves on its own. And 📦 **Packages ▸ 🌐 Browse** has had a pass over its
+structure: four sizes of text instead of four unrelated ones, one hairline-ruled
+card, monospace for the ids and versions you copy, colour for the four things
+that mean something — and **Install is the loudest button on a package again**,
+instead of the button for editing a review you had already written.
+
 **v0.61.0 "Once Is Enough"** — bake a navmesh once and it stays baked. It was
 always saved beside the scene, but v0.60 changed what that file holds, so every
 bake made before it stopped being readable — and the editor reported that as *no
