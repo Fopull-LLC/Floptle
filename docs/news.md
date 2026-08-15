@@ -1,5 +1,30 @@
 ## Just shipped
 
+**v0.60.0 "Find Your Way"** — your units walk the level themselves now, in three
+lines: `nav.agent(node, { speed = 6 })`, then `unit:moveTo(point)`. It finds its
+own route, walks it smoothly rather than corner to corner, goes around the units
+beside it, slows down at the end, and says what it is doing — and there is no
+step function to call, because the whole crowd is advanced for you each frame.
+Sixty units through one two-metre doorway all get through. Under **✚ Add ▸
+Navigation** there are three new nodes: a **Nav Mesh** that bakes what a
+character would collide with (tick auto bounds and it measures the level for
+you), **Nav Links** for ladders, jumps, doors and lifts — `nav.link("front
+door", false)` shuts one and everybody walking to it finds another way, nothing
+rebaked — and **Nav Areas** that paint ground as `mud`, `water` or `road` so one
+bake serves a guard who takes the road and a zombie who wades the river. A
+building placed *during* play still needs a rebake; that is the next piece.
+Alongside it: **undo hands you back the node you were editing** instead of
+deselecting it, and selecting is now an undo step of its own, so Ctrl+Z retraces
+your steps rather than jumping over them (picking never marks a scene unsaved
+and never eats your redo). There is a **save indicator at the right of the menu
+bar on every tab** — quiet when saved, amber when not, click to save — and it
+now reports the *whole* save, so a terrain or paint file that failed to write
+keeps the scene honestly marked unsaved. And the blockout in your `maps/` folder
+is a real asset at last: select one for a top-down floor plan of the level,
+double-click to open the scene that owns it, or **drag it into another scene** to
+bring that geometry across as fresh, independent, fully materialled nodes in one
+undoable step.
+
 **v0.59.0 "Show And Tell"** — there is a gap between installing an engine and
 having anything on screen, and it is usually filled by a grey capsule. The
 **Fofighter Sample Kit** is the other thing you could put there: four stylised
