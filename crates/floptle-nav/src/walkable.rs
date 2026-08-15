@@ -26,6 +26,9 @@ pub struct Cell {
     pub x: usize,
     pub z: usize,
     pub y: f32,
+    /// Which kind of ground it is — 0 unless a volume painted it otherwise.
+    /// See [`crate::Area`].
+    pub area: u8,
 }
 
 /// The walkable surface, connected, eroded and grouped.
@@ -66,13 +69,56 @@ impl WalkableGrid {
     /// every floor is too steep, too cramped or too narrow for the agent, which
     /// is worth telling the caller rather than handing back an empty mesh.
     pub fn build(hf: &Heightfield, settings: &NavSettings) -> Option<WalkableGrid> {
+        WalkableGrid::build_with(hf, settings, &[])
+    }
+
+    /// …with the level's area volumes: boxes that paint the ground a different
+    /// kind, or carve it out of the bake altogether.
+    ///
+    /// Painting and carving both happen **before** erosion, which is what makes
+    /// a carve-out behave like the wall it stands in for: the agent's radius is
+    /// kept clear of its edge, rather than characters being allowed to press
+    /// right up against a line that is not there.
+    pub fn build_with(
+        hf: &Heightfield,
+        settings: &NavSettings,
+        volumes: &[crate::AreaVolume],
+    ) -> Option<WalkableGrid> {
         let (w, d) = (hf.width, hf.depth);
         let mut cells: Vec<Cell> = Vec::new();
         for z in 0..d {
             for x in 0..w {
                 let Some(col) = hf.column(x, z) else { continue };
                 for s in col.walkable(settings.agent_height) {
-                    cells.push(Cell { x, z, y: s.y });
+                    let mut cell = Cell { x, z, y: s.y, area: crate::WALKABLE };
+                    if !volumes.is_empty() {
+                        let at = [
+                            hf.origin[0] + (x as f32 + 0.5) * hf.cell_size,
+                            s.y,
+                            hf.origin[2] + (z as f32 + 0.5) * hf.cell_size,
+                        ];
+                        let mut carved = false;
+                        // Later volumes win AMONG PAINTS, so a designer can
+                        // paint a patch of mud and then a path across it and
+                        // get the path. A carve is different: blocking is a
+                        // fact about the level, and a paint volume that
+                        // happens to overlap one (in either order) must not
+                        // quietly turn the hole back into ground.
+                        for v in volumes {
+                            if !v.contains(at) {
+                                continue;
+                            }
+                            if v.blocks {
+                                carved = true;
+                            } else {
+                                cell.area = v.area;
+                            }
+                        }
+                        if carved {
+                            continue;
+                        }
+                    }
+                    cells.push(cell);
                 }
             }
         }

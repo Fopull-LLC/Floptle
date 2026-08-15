@@ -33,9 +33,13 @@
 //! itself it is on.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
+use crate::filter::{Area, QueryFilter};
+use crate::index::PolyIndex;
+use crate::link::{OffLink, NOWHERE};
 use crate::walkable::WalkableGrid;
 use crate::NavSettings;
 
@@ -52,6 +56,11 @@ pub struct Poly {
     /// Which walkable region this belongs to. Polygons in different regions can
     /// never be linked, so this is also "which island of the level is it on".
     pub region: u32,
+    /// Which kind of ground this is — 0 unless an [`AreaVolume`](crate::AreaVolume)
+    /// painted it. A rectangle never straddles two areas: the cut treats a
+    /// change of area exactly like a change of region.
+    #[serde(default)]
+    pub area: u8,
     /// World-space plan bounds, as (x, z).
     pub min: [f32; 2],
     pub max: [f32; 2],
@@ -124,6 +133,24 @@ pub struct NavMesh {
     /// count as on it, how wide to draw it — without every caller having to
     /// carry the settings alongside.
     pub settings: NavSettings,
+    /// The kinds of ground in this bake, indexed by [`Poly::area`]. Always has
+    /// at least plain walkable ground in it at index 0.
+    #[serde(default = "default_areas")]
+    pub areas: Vec<Area>,
+    /// Ladders, jumps, doors — the ways across that are not ground.
+    #[serde(default)]
+    pub off_links: Vec<OffLink>,
+    /// Built on first use and thrown away by a clone or a save, because it is
+    /// derived from the polygons and rebuilding it costs a fraction of what
+    /// carrying it costs.
+    #[serde(skip)]
+    index: OnceLock<PolyIndex>,
+    #[serde(skip)]
+    link_index: OnceLock<HashMap<usize, Vec<(u32, bool)>>>,
+}
+
+fn default_areas() -> Vec<Area> {
+    vec![Area::walkable()]
 }
 
 impl NavMesh {
@@ -151,13 +178,14 @@ impl NavMesh {
             }
             let start = grid.cells[seed];
             let region = grid.region[seed];
+            let area = start.area;
             let (mut y_min, mut y_max) = (start.y, start.y);
 
             // Grow right along the seed's row.
             let mut rows: Vec<Vec<usize>> = vec![vec![seed]];
             let mut x = start.x + 1;
             while x < grid.width {
-                let Some(i) = pick(x, start.z, region, y_min, y_max, span, grid, &owner)
+                let Some(i) = pick(x, start.z, region, area, y_min, y_max, span, grid, &owner)
                 else {
                     break;
                 };
@@ -177,7 +205,7 @@ impl NavMesh {
                 let (mut ry_min, mut ry_max) = (y_min, y_max);
                 for k in 0..w {
                     let Some(i) =
-                        pick(start.x + k, z, region, ry_min, ry_max, span, grid, &owner)
+                        pick(start.x + k, z, region, area, ry_min, ry_max, span, grid, &owner)
                     else {
                         break;
                     };
@@ -213,6 +241,7 @@ impl NavMesh {
                 w,
                 d,
                 region,
+                area,
                 min,
                 max,
                 y_min,
@@ -233,6 +262,105 @@ impl NavMesh {
             cell_size: cell,
             anchor: [0.0; 3],
             settings: *settings,
+            areas: default_areas(),
+            off_links: Vec::new(),
+            index: OnceLock::new(),
+            link_index: OnceLock::new(),
+        })
+    }
+
+    /// Name the kinds of ground this bake was painted with.
+    ///
+    /// Index 0 is always plain walkable ground, whatever is passed — a bake with
+    /// no default area is one where every unpainted polygon means nothing.
+    pub fn with_areas(mut self, areas: Vec<Area>) -> Self {
+        self.areas = areas;
+        if self.areas.is_empty() {
+            self.areas.push(Area::walkable());
+        } else {
+            self.areas[0] = Area::walkable();
+        }
+        self
+    }
+
+    /// Attach the level's hand-placed links, resolving each end onto the ground.
+    ///
+    /// An end that lands nowhere leaves the link **unresolved** rather than
+    /// dropped, so the editor can say which one and why instead of a door
+    /// quietly doing nothing. Both ends are snapped onto the surface, so an
+    /// agent walking to a link's mouth arrives on the floor rather than at
+    /// whatever height the marker was left at.
+    pub fn with_links(mut self, links: Vec<OffLink>) -> Self {
+        let snap = self.settings.agent_height.max(0.5);
+        let mut resolved = links;
+        for l in &mut resolved {
+            match self.nearest(l.from, snap) {
+                Some((i, on)) => {
+                    l.from_poly = i as u32;
+                    l.from = on;
+                }
+                None => l.from_poly = NOWHERE,
+            }
+            match self.nearest(l.to, snap) {
+                Some((i, on)) => {
+                    l.to_poly = i as u32;
+                    l.to = on;
+                }
+                None => l.to_poly = NOWHERE,
+            }
+        }
+        self.off_links = resolved;
+        self
+    }
+
+    /// The links whose ends did not land on the navmesh — the ones that will
+    /// silently do nothing, named so somebody can move them.
+    pub fn unresolved_links(&self) -> impl Iterator<Item = &OffLink> {
+        self.off_links.iter().filter(|l| !l.resolved())
+    }
+
+    /// Open or close one link by its id, and say whether it was there.
+    ///
+    /// This is the door: closing it makes every route that used it repath, and
+    /// nothing has to be rebaked.
+    pub fn set_link_enabled(&mut self, id: u32, on: bool) -> bool {
+        match self.off_links.iter_mut().find(|l| l.id == id) {
+            Some(l) => {
+                l.enabled = on;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The polygon index, built the first time something asks for it.
+    pub(crate) fn index(&self) -> &PolyIndex {
+        self.index.get_or_init(|| PolyIndex::build(&self.polys, self.cell_size))
+    }
+
+    /// Which links leave each polygon, and which way round.
+    ///
+    /// Built once and kept, **including the links that are switched off**: a
+    /// door opening and closing is the ordinary case, and rebuilding this every
+    /// time one did would make the cheap thing the expensive one. The search
+    /// checks [`OffLink::usable`] as it goes instead.
+    pub(crate) fn links_from(&self) -> &HashMap<usize, Vec<(u32, bool)>> {
+        self.link_index.get_or_init(|| {
+            let mut out: HashMap<usize, Vec<(u32, bool)>> = HashMap::new();
+            for (i, l) in self.off_links.iter().enumerate() {
+                if l.from_poly != NOWHERE {
+                    out.entry(l.from_poly as usize).or_default().push((i as u32, true));
+                }
+                if l.to_poly != NOWHERE && l.bidirectional {
+                    out.entry(l.to_poly as usize).or_default().push((i as u32, false));
+                }
+            }
+            // The same reason the portals are sorted: a route that depends on
+            // hash order is a route that changes between runs.
+            for v in out.values_mut() {
+                v.sort_unstable();
+            }
+            out
         })
     }
 
@@ -268,23 +396,51 @@ impl NavMesh {
     /// character standing a few centimetres above the floor, or just off the
     /// edge of it, is the normal case rather than an error.
     pub fn nearest(&self, p: [f32; 3], max_distance: f32) -> Option<(usize, [f32; 3])> {
+        self.nearest_with(p, max_distance, &QueryFilter::default())
+    }
+
+    /// …ignoring ground this character will not walk on.
+    ///
+    /// A boat asking where it is must not be told "the quay, two metres that
+    /// way" — an answer off the water is worse than no answer, because
+    /// everything downstream then paths from a place the thing cannot be.
+    pub fn nearest_with(
+        &self,
+        p: [f32; 3],
+        max_distance: f32,
+        filter: &QueryFilter,
+    ) -> Option<(usize, [f32; 3])> {
         let mut best: Option<(usize, [f32; 3], f32)> = None;
-        for (i, poly) in self.polys.iter().enumerate() {
+        let consider = |i: usize, best: &mut Option<(usize, [f32; 3], f32)>| {
+            let poly = &self.polys[i];
+            if !filter.passable(poly.area) {
+                return;
+            }
             let q = poly.clamp(p);
             let d = dist(p, q);
             if d > max_distance {
-                continue;
+                return;
             }
             // A tie in distance goes to the polygon the point is actually over:
-            // standing on a bridge must not snap to the ground beneath it.
+            // standing on a bridge must not snap to the ground beneath it. With
+            // the index handing polygons back bucket by bucket, "first seen" is
+            // no longer "lowest index", so the tie is broken on the index
+            // itself — or the same question would answer differently depending
+            // on which bucket a point happened to land in.
             let better = match best {
                 None => true,
-                Some((_, _, bd)) => d < bd - 1e-6,
+                Some((bi, _, bd)) => d < *bd - 1e-6 || (d <= *bd + 1e-6 && i < *bi),
             };
             if better {
-                best = Some((i, q, d));
+                *best = Some((i, q, d));
             }
-        }
+        };
+
+        // The index over-reports and never under-reports, and an empty index
+        // (no polygons) offers nothing — so it is the one and only path.
+        let r = max_distance.max(0.0);
+        self.index()
+            .for_each_in([p[0] - r, p[2] - r], [p[0] + r, p[2] + r], |i| consider(i, &mut best));
         best.map(|(i, q, _)| (i, q))
     }
 
@@ -314,14 +470,32 @@ impl NavMesh {
     /// different question from `path(...).is_some()`: a path that exists but
     /// does not reach is [`Path::complete`] false, and this is that flag.
     pub fn reachable(&self, from: [f32; 3], to: [f32; 3], snap: f32) -> bool {
-        // Same region is necessary but not sufficient — regions are the coarse
-        // filter and the search is the answer.
-        match (self.region_at(from, snap), self.region_at(to, snap)) {
-            (Some(a), Some(b)) if a == b => {
-                self.path_within(from, to, snap).is_some_and(|p| p.complete)
+        self.reachable_with(from, to, snap, &QueryFilter::default())
+    }
+
+    /// …for a character with its own rules about what it will walk on.
+    ///
+    /// The region shortcut only survives when nothing can be excluded and there
+    /// are no links: a filter can cut one island into two that the bake thinks
+    /// are one, and a link can join two the bake thinks are separate, so with
+    /// either in play the search is the only thing that knows.
+    pub fn reachable_with(
+        &self,
+        from: [f32; 3],
+        to: [f32; 3],
+        snap: f32,
+        filter: &QueryFilter,
+    ) -> bool {
+        let plain = self.off_links.is_empty() && *filter == QueryFilter::default();
+        if plain {
+            // Same region is necessary but not sufficient — regions are the
+            // coarse filter and the search is the answer.
+            match (self.region_at(from, snap), self.region_at(to, snap)) {
+                (Some(a), Some(b)) if a == b => {}
+                _ => return false,
             }
-            _ => false,
         }
+        self.path_with(from, to, snap, filter).is_some_and(|p| p.complete)
     }
 
     /// Walk a straight line across the surface and report **where it stops**.
@@ -341,7 +515,22 @@ impl NavMesh {
     /// with the polygons the way an edge-crossing solver can when a portal is
     /// degenerate.
     pub fn raycast(&self, from: [f32; 3], to: [f32; 3], snap: f32) -> Option<[f32; 3]> {
-        let Some((mut cur, start)) = self.nearest(from, snap) else { return Some(from) };
+        self.raycast_with(from, to, snap, &QueryFilter::default())
+    }
+
+    /// …refusing to walk across ground this character will not enter, which is
+    /// what makes "can I just walk at it" mean the same thing for a guard who
+    /// will not swim as for a zombie who will.
+    pub fn raycast_with(
+        &self,
+        from: [f32; 3],
+        to: [f32; 3],
+        snap: f32,
+        filter: &QueryFilter,
+    ) -> Option<[f32; 3]> {
+        let Some((mut cur, start)) = self.nearest_with(from, snap, filter) else {
+            return Some(from);
+        };
         let (dx, dz) = (to[0] - from[0], to[2] - from[2]);
         let plan = (dx * dx + dz * dz).sqrt();
         if plan <= f32::EPSILON {
@@ -353,14 +542,16 @@ impl NavMesh {
         let steps = (plan / stride).ceil().max(1.0) as usize;
         let step = self.settings.step_height.max(0.0);
         let mut last = start;
+        let index = self.index();
 
         for k in 1..=steps {
             let t = k as f32 / steps as f32;
             let at = [from[0] + dx * t, 0.0, from[2] + dz * t];
-            let mut found = None;
-            for (j, poly) in self.polys.iter().enumerate() {
-                if !poly.contains_xz(at) {
-                    continue;
+            let mut found: Option<(usize, f32)> = None;
+            let consider = |j: usize, found: &mut Option<(usize, f32)>| {
+                let poly = &self.polys[j];
+                if !poly.contains_xz(at) || !filter.passable(poly.area) {
+                    return;
                 }
                 // Only ground this walk could actually get onto from where it
                 // is: the same polygon, a linked one, or one within a step.
@@ -368,16 +559,17 @@ impl NavMesh {
                     || self.links[cur].iter().any(|l| l.to == j)
                     || (poly.centre[1] - last[1]).abs() <= step;
                 if !reachable {
-                    continue;
+                    return;
                 }
                 // Where a column offers two floors, take the one nearest the
                 // height we are already walking at — a bridge must not steal a
                 // walk that is happening underneath it.
                 let d = (poly.centre[1] - last[1]).abs();
-                if found.is_none_or(|(_, bd)| d < bd) {
-                    found = Some((j, d));
+                if found.is_none_or(|(bj, bd)| d < bd - 1e-6 || (d <= bd + 1e-6 && j < bj)) {
+                    *found = Some((j, d));
                 }
-            }
+            };
+            index.for_each_in([at[0], at[2]], [at[0], at[2]], |j| consider(j, &mut found));
             let Some((j, _)) = found else { return Some(last) };
             cur = j;
             last = self.polys[j].clamp([at[0], last[1], at[2]]);
@@ -409,6 +601,18 @@ impl NavMesh {
         u: f32,
         v: f32,
     ) -> Option<[f32; 3]> {
+        self.random_point_with(near, u, v, &QueryFilter::default())
+    }
+
+    /// …only on ground this character would stand on, so a patrol point picked
+    /// for something that will not swim is never in the lake.
+    pub fn random_point_with(
+        &self,
+        near: Option<([f32; 3], f32)>,
+        u: f32,
+        v: f32,
+        filter: &QueryFilter,
+    ) -> Option<[f32; 3]> {
         let (u, v) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
         // The window to sample inside, in plan. Unbounded when nothing was asked.
         let window = near.map(|(c, r)| {
@@ -416,17 +620,45 @@ impl NavMesh {
             ([c[0] - r, c[2] - r], [c[0] + r, c[2] + r])
         });
         // Each eligible polygon, cut down to the part of it inside the window.
-        let mut parts: Vec<(&Poly, [f32; 2], [f32; 2])> = Vec::new();
-        for p in &self.polys {
+        let clip = |p: &Poly| -> Option<([f32; 2], [f32; 2])> {
+            if !filter.passable(p.area) {
+                return None;
+            }
             let (mut lo, mut hi) = (p.min, p.max);
             if let Some((wlo, whi)) = window {
                 lo = [lo[0].max(wlo[0]), lo[1].max(wlo[1])];
                 hi = [hi[0].min(whi[0]), hi[1].min(whi[1])];
                 if lo[0] > hi[0] || lo[1] > hi[1] {
-                    continue;
+                    return None;
                 }
             }
-            parts.push((p, lo, hi));
+            Some((lo, hi))
+        };
+        let mut parts: Vec<(&Poly, [f32; 2], [f32; 2])> = Vec::new();
+        match window {
+            // A windowed ask ("wander somewhere near me") is the per-frame one,
+            // and it must not walk the whole level to answer — the index hands
+            // back the neighbourhood (sorted + deduped, so the pick stays
+            // deterministic whatever bucket order it arrived in).
+            Some((wlo, whi)) => {
+                let mut idx: Vec<usize> = Vec::new();
+                self.index().for_each_in(wlo, whi, |i| idx.push(i));
+                idx.sort_unstable();
+                idx.dedup();
+                for i in idx {
+                    let p = &self.polys[i];
+                    if let Some((lo, hi)) = clip(p) {
+                        parts.push((p, lo, hi));
+                    }
+                }
+            }
+            None => {
+                for p in &self.polys {
+                    if let Some((lo, hi)) = clip(p) {
+                        parts.push((p, lo, hi));
+                    }
+                }
+            }
         }
         if parts.is_empty() {
             return None;
@@ -457,14 +689,19 @@ impl NavMesh {
 /// The best cell in one column to add to a rectangle, or `None` if there is not
 /// one that fits.
 ///
-/// "Fits" is: unclaimed, in the same region, and inside the rectangle's height
-/// span once it is added. Where a column offers two (a bridge over a floor) the
-/// one nearest the rectangle's own height wins.
+/// "Fits" is: unclaimed, in the same region, the same kind of ground, and inside
+/// the rectangle's height span once it is added. Where a column offers two (a
+/// bridge over a floor) the one nearest the rectangle's own height wins.
+///
+/// The area has to be part of that test rather than a label applied afterwards:
+/// a rectangle covering half mud and half road could only claim one of them, and
+/// whichever it claimed would be wrong for the other half.
 #[allow(clippy::too_many_arguments)]
 fn pick(
     x: usize,
     z: usize,
     region: u32,
+    area: u8,
     y_min: f32,
     y_max: f32,
     span: f32,
@@ -474,7 +711,7 @@ fn pick(
     let mid = (y_min + y_max) * 0.5;
     let mut best: Option<(usize, f32)> = None;
     for i in grid.column_range(x, z) {
-        if owner[i] != usize::MAX || grid.region[i] != region {
+        if owner[i] != usize::MAX || grid.region[i] != region || grid.cells[i].area != area {
             continue;
         }
         let y = grid.cells[i].y;
@@ -592,7 +829,9 @@ fn oriented(from: [f32; 3], to: [f32; 3], to_poly: usize, p: [f32; 3], q: [f32; 
     }
 }
 
-fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+/// Euclidean distance — the crate's one copy (path and agent share it, so a
+/// future epsilon or squared-form change is one decision).
+pub(crate) fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
     let (dx, dy, dz) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
     (dx * dx + dy * dy + dz * dz).sqrt()
 }

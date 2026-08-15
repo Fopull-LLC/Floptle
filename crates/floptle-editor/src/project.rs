@@ -1297,7 +1297,7 @@ impl Editor {
             let ok = self.save_prefab_in_place();
             if ok {
                 self.scene_dirty = false;
-                self.toast = Some(("💾  Saved".into(), 2.2));
+                self.save_flash = Editor::SAVE_FLASH_SECS; // the status chip confirms it
                 let _ = std::fs::remove_file(self.autosave_path()); // saved for real
             }
             return ok;
@@ -1311,7 +1311,11 @@ impl Editor {
             let _ = std::fs::create_dir_all(dir);
         }
         let doc = floptle_scene::to_doc(self.scene_name.clone(), &self.world);
-        let ok = match floptle_scene::save(&doc, &path) {
+        // Aggregated over EVERYTHING this save writes — the scene doc, terrain
+        // fields, paint, map geometry, the palette. The always-visible status
+        // chip rests on this flag, so it must never read "saved" while a
+        // sidecar full of sculpting is still only in memory.
+        let mut ok = match floptle_scene::save(&doc, &path) {
             Ok(()) => {
                 self.console.push(
                     floptle_script::LogLevel::Debug,
@@ -1349,6 +1353,7 @@ impl Editor {
                     format!("💾 save terrain {id} failed: {e}"),
                     None,
                 );
+                ok = false;
             } else {
                 saved_ids.push(id);
             }
@@ -1393,9 +1398,9 @@ impl Editor {
         }
         // Vertex paint: per-vertex arrays live beside the scene for the same reason
         // terrain fields do — they have no business in a .ron.
-        self.save_paint();
-        self.save_tex_paint();
-        self.save_maps();
+        ok &= self.save_paint();
+        ok &= self.save_tex_paint();
+        ok &= self.save_maps();
         // The texture PALETTE (which image fills each painted slot) is editor state,
         // not in the field — persist it so painted textures survive a reload. Glowing
         // slots keep their `|glow` marker (see adopt_terrain's load). Cold terrains
@@ -1413,15 +1418,34 @@ impl Editor {
                     }
                 })
                 .collect();
-            let _ = std::fs::write(self.terrain_palette_path(), palette.join("\n"));
+            if let Err(e) = std::fs::write(self.terrain_palette_path(), palette.join("\n")) {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("💾 save terrain palette failed: {e}"),
+                    None,
+                );
+                ok = false;
+            }
         }
         if ok {
             self.scene_dirty = false;
-            self.toast = Some(("💾  Saved".into(), 2.2)); // visible confirmation, not just Console
+            // Visible confirmation, not just Console: the menu-bar status chip
+            // glows "✓ saved" for a moment, wherever you're docked.
+            self.save_flash = Editor::SAVE_FLASH_SECS;
             let _ = std::fs::remove_file(self.autosave_path()); // saved for real
+        } else {
+            // ANY failed write — the scene doc or a sidecar full of sculpting —
+            // must be as visible as a success, and the chip stays "unsaved".
+            self.toast = Some((
+                "⚠  save FAILED — your changes are still unsaved, see the Console".into(),
+                6.0,
+            ));
         }
         ok
     }
+
+    /// How long the save-status chip glows after a successful save.
+    pub(crate) const SAVE_FLASH_SECS: f32 = 2.5;
 
     /// Where this scene's crash-recovery autosave lives (`.floptle` is the
     /// project's editor-cache dir, never exported).

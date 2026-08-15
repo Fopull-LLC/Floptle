@@ -30,7 +30,7 @@
 
 use floptle_core::math::{DVec3, Mat4, Vec3};
 use floptle_core::{Entity, Matter, World};
-use floptle_nav::{NavMesh, NavSettings, Tri};
+use floptle_nav::{NavMesh, NavSettings, OffLink, Tri};
 
 /// The scene's navmesh node, if it has one.
 ///
@@ -331,6 +331,186 @@ pub(crate) fn settings_of(m: &Matter) -> Option<NavSettings> {
     })
 }
 
+/// The level's area volumes, and the names they gave the ground.
+///
+/// Gathered **after** the bake's anchor is known, because a volume has to be
+/// measured in the same space as the triangles it paints — and auto bounds move
+/// that space out from under anything gathered earlier.
+///
+/// Area 0 is always plain walkable ground. Names are matched case-insensitively
+/// and share an id, so two volumes both called "water" are one kind of ground
+/// however they were typed, and a script that says `"Water"` finds it.
+pub(crate) fn gather_areas(
+    world: &World,
+    anchor: DVec3,
+) -> (Vec<floptle_nav::AreaVolume>, Vec<floptle_nav::Area>, Vec<String>) {
+    let mut areas = vec![floptle_nav::Area::walkable()];
+    let mut volumes = Vec::new();
+    let mut warnings = Vec::new();
+    let ents: Vec<Entity> = world.query::<Matter>().map(|(e, _)| e).collect();
+    for e in ents {
+        let Some(Matter::NavArea { half_extents, area, cost, blocks, enabled }) =
+            world.get::<Matter>(e).cloned()
+        else {
+            continue;
+        };
+        if !enabled || floptle_core::is_disabled(world, e) {
+            continue;
+        }
+        let t = floptle_core::world_transform(world, e);
+        let half = Vec3::from(half_extents) * t.scale;
+        if half.min_element() <= 0.0 {
+            continue;
+        }
+        let local = (t.translation - anchor).as_vec3();
+        // World → the box's own frame, where the box is the cube from −1 to 1:
+        // undo the translation, undo the rotation, then divide by the extents.
+        let m = Mat4::from_scale_rotation_translation(half, t.rotation, local).inverse();
+        let id = if blocks {
+            floptle_nav::WALKABLE
+        } else {
+            // TRIMMED at registration, because everything that matches against
+            // this list trims too — a stray space must not mint a second
+            // "water " that every filter then misses.
+            let name = {
+                let n = area.trim();
+                if n.is_empty() { "area".to_string() } else { n.to_string() }
+            };
+            match register_area(&mut areas, &name, cost) {
+                Ok(i) => {
+                    // First name in wins the cost — worth saying when a
+                    // same-named volume disagrees, or the Inspector shows a
+                    // number the bake is not using.
+                    if (areas[i as usize].cost - cost).abs() > 1e-4 {
+                        warnings.push(format!(
+                            "two \"{name}\" volumes name different costs ({} and {cost}) — \
+                             an area has ONE cost, and the first volume's won",
+                            areas[i as usize].cost
+                        ));
+                    }
+                    i
+                }
+                Err(()) => {
+                    // More kinds of ground than a filter can name (32). The
+                    // volume paints NOTHING rather than aliasing another
+                    // area's id — and the bake says so, because silently
+                    // merging it would look exactly like a volume in the
+                    // wrong place.
+                    warnings.push(format!(
+                        "area \"{name}\" is one kind of ground too many (the bake holds {}) — \
+                         this volume painted nothing; reuse a name or remove one",
+                        floptle_nav::MAX_AREAS
+                    ));
+                    continue;
+                }
+            }
+        };
+        volumes.push(floptle_nav::AreaVolume {
+            inverse: m.to_cols_array(),
+            area: id,
+            blocks,
+        });
+    }
+    (volumes, areas, warnings)
+}
+
+/// The one place an area NAME becomes an id: find it case-insensitively, or
+/// register it (`Err` = the bake is out of area slots). Volumes and links both
+/// go through here, so a link can name an area no volume painted and a filter
+/// still finds it.
+fn register_area(areas: &mut Vec<floptle_nav::Area>, name: &str, cost: f32) -> Result<u8, ()> {
+    if let Some(i) = areas.iter().position(|a| a.name.eq_ignore_ascii_case(name)) {
+        return Ok(i as u8);
+    }
+    if areas.len() >= floptle_nav::MAX_AREAS {
+        return Err(());
+    }
+    areas.push(floptle_nav::Area::new(name.to_string(), cost));
+    Ok((areas.len() - 1) as u8)
+}
+
+/// The level's hand-placed links, in the bake's own space.
+///
+/// A link's name is its node's name, because that is what somebody would type
+/// into `nav.link("front door", false)` — and a name that has to be kept in step
+/// with a second field is a name that goes stale.
+pub(crate) fn gather_links(
+    world: &World,
+    anchor: DVec3,
+    areas: &mut Vec<floptle_nav::Area>,
+) -> (Vec<OffLink>, Vec<String>) {
+    let mut out: Vec<OffLink> = Vec::new();
+    let mut warnings = Vec::new();
+    let ents: Vec<Entity> = world.query::<Matter>().map(|(e, _)| e).collect();
+    for e in ents {
+        let Some(Matter::NavLink { id, to, bidirectional, cost, area, duration, enabled }) =
+            world.get::<Matter>(e).cloned()
+        else {
+            continue;
+        };
+        if floptle_core::is_disabled(world, e) {
+            continue;
+        }
+        let t = floptle_core::world_transform(world, e);
+        let far = t.mul_transform(&floptle_core::Transform::from_translation(DVec3::new(
+            to[0] as f64,
+            to[1] as f64,
+            to[2] as f64,
+        )));
+        let rel = |p: DVec3| {
+            let d = p - anchor;
+            [d.x as f32, d.y as f32, d.z as f32]
+        };
+        let name = world
+            .get::<floptle_core::Name>(e)
+            .map(|n| n.0.clone())
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| format!("link {id}"));
+        let mut link = OffLink::new(id, name, rel(t.translation), rel(far.translation));
+        link.bidirectional = bidirectional;
+        link.cost = cost;
+        link.duration = duration;
+        link.enabled = enabled;
+        // A link's area name REGISTERS the area (default cost) rather than
+        // silently resolving to plain ground when no volume happens to share
+        // the name — "tag twenty links `jump` and exclude them all" has to
+        // work without also painting a jump-coloured box somewhere.
+        let area_name = area.trim();
+        link.area = if area_name.is_empty() {
+            floptle_nav::WALKABLE
+        } else {
+            match register_area(areas, area_name, 1.0) {
+                Ok(i) => i,
+                Err(()) => {
+                    warnings.push(format!(
+                        "link \"{}\": area \"{area_name}\" is one kind of ground too many — \
+                         the link counts as plain ground",
+                        link.name
+                    ));
+                    floptle_nav::WALKABLE
+                }
+            }
+        };
+        out.push(link);
+    }
+    // By id, so a bake is the same bake twice running whatever order the world
+    // happened to hand its nodes back in.
+    out.sort_by_key(|l| l.id);
+    // Two links sharing an id are two links a script cannot tell apart —
+    // `nav.link(id)` and a rebake's identity both stop meaning one thing.
+    // (Editor copies mint fresh ids; this catches hand-written scene files.)
+    for pair in out.windows(2) {
+        if pair[0].id == pair[1].id {
+            warnings.push(format!(
+                "nav links \"{}\" and \"{}\" share id {} — scripts and route crossings can \
+                 only ever reach the first; give each link its own id",
+                pair[0].name, pair[1].name, pair[0].id
+            ));
+        }
+    }
+    (out, warnings)
+}
+
 /// Cut the gathered triangles down to the volume's box.
 ///
 /// A triangle is kept when its own bounds OVERLAP the box — not when one of its
@@ -360,10 +540,19 @@ pub(crate) fn clip(tris: Vec<Tri>, half: Vec3) -> Vec<Tri> {
         .collect()
 }
 
-/// Bake, and say how long it took.
-pub(crate) fn bake(tris: &[Tri], settings: &NavSettings) -> (Option<NavMesh>, f32) {
+/// Bake, and say how long it took — with the volumes that paint or carve the
+/// ground, the links that join it up, and the names for the areas the volumes
+/// used.
+pub(crate) fn bake_with(
+    tris: &[Tri],
+    settings: &NavSettings,
+    volumes: &[floptle_nav::AreaVolume],
+    links: Vec<OffLink>,
+    areas: &[floptle_nav::Area],
+) -> (Option<NavMesh>, f32) {
     let t = std::time::Instant::now();
-    let mesh = floptle_nav::bake(tris, settings);
+    let mesh = floptle_nav::bake_with(tris, settings, volumes, links)
+        .map(|m| if areas.is_empty() { m } else { m.with_areas(areas.to_vec()) });
     (mesh, t.elapsed().as_secs_f32())
 }
 
@@ -411,7 +600,23 @@ impl crate::Editor {
             self.script_host.set_nav_mesh(None);
             return;
         };
-        self.nav_baked = load(&self.nav_path(id));
+        let path = self.nav_path(id);
+        self.nav_baked = load(&path);
+        // A bake that exists but will not read is USUALLY one written by an
+        // older Floptle (the format is compact, not self-describing). Silence
+        // here looks exactly like "the AI is broken": no outline, nil paths,
+        // units standing still — so say what happened and what fixes it.
+        if self.nav_baked.is_none() && path.exists() {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "navmesh: {} could not be read — usually a bake from an older engine \
+                     version. Select the Nav Mesh node and press Bake to rebuild it.",
+                    path.display()
+                ),
+                None,
+            );
+        }
         self.nav_overlay = None;
         self.script_host.set_nav_mesh(self.nav_baked.clone());
     }
@@ -503,7 +708,15 @@ impl crate::Editor {
             Some(c) => origin + DVec3::new(c.x as f64, c.y as f64, c.z as f64),
             None => origin,
         };
-        let (mesh, seconds) = bake(&tris, &settings);
+        // Volumes and links are measured around the anchor, which auto bounds
+        // may have just moved — so both are gathered here rather than alongside
+        // the triangles.
+        let (volumes, mut areas, area_warnings) = gather_areas(&self.world, anchor);
+        let (links, link_warnings) = gather_links(&self.world, anchor, &mut areas);
+        for w in area_warnings.into_iter().chain(link_warnings) {
+            self.console.push(LogLevel::Warn, format!("navmesh: {w}"), None);
+        }
+        let (mesh, seconds) = bake_with(&tris, &settings, &volumes, links, &areas);
         let mesh = mesh.map(|m| m.anchored_at([anchor.x, anchor.y, anchor.z]));
         let Some(mesh) = mesh else {
             self.console.push(
@@ -541,17 +754,46 @@ impl crate::Editor {
                 None,
             );
         }
+        // A link whose end missed the ground does nothing, for ever, and looks
+        // exactly like a route that simply preferred the long way. Naming the
+        // ones that missed is the whole difference between a feature people
+        // trust and one they stop using.
+        let lost: Vec<String> = mesh.unresolved_links().map(|l| l.name.clone()).collect();
+        if !lost.is_empty() {
+            self.console.push(
+                LogLevel::Warn,
+                format!(
+                    "navmesh: {} nav link{} could not find the ground at one end and will do \
+                     nothing: {}. Move the ends onto walkable floor — a link's mouth has to be \
+                     somewhere a character could stand.",
+                    lost.len(),
+                    if lost.len() == 1 { "" } else { "s" },
+                    lost.join(", ")
+                ),
+                None,
+            );
+        }
+        let crossings = mesh.off_links.len() - lost.len();
+
         self.script_host.set_nav_mesh(Some(mesh.clone()));
         self.nav_baked = Some(mesh);
         self.nav_overlay = None;
         self.nav_seconds = seconds;
         self.nav_triangles = triangles;
         self.scene_dirty = true;
+        // Independent appends — each count says its piece when it has one.
+        let mut extras = String::new();
+        if crossings > 0 {
+            extras.push_str(&format!(", {crossings} link(s)"));
+        }
+        if areas.len() > 1 {
+            extras.push_str(&format!(", {} area(s)", areas.len() - 1));
+        }
         self.console.push(
             LogLevel::Debug,
             format!(
                 "navmesh: {polys} polygons over {area:.0} m², from {triangles} triangles in \
-                 {seconds:.2}s"
+                 {seconds:.2}s{extras}"
             ),
             None,
         );

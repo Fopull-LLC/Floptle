@@ -291,6 +291,30 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field isPlaying fun(self: AudioSourceHandle): boolean Is the source audible right now?
 ---@field position fun(self: AudioSourceHandle): number Playhead in seconds.
 
+---Something that walks the navmesh, returned by `nav.agent(node)`. Order it with
+---`moveTo` and read `state` as it goes — the engine steps the whole crowd once a
+---frame, so there is no update to call.
+---@class NavAgentHandle
+---@field state string 'idle' | 'moving' | 'arrived' | 'blocked' | 'crossing', and 'gone' once destroyed.
+---@field arrived boolean True once it got there — the flag to hang \"and then attack\" off.
+---@field moving boolean True while it still has somewhere to be.
+---@field blocked boolean True when it cannot get there right now: unreachable, or no progress for giveUpAfter seconds. A crowd pin clears itself; a cut-off goal does not.
+---@field complete boolean Whether the route it is walking actually reaches the order.
+---@field remaining number How far there is left to walk, ALONG THE ROUTE rather than through the walls.
+---@field velocity Vec3 How fast it is going. With drive = 'none' this is the whole output.
+---@field speed number Ground speed in units per second — what a walk/run blend reads.
+---@field pos Vec3 Where it is, in world space.
+---@field target Vec3|nil Where it was told to go, or nil with no order.
+---@field link string|nil The Nav Link being crossed right now, by name. The hook for a climb animation.
+---@field linkProgress number|nil How far across that link, 0 to 1.
+---@field alive boolean False once the agent (or its node) has gone.
+---@field moveTo fun(self: NavAgentHandle, point: any) Send it to a world point. Idempotent, so calling it every frame to chase a moving target is fine.
+---@field stop fun(self: NavAgentHandle) Cancel the order. Anything mid-crossing finishes crossing first.
+---@field teleport fun(self: NavAgentHandle, point: any) Put it somewhere without walking there.
+---@field set fun(self: NavAgentHandle, opts: table) Change how it walks mid-game; anything left out is left alone.
+---@field corners fun(self: NavAgentHandle): table The corners still to walk, as a list of vec3.
+---@field destroy fun(self: NavAgentHandle) Take it out of the crowd.
+
 ---A playing sound returned by `audio.play(...)`. Handles stay valid until the
 ---sound finishes; calls on a finished sound are ignored.
 ---@class SoundHandle

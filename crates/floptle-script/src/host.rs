@@ -1870,7 +1870,13 @@ impl ScriptHost {
         // scene baked. Empty until one is loaded, which is the ordinary state
         // of a project that has not made one.
         let nav_mesh: crate::nav_api::NavShared = Rc::new(RefCell::new(None));
-        crate::nav_api::install_nav_api(&lua, nav_mesh.clone());
+        let nav_agents: crate::nav_api::AgentsShared = Rc::new(RefCell::new(Default::default()));
+        crate::nav_api::install_nav_api(
+            &lua,
+            nav_mesh.clone(),
+            nav_agents.clone(),
+            shared.scene.clone(),
+        );
         // The `physics.*` sim controls: pause/resume the whole physics step
         // while scripts keep running (loading screens, cutscenes, pause menus).
         let physics_pause_request: Rc<RefCell<Option<bool>>> = Rc::new(RefCell::new(None));
@@ -1983,6 +1989,7 @@ impl ScriptHost {
             sched,
             space_info,
             nav_mesh,
+            nav_agents,
             view_info,
             warp_request,
             physics_pause_request,
@@ -2369,6 +2376,14 @@ impl ScriptHost {
         // Pending timers belong to the old session — a scene switch drops them.
         // (Including a persistent node's: a timer is a promise about a world.)
         self.sched.borrow_mut().clear();
+        // So do agents: one belongs to a node in a world that is going away, and
+        // a crowd that survived a Stop would walk the next Play's units from
+        // wherever the last one left them.
+        {
+            let mut agents = self.nav_agents.borrow_mut();
+            agents.crowd.clear();
+            agents.bound.clear();
+        }
         let all: Vec<_> = self.instances.drain().collect();
         for (k, inst) in all {
             if keep.contains(&k.0) {
@@ -2508,6 +2523,143 @@ impl ScriptHost {
     /// navmesh changes when somebody bakes it and at no other time.
     pub fn set_nav_mesh(&self, mesh: Option<floptle_nav::NavMesh>) {
         *self.nav_mesh.borrow_mut() = mesh;
+        // Every route in flight was worked out against the mesh that just went
+        // away, and every filter was resolved against its area names. Both are
+        // re-done on the next step rather than left to rot.
+        let mut agents = self.nav_agents.borrow_mut();
+        agents.crowd.navmesh_changed();
+        let guard = self.nav_mesh.borrow();
+        agents.resolve_filters(guard.as_ref());
+    }
+
+    /// Walk every `nav.agent` one frame.
+    ///
+    /// Runs after the scripts, so an order given this frame is acted on this
+    /// frame, and before the writes are flushed, so an agent's movement rides
+    /// the same pass as a hand-written one.
+    ///
+    /// Positions are read from the scene **every frame** rather than owned
+    /// outright: whatever else moved a node — a script, the physics sim, a
+    /// parent, a cutscene — is the truth, and an agent that insisted otherwise
+    /// would fight it and win, which is the ugliest way for this to fail.
+    fn step_nav_agents(&mut self, dt: f32) {
+        if self.nav_agents.borrow().crowd.is_empty() {
+            return;
+        }
+        let mesh = self.nav_mesh.borrow();
+        let mut agents = self.nav_agents.borrow_mut();
+        let agents = &mut *agents;
+
+        // ---- into the crowd ------------------------------------------------
+        // Teleports write the NODE (below) rather than reading it — collected
+        // here because the scene is only borrowed immutably in this pass.
+        let mut teleports: Vec<(u32, [f64; 3])> = Vec::new();
+        let gone: Vec<floptle_nav::AgentId> = {
+            let scene = self.scene.borrow();
+            let mut gone = Vec::new();
+            for (id, b) in agents.bound.iter_mut() {
+                if !scene.transforms.contains_key(&b.entity) {
+                    // Its node has been destroyed. The agent goes with it.
+                    gone.push(*id);
+                    continue;
+                }
+                if let Some(tp) = b.teleport.take() {
+                    // The scene still holds the OLD position this frame — skip
+                    // the read-back, or the teleport is undone before it lands.
+                    b.pos = tp;
+                    if b.drive != crate::nav_api::Drive::None {
+                        teleports.push((b.entity, tp));
+                    }
+                    continue;
+                }
+                // The node is the truth: whatever else moved it (physics, a
+                // parent, a cutscene) wins over the agent.
+                let world = crate::api::world_transform_of(&scene, b.entity).translation;
+                b.pos = [world.x, world.y, world.z];
+                let Some(agent) = agents.crowd.agent_mut(*id) else { continue };
+                agent.pos = match mesh.as_ref() {
+                    Some(m) => m.to_local(b.pos),
+                    None => [world.x as f32, world.y as f32, world.z as f32],
+                };
+                match b.target {
+                    Some(t) => {
+                        let local = match mesh.as_ref() {
+                            Some(m) => m.to_local(t),
+                            None => [t[0] as f32, t[1] as f32, t[2] as f32],
+                        };
+                        // Sync, not re-order: an unchanged target must not wake
+                        // a Blocked agent (or re-queue a search) every frame.
+                        agent.sync_target(local);
+                    }
+                    None => agent.stop(),
+                }
+            }
+            gone
+        };
+        for id in gone {
+            agents.crowd.remove(id);
+            agents.bound.remove(&id);
+        }
+        self.write_agent_moves(teleports);
+
+        agents.crowd.step(mesh.as_ref(), dt);
+
+        // ---- and back out --------------------------------------------------
+        let Some(mesh) = mesh.as_ref() else { return };
+        let mut moves: Vec<(u32, [f64; 3])> = Vec::new();
+        let mut velocities: Vec<(u32, [f32; 3])> = Vec::new();
+        for (id, b) in agents.bound.iter_mut() {
+            let Some(agent) = agents.crowd.agent(*id) else { continue };
+            let world = mesh.to_world(agent.pos);
+            b.pos = world;
+            let physics = match b.drive {
+                crate::nav_api::Drive::None => continue,
+                crate::nav_api::Drive::Transform => false,
+                crate::nav_api::Drive::Velocity => true,
+                // A node with a body is driven through the body, because moving
+                // its transform underneath the sim is a fight nobody wins.
+                crate::nav_api::Drive::Auto => self.bodies.borrow().contains_key(&b.entity),
+            };
+            if physics {
+                // Horizontal only: gravity, slopes and jumps stay the sim's.
+                let keep = self.bodies.borrow().get(&b.entity).map(|s| s.vel[1]).unwrap_or(0.0);
+                velocities.push((b.entity, [agent.vel[0], keep, agent.vel[2]]));
+            } else {
+                moves.push((b.entity, world));
+            }
+        }
+        self.write_agent_moves(moves);
+        for (e, v) in velocities {
+            self.body_changes.borrow_mut().insert(e, v);
+        }
+    }
+
+    /// Put nodes where their agents say they are: world position in, node-local
+    /// translation out (through the parent chain). Shared by the per-frame
+    /// drive write-back and `agent:teleport`.
+    fn write_agent_moves(&self, moves: Vec<(u32, [f64; 3])>) {
+        if moves.is_empty() {
+            return;
+        }
+        let mut scene = self.scene.borrow_mut();
+        for (e, world) in moves {
+            let parent = crate::api::parent_world_of(&scene, e);
+            let Some(tr) = scene.transforms.get(&e).copied() else { continue };
+            let mut want = tr;
+            want.translation = glam::DVec3::new(world[0], world[1], world[2]);
+            let local = parent.inv_mul(&want).translation;
+            if let Some(slot) = scene.transforms.get_mut(&e) {
+                slot.translation = local;
+            }
+            scene.dirty.insert(e);
+            // A node with a body that was asked to be moved by its transform
+            // anyway: the physics writeback would stomp it, so this has to go
+            // through the same teleport channel a cross-node `node.pos` write
+            // does.
+            if self.bodies.borrow().contains_key(&e) {
+                self.body_pos_changes.borrow_mut().insert(e, [local.x, local.y, local.z]);
+            }
+        }
     }
 
     /// Feed this tick's celestial snapshot (`space.*` reads it — solar demo S2).
@@ -3813,6 +3965,9 @@ impl ScriptHost {
         crate::account_api::drain(&self.lua, &self.account, &self.logs);
         // Pass 2: run each script's start/update.
         self.run_pass(world, &work, dt, time, Pass::Frame, floptle_input::Domain::Frame);
+        // Every `nav.agent` walks HERE: after the orders this frame's scripts
+        // gave, before those writes reach the ECS.
+        self.step_nav_agents(dt);
         // Bindings run AFTER every `update`, so a label always shows this
         // frame's value rather than last frame's, and before the flush, so a
         // binding's write rides the same pass as a hand-written one.

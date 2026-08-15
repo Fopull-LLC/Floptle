@@ -316,6 +316,8 @@ fn matter_propagates(m: &Matter) -> bool {
         | Matter::Camera { .. }
         | Matter::PointLight { .. }
         | Matter::GravityVolume { .. }
+        | Matter::NavLink { .. }
+        | Matter::NavArea { .. }
         | Matter::WaterVolume { .. }
         | Matter::FieldShape { .. }
         | Matter::Tilemap { .. }

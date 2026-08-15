@@ -985,6 +985,38 @@ pub enum MatterDoc {
         #[serde(default = "on")]
         enabled: bool,
     },
+    /// A nav link ([`Matter::NavLink`]) — a ladder, a jump, a door. A
+    /// hand-written `NavLink()` is a one-way step two metres forward.
+    NavLink {
+        #[serde(default)]
+        id: u32,
+        #[serde(default = "default_link_to")]
+        to: [f32; 3],
+        #[serde(default)]
+        bidirectional: bool,
+        #[serde(default = "default_link_cost")]
+        cost: f32,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        area: String,
+        #[serde(default)]
+        duration: f32,
+        #[serde(default = "on")]
+        enabled: bool,
+    },
+    /// A nav area ([`Matter::NavArea`]) — ground that costs more, or ground that
+    /// is not ground.
+    NavArea {
+        #[serde(default = "default_nav_area_half")]
+        half_extents: [f32; 3],
+        #[serde(default = "default_nav_area_name")]
+        area: String,
+        #[serde(default = "default_nav_area_cost")]
+        cost: f32,
+        #[serde(default)]
+        blocks: bool,
+        #[serde(default = "on")]
+        enabled: bool,
+    },
     /// A reflection probe ([`Matter::ReflectionProbe`]). Every knob defaults, so
     /// a hand-written `ReflectionProbe()` is a room-sized box that captures on
     /// load — which is a sensible thing to type and then stop thinking about.
@@ -1255,6 +1287,23 @@ fn default_step_height() -> f32 {
 fn default_nav_cell() -> f32 {
     0.15
 }
+/// Two metres forward: far enough that a link written by hand is visible where
+/// it was put rather than a dot at the origin.
+fn default_link_to() -> [f32; 3] {
+    [0.0, 0.0, 2.0]
+}
+fn default_link_cost() -> f32 {
+    2.0
+}
+fn default_nav_area_half() -> [f32; 3] {
+    [4.0, 2.0, 4.0]
+}
+fn default_nav_area_name() -> String {
+    "rough".into()
+}
+fn default_nav_area_cost() -> f32 {
+    4.0
+}
 /// Two metres of crossover at a doorway: enough that walking out of a room does
 /// not switch environments in a single step, small enough that a probe does not
 /// quietly speak for the corridor outside it.
@@ -1406,6 +1455,24 @@ impl From<&Matter> for MatterDoc {
                 max_slope: *max_slope,
                 step_height: *step_height,
                 cell_size: *cell_size,
+                enabled: *enabled,
+            },
+            Matter::NavLink { id, to, bidirectional, cost, area, duration, enabled } => {
+                MatterDoc::NavLink {
+                    id: *id,
+                    to: *to,
+                    bidirectional: *bidirectional,
+                    cost: *cost,
+                    area: area.clone(),
+                    duration: *duration,
+                    enabled: *enabled,
+                }
+            }
+            Matter::NavArea { half_extents, area, cost, blocks, enabled } => MatterDoc::NavArea {
+                half_extents: *half_extents,
+                area: area.clone(),
+                cost: *cost,
+                blocks: *blocks,
                 enabled: *enabled,
             },
             Matter::ReflectionProbe { half_extents, enabled, intensity, fade } => {
@@ -1645,6 +1712,27 @@ impl MatterDoc {
                 max_slope: max_slope.clamp(0.0, 89.9),
                 step_height: step_height.max(0.0),
                 cell_size: cell_size.max(0.01),
+                enabled: *enabled,
+            },
+            MatterDoc::NavLink { id, to, bidirectional, cost, area, duration, enabled } => {
+                Matter::NavLink {
+                    id: *id,
+                    to: *to,
+                    bidirectional: *bidirectional,
+                    // A negative cost would make the router prefer going round in
+                    // circles, which is a level that hangs rather than one that
+                    // looks wrong.
+                    cost: cost.max(0.0),
+                    area: area.clone(),
+                    duration: duration.max(0.0),
+                    enabled: *enabled,
+                }
+            }
+            MatterDoc::NavArea { half_extents, area, cost, blocks, enabled } => Matter::NavArea {
+                half_extents: *half_extents,
+                area: area.clone(),
+                cost: cost.max(0.0),
+                blocks: *blocks,
                 enabled: *enabled,
             },
             MatterDoc::ReflectionProbe { half_extents, enabled, intensity, fade } => {

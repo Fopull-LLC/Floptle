@@ -115,6 +115,7 @@ fn the_bake_and_its_queries_stay_linear() {
     let yard = harness_can_tell_linear_from_quadratic();
     baking_grows_with_the_area_it_covers(&yard);
     pathing_grows_with_the_level_it_crosses(&yard);
+    a_crowd_costs_what_the_crowd_costs(&yard);
 }
 
 /// The harness has to be able to fail, or the guards below are decoration —
@@ -190,6 +191,40 @@ fn baking_grows_with_the_area_it_covers(yard: &Yardstick) {
         std::hint::black_box(mesh.polys.len());
     });
     yard.assert_linearish("baking a navmesh", ratio);
+}
+
+/// The same crowd, walking the same distance, on a level four times the size.
+///
+/// This must cost about the **same**, not four times as much: what an agent does
+/// each step is asked of the ground it is standing on, and the level it is not
+/// standing on should not be able to make it slower. It could — every query
+/// began life as a scan over every polygon in the bake, which is exactly the
+/// shape that makes an RTS fine in a test room and unplayable in a level.
+fn a_crowd_costs_what_the_crowd_costs(yard: &Yardstick) {
+    use floptle_nav::{AgentParams, Crowd};
+
+    let settings = NavSettings { cell_size: 0.5, ..Default::default() };
+    let mut meshes: Vec<(usize, floptle_nav::NavMesh)> = Vec::new();
+    for area in [1600usize, 6400] {
+        meshes.push((area, bake(&level(area), &settings).unwrap()));
+    }
+    let ratio = growth(1600, |area| {
+        let mesh = &meshes.iter().find(|(a, _)| *a == area).unwrap().1;
+        let mut crowd = Crowd::default();
+        crowd.paths_per_step = 64;
+        // All of them in the same corner, going the same short distance,
+        // whatever the level around them is doing.
+        for i in 0..64 {
+            let (x, z) = (1.0 + (i % 8) as f32 * 0.8, 1.0 + (i / 8) as f32 * 0.8);
+            let id = crowd.add(AgentParams::default(), [x, 0.0, z]);
+            crowd.agent_mut(id).unwrap().move_to([12.0, 0.0, 12.0]);
+        }
+        for _ in 0..30 {
+            crowd.step(Some(mesh), 1.0 / 60.0);
+        }
+        std::hint::black_box(crowd.len());
+    });
+    yard.assert_linearish("stepping a crowd", ratio);
 }
 
 /// And a path across four times the level must not cost sixteen times as much.

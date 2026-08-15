@@ -147,7 +147,9 @@ impl Editor {
     /// save from a session with broken asset resolution silently destroyed every
     /// unloaded node's paint (Ty's `assets` project lost ~90% of both paint files,
     /// 2026-07-20).
-    pub(crate) fn save_paint(&mut self) {
+    /// Whether everything that should be on disk IS — the scene save's dirty
+    /// flag aggregates this, so a failed write keeps the scene "unsaved".
+    pub(crate) fn save_paint(&mut self) -> bool {
         let referenced: std::collections::HashSet<u32> =
             self.world.query::<floptle_core::VertexPaint>().map(|(_, vp)| vp.id).collect();
         let keep: Vec<StoredPaint> = self
@@ -162,7 +164,7 @@ impl Editor {
             // Nothing painted: drop a stale file so a cleared scene doesn't resurrect
             // paint on next load.
             let _ = std::fs::remove_file(self.paint_file_path());
-            return;
+            return true;
         }
         // Which mesh key each paint id belongs to, so we can hash the right geometry.
         let keys: HashMap<u32, String> = self
@@ -173,7 +175,9 @@ impl Editor {
 
         let mut stored = Vec::new();
         for (id, blocks) in ids {
-            let Some(raster) = self.raster.as_ref() else { return };
+            // Headless (no GPU): there is nothing readable to save, and
+            // nothing lost — not a failure.
+            let Some(raster) = self.raster.as_ref() else { return true };
             let key = keys.get(&id);
             let mut parts = Vec::new();
             for (i, &(base, count)) in blocks.parts.iter().enumerate() {
@@ -195,7 +199,9 @@ impl Editor {
                 format!("💾 save vertex paint failed: {e}"),
                 None,
             );
+            return false;
         }
+        true
     }
 
     /// Reload paint for the current scene into the `vpaint` store, re-pointing every

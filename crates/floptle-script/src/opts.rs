@@ -53,6 +53,8 @@ pub const TABLES: &[OptTable] = &[
     OptTable { call: "scene.load", keys: crate::host::SCENE_LOAD_KEYS },
     OptTable { call: "http.get", keys: crate::http_api::OPT_KEYS },
     OptTable { call: "raycast", keys: crate::shape_api::QUERY_KEYS },
+    OptTable { call: "nav.agent", keys: crate::nav_api::AGENT_KEYS },
+    OptTable { call: "agent:set", keys: crate::nav_api::AGENT_KEYS },
 ];
 
 /// Refuse an options table containing anything the engine does not read.
@@ -298,6 +300,8 @@ mod tests {
             "scene.load" => "scene.load('next', { nonesuch = 1 })",
             "http.get" => "http.get('/x', { nonesuch = 1 }, function() end)",
             "raycast" => "raycast(0,0,0, 0,-1,0, 10, { nonesuch = 1 })",
+            "nav.agent" => "nav.agent(node, { nonesuch = 1 })",
+            "agent:set" => "local a = nav.agent(node) a:set{ nonesuch = 1 }",
             other => panic!(
                 "opts::TABLES lists `{other}` but no test calls it — add a line to \
                  `bogus_call` so the registry entry is a promise the code has to keep"
@@ -384,7 +388,12 @@ mod tests {
             }
             let file = path.file_name().unwrap().to_string_lossy().to_string();
             let src = std::fs::read_to_string(&path).expect("read source");
-            let takes_table = src.contains("Option<Table>") || src.contains("(Table, Table)");
+            // Both spellings — `nav_api.rs` wrote `Option<mlua::Table>` and
+            // sailed straight past the narrower scan for a release.
+            let takes_table = src.contains("Option<Table>")
+                || src.contains("(Table, Table)")
+                || src.contains("Option<mlua::Table>")
+                || src.contains("(mlua::Table, mlua::Table)");
             if !takes_table {
                 continue;
             }

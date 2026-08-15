@@ -297,6 +297,8 @@ impl Editor {
                 | Matter::WaterVolume { .. }
                 | Matter::LightProbes { .. }
                 | Matter::NavMesh { .. }
+                | Matter::NavLink { .. }
+                | Matter::NavArea { .. }
                 | Matter::ReflectionProbe { .. }
                 | Matter::Skybox { .. }
                 | Matter::PostProcess { .. } => None,

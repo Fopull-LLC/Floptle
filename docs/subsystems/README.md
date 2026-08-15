@@ -22,6 +22,7 @@ on the [`../decisions/`](../decisions/) ADRs and the top-level
 
 ### World & simulation
 - [physics.md](physics.md) — SDF-first collision; character & raycast-vehicle controllers on morphing worlds.
+- [navigation.md](navigation.md) — navmesh baking, routes, areas, links, and the agent layer that walks them.
 - [physics-slices.md](physics-slices.md) — that design cut into independently-shippable increments, and what each one covers.
 - [gravity-and-density.md](gravity-and-density.md) — gravity as a field emitted by matter; density → mass, crushability, and "walk up a fractal wall."
 - [large-world-space.md](large-world-space.md) — default-on floating-origin / camera-relative space: simulate a galaxy with no jitter.

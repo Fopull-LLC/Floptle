@@ -484,16 +484,13 @@ impl Editor {
             self.poll_image_doc_reload();
             self.step_image_live();
         }
-        // Capture this frame's pre-edit scene, so an inspector/gizmo edit can push it
-        // as a single undo step (see `begin_edit`). Inlined (not via `self.snapshot()`)
-        // so it only touches disjoint fields while gpu/egui are borrowed. Not while
-        // playing — script-driven transforms must not enter the undo history — and
-        // not while recording (the world carries previewed clip values then; edits
-        // go to the CLIP as keys, not to scene undo).
-        if !self.playing && !self.anim_ui.record {
-            self.frame_snapshot =
-                Some(floptle_scene::to_doc(self.scene_name.clone(), &self.world));
-        }
+        // History frame boundary: capture this frame's pre-edit scene+selection
+        // (what `begin_edit` coalesces a gizmo/inspector drag against), and turn
+        // any selection change since the last boundary into its own undo step.
+        // Skipped while playing — script-driven transforms must not enter the
+        // undo history — and while recording (the world carries previewed clip
+        // values then; edits go to the CLIP as keys, not to scene undo).
+        self.begin_history_frame();
 
         self.play_step(dt, game_focused);
         self.finish_input_frame();
@@ -925,6 +922,9 @@ impl Editor {
                 Volume([f32; 3], Option<f32>),
                 /// Full volume out to the first, silent by the second.
                 Audio(f32, f32),
+                /// A nav link: the far end in the node's own space, and whether
+                /// it can be crossed both ways.
+                Link([f32; 3], bool),
             }
             let filter = self.gizmo_filter;
             let gizmos: Vec<(Entity, Giz)> = self
@@ -947,11 +947,17 @@ impl Editor {
                     Matter::ReflectionProbe { half_extents, fade, .. } if filter.volumes => {
                         Some((e, Giz::Volume(*half_extents, Some(*fade))))
                     }
-                    Matter::LightProbes { half_extents, .. } if filter.volumes => {
+                    // A plain box, however it is used — one arm, so the three
+                    // cannot drift apart on screen.
+                    Matter::LightProbes { half_extents, .. }
+                    | Matter::NavMesh { half_extents, .. }
+                    | Matter::NavArea { half_extents, .. }
+                        if filter.volumes =>
+                    {
                         Some((e, Giz::Volume(*half_extents, None)))
                     }
-                    Matter::NavMesh { half_extents, .. } if filter.volumes => {
-                        Some((e, Giz::Volume(*half_extents, None)))
+                    Matter::NavLink { to, bidirectional, .. } if filter.volumes => {
+                        Some((e, Giz::Link(*to, *bidirectional)))
                     }
                     _ => None,
                 })
@@ -1033,6 +1039,21 @@ impl Editor {
                                     self.volume_gizmos.push(lines);
                                 }
                             }
+                        }
+                    }
+                    Giz::Link(to, both) => {
+                        // The far end is in the node's OWN space, so it turns
+                        // and scales with whatever the link is parented to —
+                        // which is what lets a ladder live in a prefab.
+                        let far = wt.mul_transform(&floptle_core::Transform::from_translation(
+                            DVec3::new(to[0] as f64, to[1] as f64, to[2] as f64),
+                        ));
+                        let lines = crate::viz::link_lines(
+                            wt.translation, far.translation, both, cam.world_position, view_proj,
+                            gw, gh,
+                        );
+                        if !lines.is_empty() {
+                            self.volume_gizmos.push(lines);
                         }
                     }
                     Giz::Audio(min_d, max_d) => {
@@ -1952,6 +1973,8 @@ impl Editor {
                 | Matter::FieldShape { .. }
                 | Matter::LightProbes { .. }
                 | Matter::NavMesh { .. }
+                | Matter::NavLink { .. }
+                | Matter::NavArea { .. }
                 | Matter::ReflectionProbe { .. }
                 | Matter::Skybox { .. }
                 | Matter::PostProcess { .. } => {}
@@ -2420,6 +2443,8 @@ impl Editor {
                     | Matter::WaterVolume { .. }
                     | Matter::LightProbes { .. }
                     | Matter::NavMesh { .. }
+                    | Matter::NavLink { .. }
+                    | Matter::NavArea { .. }
                     | Matter::ReflectionProbe { .. }
                     | Matter::Skybox { .. }
                     | Matter::PostProcess { .. } => {}
@@ -2605,6 +2630,7 @@ impl Editor {
         let preview_spin = &mut self.preview_spin;
         let preview_spinning = &mut self.preview_spinning;
         let preview_material = &mut self.preview_material;
+        let map_asset_preview = &mut self.map_asset_preview;
         let project = &mut self.project;
         let layer_new = &mut self.layer_new;
         let show_project_mgr = &mut self.show_project_mgr;
@@ -2671,6 +2697,13 @@ impl Editor {
             let bytes: usize = self.terrains.values().map(|t| t.field.memory_bytes()).sum();
             (self.terrains.len(), chunks, bytes)
         });
+        let save_flash = &mut self.save_flash;
+        // What the save-status chip names on hover: the real file being edited.
+        let save_status_file = if self.scene_rel.is_empty() {
+            format!("scenes/{}.ron", self.scene_name)
+        } else {
+            self.scene_rel.clone()
+        };
         let external_editor = &mut self.external_editor;
         let prefer_external = &mut self.prefer_external_editor;
         let show_preferences = &mut self.show_preferences;
@@ -3250,6 +3283,56 @@ impl Editor {
                     }
                     // The view is now chosen by the Scene / Game dock tabs (the editor
                     // free-fly view vs the active-camera gameplay view), not a toggle here.
+
+                    // ---- save status (right end of the bar, always visible) ----
+                    // Whatever tab you're docked in, this answers "are my changes
+                    // on disk?": a quiet "✔ saved" at rest, an amber "● unsaved"
+                    // the moment an edit lands, and a brief green glow when a
+                    // save completes. Right-aligned so nothing else ever moves.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let dt = ui.input(|i| i.stable_dt).min(0.1);
+                        *save_flash = (*save_flash - dt).max(0.0);
+                        let quiet = ui.visuals().weak_text_color();
+                        let (label, color, hover) = if scene_dirty_now {
+                            (
+                                "● unsaved",
+                                ui.visuals().warn_fg_color,
+                                format!("{save_status_file} has unsaved changes — click here (or Ctrl+S) to save"),
+                            )
+                        } else {
+                            // Glow bright right after a save, settle to quiet
+                            // (t = 0 IS the resting state — one branch, one wording).
+                            let t = (*save_flash / Editor::SAVE_FLASH_SECS).clamp(0.0, 1.0);
+                            let glow = egui::Color32::from_rgb(120, 210, 140);
+                            (
+                                "✔ saved",
+                                quiet.lerp_to_gamma(glow, t),
+                                format!("{save_status_file} is saved"),
+                            )
+                        };
+                        let text = egui::RichText::new(label).color(color);
+                        if playing {
+                            // Saving is blocked during Play (Play changes aren't
+                            // kept) — say so instead of failing quietly.
+                            ui.add_enabled(false, egui::Button::new(text).frame(false))
+                                .on_disabled_hover_text(
+                                    "can't save during Play — press Stop first (Play changes aren't kept)",
+                                );
+                        } else if scene_dirty_now {
+                            // Only a BUTTON when there is something to save. A
+                            // chip that looks pressable and does nothing is the
+                            // small dead interaction this is meant to replace.
+                            if ui
+                                .add(egui::Button::new(text).frame(false))
+                                .on_hover_text(hover)
+                                .clicked()
+                            {
+                                want_save = true;
+                            }
+                        } else {
+                            ui.label(text).on_hover_text(hover);
+                        }
+                    });
                 });
             });
             }
@@ -3847,6 +3930,7 @@ impl Editor {
                 preview_spin,
                 preview_spinning,
                 preview_material,
+                map_asset_preview,
                 entity_names: &entity_names,
                 gi: gi_status,
                 nav: nav_status.clone(),
@@ -7179,6 +7263,8 @@ impl Editor {
                 MatterDoc::MapMesh { .. } => "Model Mesh",
                 MatterDoc::Terrain { .. } => "Terrain",
                 MatterDoc::NavMesh { .. } => "Nav Mesh",
+                MatterDoc::NavLink { .. } => "Nav Link",
+                MatterDoc::NavArea { .. } => "Nav Area",
                 MatterDoc::Camera { .. } => "Camera",
                 MatterDoc::PointLight { .. } => "Point Light",
                 MatterDoc::GravityVolume { .. } => "Gravity Volume",
@@ -7205,6 +7291,20 @@ impl Editor {
                     .max()
                     .map_or(1, |n| n + 1);
                 MatterDoc::from(&floptle_core::Matter::default_nav_mesh(next))
+            } else if let MatterDoc::NavLink { .. } = &m {
+                // A link's id is how a script names it and how a bake matches it
+                // back, so two links sharing one is two links a game cannot tell
+                // apart.
+                let next = self
+                    .world
+                    .query::<floptle_core::Matter>()
+                    .filter_map(|(_, m)| match m {
+                        floptle_core::Matter::NavLink { id, .. } => Some(*id),
+                        _ => None,
+                    })
+                    .max()
+                    .map_or(1, |n| n + 1);
+                MatterDoc::from(&floptle_core::Matter::default_nav_link(next))
             } else {
                 m
             };
@@ -7536,6 +7636,11 @@ impl Editor {
         }
         if let Some(path) = cmd.drop_asset {
             self.drop_asset(&path);
+        }
+        if let Some(path) = cmd.import_map {
+            // The Assets browser's "Add to scene": no drop point, so the group
+            // lands in front of the camera (the `add_node_at` convention).
+            self.import_map_file(&path, None);
         }
         if let Some((path, e)) = cmd.drop_script_on {
             self.attach_script_file(&path, Some(e));
@@ -9013,7 +9118,7 @@ impl Editor {
                 Matter::LightProbes { .. } => {} // baked GI: uniforms + one texture
                 // Drawn as an outline in the Scene view, and nothing at all in
                 // the game: a navmesh is a thing to path on, not to look at.
-                Matter::NavMesh { .. } => {}
+                Matter::NavMesh { .. } | Matter::NavLink { .. } | Matter::NavArea { .. } => {}
                 // The capture is six renders of its own, taken elsewhere; here
                 // it is four uniform lanes and one texture, like the GI above.
                 Matter::ReflectionProbe { .. } => {}

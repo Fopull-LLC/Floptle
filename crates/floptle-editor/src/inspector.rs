@@ -1612,6 +1612,8 @@ impl EditorTabViewer<'_> {
             } else if is_texture(&path) {
                 self.asset_preview_ui(ui);
                 self.texture_settings_ui(ui, &path);
+            } else if crate::assets::is_map_sidecar(&path) {
+                self.map_asset_ui(ui, &path);
             } else if is_script(&path) {
                 ui.label("script — drag onto a node, double-click, or:");
                 if ui.button("🖊  Open in Scripting").clicked() {
@@ -3194,6 +3196,167 @@ impl EditorTabViewer<'_> {
                                         );
                                     }
                                 }
+                            }
+                            Matter::NavLink {
+                                id: _,
+                                to,
+                                bidirectional,
+                                cost,
+                                area,
+                                duration,
+                                enabled,
+                            } => {
+                                if ui.checkbox(enabled, "this way is open").changed() {
+                                    cmd.inspector_changed = true;
+                                }
+                                ui.small(
+                                    "A way across that is not walking: a ladder, a jump down, a \
+                                     vault, a door. This node is one end; the offset below is \
+                                     the other. Both ends have to land on the navmesh.",
+                                );
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.label("far end");
+                                    for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+                                        cmd.inspector_changed |= ui
+                                            .add(
+                                                egui::DragValue::new(&mut to[i])
+                                                    .speed(0.1)
+                                                    .prefix(format!("{axis} ")),
+                                            )
+                                            .changed();
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Where it comes out, measured in this node's own space — so \
+                                     a link inside a prefab turns and scales with the prefab.",
+                                );
+                                if ui
+                                    .checkbox(bidirectional, "can be crossed both ways")
+                                    .on_hover_text(
+                                        "A ladder can. A jump down cannot, and making one \
+                                         two-way is a character walking up a cliff.",
+                                    )
+                                    .changed()
+                                {
+                                    cmd.inspector_changed = true;
+                                }
+                                cmd.inspector_changed |= ui
+                                    .add(
+                                        egui::Slider::new(cost, 0.0..=100.0)
+                                            .logarithmic(true)
+                                            .text("cost"),
+                                    )
+                                    .on_hover_text(
+                                        "What crossing costs the router, in metres of ordinary \
+                                         walking. Raise it to make this a last resort; lower it \
+                                         to make it a shortcut.",
+                                    )
+                                    .changed();
+                                cmd.inspector_changed |= ui
+                                    .add(
+                                        egui::Slider::new(duration, 0.0..=10.0)
+                                            .suffix(" s")
+                                            .text("crossing takes"),
+                                    )
+                                    .on_hover_text(
+                                        "How long an agent spends on it. 0 means at walking \
+                                         speed, which is right for a vault and wrong for a lift.",
+                                    )
+                                    .changed();
+                                ui.horizontal(|ui| {
+                                    ui.label("area");
+                                    cmd.inspector_changed |=
+                                        ui.text_edit_singleline(area).changed();
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Optional. Name a nav area and one exclusion can rule out \
+                                     every link like this — every jump in the level, say — \
+                                     rather than one per link.",
+                                );
+                                ui.separator();
+                                ui.small(
+                                    "In a script: agent.link is this link's name while it is \
+                                     being crossed, and agent.linkProgress runs 0 to 1 — which \
+                                     is what a climb animation is driven by. nav.link(name, \
+                                     false) shuts it.",
+                                );
+                            }
+                            Matter::NavArea { half_extents, area, cost, blocks, enabled } => {
+                                if ui.checkbox(enabled, "this volume counts").changed() {
+                                    cmd.inspector_changed = true;
+                                }
+                                ui.small(
+                                    "Changes what the ground inside it means — either it costs \
+                                     more to cross, or it is not walkable at all.",
+                                );
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.label("size");
+                                    for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+                                        let mut full = half_extents[i] * 2.0;
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut full)
+                                                    .speed(0.25)
+                                                    .range(0.1..=100000.0)
+                                                    .prefix(format!("{axis} ")),
+                                            )
+                                            .changed()
+                                        {
+                                            half_extents[i] = full * 0.5;
+                                            cmd.inspector_changed = true;
+                                        }
+                                    }
+                                });
+                                if ui
+                                    .checkbox(blocks, "carve this out of the navmesh")
+                                    .on_hover_text(
+                                        "Nothing walks here, whatever it thinks of the ground. \
+                                         The answer to \"keep out of this room\" that does not \
+                                         involve an invisible wall nobody remembers building.",
+                                    )
+                                    .changed()
+                                {
+                                    cmd.inspector_changed = true;
+                                }
+                                if !*blocks {
+                                    ui.horizontal(|ui| {
+                                        ui.label("area");
+                                        cmd.inspector_changed |=
+                                            ui.text_edit_singleline(area).changed();
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "What this ground is called — water, mud, road, danger. \
+                                         The name is what scripts ask for, so two volumes with \
+                                         the same name are the same kind of ground.",
+                                    );
+                                    cmd.inspector_changed |= ui
+                                        .add(
+                                            egui::Slider::new(cost, 0.0..=50.0)
+                                                .logarithmic(true)
+                                                .text("costs"),
+                                        )
+                                        .on_hover_text(
+                                            "How expensive a metre of it is next to ordinary \
+                                             ground. Above 1 is walked round when there is a way \
+                                             round; below 1 is sought out, which is how a road \
+                                             works.",
+                                        )
+                                        .changed();
+                                    ui.small(
+                                        "One character can disagree: nav.agent(node, { filter = \
+                                         { avoid = {\"water\"}, cost = { mud = 0.5 } } }).",
+                                    );
+                                }
+                                ui.separator();
+                                ui.small(
+                                    "Bake the navmesh again after moving this — a volume is \
+                                     read when the bake runs, not while the game is playing.",
+                                );
                             }
                             Matter::LightProbes {
                                 half_extents,

@@ -646,6 +646,66 @@ pub(crate) fn box_lines(
     lines
 }
 
+/// A nav link: the line an agent crosses, with an arrowhead at each end it can
+/// be entered from.
+///
+/// The arrowheads are the whole point of drawing it as anything other than a
+/// line. A one-way drop and a two-way ladder are the same two points, and which
+/// one a link is decides whether a level is a loop or a trap — so the direction
+/// has to be visible without opening the Inspector.
+pub(crate) fn link_lines(
+    from: DVec3,
+    to: DVec3,
+    both_ways: bool,
+    cam_world: DVec3,
+    vp: Mat4,
+    w: f32,
+    h: f32,
+) -> Vec<(Vec2, Vec2)> {
+    let mut lines = Vec::new();
+    let span = to - from;
+    let len = span.length();
+    if !len.is_finite() || len <= 1e-4 {
+        return lines;
+    }
+    let dir = span / len;
+    // The perpendicular frame and both mark sizes depend only on the link, so
+    // they are worked out once rather than per end.
+    let side = if dir.y.abs() > 0.9 { DVec3::X } else { DVec3::Y.cross(dir).normalize() };
+    let up = dir.cross(side);
+    let r = (len * 0.06).clamp(0.05, 0.35);
+    let wing = (len * 0.05).clamp(0.04, 0.3);
+    // A cross at each mouth, so an end that lands on nothing is obvious as a
+    // mark hanging in the air rather than as a line that stops early.
+    for (at, sign) in [(from, 1.0), (to, -1.0)] {
+        let Some(tip) = project(at, cam_world, vp, w, h) else { continue };
+        for axis in [side, up] {
+            if let (Some(a), Some(b)) = (
+                project(at + axis * r, cam_world, vp, w, h),
+                project(at - axis * r, cam_world, vp, w, h),
+            ) {
+                lines.push((a, b));
+            }
+        }
+        // The arrowhead, drawn only at an end you can arrive at: four barbs
+        // back from the tip, one per perpendicular direction.
+        if sign < 0.0 || both_ways {
+            let back = at + dir * (len * 0.12 * sign);
+            for off in [side * wing, -side * wing, up * wing, -up * wing] {
+                if let Some(b) = project(back + off, cam_world, vp, w, h) {
+                    lines.push((tip, b));
+                }
+            }
+        }
+    }
+    if let (Some(a), Some(b)) =
+        (project(from, cam_world, vp, w, h), project(to, cam_world, vp, w, h))
+    {
+        lines.push((a, b));
+    }
+    lines
+}
+
 /// Oriented box wireframe (12 edges): the 8 corners of a ±`half` cube transformed by
 /// `m` (a node's world matrix), so the box follows the node's rotation + scale — the
 /// outline of a static `Collidable` Cube's box collider.

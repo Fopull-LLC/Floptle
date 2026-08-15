@@ -223,6 +223,10 @@ struct EditorCmd {
     step_tick_back: bool,
     /// An asset was dropped (path) — spawn a model or attach a script.
     drop_asset: Option<String>,
+    /// Import a map sidecar's geometry into the open scene (the Assets
+    /// browser's "Add to scene" — placed in front of the camera; a viewport
+    /// drop goes through `drop_asset` and lands at the cursor instead).
+    import_map: Option<String>,
     /// Open a folder in the OS file manager (empty path = the project root).
     open_folder: Option<PathBuf>,
     /// Autosave recovery prompt answered: true = restore it, false = discard.
@@ -738,6 +742,8 @@ struct EditorTabViewer<'a> {
     preview_spinning: &'a mut bool,
     /// The material being previewed/edited when a material asset is selected.
     preview_material: &'a mut Option<(String, Material)>,
+    /// The map-sidecar floor-plan cache (see `Editor::map_asset_preview`).
+    map_asset_preview: &'a mut Option<map_edit::MapAssetPreview>,
     entity_names: &'a [(Entity, String)],
     /// This frame's baked-GI summary — the Light Probes section's bake button,
     /// progress bar and probe counts.
@@ -2301,6 +2307,9 @@ struct Editor {
     /// The material being previewed/edited when a material asset is selected:
     /// (path, editable Material).
     preview_material: Option<(String, Material)>,
+    /// Parsed floor-plan preview of the selected `maps/*.map.ron` (cached by
+    /// path + mtime; rebuilt by the Inspector's map-asset panel on demand).
+    map_asset_preview: Option<map_edit::MapAssetPreview>,
     /// Active editing tool (keys 1-4); drives which gizmo handles are shown.
     tool: Tool,
     /// Cursor position in physical pixels (cached from `CursorMoved`).
@@ -2332,6 +2341,14 @@ struct Editor {
     editing: bool,
     /// The pre-edit scene snapshot captured at the start of this frame.
     frame_snapshot: Option<floptle_scene::SceneDoc>,
+    /// The selection as of the last history-frame boundary. A change against
+    /// this baseline (with no other undo step minted in between) becomes a
+    /// [`Snapshot::Selection`] step — see [`Editor::begin_history_frame`].
+    sel_baseline: Vec<Entity>,
+    /// Swallow the next boundary's selection diff: set whenever selection moved
+    /// for a reason that is already on the history (an edit's own snapshot) or
+    /// must never be one (undo/redo/restore/scene loads/Play).
+    suppress_sel_step: bool,
     /// The dock tab the user is focused in (updated each frame from the dock's
     /// focused leaf). Global scene shortcuts (Delete, arrows, F, Ctrl+C/V/D…) are
     /// suppressed while a timeline tab holds focus so it owns those keys for its
@@ -2619,6 +2636,11 @@ struct Editor {
     /// A short-lived on-screen confirmation (message, seconds remaining) — so a save is
     /// visibly acknowledged instead of only whispering to the Console.
     toast: Option<(String, f32)>,
+    /// Seconds left of the save-status chip's "✔ saved" glow (set by a
+    /// successful save, counts down to the chip's quiet resting state). The
+    /// chip itself lives at the right end of the menu bar, so the confirmation
+    /// is visible whatever tab you're in — see the menu-bar draw.
+    save_flash: f32,
     /// An asset delete awaiting confirmation (absolute path).
     delete_confirm: Option<Vec<String>>,
     last: Option<Instant>,
@@ -2630,7 +2652,18 @@ struct Editor {
 /// doc; terrain strokes store the field's serialized bytes. Keeping both kinds on
 /// one stack means Ctrl+Z walks back through scene + terrain edits in true order.
 enum Snapshot {
-    Scene(floptle_scene::SceneDoc),
+    /// A whole-scene snapshot plus the selection that existed with it, as node
+    /// indices in `query::<Matter>()` order — the order `to_doc` serializes, so
+    /// the refs survive the world respawn `restore` performs (Entities don't).
+    /// Undoing an edit therefore leaves you holding the node you were editing
+    /// instead of deselecting it.
+    Scene(floptle_scene::SceneDoc, Vec<usize>),
+    /// A selection change on its own (same node-index refs as `Scene`). Minted
+    /// once per frame when the selection moved and nothing else entered the
+    /// history — so Ctrl+Z steps back through picks as well as edits, and never
+    /// jumps further than the last thing you did. Costs bytes, not a scene doc,
+    /// and deliberately does NOT mark the scene unsaved.
+    Selection(Vec<usize>),
     /// A terrain stroke snapshot: `(terrain id, the touched chunks' pre-stroke
     /// contents)` — keyed by the stable id (not Entity) so it survives scene
     /// restores. Undo/redo swaps the chunks back through the live field.

@@ -126,7 +126,8 @@ impl Editor {
     /// Entries the last adopt could NOT apply (`paint_tex_orphans`) ride along
     /// unchanged while a node still references them and they weren't repainted —
     /// same data-loss guard as `save_paint`.
-    pub(crate) fn save_tex_paint(&mut self) {
+    /// Whether everything that should be on disk IS — see `save_paint`.
+    pub(crate) fn save_tex_paint(&mut self) -> bool {
         let referenced: std::collections::HashSet<u32> = self
             .world
             .query::<floptle_core::TexturePaint>()
@@ -141,7 +142,7 @@ impl Editor {
         if self.paint_tex.is_empty() && keep.is_empty() {
             // Nothing painted: drop a stale file so a cleared scene doesn't resurrect paint.
             let _ = std::fs::remove_file(self.tex_paint_file_path());
-            return;
+            return true;
         }
         // Which mesh key each paint id belongs to, so we can hash the right geometry.
         let keys: HashMap<u32, String> = self
@@ -184,7 +185,9 @@ impl Editor {
                 format!("💾 save texture paint failed: {e}"),
                 None,
             );
+            return false;
         }
+        true
     }
 
     /// Reload texture paint for the current scene, rebuilding each painted node's atlas and

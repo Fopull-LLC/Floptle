@@ -395,6 +395,31 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
             pick = Some(MatterDoc::from(&Matter::default_nav_mesh(1)));
             ui.close();
         }
+        if ui
+            .button("⇄ Nav Link")
+            .on_hover_text(
+                "a way across that is not walking: a ladder, a jump down, a vault, a door. \
+                 This node is one end and the far end is an offset from it; bake the navmesh \
+                 again to join them up.",
+            )
+            .clicked()
+        {
+            // The id is replaced with a fresh one on the way in — see `cmd.add`.
+            pick = Some(MatterDoc::from(&Matter::default_nav_link(1)));
+            ui.close();
+        }
+        if ui
+            .button("▨ Nav Area")
+            .on_hover_text(
+                "ground that means something: water, mud, a road, or nothing walkable at \
+                 all. Routes cost more (or less) through it, and one character can refuse it \
+                 while another wades in.",
+            )
+            .clicked()
+        {
+            pick = Some(MatterDoc::from(&Matter::default_nav_area()));
+            ui.close();
+        }
         if ui.button("◎ Skybox").on_hover_text("the scene environment background (solid color or equirect texture)").clicked() {
             pick = Some(MatterDoc::from(&Matter::default_skybox()));
             ui.close();

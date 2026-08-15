@@ -218,6 +218,42 @@ identities). `Transform` diffs per axis, or typing a height would align nothing.
 the script-drop path loop over it, so "add a rigid body" with twelve selected
 means twelve rigid bodies.
 
+### Undo walks through what you selected (v0.60)
+
+Picking a node is an undo step of its own. Ctrl+Z steps back through *selections
+as well as edits*, in the order they happened, and undoing an edit hands you back
+the node you were editing rather than dropping the selection on the floor — which
+is what made undo feel like it had gone one step too far.
+
+Three rules make that safe:
+
+- **A selection step is history, not an edit.** It does not mark the scene
+  unsaved and it does not clear the redo stack. Undo a move, click another node
+  to check something, press Ctrl+Y: the move comes back. A click must never make
+  an edit unrecoverable.
+- **A selection that moved *because* of an edit belongs to that edit.** Deleting
+  a node clears the selection; that is one step, not two, so undoing the delete
+  restores the node *and* re-selects it.
+- **Refs, not entities.** A step stores node *indices* in `query::<Matter>()`
+  order — the order the scene serializer writes — because `restore()` respawns
+  the world and an `Entity` would dangle. `Editor::begin_history_frame` is the
+  one place a frame's selection diff becomes a step; a change that resolves to
+  the same refs (a scene load swapping the world) mints nothing.
+
+### The save indicator is always on screen (v0.60)
+
+At the right end of the menu bar, wherever you are docked: a quiet `✔ saved`, an
+amber `● unsaved` the moment an edit lands, and a green glow when a save
+completes. Clicking it saves. Right-aligned in its own layout so nothing else on
+the bar ever moves, and it is a chip rather than a toast because "did that
+save?" is a question people ask *later*, when the toast is long gone.
+
+It reads one flag, and that flag is aggregated over **everything a save writes**
+— the scene `.ron`, terrain fields, vertex and texture paint, map geometry, the
+texture palette. A sidecar that failed to write keeps the scene dirty and raises
+the failure toast, because a permanent widget claiming "saved" while an hour of
+sculpting sits only in memory is worse than no widget at all.
+
 ### The rig in the viewport (v0.49)
 
 A selected rigged mesh draws its skeleton in the Scene view — sticks between the

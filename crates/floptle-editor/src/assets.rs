@@ -97,6 +97,14 @@ pub(crate) fn is_scene(path: &str) -> bool {
     p.ends_with(".ron") && p.contains("scenes/")
 }
 
+/// A map-geometry sidecar (`maps/<scene>.map.ron`) — the blockout shapes a
+/// scene's Map tool built. Select one for a floor-plan preview; drag it into
+/// the viewport (or right-click → Add to scene) to bring its geometry into the
+/// open scene as fresh, independent map nodes.
+pub(crate) fn is_map_sidecar(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(".map.ron")
+}
+
 /// Shorten `name` to at most `max` chars (…-elided), for fixed-width grid tiles.
 pub(crate) fn truncate_label(name: &str, max: usize) -> String {
     if name.chars().count() <= max {
@@ -131,6 +139,8 @@ pub(crate) fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
         ("◈", egui::Color32::from_rgb(190, 140, 255)) // .flsl shader (ADR-0007)
     } else if is_audio(path) {
         ("♪", egui::Color32::from_rgb(120, 220, 180)) // audio clip
+    } else if is_map_sidecar(path) {
+        ("▦", egui::Color32::from_rgb(150, 205, 170)) // a scene's map geometry
     } else if path.to_ascii_lowercase().ends_with(".ron") {
         ("⎙", egui::Color32::from_rgb(200, 150, 230)) // a scene
     } else if is_markdown(path) {

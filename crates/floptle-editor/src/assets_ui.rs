@@ -371,6 +371,12 @@ impl<'a> EditorTabViewer<'a> {
             self.cmd.open_prefab = Some(path.to_string());
         } else if is_scene(path) {
             self.cmd.open_scene = Some(path.to_string());
+        } else if crate::assets::is_map_sidecar(path) {
+            // A map sidecar's natural editing context is the scene that owns
+            // it (the file stores geometry; the scene stores where it sits).
+            if let Some(scene) = crate::map_edit::owning_scene_of_map(self.project_root, path) {
+                self.cmd.open_scene = Some(scene.to_string_lossy().to_string());
+            }
         } else if anim_ui::is_anim_ctl(path) {
             self.cmd.open_anim_graph = Some(anim::asset_key(
                 Path::new(path),
@@ -415,6 +421,26 @@ impl<'a> EditorTabViewer<'a> {
                 .clicked()
             {
                 self.cmd.instantiate_prefab = Some((path.to_string(), None));
+                ui.close();
+            }
+            ui.separator();
+        }
+        if crate::assets::is_map_sidecar(path) {
+            if ui
+                .button("▦ Add to scene")
+                .on_hover_text("bring this file's shapes into the open scene as fresh map nodes — or just drag the file into the viewport")
+                .clicked()
+            {
+                self.cmd.import_map = Some(path.to_string());
+                ui.close();
+            }
+            if let Some(scene) = crate::map_edit::owning_scene_of_map(self.project_root, path)
+                && ui
+                    .button("⎙ Open its scene")
+                    .on_hover_text("the scene this map geometry belongs to (or just double-click the file)")
+                    .clicked()
+            {
+                self.cmd.open_scene = Some(scene.to_string_lossy().to_string());
                 ui.close();
             }
             ui.separator();
@@ -646,6 +672,86 @@ impl<'a> EditorTabViewer<'a> {
             None => {
                 ui.weak("(building preview…)");
             }
+        }
+    }
+
+    /// Inspector panel for a selected map sidecar (`maps/*.map.ron`): what it
+    /// holds, which scene it belongs to, a top-down floor plan, and the one
+    /// action that matters — Add to scene.
+    pub(crate) fn map_asset_ui(&mut self, ui: &mut egui::Ui, path: &str) {
+        // (Re)parse on first look or when the file changed on disk.
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        let stale = self
+            .map_asset_preview
+            .as_ref()
+            .is_none_or(|p| p.path != path || p.mtime != mtime);
+        if stale {
+            *self.map_asset_preview =
+                Some(crate::map_edit::map_asset_preview(self.project_root, path));
+        }
+        let Some(p) = self.map_asset_preview.as_ref() else { return };
+        if let Some(err) = &p.error {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!("this file could not be read: {err}"),
+            );
+            return;
+        }
+        ui.label("map geometry — the blockout shapes a scene's Map tool built");
+        match &p.scene {
+            Some(s) => {
+                ui.small(format!("belongs to {s} — double-click the file to open that scene"));
+            }
+            None => {
+                ui.small("no scene with this name was found — shapes preview at their own origins");
+            }
+        }
+        let (verts, faces) =
+            p.shapes.iter().fold((0usize, 0usize), |a, (_, v, f)| (a.0 + v, a.1 + f));
+        ui.small(format!(
+            "{} shape{} · {verts} verts · {faces} faces",
+            p.shapes.len(),
+            if p.shapes.len() == 1 { "" } else { "s" },
+        ));
+
+        // ---- floor plan: the file's edges from above, in world XZ ----
+        if !p.segs.is_empty() {
+            let size = egui::vec2(240.0, 240.0);
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+            let (w, h) = (p.max[0] - p.min[0], p.max[1] - p.min[1]);
+            let span = w.max(h).max(1e-3);
+            let scale = (size.x - 16.0) / span;
+            let (cx, cz) = ((p.min[0] + p.max[0]) * 0.5, (p.min[1] + p.max[1]) * 0.5);
+            let center = rect.center();
+            let to_px = |pt: [f32; 2]| {
+                egui::pos2(center.x + (pt[0] - cx) * scale, center.y + (pt[1] - cz) * scale)
+            };
+            let stroke = egui::Stroke::new(1.0, ui.visuals().selection.stroke.color);
+            for (a, b) in &p.segs {
+                painter.line_segment([to_px(*a), to_px(*b)], stroke);
+            }
+            ui.small(format!("top-down · {w:.0}×{h:.0} units"));
+        }
+
+        if ui
+            .button("▦ Add to scene")
+            .on_hover_text(
+                "bring these shapes into the open scene as fresh map nodes (grouped, \
+                 selected, one undo step) — or just drag the file into the viewport",
+            )
+            .clicked()
+        {
+            self.cmd.import_map = Some(path.to_string());
+        }
+        if !p.shapes.is_empty() {
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                for (name, v, f) in &p.shapes {
+                    ui.small(format!("▦ {name} — {v} verts, {f} faces"));
+                }
+            });
         }
     }
 

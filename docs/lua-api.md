@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 24
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 44
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 23
 - [vectors, directions & easing](#vectors-directions--easing) — 47
@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [networking — net.*, synced](#networking--net-synced) — 31
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 14
-- [pathfinding — nav.*](#pathfinding--nav) — 15
+- [pathfinding — nav.*](#pathfinding--nav) — 19
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
 - [2D — tilemaps & sprite batches](#2d--tilemaps--sprite-batches) — 22
@@ -53,6 +53,86 @@ each group, and meant to be searched.
 ### `access`
 
 Accessibility a game offers its players: UI text scale, a colour-vision filter, reduced motion and captions. The engine honours what it owns — text sizes go through the LAYOUT so scaling reflows, the filter is a post-chain stage, and UI transitions snap when motion is reduced. What it cannot honour for you (your camera shake) reads access.reducedMotion(). These are the PLAYER's settings, so persist them with save.*; the editor's ⚙ Settings → Accessibility drives the same values so you can try them. See docs/accessibility.md.
+
+### `agent`
+
+A nav agent handle, from nav.agent(node). It walks its node along the navmesh: agent:moveTo(point) and read agent.state as it goes. Everything about it is a field or a method on this handle — there is no per-frame step to call.
+
+### `agent.alive`
+
+False once the agent has been destroyed (or its node has). A handle kept in a variable answers about itself rather than pointing at whoever took its place.
+
+### `agent.arrived`
+
+True once it got there. The flag to hang "and then attack / gather / open the door" off.
+
+### `agent.blocked`
+
+True when it cannot get there right now: unreachable, or no progress for giveUpAfter seconds. A crowd pin clears itself; a cut-off goal does not.
+
+### `agent.complete`
+
+Whether the route it is walking actually reaches the order. False means it is heading for the closest it can get, which is the right behaviour and worth being able to say out loud — "can't get there, going as near as I can".
+
+### `agent.link`
+
+The name of the Nav Link being crossed right now, or nil the rest of the time. This is the hook for "play the climb animation": if agent.link == 'ladder' then ... end.
+
+### `agent.linkProgress`
+
+How far across a link it is, 0 to 1 — nil when it is not on one. What a vault or climb animation is driven by, so the animation and the movement cannot disagree.
+
+### `agent.moving`
+
+True while it still has somewhere to be — walking or crossing a link.
+
+### `agent.pos`
+
+Where it is, in world space.
+
+### `agent.remaining`
+
+How far there is left to walk, in metres, ALONG THE ROUTE rather than through the walls. The number an ETA or a progress bar wants.
+
+### `agent.speed`
+
+How fast it is going along the ground, in units per second. What an idle/walk/run animation blend reads.
+
+### `agent.state`
+
+'idle' | 'moving' | 'arrived' | 'blocked' | 'crossing' — and 'gone' for a handle whose agent has been destroyed. 'blocked' is the one worth acting on: it means the goal cannot be reached from here, or the unit has made no progress for giveUpAfter seconds. A unit pinned by its own crowd rests and tries again on its own; one whose goal is genuinely cut off stays blocked until something changes. A unit standing still with no explanation is the commonest "the pathfinding is broken" report there is, and this is the explanation.
+
+### `agent.target`
+
+Where it was told to go, or nil if it has no order.
+
+### `agent.velocity`
+
+How fast it is going, as a vec3. With drive = 'none' this is the whole point of the agent: it steers, and your script decides what that means for a vehicle, a boat or an animation.
+
+### `agent:corners`
+
+agent:corners() — the corners still to walk, as a list of vec3 in world space. For drawing the route while working out why a unit went the way it did.
+
+### `agent:destroy`
+
+agent:destroy() — take it out of the crowd. Not required (an agent whose node is destroyed goes with it on the next frame) but the right thing to call from a script's own teardown.
+
+### `agent:moveTo`
+
+agent:moveTo(point) — send it to a world point (a vec3, anything with x/y/z, or a node). Idempotent: ordering it to where it is already heading costs nothing, so calling this every frame to follow a moving target is fine. The point does not have to be exactly on the navmesh — it is snapped — and a point that is on the mesh but cut off makes the agent walk as near as it can and then report blocked.
+
+### `agent:set`
+
+agent:set{ ... } — change how it walks, mid-game. Takes the same options as nav.agent; anything left out is left alone. Slowing a unit down, making it stop giving way, or swapping its filter when it picks up a boat.
+
+### `agent:stop`
+
+agent:stop() — cancel the order and stand still. Anything mid-crossing finishes the crossing first: halfway up a ladder is not a place to be left.
+
+### `agent:teleport`
+
+agent:teleport(point) — put it AND its node somewhere without walking there, and forget what it was doing. For spawns, respawns and cutscenes. (With drive = 'none' the engine leaves the node alone, so move it yourself.)
 
 ### `createNode`
 
@@ -1783,13 +1863,29 @@ How many numbers nav.areas() uses per area (10). Read it rather than writing the
 
 How many numbers nav.links() uses per link (8).
 
+### `nav.agent`
+
+nav.agent(node[, opts]) — make this node something that walks the navmesh, and get a handle to order about. THE call for "move a unit from A to B": agent:moveTo(point), and it finds its own way, goes round its neighbours, slows down at the end and stops. Options, all optional: speed, accel, radius, arrive (how close counts as there), slow (where it starts easing off), avoid (take other agents into account), priority (who gives way), separation, repath (seconds between route checks), giveUpAfter (seconds of no progress before it reports blocked), drive ('auto' | 'transform' | 'velocity' | 'none'), and filter = { avoid = {'water'}, cost = { mud = 0.5 } }. drive defaults to 'auto': a node with a physics body is steered through the body, one without has its transform moved. The whole crowd is stepped once a frame by the engine, after your update — you never call a step function.
+
+### `nav.agents`
+
+nav.agents() — how many nav agents exist right now. For a HUD, a test, or checking that the ones you destroyed really went.
+
 ### `nav.areas`
 
 nav.areas() — every walkable area, as ONE FLAT ARRAY of numbers plus a count. Ten numbers each, in nav.AREA_STRIDE steps: minX, minZ, maxX, maxZ, yMin, yMax, region, centreX, centreY, centreZ — all world space. Flat rather than a table per area on purpose: a real bake is thousands of areas, and a held Lua table costs one of a few thousand mlua slots, so a table each exhausts them and panics the editor rather than raising something a script could catch. One array costs one slot however big the level is. Read it as: local a, n = nav.areas(); for i = 0, n - 1 do local o = i * nav.AREA_STRIDE ... end
 
+### `nav.budget`
+
+nav.budget([n]) — how many path searches the whole crowd may run per frame (default 8); returns the current value, and sets it when given a number. A hundred units given one order do not all think on the same frame: they queue, oldest first, and keep walking their old route while they wait. Raise it for a game where a burst of orders should be acted on at once, lower it if the searches show up in a frame graph.
+
 ### `nav.distance`
 
 nav.distance(from, to) — how far it is to WALK, in metres, or nil if there is no complete route. This is the number a decision should be made on: the straight-line distance to something on the far side of a wall is a lie, and "chase the nearest one" built on it picks the wrong one every time.
+
+### `nav.link`
+
+nav.link(name | id[, open]) — open or shut a Nav Link, or ask whether it is open. nil when there is no link by that name. This is the door: nav.link('front gate', false) makes every route that used it repath, nothing is rebaked, and a unit already halfway across finishes crossing rather than stopping in mid-air.
 
 ### `nav.links`
 

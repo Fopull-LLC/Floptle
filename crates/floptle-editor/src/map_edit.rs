@@ -468,7 +468,9 @@ impl Editor {
     /// Write the whole store beside the scene. Deliberately never drops an
     /// entry: geometry whose node was deleted stays in the file (an undo can
     /// resurrect the node after a save; a few kilobytes of RON is nothing).
-    pub(crate) fn save_maps(&mut self) {
+    /// Returns whether the data really is on disk — a save that couldn't write
+    /// must keep the scene reading "unsaved".
+    pub(crate) fn save_maps(&mut self) -> bool {
         if self.maps.load_failed {
             // The store is not the authority for this scene — writing it would
             // replace geometry we never managed to read.
@@ -480,11 +482,11 @@ impl Editor {
                 ),
                 None,
             );
-            return;
+            return false;
         }
         if self.maps.meshes.is_empty() {
             let _ = std::fs::remove_file(self.maps_file_path());
-            return;
+            return true;
         }
         let ordered: BTreeMap<u32, &MapMesh> =
             self.maps.meshes.iter().map(|(&k, v)| (k, v)).collect();
@@ -499,13 +501,18 @@ impl Editor {
                         format!("💾 save map meshes failed: {e}"),
                         None,
                     );
+                    return false;
                 }
+                true
             }
-            Err(e) => self.console.push(
-                floptle_script::LogLevel::Error,
-                format!("💾 encode map meshes failed: {e}"),
-                None,
-            ),
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("💾 encode map meshes failed: {e}"),
+                    None,
+                );
+                false
+            }
         }
     }
 
@@ -581,7 +588,7 @@ impl Editor {
         // from under the history would undo a deletion into a placeholder box.
         for snap in self.history.undo.iter().chain(self.history.redo.iter()) {
             match snap {
-                crate::Snapshot::Scene(doc) => live.extend(doc.nodes.iter().filter_map(|n| {
+                crate::Snapshot::Scene(doc, _) => live.extend(doc.nodes.iter().filter_map(|n| {
                     match n.matter {
                         MatterDoc::MapMesh { id, .. } => Some(id),
                         _ => None,
@@ -609,6 +616,136 @@ impl Editor {
         drop.len()
     }
 
+    /// Import a map sidecar's geometry into the OPEN scene (the Assets browser's
+    /// `maps/*.map.ron` files — drag one into the viewport, or right-click →
+    /// Add to scene). Every shape arrives as a fresh map node (new ids, its own
+    /// copy of the geometry — nothing aliases the source scene), grouped under
+    /// one new Empty so the import moves and deletes as a unit.
+    ///
+    /// Placement, names, materials and physics flags come from the sidecar's
+    /// own scene file when it can be found (a sidecar alone stores geometry,
+    /// not where it sat); without one, shapes land in file order at the drop
+    /// point. `at` places the group there; `None` = in front of the camera.
+    /// One undo step; the group ends up selected.
+    pub(crate) fn import_map_file(&mut self, path: &str, at: Option<floptle_core::math::DVec3>) {
+        if self.playing {
+            self.map_note(
+                floptle_script::LogLevel::Warn,
+                "can't import map geometry while playing — stop first".to_string(),
+            );
+            return;
+        }
+        let stem = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().trim_end_matches(".map.ron").to_string())
+            .unwrap_or_else(|| "map".into());
+        // Read through the SAME reader the Inspector's preview used, so what
+        // was drawn is exactly what arrives.
+        let (entries, owner) = match read_map_file(&self.project_root, path) {
+            Ok(v) => v,
+            Err(e) => {
+                self.map_note(floptle_script::LogLevel::Error, format!("▦ {path} {e}"));
+                return;
+            }
+        };
+        if entries.is_empty() {
+            // Either the file is empty, or every entry in it belongs to a node
+            // the owning scene has since deleted — a save keeps that geometry
+            // so an undo can resurrect the node, and an import must not.
+            self.map_note(
+                floptle_script::LogLevel::Warn,
+                match &owner {
+                    Some(p) => format!(
+                        "▦ nothing to import — {} keeps no map nodes any more (what is left in \
+                         the file belongs to deleted ones)",
+                        p.display()
+                    ),
+                    None => format!("▦ {path} has no geometry in it"),
+                },
+            );
+            return;
+        }
+        let imported = entries.len();
+        // Anchor: the combined footprint's XZ center at its lowest point, so
+        // the group sits ON the drop point instead of hanging off it.
+        let mut lo = floptle_core::math::DVec3::splat(f64::INFINITY);
+        let mut hi = floptle_core::math::DVec3::splat(f64::NEG_INFINITY);
+        for en in &entries {
+            if let Some((blo, bhi)) = en.mesh.bounds() {
+                let m = en.world.world_matrix();
+                for i in 0..8 {
+                    let c = floptle_core::math::Vec3::new(
+                        if i & 1 == 0 { blo.x } else { bhi.x },
+                        if i & 2 == 0 { blo.y } else { bhi.y },
+                        if i & 4 == 0 { blo.z } else { bhi.z },
+                    );
+                    let w = m.transform_point3(c.as_dvec3());
+                    lo = lo.min(w);
+                    hi = hi.max(w);
+                }
+            }
+        }
+        let anchor = if lo.x.is_finite() {
+            floptle_core::math::DVec3::new((lo.x + hi.x) * 0.5, lo.y, (lo.z + hi.z) * 0.5)
+        } else {
+            floptle_core::math::DVec3::ZERO
+        };
+        // Same drop convention as `add_node_at`: the cursor point when dragged,
+        // ~5 units ahead of the camera otherwise, snapped when snap is on.
+        let drop = at.unwrap_or_else(|| {
+            let cam = self.camera.render_camera();
+            cam.world_position
+                + (cam.rotation * floptle_core::math::Vec3::NEG_Z * 5.0).as_dvec3()
+        });
+        let drop = if self.grid.snap { crate::snap_dvec3(drop, self.grid.size as f64) } else { drop };
+
+        self.record(); // the whole import is ONE undo step
+        let group = self.spawn_node(&bare_map_node(
+            format!("{stem} (map)"),
+            floptle_scene::TransformDoc {
+                translation: [drop.x, drop.y, drop.z],
+                ..Default::default()
+            },
+            MatterDoc::Empty,
+        ));
+        for en in entries {
+            // The group carries the drop offset (identity rotation/scale), so a
+            // child's local transform is its authored world one, re-anchored.
+            let t = en.world.translation - anchor;
+            let mut node = bare_map_node(
+                en.name,
+                floptle_scene::TransformDoc {
+                    translation: [t.x, t.y, t.z],
+                    rotation: en.world.rotation.to_array(),
+                    scale: en.world.scale.to_array(),
+                },
+                // `spawn_node` mints a fresh id for inline geometry and copies
+                // it into this scene's store — the same path a pasted or
+                // prefab'd map node takes.
+                MatterDoc::MapMesh { id: 0, geo: Some(en.mesh) },
+            );
+            node.material = en.material;
+            node.object_materials = en.object_materials;
+            node.collidable = en.collidable;
+            node.visible = en.visible;
+            node.cast_shadow = en.cast_shadow;
+            let e = self.spawn_node(&node);
+            self.world.insert(e, floptle_core::Parent(group));
+        }
+        self.select_single(group);
+        self.map_note(
+            floptle_script::LogLevel::Debug,
+            format!(
+                "▦ imported {imported} shape{} from {path}{}",
+                if imported == 1 { "" } else { "s" },
+                match &owner {
+                    Some(p) => format!(" (placement from {})", p.display()),
+                    None => " (no matching scene found — shapes kept their own origins)".into(),
+                }
+            ),
+        );
+    }
+
     /// Undo/redo value swap through the store (the terrain/paint pattern —
     /// the ECS is untouched, so Entity churn can't orphan geometry).
     pub(crate) fn swap_map_mesh(&mut self, id: u32, mesh: &MapMesh) -> MapMesh {
@@ -622,6 +759,264 @@ impl Editor {
         }
         old
     }
+}
+
+// ===== Map sidecars as assets ================================================
+
+/// The scene file a map sidecar belongs to. Sidecars are keyed by the scene's
+/// STEM (`maps/<stem>.map.ron` — see [`Editor::maps_file_path`]), so this looks
+/// for `<stem>.ron` anywhere under `scenes/`, subfolders included (first match
+/// in sorted order — the stem is the sidecar's whole identity, so two scenes
+/// sharing one already share the sidecar too).
+pub(crate) fn owning_scene_of_map(project_root: &std::path::Path, map_path: &str) -> Option<PathBuf> {
+    let stem = std::path::Path::new(map_path)
+        .file_name()?
+        .to_str()?
+        .strip_suffix(".map.ron")?
+        .to_string();
+    let want = format!("{stem}.ron");
+    fn find(dir: &std::path::Path, want: &str) -> Option<PathBuf> {
+        let mut entries: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let p = e.path();
+            if p.is_dir() {
+                if let Some(hit) = find(&p, want) {
+                    return Some(hit);
+                }
+            } else if p.file_name().and_then(|n| n.to_str()) == Some(want) {
+                return Some(p);
+            }
+        }
+        None
+    }
+    find(&project_root.join("scenes"), &want)
+}
+
+/// A shape ready to import: its geometry plus what the owning scene said about
+/// the node that carried it.
+pub(crate) struct MapImportEntry {
+    mesh: MapMesh,
+    name: String,
+    world: floptle_core::Transform,
+    material: Option<floptle_scene::MaterialDoc>,
+    object_materials: std::collections::BTreeMap<String, floptle_scene::MaterialDoc>,
+    collidable: bool,
+    visible: bool,
+    cast_shadow: bool,
+}
+
+/// What a map sidecar holds, ready to place: the shapes, and the scene that
+/// said where they sit (`None` = none found, so they keep their own origins).
+///
+/// **One** reader for both the Inspector's floor plan and the import that
+/// follows it — a preview of a different set of shapes than the button then
+/// creates is the kind of quiet disagreement nobody thinks to check.
+pub(crate) fn read_map_file(
+    project_root: &std::path::Path,
+    path: &str,
+) -> Result<(Vec<MapImportEntry>, Option<PathBuf>), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("could not be read: {e}"))?;
+    let meshes = ron::from_str::<BTreeMap<u32, MapMesh>>(&text)
+        .map_err(|e| format!("failed to parse: {e}"))?;
+    if meshes.is_empty() {
+        return Ok((Vec::new(), None));
+    }
+    let owner = owning_scene_of_map(project_root, path);
+    let doc = owner.as_deref().and_then(|p| floptle_scene::load(p).ok());
+    match doc {
+        Some(doc) => Ok((map_entries_from_scene(&doc, &meshes), owner)),
+        // No scene of this name: every shape stands at its own origin, named
+        // for the id it is filed under.
+        None => Ok((
+            meshes
+                .iter()
+                .map(|(id, mesh)| MapImportEntry {
+                    mesh: mesh.clone(),
+                    name: format!("Map {id}"),
+                    world: floptle_core::Transform::IDENTITY,
+                    material: None,
+                    object_materials: Default::default(),
+                    collidable: true,
+                    visible: true,
+                    cast_shadow: true,
+                })
+                .collect(),
+            None,
+        )),
+    }
+}
+
+/// The scene's map nodes married to the sidecar's geometry, each with its WORLD
+/// transform (composed through the doc's parent links, so a shape nested under
+/// an Empty imports where it actually sat). Ids the scene no longer references
+/// are left behind on purpose: a save keeps deleted nodes' geometry so undo can
+/// resurrect them, and an import must not.
+fn map_entries_from_scene(
+    doc: &floptle_scene::SceneDoc,
+    meshes: &BTreeMap<u32, MapMesh>,
+) -> Vec<MapImportEntry> {
+    let by_id = floptle_scene::node_id_positions(&doc.nodes);
+    let world_of = |start: usize| -> floptle_core::Transform {
+        // Collect the ancestor chain (bounded, cycle-proof), compose root-down.
+        let mut chain = vec![start];
+        let mut i = start;
+        for _ in 0..64 {
+            match floptle_scene::resolve_parent(&doc.nodes[i], &by_id) {
+                Some(p) if p < doc.nodes.len() && p != i && !chain.contains(&p) => {
+                    chain.push(p);
+                    i = p;
+                }
+                _ => break,
+            }
+        }
+        let mut w = floptle_core::Transform::IDENTITY;
+        for &j in chain.iter().rev() {
+            w = w.mul_transform(&doc.nodes[j].transform.to_transform());
+        }
+        w
+    };
+    doc.nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| {
+            let MatterDoc::MapMesh { id, .. } = &n.matter else { return None };
+            let mesh = meshes.get(id)?.clone();
+            Some(MapImportEntry {
+                mesh,
+                name: if n.name.is_empty() { format!("Map {id}") } else { n.name.clone() },
+                world: world_of(i),
+                material: n.material.clone(),
+                object_materials: n.object_materials.clone(),
+                collidable: n.collidable,
+                visible: n.visible,
+                cast_shadow: n.cast_shadow,
+            })
+        })
+        .collect()
+}
+
+/// A `NodeDoc` carrying nothing but the given identity — the import's building
+/// block (NodeDoc has no `Default`; every field the import doesn't set is the
+/// serializer's own default).
+fn bare_map_node(
+    name: String,
+    transform: floptle_scene::TransformDoc,
+    matter: MatterDoc,
+) -> floptle_scene::NodeDoc {
+    floptle_scene::NodeDoc {
+        id: None,
+        parent_id: None,
+        terrain_gen: None,
+        name,
+        transform,
+        matter,
+        scripts: Vec::new(),
+        material: None,
+        object_materials: Default::default(),
+        rigidbody: None,
+        celestial: None,
+        disabled: false,
+        mesh_collider: false,
+        paint: None,
+        tex_paint: None,
+        collidable: false,
+        trigger: false,
+        nav_exclude: false,
+        visible: true,
+        cast_shadow: true,
+        anim_controller: None,
+        particles: None,
+        parent: None,
+        attachment: None,
+        net: None,
+        ui_layer: None,
+        ui: None,
+        audio: None,
+        layer: None,
+        tags: Vec::new(),
+        sorting: None,
+        lit_2d: None,
+        light_layers: Vec::new(),
+        shadow_2d: None,
+        light_inner: None,
+        light_falloff: None,
+        light_shadows: None,
+    }
+}
+
+/// What the Assets browser shows for a selected `maps/*.map.ron`: a top-down
+/// floor plan (world XZ, placement from the owning scene when it exists) plus
+/// per-shape stats. Cached by path + mtime — see the Inspector's map branch.
+pub(crate) struct MapAssetPreview {
+    pub(crate) path: String,
+    pub(crate) mtime: Option<std::time::SystemTime>,
+    /// `(name, verts, faces)` per shape the preview covers.
+    pub(crate) shapes: Vec<(String, usize, usize)>,
+    /// Floor-plan line segments in world XZ.
+    pub(crate) segs: Vec<([f32; 2], [f32; 2])>,
+    pub(crate) min: [f32; 2],
+    pub(crate) max: [f32; 2],
+    /// The scene file placement/names came from, for the caption (`None` =
+    /// no matching scene; shapes previewed at their own origins).
+    pub(crate) scene: Option<String>,
+    pub(crate) error: Option<String>,
+}
+
+/// Cap on floor-plan segments — a preview, not a render (the biggest maps stay
+/// legible; beyond this the plan is ink anyway).
+const MAP_PREVIEW_MAX_SEGS: usize = 8000;
+
+pub(crate) fn map_asset_preview(project_root: &std::path::Path, path: &str) -> MapAssetPreview {
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let mut out = MapAssetPreview {
+        path: path.to_string(),
+        mtime,
+        shapes: Vec::new(),
+        segs: Vec::new(),
+        min: [0.0; 2],
+        max: [0.0; 2],
+        scene: None,
+        error: None,
+    };
+    let (entries, owner) = match read_map_file(project_root, path) {
+        Ok(v) => v,
+        Err(e) => {
+            out.error = Some(e);
+            return out;
+        }
+    };
+    out.scene = owner.map(|p| {
+        p.strip_prefix(project_root)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| p.to_string_lossy().to_string())
+    });
+    let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
+    for en in &entries {
+        out.shapes.push((en.name.clone(), en.mesh.verts.len(), en.mesh.faces.len()));
+        let m = en.world.world_matrix();
+        let plan = |v: u32| -> [f32; 2] {
+            let p = en.mesh.verts.get(v as usize).copied().unwrap_or_default();
+            let w = m.transform_point3(p.as_dvec3());
+            [w.x as f32, w.z as f32]
+        };
+        for (va, vb) in en.mesh.edges() {
+            if out.segs.len() >= MAP_PREVIEW_MAX_SEGS {
+                break;
+            }
+            let (a, b) = (plan(va), plan(vb));
+            for p in [a, b] {
+                lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+                hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+            }
+            out.segs.push((a, b));
+        }
+    }
+    if lo[0].is_finite() {
+        out.min = lo;
+        out.max = hi;
+    }
+    out
 }
 
 // ===== Sub-object editing (Tool::MapEdit) ====================================
@@ -3163,6 +3558,134 @@ mod tests {
         light_falloff: None,
         light_shadows: None,
         }
+    }
+
+    /// Importing a map sidecar into another scene: every shape the OWNING
+    /// scene still shows arrives as a fresh node under one group — names,
+    /// relative placement (through parent chains) and geometry intact, ids
+    /// minted fresh — and the whole import is one undo step.
+    #[test]
+    fn a_map_sidecar_imports_into_another_scene() {
+        let dir = tmp_dir("import");
+        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+
+        // ---- author scene "level": two shapes, one nested under an Empty ----
+        let mut ed =
+            Editor { project_root: dir.clone(), scene_name: "level".into(), ..Default::default() };
+        let wall = MapShape::Box.mesh(MapOpts::default());
+        let ramp = MapShape::Wedge.mesh(MapOpts::default());
+        let a = ed
+            .spawn_node(&floptle_scene::NodeDoc {
+                name: "WallA".into(),
+                matter: MatterDoc::MapMesh { id: 0, geo: Some(wall.clone()) },
+                transform: floptle_scene::TransformDoc {
+                    translation: [1.0, 0.0, 2.0],
+                    ..Default::default()
+                },
+                ..blank_node()
+            });
+        ed.world.insert(a, floptle_core::Collidable);
+        let holder = ed.spawn_node(&floptle_scene::NodeDoc {
+            name: "Holder".into(),
+            transform: floptle_scene::TransformDoc {
+                translation: [10.0, 0.0, 0.0],
+                ..Default::default()
+            },
+            ..blank_node()
+        });
+        let b = ed.spawn_node(&floptle_scene::NodeDoc {
+            name: "RampB".into(),
+            matter: MatterDoc::MapMesh { id: 0, geo: Some(ramp.clone()) },
+            transform: floptle_scene::TransformDoc {
+                translation: [0.0, 0.0, 5.0],
+                ..Default::default()
+            },
+            ..blank_node()
+        });
+        ed.world.insert(b, floptle_core::Parent(holder));
+        // Orphan geometry (a deleted node's) stays in the file on purpose —
+        // and must NOT come back through an import.
+        ed.maps.meshes.insert(77, MapShape::Sphere.mesh(MapOpts::default()));
+        let doc = floptle_scene::to_doc("level", &ed.world);
+        floptle_scene::save(&doc, &dir.join("scenes/level.ron")).unwrap();
+        ed.save_maps();
+        let sidecar = ed.maps_file_path();
+        assert!(sidecar.exists());
+
+        // ---- a different scene in the same project imports it ----
+        let mut ed =
+            Editor { project_root: dir.clone(), scene_name: "other".into(), ..Default::default() };
+        ed.begin_history_frame();
+        let at = floptle_core::math::DVec3::new(100.0, 0.0, 100.0);
+        ed.import_map_file(&sidecar.to_string_lossy(), Some(at));
+
+        let find = |ed: &Editor, name: &str| {
+            ed.world
+                .query::<floptle_core::Matter>()
+                .map(|(e, _)| e)
+                .find(|&e| ed.world.get::<floptle_core::Name>(e).is_some_and(|n| n.0 == name))
+        };
+        let group = find(&ed, "level (map)").expect("the import is grouped under one node");
+        assert_eq!(ed.selection, vec![group], "the group ends up selected");
+        let wa = find(&ed, "WallA").expect("WallA imported");
+        let rb = find(&ed, "RampB").expect("RampB imported");
+        assert!(find(&ed, "Holder").is_none(), "only map nodes come along, flattened");
+        for e in [wa, rb] {
+            assert_eq!(
+                ed.world.get::<floptle_core::Parent>(e).map(|p| p.0),
+                Some(group),
+                "shapes hang under the group"
+            );
+        }
+        assert!(
+            ed.world.get::<floptle_core::Collidable>(wa).is_some(),
+            "physics flags carry over"
+        );
+
+        // Fresh ids, real copies of the right geometry — and no orphan revival.
+        let id_of = |e| match ed.world.get::<floptle_core::Matter>(e) {
+            Some(floptle_core::Matter::MapMesh { id }) => *id,
+            _ => panic!("imported node is a map mesh"),
+        };
+        let (ia, ib) = (id_of(wa), id_of(rb));
+        assert_ne!(ia, ib);
+        assert_eq!(ed.maps.meshes[&ia], wall);
+        assert_eq!(ed.maps.meshes[&ib], ramp);
+        assert_eq!(ed.maps.meshes.len(), 2, "the deleted node's orphan entry stayed behind");
+
+        // Relative placement survives (RampB sat at world (10,0,5), WallA at
+        // (1,0,2) — the authored delta between them must be exactly kept).
+        let wt = |e| floptle_core::world_transform(&ed.world, e).translation;
+        let delta = wt(rb) - wt(wa);
+        assert!(
+            (delta - floptle_core::math::DVec3::new(9.0, 0.0, 3.0)).length() < 1e-6,
+            "authored spacing kept, got {delta:?}"
+        );
+
+        // One undo step takes the whole import away again.
+        ed.begin_history_frame();
+        ed.undo();
+        assert!(find(&ed, "level (map)").is_none());
+        assert!(find(&ed, "WallA").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sidecar names its scene by STEM; the owning-scene lookup must find it
+    /// in a subfolder too, and come back empty rather than guessing wrong.
+    #[test]
+    fn the_owning_scene_lookup_searches_subfolders() {
+        let dir = tmp_dir("owner");
+        std::fs::create_dir_all(dir.join("scenes/dungeons")).unwrap();
+        std::fs::write(dir.join("scenes/dungeons/crypt.ron"), "").unwrap();
+        assert_eq!(
+            owning_scene_of_map(&dir, &dir.join("maps/crypt.map.ron").to_string_lossy()),
+            Some(dir.join("scenes/dungeons/crypt.ron"))
+        );
+        assert_eq!(
+            owning_scene_of_map(&dir, &dir.join("maps/missing.map.ron").to_string_lossy()),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The draw gesture's output: a footprint dragged on the ground plus a

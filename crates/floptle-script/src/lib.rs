@@ -546,6 +546,10 @@ pub struct ScriptHost {
     space_info: Rc<RefCell<space_api::SpaceInfo>>,
     /// The scene's baked navmesh, if it has one — what `nav.*` answers from.
     nav_mesh: nav_api::NavShared,
+    /// Every `nav.agent` in the scene. Stepped once per frame by [`ScriptHost::run`],
+    /// after scripts have had their say, so an order given this frame is walked
+    /// this frame.
+    nav_agents: nav_api::AgentsShared,
     /// This frame's active game camera + viewport (`camera.worldToScreen` reads
     /// it; the editor feeds it every frame). Powers map click-on-line picking.
     view_info: Rc<RefCell<view_api::ViewInfo>>,
@@ -4203,6 +4207,120 @@ end
         let mut host = ScriptHost::new();
         host.run(&mut world, &dir, 0.016, 0.0);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+    }
+
+    /// Three lines of Lua, and the node walks across the level.
+    ///
+    /// This is the shape the whole agent layer exists to make possible, so it is
+    /// worth pinning end to end rather than only in the crate that does the
+    /// walking: a script that says `moveTo` and never touches a position, and a
+    /// node that arrives anyway.
+    #[test]
+    fn an_agent_ordered_from_a_script_walks_the_node_there() {
+        let dir = std::env::temp_dir().join("floptle_script_test_navagent");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "unit",
+            "function start(node)\n\
+             \x20 agent = nav.agent(node, { speed = 6, arrive = 0.4 })\n\
+             \x20 agent:moveTo(vec3(9, 0, 9))\n\
+             end\n\
+             function update(node, dt)\n\
+             \x20 if agent.arrived then arrived = true end\n\
+             end\n",
+        );
+
+        // A plain 12x12 floor, baked for a small character.
+        let floor = [
+            floptle_nav::Tri::new([0.0, 0.0, 0.0], [12.0, 0.0, 0.0], [0.0, 0.0, 12.0]),
+            floptle_nav::Tri::new([12.0, 0.0, 0.0], [12.0, 0.0, 12.0], [0.0, 0.0, 12.0]),
+        ];
+        let mesh = floptle_nav::bake(
+            &floor,
+            &floptle_nav::NavSettings { agent_radius: 0.3, cell_size: 0.15, ..Default::default() },
+        )
+        .expect("this floor bakes");
+
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::from_translation(floptle_core::math::DVec3::new(1.5, 0.0, 1.5)));
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "unit".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+
+        let mut host = ScriptHost::new();
+        host.set_nav_mesh(Some(mesh));
+        for _ in 0..400 {
+            host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        }
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+
+        let at = world.get::<Transform>(e).unwrap().translation;
+        assert!(
+            (at.x - 9.0).abs() < 0.6 && (at.z - 9.0).abs() < 0.6,
+            "the node should have walked to (9, 9): {at:?}"
+        );
+    }
+
+    /// `agent:teleport` puts the NODE there — the host used to read the scene
+    /// position straight back over it every frame, which turned a documented
+    /// teleport into a `stop()` that moved nothing.
+    #[test]
+    fn an_agent_teleported_from_a_script_moves_the_node() {
+        let dir = std::env::temp_dir().join("floptle_script_test_navteleport");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "porter",
+            "function start(node)\n\
+             \x20 agent = nav.agent(node)\n\
+             \x20 agent:teleport(vec3(10, 0, 10))\n\
+             end\n",
+        );
+
+        let floor = [
+            floptle_nav::Tri::new([0.0, 0.0, 0.0], [12.0, 0.0, 0.0], [0.0, 0.0, 12.0]),
+            floptle_nav::Tri::new([12.0, 0.0, 0.0], [12.0, 0.0, 12.0], [0.0, 0.0, 12.0]),
+        ];
+        let mesh = floptle_nav::bake(
+            &floor,
+            &floptle_nav::NavSettings { agent_radius: 0.3, cell_size: 0.15, ..Default::default() },
+        )
+        .expect("this floor bakes");
+
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::from_translation(floptle_core::math::DVec3::new(1.5, 0.0, 1.5)));
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "porter".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+
+        let mut host = ScriptHost::new();
+        host.set_nav_mesh(Some(mesh));
+        for _ in 0..10 {
+            host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        }
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let at = world.get::<Transform>(e).unwrap().translation;
+        assert!(
+            (at.x - 10.0).abs() < 0.3 && (at.z - 10.0).abs() < 0.3,
+            "the node should be AT the teleport point, not still at the spawn: {at:?}"
+        );
     }
 
     /// A checkbox tunable reads as a real boolean inside a RUNNING script —

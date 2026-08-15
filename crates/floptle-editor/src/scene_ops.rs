@@ -225,6 +225,13 @@ impl Editor {
             self.maps.dirty.insert(id);
             self.world.insert(e, floptle_core::Matter::MapMesh { id });
         }
+        // The same rule for the OTHER id-bearing nodes: an id is identity, not
+        // data to copy. A Nav Link's id is how a script names it and how a bake
+        // matches routes back; a Nav Mesh's id keys its bake file. A copy
+        // arriving with a taken id (duplicate, paste, prefab instance) — or
+        // with the hand-written default 0 — mints its own. (`cmd.add` already
+        // mints fresh ids for fresh nodes; this closes the copy paths.)
+        self.rekey_matter_id(e);
         if !node.scripts.is_empty() {
             let insts = node
                 .scripts
@@ -299,6 +306,47 @@ impl Editor {
             self.world.insert(e, floptle_core::Tags(node.tags.clone()));
         }
         e
+    }
+
+    /// Give `e` a fresh id if its Matter carries one that is 0 or already taken
+    /// by another node — see the call in [`Self::spawn_node`].
+    fn rekey_matter_id(&mut self, e: Entity) {
+        enum Kind {
+            Link,
+            Mesh,
+        }
+        let (kind, id) = match self.world.get::<Matter>(e) {
+            Some(Matter::NavLink { id, .. }) => (Kind::Link, *id),
+            Some(Matter::NavMesh { id, .. }) => (Kind::Mesh, *id),
+            _ => return,
+        };
+        let same_kind = |m: &Matter| -> Option<u32> {
+            match (m, &kind) {
+                (Matter::NavLink { id, .. }, Kind::Link) => Some(*id),
+                (Matter::NavMesh { id, .. }, Kind::Mesh) => Some(*id),
+                _ => None,
+            }
+        };
+        let taken = id == 0
+            || self
+                .world
+                .query::<Matter>()
+                .any(|(o, m)| o != e && same_kind(m) == Some(id));
+        if !taken {
+            return;
+        }
+        let next = self
+            .world
+            .query::<Matter>()
+            .filter(|(o, _)| *o != e)
+            .filter_map(|(_, m)| same_kind(m))
+            .max()
+            .map_or(1, |n| n + 1);
+        match self.world.get_mut::<Matter>(e) {
+            Some(Matter::NavLink { id, .. }) => *id = next,
+            Some(Matter::NavMesh { id, .. }) => *id = next,
+            _ => {}
+        }
     }
 
     /// Spawn a new node ~5 units in front of the camera, and select it.
@@ -378,6 +426,9 @@ impl Editor {
         if crate::assets::is_prefab(path) {
             let at = self.cursor_world();
             self.instantiate_prefab(path, Some(at), None);
+        } else if crate::assets::is_map_sidecar(path) {
+            let at = self.cursor_world();
+            self.import_map_file(path, Some(at));
         } else if is_model(path) {
             if !self.import_model(path) {
                 return;

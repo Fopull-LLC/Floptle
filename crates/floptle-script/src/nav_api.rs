@@ -43,9 +43,11 @@
 //! ```
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
-use mlua::{Lua, Value};
+use floptle_nav::{AgentId, AgentParams, AgentState, Crowd, QueryFilter};
+use mlua::{Lua, UserData, UserDataFields, UserDataMethods, Value};
 
 use crate::math_api::{vec3_of, LuaVec3};
 
@@ -84,8 +86,507 @@ fn world_vec(mesh: &floptle_nav::NavMesh, local: [f32; 3]) -> LuaVec3 {
     LuaVec3(glam::DVec3::new(w[0], w[1], w[2]))
 }
 
-pub fn install_nav_api(lua: &Lua, mesh: NavShared) {
+/// Keys `nav.agent(node, opts)` and `agent:set{...}` read — the registry
+/// entries that make a typo an error instead of a silent default, which is
+/// this engine's most-filed bug shape (`floptle/0082`).
+pub(crate) const AGENT_KEYS: &[&str] = &[
+    "radius",
+    "speed",
+    "accel",
+    "arrive",
+    "slow",
+    "avoid",
+    "priority",
+    "separation",
+    "repath",
+    "giveUpAfter",
+    "drive",
+    "filter",
+];
+
+/// Keys inside the `filter = {...}` sub-table.
+pub(crate) const FILTER_KEYS: &[&str] = &["avoid", "cost"];
+
+/// How an agent's movement reaches the node it belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Drive {
+    /// Feed a physics body if the node has one, and move the transform if it
+    /// does not. **What almost everything wants**, and the only reason it is not
+    /// simply the behaviour is that saying so in the Inspector is better than
+    /// having people discover it.
+    #[default]
+    Auto,
+    /// Move the node's transform. Nothing collides; the navmesh is the collision.
+    Transform,
+    /// Write the node's velocity and let the physics sim carry it. Slopes,
+    /// gravity and pushing each other come free; walls are enforced twice.
+    Velocity,
+    /// Steer, and leave the node alone. The script reads `agent.velocity` and
+    /// does whatever it likes with it — a vehicle with a turning circle, an
+    /// animation-driven character, a boat.
+    None,
+}
+
+/// One agent's tie to the scene.
+///
+/// The crowd works in the navmesh's own frame and the scene works in world
+/// coordinates, and this is where the two meet. **Targets are kept in world
+/// space**, not converted once and stored: a rebake can move the mesh's anchor,
+/// and an order half-translated into a frame that no longer exists is a unit
+/// walking confidently to the wrong place.
+pub struct Bound {
+    pub entity: u32,
+    pub drive: Drive,
+    /// Where it was told to go, in world space, or `None` for "stand still".
+    pub target: Option<[f64; 3]>,
+    /// The last world position the host wrote, so a script can ask an agent
+    /// where it is without the answer depending on a mesh being loaded.
+    pub pos: [f64; 3],
+    /// A pending `agent:teleport(...)`, in world space. The host writes it to
+    /// the NODE and skips this frame's scene read-back — without that, the
+    /// read-back immediately puts the agent right back where it was and a
+    /// teleport is just a `stop()` wearing a hat.
+    pub teleport: Option<[f64; 3]>,
+    /// The filter as it was written, by name. Re-resolved against the mesh's
+    /// area list whenever a bake arrives, because a name is the identity and an
+    /// index is not.
+    pub avoid: Vec<String>,
+    pub costs: Vec<(String, f32)>,
+}
+
+/// Every agent in the scene, and what each one is attached to.
+#[derive(Default)]
+pub struct AgentWorld {
+    pub crowd: Crowd,
+    pub bound: HashMap<AgentId, Bound>,
+}
+
+impl AgentWorld {
+    /// Work every agent's named filter out against this mesh's areas.
+    ///
+    /// An area a filter names that the bake does not have is **ignored rather
+    /// than guessed at**: excluding an area that is not there would be a filter
+    /// that does nothing, and picking the nearest name would be a filter that
+    /// does something nobody asked for. The editor reports the mismatch after a
+    /// bake, where there is room to say which name.
+    pub fn resolve_filters(&mut self, mesh: Option<&floptle_nav::NavMesh>) {
+        for (id, b) in &self.bound {
+            let mut f = QueryFilter::default();
+            if let Some(mesh) = mesh {
+                let index = |name: &str| {
+                    mesh.areas.iter().position(|a| a.name.eq_ignore_ascii_case(name)).map(|i| i as u8)
+                };
+                for name in &b.avoid {
+                    if let Some(i) = index(name) {
+                        f.exclude(i);
+                    }
+                }
+                for (name, c) in &b.costs {
+                    if let Some(i) = index(name) {
+                        f.set_cost(i, *c);
+                    }
+                }
+            }
+            if let Some(a) = self.crowd.agent_mut(*id) {
+                a.params.filter = f;
+            }
+        }
+    }
+}
+
+pub type AgentsShared = Rc<RefCell<AgentWorld>>;
+
+/// A script's handle on one agent.
+///
+/// Holds an id rather than the agent itself, so a handle kept in a Lua variable
+/// after the unit died answers "no" to everything instead of pointing at
+/// whoever was created next.
+pub struct LuaAgent {
+    id: AgentId,
+    world: AgentsShared,
+    mesh: NavShared,
+}
+
+impl LuaAgent {
+    fn with<T>(&self, f: impl FnOnce(&floptle_nav::Agent, &Bound) -> T) -> Option<T> {
+        let w = self.world.borrow();
+        let a = w.crowd.agent(self.id)?;
+        let b = w.bound.get(&self.id)?;
+        Some(f(a, b))
+    }
+}
+
+fn state_name(s: AgentState) -> &'static str {
+    match s {
+        AgentState::Idle => "idle",
+        AgentState::Moving => "moving",
+        AgentState::Arrived => "arrived",
+        AgentState::Blocked => "blocked",
+        AgentState::Crossing => "crossing",
+    }
+}
+
+impl UserData for LuaAgent {
+    fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // "idle" | "moving" | "arrived" | "blocked" | "crossing", and "gone" for
+        // a handle whose agent has been destroyed — a state rather than an error,
+        // because a script holding one is usually mid-cleanup.
+        fields.add_field_method_get("state", |_, a| {
+            Ok(a.with(|ag, _| state_name(ag.state())).unwrap_or("gone").to_string())
+        });
+        fields.add_field_method_get("moving", |_, a| {
+            Ok(a.with(|ag, _| ag.state() == AgentState::Moving || ag.state() == AgentState::Crossing)
+                .unwrap_or(false))
+        });
+        fields.add_field_method_get("arrived", |_, a| {
+            Ok(a.with(|ag, _| ag.arrived()).unwrap_or(false))
+        });
+        fields.add_field_method_get("blocked", |_, a| {
+            Ok(a.with(|ag, _| ag.state() == AgentState::Blocked).unwrap_or(false))
+        });
+        // Whether the route in hand actually reaches the order. False while
+        // walking to the nearest reachable point instead.
+        fields.add_field_method_get("complete", |_, a| {
+            Ok(a.with(|ag, _| ag.route_complete()).unwrap_or(false))
+        });
+        // How far there is left to walk, along the route — not the straight line.
+        fields.add_field_method_get("remaining", |_, a| {
+            Ok(a.with(|ag, _| ag.distance_left() as f64).unwrap_or(0.0))
+        });
+        fields.add_field_method_get("velocity", |_, a| {
+            let v = a.with(|ag, _| ag.vel).unwrap_or([0.0; 3]);
+            Ok(LuaVec3(glam::DVec3::new(v[0] as f64, v[1] as f64, v[2] as f64)))
+        });
+        fields.add_field_method_get("speed", |_, a| {
+            let v = a.with(|ag, _| ag.vel).unwrap_or([0.0; 3]);
+            Ok((v[0] * v[0] + v[2] * v[2]).sqrt() as f64)
+        });
+        fields.add_field_method_get("pos", |_, a| {
+            let p = a.with(|_, b| b.pos).unwrap_or([0.0; 3]);
+            Ok(LuaVec3(glam::DVec3::new(p[0], p[1], p[2])))
+        });
+        fields.add_field_method_get("target", |_, a| {
+            Ok(a.with(|_, b| b.target)
+                .flatten()
+                .map(|t| LuaVec3(glam::DVec3::new(t[0], t[1], t[2]))))
+        });
+        // The link being crossed right now, by name — nil the rest of the time.
+        // This is the hook for "play the climb animation".
+        fields.add_field_method_get("link", |_, a| {
+            let Some(ride) = a.with(|ag, _| ag.crossing()).flatten() else { return Ok(None) };
+            let guard = a.mesh.borrow();
+            Ok(guard
+                .as_ref()
+                .and_then(|m| m.off_links.iter().find(|l| l.id == ride.link))
+                .map(|l| l.name.clone()))
+        });
+        // How far across it is, 0 to 1 — what an animation is driven by.
+        fields.add_field_method_get("linkProgress", |_, a| {
+            Ok(a.with(|ag, _| ag.crossing().map(|r| r.progress as f64)).flatten())
+        });
+        fields.add_field_method_get("alive", |_, a| Ok(a.with(|_, _| true).unwrap_or(false)));
+    }
+
+    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
+        // agent:moveTo(point | node) — the whole API, most days.
+        methods.add_method("moveTo", |_, a, target: Value| {
+            let Some(p) = vec3_of(&target) else {
+                return Err(mlua::Error::RuntimeError(
+                    "agent:moveTo takes a vec3 (or anything with x/y/z)".into(),
+                ));
+            };
+            let mut w = a.world.borrow_mut();
+            if let Some(b) = w.bound.get_mut(&a.id) {
+                b.target = Some([p.x, p.y, p.z]);
+            }
+            Ok(())
+        });
+        methods.add_method("stop", |_, a, ()| {
+            let mut w = a.world.borrow_mut();
+            if let Some(b) = w.bound.get_mut(&a.id) {
+                b.target = None;
+            }
+            if let Some(ag) = w.crowd.agent_mut(a.id) {
+                ag.stop();
+            }
+            Ok(())
+        });
+        // Put it somewhere without walking there — a spawn, a teleport, a
+        // cutscene. Whatever it was doing is forgotten. (The host moves the
+        // node too; with `drive = "none"` move the node yourself instead.)
+        methods.add_method("teleport", |_, a, to: Value| {
+            let Some(p) = vec3_of(&to) else {
+                return Err(mlua::Error::RuntimeError("agent:teleport takes a vec3".into()));
+            };
+            let mut w = a.world.borrow_mut();
+            if let Some(b) = w.bound.get_mut(&a.id) {
+                b.pos = [p.x, p.y, p.z];
+                b.target = None;
+                b.teleport = Some([p.x, p.y, p.z]);
+            }
+            let guard = a.mesh.borrow();
+            let local = match guard.as_ref() {
+                Some(m) => m.to_local([p.x, p.y, p.z]),
+                None => [p.x as f32, p.y as f32, p.z as f32],
+            };
+            if let Some(ag) = w.crowd.agent_mut(a.id) {
+                ag.teleport(local);
+                ag.stop();
+            }
+            Ok(())
+        });
+        // Change how it walks, mid-game. Anything left out is left alone.
+        methods.add_method("set", |_, a, opts: mlua::Table| {
+            crate::opts::check_keys(&opts, AGENT_KEYS, "agent:set")?;
+            let mut w = a.world.borrow_mut();
+            let mut params = match w.crowd.agent(a.id) {
+                Some(ag) => ag.params,
+                None => return Ok(()),
+            };
+            read_params(&opts, &mut params);
+            if let Some(ag) = w.crowd.agent_mut(a.id) {
+                ag.params = params;
+            }
+            let mut filter_changed = false;
+            if let Some(b) = w.bound.get_mut(&a.id) {
+                filter_changed = read_filter(&opts, b, "agent:set")?;
+                if let Some(d) = opts.get::<Option<String>>("drive").ok().flatten() {
+                    b.drive = drive_of(&d);
+                }
+            }
+            // Names only mean something against the mesh's area list — resolve
+            // NOW, or the new filter waits for the next bake that never comes
+            // in a shipped game.
+            if filter_changed {
+                let guard = a.mesh.borrow();
+                w.resolve_filters(guard.as_ref());
+            }
+            Ok(())
+        });
+        // The corners still to walk, in world space — for drawing a route while
+        // working out why a unit went the way it did.
+        methods.add_method("corners", |lua, a, ()| {
+            let w = a.world.borrow();
+            let out = lua.create_table()?;
+            // Through the mesh's anchor, like every other point this module
+            // hands out — the corridor itself lives in bake-local space.
+            let guard = a.mesh.borrow();
+            if let Some(ag) = w.crowd.agent(a.id) {
+                for (i, p) in ag.remaining().iter().enumerate() {
+                    let v = match guard.as_ref() {
+                        Some(m) => world_vec(m, *p),
+                        None => LuaVec3(glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)),
+                    };
+                    out.set(i + 1, v)?;
+                }
+            }
+            Ok(out)
+        });
+        // Take it out of the crowd. Not required — an agent whose node is gone
+        // is dropped on the next frame — but the right thing to call from a
+        // script's own teardown.
+        methods.add_method("destroy", |_, a, ()| {
+            let mut w = a.world.borrow_mut();
+            w.crowd.remove(a.id);
+            w.bound.remove(&a.id);
+            Ok(())
+        });
+    }
+}
+
+fn drive_of(name: &str) -> Drive {
+    match name.to_ascii_lowercase().as_str() {
+        "transform" | "move" => Drive::Transform,
+        "velocity" | "physics" | "body" => Drive::Velocity,
+        "none" | "steer" | "off" => Drive::None,
+        _ => Drive::Auto,
+    }
+}
+
+fn read_params(opts: &mlua::Table, p: &mut AgentParams) {
+    let num = |key: &str| opts.get::<Option<f64>>(key).ok().flatten().map(|v| v as f32);
+    if let Some(v) = num("radius") {
+        p.radius = v.max(0.0);
+    }
+    if let Some(v) = num("speed") {
+        p.speed = v.max(0.0);
+    }
+    if let Some(v) = num("accel") {
+        p.accel = v.max(0.0);
+    }
+    if let Some(v) = num("arrive") {
+        p.arrive = v.max(0.0);
+    }
+    if let Some(v) = num("slow") {
+        p.slow = v.max(0.0);
+    }
+    if let Some(v) = num("priority") {
+        p.priority = v;
+    }
+    if let Some(v) = num("separation") {
+        p.separation = v.clamp(0.0, 4.0);
+    }
+    if let Some(v) = num("repath") {
+        p.repath = v.max(0.0);
+    }
+    if let Some(v) = num("giveUpAfter") {
+        p.stuck_after = v.max(0.0);
+    }
+    if let Ok(Some(v)) = opts.get::<Option<bool>>("avoid") {
+        p.avoid = v;
+    }
+}
+
+/// `filter = { avoid = {"water"}, cost = { mud = 4 } }`, kept by name.
+/// Returns whether a filter table was present (so the caller re-resolves).
+fn read_filter(opts: &mlua::Table, b: &mut Bound, call: &str) -> mlua::Result<bool> {
+    let Ok(Some(f)) = opts.get::<Option<mlua::Table>>("filter") else { return Ok(false) };
+    crate::opts::check_keys(&f, FILTER_KEYS, call)?;
+    if let Ok(Some(list)) = f.get::<Option<mlua::Table>>("avoid") {
+        b.avoid = list.sequence_values::<String>().flatten().collect();
+    }
+    if let Ok(Some(costs)) = f.get::<Option<mlua::Table>>("cost") {
+        b.costs = costs
+            .pairs::<String, f64>()
+            .flatten()
+            .map(|(k, v)| (k, v as f32))
+            .collect();
+        // Deterministic, because a table's pairs are not.
+        b.costs.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    Ok(true)
+}
+
+pub(crate) fn install_nav_api(
+    lua: &Lua,
+    mesh: NavShared,
+    agents: AgentsShared,
+    scene: Rc<RefCell<crate::SceneMirror>>,
+) {
     let Ok(t) = lua.create_table() else { return };
+
+    // nav.agent(node[, opts]) -> agent
+    //
+    // The one call this whole module exists for. Everything else answers
+    // questions about the navmesh; this walks something along it.
+    let m = mesh.clone();
+    let w = agents.clone();
+    let scene = scene.clone();
+    if let Ok(f) = lua.create_function(move |lua, (node, opts): (Value, Option<mlua::Table>)| {
+        let Value::Table(handle) = &node else {
+            return Err(mlua::Error::RuntimeError(
+                "nav.agent(node[, opts]) takes a node — pass the `node` your script was given"
+                    .into(),
+            ));
+        };
+        let Ok(entity) = handle.raw_get::<u32>("__id") else {
+            return Err(mlua::Error::RuntimeError(
+                "nav.agent(node[, opts]): that is not a node handle".into(),
+            ));
+        };
+
+        let mut params = AgentParams::default();
+        // A mesh baked for a wider character than the agent thinks it is would
+        // let it stand somewhere it does not fit, so the bake's radius is the
+        // starting point rather than a guess.
+        if let Some(mesh) = m.borrow().as_ref() {
+            params.radius = mesh.settings.agent_radius.max(0.05);
+        }
+        let mut bound = Bound {
+            entity,
+            drive: Drive::Auto,
+            target: None,
+            pos: [0.0; 3],
+            teleport: None,
+            avoid: Vec::new(),
+            costs: Vec::new(),
+        };
+        if let Some(opts) = &opts {
+            crate::opts::check_keys(opts, AGENT_KEYS, "nav.agent")?;
+            read_params(opts, &mut params);
+            read_filter(opts, &mut bound, "nav.agent")?;
+            if let Some(d) = opts.get::<Option<String>>("drive").ok().flatten() {
+                bound.drive = drive_of(&d);
+            }
+        }
+
+        // Start where the node is, so an agent asked about before its first step
+        // answers about the right place.
+        let world_pos = {
+            let s = scene.borrow();
+            crate::api::world_transform_of_handle(&s, handle, entity).translation
+        };
+        bound.pos = [world_pos.x, world_pos.y, world_pos.z];
+        let local = match m.borrow().as_ref() {
+            Some(mesh) => mesh.to_local(bound.pos),
+            None => [world_pos.x as f32, world_pos.y as f32, world_pos.z as f32],
+        };
+
+        let mut world = w.borrow_mut();
+        let id = world.crowd.add(params, local);
+        world.bound.insert(id, bound);
+        drop(world);
+        {
+            let guard = m.borrow();
+            w.borrow_mut().resolve_filters(guard.as_ref());
+        }
+        lua.create_userdata(LuaAgent { id, world: w.clone(), mesh: m.clone() })
+    }) {
+        let _ = t.set("agent", f);
+    }
+
+    // nav.agents() -> how many there are. One number, for a HUD or a test.
+    let w = agents.clone();
+    if let Ok(f) = lua.create_function(move |_, ()| Ok(w.borrow().crowd.len())) {
+        let _ = t.set("agents", f);
+    }
+
+    // nav.budget([n]) -> how many path searches the crowd may run per frame.
+    //
+    // Raising it makes a hundred units react to one order in the same frame at
+    // the cost of that frame; lowering it spreads the thinking further. Read it
+    // with no argument.
+    let w = agents.clone();
+    if let Ok(f) = lua.create_function(move |_, n: Option<usize>| {
+        let mut world = w.borrow_mut();
+        if let Some(n) = n {
+            world.crowd.paths_per_step = n.max(1);
+        }
+        Ok(world.crowd.paths_per_step)
+    }) {
+        let _ = t.set("budget", f);
+    }
+
+    // nav.link(name | id[, open]) -> is it open, or nil if there is no such link
+    //
+    // The door. Closing one makes every route that used it repath, with nothing
+    // rebaked and nothing else to remember.
+    let m = mesh.clone();
+    let w = agents.clone();
+    if let Ok(f) = lua.create_function(move |_, (which, open): (Value, Option<bool>)| {
+        let mut guard = m.borrow_mut();
+        let Some(mesh) = guard.as_mut() else { return Ok(None) };
+        let found = match &which {
+            Value::Integer(i) => mesh.off_links.iter_mut().find(|l| l.id == *i as u32),
+            Value::Number(n) => mesh.off_links.iter_mut().find(|l| l.id == *n as u32),
+            Value::String(s) => {
+                let name = s.to_str()?.to_string();
+                mesh.off_links.iter_mut().find(|l| l.name == name)
+            }
+            _ => None,
+        };
+        let Some(link) = found else { return Ok(None) };
+        if let Some(open) = open {
+            let changed = link.enabled != open;
+            link.enabled = open;
+            if changed {
+                w.borrow_mut().crowd.navmesh_changed();
+            }
+        }
+        Ok(Some(link.enabled))
+    }) {
+        let _ = t.set("link", f);
+    }
 
     let _ = t.set("AREA_STRIDE", AREA_STRIDE);
     let _ = t.set("LINK_STRIDE", LINK_STRIDE);
@@ -349,7 +850,12 @@ mod tests {
         let lua = Lua::new();
         let _ = crate::math_api::install(&lua);
         let shared: NavShared = Rc::new(RefCell::new(Some(mesh)));
-        install_nav_api(&lua, shared.clone());
+        install_nav_api(
+            &lua,
+            shared.clone(),
+            Rc::new(RefCell::new(AgentWorld::default())),
+            Rc::new(RefCell::new(crate::SceneMirror::default())),
+        );
         (lua, shared)
     }
 
@@ -523,7 +1029,12 @@ mod tests {
     fn a_scene_with_no_bake_answers_every_question_with_nothing() {
         let lua = Lua::new();
         let _ = crate::math_api::install(&lua);
-        install_nav_api(&lua, Rc::new(RefCell::new(None)));
+        install_nav_api(
+            &lua,
+            Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(AgentWorld::default())),
+            Rc::new(RefCell::new(crate::SceneMirror::default())),
+        );
         assert!(!eval::<bool>(&lua, "return nav.ready()"));
         assert!(eval::<bool>(
             &lua,

@@ -200,5 +200,26 @@ empty, and **refuses to save map geometry** for the session — a transient IO
 error must never be able to replace a level with placeholder cubes and then
 persist them.
 
+## 8. Reusing a level's geometry somewhere else
+
+Those `maps/*.map.ron` files are ordinary assets in the browser. Select one and
+the Inspector shows what it holds: which scene it belongs to, the shapes and
+their sizes, and a **top-down floor plan** of the level drawn from the geometry
+itself. Double-click opens the scene that owns it.
+
+**Drag it into the viewport** — or right-click → *Add to scene* — to bring that
+geometry into whatever scene is open. Every shape arrives as a fresh map node
+with its own copy of the geometry and its own id, so nothing is shared with
+where it came from: edit the copy freely. Names, relative placement, materials
+and the collidable flag all come across, the whole import is grouped under one
+node, and it is a single undo step.
+
+Placement comes from the owning scene rather than the sidecar, because a sidecar
+stores what a shape *looks like* and the scene stores where it *sits*. If no
+scene of that name is found, the shapes still import — each at its own origin —
+and the Inspector says so rather than quietly stacking them. Geometry belonging
+to nodes the owning scene has since deleted is left behind: a save keeps it so
+an undo can resurrect the node, and an import must not resurrect it instead.
+
 See also: [materials & textures](subsystems/materials-and-textures.md), which
 is also where vertex paint is documented.

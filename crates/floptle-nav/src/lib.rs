@@ -45,16 +45,24 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod agent;
+pub mod filter;
 pub mod heightfield;
+pub mod index;
+pub mod link;
 pub mod mesh;
 pub mod overlay;
 pub mod path;
 pub mod walkable;
 
+pub use agent::{Agent, AgentId, AgentParams, AgentState, Crowd, Ride};
+pub use filter::{Area, AreaVolume, QueryFilter, MAX_AREAS, WALKABLE};
 pub use heightfield::{Column, Heightfield, Surface};
+pub use index::PolyIndex;
+pub use link::OffLink;
 pub use mesh::{Link, NavMesh, Poly};
 pub use overlay::{Edge, Overlay, Step, SurfaceTri};
-pub use path::Path;
+pub use path::{Crossing, Path};
 pub use walkable::{Cell, WalkableGrid};
 
 /// Bake a navmesh from triangles — the whole pipeline in one call.
@@ -77,6 +85,43 @@ pub fn bake(tris: &[Tri], settings: &NavSettings) -> Option<NavMesh> {
     let field = Heightfield::build(tris, settings)?;
     let grid = WalkableGrid::build(&field, settings)?;
     NavMesh::build(&grid, settings)
+}
+
+/// Bake with everything a designer put in the level besides its geometry:
+/// volumes that paint or carve the ground, and links that join it up.
+///
+/// The three arrive together because they are resolved in one order and the
+/// order matters — volumes change the ground, so they run first; links are
+/// snapped onto whatever ground came out, so they run last. A caller doing this
+/// by hand would get it right the first time and wrong after the next change.
+///
+/// ```
+/// use floptle_nav::{bake_with, NavSettings, OffLink, Tri};
+/// // Two floors, four metres apart in x, with a plank between them.
+/// let quad = |x: f32| {
+///     [
+///         Tri::new([x, 0.0, 0.0], [x + 3.0, 0.0, 0.0], [x, 0.0, 3.0]),
+///         Tri::new([x + 3.0, 0.0, 0.0], [x + 3.0, 0.0, 3.0], [x, 0.0, 3.0]),
+///     ]
+/// };
+/// let tris: Vec<Tri> = quad(0.0).into_iter().chain(quad(7.0)).collect();
+/// let plank = OffLink::new(1, "plank", [2.5, 0.0, 1.5], [7.5, 0.0, 1.5]);
+///
+/// let settings = NavSettings { agent_radius: 0.0, cell_size: 0.25, ..Default::default() };
+/// let mesh = bake_with(&tris, &settings, &[], vec![plank]).unwrap();
+/// let path = mesh.path([1.0, 0.0, 1.5], [9.0, 0.0, 1.5]).unwrap();
+/// assert!(path.complete, "the plank joins two islands the bake cannot");
+/// assert_eq!(path.crossings.len(), 1, "and the walk knows it is crossing one");
+/// ```
+pub fn bake_with(
+    tris: &[Tri],
+    settings: &NavSettings,
+    volumes: &[AreaVolume],
+    links: Vec<OffLink>,
+) -> Option<NavMesh> {
+    let field = Heightfield::build(tris, settings)?;
+    let grid = WalkableGrid::build_with(&field, settings, volumes)?;
+    Some(NavMesh::build(&grid, settings)?.with_links(links))
 }
 
 /// What a bake needs to know. Defaults describe a human-ish character on a

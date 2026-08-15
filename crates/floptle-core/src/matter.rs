@@ -1675,6 +1675,65 @@ pub enum Matter {
         /// stops anything pathing on it.
         enabled: bool,
     },
+    /// A **nav link**: a way across that is not walking.
+    ///
+    /// A ladder, a jump down, a vault, a door, a teleport, a rope. The navmesh
+    /// is a surface and can only ever say "walk along the floor to there"; this
+    /// is how two pieces of floor with nothing between them get joined up.
+    ///
+    /// The node's own position is one end and `to` is the other, as an offset in
+    /// the node's own space — so a link inside a prefab moves, turns and scales
+    /// with the prefab rather than pointing at wherever it was authored.
+    ///
+    /// **It does not know what a ladder is.** What makes it one is the animation
+    /// a script plays while an agent reports crossing it, which is the split
+    /// that lets the same node be a jump in one game and a lift in the next.
+    NavLink {
+        /// Stable id, so a script can name this link and a rebake keeps meaning
+        /// the same one.
+        id: u32,
+        /// The far end, in this node's own space.
+        to: [f32; 3],
+        /// Whether it can be crossed both ways. A ladder is; a jump down is not.
+        bidirectional: bool,
+        /// What crossing costs the router, in metres of ordinary walking. The
+        /// number to raise when a route should only take this as a last resort.
+        cost: f32,
+        /// Which nav area it counts as, by name — so one exclusion can rule out
+        /// every jump in the level rather than one per link. Empty is ordinary
+        /// ground.
+        area: String,
+        /// How long a crossing takes, in seconds. 0 means "at walking speed",
+        /// which is right for a vault and wrong for a lift.
+        duration: f32,
+        /// Off is a shut door: the route disappears and everything using it
+        /// finds another way, with nothing rebaked.
+        enabled: bool,
+    },
+    /// A **nav area**: a box that changes what the ground inside it means.
+    ///
+    /// Either it labels that ground — *water*, *mud*, *road*, *danger* — so
+    /// routes can prefer or avoid it and different characters can disagree about
+    /// it, or it carves the ground out of the bake entirely.
+    ///
+    /// Carving is the designer's answer to "nothing may walk here" that does not
+    /// involve building an invisible wall and remembering why it is there. It
+    /// cannot be argued with by a filter, because it is a fact about the level
+    /// rather than one character's opinion.
+    NavArea {
+        /// Half the box, in local units, before the node's scale.
+        half_extents: [f32; 3],
+        /// What this ground is called. The name is the identity — a script says
+        /// `"water"`, so inserting an area cannot re-point every script at a
+        /// different one.
+        area: String,
+        /// What a metre of it costs to cross, as a multiple of ordinary ground.
+        /// Above 1 is avoided when there is a way round; below 1 is sought out.
+        cost: f32,
+        /// Carve this ground out instead of labelling it.
+        blocks: bool,
+        enabled: bool,
+    },
     /// A **reflection probe**: what the surfaces in one room reflect.
     ///
     /// A reflective surface asks two things in turn — "is what I am reflecting
@@ -1845,6 +1904,40 @@ impl Matter {
             max_slope: 45.0,
             step_height: 0.75,
             cell_size: 0.15,
+            enabled: true,
+        }
+    }
+
+    /// A fresh nav link: two metres forward, one way, costing what it spans.
+    ///
+    /// One way rather than both, because the commonest link by a distance is a
+    /// drop off a ledge — and a two-way drop is a character walking up a cliff.
+    /// The far end is offset rather than at the origin so a new link is visible
+    /// the moment it is placed.
+    pub fn default_nav_link(id: u32) -> Self {
+        Matter::NavLink {
+            id,
+            to: [0.0, 0.0, 2.0],
+            bidirectional: false,
+            cost: 2.0,
+            area: String::new(),
+            duration: 0.0,
+            enabled: true,
+        }
+    }
+
+    /// A fresh nav area: a room-sized box of ground that costs four times as
+    /// much to cross.
+    ///
+    /// Four, because a volume that changed nothing until somebody found the cost
+    /// field would look broken, and because "avoid this if there is any way
+    /// round" is what a fresh one is nearly always for.
+    pub fn default_nav_area() -> Self {
+        Matter::NavArea {
+            half_extents: [4.0, 2.0, 4.0],
+            area: "rough".into(),
+            cost: 4.0,
+            blocks: false,
             enabled: true,
         }
     }
