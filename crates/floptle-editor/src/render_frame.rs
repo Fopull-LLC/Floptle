@@ -3293,20 +3293,23 @@ impl Editor {
                         let dt = ui.input(|i| i.stable_dt).min(0.1);
                         *save_flash = (*save_flash - dt).max(0.0);
                         let quiet = ui.visuals().weak_text_color();
+                        // The two signal colours, from the one place they live
+                        // (`theme::signal`) — an unsaved change is a warn and a
+                        // save that landed is a good, the same amber and green
+                        // as everywhere else in the editor.
                         let (label, color, hover) = if scene_dirty_now {
                             (
                                 "● unsaved",
-                                ui.visuals().warn_fg_color,
+                                crate::theme::signal::WARN,
                                 format!("{save_status_file} has unsaved changes — click here (or Ctrl+S) to save"),
                             )
                         } else {
                             // Glow bright right after a save, settle to quiet
                             // (t = 0 IS the resting state — one branch, one wording).
                             let t = (*save_flash / Editor::SAVE_FLASH_SECS).clamp(0.0, 1.0);
-                            let glow = egui::Color32::from_rgb(120, 210, 140);
                             (
                                 "✔ saved",
-                                quiet.lerp_to_gamma(glow, t),
+                                quiet.lerp_to_gamma(crate::theme::signal::GOOD, t),
                                 format!("{save_status_file} is saved"),
                             )
                         };

@@ -247,10 +247,10 @@ pub(crate) fn body(
         ui.separator();
 
         if let Some(e) = state.error.clone() {
-            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), e);
+            ui.colored_label(crate::theme::signal::BAD, e);
         }
         if let Some(n) = state.note.clone() {
-            ui.colored_label(egui::Color32::from_rgb(130, 210, 150), n);
+            ui.colored_label(crate::theme::signal::GOOD, n);
         }
 
     match state.tab {
@@ -267,7 +267,7 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
         let reg = match Registry::load(ctx.project_root) {
             Ok(r) => r,
             Err(e) => {
-                ui.colored_label(egui::Color32::from_rgb(230, 120, 110), e);
+                ui.colored_label(crate::theme::signal::BAD, e);
                 return;
             }
         };
@@ -338,14 +338,14 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                     for (id, sev, msg) in problems {
                         if id.as_deref() == Some(entry.id.as_str()) {
                             let col = match sev {
-                                Severity::Error => egui::Color32::from_rgb(230, 120, 110),
-                                Severity::Warning => egui::Color32::from_rgb(225, 195, 110),
+                                Severity::Error => crate::theme::signal::BAD,
+                                Severity::Warning => crate::theme::signal::WARN,
                             };
                             ui.colored_label(col, msg);
                         }
                     }
                     if let Some(err) = ctx.load.failure(&entry.id) {
-                        ui.colored_label(egui::Color32::from_rgb(230, 120, 110), err);
+                        ui.colored_label(crate::theme::signal::BAD, err);
                     }
 
                     // Arrived from somewhere else and asked for something, so it
@@ -355,7 +355,7 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                     // wants precisely when it is not yet allowed to have it.
                     if state.awaiting_consent.as_deref() == Some(entry.id.as_str()) {
                         ui.colored_label(
-                            egui::Color32::from_rgb(225, 195, 110),
+                            crate::theme::signal::WARN,
                             "⚠ Installed, but NOT running yet — it asked for the following. \
                              Tick the box to let it run.",
                         );
@@ -435,7 +435,7 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                         }
                         if state.confirm_remove.as_deref() == Some(entry.id.as_str()) {
                             ui.colored_label(
-                                egui::Color32::from_rgb(230, 120, 110),
+                                crate::theme::signal::BAD,
                                 if entry.source.is_linked() {
                                     "Unlink it?"
                                 } else {
@@ -610,7 +610,7 @@ fn add_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, actio
             if !id.is_empty()
                 && let Err(e) = floptle_package::manifest::validate_id(&id)
             {
-                ui.small(egui::RichText::new(e).color(egui::Color32::from_rgb(225, 195, 110)));
+                ui.small(egui::RichText::new(e).color(crate::theme::signal::WARN));
             }
             let ok = !id.is_empty()
                 && !name.is_empty()
@@ -747,7 +747,7 @@ fn browse_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, ac
             return;
         }
         Catalogue::Failed(e) => {
-            ui.colored_label(egui::Color32::from_rgb(230, 120, 110), e.clone());
+            ui.colored_label(crate::theme::signal::BAD, e.clone());
             ui.small(
                 "Installing from a folder or a Git URL does not need the catalogue — the \
                  ✚ Add tab still works.",
@@ -1151,7 +1151,7 @@ fn detail_panel(
                         Some(req) if !req.matches(engine) => {
                             ui.small(
                                 egui::RichText::new(format!("needs {}", req.as_str()))
-                                    .color(egui::Color32::from_rgb(225, 195, 110)),
+                                    .color(crate::theme::signal::WARN),
                             );
                         }
                         Some(req) => {

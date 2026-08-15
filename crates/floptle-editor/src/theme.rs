@@ -3,6 +3,43 @@
 
 use crate::ide::{LUA_API_WORDS, LUA_KEYWORDS};
 
+/// The three colours that mean something, shared with fopull.com.
+///
+/// **Colour is a signal, not decoration.** A resting panel is monochrome; these
+/// appear for a rating, a permission, a compatibility warning, or the one
+/// primary action, and nowhere else. That rule is what makes them readable —
+/// a page where everything is coloured says nothing.
+///
+/// They are the same values the website uses, which is deliberate and is why
+/// they live in one named place instead of being spelled out at each site. Two
+/// of them came *from* this editor and went to the site; `WARN` came back the
+/// other way, a more saturated amber than the muddy gold that was here. Change
+/// one and it changes everywhere in the editor — and then tell the site, or the
+/// two drift and "the same green" stops being the same green.
+///
+/// Deliberately NOT theme-derived. A rating being good and a package asking for
+/// the network are facts about the thing, not about the chrome around it, and
+/// they have to keep meaning the same under every theme. Everything that IS
+/// about the chrome — panel fills, text, hairlines — must still come from
+/// `ui.visuals()`.
+///
+/// **The accent is the one that stayed with the theme**, and it is the
+/// exception that shows the rule. The site picked a teal to match this
+/// editor's default look, but an accent is chrome: somebody who chose GitHub
+/// Light should get that theme's accent, not a fixed teal sitting in it. So the
+/// editor reads `ui.visuals().selection.stroke.color` for "switched on" and
+/// "the primary action", and only the three signals below are pinned.
+pub(crate) mod signal {
+    use egui::Color32;
+
+    /// Good: a healthy rating, a check that passed, a save that landed.
+    pub(crate) const GOOD: Color32 = Color32::from_rgb(0x82, 0xd2, 0x96);
+    /// Warn: a permission, an unsaved change, something that wants a look.
+    pub(crate) const WARN: Color32 = Color32::from_rgb(0xe0, 0xb0, 0x50);
+    /// Bad: a failure, an incompatibility, a refusal.
+    pub(crate) const BAD: Color32 = Color32::from_rgb(0xe6, 0x78, 0x6e);
+}
+
 /// Build a colored layout for Lua source (keywords, strings, numbers, comments,
 /// engine API). A simple single-pass tokenizer — good enough for an in-engine IDE.
 /// A code-editor color theme: the syntax token colors plus the editor background, gutter
