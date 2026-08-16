@@ -543,8 +543,41 @@ pub(crate) fn install_nav_api(
     mesh: NavShared,
     agents: AgentsShared,
     scene: Rc<RefCell<crate::SceneMirror>>,
+    rebakes: Rc<RefCell<Vec<crate::NavRebakeRequest>>>,
 ) {
     let Ok(t) = lua.create_table() else { return };
+
+    // nav.rebake(centre, size) -> queued
+    //
+    // "The level here is different now — measure it again." The other half of
+    // `nav.obstacle`: a crate standing on the floor is an obstacle, a corridor
+    // that has just been built is a rebake, and only one of them can be undone.
+    //
+    // It queues rather than acting, because re-measuring needs the world's
+    // triangles and only the editor has those — the same reason `spawn` queues.
+    // The answer lands in the same pass, before anything paths through it.
+    //
+    // World coordinates, and the box is snapped outward to whole navmesh cells:
+    // read the mesh back rather than assuming you got the box you asked for.
+    let q = rebakes.clone();
+    if let Ok(f) = lua.create_function(move |_, (centre, size): (Value, Value)| {
+        let (Some(c), Some(s)) = (vec3_of(&centre), vec3_of(&size)) else {
+            return Err(mlua::Error::RuntimeError(
+                "nav.rebake(centre, size) takes two vec3s — the middle of the box to \
+                 re-measure and how big it is"
+                    .into(),
+            ));
+        };
+        // Size is a span, not a place, so it is NOT put through `to_local` —
+        // the same trap `nav.obstacle` has a test for.
+        q.borrow_mut().push(crate::NavRebakeRequest {
+            centre: [c.x, c.y, c.z],
+            size: [s.x as f32, s.y as f32, s.z as f32],
+        });
+        Ok(())
+    }) {
+        let _ = t.set("rebake", f);
+    }
 
     // nav.agent(node[, opts]) -> agent
     //
@@ -1089,6 +1122,7 @@ mod tests {
             shared.clone(),
             Rc::new(RefCell::new(AgentWorld::default())),
             Rc::new(RefCell::new(crate::SceneMirror::default())),
+            Rc::new(RefCell::new(Vec::new())),
         );
         (lua, shared)
     }
@@ -1131,6 +1165,7 @@ mod tests {
             Rc::new(RefCell::new(Some(mesh))),
             Rc::new(RefCell::new(AgentWorld::default())),
             Rc::new(RefCell::new(crate::SceneMirror::default())),
+            Rc::new(RefCell::new(Vec::new())),
         );
         lua
     }
@@ -1198,6 +1233,7 @@ mod tests {
             Rc::new(RefCell::new(None)),
             Rc::new(RefCell::new(AgentWorld::default())),
             Rc::new(RefCell::new(crate::SceneMirror::default())),
+            Rc::new(RefCell::new(Vec::new())),
         );
         let (g, l): (Option<mlua::Table>, Option<mlua::Table>) =
             eval(&lua, "return nav.ground(), nav.offLinks()");
@@ -1426,6 +1462,7 @@ mod tests {
             Rc::new(RefCell::new(None)),
             Rc::new(RefCell::new(AgentWorld::default())),
             Rc::new(RefCell::new(crate::SceneMirror::default())),
+            Rc::new(RefCell::new(Vec::new())),
         );
         assert!(!eval::<bool>(&lua, "return nav.ready()"));
         assert!(eval::<bool>(

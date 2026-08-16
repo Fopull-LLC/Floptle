@@ -664,6 +664,8 @@ pub struct ScriptHost {
     /// drained by the driver, which spawns the subtree + wires physics, then
     /// invokes each request's callback with the new root's handle.
     spawn_requests: Rc<RefCell<Vec<SpawnRequest>>>,
+    /// `nav.rebake(...)`, waiting for the editor to gather the geometry.
+    nav_rebakes: Rc<RefCell<Vec<NavRebakeRequest>>>,
     /// This tick's `draw.line(...)` segments (immediate mode; drained per tick).
     draw_lines: Rc<RefCell<Vec<DrawLine>>>,
     /// This tick's `draw.tri/cone/disc(...)` filled triangles (immediate mode).
@@ -1080,6 +1082,20 @@ impl SceneMirror {
 /// the prefab name/path, an optional world position for its first root, and
 /// an optional callback (a Lua registry key) the driver invokes with the new
 /// root's node handle once it exists (`ScriptHost::call_spawn_callback`).
+/// A `nav.rebake(centre, size)` request: re-measure this box of the level and
+/// splice the answer into the navmesh in hand.
+///
+/// A request rather than a call, like `spawn`, because it needs the world's
+/// triangles and the scripting host does not have them — only the editor can
+/// gather geometry, import models and voxelise. Drained in the same pass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NavRebakeRequest {
+    /// The middle of the box, in world coordinates.
+    pub centre: [f64; 3],
+    /// How big it is. The bake snaps it outward to whole navmesh cells.
+    pub size: [f32; 3],
+}
+
 pub struct SpawnRequest {
     pub prefab: String,
     pub pos: Option<[f64; 3]>,

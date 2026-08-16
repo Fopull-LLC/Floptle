@@ -216,6 +216,25 @@ and the bake names it in the Console. A door that quietly does nothing is exactl
 the silent-failure shape this engine's own audit found again and again: the level
 looks right, the route goes the long way, and nothing anywhere says why.
 
+### On a level that builds itself, the navmesh arrives late
+
+**There is no navmesh in `start()` on a procedural level**, because there is no
+geometry yet for a bake to measure. `nav.ready()` is false, and the obvious shape
+
+```lua
+function start(node)
+    if nav.ready() then self.agent = nav.agent(node) end   -- never runs
+end
+```
+
+leaves `self.agent` nil for the whole session, so every routing call falls
+through to whatever the script does without one. Nothing errors. It looks exactly
+like broken pathfinding.
+
+Ask for it every frame until you have one. The reason this bites is that the
+correct handling of *"no navmesh yet"* and the incorrect handling of *"no navmesh
+ever"* are the same code.
+
 ## Reading it from the editor
 
 An editor package gets the same `nav` table, minus everything that moves —
@@ -284,6 +303,56 @@ Play is not: pressing Stop has to give the level back.
 There is deliberately no *moving* obstacle. Carving every frame is rebuilding
 every frame, which is the cost this exists to avoid — something that moves
 wants an agent, or an area filter, or a rebake.
+
+## Re-measuring one box of it
+
+A level that builds itself changes a **box** at a time, and re-measuring the
+whole level to account for one 32 m chunk is the wrong unit of work by
+construction: the amount of *new* level per chunk is constant, so the cost per
+chunk should be too, and instead it grows with how much is loaded.
+
+`nav.rebake(centre, size)` measures the box and splices the answer into the mesh
+in hand. It queues, like `spawn` — re-measuring needs the world's triangles and
+the scripting side does not have them — and lands in the same pass, after that
+pass's spawns and destroys, so a chunk can build itself and ask in one breath.
+
+| | one 32 m chunk | the whole ring |
+|---|---|---|
+| 2×2 chunks | 2.8 ms | 4.1 ms |
+| 3×3 chunks | 2.2 ms | 8.1 ms |
+| 4×4 chunks | 2.6 ms | 14.0 ms |
+
+The finding is the shape of the second column, not the first.
+
+### The seam is the whole problem
+
+Two navmeshes do not join because they are adjacent. A portal exists between two
+rectangles that **share an edge**, and the surviving polygons end wherever the
+old bake put them — not on the box's boundary. So the host's polygons are **cut**
+at the box, by the same subtraction a carve uses, and the incoming ones are
+clipped to it. Both sides then end on the same coordinate to the last bit, and
+the bake's own portal rule finds the joins with nothing special about the seam.
+
+That is also why the two bakes do **not** have to be on the same grid. Only the
+two edges at the seam have to agree, and clipping both to one number is what
+makes them.
+
+### It is not carving
+
+`nav.obstacle` takes ground away and can put it back, because the box it cut is a
+thing standing on a level that has not changed. A splice is the opposite claim —
+*the level here is different now* — so it writes through to the bake and becomes
+what carves are re-derived from. **Obstacles outstanding at the time survive it**:
+re-measuring the ground under a crate does not move the crate.
+
+### Regions are re-flooded, not re-split
+
+A splice can **merge** islands as readily as break them — a new corridor joins
+two wings that were separate — and `resplit_regions` only splits. So a splice
+floods the whole mesh and lets each island claim the lowest id it already
+contained. It is O(polygons + links), which a splice can afford, and an island
+nothing happened to keeps its number: the overlay does not recolour the level and
+an id a script wrote down still means what it meant.
 
 ## Keeping it
 

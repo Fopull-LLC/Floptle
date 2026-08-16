@@ -12,7 +12,9 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use floptle_core::math::{Mat3, Mat4, Vec3};
 use floptle_render::{MeshData, TextureData, Vertex};
@@ -65,10 +67,68 @@ impl std::error::Error for ImportError {}
 
 /// Import a `.glb`/`.gltf` model into per-material parts + decoded textures.
 pub fn import(path: &Path) -> Result<ImportedModel, ImportError> {
-    let (doc, buffers, images) = gltf::import(path).map_err(ImportError::Gltf)?;
+    import_inner(path, true)
+}
 
-    // Decode every image to RGBA8 once; parts reference them by index.
-    let textures: Vec<TextureData> = images.iter().map(to_rgba8).collect();
+/// The same model with **no images read and no textures decoded**.
+///
+/// For every caller that wants a model's *shape*: the navmesh bake, a mesh
+/// collider, a measurement. Decoding a model's textures to answer a question
+/// about its vertex positions is pure waste, and it is not small waste — a
+/// streamed level of 313 props in `floptle/0140` spent ~43 MB of RGBA
+/// allocation, per bake, on pixels it dropped on the next line.
+///
+/// Geometry is produced by the same walk as [`import`], deliberately: two
+/// importers that were supposed to agree about vertex positions and did not
+/// would move a level's navmesh out from under it, and the disagreement would
+/// be invisible until somebody walked into a wall.
+pub fn import_geometry(path: &Path) -> Result<ImportedModel, ImportError> {
+    import_inner(path, false)
+}
+
+/// Path + when it was last written → the geometry read from it.
+type GeometryCache = HashMap<(PathBuf, Option<SystemTime>), Arc<ImportedModel>>;
+
+/// [`import_geometry`], memoised on path + modification time.
+///
+/// A bake reads every model in the level; a level that changes while you walk
+/// through it bakes again and again, and re-reading an unchanged `.glb` off disk
+/// each time is the largest single cost in it. Keyed on mtime rather than path
+/// alone so re-exporting a model from Blender is picked up without anybody
+/// having to know a cache exists.
+pub fn geometry(path: &Path) -> Result<Arc<ImportedModel>, ImportError> {
+    static CACHE: OnceLock<Mutex<GeometryCache>> = OnceLock::new();
+    let stamp = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let key = (path.to_path_buf(), stamp);
+    let cache = CACHE.get_or_init(Default::default);
+    if let Ok(map) = cache.lock()
+        && let Some(hit) = map.get(&key)
+    {
+        return Ok(hit.clone());
+    }
+    let model = Arc::new(import_geometry(path)?);
+    if let Ok(mut map) = cache.lock() {
+        // A model re-exported mid-session leaves its old entry behind. Drop the
+        // stale stamps for this path rather than growing a set per save.
+        map.retain(|(p, s), _| p != path || *s == stamp);
+        map.insert(key, model.clone());
+    }
+    Ok(model)
+}
+
+fn import_inner(path: &Path, want_textures: bool) -> Result<ImportedModel, ImportError> {
+    let (doc, buffers, textures) = if want_textures {
+        let (doc, buffers, images) = gltf::import(path).map_err(ImportError::Gltf)?;
+        // Decode every image to RGBA8 once; parts reference them by index.
+        (doc, buffers, images.iter().map(to_rgba8).collect())
+    } else {
+        // `Gltf::open` parses the document and keeps the binary blob; it does
+        // not touch the images at all.
+        let gltf = gltf::Gltf::open(path).map_err(ImportError::Gltf)?;
+        let buffers = gltf::import_buffers(&gltf.document, path.parent(), gltf.blob.clone())
+            .map_err(ImportError::Gltf)?;
+        (gltf.document, buffers, Vec::new())
+    };
 
     let mut parts = Parts::default();
     if let Some(scene) = doc.default_scene().or_else(|| doc.scenes().next()) {
@@ -287,5 +347,90 @@ mod tests {
             assert!((v[0]).abs() < 1e-6 && (v[1]).abs() < 1e-6);
             assert!((v[2] - 1.0).abs() < 1e-6, "expected +Z normal, got {v:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    /// A model in the repo to measure against. `None` skips rather than fails —
+    /// this file is checked in, but a test that hard-fails on a missing asset
+    /// turns an asset move into a red build for no engineering reason.
+    fn sample() -> Option<PathBuf> {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/fofighter-kit/assets/models/Elvira.glb");
+        p.exists().then_some(p)
+    }
+
+    /// The two importers must agree about vertex positions, exactly.
+    ///
+    /// **This is the one that matters.** They are two entry points into one walk
+    /// precisely so they cannot drift — but "cannot" is a claim, and a
+    /// disagreement here would move a level's navmesh out from under the
+    /// characters walking on it, invisibly, until somebody walked into a wall.
+    #[test]
+    fn geometry_is_the_same_shape_as_a_full_import() {
+        let Some(p) = sample() else { return };
+        let full = import(&p).expect("the sample imports");
+        let geo = import_geometry(&p).expect("and imports without its textures");
+
+        assert_eq!(geo.parts.len(), full.parts.len(), "a different number of parts");
+        assert_eq!(geo.size, full.size);
+        assert_eq!(geo.min, full.min);
+        assert_eq!(geo.max, full.max);
+        for (a, b) in geo.parts.iter().zip(&full.parts) {
+            assert_eq!(a.mesh.indices, b.mesh.indices);
+            let pa: Vec<[f32; 3]> = a.mesh.vertices.iter().map(|v| v.pos).collect();
+            let pb: Vec<[f32; 3]> = b.mesh.vertices.iter().map(|v| v.pos).collect();
+            assert_eq!(pa, pb, "vertex positions differ between the two importers");
+        }
+        assert!(geo.textures.is_empty(), "the geometry path decoded textures anyway");
+        assert!(!full.textures.is_empty(), "the sample has no textures, so this proves nothing");
+    }
+
+    /// Two reads of the same unchanged file are one read.
+    #[test]
+    fn geometry_is_cached_on_the_file_it_read() {
+        let Some(p) = sample() else { return };
+        let a = geometry(&p).expect("first read");
+        let b = geometry(&p).expect("second read");
+        assert!(Arc::ptr_eq(&a, &b), "the second read went back to disk");
+    }
+
+    /// The numbers `floptle/0140` asks for, printed rather than asserted —
+    /// a threshold in wall-clock on a shared runner is a coin flip.
+    ///
+    /// `cargo test -p floptle-assets --release geometry_cost -- --nocapture`
+    #[test]
+    fn geometry_cost_against_a_full_import() {
+        let Some(p) = sample() else { return };
+        let time = |mut f: Box<dyn FnMut()>| {
+            let t = std::time::Instant::now();
+            for _ in 0..8 {
+                f();
+            }
+            t.elapsed().as_secs_f64() * 1000.0 / 8.0
+        };
+        let full = time(Box::new(|| {
+            let _ = std::hint::black_box(import(&p));
+        }));
+        let geo = time(Box::new(|| {
+            let _ = std::hint::black_box(import_geometry(&p));
+        }));
+        let cached = time(Box::new(|| {
+            let _ = std::hint::black_box(geometry(&p));
+        }));
+        let bytes: usize =
+            import(&p).map(|m| m.textures.iter().map(|t| t.pixels.len()).sum()).unwrap_or(0);
+        println!("\n  {}", p.file_name().unwrap().to_string_lossy());
+        println!("    full import      {full:7.2} ms   ({} KB of texture decoded)", bytes / 1024);
+        println!("    geometry only    {geo:7.2} ms");
+        println!("    geometry cached  {cached:7.3} ms");
+        println!(
+            "\n  A navmesh bake reads every model in the level, and a level that\n  \
+             streams bakes again every few seconds. The third row is what a\n  \
+             second bake of an unchanged level now costs.\n"
+        );
     }
 }

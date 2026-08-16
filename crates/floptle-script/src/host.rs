@@ -1871,11 +1871,15 @@ impl ScriptHost {
         // of a project that has not made one.
         let nav_mesh: crate::nav_api::NavShared = Rc::new(RefCell::new(None));
         let nav_agents: crate::nav_api::AgentsShared = Rc::new(RefCell::new(Default::default()));
+        // `nav.rebake` cannot act here: re-measuring a box needs the world's
+        // triangles, which only the editor has. It queues, like `spawn`.
+        let nav_rebakes: Rc<RefCell<Vec<crate::NavRebakeRequest>>> = Rc::new(RefCell::new(Vec::new()));
         crate::nav_api::install_nav_api(
             &lua,
             nav_mesh.clone(),
             nav_agents.clone(),
             shared.scene.clone(),
+            nav_rebakes.clone(),
         );
         // The `physics.*` sim controls: pause/resume the whole physics step
         // while scripts keep running (loading screens, cutscenes, pause menus).
@@ -2027,6 +2031,7 @@ impl ScriptHost {
             gizmos,
             spawn_effects,
             spawn_requests,
+            nav_rebakes,
             assembly_info,
             assembly_impacts,
             assembly_cmds,
@@ -2753,6 +2758,11 @@ impl ScriptHost {
 
     /// Drain the prefab instances scripts requested via `spawn(...)`. The driver
     /// spawns each subtree, then calls [`Self::call_spawn_callback`] per request.
+    /// Drain queued `nav.rebake(...)` requests. See [`crate::NavRebakeRequest`].
+    pub fn take_nav_rebakes(&self) -> Vec<crate::NavRebakeRequest> {
+        std::mem::take(&mut *self.nav_rebakes.borrow_mut())
+    }
+
     pub fn take_spawn_requests(&self) -> Vec<crate::SpawnRequest> {
         std::mem::take(&mut *self.spawn_requests.borrow_mut())
     }

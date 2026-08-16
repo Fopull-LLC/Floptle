@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [networking — net.*, synced](#networking--net-synced) — 31
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 14
-- [pathfinding — nav.*](#pathfinding--nav) — 24
+- [pathfinding — nav.*](#pathfinding--nav) — 25
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
 - [2D — tilemaps & sprite batches](#2d--tilemaps--sprite-batches) — 22
@@ -1877,7 +1877,7 @@ How many numbers nav.links() uses per link (8).
 
 ### `nav.agent`
 
-nav.agent(node[, opts]) — make this node something that walks the navmesh, and get a handle to order about. THE call for "move a unit from A to B": agent:moveTo(point), and it finds its own way, goes round its neighbours, slows down at the end and stops. Options, all optional: speed, accel, radius, arrive (how close counts as there), slow (where it starts easing off), avoid (take other agents into account), priority (who gives way), separation, repath (seconds between route checks), giveUpAfter (seconds of no progress before it reports blocked), drive ('auto' | 'transform' | 'velocity' | 'none'), and filter = { avoid = {'water'}, cost = { mud = 0.5 } }. drive defaults to 'auto': a node with a physics body is steered through the body, one without has its transform moved. The whole crowd is stepped once a frame by the engine, after your update — you never call a step function.
+nav.agent(node[, opts]) — make this node something that walks the navmesh, and get a handle to order about. THE call for "move a unit from A to B": agent:moveTo(point), and it finds its own way, goes round its neighbours, slows down at the end and stops. Options, all optional: speed, accel, radius, arrive (how close counts as there), slow (where it starts easing off), avoid (take other agents into account), priority (who gives way), separation, repath (seconds between route checks), giveUpAfter (seconds of no progress before it reports blocked), drive ('auto' | 'transform' | 'velocity' | 'none'), and filter = { avoid = {'water'}, cost = { mud = 0.5 } }. drive defaults to 'auto': a node with a physics body is steered through the body, one without has its transform moved. The whole crowd is stepped once a frame by the engine, after your update — you never call a step function. ON A PROCEDURAL OR STREAMED LEVEL THE NAVMESH ARRIVES AFTER start(): there is no geometry at all when start() runs, so nav.ready() is false, and asking for the agent once behind that check means it is never made and every routing call silently takes your fallback for the rest of the session. Ask every frame until you have one — a script that handles 'no navmesh yet' gracefully handles 'no navmesh ever' identically, which is why this fails quietly.
 
 ### `nav.agents`
 
@@ -1950,6 +1950,10 @@ nav.reachable(from, to) — can something actually walk from here to there? Diff
 ### `nav.ready`
 
 nav.ready() — whether this scene has a baked navmesh to ask. False is the ordinary state of a project that has not made one, not an error.
+
+### `nav.rebake`
+
+nav.rebake(centre, size) — re-measure this box of the level and splice the answer into the navmesh, in the same frame. THE call for a level that builds itself: a streamer that has just finished a chunk, a generated room, a wall that came down. A full rebake measures the WHOLE level to account for one box, so the cost of building a chunk grows with how much level is already loaded — which is backwards, because the amount of new level per chunk is constant. This costs the box. Different from nav.obstacle: a crate standing on the floor is an obstacle and can be taken away again; a corridor that has just been built is a rebake and becomes the level. Carved obstacles survive it. It QUEUES like spawn (re-measuring needs the world's triangles, which the scripting side does not have) and lands in the same pass, after that pass's spawns and destroys — so build the chunk and ask in the same breath. World coordinates; the box is snapped outward to whole navmesh cells. Needs a navmesh already baked to splice into.
 
 ### `nav.regionOf`
 

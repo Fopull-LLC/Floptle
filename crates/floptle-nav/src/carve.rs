@@ -77,7 +77,7 @@ impl Obstacle {
     /// Touching is not overlapping: a box whose edge lies exactly on a
     /// polygon's edge removes nothing, and treating that as a hit would leave
     /// zero-width slivers behind.
-    fn bites(&self, p: &Poly) -> bool {
+    pub(crate) fn bites(&self, p: &Poly) -> bool {
         self.min[0] < p.max[0]
             && self.max[0] > p.min[0]
             && self.min[1] < p.max[1]
@@ -176,7 +176,7 @@ impl NavMesh {
     }
 
     /// Rebuild the carved mesh from the bake and the whole obstacle list.
-    fn recarve(&mut self) {
+    pub(crate) fn recarve(&mut self) {
         self.obstacle_rev = self.obstacle_rev.wrapping_add(1);
         // First carve on this mesh: keep the bake before touching it. Later
         // calls restore from that copy, so the polygons a carve works on are
@@ -389,7 +389,7 @@ impl NavMesh {
 /// A rectangle minus a rectangle is at most four rectangles — the strips left
 /// on each side — and doing that once per obstacle over the growing list is
 /// what makes overlapping obstacles need no special case at all.
-fn subtract(p: &Poly, obstacles: &[Obstacle]) -> Vec<([f32; 2], [f32; 2])> {
+pub(crate) fn subtract(p: &Poly, obstacles: &[Obstacle]) -> Vec<([f32; 2], [f32; 2])> {
     let mut pieces: Vec<([f32; 2], [f32; 2])> = vec![(p.min, p.max)];
     for o in obstacles {
         if !o.bites(p) {
@@ -433,7 +433,7 @@ fn subtract(p: &Poly, obstacles: &[Obstacle]) -> Vec<([f32; 2], [f32; 2])> {
 /// does not change what kind of floor it is or how high it is. The grid columns
 /// are recomputed, and they are exact because the carve was snapped to this
 /// same grid before anything was cut.
-fn child(parent: &Poly, r: ([f32; 2], [f32; 2]), origin: [f32; 3], cell: f32) -> Poly {
+pub(crate) fn child(parent: &Poly, r: ([f32; 2], [f32; 2]), origin: [f32; 3], cell: f32) -> Poly {
     let (min, max) = r;
     let col = |v: f32, o: f32| ((v - o) / cell).round().max(0.0) as usize;
     let x0 = col(min[0], origin[0]);
@@ -464,7 +464,7 @@ fn child(parent: &Poly, r: ([f32; 2], [f32; 2]), origin: [f32; 3], cell: f32) ->
 /// within a step of each other vertically. A floor and the bridge four metres
 /// over it share a plan edge and fail the last test, which is the whole reason
 /// it is there.
-fn portal(a: &Poly, b: &Poly, step: f32) -> Option<([f32; 3], [f32; 3])> {
+pub(crate) fn portal(a: &Poly, b: &Poly, step: f32) -> Option<([f32; 3], [f32; 3])> {
     // How far apart the two height bands are — zero where they overlap.
     let gap = if a.y_max < b.y_min {
         b.y_min - a.y_max

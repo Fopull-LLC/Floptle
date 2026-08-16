@@ -220,6 +220,86 @@ fn counts(world: &World, e: Entity, layers: &[String]) -> bool {
     collidable || static_body
 }
 
+/// Is this node definitely not inside the box?
+///
+/// **Only ever answers true when it is sure.** The half-extents of a primitive
+/// and of a static body are known without touching the disk; a model's are not,
+/// and a model is therefore never skipped. Being wrong the other way — leaving a
+/// wall out of a regional bake — makes a navmesh with a hole in it that nothing
+/// downstream can tell from a level with a hole in it.
+fn certainly_outside(
+    world: &World,
+    e: Entity,
+    local: Vec3,
+    scale: Vec3,
+    (lo, hi): ([f32; 3], [f32; 3]),
+) -> bool {
+    let half = match world.get::<Matter>(e) {
+        Some(Matter::Primitive { .. }) => scale * 0.85,
+        Some(Matter::Mesh { .. }) => match static_body_shape(world, e) {
+            // Rotation is not applied: a box turned 45 degrees reaches further
+            // than its half-extents, so the bound is widened to its diagonal
+            // rather than being made exact.
+            Some(rb) => Vec3::splat((Vec3::from(rb.half_extents) * scale).length()),
+            None => return false,
+        },
+        _ => return false,
+    };
+    for k in 0..3 {
+        if local[k] + half[k] <= lo[k] || local[k] - half[k] >= hi[k] {
+            return true;
+        }
+    }
+    false
+}
+
+/// The shape a node collides as, when that is a body rather than its geometry.
+///
+/// `None` means "path on this node's own geometry", which is what a node with
+/// `Collidable` or `MeshCollider` and no body collides as.
+///
+/// **A `RigidBody` owns the node's physics, and the markers are ignored when one
+/// is present.** That is not a guess — `Sim::build` says so ("if the node is
+/// *also* flagged `Collidable`/`MeshCollider`, that marker is ignored here") and
+/// `Editor::add_static_colliders` filters out every node carrying a `RigidBody`
+/// for the same reason, so a body never fights a static shape sitting on top of
+/// it. The Inspector prints it too. The navmesh has to follow the same rule or it
+/// disagrees with physics in exactly the way this exists to stop.
+///
+/// Only a **Static** body: a Dynamic one is an object rather than ground, and
+/// what it does to the floor it stands on is not a bake's question.
+fn static_body_shape(world: &World, e: Entity) -> Option<floptle_core::RigidBody> {
+    world
+        .get::<floptle_core::RigidBody>(e)
+        .filter(|rb| rb.mode == floptle_core::BodyMode::Static)
+        .copied()
+}
+
+/// Add the triangles of a rigid body's shape, scaled the way physics scales it.
+fn push_body(
+    out: &mut Vec<Tri>,
+    centre: Vec3,
+    rb: &floptle_core::RigidBody,
+    rot: floptle_core::math::Quat,
+    scale: Vec3,
+) {
+    match rb.kind {
+        floptle_core::BodyKind::Box => {
+            let h = Vec3::from(rb.half_extents) * scale;
+            push_box(out, centre, h, rot);
+        }
+        floptle_core::BodyKind::Sphere => {
+            push_sphere(out, centre, rb.radius * scale.max_element());
+        }
+        // As the box it stands in, for the reason the capsule primitive below
+        // gives: round ends are not walkable at any slope worth walking.
+        floptle_core::BodyKind::Capsule => {
+            let r = rb.radius * scale.x.max(scale.z);
+            push_box(out, centre, Vec3::new(r, 0.5 * rb.height * scale.y + r, r), rot);
+        }
+    }
+}
+
 /// Add a box's twelve triangles, in world space.
 fn push_box(out: &mut Vec<Tri>, centre: Vec3, half: Vec3, rot: floptle_core::math::Quat) {
     let c = |sx: f32, sy: f32, sz: f32| {
@@ -288,6 +368,7 @@ pub(crate) fn gather(
     layers: &[String],
     maps: &crate::map_edit::MapStore,
     terrains: &std::collections::HashMap<Entity, crate::terrain_edit::EditorTerrain>,
+    within: Option<([f32; 3], [f32; 3])>,
 ) -> Gathered {
     let mut tris: Vec<Tri> = Vec::new();
     let mut sources = 0usize;
@@ -299,25 +380,55 @@ pub(crate) fn gather(
         let t = floptle_core::world_transform(world, e);
         let local = (t.translation - origin).as_vec3();
         let s = t.scale;
+        // A REGIONAL bake reads only the box it was asked about. Skipping is
+        // conservative — a node whose size cannot be known without opening a
+        // file is kept — because leaving geometry out of a bake produces a
+        // navmesh that looks right and has a hole in it, and reading one model
+        // too many costs a cached lookup.
+        if let Some(bx) = within
+            && certainly_outside(world, e, local, s, bx)
+        {
+            continue;
+        }
         let m = Mat4::from_scale_rotation_translation(s, t.rotation, local);
         let before = tris.len();
         match world.get::<Matter>(e) {
-            Some(Matter::Mesh { asset_path }) => {
-                let path = asset_path.clone();
-                let Ok(model) = floptle_assets::gltf_import::import(std::path::Path::new(&path))
-                else {
-                    continue;
-                };
-                for part in &model.parts {
-                    let v = &part.mesh.vertices;
-                    for i in part.mesh.indices.chunks_exact(3) {
-                        let p = |k: usize| {
-                            m.transform_point3(Vec3::from(v[i[k] as usize].pos)).into()
-                        };
-                        tris.push(Tri::new(p(0), p(1), p(2)));
+            // **A model is baked as the thing it collides as, not as the thing
+            // it is drawn as.** `Matter::Primitive` below has said so in a
+            // comment for a long time — "the same sizes the static colliders
+            // use, so what you path on is what you bump into" — and a mesh node
+            // quietly broke it: a prop authored as a static BOX body was cut out
+            // of the navmesh at its silhouette, so a character routed around the
+            // arms of a chair it physically collides with as a box, and squeezed
+            // through gaps physics does not have. Nobody would report the right
+            // bug; they would report that the AI walks oddly.
+            //
+            // `MeshCollider` (and `Collidable`, which auto-shapes a mesh as its
+            // triangles) is the existing opt-in for "path on my geometry", so
+            // this needs no new switch — only for the two to agree.
+            Some(Matter::Mesh { asset_path }) => match static_body_shape(world, e) {
+                Some(rb) => push_body(&mut tris, local, &rb, t.rotation, s),
+                None => {
+                    let path = asset_path.clone();
+                    // Geometry only, and cached: a bake reads every model in the
+                    // level, and a level that changes while you walk through it
+                    // bakes over and over. See `gltf_import::geometry`.
+                    let Ok(model) =
+                        floptle_assets::gltf_import::geometry(std::path::Path::new(&path))
+                    else {
+                        continue;
+                    };
+                    for part in &model.parts {
+                        let v = &part.mesh.vertices;
+                        for i in part.mesh.indices.chunks_exact(3) {
+                            let p = |k: usize| {
+                                m.transform_point3(Vec3::from(v[i[k] as usize].pos)).into()
+                            };
+                            tris.push(Tri::new(p(0), p(1), p(2)));
+                        }
                     }
                 }
-            }
+            },
             Some(Matter::MapMesh { id }) => {
                 let Some(mesh) = maps.meshes.get(id) else { continue };
                 for sm in floptle_map::triangulate(mesh) {
@@ -993,6 +1104,90 @@ impl crate::Editor {
         self.finish_nav_bake(job, mesh, seconds);
     }
 
+    /// Re-measure one box of the level and splice the result into the navmesh
+    /// in hand.
+    ///
+    /// **The unit of work a level that builds itself actually changes in.** A
+    /// full rebake measures the whole level to account for one chunk, so the
+    /// cost of crossing a chunk boundary grows with how much level is loaded —
+    /// which is backwards, because the amount of *new* level per crossing is
+    /// constant. This costs the box.
+    ///
+    /// Synchronous, unlike [`Self::start_nav_bake`], and deliberately: a caller
+    /// asks for this at the moment it knows the chunk is finished, and the
+    /// answer has to be in before anything paths through it. The box is small —
+    /// that is the whole premise — so it stays on this thread rather than
+    /// arriving two frames later with the level already moved on again.
+    ///
+    /// Returns the polygon count afterwards, or a sentence saying why not.
+    pub(crate) fn rebake_region(
+        &mut self,
+        centre: DVec3,
+        size: Vec3,
+    ) -> Result<usize, String> {
+        let Some(host) = self.nav_baked.as_ref() else {
+            return Err("there is no baked navmesh to splice into — bake the level once first"
+                .into());
+        };
+        let settings = host.settings;
+        let anchor = DVec3::from(host.anchor);
+        let local = host.to_local([centre.x, centre.y, centre.z]);
+        let half = [size.x.abs() * 0.5, size.y.abs() * 0.5, size.z.abs() * 0.5];
+        if half[0] <= 0.0 || half[2] <= 0.0 {
+            return Err("a region needs a width and a depth".into());
+        }
+        let layers = match nav_node(&self.world) {
+            Some((_, Matter::NavMesh { layers, .. })) => layers.clone(),
+            _ => Vec::new(),
+        };
+
+        // A margin of a cell either side, so geometry sitting exactly on the
+        // boundary is gathered rather than being on the edge of the filter. The
+        // splice clips to the box afterwards, so the margin costs nothing.
+        let m = settings.cell_size.max(1e-4);
+        let within = (
+            [local[0] - half[0] - m, local[1] - half[1] - m, local[2] - half[2] - m],
+            [local[0] + half[0] + m, local[1] + half[1] + m, local[2] + half[2] + m],
+        );
+        let t0 = std::time::Instant::now();
+        let g = gather(&self.world, anchor, &layers, &self.maps, &self.terrains, Some(within));
+
+        // Nothing walkable here now is a real answer — a building came down —
+        // and it has to reach the mesh as an empty region rather than as a
+        // refusal, or a demolished chunk keeps its floor forever.
+        let (volumes, _, _) = gather_areas(&self.world, anchor);
+        let region = if g.tris.is_empty() {
+            self.nav_baked.as_ref().expect("checked above").empty_like()
+        } else {
+            match floptle_nav::bake_with(&g.tris, &settings, &volumes, Vec::new()) {
+                Some(m) => m.anchored_at([anchor.x, anchor.y, anchor.z]),
+                None => self.nav_baked.as_ref().expect("checked above").empty_like(),
+            }
+        };
+
+        let host = self.nav_baked.as_mut().expect("checked above");
+        let n = host
+            .splice(local, [size.x, size.y, size.z], &region)
+            .map_err(|e| format!("navmesh: {e}"))?;
+        self.nav_overlay = None;
+        self.nav_triangles = n;
+        // `set_nav_mesh` inside this tells the crowd the ground moved and
+        // re-resolves every filter, which is exactly what a rebake needs.
+        self.publish_nav_mesh();
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            format!(
+                "navmesh: re-measured {:.0}x{:.0} m in {:.1} ms ({} triangles, {n} polygons)",
+                size.x,
+                size.z,
+                t0.elapsed().as_secs_f64() * 1000.0,
+                g.tris.len()
+            ),
+            None,
+        );
+        Ok(n)
+    }
+
     /// Bake the scene's navmesh, reporting what happened either way.
     pub(crate) fn bake_nav(&mut self) {
         self.start_nav_bake(BakeReason::Asked);
@@ -1037,7 +1232,7 @@ impl crate::Editor {
         let Some(settings) = settings_of(&matter) else { return };
 
         let origin = floptle_core::world_transform(&self.world, e).translation;
-        let g = gather(&self.world, origin, &layers, &self.maps, &self.terrains);
+        let g = gather(&self.world, origin, &layers, &self.maps, &self.terrains, None);
         if g.tris.is_empty() {
             self.console.push(
                 LogLevel::Warn,
@@ -1458,6 +1653,99 @@ mod tests {
         assert!(matches!(load(&torn), Err(LoadError::Corrupt(_))));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **What you path on is what you bump into.**
+    ///
+    /// A prop authored as a model with a static BOX body collides as a box, and
+    /// used to be cut out of the navmesh at its silhouette — so a character
+    /// routed around the arms of a chair it collides with as a box, and squeezed
+    /// through gaps physics does not have. Neither picture is obviously wrong to
+    /// look at, which is why this is a test and not something somebody noticed.
+    #[test]
+    fn a_model_with_a_static_box_body_bakes_as_the_box() {
+        use floptle_core::{BodyKind, BodyMode, RigidBody, Transform};
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Mesh { asset_path: "models/nothing-here.glb".into() });
+        world.insert(
+            e,
+            RigidBody {
+                kind: BodyKind::Box,
+                mode: BodyMode::Static,
+                half_extents: [2.0, 0.5, 3.0],
+                ..Default::default()
+            },
+        );
+
+        let maps = crate::map_edit::MapStore::default();
+        let terrains = std::collections::HashMap::new();
+        let g = gather(&world, DVec3::ZERO, &[], &maps, &terrains, None);
+
+        // Twelve triangles, and — the part that matters — they came from the
+        // BODY. The asset path does not exist, so a gather that still reached
+        // for the model would produce nothing at all.
+        assert_eq!(g.tris.len(), 12, "a box is twelve triangles");
+        assert_eq!(g.sources, 1);
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for t in &g.tris {
+            for p in [t.a, t.b, t.c] {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+        }
+        for (k, want) in [2.0f32, 0.5, 3.0].iter().enumerate() {
+            assert!((hi[k] - want).abs() < 1e-4, "half-extent {k} came out {}", hi[k]);
+            assert!((lo[k] + want).abs() < 1e-4);
+        }
+    }
+
+    /// The three cases, against what PHYSICS does with each — which is the only
+    /// thing that makes any of them right.
+    ///
+    /// The one worth writing down is the middle: a `MeshCollider` **beside a
+    /// body** does not win, because physics ignores it there. Getting this
+    /// backwards would have made the navmesh disagree with the collider in
+    /// exactly the way this whole change exists to stop.
+    #[test]
+    fn the_body_owns_the_shape_and_a_marker_only_speaks_without_one() {
+        use floptle_core::{BodyKind, BodyMode, Collidable, MeshCollider, RigidBody, Transform};
+        let mut world = World::default();
+        let mesh = |world: &mut World| {
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(e, Matter::Mesh { asset_path: "models/nothing-here.glb".into() });
+            e
+        };
+        let body = RigidBody {
+            kind: BodyKind::Box,
+            mode: BodyMode::Static,
+            ..Default::default()
+        };
+
+        // A marker on its own: the model's triangles, as it always was.
+        let a = mesh(&mut world);
+        world.insert(a, Collidable);
+        assert!(super::static_body_shape(&world, a).is_none());
+
+        // A marker AND a static body: the body, because `add_static_colliders`
+        // skips every node with a RigidBody and `Sim::build` ignores the marker.
+        let b = mesh(&mut world);
+        world.insert(b, MeshCollider);
+        world.insert(b, body);
+        assert!(
+            super::static_body_shape(&world, b).is_some(),
+            "physics collides this as the body, so the navmesh must too"
+        );
+
+        // A DYNAMIC body is an object, not ground — nothing here claims it.
+        let c = mesh(&mut world);
+        world.insert(c, Collidable);
+        world.insert(c, RigidBody { mode: BodyMode::Dynamic, ..body });
+        assert!(super::static_body_shape(&world, c).is_none());
     }
 
     /// A bake this engine cannot read is work it can do again, and doing it is

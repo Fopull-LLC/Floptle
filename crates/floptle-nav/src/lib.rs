@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod agent;
 pub mod carve;
+mod splice;
 pub mod filter;
 pub mod heightfield;
 pub mod index;

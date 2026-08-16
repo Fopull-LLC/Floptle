@@ -352,10 +352,21 @@ impl Editor {
                 None,
             );
         }
-        if destroys.is_empty() {
-            return;
+        if !destroys.is_empty() {
+            self.apply_destroys(destroys);
         }
-        self.apply_destroys(destroys);
+
+        // `nav.rebake(centre, size)` — AFTER the spawns and the destroys, which
+        // is the whole point of it being a queue: a chunk asks for its box to be
+        // re-measured in the same breath as it builds it, and the measurement
+        // has to see the nodes rather than race them.
+        for req in self.script_host.take_nav_rebakes() {
+            let centre = DVec3::new(req.centre[0], req.centre[1], req.centre[2]);
+            let size = floptle_core::math::Vec3::from(req.size);
+            if let Err(why) = self.rebake_region(centre, size) {
+                self.console.push(floptle_script::LogLevel::Warn, why, None);
+            }
+        }
     }
 
     pub(crate) fn apply_spawn_batch(
