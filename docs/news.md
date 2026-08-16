@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.64.1 "Point It At Something"** — **spot lights**. Add ⏵ ◤ Spot Light and
+**v0.64.2 "Point It At Something"** — **spot lights**. Add ⏵ ◤ Spot Light and
 rotate the node to aim it; the beam runs down the node's forward, the same axis a
 camera looks down. Two numbers: the **cone**, as the full angle a real fixture is
 sold by, and the **edge**, how much of that cone is falloff — and the edge is a
