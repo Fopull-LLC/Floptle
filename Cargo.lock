@@ -1462,6 +1462,7 @@ dependencies = [
  "floptle-tiles",
  "floptle-ui",
  "floptle-vfx",
+ "getrandom 0.2.17",
  "image",
  "log",
  "mlua",

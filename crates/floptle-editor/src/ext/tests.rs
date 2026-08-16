@@ -1042,3 +1042,136 @@ fn nav_answers_nothing_rather_than_raising_with_no_bake() {
     assert!(log.contains(&"ground nil links nil".to_string()), "{log:?}");
     let _ = std::fs::remove_dir_all(&proj);
 }
+
+/// A timer fires once, on the editor's clock, and not before its time.
+#[test]
+fn a_one_shot_timer_fires_once_when_it_is_due() {
+    let proj = temp("timer-once");
+    install(
+        &proj,
+        "com.t.timer",
+        "",
+        r#"
+        fired = 0
+        ed.after(1.0, function() fired = fired + 1 ed.log("fired " .. fired) end)
+        ed.onUpdate(function() end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    let at = |host: &mut ExtHost, t: f64| {
+        host.begin_frame(
+            Snapshot { project_root: proj.clone(), time: t, ..Snapshot::default() },
+            SceneMirror::default(),
+        );
+        host.tick_timers();
+    };
+    at(&mut host, 0.5);
+    assert!(host.take_log().is_empty(), "it fired before it was due");
+    at(&mut host, 1.5);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert_eq!(log, vec!["fired 1".to_string()]);
+    // …and a one-shot is gone afterwards rather than firing every frame after
+    // its deadline, which is the way this goes wrong.
+    at(&mut host, 9.0);
+    assert!(host.take_log().is_empty(), "a one-shot fired twice");
+    assert!(host.timers.is_empty(), "a spent timer was left on the list");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// A repeat keeps its period rather than drifting by a frame each time, and a
+/// long stall does not make it fire once for every period it missed.
+#[test]
+fn a_repeating_timer_keeps_its_period_and_does_not_catch_up() {
+    let proj = temp("timer-every");
+    install(
+        &proj,
+        "com.t.timer",
+        "",
+        r#"
+        n = 0
+        ed.every(0.5, function() n = n + 1 ed.log("tick " .. n) end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    let at = |host: &mut ExtHost, t: f64| {
+        host.begin_frame(
+            Snapshot { project_root: proj.clone(), time: t, ..Snapshot::default() },
+            SceneMirror::default(),
+        );
+        host.tick_timers();
+        host.take_log().len()
+    };
+    assert_eq!(at(&mut host, 0.4), 0);
+    assert_eq!(at(&mut host, 0.6), 1);
+    assert_eq!(at(&mut host, 1.1), 1);
+    // A minute of nothing — a modal dialog, a bake, a laptop lid. One firing,
+    // not a hundred and twenty.
+    assert_eq!(at(&mut host, 61.0), 1, "it tried to catch up on a stall");
+    assert_eq!(at(&mut host, 61.6), 1, "and its period survived the stall");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// Cancelling from inside the callback is the case that eats its own list.
+#[test]
+fn a_timer_can_cancel_itself_from_inside_its_own_callback() {
+    let proj = temp("timer-cancel");
+    install(
+        &proj,
+        "com.t.timer",
+        "",
+        r#"
+        n = 0
+        local t
+        t = ed.every(0.5, function()
+            n = n + 1
+            ed.log("tick " .. n)
+            if n == 2 then t:cancel() end
+        end)
+        ed.every(0.5, function() ed.log("neighbour") end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    let at = |host: &mut ExtHost, t: f64| {
+        host.begin_frame(
+            Snapshot { project_root: proj.clone(), time: t, ..Snapshot::default() },
+            SceneMirror::default(),
+        );
+        host.tick_timers();
+        let msgs: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+        msgs
+    };
+    assert_eq!(at(&mut host, 0.6), vec!["tick 1", "neighbour"]);
+    assert_eq!(at(&mut host, 1.1), vec!["tick 2", "neighbour"]);
+    // The neighbour must survive: a cancel that shortened the list mid-walk
+    // would take whatever moved into the freed slot with it.
+    assert_eq!(at(&mut host, 1.6), vec!["neighbour"]);
+    assert_eq!(host.timers.len(), 1);
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// A package that never declared anything still gets real randomness. It is not
+/// a capability — it is the difference between a correct sign-in challenge and a
+/// guessable one.
+#[test]
+fn random_bytes_are_the_length_asked_for_and_not_the_same_twice() {
+    let proj = temp("random");
+    install(
+        &proj,
+        "com.t.rand",
+        "",
+        r#"
+        local a, b = ed.randomBytes(32), ed.randomBytes(32)
+        ed.log("len " .. #a .. " " .. #b)
+        ed.log("same " .. tostring(a == b))
+        local ok, err = pcall(ed.randomBytes, 0)
+        ed.log("zero " .. tostring(ok))
+        "#,
+    );
+    let host = host_for(&proj);
+    assert!(host.packages[0].failed.is_none(), "{:?}", host.packages[0].failed);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log.contains(&"len 32 32".to_string()), "{log:?}");
+    assert!(log.contains(&"same false".to_string()), "{log:?}");
+    assert!(log.contains(&"zero false".to_string()), "{log:?}");
+    let _ = std::fs::remove_dir_all(&proj);
+}

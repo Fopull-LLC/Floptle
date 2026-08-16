@@ -262,6 +262,66 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
             })?,
         )?;
     }
+    // ---- randomness the OS vouches for --------------------------------------
+    //
+    // `math.random` is a PRNG seeded from the clock. It is right for a puff of
+    // smoke and wrong for anything an attacker gets to guess at — a sign-in
+    // challenge, a nonce, a token, an id that must not collide. A package cannot
+    // build one out of what it has, so without this the only options are to use
+    // the wrong thing or to not do the job.
+    //
+    // Ungated: reading entropy tells the package nothing about the machine, and a
+    // permission prompt in front of it would train people to click through the
+    // prompts that matter.
+    t.set(
+        "randomBytes",
+        lua.create_function(|lua, n: usize| {
+            if n == 0 || n > 1024 {
+                return Err(mlua::Error::runtime(
+                    "ed.randomBytes(n): n has to be between 1 and 1024",
+                ));
+            }
+            let mut buf = vec![0u8; n];
+            getrandom::getrandom(&mut buf)
+                .map_err(|e| mlua::Error::runtime(format!("no system randomness: {e}")))?;
+            // A Lua string, because Lua strings are byte strings — the caller
+            // decides whether that becomes hex, base64url or a raw key, and a
+            // hex-only answer would make half of them decode it back again.
+            lua.create_string(&buf)
+        })?,
+    )?;
+
+    // ---- timers ------------------------------------------------------------
+    //
+    // Every package that waits for anything was writing the same four lines:
+    // keep a deadline, compare it against `ed.time()` from inside `onUpdate`,
+    // remember to take it down. Polling a job, debouncing a text box, retrying a
+    // request, stepping an animation — all of them, all the same, and each copy
+    // its own chance to leave a dead deadline behind.
+    for (name, repeat) in [("after", false), ("every", true)] {
+        let shared = shared.clone();
+        t.set(
+            name,
+            lua.create_function(move |lua, (secs, cb): (f64, Function)| {
+                if !secs.is_finite() || secs < 0.0 {
+                    return Err(mlua::Error::runtime(format!(
+                        "ed.{name}({secs}, fn): the delay has to be a number of seconds"
+                    )));
+                }
+                // `ed.every(0, fn)` is a request for an infinite loop; a frame
+                // is the fastest anything here can happen anyway.
+                let secs = if repeat { secs.max(1e-3) } else { secs };
+                let id = shared.alloc_id();
+                let key = lua.create_registry_value(cb)?;
+                shared
+                    .pending
+                    .borrow_mut()
+                    .push(Registration::Timer { pkg, id, every: secs, repeat, cb: key });
+                timer_handle(lua, &shared, id)
+            })?,
+        )?;
+    }
+
     {
         let shared = shared.clone();
         t.set(
@@ -426,6 +486,25 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
 }
 
 /// A `{ show, hide, toggle, focus, isOpen }` handle over a registered panel.
+/// What `ed.after` / `ed.every` hand back: an id and a way to stop it.
+///
+/// A handle rather than an id, for the same reason `nav.obstacle` gives one —
+/// `t:cancel()` needs nothing written down, and there is no second call that
+/// takes a number and could be given the wrong one.
+fn timer_handle(lua: &Lua, shared: &Rc<Shared>, id: u32) -> mlua::Result<Table> {
+    let h = lua.create_table()?;
+    h.set("id", id)?;
+    let s = shared.clone();
+    h.set(
+        "cancel",
+        lua.create_function(move |_, _: Value| {
+            s.cancelled.borrow_mut().insert(id);
+            Ok(())
+        })?,
+    )?;
+    Ok(h)
+}
+
 fn panel_handle(lua: &Lua, shared: &Rc<Shared>, id: u32, is_window: bool) -> mlua::Result<Table> {
     let h = lua.create_table()?;
     h.set("id", id)?;

@@ -116,6 +116,7 @@ impl Editor {
         let mirror = self.ext_mirror();
         self.ext.begin_frame(self.ext_snapshot(), mirror);
         self.ext.pump_web();
+        self.ext.tick_timers();
         self.ext.fire(HookKind::Update);
         // Selection changes are noticed here rather than pushed from twenty
         // call sites: every path that changes the selection goes through the
@@ -301,9 +302,7 @@ impl Editor {
     /// three scenes ago.
     fn entity_of(&self, id: u32) -> Option<Entity> {
         self.world
-            .query::<floptle_core::Name>()
-            .map(|(e, _)| e)
-            .find(|e| e.index() == id)
+            .entity_with::<floptle_core::Name>(id)
     }
 
     fn ext_spawn_prefab(&mut self, path: &str, pos: Option<[f64; 3]>) {

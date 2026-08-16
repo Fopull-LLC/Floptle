@@ -69,6 +69,8 @@ mod learn_content;
 mod settings_ui;
 mod shadow;
 mod sprite2d;
+#[cfg(test)]
+mod spawn_scaling;
 mod lua_format;
 mod lua_lint;
 mod lua_support;
@@ -2486,6 +2488,10 @@ struct Editor {
     /// What the bake in hand was made from, so an automatic rebake asks for a
     /// bake that would be different rather than one it already has.
     nav_baked_stamp: u64,
+    /// The world revision the nav watch stamp was computed at. While the world
+    /// has not been written to, re-hashing the level cannot change the answer —
+    /// see `tick_nav_autobake`.
+    nav_watch_rev: u64,
     /// The `.fnav` beside this scene could not be read, so it wants making
     /// again. Set when the scene loads and acted on a frame later, once the
     /// scene has finished arriving.

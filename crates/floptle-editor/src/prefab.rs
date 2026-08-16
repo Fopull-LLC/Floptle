@@ -374,15 +374,13 @@ impl Editor {
             if let Some(pid) = req.parent {
                 let pe = self
                     .world
-                    .query::<floptle_core::Matter>()
-                    .map(|(pe, _)| pe)
-                    .find(|pe| pe.index() == pid);
+                    .entity_with::<floptle_core::Matter>(pid);
                 if let Some(pe) = pe {
                     self.world.insert(e, floptle_core::Parent(pe));
                 }
             }
             if let Some(cb) = req.cb {
-                self.script_host.call_create_callback(&mut self.world, cb, e.index());
+                self.script_host.call_create_callback(&mut self.world, cb, e);
             }
         }
         for req in spawns {
@@ -412,8 +410,16 @@ impl Editor {
                 }
             }
             let ents = self.spawn_docs(&docs);
-            if docs.iter().any(|d| matches!(d.matter, floptle_scene::MatterDoc::Mesh { .. })) {
-                self.register_scene_meshes();
+            // Only the models this prefab brought with it. See `register_meshes`.
+            let fresh: Vec<&str> = docs
+                .iter()
+                .filter_map(|d| match &d.matter {
+                    floptle_scene::MatterDoc::Mesh { asset_path, .. } => Some(asset_path.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if !fresh.is_empty() {
+                self.register_meshes(fresh);
             }
             // Optional parenting (`spawn(name, pos, fn, parentNode)`): the
             // spawned ROOTS go under the parent, keeping their WORLD pose —
@@ -422,9 +428,7 @@ impl Editor {
             if let Some(pid) = req.parent {
                 let pe = self
                     .world
-                    .query::<floptle_core::Matter>()
-                    .map(|(pe, _)| pe)
-                    .find(|pe| pe.index() == pid);
+                    .entity_with::<floptle_core::Matter>(pid);
                 if let Some(pe) = pe {
                     let pw = floptle_core::world_transform(&self.world, pe);
                     let inv_rot = pw.rotation.inverse();
@@ -463,7 +467,7 @@ impl Editor {
             // must bake its collider at the ORIENTED pose, not the authored
             // one. Velocity writes still land via the body-changes queue.
             if let (Some(cb), Some(root)) = (req.cb, root) {
-                self.script_host.call_spawn_callback(&mut self.world, cb, root.index());
+                self.script_host.call_spawn_callback(&mut self.world, cb, root.index(), &ents);
             }
             if let Some(sim) = self.sim.as_mut() {
                 for &e in &ents {
@@ -564,9 +568,7 @@ impl Editor {
                         sim.remove_compound(root);
                         let ent = self
                             .world
-                            .query::<floptle_core::RigidBody>()
-                            .map(|(e, _)| e)
-                            .find(|e| e.index() == root);
+                            .entity_with::<floptle_core::RigidBody>(root);
                         if let Some(e) = ent {
                             sim.add_compound_for(e, &self.world);
                         }
@@ -608,7 +610,7 @@ impl Editor {
                             // split existed — so every such read came back nil
                             // and the separation kick silently did nothing.
                             self.feed_assembly_info();
-                            self.script_host.call_spawn_callback(&mut self.world, cb, nr);
+                            self.script_host.call_resync_callback(&mut self.world, cb, nr);
                         }
                         (_, Some(cb)) => self.script_host.drop_registry_value(cb),
                         _ => {}
@@ -638,9 +640,7 @@ impl Editor {
         self.sim.as_ref()?;
         let root_ent = self
             .world
-            .query::<RigidBody>()
-            .map(|(e, _)| e)
-            .find(|e| e.index() == root_eid)?;
+            .entity_with::<RigidBody>(root_eid)?;
         // The fresh vessel root: a prefab instance when asked for (scripts and
         // all), otherwise a bare node inheriting the old root's RigidBody
         // (assembly flag, friction...) and a derived name.
@@ -673,9 +673,7 @@ impl Editor {
         for pid in parts {
             let Some(pe) = self
                 .world
-                .query::<RigidBody>()
-                .map(|(e, _)| e)
-                .find(|e| e.index() == *pid)
+                .entity_with::<RigidBody>(*pid)
             else {
                 continue;
             };
@@ -746,7 +744,7 @@ impl Editor {
         use floptle_core::{Parent, RigidBody};
         use floptle_core::transform::Transform;
         let find = |w: &floptle_core::World, id: u32| {
-            w.query::<RigidBody>().map(|(e, _)| e).find(|e| e.index() == id)
+            w.entity_with::<RigidBody>(id)
         };
         let (Some(root_ent), Some(other_ent)) =
             (find(&self.world, root_eid), find(&self.world, other_eid))
@@ -829,9 +827,7 @@ impl Editor {
         for eid in destroys {
             let Some(target) = self
                 .world
-                .query::<floptle_core::Matter>()
-                .map(|(e, _)| e)
-                .find(|e| e.index() == eid)
+                .entity_with::<floptle_core::Matter>(eid)
             else {
                 continue; // already gone (double destroy is harmless)
             };

@@ -274,7 +274,7 @@ pub(crate) fn save_guides(
         if g.x.is_empty() && g.y.is_empty() {
             continue;
         }
-        let Some(e) = world.query::<UiLayer>().map(|(e, _)| e).find(|e| e.index() == *idx) else {
+        let Some(e) = world.entity_with::<UiLayer>(*idx) else {
             continue;
         };
         let name = world.get::<floptle_core::Name>(e).map(|n| n.0.clone()).unwrap_or_default();

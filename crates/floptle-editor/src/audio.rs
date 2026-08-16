@@ -303,11 +303,7 @@ impl AudioSystem {
                         }
                         AudioAt::Pos(p) => (Some(DVec3::from_array(p)), None),
                         AudioAt::Node(idx) => {
-                            match world
-                                .query::<floptle_core::Transform>()
-                                .find(|(e, _)| e.index() == idx)
-                                .map(|(e, _)| e)
-                            {
+                            match world.entity_with::<floptle_core::Transform>(idx) {
                                 Some(e) => (Some(Self::world_pos(world, e)), Some(e)),
                                 None => (None, None),
                             }
@@ -447,7 +443,7 @@ impl AudioSystem {
 
     /// Resolve an entity index from a script command to a live AudioSource node.
     fn source_entity(world: &World, idx: u32) -> Option<Entity> {
-        world.query::<AudioSource>().find(|(e, _)| e.index() == idx).map(|(e, _)| e)
+        world.entity_with::<AudioSource>(idx)
     }
 
     /// The play session's live copy of a mixer track ("Master" = the master).

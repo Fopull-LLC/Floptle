@@ -713,9 +713,7 @@ impl EditorTabViewer<'_> {
             .map(|r| (r.name.as_str(), r.id))
             .collect();
         let nav = self.world
-            .query::<floptle_core::transform::Transform>()
-            .map(|(e, _)| e)
-            .find(|e| e.index() == from)
+            .entity_with::<floptle_core::transform::Transform>(from)
             .and_then(|e| self.world.get::<ElementSpec>(e))
             .and_then(|s| s.nav.clone());
         for dir in [
@@ -1460,7 +1458,7 @@ impl EditorTabViewer<'_> {
     fn ui_design_depth(&mut self, sel: &[u32], front: bool) {
         let Some(layer) = self.ui_design.layer else { return };
         let Some(layer_ent) =
-            self.world.query::<floptle_core::transform::Transform>().map(|(e, _)| e).find(|e| e.index() == layer)
+            self.world.entity_with::<floptle_core::transform::Transform>(layer)
         else {
             return;
         };
@@ -1486,7 +1484,7 @@ impl EditorTabViewer<'_> {
             self.ui_design.placed.iter().map(|p| (p.id, p.rect)).collect();
         let Some(layer) = self.ui_design.layer else { return };
         let Some(layer_ent) =
-            self.world.query::<floptle_core::transform::Transform>().map(|(e, _)| e).find(|e| e.index() == layer)
+            self.world.entity_with::<floptle_core::transform::Transform>(layer)
         else {
             return;
         };
@@ -1618,9 +1616,7 @@ impl EditorTabViewer<'_> {
         if commit {
             let spec = self
                 .world
-                .query::<floptle_core::transform::Transform>()
-                .map(|(e, _)| e)
-                .find(|e| e.index() == id)
+                .entity_with::<floptle_core::transform::Transform>(id)
                 .and_then(|e| self.world.get::<ElementSpec>(e))
                 .cloned();
             if let Some(spec) = spec {

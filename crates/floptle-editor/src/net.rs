@@ -194,9 +194,7 @@ impl Editor {
                     if self.net_server.is_some() {
                         let ent = self
                             .world
-                            .query::<Transform>()
-                            .map(|(e, _)| e)
-                            .find(|e| e.index() == eid);
+                            .entity_with::<Transform>(eid);
                         if let (Some(s), Some(e)) = (self.net_server.as_mut(), ent) {
                             s.despawn(&mut self.world, e);
                             if let Some(sim) = self.sim.as_mut() {
@@ -1311,7 +1309,7 @@ impl Editor {
                 }
                 NetCmd::Despawn { eid } => {
                     let ent =
-                        hs.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == eid);
+                        hs.world.entity_with::<Transform>(eid);
                     if let Some(e) = ent {
                         hs.session.despawn(&mut hs.world, e);
                         hs.sim.remove_body(eid);

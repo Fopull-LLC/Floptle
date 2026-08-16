@@ -945,7 +945,26 @@ impl crate::Editor {
         if !auto || self.nav_job.is_some() {
             return;
         }
-        let now = self.nav_inputs_stamp();
+        // **Hashing the level is O(scene); asking whether it is worth hashing is
+        // O(1).** The stamp is a pure function of the world, so while the world's
+        // revision has not moved the answer provably has not either — and on a
+        // level being streamed in, that is nearly every frame (`floptle/0138`:
+        // thousands of nodes walked and hashed sixty times a second to conclude
+        // that nothing had happened).
+        //
+        // The hash itself is untouched and stays the authority. The revision is
+        // conservative in the safe direction: it can say "maybe" when the answer
+        // is no, which costs one hash, and it cannot say "no" when the answer is
+        // yes. Undo, a reload and a nudge that ends where it started all move the
+        // revision and still hash to the same number, which is the property this
+        // is a hash for in the first place.
+        let rev = self.world.revision();
+        let now = if rev == self.nav_watch_rev {
+            self.nav_watch_stamp
+        } else {
+            self.nav_watch_rev = rev;
+            self.nav_inputs_stamp()
+        };
         if now != self.nav_watch_stamp {
             self.nav_watch_stamp = now;
             self.nav_watch_settled = 0.0;

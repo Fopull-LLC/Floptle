@@ -85,9 +85,7 @@ impl EditorTabViewer<'_> {
                     }
                     let ent = self
                         .world
-                        .query::<floptle_core::transform::Transform>()
-                        .map(|(e, _)| e)
-                        .find(|e| e.index() == *idx);
+                        .entity_with::<floptle_core::transform::Transform>(*idx);
                     let selected = ent.map(|e| self.selection.contains(&e)).unwrap_or(false);
                     let color = if selected {
                         egui::Color32::from_rgb(255, 180, 60)

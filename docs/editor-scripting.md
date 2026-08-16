@@ -72,6 +72,34 @@ window — `:focus()`. A window starts hidden; open it from your menu item.
 | `ed.onPlay(fn)` / `ed.onStop(fn)` | before the scene changes under you |
 | `ed.onUnload(fn)` | the project or the package is going away |
 
+### Waiting
+
+| | |
+| --- | --- |
+| `ed.after(seconds, fn)` | run it once, later |
+| `ed.every(seconds, fn)` | run it again and again |
+| `t:cancel()` | stop one; both hand back a handle |
+
+```lua
+local poll
+poll = ed.every(2, function()
+    http.get(url .. "/progress/" .. id, function(r)
+        if r.body.complete then poll:cancel() ; show(r.body) end
+    end)
+end)
+```
+
+They run on the **editor's clock** — the same one `ed.time()` answers with — so
+nothing fires while the editor is not drawing, and a timer is not a way to
+measure real time. What they are for is "in two seconds" and "every half
+second".
+
+A repeat keeps its period rather than drifting a frame at a time, and it never
+catches up: a minute spent in a modal dialog costs you one firing, not a hundred
+and twenty. A timer may cancel itself, or another, from inside its own callback.
+
+Everything a package registers goes away on ⟲ Reload, timers included.
+
 ### Reading the editor
 
 | | |
@@ -93,6 +121,13 @@ window — `:focus()`. A window starts hidden; open it from your menu item.
 | `ed.openUrl(url)` | `Browser` permission. `http://` and `https://` only |
 | `ed.repaint()` | draw again promptly (for an animating panel) |
 | `ed.log(…)` / `ed.warn(…)` / `ed.error(…)` | to the Console, tagged with your package's name. `print` does the same |
+| `ed.randomBytes(n)` | `n` bytes of real randomness, as a string (1–1024) |
+
+> `math.random` is a generator seeded from the clock — right for a puff of smoke,
+> wrong for anything somebody gets to guess at. Use `ed.randomBytes` for a
+> sign-in challenge, a nonce, a token or an id that must not collide. Lua strings
+> are byte strings, so the result is raw bytes and turning them into hex or
+> base64url is yours to do.
 
 ### Remembering things
 

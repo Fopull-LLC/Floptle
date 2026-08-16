@@ -2795,8 +2795,13 @@ impl ScriptHost {
 
     /// Invoke `cb` with a fresh handle for `eid` — the shared callback shape
     /// used by both `spawn(...)` and `createNode(...)` drains.
-    pub fn call_create_callback(&mut self, world: &mut World, cb: mlua::RegistryKey, eid: u32) {
-        self.call_spawn_callback(world, cb, eid);
+    pub fn call_create_callback(
+        &mut self,
+        world: &mut World,
+        cb: mlua::RegistryKey,
+        e: floptle_core::Entity,
+    ) {
+        self.call_spawn_callback(world, cb, e.index(), &[e]);
     }
 
     /// Drain this tick's `draw.line(...)` segments (immediate mode — the editor
@@ -3033,16 +3038,46 @@ impl ScriptHost {
     }
 
     /// Invoke a `spawn(...)` request's callback with the freshly spawned root's
-    /// node handle. The world is re-mirrored first (the node didn't exist at the
+    /// node handle. The new nodes are mirrored first (they didn't exist at the
     /// last sync) and the callback's writes are flushed straight back — so
     /// `spawn("bullet", p, function(b) b.vx = 40 end)` lands the same frame.
+    ///
+    /// **`new` is the entities this spawn created, and only those.** This used to
+    /// re-mirror the whole scene per spawn, which is fine for a bullet and
+    /// quadratic for a script that builds a level: `floptle/0138`, where a
+    /// streamer spawning ~800 nodes a chunk into a 7,000-node scene rebuilt a
+    /// twenty-collection table 800 times to add 800 rows to it.
     /// The FULL write flush runs (not just transforms): a `createNode` callback
     /// configures its node with the construction API (`setTerrain`/`setCelestial`/
     /// `setPrimitive`/…), and those are RichSet-queued — in the play loop the next
     /// pass's flush would catch them a tick late, but an EDITOR ACTION drain has
     /// no next pass, and the components simply never landed (the "generated field
     /// … but no node carries it" bug: generator bodies stayed Matter::Empty).
-    pub fn call_spawn_callback(&mut self, world: &mut World, cb: mlua::RegistryKey, eid: u32) {
+    pub fn call_spawn_callback(
+        &mut self,
+        world: &mut World,
+        cb: mlua::RegistryKey,
+        eid: u32,
+        new: &[floptle_core::Entity],
+    ) {
+        self.sync_new_entities(world, new);
+        let Ok(f) = self.lua.registry_value::<mlua::Function>(&cb) else { return };
+        let Ok(node) = new_node_handle(&self.lua, eid) else { return };
+        if let Err(err) = f.call::<()>(node) {
+            self.record_error("spawn", format!("spawn callback: {err}"));
+        }
+        let _ = self.lua.remove_registry_value(cb);
+        self.flush_writes(world);
+    }
+
+    /// Run a callback after re-mirroring the WHOLE scene.
+    ///
+    /// The expensive one, kept for the case that needs it: an assembly split
+    /// does not add nodes so much as re-parent existing ones, and the
+    /// incremental path only ever inserts — it cannot correct a `parent` that
+    /// changed. A split is one event when a vessel comes apart, not one per node
+    /// of a level being built, so the cost is in the right place.
+    pub fn call_resync_callback(&mut self, world: &mut World, cb: mlua::RegistryKey, eid: u32) {
         self.sync_scene(world);
         let Ok(f) = self.lua.registry_value::<mlua::Function>(&cb) else { return };
         let Ok(node) = new_node_handle(&self.lua, eid) else { return };
@@ -4673,6 +4708,31 @@ impl ScriptHost {
         s.by_kind.clear();
         s.by_tag.clear();
         for (e, tr) in world.query::<Transform>() {
+            Self::mirror_entity(&mut s, world, e, tr, Some(&mut live_tilemaps));
+        }
+        // A node that was despawned, or whose Matter became something else, must
+        // not leave a grid behind for a later node to be handed by id reuse.
+        s.tilemaps.retain(|id, _| live_tilemaps.contains(id));
+    }
+
+    /// Put ONE entity into the mirror.
+    ///
+    /// Split out of [`Self::sync_scene`] so that a freshly spawned node can be
+    /// added to the mirror without rebuilding it. Every collection it writes to
+    /// is an insert or a push, never a replace, so mirroring an entity that is
+    /// already in there would duplicate it — the incremental caller is for NEW
+    /// entities and nothing else.
+    ///
+    /// `live` is `Some` only on a full rebuild, where it collects which tilemaps
+    /// still exist so the stale ones can be dropped afterwards. There is nothing
+    /// to drop when the pass only adds.
+    fn mirror_entity(
+        s: &mut crate::SceneMirror,
+        world: &World,
+        e: floptle_core::Entity,
+        tr: &Transform,
+        mut live: Option<&mut std::collections::HashSet<u32>>,
+    ) {
             let id = e.index();
             s.order.push(id);
             s.ents.insert(id, e);
@@ -4682,7 +4742,9 @@ impl ScriptHost {
                     s.models.insert(id, asset_path.clone());
                 }
                 Some(Matter::Tilemap { cols, rows, tile, data, tileset }) => {
-                    live_tilemaps.insert(id);
+                    if let Some(live) = &mut live {
+                        live.insert(id);
+                    }
                     // `floptle/0117`: the grid used to be `data.clone()`d here,
                     // unconditionally, twice a frame — a heap allocation and a
                     // memcpy of the whole map whether or not any script ever
@@ -4797,10 +4859,24 @@ impl ScriptHost {
                 }
                 s.scripts.insert(id, sc.0.iter().map(|i| i.kind.clone()).collect());
             }
+    }
+
+    /// Add newly created entities to the mirror, leaving the rest of it alone.
+    ///
+    /// **This is what a `spawn(...)` callback needs and a full re-sync was doing
+    /// instead.** The callback has to be able to hold a handle on a node that did
+    /// not exist at the last sync, which is an argument for inserting one entity,
+    /// not for rebuilding a table of twenty collections from every entity in the
+    /// scene. Doing the latter once per spawned node makes building a level
+    /// quadratic in how much level is already loaded — invisible when a script
+    /// spawns a bullet at a time, and the whole frame budget when it streams a
+    /// building.
+    pub fn sync_new_entities(&self, world: &World, ents: &[floptle_core::Entity]) {
+        let mut s = self.scene.borrow_mut();
+        for &e in ents {
+            let Some(tr) = world.get::<Transform>(e) else { continue };
+            Self::mirror_entity(&mut s, world, e, tr, None);
         }
-        // A node that was despawned, or whose Matter became something else, must
-        // not leave a grid behind for a later node to be handed by id reuse.
-        s.tilemaps.retain(|id, _| live_tilemaps.contains(id));
     }
 
     /// Write transforms that a node handle modified on OTHER nodes back to the ECS.

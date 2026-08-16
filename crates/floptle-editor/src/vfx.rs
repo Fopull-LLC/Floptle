@@ -377,9 +377,8 @@ impl VfxSystem {
         for (eid, cmd) in cmds {
             // Resolve the entity (with generation) + its effect asset from the index.
             let Some((e, key)) = world
-                .query::<ParticleSystem>()
-                .find(|(e, _)| e.index() == eid)
-                .map(|(e, ps)| (e, ps.asset.clone()))
+                .entity_with::<ParticleSystem>(eid)
+                .and_then(|e| world.get::<ParticleSystem>(e).map(|ps| (e, ps.asset.clone())))
             else {
                 continue;
             };

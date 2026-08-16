@@ -35,6 +35,7 @@ floptle-ui = { path = "../floptle-ui" }
 floptle-assets = { path = "../floptle-assets" }
 floptle-image = { path = "../floptle-image" }   # image documents behind the 🖼 Image tab
 floptle-script = { path = "../floptle-script" }
+getrandom = "0.2"
 floptle-package = { path = "../floptle-package" }
 # The signed-in account, shared with the Hub through one keyring entry, so
 # somebody who signed in there is already signed in here.

@@ -159,6 +159,11 @@ pub(crate) struct Shared {
     /// Panel id → is it open. Mirrored here so a handle's `isOpen()` can answer
     /// without reaching into the host, and written by both sides.
     pub(crate) open_state: RefCell<HashMap<u32, bool>>,
+    /// Timer ids a handle's `cancel()` has struck out. A set rather than a
+    /// removal because the binding cannot reach the host's list, and because a
+    /// timer that cancels itself from inside its own callback must not shorten
+    /// the list the fire pass is walking.
+    pub(crate) cancelled: RefCell<std::collections::HashSet<u32>>,
     /// The id `ed.window` / `ed.overlay` hands back. Allocated from Lua, so it
     /// lives on the shared state rather than on the host.
     next_id: std::cell::Cell<u32>,
@@ -179,6 +184,7 @@ pub(crate) enum Registration {
     Overlay { pkg: usize, id: u32, name: String, cb: RegistryKey, open: bool },
     Shortcut { pkg: usize, keys: String, cb: RegistryKey },
     Hook { pkg: usize, kind: HookKind, cb: RegistryKey },
+    Timer { pkg: usize, id: u32, every: f64, repeat: bool, cb: RegistryKey },
 }
 
 /// Which editor moment a callback wants.
@@ -282,6 +288,29 @@ pub(crate) struct HookReg {
     pub(crate) cb: RegistryKey,
 }
 
+/// A callback waiting for a clock rather than for an event.
+///
+/// Registered by `ed.after` / `ed.every`, which exist because the alternative
+/// was every package writing the same thing: keep a deadline, compare it against
+/// `ed.time()` from inside `onUpdate`, and remember to take it down again. That
+/// is four lines of bookkeeping to say "in two seconds", and each copy of it is
+/// a place to get the take-down wrong.
+pub(crate) struct TimerReg {
+    pub(crate) pkg: usize,
+    pub(crate) id: u32,
+    /// Seconds between firings. Clamped away from zero at registration, because
+    /// `ed.every(0, …)` is a request for an infinite loop.
+    pub(crate) every: f64,
+    pub(crate) repeat: bool,
+    /// Editor clock reading this next fires at.
+    pub(crate) due: f64,
+    pub(crate) cb: RegistryKey,
+    /// Set by the handle's `cancel()`. Swept after the fire pass rather than
+    /// removed on the spot, so a timer cancelling itself — or its neighbour —
+    /// from inside its own callback cannot shift the list being walked.
+    pub(crate) cancelled: bool,
+}
+
 /// The editor's extension host. Present even with no packages installed, in
 /// which case every entry point is a cheap no-op.
 pub(crate) struct ExtHost {
@@ -293,6 +322,7 @@ pub(crate) struct ExtHost {
     pub(crate) overlays: Vec<OverlayReg>,
     pub(crate) shortcuts: Vec<ShortcutReg>,
     pub(crate) hooks: Vec<HookReg>,
+    pub(crate) timers: Vec<TimerReg>,
     /// What [`floptle_package::resolve`] found — the package list's data.
     pub(crate) report: LoadReport,
     /// Which panels were open before the last reload, so a reload does not
@@ -327,6 +357,7 @@ impl ExtHost {
             overlays: Vec::new(),
             shortcuts: Vec::new(),
             hooks: Vec::new(),
+            timers: Vec::new(),
             report: LoadReport::default(),
             reopen: HashMap::new(),
             dynamic: None,
@@ -375,6 +406,8 @@ impl ExtHost {
         self.overlays.clear();
         self.shortcuts.clear();
         self.hooks.clear();
+        self.timers.clear();
+        self.shared.cancelled.borrow_mut().clear();
         self.shared.pending.borrow_mut().clear();
         self.shared.handles.borrow_mut().clear();
         self.shared.cmds.borrow_mut().clear();
@@ -479,6 +512,20 @@ impl ExtHost {
                 Registration::Hook { pkg, kind, cb } => {
                     self.hooks.push(HookReg { pkg, kind, cb });
                 }
+                Registration::Timer { pkg, id, every, repeat, cb } => {
+                    // Due relative to the clock the fire pass reads, so a timer
+                    // registered mid-frame does not fire in that same frame.
+                    let now = self.shared.snap.borrow().time;
+                    self.timers.push(TimerReg {
+                        pkg,
+                        id,
+                        every,
+                        repeat,
+                        due: now + every,
+                        cb,
+                        cancelled: false,
+                    });
+                }
             }
         }
     }
@@ -523,6 +570,62 @@ impl ExtHost {
                 let where_ = kind.lua_name();
                 self.fail(pkg, format!("{where_}: {}", trim_lua_error(&e.to_string())));
             }
+        }
+        self.drain_pending();
+    }
+
+    /// Fire whichever timers are due, and take the spent ones away.
+    ///
+    /// Runs before `onUpdate`, so a package that registers a timer and a hook
+    /// sees them in the order it wrote them. The clock is the editor's, the same
+    /// one `ed.time()` answers with — which means timers do not run while the
+    /// editor is not drawing, and a package must not use one to measure real
+    /// time. What they are for is "in two seconds", "every half second", and
+    /// that is what the docs say they are for.
+    ///
+    /// A repeating timer's next due time is computed from the one it just met
+    /// rather than from now, so a slow frame does not make every subsequent
+    /// firing late — but it is never allowed to fall more than one period
+    /// behind, because catching up on a stalled minute by firing a hundred and
+    /// twenty times is worse than missing them.
+    pub(crate) fn tick_timers(&mut self) {
+        if self.timers.is_empty() {
+            return;
+        }
+        let now = self.shared.snap.borrow().time;
+        let due: Vec<usize> = self
+            .timers
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| !t.cancelled && t.due <= now)
+            .map(|(i, _)| i)
+            .collect();
+        for i in due {
+            let (pkg, id, repeat, every) = {
+                let t = &self.timers[i];
+                (t.pkg, t.id, t.repeat, t.every)
+            };
+            if self.packages.get(pkg).is_some_and(|p| p.failed.is_some()) {
+                continue;
+            }
+            // Re-arm BEFORE the call, so a callback that cancels itself wins.
+            if repeat {
+                let t = &mut self.timers[i];
+                t.due = (t.due + every).max(now - every);
+            } else {
+                self.shared.cancelled.borrow_mut().insert(id);
+            }
+            let Some(func) = self.func(&self.timers[i].cb) else { continue };
+            if let Err(e) = func.call::<()>(()) {
+                self.fail(pkg, format!("timer: {}", trim_lua_error(&e.to_string())));
+            }
+        }
+        let struck = std::mem::take(&mut *self.shared.cancelled.borrow_mut());
+        if !struck.is_empty() {
+            for t in self.timers.iter_mut().filter(|t| struck.contains(&t.id)) {
+                t.cancelled = true;
+            }
+            self.timers.retain(|t| !t.cancelled);
         }
         self.drain_pending();
     }

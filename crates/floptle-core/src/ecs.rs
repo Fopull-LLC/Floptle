@@ -103,17 +103,55 @@ impl<T: 'static> AnyColumn for Column<T> {
 }
 
 /// The one source of truth: entities and their components.
-#[derive(Default)]
 pub struct World {
     generations: Vec<u32>,
     free: Vec<u32>,
     alive: Vec<bool>,
     columns: HashMap<TypeId, Box<dyn AnyColumn>>,
+    revision: u64,
+}
+
+impl Default for World {
+    fn default() -> Self {
+        World {
+            generations: Vec::new(),
+            free: Vec::new(),
+            alive: Vec::new(),
+            columns: HashMap::new(),
+            // Revision 1, never 0: a cache holding a default-initialised `u64`
+            // must not read as already up to date with a world nobody has
+            // touched. `new` and `default` have to agree about this, so there is
+            // one constructor and `new` calls it.
+            revision: 1,
+        }
+    }
 }
 
 impl World {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A number that changes whenever anything in the world might have.
+    ///
+    /// **For skipping work, not for describing the world.** Anything derived
+    /// from the world — a hash of the level, a spatial index, a cached bounds —
+    /// can hold the revision it was computed at and know, for the cost of one
+    /// comparison, that recomputing it would produce the same answer.
+    ///
+    /// Deliberately **conservative**: [`Self::get_mut`] and [`Self::query_mut`]
+    /// bump it whether or not the caller went on to write anything, because the
+    /// world cannot tell. So an unchanged revision proves nothing changed, and a
+    /// changed one proves only that something might have. That is the direction
+    /// that is safe to be wrong in — the cache recomputes and gets the right
+    /// answer — and the reverse would let a stale value survive a real edit.
+    ///
+    /// It is not a replacement for a content hash. It cannot tell you that an
+    /// undo, a reload, or a nudge that ended where it started left the world
+    /// looking exactly as it did. Use it to decide whether to bother asking that
+    /// question, not to answer it.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Number of live entities.
@@ -126,6 +164,7 @@ impl World {
 
     /// Create a new entity (no components yet).
     pub fn spawn(&mut self) -> Entity {
+        self.revision += 1;
         if let Some(index) = self.free.pop() {
             self.alive[index as usize] = true;
             Entity { index, generation: self.generations[index as usize] }
@@ -135,6 +174,40 @@ impl World {
             self.alive.push(true);
             Entity { index, generation: 0 }
         }
+    }
+
+    /// The live entity occupying a slot, or `None` if that slot is empty.
+    ///
+    /// **The way back from a bare index to a handle.** A [`Entity`] is a slot
+    /// plus a generation, and everything outside the engine carries only the
+    /// slot: a Lua node id, an id in a save file, an id on the wire. Rebuilding
+    /// the handle is this lookup — one bounds check and one array read.
+    ///
+    /// It exists because the alternative was being written instead, in more than
+    /// one place: `world.query::<Matter>().find(|e| e.index() == id)`, which is
+    /// a walk of every entity in the scene to answer a question the slot table
+    /// already knows. That is invisible in a hand-built level and quadratic in a
+    /// script-built one, which is what a streamer, a procedural dungeon or a
+    /// destructible building all are.
+    ///
+    /// The generation comes from the slot, so the handle is the *current*
+    /// occupant. An index that was destroyed and whose slot was reused answers
+    /// with the new node rather than with the old one — which is why an id that
+    /// has to survive a destroy needs more than an index to begin with.
+    pub fn entity_at(&self, index: u32) -> Option<Entity> {
+        let i = index as usize;
+        (i < self.alive.len() && self.alive[i])
+            .then(|| Entity { index, generation: self.generations[i] })
+    }
+
+    /// The live entity in this slot, if it carries a `T`.
+    ///
+    /// The form nearly every caller wants, because the scan it replaces was
+    /// nearly always written as `world.query::<Transform>().find(…)` — "the node
+    /// with this id, and it must be a real node". Two O(1) lookups instead of a
+    /// walk of the scene.
+    pub fn entity_with<T: 'static>(&self, index: u32) -> Option<Entity> {
+        self.entity_at(index).filter(|&e| self.get::<T>(e).is_some())
     }
 
     /// True if the handle still refers to a live entity.
@@ -148,6 +221,7 @@ impl World {
         if !self.is_alive(e) {
             return;
         }
+        self.revision += 1;
         for col in self.columns.values_mut() {
             col.remove_entity(e);
         }
@@ -174,11 +248,13 @@ impl World {
         if !self.is_alive(e) {
             return;
         }
+        self.revision += 1;
         self.column_mut::<T>().set(e, value);
     }
 
     /// Remove a component, returning it if present.
     pub fn remove<T: 'static>(&mut self, e: Entity) -> Option<T> {
+        self.revision += 1;
         self.column_mut::<T>().take(e)
     }
 
@@ -187,6 +263,7 @@ impl World {
         col.position(e).map(|i| &col.rows[i].1)
     }
     pub fn get_mut<T: 'static>(&mut self, e: Entity) -> Option<&mut T> {
+        self.revision += 1;
         let col = self.column_mut::<T>();
         col.position(e).map(|i| &mut col.rows[i].1)
     }
@@ -198,6 +275,7 @@ impl World {
     }
     /// Mutable iteration over a single component type.
     pub fn query_mut<T: 'static>(&mut self) -> impl Iterator<Item = (Entity, &mut T)> {
+        self.revision += 1;
         self.column_mut::<T>().rows.iter_mut().map(|(e, v)| (*e, v))
     }
 }

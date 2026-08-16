@@ -440,7 +440,7 @@ pub fn reconcile(world: &mut World, container: u32, roots: &[MadeNode]) -> MakeR
 }
 
 fn entity_of(world: &World, index: u32) -> Option<Entity> {
-    world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == index)
+    world.entity_with::<Transform>(index)
 }
 
 fn reconcile_children(

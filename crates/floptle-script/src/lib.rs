@@ -1660,7 +1660,7 @@ end
         world.insert(child, floptle_core::Name(creates[0].name.clone()));
         world.insert(child, Matter::Empty);
         let cb = creates.remove(0).cb.expect("create carried its callback");
-        host.call_create_callback(&mut world, cb, child.index());
+        host.call_create_callback(&mut world, cb, child);
         match world.get::<Matter>(child) {
             Some(Matter::Terrain { id }) => assert_eq!(*id, 3),
             other => panic!("createNode callback's setTerrain(3) did not land: {other:?}"),
@@ -6202,7 +6202,12 @@ end
         world.insert(bullet, Transform::IDENTITY);
         world.insert(bullet, floptle_core::Name("bullet".into()));
         world.insert(bullet, floptle_core::Matter::Empty);
-        host.call_spawn_callback(&mut world, req.cb.expect("callback captured"), bullet.index());
+        host.call_spawn_callback(
+            &mut world,
+            req.cb.expect("callback captured"),
+            bullet.index(),
+            &[bullet],
+        );
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
         assert_eq!(world.get::<Transform>(bullet).unwrap().translation.x, 42.0);
     }

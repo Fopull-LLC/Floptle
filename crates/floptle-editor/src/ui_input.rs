@@ -158,7 +158,7 @@ impl Editor {
 
     /// Resolve an element id back to its entity.
     pub(crate) fn ui_entity(&self, id: u32) -> Option<Entity> {
-        self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == id)
+        self.world.entity_with::<Transform>(id)
     }
 
     /// Start or stop editing, following focus.

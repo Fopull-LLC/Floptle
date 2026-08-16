@@ -1280,7 +1280,7 @@ impl Editor {
         // back if somebody keeps asking.
         self.ui_pointer_wanted = pointer_wanted;
         if let Some((id, next)) = wheel_target {
-            let ent = self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == id);
+            let ent = self.world.entity_with::<Transform>(id);
             if let Some(e) = ent
                 && let Some(spec) = self.world.get_mut::<ElementSpec>(e)
                 && let Some(sc) = &mut spec.scroll
@@ -1374,7 +1374,7 @@ impl Editor {
                 t = 1.0 - t;
             }
             let value = s.min + t * (s.max - s.min);
-            let ent = self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == id);
+            let ent = self.world.entity_with::<Transform>(id);
             if let Some(e) = ent
                 && let Some(spec) = self.world.get_mut::<ElementSpec>(e)
                 && let Some(sl) = &mut spec.slider
@@ -1420,9 +1420,7 @@ impl Editor {
             && let Some(&(view, _)) = scroll_hits.last()
             && self
                 .world
-                .query::<Transform>()
-                .map(|(e, _)| e)
-                .find(|e| e.index() == view)
+                .entity_with::<Transform>(view)
                 .and_then(|e| self.world.get::<ElementSpec>(e))
                 .and_then(|s| s.scroll)
                 .is_some_and(|sc| sc.drag)
@@ -1438,9 +1436,7 @@ impl Editor {
             if let Some(max) = travel {
                 let cur = self
                     .world
-                    .query::<Transform>()
-                    .map(|(e, _)| e)
-                    .find(|e| e.index() == view)
+                    .entity_with::<Transform>(view)
                     .and_then(|e| self.world.get::<ElementSpec>(e))
                     .and_then(|s| s.scroll)
                     .map(|sc| [sc.offset_x, sc.offset])
@@ -1490,7 +1486,7 @@ impl Editor {
 
     /// Write one axis of a scroll view's offset.
     fn ui_set_scroll(&mut self, view: u32, axis: usize, value: f32) {
-        let ent = self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == view);
+        let ent = self.world.entity_with::<Transform>(view);
         if let Some(e) = ent
             && let Some(spec) = self.world.get_mut::<ElementSpec>(e)
             && let Some(sc) = &mut spec.scroll
@@ -1512,7 +1508,7 @@ impl Editor {
     /// mates within the same LAYER, so two screens can reuse a group name.
     fn ui_toggle(&mut self, clicked: u32) {
         let Some(ent) =
-            self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == clicked)
+            self.world.entity_with::<Transform>(clicked)
         else {
             return;
         };

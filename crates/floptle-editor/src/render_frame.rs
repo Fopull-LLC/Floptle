@@ -6581,7 +6581,7 @@ impl Editor {
                 let mut changed = false;
                 for (eid, on) in freezes {
                     let Some(e) =
-                        self.world.query::<Matter>().map(|(e, _)| e).find(|e| e.index() == eid)
+                        self.world.entity_with::<Matter>(eid)
                     else {
                         continue;
                     };
@@ -7460,7 +7460,7 @@ impl Editor {
             self.begin_edit();
         }
         for (idx, d) in &cmd.ui_move {
-            let ent = self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == *idx);
+            let ent = self.world.entity_with::<Transform>(*idx);
             if let Some(e) = ent
                 && let Some(mut spec) = self.world.get::<floptle_ui::ElementSpec>(e).cloned()
             {
@@ -7472,7 +7472,7 @@ impl Editor {
         // OPPOSITE edge visually fixed — Free positions and Pin offsets get the
         // exact compensation for their placement mode.
         if let Some((idx, dsize, from_min, cur)) = cmd.ui_resize {
-            let ent = self.world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == idx);
+            let ent = self.world.entity_with::<Transform>(idx);
             if let Some(e) = ent
                 && let Some(mut spec) = self.world.get::<floptle_ui::ElementSpec>(e).cloned()
             {
@@ -7521,7 +7521,7 @@ impl Editor {
         {
             self.begin_edit();
             let ent = |world: &floptle_core::World, idx: u32| {
-                world.query::<Transform>().map(|(e, _)| e).find(|e| e.index() == idx)
+                world.entity_with::<Transform>(idx)
             };
             for (idx, order) in &cmd.ui_order {
                 if let Some(e) = ent(&self.world, *idx)

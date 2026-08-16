@@ -428,7 +428,24 @@ impl Editor {
         println!("  opened scene: {}", p.display());
     }
 
-    /// Register the GPU meshes for every imported model the current scene references.
+    /// Register the GPU meshes named by a set of paths, importing each once.
+    ///
+    /// Prefer this to [`Self::register_scene_meshes`] whenever the caller knows
+    /// which models arrived. Registering "everything in the scene" to account for
+    /// one new prop is `floptle/0138`: spawning a desk into a room holding two
+    /// thousand props cloned two thousand asset paths and re-imported all of
+    /// them, per desk.
+    pub(crate) fn register_meshes<'a>(&mut self, paths: impl IntoIterator<Item = &'a str>) {
+        let mut seen = std::collections::HashSet::new();
+        let wanted: Vec<String> =
+            paths.into_iter().filter(|p| seen.insert(*p)).map(str::to_string).collect();
+        for p in wanted {
+            self.import_model(&p);
+        }
+    }
+
+    /// Register the GPU meshes for every imported model the current scene
+    /// references. For opening a scene, where "everything" is the honest answer.
     pub(crate) fn register_scene_meshes(&mut self) {
         let mesh_paths: Vec<String> = self
             .world
