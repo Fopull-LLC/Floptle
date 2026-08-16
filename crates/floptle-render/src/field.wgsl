@@ -159,6 +159,11 @@ struct Globals {
     probe_meta: vec4<f32>,
     probe_pos: array<vec4<f32>, 4>,
     probe_half: array<vec4<f32>, 4>,
+    // Each lamp's CONE: x = cos(half angle where it reaches zero), y = cos(half
+    // angle where it is still at full brightness. **x = -1 is no cone**, which
+    // is every light authored before spots existed. Appended at the END so this
+    // struct stays byte-identical to the Rust `RaymarchGlobals`.
+    point_cone: array<vec4<f32>, 16>,
 };
 
 // A point mapped into Field Shape `i`'s local frame: un-translate (positions
@@ -753,6 +758,10 @@ struct AreaTerms {
     l: vec3<f32>,
     dist: f32,
     spread: f32,
+    // How much of the lamp reaches here at all, 0–1: the CONE, for a lamp that
+    // is aimed. 1 for every omnidirectional light, which is what makes a spot
+    // cost nothing to a scene that has none. See `spot_atten`.
+    atten: f32,
 };
 
 fn quat_rot(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
@@ -802,8 +811,39 @@ fn light_flag(shape: vec4<f32>, bit: u32) -> bool {
     return (u32(max(shape.w, 0.0) + 0.5) & bit) != 0u;
 }
 
-fn area_terms(shape: vec4<f32>, rot: vec4<f32>, to: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> AreaTerms {
+// How much of an aimed lamp reaches a point in direction `to` (which points
+// from the shading point AT the light).
+//
+// `cone.x` is the cosine of the half angle where it reaches zero and `cone.y`
+// the cosine of the half angle where it is still full. **`cone.x < -0.999` means
+// no cone**, and returns 1 immediately — the branch every light in every scene
+// authored before spots existed takes.
+//
+// Cosines, so this is two dots and a smoothstep with no trigonometry per pixel.
+// Note the sense: a NARROWER cone has a LARGER cosine, so `x` (the outer edge)
+// is the smaller number and `smoothstep(x, y, c)` runs the right way round.
+//
+// Squared at the end because a linear ramp across the penumbra reads as a
+// visible ring — the eye finds the discontinuity in the *slope*, and squaring
+// puts a soft shoulder on both ends of the band for one multiply.
+fn spot_atten(cone: vec4<f32>, rot: vec4<f32>, to: vec3<f32>) -> f32 {
+    if (cone.x < -0.999) {
+        return 1.0;
+    }
+    // The lamp points down its own -Z, the same axis a camera looks down.
+    let aim = quat_rot(rot, vec3<f32>(0.0, 0.0, -1.0));
+    // `to` points at the light, so the direction the light travels to get here
+    // is its negation. Geometric, and deliberately NOT the representative point
+    // an area emitter computes: a cone edge that moved as the camera did would
+    // shimmer along every wall it lands on.
+    let c = dot(aim, -normalize(to));
+    let t = clamp((c - cone.x) / max(cone.y - cone.x, 1e-4), 0.0, 1.0);
+    return t * t;
+}
+
+fn area_terms(shape: vec4<f32>, rot: vec4<f32>, cone: vec4<f32>, to: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> AreaTerms {
     var out: AreaTerms;
+    out.atten = spot_atten(cone, rot, to);
     let d0 = max(length(to), 1e-4);
     out.l = to / d0;
     out.dist = d0;

@@ -224,6 +224,18 @@ pub struct RaymarchGlobals {
     /// the walls and mark which surfaces the probe covers, w = how far outside
     /// that box its influence fades before the sky takes over.
     pub probe_half: [[f32; 4]; crate::reflect::MAX_PROBES],
+    /// Each point light's CONE, when it is aimed. Appended at the END so this
+    /// struct stays byte-identical to the WGSL one.
+    ///
+    /// `x` = cosine of the half angle where the light reaches zero, `y` =
+    /// cosine of the half angle where it is still at full brightness. **`x = -1`
+    /// means no cone**, which is every light that was ever authored before spots
+    /// existed and is the value the default fills.
+    ///
+    /// Cosines rather than angles because the shader compares against
+    /// `dot(spot_dir, -l)` and would otherwise pay an `acos` per lit pixel per
+    /// light. The conversion is done once, where the light is packed.
+    pub point_cone: [[f32; 4]; 16],
 }
 
 impl Default for RaymarchGlobals {
@@ -311,6 +323,8 @@ impl Default for RaymarchGlobals {
             ssr: [0.0, 30.0, 32.0, 0.5],
             point_steps: [16.0, 1.0, 0.0, 0.0],
             probe_meta: [0.0; 4],
+            // -1 is "no cone": every direction is inside it.
+            point_cone: [[-1.0, -1.0, 0.0, 0.0]; 16],
             probe_pos: [[0.0; 4]; crate::reflect::MAX_PROBES],
             probe_half: [[1.0; 4]; crate::reflect::MAX_PROBES],
         }

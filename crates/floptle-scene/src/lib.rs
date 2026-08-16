@@ -751,6 +751,19 @@ pub enum MatterDoc {
         /// before this existed round-trips byte-identically AND costs nothing.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         shadows: bool,
+        /// Aimed down the node's local −Z, or `None` for an ordinary
+        /// omnidirectional lamp.
+        ///
+        /// **One optional field rather than two defaulted numbers**, for a
+        /// reason worth stating: `skip_serializing_if` cannot see a sibling, so
+        /// two fields could not be omitted *together* when there is no cone.
+        /// Either every light ever written would grow two lines it does not
+        /// need, or a spot with a deliberately hard edge (`softness: 0.0`)
+        /// would have that zero skipped as "the default" and come back soft.
+        /// Grouping them makes both problems go away: absent means omni,
+        /// present means both numbers were meant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spot: Option<SpotDoc>,
     },
     /// A physics gravity source (Down = level gravity, Radial = planet).
     GravityVolume {
@@ -1210,6 +1223,22 @@ fn is_point_shape(s: &LightShapeDoc) -> bool {
     matches!(s, LightShapeDoc::Point)
 }
 
+/// A lamp's cone, when it has one.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SpotDoc {
+    /// The FULL cone angle in degrees, down the node's local −Z.
+    pub angle: f32,
+    /// How much of the cone's edge is falloff, 0–1. Defaulted so a hand-written
+    /// scene may say only the angle, which is the number somebody actually has
+    /// in mind.
+    #[serde(default = "default_spot_softness")]
+    pub softness: f32,
+}
+
+fn default_spot_softness() -> f32 {
+    0.25
+}
+
 impl LightShapeDoc {
     pub fn to_shape(self) -> floptle_core::LightShape {
         use floptle_core::LightShape as S;
@@ -1382,13 +1411,20 @@ impl From<&Matter> for MatterDoc {
                 ortho: *ortho,
                 ortho_height: *ortho_height,
             },
-            Matter::PointLight { color, intensity, range, shape, shadows } => MatterDoc::PointLight {
-                color: *color,
-                intensity: *intensity,
-                range: *range,
-                shape: LightShapeDoc::from(*shape),
-                shadows: *shadows,
-            },
+            Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness } => {
+                MatterDoc::PointLight {
+                    color: *color,
+                    intensity: *intensity,
+                    range: *range,
+                    shape: LightShapeDoc::from(*shape),
+                    shadows: *shadows,
+                    // Written only when the lamp is actually aimed, which is
+                    // what keeps every scene authored before spots existed
+                    // byte-identical through a load and a save.
+                    spot: floptle_core::is_spot(*spot_angle)
+                        .then_some(SpotDoc { angle: *spot_angle, softness: *spot_softness }),
+                }
+            }
             Matter::GravityVolume { mode, strength, radius } => MatterDoc::GravityVolume {
                 radial: *mode == GravityMode::Radial,
                 strength: *strength,
@@ -1633,7 +1669,9 @@ impl MatterDoc {
                     ortho_height: Matter::clamp_ortho_height(*ortho_height),
                 }
             }
-            MatterDoc::PointLight { color, intensity, range, shape, shadows } => Matter::PointLight {
+            MatterDoc::PointLight { color, intensity, range, shape, shadows, spot } => Matter::PointLight {
+                spot_angle: spot.map(|s| s.angle).unwrap_or(floptle_core::OMNI_ANGLE),
+                spot_softness: spot.map(|s| s.softness).unwrap_or_else(default_spot_softness),
                 color: *color,
                 intensity: *intensity,
                 range: *range,
@@ -3960,7 +3998,7 @@ mod tests {
                     terrain_gen: None,
                     name: "lamp".into(),
                     transform: TransformDoc::default(),
-                    matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default(), shadows: false },
+                    matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default(), shadows: false, spot: None },
                     object_materials: Default::default(),
                     scripts: Vec::new(),
                     material: None,
@@ -4052,7 +4090,7 @@ mod tests {
         let mut world = World::new();
         let e = world.spawn();
         world.insert(e, floptle_core::transform::Transform::IDENTITY);
-        world.insert(e, Matter::PointLight { color: [1.0, 0.86, 0.62], intensity: 3.0, range: 8.0, shape: Default::default(), shadows: false });
+        world.insert(e, Matter::PointLight { color: [1.0, 0.86, 0.62], intensity: 3.0, range: 8.0, shape: Default::default(), shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25 });
         world.insert(
             e,
             floptle_core::Lighting2D {
@@ -4079,7 +4117,7 @@ mod tests {
         let mut plain = World::new();
         let p = plain.spawn();
         plain.insert(p, floptle_core::transform::Transform::IDENTITY);
-        plain.insert(p, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape: Default::default(), shadows: false });
+        plain.insert(p, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape: Default::default(), shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25 });
         plain.insert(p, floptle_core::Lighting2D { mode: floptle_core::Lit2D::Yes, ..Default::default() });
         let text = to_ron(&to_doc("plain", &plain)).unwrap();
         for key in ["light_inner", "light_falloff", "light_shadows"] {
@@ -4146,7 +4184,7 @@ mod tests {
         let lamp = snap.nodes.iter().find(|n| n.name == "lamp").unwrap();
         assert_eq!(
             lamp.matter,
-            MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default(), shadows: false }
+            MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default(), shadows: false, spot: None }
         );
         // the camera's fov/active round-trip
         let eye = snap.nodes.iter().find(|n| n.name == "eye").unwrap();
@@ -4276,7 +4314,7 @@ mod tests {
             world.insert(e, Transform::IDENTITY);
             world.insert(
                 e,
-                Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape, shadows: false },
+                Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 10.0, shape, shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25 },
             );
         }
         let ron = to_ron(&to_doc("lights", &world)).expect("serializes");
@@ -4314,7 +4352,7 @@ mod tests {
                 intensity: 1.0,
                 range: 10.0,
                 shape: LS::Point,
-                shadows: false,
+                shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25,
             });
             to_doc("one", &w)
         })
@@ -4672,6 +4710,86 @@ mod tests {
         assert!(floptle_core::is_persistent(&world, child), "a child of a keeper is a keeper");
         assert!(!floptle_core::is_persistent(&world, other), "and a sibling is not");
     }
+
+    /// Spot lights: the cone round-trips, a lamp nobody aimed writes nothing at
+    /// all, and a spot with a deliberately HARD edge keeps its zero.
+    ///
+    /// That last one is why the two numbers live in one optional field rather
+    /// than as two defaulted ones. `skip_serializing_if` cannot see a sibling,
+    /// so `softness: 0.0` would have been skipped as "the default" and come back
+    /// as the default softness — a hard-edged spot that goes soft on reload, in
+    /// a scene file that looks correct.
+    #[test]
+    fn a_spot_round_trips_its_cone_and_an_unaimed_lamp_writes_nothing() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, floptle_core::transform::Transform::IDENTITY);
+        world.insert(e, floptle_core::Name("Spot".into()));
+        world.insert(
+            e,
+            Matter::PointLight {
+                color: [1.0, 0.95, 0.85],
+                intensity: 4.0,
+                range: 14.0,
+                shape: Default::default(),
+                shadows: true,
+                spot_angle: 37.5,
+                // Hard edge, on purpose.
+                spot_softness: 0.0,
+            },
+        );
+        let text = to_ron(&to_doc("spot", &world)).unwrap();
+        assert!(text.contains("spot"), "the cone did not reach the file: {text}");
+
+        let back = from_ron(&text).unwrap();
+        let mut w2 = World::new();
+        spawn_into(&back, &mut w2);
+        let (angle, softness) = w2
+            .query::<Matter>()
+            .find_map(|(_, m)| match m {
+                Matter::PointLight { spot_angle, spot_softness, .. } => {
+                    Some((*spot_angle, *spot_softness))
+                }
+                _ => None,
+            })
+            .expect("the spot came back");
+        assert_eq!(angle, 37.5);
+        assert_eq!(softness, 0.0, "a hard edge must survive a save and a load");
+
+        // …and a lamp nobody aimed writes no cone at all, so every scene
+        // authored before spots existed is byte-identical through a round trip.
+        let mut plain = World::new();
+        let p = plain.spawn();
+        plain.insert(p, floptle_core::transform::Transform::IDENTITY);
+        plain.insert(p, floptle_core::Name("Lamp".into()));
+        plain.insert(
+            p,
+            Matter::PointLight {
+                color: [1.0; 3],
+                intensity: 1.0,
+                range: 10.0,
+                shape: Default::default(),
+                shadows: false,
+                spot_angle: floptle_core::OMNI_ANGLE,
+                spot_softness: 0.25,
+            },
+        );
+        let text = to_ron(&to_doc("plain", &plain)).unwrap();
+        assert!(!text.contains("spot"), "an unaimed lamp wrote a cone: {text}");
+
+        // A scene file from before this existed loads as the omnidirectional
+        // light it was — not as a spot with a zero-width beam, which would read
+        // as every lamp in an old project having gone out.
+        let old = from_ron(&text).unwrap();
+        let mut w3 = World::new();
+        spawn_into(&old, &mut w3);
+        let a = w3
+            .query::<Matter>()
+            .find_map(|(_, m)| match m {
+                Matter::PointLight { spot_angle, .. } => Some(*spot_angle),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!floptle_core::is_spot(a), "an old lamp came back aimed: {a}");
+    }
 }
-
-

@@ -527,6 +527,10 @@ fn a_shortcut_that_is_not_one_raises_where_the_author_will_see_it() {
 /// see it at all.
 fn draw_once(host: &mut ExtHost, which: usize) {
     let ctx = egui::Context::default();
+    // The same stack the editor gives it, package faces included — otherwise a
+    // test draws against a font set the editor never has, and `gui.font` is
+    // exercised only on its fallback path.
+    ctx.set_fonts(crate::fonts::definitions(&host.fonts));
     let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
         host.draw_window(which, ui);
     });
@@ -662,6 +666,7 @@ fn every_name_in_the_environment_is_in_the_reference() {
         walk("selection.", selection)
         walk("handles.", handles)
         walk("nav.", nav)
+        walk("mesh.", mesh)
         walk("http.", http)
         walk("sys.", sys)
         walk("ed.prefs.", ed.prefs)
@@ -700,7 +705,7 @@ fn every_name_in_the_environment_is_in_the_reference() {
         tables.sort();
         assert_eq!(
             tables,
-            ["ed", "handles", "http", "nav", "scene", "selection", "sys"],
+            ["ed", "handles", "http", "mesh", "nav", "scene", "selection", "sys"],
             "the environment has a table the coverage walk above does not visit"
         );
     }
@@ -1173,5 +1178,577 @@ fn random_bytes_are_the_length_asked_for_and_not_the_same_twice() {
     assert!(log.contains(&"len 32 32".to_string()), "{log:?}");
     assert!(log.contains(&"same false".to_string()), "{log:?}");
     assert!(log.contains(&"zero false".to_string()), "{log:?}");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+// ---------------------------------------------------------------------------
+// Fonts (`floptle/0139`). A package ships a typeface and draws a run of widgets
+// in it. The interesting cases are all failure cases: a face that is not there,
+// a path that tries to leave the folder, and a reload that must not accumulate.
+// ---------------------------------------------------------------------------
+
+/// `install`, plus a `fonts:` list and the files it names.
+fn install_with_fonts(proj: &Path, id: &str, faces: &[(&str, &str)], lua: &str) {
+    install(proj, id, "", lua);
+    let root = proj.join("packages").join(id);
+    std::fs::create_dir_all(root.join("fonts")).unwrap();
+    let declared: Vec<String> = faces
+        .iter()
+        .map(|(name, path)| format!("(name: {name:?}, path: {path:?})"))
+        .collect();
+    std::fs::write(
+        root.join("package.ron"),
+        format!(
+            r#"( id: "{id}", name: "{id}", version: "1.0.0", fonts: [{}] )"#,
+            declared.join(", ")
+        ),
+    )
+    .unwrap();
+    // A real font, so the loader's "is this a font" check passes on the ones
+    // meant to succeed. Whatever egui ships — the point is that it parses.
+    let defs = egui::FontDefinitions::default();
+    let first = defs.families[&egui::FontFamily::Proportional][0].clone();
+    let bytes = defs.font_data[&first].font.to_vec();
+    for (_, path) in faces {
+        let p = root.join(path);
+        if let Some(dir) = p.parent() {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        if !p.exists() {
+            std::fs::write(&p, &bytes).unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_package_ships_a_face_and_draws_a_run_of_widgets_in_it() {
+    let proj = temp("fontdraw");
+    install_with_fonts(
+        &proj,
+        "com.t.brand",
+        &[("Heading", "fonts/display.ttf")],
+        r#"
+        ed.window("P", function()
+            ed.log("has " .. tostring(gui.hasFont("Heading")))
+            ed.log("missing " .. tostring(gui.hasFont("Nope")))
+            gui.font("Heading", function() gui.heading("Branded") end)
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    assert!(host.packages[0].failed.is_none(), "{:?}", host.packages[0].failed);
+    assert_eq!(host.fonts.len(), 1, "the declared face should have been read");
+    assert_eq!(host.fonts[0].family, "com.t.brand:Heading");
+    assert!(host.fonts_dirty, "the editor has to be told to rebuild the atlas");
+    let _ = host.take_log();
+    draw_once(&mut host, 0);
+    assert!(host.packages[0].failed.is_none(), "{:?}", host.packages[0].failed);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log.contains(&"has true".to_string()), "{log:?}");
+    assert!(log.contains(&"missing false".to_string()), "{log:?}");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// The failure that would otherwise be a tofu row or sixty Console lines a
+/// second: a panel drawing every frame in a face that is not there.
+#[test]
+fn a_face_that_is_not_there_draws_in_the_editors_type_and_says_so_once() {
+    let proj = temp("fontmissing");
+    install(
+        &proj,
+        "com.t.b",
+        "",
+        r#"ed.window("P", function() gui.font("Ghost", function() gui.label("x") end) end)"#,
+    );
+    let mut host = host_for(&proj);
+    let _ = host.take_log();
+    for _ in 0..5 {
+        draw_once(&mut host, 0);
+    }
+    assert!(
+        host.packages[0].failed.is_none(),
+        "a missing face is a warning, not a broken panel: {:?}",
+        host.packages[0].failed
+    );
+    let warns: Vec<String> = host
+        .take_log()
+        .into_iter()
+        .filter(|l| l.level == ExtLevel::Warn)
+        .map(|l| l.msg)
+        .collect();
+    assert_eq!(warns.len(), 1, "five frames, one complaint: {warns:?}");
+    assert!(warns[0].contains("Ghost"), "{warns:?}");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// Two packages both calling their face `"Heading"` must each get their own.
+#[test]
+fn one_packages_face_is_not_reachable_by_another_packages_name() {
+    let proj = temp("fontscope");
+    install_with_fonts(&proj, "com.t.one", &[("Heading", "fonts/a.ttf")], r#"
+        ed.window("One", function() ed.log("one " .. tostring(gui.hasFont("Heading"))) end)
+    "#);
+    install(&proj, "com.t.two", "", r#"
+        ed.window("Two", function() ed.log("two " .. tostring(gui.hasFont("Heading"))) end)
+    "#);
+    let mut host = host_for(&proj);
+    assert_eq!(host.fonts.len(), 1, "only one package shipped a face");
+    let _ = host.take_log();
+    draw_once(&mut host, 0);
+    draw_once(&mut host, 1);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log.contains(&"one true".to_string()), "{log:?}");
+    assert!(
+        log.contains(&"two false".to_string()),
+        "com.t.two never shipped a Heading and must not inherit one: {log:?}"
+    );
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// ⟲ Reload all replaces the set. Accumulating would mean the face of a package
+/// somebody has just switched off is still registered — and the atlas grows
+/// every time somebody presses the button.
+#[test]
+fn a_reload_replaces_the_font_set_rather_than_adding_to_it() {
+    let proj = temp("fontreload");
+    install_with_fonts(&proj, "com.t.brand", &[("Heading", "fonts/display.ttf")], r#"
+        ed.window("P", function() end)
+    "#);
+    let mut host = host_for(&proj);
+    assert_eq!(host.fonts.len(), 1);
+    host.reload(&proj, &engine());
+    assert_eq!(host.fonts.len(), 1, "one package, one face, however many reloads");
+
+    floptle_package::install::set_enabled(&proj, "com.t.brand", false).unwrap();
+    host.reload(&proj, &engine());
+    assert!(host.fonts.is_empty(), "a switched-off package's face must go with it");
+    assert!(host.fonts_dirty, "and the atlas has to be rebuilt without it");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// A project whose packages ship no fonts must not pay for this feature: no
+/// atlas rebuild, on load or on reload.
+#[test]
+fn a_project_with_no_package_fonts_never_rebuilds_the_atlas() {
+    let proj = temp("fontfree");
+    install(&proj, "com.t.a", "", r#"ed.window("P", function() end)"#);
+    let mut host = host_for(&proj);
+    assert!(host.fonts.is_empty());
+    assert!(!host.fonts_dirty, "nothing to register, so nothing to rebuild");
+    host.reload(&proj, &engine());
+    assert!(!host.fonts_dirty);
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// The one-frame gap: a package has loaded and declared a face, but `set_fonts`
+/// has not run yet. epaint **panics** on a `FontFamily::Name` it does not hold,
+/// so this must draw in the editor's type rather than take the editor down.
+#[test]
+fn a_declared_face_egui_has_not_been_given_yet_draws_instead_of_panicking() {
+    let proj = temp("fontgap");
+    install_with_fonts(
+        &proj,
+        "com.t.brand",
+        &[("Heading", "fonts/display.ttf")],
+        r#"ed.window("P", function() gui.font("Heading", function() gui.heading("H") end) end)"#,
+    );
+    let mut host = host_for(&proj);
+    assert_eq!(host.fonts.len(), 1, "declared and read");
+    let _ = host.take_log();
+    // Deliberately NOT `draw_once`: a bare context, exactly as the editor's is
+    // between the package load and the `set_fonts` that follows it.
+    let ctx = egui::Context::default();
+    let _ = ctx.run_ui(egui::RawInput::default(), |ui| host.draw_window(0, ui));
+    assert!(host.packages[0].failed.is_none(), "{:?}", host.packages[0].failed);
+    let warns: Vec<String> = host
+        .take_log()
+        .into_iter()
+        .filter(|l| l.level == ExtLevel::Warn)
+        .map(|l| l.msg)
+        .collect();
+    assert!(
+        warns.is_empty(),
+        "the face IS declared — a frame of the editor's type is not worth a complaint: {warns:?}"
+    );
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// The node document, from Lua's side (`floptle/0142`). What a level-design tool
+/// does after it has finished analysing: put something in the level.
+#[test]
+fn a_package_writes_a_node_document_and_builds_a_subtree() {
+    let proj = temp("nodedoc");
+    install(
+        &proj,
+        "com.t.build",
+        "",
+        r#"
+        ed.onUpdate(function()
+            for _, id in ipairs(scene.all()) do
+                if scene.info(id).name == "Crate" then
+                    scene.set(id, { tags = {"cover"}, layer = "props" })
+                    scene.setParent(id, nil)
+                end
+            end
+            scene.add({
+                name = "Guard Post",
+                children = { { name = "Lamp" } },
+            })
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    let mut w = floptle_core::World::new();
+    let e = w.spawn();
+    w.insert(e, floptle_core::Name("Crate".into()));
+    w.insert(e, floptle_core::Matter::Empty);
+    host.begin_frame(
+        Snapshot { project_root: proj.clone(), ..Snapshot::default() },
+        SceneMirror::build(&w, &|_, _| None, &|_, _| None),
+    );
+    host.fire(HookKind::Update);
+
+    let cmds = host.take_cmds();
+    assert!(
+        cmds.iter().any(|c| matches!(c, ExtCmd::NodeSet { id, patch }
+            if *id == e.index() && patch["layer"] == "props")),
+        "{cmds:?}"
+    );
+    assert!(
+        cmds.iter().any(|c| matches!(c, ExtCmd::NodeSetParent { id, parent: None }
+            if *id == e.index())),
+        "{cmds:?}"
+    );
+    assert!(
+        cmds.iter().any(|c| matches!(c, ExtCmd::NodeAdd { spec, parent: None }
+            if spec["name"] == "Guard Post" && spec["children"][0]["name"] == "Lamp")),
+        "{cmds:?}"
+    );
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// A queued edit must not hold anything of Lua's. LuaJIT has ~8000 registry
+/// slots and `create_table` PANICS when they run out, so a tool that queues a
+/// few hundred edits in a loop would take the editor down if the command carried
+/// the table rather than a copy of it.
+#[test]
+fn queueing_many_document_edits_does_not_run_lua_out_of_registry_slots() {
+    let proj = temp("nodedocmany");
+    install(
+        &proj,
+        "com.t.many",
+        "",
+        r#"
+        ed.onUpdate(function()
+            for i = 1, 2000 do
+                scene.add({ name = "N" .. i, tags = {"generated"} })
+            end
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    host.fire(HookKind::Update);
+    assert!(host.packages[0].failed.is_none(), "{:?}", host.packages[0].failed);
+    assert_eq!(host.take_cmds().len(), 2000);
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// `scene.doc` round-trips: what comes out of a node goes back into one.
+///
+/// Reading a document and writing it to a new node is the whole basis of
+/// "place another one of these", and a field that survives the read but not the
+/// write is a copy that quietly is not one.
+#[test]
+fn a_document_read_from_a_node_can_be_written_to_a_new_one() {
+    let proj = temp("docroundtrip");
+    install(
+        &proj,
+        "com.t.copy",
+        "",
+        r#"
+        ed.onUpdate(function()
+            local id = selection.active()
+            if not id then return end
+            local doc = scene.doc(id)
+            ed.log("name " .. tostring(doc.name))
+            ed.log("tags " .. tostring(doc.tags and doc.tags[1]))
+            doc.name = doc.name .. " copy"
+            scene.add(doc)
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    let mut w = floptle_core::World::new();
+    let e = w.spawn();
+    w.insert(e, floptle_core::Name("Crate".into()));
+    w.insert(e, floptle_core::Matter::Empty);
+    w.insert(e, floptle_core::Tags(vec!["cover".into()]));
+
+    let mut mirror = SceneMirror::build(&w, &|_, _| None, &|_, _| None);
+    // What `Editor::fill_mirror_docs` does for the selection.
+    let doc = floptle_scene::NodeDoc {
+        name: "Crate".into(),
+        tags: vec!["cover".into()],
+        ..blank_doc()
+    };
+    mirror.docs.insert(e.index(), serde_json::to_value(&doc).unwrap());
+
+    host.begin_frame(
+        Snapshot {
+            project_root: proj.clone(),
+            selection: vec![e.index()],
+            ..Snapshot::default()
+        },
+        mirror,
+    );
+    host.fire(HookKind::Update);
+    assert!(host.packages[0].failed.is_none(), "{:?}", host.packages[0].failed);
+
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log.contains(&"name Crate".to_string()), "{log:?}");
+    assert!(log.contains(&"tags cover".to_string()), "{log:?}");
+
+    let cmds = host.take_cmds();
+    assert!(
+        cmds.iter().any(|c| matches!(c, ExtCmd::NodeAdd { spec, .. }
+            if spec["name"] == "Crate copy" && spec["tags"][0] == "cover")),
+        "the copy should carry the original's tags: {cmds:?}"
+    );
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// Reading a node that is not selected RAISES. A nil would have a tool place an
+/// empty node and report success, which is the failure this API exists to avoid.
+#[test]
+fn reading_the_document_of_an_unselected_node_says_why_rather_than_answering_nil() {
+    let proj = temp("docunselected");
+    install(
+        &proj,
+        "com.t.copy",
+        "",
+        r#"
+        ed.onUpdate(function()
+            local ok, err = pcall(scene.doc, 1)
+            ed.log("ok " .. tostring(ok))
+            ed.log("err " .. tostring(err))
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    let mut w = floptle_core::World::new();
+    let e = w.spawn();
+    w.insert(e, floptle_core::Name("Crate".into()));
+    w.insert(e, floptle_core::Matter::Empty);
+    host.begin_frame(
+        Snapshot { project_root: proj.clone(), ..Snapshot::default() },
+        SceneMirror::build(&w, &|_, _| None, &|_, _| None),
+    );
+    host.fire(HookKind::Update);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log.contains(&"ok false".to_string()), "{log:?}");
+    assert!(
+        log.iter().any(|l| l.contains("selected") || l.contains("no node")),
+        "the message has to say what to do about it: {log:?}"
+    );
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// The smallest `NodeDoc` the tests can build, so a field added to it does not
+/// mean editing every test that ever made one.
+#[cfg(test)]
+fn blank_doc() -> floptle_scene::NodeDoc {
+    serde_json::from_value(serde_json::json!({ "name": "x" })).unwrap()
+}
+
+/// A UI element is an ordinary node carrying an `ElementSpec`, so its `kind` is
+/// `"empty"` — a package had no way to tell a button from a folder, which is
+/// the whole basis of any tool that reasons about a screen.
+#[test]
+fn a_package_can_tell_a_button_from_a_folder() {
+    let proj = temp("uikind");
+    install(
+        &proj,
+        "com.t.ui",
+        "",
+        r#"
+        ed.onUpdate(function()
+            for _, id in ipairs(scene.all()) do
+                local n = scene.info(id)
+                if n.ui then
+                    ed.log(n.name .. " is a " .. n.ui.element
+                           .. " saying " .. n.ui.text
+                           .. " interactive=" .. tostring(n.ui.interactive))
+                else
+                    ed.log(n.name .. " is not ui")
+                end
+            end
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    let mut w = floptle_core::World::new();
+
+    let folder = w.spawn();
+    w.insert(folder, floptle_core::Name("Menu".into()));
+    w.insert(folder, floptle_core::Matter::Empty);
+
+    let button = w.spawn();
+    w.insert(button, floptle_core::Name("Button (3)".into()));
+    w.insert(button, floptle_core::Matter::Empty);
+    w.insert(
+        button,
+        floptle_ui::ElementSpec {
+            button: true,
+            text: Some(floptle_ui::TextSpec {
+                text: "Start Game".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+
+    host.begin_frame(
+        Snapshot { project_root: proj.clone(), ..Snapshot::default() },
+        SceneMirror::build(&w, &|_, _| None, &|_, _| None),
+    );
+    host.fire(HookKind::Update);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(
+        log.contains(&"Button (3) is a button saying Start Game interactive=true".to_string()),
+        "{log:?}"
+    );
+    assert!(log.contains(&"Menu is not ui".to_string()), "{log:?}");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// `mesh.read` end to end from Lua: a request queues, and the answer is flat
+/// arrays a package can walk.
+#[test]
+fn a_package_reads_a_nodes_triangles() {
+    let proj = temp("meshread");
+    install(
+        &proj,
+        "com.t.mesh",
+        "",
+        r#"
+        ed.onUpdate(function()
+            mesh.read(1, function(m, err)
+                if not m then ed.log("err " .. tostring(err)) return end
+                ed.log("source " .. m.source)
+                ed.log("counts " .. m.vertices .. " " .. m.triangles)
+                ed.log("flat " .. #m.positions .. " " .. #m.indices)
+                -- Indices are ZERO based and address the flat array; getting
+                -- this wrong is the first thing anybody does.
+                local i0 = m.indices[1]
+                ed.log("first x " .. tostring(m.positions[i0 * 3 + 1] ~= nil))
+            end)
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    host.fire(HookKind::Update);
+
+    let reqs = host.take_mesh_requests();
+    assert_eq!(reqs.len(), 1, "the read should have queued");
+
+    // What the editor does, without an editor.
+    let mut w = floptle_core::World::new();
+    let e = w.spawn();
+    w.insert(e, floptle_core::Name("Box".into()));
+    w.insert(
+        e,
+        floptle_core::Matter::Primitive {
+            shape: floptle_core::Shape::Cube,
+            color: [1.0; 3],
+        },
+    );
+    let geo =
+        crate::mesh_read::read_node(&w, e, std::path::Path::new("."), &Default::default()).unwrap();
+    let (verts, tris) = (geo.vertex_count(), geo.triangle_count());
+    for req in reqs {
+        let g = crate::mesh_read::read_node(&w, e, std::path::Path::new("."), &Default::default());
+        host.deliver_mesh(req.cb, g);
+    }
+
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log.contains(&"source primitive".to_string()), "{log:?}");
+    assert!(log.contains(&format!("counts {verts} {tris}")), "{log:?}");
+    assert!(log.contains(&format!("flat {} {}", verts * 3, tris * 3)), "{log:?}");
+    assert!(log.contains(&"first x true".to_string()), "{log:?}");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// A read that cannot be answered calls back with `nil` and a REASON, rather
+/// than never calling back — a callback that silently never runs is the worst
+/// of the three possible failures.
+#[test]
+fn a_mesh_read_that_fails_still_calls_back_and_says_why() {
+    let proj = temp("meshfail");
+    install(
+        &proj,
+        "com.t.mesh",
+        "",
+        r#"
+        ed.onUpdate(function()
+            mesh.read(99, function(m, err)
+                ed.log("got " .. tostring(m) .. " / " .. tostring(err))
+            end)
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    host.fire(HookKind::Update);
+    for req in host.take_mesh_requests() {
+        host.deliver_mesh(req.cb, Err("no node 99".into()));
+    }
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log.contains(&"got nil / no node 99".to_string()), "{log:?}");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// `ed.lookAt` — a tool with a list of places has to be able to take you to one.
+///
+/// The distance is checked because the failure is silent: a camera glided to
+/// zero metres from a point lands inside the geometry and reads as the editor
+/// having broken, not as a bad argument.
+#[test]
+fn a_package_points_the_camera_at_a_place_without_touching_the_selection() {
+    let proj = temp("lookat");
+    install(
+        &proj,
+        "com.t.look",
+        "",
+        r#"
+        ed.onUpdate(function()
+            ed.lookAt(vec3(12, 1, -4))
+            ed.lookAt({ 3, 0, 0 }, 2.5)
+            local ok = pcall(ed.lookAt, vec3(0, 0, 0), 0)
+            if ok then error("a zero distance was accepted") end
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    host.begin_frame(
+        Snapshot { project_root: proj.clone(), ..Snapshot::default() },
+        SceneMirror::build(&floptle_core::World::new(), &|_, _| None, &|_, _| None),
+    );
+    host.fire(HookKind::Update);
+    assert!(host.packages[0].failed.is_none(), "{:?}", host.packages[0].failed);
+
+    let cmds = host.take_cmds();
+    assert!(
+        cmds.iter().any(|c| matches!(c, ExtCmd::LookAt { at, distance: None }
+            if *at == [12.0, 1.0, -4.0])),
+        "{cmds:?}"
+    );
+    assert!(
+        cmds.iter().any(|c| matches!(c, ExtCmd::LookAt { at, distance: Some(d) }
+            if *at == [3.0, 0.0, 0.0] && (*d - 2.5).abs() < 1e-9)),
+        "{cmds:?}"
+    );
+    assert!(
+        !cmds.iter().any(|c| matches!(c, ExtCmd::SelectionSet(_))),
+        "looking at a place must not change what is selected: {cmds:?}"
+    );
     let _ = std::fs::remove_dir_all(&proj);
 }

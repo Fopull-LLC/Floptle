@@ -107,15 +107,12 @@ pub(crate) const ALL: &[(&str, &str)] = &[
     ("IMAGE", IMAGE),
 ];
 
-/// Build the editor's exact font stack (mirrors the setup in `main.rs`).
+/// Build the editor's exact font stack — the same builder `main.rs` calls, so
+/// a test cannot draw in a stack the editor does not have.
 #[cfg(test)]
 pub(crate) fn test_context() -> egui::Context {
     let ctx = egui::Context::default();
-    let mut fonts = egui::FontDefinitions::default();
-    if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-        fam.push("Hack".into());
-    }
-    ctx.set_fonts(fonts);
+    ctx.set_fonts(crate::fonts::definitions(&[]));
     // Fonts don't exist until a frame has run.
     let _ = ctx.run_ui(test_input(), |_| {});
     ctx
@@ -148,15 +145,13 @@ mod tests {
     /// This is the ground truth the renderer acts on. See the module docs for
     /// why `Fonts::has_glyph` can't be used instead.
     fn drawable() -> std::collections::HashSet<char> {
-        let defs = egui::FontDefinitions::default();
-        // The Proportional family plus the "Hack" the editor appends to it —
-        // mirror of the setup in `main.rs`.
-        let mut names: Vec<String> = defs
+        // The editor's real stack, from the one builder that makes it.
+        let defs = crate::fonts::definitions(&[]);
+        let names: Vec<String> = defs
             .families
             .get(&egui::FontFamily::Proportional)
             .cloned()
             .unwrap_or_default();
-        names.push("Hack".to_owned());
 
         let mut out = std::collections::HashSet::new();
         for name in &names {

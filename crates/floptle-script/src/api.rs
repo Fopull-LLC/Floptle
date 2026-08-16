@@ -307,7 +307,9 @@ fn light_shape_from_id(id: f64, size: f32) -> floptle_core::LightShape {
 /// more components / fields.
 pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<String, f64>> {
     let mut out: HashMap<String, HashMap<String, f64>> = HashMap::new();
-    if let Some(Matter::PointLight { color, intensity, range, shape, shadows }) = world.get::<Matter>(e) {
+    if let Some(Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness }) =
+        world.get::<Matter>(e)
+    {
         use floptle_core::LightShape as LS;
         // The emitter's dimensions, each reading 0 on a shape that has no such
         // dimension. One flat set rather than a nested table because every
@@ -340,6 +342,12 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("thickness".to_string(), thick),
                 ("twoSided".to_string(), two),
                 ("shadows".to_string(), f64::from(*shadows)),
+                // The cone. Reads 180 on an ordinary lamp — the same number
+                // that turns one back off — so a script can test
+                // `light.spotAngle < 180` rather than needing a separate
+                // "is it a spot" it would have to keep in step.
+                ("spotAngle".to_string(), *spot_angle as f64),
+                ("spotSoftness".to_string(), *spot_softness as f64),
             ]),
         );
     }
@@ -1027,8 +1035,15 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
             }
         }
         "PointLight" => {
-            if let Some(Matter::PointLight { color, intensity, range, shape, shadows }) =
-                world.get_mut::<Matter>(ent)
+            if let Some(Matter::PointLight {
+                color,
+                intensity,
+                range,
+                shape,
+                shadows,
+                spot_angle,
+                spot_softness,
+            }) = world.get_mut::<Matter>(ent)
             {
                 use floptle_core::LightShape as LS;
                 let v = (val as f32).max(0.0);
@@ -1043,6 +1058,18 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     // not have to restate its dimensions to avoid a flash.
                     "shape" => *shape = light_shape_from_id(val, shape.extent()),
                     "shadows" => *shadows = val != 0.0,
+                    // Aiming it. `spotAngle` is the FULL cone in degrees, and
+                    // 180 or more is the omnidirectional lamp this has always
+                    // been — so `light.spotAngle = 180` is how a script opens a
+                    // spot back up, and there is no second flag to remember.
+                    "spotAngle" => {
+                        *spot_angle = if val >= floptle_core::OMNI_ANGLE as f64 {
+                            floptle_core::OMNI_ANGLE
+                        } else {
+                            (val as f32).max(floptle_core::MIN_SPOT_ANGLE)
+                        }
+                    }
+                    "spotSoftness" => *spot_softness = (val as f32).clamp(0.0, 1.0),
                     // A dimension write lands only on a shape that has it. A
                     // zero would collapse the emitter into a degenerate polygon,
                     // so every one of these has a floor.
@@ -1722,13 +1749,27 @@ pub(crate) fn apply_rich_sets(
             RichSet::MatterPointLight { color, intensity, range } => {
                 // The SHAPE is kept, never reset: a script retuning a window's
                 // colour must not quietly turn it back into a bare point.
-                let (mut c, mut i, mut r, shape) = match world.get::<Matter>(e) {
-                    Some(Matter::PointLight { color, intensity, range, shape, shadows }) => {
-                        (*color, *intensity, *range, (*shape, *shadows))
-                    }
-                    _ => ([1.0, 1.0, 1.0], 1.0, 10.0, (floptle_core::LightShape::default(), false)),
+                // The SHAPE and the CONE are kept, never reset, for the same
+                // reason: a script retuning a spot's colour must not quietly
+                // point it back at everything.
+                let (mut c, mut i, mut r, keep) = match world.get::<Matter>(e) {
+                    Some(Matter::PointLight {
+                        color,
+                        intensity,
+                        range,
+                        shape,
+                        shadows,
+                        spot_angle,
+                        spot_softness,
+                    }) => (*color, *intensity, *range, (*shape, *shadows, *spot_angle, *spot_softness)),
+                    _ => (
+                        [1.0, 1.0, 1.0],
+                        1.0,
+                        10.0,
+                        (floptle_core::LightShape::default(), false, floptle_core::OMNI_ANGLE, 0.25),
+                    ),
                 };
-                let (shape, shadows) = shape;
+                let (shape, shadows, spot_angle, spot_softness) = keep;
                 if let Some(v) = color {
                     c = v;
                 }
@@ -1741,7 +1782,18 @@ pub(crate) fn apply_rich_sets(
                 if let Some(v) = range {
                     r = v.max(0.0);
                 }
-                world.insert(e, Matter::PointLight { color: c, intensity: i, range: r, shape, shadows });
+                world.insert(
+                    e,
+                    Matter::PointLight {
+                        color: c,
+                        intensity: i,
+                        range: r,
+                        shape,
+                        shadows,
+                        spot_angle,
+                        spot_softness,
+                    },
+                );
             }
             RichSet::TileCells(writes) => {
                 let Some(Matter::Tilemap { cols, rows, data, .. }) =

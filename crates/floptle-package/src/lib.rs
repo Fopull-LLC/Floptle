@@ -54,8 +54,8 @@ pub use contents::{Contents, Facet};
 pub use index::{Index, Listing, Query, Release, Sort};
 pub use install::InstallError;
 pub use manifest::{
-    Author, Category, Dependency, DirKind, Manifest, ManifestError, Media, Permission, Sample,
-    MANIFEST_FILE,
+    Author, Category, Dependency, DirKind, FontFace, Manifest, ManifestError, Media, Permission,
+    Sample, MANIFEST_FILE,
 };
 pub use registry::{Entry, Registry, Source, PACKAGES_DIR, REGISTRY_FILE};
 pub use resolve::{resolve, resolve_pkg_url, LoadReport, Loaded, Problem, Severity, PKG_SCHEME};

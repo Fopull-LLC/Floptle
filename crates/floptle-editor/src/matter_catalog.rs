@@ -164,6 +164,27 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
             range: 10.0,
             shape: floptle_core::LightShape::Point,
             shadows: false,
+            spot_angle: floptle_core::OMNI_ANGLE,
+            spot_softness: 0.25,
+        }),
+        // The same component, aimed. Two entries rather than two node types
+        // because a spot IS a point light with a cone — it takes the same
+        // emitter shapes, the same range, the same local shadows and the same
+        // slot in the sixteen — and somebody looking for "spot light" in a menu
+        // should not have to know that.
+        //
+        // Shadows ON by default here, unlike the point light. A spot is aimed at
+        // something, which means somebody placed it to light one thing and not
+        // its neighbours, and a spot that shines through the wall it is pointed
+        // at is the first thing they would file.
+        ("◤  Spot Light", Matter::PointLight {
+            color: [1.0, 0.95, 0.85],
+            intensity: 4.0,
+            range: 14.0,
+            shape: floptle_core::LightShape::Point,
+            shadows: true,
+            spot_angle: 45.0,
+            spot_softness: 0.25,
         }),
         ("⬇  Gravity Volume", Matter::GravityVolume { mode: GravityMode::Down, strength: 9.81, radius: 20.0 }),
         ("≈  Water Volume", Matter::default_water()),

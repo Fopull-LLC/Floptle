@@ -921,7 +921,7 @@ impl Editor {
             // need (no per-frame Matter clone over the whole world).
             enum Giz {
                 Cam(f32, bool, Option<f32>),
-                Light(f32, floptle_core::LightShape),
+                Light(f32, floptle_core::LightShape, f32),
                 Gravity(bool, f32), // radial?, radius
                 /// A box whose size decides where something applies, and an
                 /// optional inner box for the part that fades.
@@ -942,8 +942,8 @@ impl Editor {
                     {
                         Some((e, Giz::Cam(*fov_y, *active, ortho.then_some(*ortho_height))))
                     }
-                    Matter::PointLight { range, shape, .. } if filter.lights => {
-                        Some((e, Giz::Light(*range, *shape)))
+                    Matter::PointLight { range, shape, spot_angle, .. } if filter.lights => {
+                        Some((e, Giz::Light(*range, *shape, *spot_angle)))
                     }
                     Matter::GravityVolume { mode, radius, .. } if filter.lights => {
                         Some((e, Giz::Gravity(*mode == floptle_core::GravityMode::Radial, *radius)))
@@ -1001,9 +1001,9 @@ impl Editor {
                             self.camera_gizmos.push(CameraGizmo { lines, active });
                         }
                     }
-                    Giz::Light(range, shape) => {
+                    Giz::Light(range, shape, spot_angle) => {
                         let lines = point_light_lines(
-                            wt.translation, wt.rotation, wt.scale, range, shape,
+                            wt.translation, wt.rotation, wt.scale, range, shape, spot_angle,
                             cam.world_position, view_proj, gw, gh,
                         );
                         if !lines.is_empty() {
@@ -1641,8 +1641,14 @@ impl Editor {
             flat_camera,
         );
         let lit3 = lights_split.three_d;
-        let (pl_count, pl_pos, pl_col, pl_shape, pl_rot) =
-            ([lit3.count as f32, 0.0, 0.0, 0.0], lit3.pos, lit3.color, lit3.shape, lit3.rot);
+        let (pl_count, pl_pos, pl_col, pl_shape, pl_rot, pl_cone) = (
+            [lit3.count as f32, 0.0, 0.0, 0.0],
+            lit3.pos,
+            lit3.color,
+            lit3.shape,
+            lit3.rot,
+            lit3.cone,
+        );
         self.light_counts =
             (lights_split.three_d.count + lights_split.two_d.count, lights_split.dropped);
         // Sun shadows (Lighting node knobs) + the collider-proxy occluders that let
@@ -1708,6 +1714,7 @@ impl Editor {
             point_color: pl_col,
             point_shape: pl_shape,
             point_rot: pl_rot,
+            point_cone: pl_cone,
             // Meshed terrain reads the triplanar scale + the per-slot NEAREST /
             // GLOW bitmasks here (bitmasks as u32 — bit-exact at 32 slots).
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
@@ -2327,6 +2334,7 @@ impl Editor {
                 point_color: pl_col,
                 point_shape: pl_shape,
                 point_rot: pl_rot,
+                point_cone: pl_cone,
                 blob_tint,
                 blob_emissive,
                 blob_specular,
@@ -2560,6 +2568,14 @@ impl Editor {
             crate::game_keys::claim_keys_for_game(&mut raw_input, &egui.ctx);
         }
         let ctx = egui.ctx.clone();
+        // A package that shipped a typeface gets it registered here — after the
+        // load pass, before anything draws with it. `set_fonts` rebuilds egui's
+        // glyph atlas, so it is gated on the flag and not run per frame; a
+        // project whose packages ship no fonts never reaches it at all.
+        if self.ext.fonts_dirty {
+            self.ext.fonts_dirty = false;
+            ctx.set_fonts(crate::fonts::definitions(&self.ext.fonts));
+        }
         // Apply the selected engine (chrome) theme, then a play-mode tint on top so you
         // never mistake play mode for edit mode (and lose edits on Stop). Reapplied each
         // frame so switching the theme in Preferences takes effect immediately.
@@ -8868,8 +8884,14 @@ impl Editor {
             flat_camera,
         );
         let lit3 = off_split.three_d;
-        let (pl_count, pl_pos, pl_col, pl_shape, pl_rot) =
-            ([lit3.count as f32, 0.0, 0.0, 0.0], lit3.pos, lit3.color, lit3.shape, lit3.rot);
+        let (pl_count, pl_pos, pl_col, pl_shape, pl_rot, pl_cone) = (
+            [lit3.count as f32, 0.0, 0.0, 0.0],
+            lit3.pos,
+            lit3.color,
+            lit3.shape,
+            lit3.rot,
+            lit3.cone,
+        );
         // Same question and same answer as the window path: what a reflective
         // surface sees when the screen-space march finds nothing.
         let (probe_meta, probe_pos, probe_half) = crate::reflect_capture::probe_uniforms(
@@ -8913,6 +8935,7 @@ impl Editor {
             point_color: pl_col,
             point_shape: pl_shape,
             point_rot: pl_rot,
+            point_cone: pl_cone,
             // Meshed terrain reads the triplanar scale + the per-slot NEAREST /
             // GLOW bitmasks here (bitmasks as u32 — bit-exact at 32 slots).
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
@@ -9315,6 +9338,7 @@ impl Editor {
                 point_color: pl_col,
                 point_shape: pl_shape,
                 point_rot: pl_rot,
+                point_cone: pl_cone,
                 blob_tint,
                 blob_emissive,
                 blob_specular,

@@ -235,6 +235,21 @@ pub fn is_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
+/// A typeface a package ships and names, so its own panels can be drawn in it.
+///
+/// `name` is how the package's Lua asks for it and is scoped to that package —
+/// two packages may both ship a face called `"Heading"` without either seeing
+/// the other's. `path` is package-relative and points at a `.ttf` or `.otf`
+/// inside the package folder.
+///
+/// Shipping a face is not a capability: reading a file inside your own folder is
+/// what `require` already does, so this needs no permission.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FontFace {
+    pub name: String,
+    pub path: String,
+}
+
 /// A parsed `package.ron`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -287,6 +302,9 @@ pub struct Manifest {
     pub assets: Vec<String>,
     #[serde(default)]
     pub samples: Vec<Sample>,
+    /// Typefaces this package ships and names, for drawing its own panels.
+    #[serde(default)]
+    pub fonts: Vec<FontFace>,
     #[serde(default)]
     pub permissions: Vec<Permission>,
 }
@@ -332,6 +350,7 @@ impl Manifest {
             scripts: default_script_dirs(),
             assets: default_asset_dirs(),
             samples: Vec::new(),
+            fonts: Vec::new(),
             permissions: Vec::new(),
         }
     }

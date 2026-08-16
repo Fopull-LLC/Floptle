@@ -212,6 +212,21 @@ impl Editor {
 
     pub(crate) fn spawn_node(&mut self, node: &NodeDoc) -> Entity {
         let e = self.world.spawn();
+        self.insert_doc(e, node);
+        e
+    }
+
+    /// Put a node document onto an entity.
+    ///
+    /// Split out of [`Self::spawn_node`] so that writing a document to a node
+    /// that already exists — which is what `scene.set` from a package does —
+    /// goes through the SAME code that loading a scene does, rather than a
+    /// second copy of it that agrees today ([[two-gathers-must-agree]]).
+    ///
+    /// **Adds only.** A field the document leaves out is left alone, not
+    /// removed, which is right for a fresh entity and wrong for a reused one —
+    /// so the reuse path clears first. See `Editor::clear_doc_components`.
+    pub(crate) fn insert_doc(&mut self, e: Entity, node: &NodeDoc) {
         self.world.insert(e, node.transform.to_transform());
         self.world.insert(e, Name(node.name.clone()));
         self.world.insert(e, node.matter.to_matter());
@@ -305,7 +320,81 @@ impl Editor {
         if !node.tags.is_empty() {
             self.world.insert(e, floptle_core::Tags(node.tags.clone()));
         }
-        e
+    }
+
+    /// Take off everything a node document can put on, so that writing a
+    /// document to a live node LEAVES it saying what the document says.
+    ///
+    /// The exhaustive `let NodeDoc { .. }` below is the point of this function:
+    /// a field added to `NodeDoc` stops this compiling, and whoever adds it has
+    /// to decide how a package clears it. A silent no-op here would mean a tool
+    /// that removes a rigidbody appears to work and does not, which is the
+    /// failure this whole API exists to stop being possible.
+    pub(crate) fn clear_doc_components(&mut self, e: Entity, doc: &NodeDoc) {
+        // Named, not `..`, so this is a compile error when NodeDoc grows.
+        #[allow(unused_variables)]
+        let NodeDoc {
+            name,
+            transform,
+            matter,
+            scripts,
+            material,
+            object_materials,
+            rigidbody,
+            celestial,
+            mesh_collider,
+            disabled,
+            paint,
+            tex_paint,
+            terrain_gen,
+            collidable,
+            trigger,
+            nav_exclude,
+            visible,
+            cast_shadow,
+            anim_controller,
+            particles,
+            id,
+            parent_id,
+            parent,
+            attachment,
+            net,
+            ui_layer,
+            ui,
+            audio,
+            layer,
+            tags,
+            sorting,
+            lit_2d,
+            light_layers,
+            shadow_2d,
+            light_inner,
+            light_falloff,
+            light_shadows,
+        } = doc;
+
+        // `name`, `transform` and `matter` are always written by `insert_doc`,
+        // so they need no clearing — a node always has all three.
+        self.world.remove::<Scripts>(e);
+        self.world.remove::<Material>(e);
+        self.world.remove::<floptle_core::ObjectMaterials>(e);
+        self.world.remove::<floptle_core::RigidBody>(e);
+        self.world.remove::<floptle_core::CelestialBody>(e);
+        self.world.remove::<floptle_core::MeshCollider>(e);
+        self.world.remove::<floptle_core::Disabled>(e);
+        self.world.remove::<floptle_core::Collidable>(e);
+        self.world.remove::<floptle_core::Trigger>(e);
+        self.world.remove::<floptle_core::NavMeshExclude>(e);
+        self.world.remove::<floptle_core::Visible>(e);
+        self.world.remove::<floptle_core::CastShadow>(e);
+        self.world.remove::<floptle_core::AnimController>(e);
+        self.world.remove::<floptle_core::ParticleSystem>(e);
+        self.world.remove::<floptle_core::Layer>(e);
+        self.world.remove::<floptle_core::Tags>(e);
+        // `paint`, `tex_paint` and `terrain_gen` are KEYS into per-scene stores
+        // and not components; `id`, `parent_id`, `parent` and `attachment` are
+        // the scene file's linkage, owned by save/load. None of them is a
+        // package's to clear, and `insert_doc` does not write them either.
     }
 
     /// Give `e` a fresh id if its Matter carries one that is 0 or already taken

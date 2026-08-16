@@ -82,6 +82,15 @@ pub(crate) enum ExtCmd {
     NodeSetScale(u32, [f32; 3]),
     NodeSetVisible(u32, bool),
     NodeCreate { name: String, parent: Option<u32> },
+    /// Apply a **partial** node document to an existing node: only the keys
+    /// present are changed. See `scene.set` in `api.rs` for why partial rather
+    /// than whole-document replacement.
+    NodeSet { id: u32, patch: serde_json::Value },
+    /// Create a node — and, if the document names any, its whole subtree — from
+    /// a node document. One command, so it is one undo step.
+    NodeAdd { spec: serde_json::Value, parent: Option<u32> },
+    /// Re-parent. `None` makes it a root. The node keeps its **world** place.
+    NodeSetParent { id: u32, parent: Option<u32> },
     NodeDestroy(u32),
     SpawnPrefab { path: String, pos: Option<[f64; 3]> },
     OpenScene(String),
@@ -94,6 +103,11 @@ pub(crate) enum ExtCmd {
     WindowOpen(u32, bool),
     WindowFocus(u32),
     OverlayOpen(u32, bool),
+    /// Glide the Scene camera until `at` is `distance` straight ahead, keeping
+    /// the view direction. The same move the `F` key makes, aimed at a point
+    /// rather than at the selection — a tool that lists places has to be able
+    /// to take you to one without changing what is selected to do it.
+    LookAt { at: [f64; 3], distance: Option<f64> },
     /// A modal message, shown by the editor next frame.
     Message { title: String, body: String },
 }
@@ -164,6 +178,15 @@ pub(crate) struct Shared {
     /// timer that cancels itself from inside its own callback must not shorten
     /// the list the fire pass is walking.
     pub(crate) cancelled: RefCell<std::collections::HashSet<u32>>,
+    /// Meshes a package asked to read, drained by the editor after the frame.
+    ///
+    /// Queued rather than answered on the spot for the reason `http` is: the
+    /// first read of a model is a file off disk, and a binding cannot reach the
+    /// editor anyway. The callback runs on a later frame, on the main thread.
+    pub(crate) mesh_reqs: RefCell<Vec<MeshReq>>,
+    /// Font names `gui.font` has already complained about, by scoped family.
+    /// A panel draws every frame; the complaint is worth making once.
+    pub(crate) warned_fonts: RefCell<std::collections::HashSet<String>>,
     /// The id `ed.window` / `ed.overlay` hands back. Allocated from Lua, so it
     /// lives on the shared state rather than on the host.
     next_id: std::cell::Cell<u32>,
@@ -175,6 +198,28 @@ impl Shared {
         self.next_id.set(id);
         id
     }
+}
+
+/// Geometry as Lua sees it: flat arrays, and the counts to walk them by.
+fn mesh_table(lua: &Lua, g: &crate::mesh_read::Geometry) -> mlua::Result<mlua::Table> {
+    let t = lua.create_table()?;
+    // `create_sequence_from` builds the array in one go. Setting a hundred
+    // thousand numbers one at a time through `set` is measurably slower and
+    // rehashes the table as it grows.
+    t.set("positions", lua.create_sequence_from(g.positions.iter().copied())?)?;
+    t.set("normals", lua.create_sequence_from(g.normals.iter().copied())?)?;
+    t.set("uvs", lua.create_sequence_from(g.uvs.iter().copied())?)?;
+    t.set("indices", lua.create_sequence_from(g.indices.iter().copied())?)?;
+    t.set("vertices", g.vertex_count())?;
+    t.set("triangles", g.triangle_count())?;
+    t.set("source", g.source)?;
+    Ok(t)
+}
+
+/// One `mesh.read` waiting on the editor.
+pub(crate) struct MeshReq {
+    pub(crate) source: crate::mesh_read::MeshSource,
+    pub(crate) cb: RegistryKey,
 }
 
 /// A registration a package made while loading (or later, from a callback).
@@ -328,6 +373,15 @@ pub(crate) struct ExtHost {
     /// Which panels were open before the last reload, so a reload does not
     /// close everything the author had arranged.
     reopen: HashMap<String, bool>,
+    /// Typefaces the loaded packages ship, read once per reload.
+    ///
+    /// The editor merges these into egui's stack after the load pass and clears
+    /// [`fonts_dirty`](Self::fonts_dirty). An atlas rebuild is expensive, so it
+    /// happens once per reload and never per frame — and not at all when no
+    /// package ships a face, which is almost every project.
+    pub(crate) fonts: Vec<crate::fonts::PackageFont>,
+    /// Set when [`fonts`](Self::fonts) changed and egui has not been told yet.
+    pub(crate) fonts_dirty: bool,
     /// The one table every package's environment falls through to.
     ///
     /// This is how `gui` can exist for the length of one callback and not a
@@ -360,6 +414,8 @@ impl ExtHost {
             timers: Vec::new(),
             report: LoadReport::default(),
             reopen: HashMap::new(),
+            fonts: Vec::new(),
+            fonts_dirty: false,
             dynamic: None,
         }
     }
@@ -407,7 +463,17 @@ impl ExtHost {
         self.shortcuts.clear();
         self.hooks.clear();
         self.timers.clear();
+        // A reload REPLACES the set rather than accumulating: the faces of a
+        // package that has just been switched off must stop being registered.
+        // Only mark it dirty if there was something to drop, so a project with
+        // no package fonts never rebuilds the atlas.
+        if !self.fonts.is_empty() {
+            self.fonts.clear();
+            self.fonts_dirty = true;
+        }
         self.shared.cancelled.borrow_mut().clear();
+        self.shared.warned_fonts.borrow_mut().clear();
+        self.shared.mesh_reqs.borrow_mut().clear();
         self.shared.pending.borrow_mut().clear();
         self.shared.handles.borrow_mut().clear();
         self.shared.cmds.borrow_mut().clear();
@@ -429,6 +495,23 @@ impl ExtHost {
             failed: None,
         };
         self.packages.push(state);
+
+        // Before the scripts run, and whether or not there are any: a font is
+        // an asset, and a package may ship faces for another package's panels
+        // to name. Failures are Console lines, once each, at load — never a
+        // tofu row and never once a frame.
+        if !pkg.manifest.fonts.is_empty() {
+            let (faces, problems) =
+                crate::fonts::read_package_fonts(pkg.id(), &pkg.root, &pkg.manifest.fonts);
+            for msg in problems {
+                self.warn(idx, msg);
+            }
+            if !faces.is_empty() {
+                self.fonts.extend(faces);
+                self.fonts_dirty = true;
+            }
+        }
+
         if scripts.is_empty() {
             return; // an assets-only package is a perfectly good package
         }
@@ -481,6 +564,18 @@ impl ExtHost {
         }
         self.shared.log.borrow_mut().push(ExtLog {
             level: ExtLevel::Error,
+            msg: why,
+            from: name,
+        });
+    }
+
+    /// Something went wrong in a package that is not worth refusing to load it
+    /// over — a font file that would not read, say. One Console line, and the
+    /// package keeps running.
+    fn warn(&mut self, pkg: usize, why: String) {
+        let name = self.packages.get(pkg).map(|p| p.name.clone()).unwrap_or_default();
+        self.shared.log.borrow_mut().push(ExtLog {
+            level: ExtLevel::Warn,
             msg: why,
             from: name,
         });
@@ -541,8 +636,19 @@ impl ExtHost {
     }
 
     pub(crate) fn begin_frame(&mut self, snap: Snapshot, scene: SceneMirror) {
-        *self.shared.snap.borrow_mut() = snap;
         *self.shared.scene.borrow_mut() = scene;
+        self.begin_frame_keeping_scene(snap);
+    }
+
+    /// Start a frame without rebuilding the scene mirror.
+    ///
+    /// The mirror is a copy of the whole scene and the scene does not change
+    /// while somebody reads a panel, so it is replaced when the world's
+    /// revision moves and left alone otherwise. Kept in place rather than
+    /// cached-and-cloned on the editor: a clone per frame would cost exactly
+    /// what building it cost.
+    pub(crate) fn begin_frame_keeping_scene(&mut self, snap: Snapshot) {
+        *self.shared.snap.borrow_mut() = snap;
         self.shared.handles.borrow_mut().clear();
         self.shared.repaint.set(false);
         self.shared.web.borrow_mut().pump();
@@ -632,6 +738,39 @@ impl ExtHost {
 
     /// Fire the web replies that arrived since the last frame.
     pub(crate) fn pump_web(&mut self) {
+        // Frames first, so a stream's last frame reaches Lua before the `onEnd`
+        // that says the stream is over. The other order would deliver "done"
+        // and then a progress step, which reads as a bug in the package.
+        let frames = self.shared.web.borrow_mut().take_frames();
+        for (id, event, data) in frames {
+            let cb = {
+                let web = self.shared.web.borrow();
+                let Some(key) = web.frame_callback(id) else { continue };
+                self.func(key)
+            };
+            let Some(func) = cb else { continue };
+            let table = match self.lua.create_table() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if table.set("event", event).is_err() || table.set("data", data).is_err() {
+                continue;
+            }
+            if let Err(e) = func.call::<()>(table) {
+                self.shared.log.borrow_mut().push(ExtLog {
+                    level: ExtLevel::Error,
+                    msg: format!("a stream frame raised: {}", trim_lua_error(&e.to_string())),
+                    from: String::new(),
+                });
+                // One raise per stream is enough to say what is wrong; a frame
+                // callback that throws sixty times a second is not more
+                // informative, it is just louder.
+                self.shared.web.borrow_mut().stop_stream(id);
+            }
+        }
+        for key in self.shared.web.borrow_mut().take_finished_keys() {
+            self.lua.remove_registry_value(key).ok();
+        }
         let replies = self.shared.web.borrow_mut().take_ready();
         for (cb, value) in replies {
             let Some(func) = self.func(&cb) else { continue };
@@ -648,6 +787,49 @@ impl ExtHost {
             }
             self.lua.remove_registry_value(cb).ok();
         }
+        self.drain_pending();
+    }
+
+    /// Everything a package asked to read this frame.
+    pub(crate) fn take_mesh_requests(&self) -> Vec<MeshReq> {
+        self.shared.mesh_reqs.borrow_mut().drain(..).collect()
+    }
+
+    /// Hand one mesh read back to the Lua that asked for it.
+    ///
+    /// The table is built HERE rather than in the editor because it is Lua's
+    /// shape, not the editor's — and it is built once per read, not per frame.
+    pub(crate) fn deliver_mesh(
+        &mut self,
+        cb: RegistryKey,
+        result: Result<crate::mesh_read::Geometry, String>,
+    ) {
+        let called = self.func(&cb).map(|func| {
+            let arg = match &result {
+                Ok(g) => match mesh_table(&self.lua, g) {
+                    Ok(t) => mlua::Value::Table(t),
+                    Err(_) => mlua::Value::Nil,
+                },
+                Err(_) => mlua::Value::Nil,
+            };
+            let why = match &result {
+                Ok(_) => mlua::Value::Nil,
+                Err(e) => self
+                    .lua
+                    .create_string(e)
+                    .map(mlua::Value::String)
+                    .unwrap_or(mlua::Value::Nil),
+            };
+            func.call::<()>((arg, why))
+        });
+        if let Some(Err(e)) = called {
+            self.shared.log.borrow_mut().push(ExtLog {
+                level: ExtLevel::Error,
+                msg: format!("a mesh read raised: {}", trim_lua_error(&e.to_string())),
+                from: String::new(),
+            });
+        }
+        self.lua.remove_registry_value(cb).ok();
         self.drain_pending();
     }
 
@@ -675,7 +857,7 @@ impl ExtHost {
             return;
         }
         let Some(func) = self.func(&self.windows[which].cb) else { return };
-        if let Err(e) = self.call_with_ui(&func, ui) {
+        if let Err(e) = self.call_with_ui(pkg, &func, ui) {
             let msg = trim_lua_error(&e.to_string());
             self.windows[which].error = Some(msg.clone());
             self.fail(pkg, format!("panel: {msg}"));
@@ -694,7 +876,7 @@ impl ExtHost {
             return;
         }
         let Some(func) = self.func(&self.overlays[which].cb) else { return };
-        if let Err(e) = self.call_with_ui(&func, ui) {
+        if let Err(e) = self.call_with_ui(pkg, &func, ui) {
             let msg = trim_lua_error(&e.to_string());
             self.overlays[which].error = Some(msg.clone());
             self.fail(pkg, format!("overlay: {msg}"));
@@ -727,13 +909,24 @@ impl ExtHost {
     /// Call `func` with `gui.*` bound to `ui` for exactly the length of the
     /// call. See the module docs: this is the one place an extension touches
     /// anything of the editor's directly, and it is undone before returning.
-    fn call_with_ui(&self, func: &mlua::Function, ui: &mut egui::Ui) -> mlua::Result<()> {
+    fn call_with_ui(&self, pkg: usize, func: &mlua::Function, ui: &mut egui::Ui) -> mlua::Result<()> {
         let Some(dynamic) = self.dynamic_table() else {
             return Err(mlua::Error::runtime("the extension host has no environment"));
         };
+        let (pkg_id, pkg_name) = match self.packages.get(pkg) {
+            Some(p) => (p.id.as_str(), p.name.as_str()),
+            None => ("", ""),
+        };
+        let fonts = gui::FontScope {
+            pkg_id,
+            pkg_name,
+            faces: &self.fonts,
+            warned: &self.shared.warned_fonts,
+            log: &self.shared.log,
+        };
         let slot = RefCell::new(gui::UiSlot::new(ui));
         self.lua.scope(|scope| {
-            let table = gui::bind(&self.lua, scope, &slot)?;
+            let table = gui::bind(&self.lua, scope, &slot, &fonts)?;
             dynamic.set("gui", table)?;
             let r = func.call::<()>(());
             // Taken away again whatever happened — a raised callback must not

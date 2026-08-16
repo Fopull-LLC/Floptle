@@ -1153,6 +1153,28 @@ pub enum LightShape {
     Tube { length: f32, radius: f32 },
 }
 
+/// The cone angle at and above which a lamp is not a spot at all.
+///
+/// 180° rather than 360°, because the angle is the FULL cone: a 180° cone is
+/// already a whole hemisphere, and past that the "cone" contains every direction
+/// a surface in front of the lamp could be. Anything at or over this is packed
+/// as an ordinary omnidirectional light and costs the shader nothing.
+pub const OMNI_ANGLE: f32 = 180.0;
+
+/// Narrowest a spot may be, in degrees. A cone with no width lights nothing, and
+/// a zero here would read in the viewport as the lamp having stopped working.
+pub const MIN_SPOT_ANGLE: f32 = 1.0;
+
+/// Is this lamp aimed?
+///
+/// One predicate rather than `< 180.0` written in eight places, because the
+/// boundary is the thing that has to agree between the gather, the Inspector,
+/// the gizmo, the scene writer and the script API — and eight copies of a
+/// comparison is eight chances for one of them to be `<=`.
+pub fn is_spot(spot_angle: f32) -> bool {
+    spot_angle.is_finite() && spot_angle < OMNI_ANGLE
+}
+
 impl LightShape {
     /// The largest half-dimension of the emitter, in world units — how far the
     /// light's own surface reaches from the node. Zero for a point.
@@ -1271,6 +1293,30 @@ pub enum Matter {
         /// stops when you look away from it. The scene-wide quality and darkness
         /// are on the Lighting node, not here.
         shadows: bool,
+        /// **Aim it.** The full cone angle in degrees, down the node's local −Z —
+        /// the same axis a camera looks down, so pointing a lamp and pointing a
+        /// camera are the same gesture and the same gizmo.
+        ///
+        /// [`OMNI_ANGLE`] (180°) or more means **no cone at all**, which is the
+        /// default and is exactly the omnidirectional light this has always
+        /// been. A spot is not a second kind of node here: aiming is a property
+        /// a lamp has or does not have, and every other property — the emitter
+        /// shape, the range, the local shadows, the layer mask, the fog
+        /// injection — is the same question either way.
+        ///
+        /// A **full** angle rather than a half angle because that is the number
+        /// on a real fixture and the one every other engine's Inspector shows.
+        /// The half-angle is what the shader wants and the conversion happens
+        /// once, where the light is packed.
+        spot_angle: f32,
+        /// How much of the cone's edge is falloff rather than full brightness,
+        /// 0–1. At 0 the edge is a hard circle; at 1 the light fades from the
+        /// centre of the cone all the way out.
+        ///
+        /// A fraction of the cone rather than a second angle in degrees, so
+        /// widening a spot keeps the softness it was given instead of turning a
+        /// soft edge hard.
+        spot_softness: f32,
     },
     /// A gravity source for the physics sim — `Down` for normal-style level gravity,
     /// `Radial` for a planet (Mario-Galaxy) gravity well centered on the node.

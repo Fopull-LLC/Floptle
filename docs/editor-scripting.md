@@ -118,6 +118,7 @@ Everything a package registers goes away on ⟲ Reload, timers included.
 | `ed.saveScene()` / `ed.openScene(rel)` | |
 | `ed.play()` / `ed.stop()` | |
 | `ed.message(title, body)` | a modal with an OK button |
+| `ed.lookAt(point [, distance])` | glide the Scene camera to a place — see below |
 | `ed.openUrl(url)` | `Browser` permission. `http://` and `https://` only |
 | `ed.repaint()` | draw again promptly (for an animating panel) |
 | `ed.log(…)` / `ed.warn(…)` / `ed.error(…)` | to the Console, tagged with your package's name. `print` does the same |
@@ -128,6 +129,23 @@ Everything a package registers goes away on ⟲ Reload, timers included.
 > sign-in challenge, a nonce, a token or an id that must not collide. Lua strings
 > are byte strings, so the result is raw bytes and turning them into hex or
 > base64url is yours to do.
+
+### Taking somebody to a place
+
+```lua
+ed.lookAt(vec3(12, 0, -4))       -- ten metres back from there
+ed.lookAt(hit.point, 3)          -- closer
+```
+
+The same move the `F` key makes — the view angle is kept and the camera glides
+rather than jumping — aimed at a **point** instead of at the selection. Any tool
+with a list of places in it needs this: a search result, a lint hit, a
+measurement, a suggested position. The alternative is selecting a node in order
+to move a camera, which is an edit to somebody's selection made behind their
+back.
+
+Nothing is selected, nothing is changed, and it does not care whether there is
+anything at the point.
 
 ### Remembering things
 
@@ -229,9 +247,77 @@ Edits:
 | `scene.setName(id, name)` | |
 | `scene.setPos(id, v)` / `scene.setScale(id, v)` / `scene.setRot(id, x, y, z, w)` | |
 | `scene.setVisible(id, on)` | |
+| `scene.setParent(id, parentId or nil)` | keeps the node where it is standing |
 | `scene.create(name [, parentId])` | an empty node |
 | `scene.destroy(id)` | the node and its whole subtree |
 | `scene.spawnPrefab(path [, at])` | |
+
+### Reading and writing the whole node
+
+The setters above name one property each, and a tool that *builds* a level needs
+the rest of them. `scene.set` and `scene.add` take the node **document** — the
+same shape a `.ron` scene, a prefab and the clipboard all use — so anything a
+node can be, a package can write.
+
+```lua
+-- Read one. `scene.doc` answers the whole node, in the same shape you write.
+local doc = scene.doc(selection.active())
+doc.name = doc.name .. " copy"
+doc.transform.translation = { x, y, z }
+scene.add(doc)          -- a real copy: its mesh, material, collider, tags
+```
+
+> **`scene.doc` reads a node in the selection.** That is a real limit and worth
+> knowing rather than discovering: a node's document is every component it has,
+> serialised, and building the whole scene's would mean rebuilding all of them on
+> every frame of a gizmo drag in any project that had such a package installed.
+> The selection is what a tool acts on and it is a handful of nodes.
+>
+> Asking for one that is not selected **raises**, saying so, rather than
+> answering nil — a read that quietly returns nothing is how a tool places an
+> empty node and reports success. `selection.set({id})` first, or use
+> `scene.info(id)` for the summary, which is always available for every node.
+
+```lua
+-- Change what you name, and nothing else.
+scene.set(id, { tags = {"cover", "movable"}, layer = "props" })
+scene.set(id, { rigidbody = { mode = "Static" }, collidable = true })
+scene.set(id, { transform = { translation = {4, 0, 2} } })   -- keeps the rotation
+
+-- Build a room and everything in it: one call, one undo step.
+ed.undo()
+scene.add({
+    name = "Guard Post",
+    transform = { translation = {12, 0, -8} },
+    children = {
+        { name = "Crate", matter = { Primitive = { shape = "Cube", color = {0.6,0.5,0.4} } },
+          tags = {"cover"}, collidable = true },
+        { name = "Lamp",  matter = { PointLight = { color = {1,0.9,0.7}, intensity = 8 } } },
+    },
+})
+```
+
+**`scene.set` is a patch.** Only the keys you name change — which is what lets a
+tool tint a light without knowing what else that light is, and what stops a tool
+written for 0.64 from silently clearing a field 0.70 adds. Nested keys merge one
+level, so naming `transform.translation` leaves the rotation and scale alone; a
+list is a value, so `tags = {"cover"}` sets the tags to exactly that.
+
+**A key that is not a node property is refused and named**, with the property you
+probably meant. Nothing is half-applied: a typo three nodes down inside a
+`children` list costs a Console line, not half a room.
+
+**The node keeps its id.** An id you took last frame still names the same node
+after a write, and its children stay under it.
+
+`scene.info(id)` is the quickest way to see what a node of some kind carries —
+the document uses the same names, and every field of it is in `docs/scripting.md`
+alongside the node types themselves.
+
+> Four keys are the scene *file's* and not yours: `id`, `parent_id`, `parent`
+> and `attachment`. They link nodes together by position in a list, and a package
+> re-pointing one wires the scene to something else without warning. Use the ids
+> `scene.*` gives you, and `scene.setParent`.
 
 `selection.get()`, `selection.active()`, `selection.set(ids)` and
 `selection.clear()` do what they say.
@@ -368,6 +454,9 @@ what follows to the far end of a row) · `available() → {w, h}`
 **Feedback** — `progress(fraction [, text])` · `spinner()` ·
 `helpBox(text [, "info" | "warn" | "error"])`
 
+**Type** — `font(name, fn)` · `hasFont(name) → boolean`. See
+[Your own typeface](#your-own-typeface).
+
 Pass `true` as `textField`'s third argument to take the keyboard this frame —
 what a panel opened by a shortcut wants, so it can be typed into straight away.
 
@@ -383,6 +472,106 @@ Coordinates are pixels from the panel's top-left.
 painted, which is the call everybody forgets.
 
 **Input** — `mouse() → {x, y, inside}` · `clicked()`
+
+### Your own typeface
+
+A tool that arrives with a brand should be able to keep it. Ship the font in your
+package and name it:
+
+```ron
+// package.ron
+fonts: [ (name: "Heading", path: "fonts/YourFace-Black.ttf") ]
+```
+
+```lua
+gui.font("Heading", function()
+    gui.heading("Lumen")
+    gui.small("LIGHTING TOOLS")
+end)
+```
+
+`.ttf`, `.otf` and `.ttc`. The path is inside your package folder and cannot
+leave it — which is why shipping a face needs **no permission**: reading a file
+of your own is what `require` already does.
+
+Everything drawn inside the closure uses that face, and **only the family
+changes** — sizes are left alone, so `gui.heading` inside is still bigger than
+`gui.label` inside. It applies to `monospace` too: a package that ships a mono
+face and asks for it means it.
+
+There is no `gui.setFont`. A face is chosen for the length of a closure, like
+every other nesting call here, because a mode that outlives the panel that
+switched it on is a mode somebody forgets to switch off.
+
+> **The name is yours alone.** Two packages may both ship a `"Heading"` and
+> neither sees the other's — names are scoped to the package that declared them.
+
+A face that will not load is one line in the Console naming your package and the
+file, and the panel draws in the editor's type. Never a row of tofu, and never
+once a frame. `gui.hasFont(name)` is the same answer in advance, for a tool that
+would rather draw its wordmark as an image than as the wrong type.
+
+> A display face usually ships an alphabet and little else, so the editor's own
+> stack sits behind yours as a fallback — a heading with an arrow or an emoji in
+> it still draws.
+
+---
+
+## `mesh` — the triangles behind a node
+
+Everything else here answers with a box. This answers with the geometry: what a
+node is actually made of, or what is in a model file.
+
+```lua
+mesh.read(id, function(m, err)
+    if not m then ed.warn(err) return end
+    ed.log(m.vertices .. " vertices, " .. m.triangles .. " triangles")
+end)
+
+mesh.read("assets/models/chair.glb", function(m) … end)   -- a file, by path
+```
+
+A **callback**, like `http`, and for the same reason: the first read of a model
+is a file off disk. Your callback runs on a later frame, on the main thread. A
+read that cannot be answered still calls back — with `nil` and a reason, never
+silently.
+
+| | |
+| --- | --- |
+| `m.positions` | `{x, y, z, x, y, z, …}` |
+| `m.normals` / `m.uvs` | the same shape, empty where the source has none |
+| `m.indices` | triangle corners, **zero-based** |
+| `m.vertices` / `m.triangles` | how many, so you can loop without dividing |
+| `m.source` | `"model"`, `"map"` or `"primitive"` |
+
+**Flat arrays, not a table per vertex.** A table each costs one of Lua's ~8000
+registry slots and the editor *crashes* when they run out, so a hundred-thousand
+vertex model has to arrive like this. Walk it by index:
+
+```lua
+for t = 0, m.triangles - 1 do
+    local a = m.indices[t * 3 + 1]          -- Lua is 1-based…
+    local x = m.positions[a * 3 + 1]        -- …but an index is 0-based
+end
+```
+
+> **Indices are zero-based** even though Lua's tables are not, because every
+> mesh format and every consumer of one counts from zero. Converting would make
+> `positions[indices[i] * 3 + 1]` wrong in a way nothing would report.
+
+**Positions are in the node's own space**, which is what a mesh file holds and
+what an exporter wants — `scene.info(id)` carries the transform to place them
+with. Returning world space would bake the current transform into data you might
+be about to save.
+
+No permission is needed: it reads what is in the scene, which the same package
+can already measure and draw. Reading a file *outside* your package still needs
+`Files`.
+
+Terrain has no fixed triangles — it is meshed per chunk at the detail it is
+viewed at — so `mesh.read` says so rather than picking a level of detail for
+you. Sample it with `scene.raycast`. `mesh.maxTriangles` is the ceiling on one
+read.
 
 ---
 
@@ -421,6 +610,50 @@ bound — pass `0` to let the machine pick a free one. It answers the first requ
 that arrives, hands your callback `{ path, query, body }`, and closes. It closes
 itself anyway after five minutes, when the package reloads, and when the project
 does. `http.stopListening()` closes it early.
+
+### Streaming — a progress bar that moves
+
+A long job on a server usually offers **Server-Sent Events**: one open
+connection the server writes to as it goes, instead of you asking "done yet?"
+every second.
+
+```lua
+local s = http.stream(url, { headers = { Authorization = key } },
+    function(frame)          -- once per event
+        if frame.event == "progress" then
+            pct = json.decode(frame.data).pct
+            ed.repaint()
+        end
+    end,
+    function(res)            -- once, when the connection closes
+        if not res.ok then pollInstead() end
+    end)
+```
+
+Each `frame` is `{ event, data }`. `data` is the text the server sent — decode
+it yourself, since a server may stream JSON, plain text or nothing at all. An
+event with no name is `"message"`, which is what the protocol says it means.
+
+**Comments and keepalives never reach you.** Servers hold a connection open
+through proxies by sending `: keepalive` every few seconds; that is protocol, not
+data, and a package should not have to know it exists.
+
+The handle answers `s:cancel()` and `s:isOpen()`. A stream closes itself when the
+server closes it, when the package reloads, when the project does, and after 90
+seconds of complete silence — not even a keepalive — which is a dead connection
+rather than a quiet one. Cancelling takes effect within about ten seconds on the
+network side; your callbacks stop immediately.
+
+> **`onEnd` is not "it worked".** It says the connection closed, and `res.ok`
+> tells you whether it closed the way it meant to. A server that has no streaming
+> endpoint answers with a status instead, which arrives as `res.ok == false` and
+> `res.status == 404` — that is your cue to fall back to polling, and it is worth
+> writing that fallback, because a stream is the thing most likely to be blocked
+> by somebody's proxy.
+
+Four streams may be open at once. If a server sends frames faster than the editor
+draws, frames are dropped rather than queued without limit, and `res.error` says
+how many when the stream ends.
 
 ---
 

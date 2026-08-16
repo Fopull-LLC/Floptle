@@ -105,6 +105,14 @@ pub(crate) struct LightSlots {
     /// The emitter's world orientation (xyzw quaternion) — a rect faces the
     /// node's forward, a tube lies along its local X.
     pub rot: [[f32; 4]; 16],
+    /// The CONE, for a lamp that is aimed: `[cos(outer half angle),
+    /// cos(inner half angle), 0, 0]`. `-1` in `x` is **no cone**, which is what
+    /// every omnidirectional light gets and what the default fills.
+    ///
+    /// Cosines rather than degrees because the shader compares them against a
+    /// dot product; converting here costs two `cos` per light per frame instead
+    /// of an `acos` per lit pixel per light.
+    pub cone: [[f32; 4]; 16],
 }
 
 impl Default for LightSlots {
@@ -117,6 +125,9 @@ impl Default for LightSlots {
             falloff: [[0.0; 4]; 16],
             shape: [[0.0; 4]; 16],
             rot: [[0.0, 0.0, 0.0, 1.0]; 16],
+            // -1 is "no cone": every direction is inside it, so an unset slot
+            // and a slot holding an omnidirectional lamp are the same value.
+            cone: [[-1.0, -1.0, 0.0, 0.0]; 16],
         }
     }
 }
@@ -167,7 +178,11 @@ pub(crate) fn split_point_lights(
     let mut three: Vec<Candidate> = Vec::new();
     let mut two: Vec<Candidate> = Vec::new();
     for (e, m) in world.query::<Matter>() {
-        let Matter::PointLight { color, intensity, range, shape, shadows } = m else { continue };
+        let Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness } =
+            m
+        else {
+            continue;
+        };
         // A light turned off does not take a slot. Keeping N lights and parking
         // the spare ones at zero is the standard way to pool a capped resource —
         // and scripts cannot create a PointLight, so it is the ONLY way. A
@@ -200,6 +215,7 @@ pub(crate) fn split_point_lights(
             falloff: lit.falloff_lane(*range),
             shape: emitter_lane(*shape, wt.scale, *shadows),
             rot: [q.x, q.y, q.z, q.w],
+            cone: cone_lane(*spot_angle, *spot_softness),
         });
     }
     let dropped = three.len().saturating_sub(16) + two.len().saturating_sub(16);
@@ -211,6 +227,30 @@ pub(crate) fn split_point_lights(
 /// The node's SCALE is folded in here rather than in the shader, because that is
 /// what dragging a scale handle on a window light is expected to do — and doing
 /// it once per light per frame beats doing it once per light per fragment.
+/// A lamp's cone packed for the shader: `[cos(outer half), cos(inner half), 0, 0]`.
+///
+/// `-1` in `x` means no cone. A cosine of −1 is the angle 180°, so "no cone" is
+/// not a sentinel the shader has to remember — it is the widest cone there is,
+/// and a lamp with it behaves as an omnidirectional light *by arithmetic*
+/// rather than by a branch somebody could forget.
+///
+/// The angle is the FULL cone, so both are halved here. That conversion happens
+/// exactly once, in this function, because a half angle and a full angle look
+/// identical in a struct field and telling them apart later means measuring a
+/// light in the viewport.
+fn cone_lane(spot_angle: f32, spot_softness: f32) -> [f32; 4] {
+    if !floptle_core::is_spot(spot_angle) {
+        return [-1.0, -1.0, 0.0, 0.0];
+    }
+    let outer = spot_angle.clamp(floptle_core::MIN_SPOT_ANGLE, floptle_core::OMNI_ANGLE) * 0.5;
+    // Softness is a fraction OF the cone, so a spot keeps the edge it was given
+    // when somebody widens it. Capped just below 1 so the inner and outer angles
+    // can never coincide, which would make the smoothstep divide by zero and
+    // put a hard ring where a soft edge was asked for.
+    let inner = outer * (1.0 - spot_softness.clamp(0.0, 0.999));
+    [outer.to_radians().cos(), inner.to_radians().cos(), 0.0, 0.0]
+}
+
 fn emitter_lane(shape: floptle_core::LightShape, scale: Vec3, shadows: bool) -> [f32; 4] {
     use floptle_core::LightShape as S;
     // A uniform-ish scale for the shapes that only have a radius: the largest
@@ -257,6 +297,7 @@ struct Candidate {
     falloff: [f32; 4],
     shape: [f32; 4],
     rot: [f32; 4],
+    cone: [f32; 4],
 }
 
 /// How much a light can matter to this frame: how bright it is, against how far
@@ -295,6 +336,7 @@ fn fill(mut lights: Vec<Candidate>) -> LightSlots {
         out.falloff[i] = l.falloff;
         out.shape[i] = l.shape;
         out.rot[i] = l.rot;
+        out.cone[i] = l.cone;
     }
     out
 }
@@ -1014,7 +1056,7 @@ mod light_split_tests {
 
     fn light_at(world: &mut World, x: f64, mode: Option<Lighting2D>) -> floptle_core::Entity {
         let e = world.spawn();
-        world.insert(e, Matter::PointLight { color: [1.0, 0.5, 0.25], intensity: 2.0, range: 8.0, shape: Default::default() , shadows: false});
+        world.insert(e, Matter::PointLight { color: [1.0, 0.5, 0.25], intensity: 2.0, range: 8.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25});
         world.insert(
             e,
             floptle_core::transform::Transform {
@@ -1121,10 +1163,10 @@ mod light_split_tests {
         let dark = light_at(&mut world, 0.0, None);
         world.insert(
             dark,
-            Matter::PointLight { color: [1.0; 3], intensity: 0.0, range: 8.0, shape: Default::default() , shadows: false},
+            Matter::PointLight { color: [1.0; 3], intensity: 0.0, range: 8.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25},
         );
         let spent = light_at(&mut world, 1.0, None);
-        world.insert(spent, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 0.0, shape: Default::default() , shadows: false});
+        world.insert(spent, Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 0.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25});
         light_at(&mut world, 2.0, None); // the only one actually lighting anything
 
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
@@ -1198,5 +1240,98 @@ mod light_split_tests {
         let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
         assert_eq!(s.two_d.count, 16, "the 2D side fills up");
         assert_eq!(s.three_d.count, 3, "…and the 3D side still gets all of its own");
+    }
+
+    // ---- spot lights -------------------------------------------------------
+
+    /// The whole promise of the design: a lamp nobody aimed is packed exactly as
+    /// it was before spots existed, and the shader's "no cone" branch is the one
+    /// it takes.
+    #[test]
+    fn a_lamp_nobody_aimed_packs_as_no_cone_at_all() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, floptle_core::Transform::IDENTITY);
+        world.insert(
+            e,
+            Matter::PointLight {
+                color: [1.0; 3],
+                intensity: 1.0,
+                range: 10.0,
+                shape: Default::default(),
+                shadows: false,
+                spot_angle: floptle_core::OMNI_ANGLE,
+                spot_softness: 0.25,
+            },
+        );
+        let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
+        assert_eq!(s.three_d.count, 1);
+        assert_eq!(
+            s.three_d.cone[0][0], -1.0,
+            "an omnidirectional lamp must pack the no-cone sentinel"
+        );
+    }
+
+    /// The FULL angle is halved exactly once, and the cosine runs the right way
+    /// round. Both are invisible mistakes: a spot twice as wide as its number
+    /// still looks like a spot, and an inverted cosine lights everything the
+    /// cone should have excluded.
+    #[test]
+    fn a_cone_is_packed_as_the_cosine_of_its_half_angle() {
+        // A 60° cone reaches zero 30° off axis.
+        let c = cone_lane(60.0, 0.0);
+        assert!((c[0] - 30f32.to_radians().cos()).abs() < 1e-6, "{c:?}");
+        // Zero softness: full brightness right up to the edge, so both angles
+        // coincide.
+        assert!((c[1] - c[0]).abs() < 1e-6, "a hard edge has no falloff band: {c:?}");
+
+        // A NARROWER cone has a LARGER cosine. Getting this backwards is the
+        // one error `smoothstep(outer, inner, …)` would hide by simply
+        // inverting the beam.
+        let narrow = cone_lane(20.0, 0.25);
+        let wide = cone_lane(120.0, 0.25);
+        assert!(narrow[0] > wide[0], "narrow {narrow:?} vs wide {wide:?}");
+
+        // Softness is a FRACTION of the cone: the inner angle is inside the
+        // outer one, never outside it.
+        let soft = cone_lane(60.0, 0.5);
+        assert!(soft[1] > soft[0], "the full-brightness angle is the narrower one: {soft:?}");
+
+        // …and it can never make the two coincide, which would divide by zero
+        // in the shader and put a hard ring where a soft edge was asked for.
+        let softest = cone_lane(60.0, 1.0);
+        assert!(softest[1] > softest[0], "{softest:?}");
+    }
+
+    /// A spot is packed through the same path as every other lamp — same slot,
+    /// same budget, same emitter shape. That is the point of it being a field
+    /// rather than a second node type.
+    #[test]
+    fn a_spot_is_an_ordinary_lamp_that_also_carries_a_cone() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.insert(e, floptle_core::Transform::IDENTITY);
+        world.insert(
+            e,
+            Matter::PointLight {
+                color: [1.0, 0.5, 0.25],
+                intensity: 2.0,
+                range: 8.0,
+                shape: floptle_core::LightShape::Sphere { radius: 0.3 },
+                shadows: true,
+                spot_angle: 45.0,
+                spot_softness: 0.25,
+            },
+        );
+        let s = split_point_lights(&world, DVec3::ZERO, &layers(), false);
+        assert_eq!(s.three_d.count, 1);
+        assert_eq!(s.three_d.pos[0][3], 8.0, "range is untouched by the cone");
+        assert_eq!(s.three_d.shape[0][0], 1.0, "and so is the emitter shape");
+        assert!(s.three_d.cone[0][0] > -1.0, "but it is aimed: {:?}", s.three_d.cone[0]);
+        assert!(
+            (s.three_d.cone[0][0] - 22.5f32.to_radians().cos()).abs() < 1e-6,
+            "{:?}",
+            s.three_d.cone[0]
+        );
     }
 }

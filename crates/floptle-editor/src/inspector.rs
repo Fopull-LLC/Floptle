@@ -2639,9 +2639,18 @@ impl EditorTabViewer<'_> {
                                     cmd.camera_from_view = Some(e);
                                 }
                             }
-                            Matter::PointLight { color, intensity, range, shape, shadows } => {
+                            Matter::PointLight {
+                                color,
+                                intensity,
+                                range,
+                                shape,
+                                shadows,
+                                spot_angle,
+                                spot_softness,
+                            } => {
                                 use floptle_core::LightShape as LS;
-                                ui.label("light");
+                                let aimed = floptle_core::is_spot(*spot_angle);
+                                ui.label(if aimed { "spot light" } else { "light" });
                                 ui.small("position and facing come from the transform below");
                                 ui.horizontal(|ui| {
                                     ui.label("color");
@@ -2662,6 +2671,55 @@ impl EditorTabViewer<'_> {
                                          the Lighting node.",
                                     )
                                     .changed();
+                                // AIMING it. Above the emitter section because
+                                // it is the bigger question — "does this lamp
+                                // light the room or one thing in it" changes
+                                // what every control under it means.
+                                ui.separator();
+                                let mut on = aimed;
+                                if ui
+                                    .checkbox(&mut on, "aim it (spot)")
+                                    .on_hover_text(
+                                        "cone down the node's forward, the same axis a camera looks \
+                                         down — rotate the node to aim it. Off means the lamp lights \
+                                         everything around it, which is what it has always done.",
+                                    )
+                                    .changed()
+                                {
+                                    // Turning it off parks the angle at omni and
+                                    // KEEPS the softness, so switching a spot off
+                                    // and on again gives back the same cone
+                                    // rather than the default one.
+                                    *spot_angle =
+                                        if on { 45.0 } else { floptle_core::OMNI_ANGLE };
+                                    cmd.inspector_changed = true;
+                                }
+                                if on {
+                                    cmd.inspector_changed |= ui
+                                        .add(
+                                            egui::Slider::new(
+                                                spot_angle,
+                                                floptle_core::MIN_SPOT_ANGLE
+                                                    ..=floptle_core::OMNI_ANGLE - 0.5,
+                                            )
+                                            .text("cone")
+                                            .suffix("°"),
+                                        )
+                                        .on_hover_text(
+                                            "the FULL angle, the number on a real fixture — 45° is a \
+                                             45° cone, not a 90° one",
+                                        )
+                                        .changed();
+                                    cmd.inspector_changed |= ui
+                                        .add(egui::Slider::new(spot_softness, 0.0..=1.0).text("edge"))
+                                        .on_hover_text(
+                                            "how much of the cone is falloff. 0 is a hard circle; 1 \
+                                             fades from the middle out. A fraction of the cone, so \
+                                             widening the beam keeps the edge you gave it.",
+                                        )
+                                        .changed();
+                                }
+
                                 // The EMITTER. Switching shape keeps whatever
                                 // size the old one had where the two agree, so
                                 // trying rect against disk is one click and not
@@ -6725,7 +6783,7 @@ mod tests {
     fn auto_shows_what_it_inferred_and_why() {
         let layers = vec!["Default".to_string(), "Background".to_string()];
 
-        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false}, true);
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25}, true);
         let (painted, _) = run_lighting_2d(&world, e, &layers);
         assert!(painted.contains("2D light"), "no row at all:\n{painted}");
         assert!(painted.contains("auto"), "the flag is not shown:\n{painted}");
@@ -6733,7 +6791,7 @@ mod tests {
         assert!(painted.contains("orthographic"), "…nor why:\n{painted}");
 
         // The same light in a 3D scene decides the other way, and says so.
-        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false}, false);
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25}, false);
         let (painted, _) = run_lighting_2d(&world, e, &layers);
         assert!(painted.contains("→ 3D"), "a light in a perspective scene must read 3D:\n{painted}");
     }
@@ -6774,7 +6832,7 @@ mod tests {
     #[test]
     fn unticking_a_layer_keeps_the_rest() {
         let layers = vec!["Default".to_string(), "Terrain".to_string(), "Background".to_string()];
-        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false}, true);
+        let (world, e) = scene_with(Matter::PointLight { color: [1.0; 3], intensity: 1.0, range: 5.0, shape: Default::default() , shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25}, true);
         let (painted, _) = run_lighting_2d(&world, e, &layers);
         assert!(painted.contains("every layer"), "an untouched light must say it reaches all:\n{painted}");
 

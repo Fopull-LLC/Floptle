@@ -84,6 +84,13 @@ pub struct Globals {
     /// Per-slot bitmasks, exact at 32 slots: x = NEAREST filtering, y = GLOW
     /// (self-lit slots), z/w unused.
     pub terrain_bits: [u32; 4],
+    /// Each light's CONE, when it is aimed: x = cosine of the half angle where
+    /// it reaches zero, y = cosine of the half angle where it is still full.
+    /// **x = -1 is no cone**, which is what the default fills, so a caller that
+    /// never sets this gets exactly the omnidirectional light it always had.
+    ///
+    /// Appended at the END so the WGSL struct stays byte-identical.
+    pub point_cone: [[f32; 4]; 16],
 }
 
 impl Default for Globals {
@@ -100,6 +107,8 @@ impl Default for Globals {
             point_rot: [[0.0, 0.0, 0.0, 1.0]; 16],
             terrain_mask: [0.0, 0.22, 0.0, 0.0],
             terrain_bits: [0; 4],
+            // -1 is "no cone": every direction is inside it.
+            point_cone: [[-1.0, -1.0, 0.0, 0.0]; 16],
         }
     }
 }

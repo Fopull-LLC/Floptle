@@ -349,6 +349,24 @@ pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Opti
                 range: 10.0,
                 shape: Default::default(),
                 shadows: false,
+                spot: None,
+            });
+            ui.close();
+        }
+        if ui
+            .button("◤ Spot Light")
+            .on_hover_text("a point light aimed down the node's forward — rotate it to aim")
+            .clicked()
+        {
+            pick = Some(MatterDoc::PointLight {
+                color: [1.0, 0.95, 0.85],
+                intensity: 4.0,
+                range: 14.0,
+                shape: Default::default(),
+                // See `matter_catalog`: a spot is aimed at one thing, so it
+                // shadows by default where an omni lamp does not.
+                shadows: true,
+                spot: Some(floptle_scene::SpotDoc { angle: 45.0, softness: 0.25 }),
             });
             ui.close();
         }

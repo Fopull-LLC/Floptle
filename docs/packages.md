@@ -77,6 +77,10 @@ Only `id`, `name` and `version` are required.
     // Optional extras, copied into the project when somebody asks for them.
     samples: [ (name: "Demo", path: "samples/demo", description: "A field") ],
 
+    // Typefaces your editor panels can draw in — see editor-scripting.md.
+    // Not a permission: the file is inside your own folder.
+    fonts: [ (name: "Heading", path: "fonts/YourFace-Black.ttf") ],
+
     // What it may reach for. See below.
     permissions: [Network, Browser],
 )

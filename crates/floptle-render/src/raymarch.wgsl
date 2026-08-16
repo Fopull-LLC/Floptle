@@ -208,9 +208,9 @@ fn point_diffuse(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         let lp = G.point_pos[i];
         // The emitter's SHAPE decides the direction, the softness and the
         // distance; a point light returns the same three numbers it always did.
-        let a = area_terms(G.point_shape[i], G.point_rot[i], lp.xyz - p, n, n);
+        let a = area_terms(G.point_shape[i], G.point_rot[i], G.point_cone[i], lp.xyz - p, n, n);
         let x = clamp(1.0 - a.dist / max(lp.w, 0.0001), 0.0, 1.0);
-        acc = acc + G.point_color[i].rgb * (a.ndl * x * x);
+        acc = acc + G.point_color[i].rgb * (a.ndl * x * x * a.atten);
     }
     return acc;
 }

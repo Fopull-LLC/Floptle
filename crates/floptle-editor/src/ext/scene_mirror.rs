@@ -37,6 +37,13 @@ pub(crate) struct MirrorNode {
     /// [`SceneMirror::raycast`]. `None` for the same nodes `radius` is `None`
     /// for.
     pub(crate) half: Option<[f32; 3]>,
+    /// What this node is as a piece of UI, or `None` if it is not one.
+    ///
+    /// A UI element is an ordinary node carrying an `ElementSpec`, so its
+    /// `kind` reads `"empty"` — which leaves a package unable to tell a button
+    /// from a folder. Anything that builds tooling for a screen needs this, and
+    /// it is a few small fields rather than the whole spec.
+    pub(crate) ui: Option<UiSummary>,
     pub(crate) tags: Vec<String>,
     pub(crate) layer: String,
     /// False when this node or any parent is switched off.
@@ -55,9 +62,21 @@ pub(crate) struct SceneMirror {
     by_id: HashMap<u32, usize>,
     /// Nodes with no parent, in scene order.
     pub(crate) roots: Vec<u32>,
+    /// id → the node's full document, for `scene.doc`.
+    ///
+    /// **Empty unless a package has asked for one.** Building these means
+    /// serialising every component of every node, which is far more work than
+    /// the rest of the mirror put together — so a project whose packages never
+    /// read a document pays nothing, and one that does pays only when the scene
+    /// has actually changed (see `Editor::ext_mirror`).
+    pub(crate) docs: HashMap<u32, serde_json::Value>,
 }
 
 impl SceneMirror {
+    pub(crate) fn doc(&self, id: u32) -> Option<&serde_json::Value> {
+        self.docs.get(&id)
+    }
+
     pub(crate) fn get(&self, id: u32) -> Option<&MirrorNode> {
         self.by_id.get(&id).and_then(|i| self.nodes.get(*i))
     }
@@ -115,6 +134,7 @@ impl SceneMirror {
                     let s = world_t.scale;
                     [h[0] * s.x.abs(), h[1] * s.y.abs(), h[2] * s.z.abs()]
                 }),
+                ui: world.get::<floptle_ui::ElementSpec>(e).map(ui_summary),
                 tags: world.get::<floptle_core::Tags>(e).map(|t| t.0.clone()).unwrap_or_default(),
                 layer: world
                     .get::<floptle_core::Layer>(e)
@@ -176,6 +196,49 @@ impl SceneMirror {
             None => DVec3::splat(n.radius.unwrap_or(0.0) as f64),
         };
         Some(((c - e).into(), (c + e).into()))
+    }
+}
+
+/// The part of a UI element a tool needs to reason about it.
+#[derive(Clone, Debug)]
+pub(crate) struct UiSummary {
+    /// `"button"`, `"slider"`, `"text"`, `"image"`, `"scroll"` or `"panel"`.
+    ///
+    /// One word rather than the flags it is derived from: a package asking
+    /// "is this clickable" should not have to know that a button is a shape
+    /// with `button: true` on it.
+    pub(crate) element: &'static str,
+    /// The label it draws, where it draws one. What a tool matches a name
+    /// against — a button called "Button (3)" whose text says "Start Game" is
+    /// the ordinary case, and the text is the useful half.
+    pub(crate) text: String,
+    /// Does it take a click at all? A panel is not interactive; a button is.
+    pub(crate) interactive: bool,
+    pub(crate) disabled: bool,
+}
+
+/// One word for what an element is, from the flags that make it that.
+fn ui_summary(spec: &floptle_ui::ElementSpec) -> UiSummary {
+    // Ordered by how specific each is: a slider that also carries text is a
+    // slider, and a button that also carries text is a button.
+    let element = if spec.slider.is_some() {
+        "slider"
+    } else if spec.button {
+        "button"
+    } else if spec.scroll.is_some() {
+        "scroll"
+    } else if spec.image.is_some() {
+        "image"
+    } else if spec.text.is_some() {
+        "text"
+    } else {
+        "panel"
+    };
+    UiSummary {
+        element,
+        text: spec.text.as_ref().map(|t| t.text.clone()).unwrap_or_default(),
+        interactive: spec.button || spec.slider.is_some() || spec.scroll.is_some(),
+        disabled: spec.disabled,
     }
 }
 
@@ -330,7 +393,7 @@ mod tests {
                 intensity: 1.0,
                 range: 5.0,
                 shape: floptle_core::LightShape::Point,
-                shadows: false,
+                shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25,
             },
         );
         w.insert(child, floptle_core::Transform::from_translation(DVec3::new(0.0, 2.0, 0.0)));

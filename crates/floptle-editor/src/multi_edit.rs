@@ -407,9 +407,33 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
             hit
         }
         (
-            Matter::PointLight { color, intensity, range, shape, shadows },
-            Matter::PointLight { color: bc, intensity: bi, range: br, shape: bsh, shadows: bsd },
-            Matter::PointLight { color: tc, intensity: ti, range: tr, shape: tsh, shadows: tsd },
+            Matter::PointLight {
+                color,
+                intensity,
+                range,
+                shape,
+                shadows,
+                spot_angle,
+                spot_softness,
+            },
+            Matter::PointLight {
+                color: bc,
+                intensity: bi,
+                range: br,
+                shape: bsh,
+                shadows: bsd,
+                spot_angle: bsa,
+                spot_softness: bss,
+            },
+            Matter::PointLight {
+                color: tc,
+                intensity: ti,
+                range: tr,
+                shape: tsh,
+                shadows: tsd,
+                spot_angle: tsa,
+                spot_softness: tss,
+            },
         ) => {
             let mut hit = false;
             set(color, bc, tc, &mut hit);
@@ -417,6 +441,8 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
             set(range, br, tr, &mut hit);
             set(shape, bsh, tsh, &mut hit);
             set(shadows, bsd, tsd, &mut hit);
+            set(spot_angle, bsa, tsa, &mut hit);
+            set(spot_softness, bss, tss, &mut hit);
             hit
         }
         (
@@ -744,7 +770,7 @@ mod tests {
                 intensity: 1.0,
                 range: 5.0,
                 shape: floptle_core::LightShape::Point,
-                shadows: false,
+                shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25,
             });
         }
         // b is last, so b is the primary.

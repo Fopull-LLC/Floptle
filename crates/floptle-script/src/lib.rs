@@ -5922,7 +5922,7 @@ end
             intensity: 2.0,
             range: 10.0,
             shape: Default::default(),
-            shadows: false,
+            shadows: false, spot_angle: floptle_core::OMNI_ANGLE, spot_softness: 0.25,
         });
         world.insert(
             e,

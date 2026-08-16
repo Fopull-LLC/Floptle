@@ -635,6 +635,20 @@ const COMPONENT_FIELDS: &[(&str, &str, &str)] = &[
     ("PointLight", "r", "Color red 0..1."),
     ("PointLight", "g", "Color green 0..1."),
     ("PointLight", "b", "Color blue 0..1."),
+    ("PointLight", "shadows", "1/0: stop this lamp at the walls between it and what it lights."),
+    (
+        "PointLight",
+        "spotAngle",
+        "Aim it: the FULL cone angle in degrees, down the node's forward. 180 or more is no cone \
+         at all — an ordinary omnidirectional lamp, which is what every light reads until you \
+         change this.",
+    ),
+    (
+        "PointLight",
+        "spotSoftness",
+        "How much of the cone's edge is falloff, 0..1. A fraction of the cone, so widening the \
+         beam keeps the edge you gave it.",
+    ),
     ("PostProcess", "enabled", "The whole post chain on/off."),
     ("PostProcess", "bloom", "Bloom on/off."),
     ("PostProcess", "bloomThreshold", "Brightness bloom starts above."),

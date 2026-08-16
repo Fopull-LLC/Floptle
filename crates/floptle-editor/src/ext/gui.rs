@@ -103,9 +103,34 @@ fn nest(
     }
 }
 
+/// Does egui actually hold this family?
+///
+/// Asked of egui rather than assumed, because `FontFamily::Name` is a panic and
+/// not a fallback when it is wrong.
+fn is_bound(ui: &egui::Ui, family: &str) -> bool {
+    let want = egui::FontFamily::Name(family.into());
+    ui.ctx().fonts(|f| f.families().contains(&want))
+}
+
 fn color(r: f64, g: f64, b: f64, a: Option<f64>) -> egui::Color32 {
     let f = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     egui::Color32::from_rgba_unmultiplied(f(r), f(g), f(b), f(a.unwrap_or(1.0)))
+}
+
+/// Which typefaces the package that is drawing may name, and who to blame in the
+/// Console when it names one that is not there.
+///
+/// Passed in rather than looked up, because `gui` is built per draw call and the
+/// answer to "does this package have a face called Heading" is fixed for the
+/// length of a package load.
+pub(crate) struct FontScope<'a> {
+    pub(crate) pkg_id: &'a str,
+    pub(crate) faces: &'a [crate::fonts::PackageFont],
+    /// Names already complained about, so a panel drawing at 60 Hz costs one
+    /// Console line and not sixty a second.
+    pub(crate) warned: &'a RefCell<std::collections::HashSet<String>>,
+    pub(crate) log: &'a RefCell<Vec<super::ExtLog>>,
+    pub(crate) pkg_name: &'a str,
 }
 
 /// Build the `gui` table for one callback. Every function is scoped: it stops
@@ -114,6 +139,7 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
     lua: &Lua,
     scope: &'scope Scope<'scope, 'env>,
     slot: &'env RefCell<UiSlot>,
+    fonts: &'env FontScope<'env>,
 ) -> mlua::Result<Table> {
     let t = lua.create_table()?;
 
@@ -393,6 +419,69 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             nest(slot, &cb, move |ui, f| {
                 ui.add_enabled_ui(on, |inner| f(inner));
             })
+        })?,
+    )?;
+    // Draw a run of widgets in a face this package shipped. Scoped, like every
+    // other nesting call here — there is no `setFont`, because a mode that
+    // outlives the panel that switched it on is a mode somebody forgets to
+    // switch off.
+    //
+    // The face replaces the *family* of every text style and leaves the sizes
+    // alone, so `gui.heading` inside is still bigger than `gui.label` inside.
+    // That includes Monospace: a package that ships a mono face and asks for it
+    // means it.
+    t.set(
+        "font",
+        scope.create_function(move |_, (name, cb): (String, Function)| {
+            let family = crate::fonts::family_key(fonts.pkg_id, &name);
+            // Two different questions, and conflating them is a crash.
+            //
+            // DECLARED — is this face in the package's manifest? That is what
+            // decides whether to complain: a name nobody shipped is an author's
+            // typo and worth one Console line.
+            //
+            // BOUND — has egui actually been handed it? That is what decides
+            // whether to *draw* with it, because epaint PANICS on a
+            // `FontFamily::Name` it does not know rather than falling back. The
+            // two can disagree for one frame, between a package load and the
+            // `set_fonts` that follows it, and a declared face drawing in the
+            // editor's type for that frame is the right answer to that.
+            let declared = fonts.faces.iter().any(|f| f.family == family);
+            if !declared && fonts.warned.borrow_mut().insert(family.clone()) {
+                fonts.log.borrow_mut().push(super::ExtLog {
+                    level: super::ExtLevel::Warn,
+                    msg: format!(
+                        "gui.font({name:?}): this package has no font by that name — drawing in \
+                         the editor's type. Name it in package.ron: \
+                         fonts: [ (name: {name:?}, path: \"fonts/…\") ]"
+                    ),
+                    from: fonts.pkg_name.to_owned(),
+                });
+            }
+            nest(slot, &cb, move |ui, f| {
+                let bound = declared && is_bound(ui, &family);
+                // A child scope, so the style change cannot leak past the
+                // closure even if the closure raises.
+                ui.scope(|inner| {
+                    if bound {
+                        let fam = egui::FontFamily::Name(family.clone().into());
+                        for id in inner.style_mut().text_styles.values_mut() {
+                            id.family = fam.clone();
+                        }
+                    }
+                    f(inner);
+                });
+            })
+        })?,
+    )?;
+    // Did the face this package named actually load? A brand-conscious tool
+    // can draw a wordmark as type when it has the face and as an image when it
+    // does not, rather than guessing.
+    t.set(
+        "hasFont",
+        scope.create_function(move |_, name: String| {
+            let family = crate::fonts::family_key(fonts.pkg_id, &name);
+            Ok(fonts.faces.iter().any(|f| f.family == family))
         })?,
     )?;
     t.set(

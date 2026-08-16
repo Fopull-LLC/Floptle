@@ -45,6 +45,7 @@ mod curve_edit;
 mod dock;
 mod export;
 mod ext;
+mod fonts;
 mod ext_wire;
 mod game_keys;
 mod gi_bake;
@@ -75,6 +76,7 @@ mod lua_format;
 mod lua_lint;
 mod lua_support;
 mod map_edit;
+mod mesh_read;
 mod map_paint;
 mod map_ui;
 mod matter_catalog;
@@ -1471,6 +1473,15 @@ struct Editor {
     /// The selection the extensions were last told about, so `onSelectionChange`
     /// fires once per actual change rather than every frame.
     ext_last_selection: Vec<u32>,
+    /// The world revision the extension host's scene mirror was built from.
+    /// The mirror itself lives in the host; this says whether it is still
+    /// current. Rebuilt when the scene changes, not when the editor draws —
+    /// see `Editor::ext_tick`.
+    ext_mirror_rev: u64,
+    /// How many nodes were selected when the mirror was built. The mirror
+    /// carries the selection's documents, so a pick that changes nothing else
+    /// still makes it stale.
+    ext_mirror_selection: usize,
     /// A package panel asking to be brought to the front next frame.
     ext_focus_window: Option<usize>,
     /// `ed.message(title, body)`, shown as a modal until dismissed.
@@ -3044,15 +3055,10 @@ impl ApplicationHandler for Editor {
         self.ui_render = Some(floptle_render::Ui::new(&gpu));
 
         let ctx = egui::Context::default();
-        // egui's proportional fallback (Ubuntu + the two emoji fonts) is
-        // missing many of the arrow/geometry glyphs the editor uses as icons
-        // (→ ● ◌ ⊘ ⊕ …); Hack covers them and already ships with egui, so
-        // append it or those labels render as tofu squares.
-        let mut fonts = egui::FontDefinitions::default();
-        if let Some(fam) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-            fam.push("Hack".into());
-        }
-        ctx.set_fonts(fonts);
+        // No package has loaded yet, so this is the editor's own stack. Any
+        // package faces are merged in and `set_fonts` called again by
+        // `apply_package_fonts` after the package pass — see `fonts.rs`.
+        ctx.set_fonts(fonts::definitions(&[]));
         let state = egui_winit::State::new(
             ctx.clone(),
             egui::ViewportId::ROOT,

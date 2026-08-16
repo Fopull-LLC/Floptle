@@ -175,11 +175,25 @@ impl Editor {
 
     /// Frame the selected object in the viewport (the F key): keep the view angle,
     /// move the camera so the object is centered at a size-appropriate distance.
+    ///
+    /// **Reads the node's WORLD placement, not its local `Transform`.** A local
+    /// translation is an offset from a parent, so pressing `F` on a door inside
+    /// a building used to fly to wherever `(0.4, 0, 1.2)` happens to be in the
+    /// world — usually the origin, occasionally somewhere with nothing in it.
+    /// It looked like the key had missed rather than like it had gone to the
+    /// wrong place, which is why it survived this long: every unparented node in
+    /// every test scene works perfectly.
     pub(crate) fn focus_selected(&mut self) {
         let Some(e) = self.selection.last().copied() else { return };
-        let Some(t) = self.world.get::<Transform>(e) else { return };
-        let target = t.translation;
-        let scale = t.scale.abs().max_element() as f64;
+        if self.world.get::<Transform>(e).is_none() {
+            return; // nothing placeable to frame
+        }
+        let wt = floptle_core::world_transform(&self.world, e);
+        let target = wt.translation;
+        // The world scale too, for the same reason: a node scaled by its parent
+        // is that much bigger on screen, and framing it by its local scale sits
+        // the camera at the wrong distance by exactly the parent's factor.
+        let scale = wt.scale.abs().max_element() as f64;
         let base = match self.world.get::<Matter>(e) {
             Some(Matter::Mesh { asset_path }) => {
                 self.mesh_registry.get(asset_path).map(|a| a.size as f64).unwrap_or(1.0)
@@ -188,7 +202,17 @@ impl Editor {
             _ => 1.0,
         };
         let radius = (base * scale).max(0.3);
-        let distance = (radius * 3.0 + 2.0).clamp(2.5, 80.0);
+        self.focus_point(target, (radius * 3.0 + 2.0).clamp(2.5, 80.0));
+    }
+
+    /// Glide the camera until `target` sits `distance` straight ahead.
+    ///
+    /// Split out of [`Self::focus_selected`] because `ed.lookAt` needs exactly
+    /// this and nothing else: a package pointing at a place must move the
+    /// camera the same way the `F` key does — same easing, same kept view
+    /// angle — or "show me" from a tool feels like a different editor from
+    /// "show me" from the keyboard.
+    pub(crate) fn focus_point(&mut self, target: DVec3, distance: f64) {
         // Keep the current view direction; glide the position so the target ends up
         // `distance` straight ahead. The eased move runs in the per-frame update.
         let forward = (self.camera.rotation() * Vec3::NEG_Z).as_dvec3();
@@ -779,5 +803,70 @@ pub(crate) fn rect_base_half(
             Some(Vec3::splat(r.max(0.05)))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+
+    /// A child node's `Transform.translation` is an offset from its PARENT.
+    /// Framing on it flies the camera to wherever that offset happens to land in
+    /// world space — for a door at `(0.4, 0, 1.2)` inside a building parked a
+    /// kilometre away, that is the origin, and it reads as the `F` key having
+    /// done nothing rather than as it having gone somewhere wrong.
+    ///
+    /// Every unparented node works either way, which is exactly why this lasted.
+    #[test]
+    fn framing_a_parented_node_goes_where_the_node_actually_is() {
+        let mut ed = Editor::default();
+        let parent = ed.world.spawn();
+        ed.world.insert(parent, floptle_core::Name("Building".into()));
+        ed.world.insert(
+            parent,
+            Transform { translation: DVec3::new(1000.0, 0.0, -500.0), ..Transform::IDENTITY },
+        );
+        let child = ed.world.spawn();
+        ed.world.insert(child, floptle_core::Name("Door".into()));
+        ed.world.insert(child, floptle_core::Parent(parent));
+        ed.world
+            .insert(child, Transform { translation: DVec3::new(0.4, 0.0, 1.2), ..Transform::IDENTITY });
+
+        ed.selection = vec![child];
+        ed.focus_selected();
+
+        let anim = ed.focus_anim.expect("F should have started a move");
+        let world = floptle_core::world_transform(&ed.world, child).translation;
+        assert!(
+            world.length() > 1000.0,
+            "the fixture is wrong — the door has to be far from the origin for \
+             this to be able to fail"
+        );
+        // The claim: the door ends up straight ahead of where the camera stopped.
+        // Framing on the LOCAL offset would leave the camera near the origin,
+        // pointing at a door a kilometre away.
+        let forward = (ed.camera.rotation() * Vec3::NEG_Z).as_dvec3();
+        let to_door = world - anim.to;
+        assert!(
+            to_door.normalize().dot(forward) > 0.999,
+            "the door is not straight ahead of where the camera stopped: {to_door:?}"
+        );
+    }
+
+    /// The unparented case, unchanged — the one every scene in every test has.
+    #[test]
+    fn framing_a_root_node_still_lands_on_it() {
+        let mut ed = Editor::default();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Name("Crate".into()));
+        ed.world
+            .insert(e, Transform { translation: DVec3::new(3.0, 1.0, -2.0), ..Transform::IDENTITY });
+        ed.selection = vec![e];
+        ed.focus_selected();
+
+        let anim = ed.focus_anim.expect("F should have started a move");
+        let forward = (ed.camera.rotation() * Vec3::NEG_Z).as_dvec3();
+        let to_crate = DVec3::new(3.0, 1.0, -2.0) - anim.to;
+        assert!(to_crate.normalize().dot(forward) > 0.999, "{to_crate:?}");
     }
 }

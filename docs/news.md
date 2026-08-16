@@ -1,5 +1,28 @@
 ## Just shipped
 
+**v0.64.0 "Point It At Something"** — **spot lights**. Add ⏵ ◤ Spot Light and
+rotate the node to aim it; the beam runs down the node's forward, the same axis a
+camera looks down. Two numbers: the **cone**, as the full angle a real fixture is
+sold by, and the **edge**, how much of that cone is falloff — and the edge is a
+fraction of the cone, so widening a beam keeps the softness you gave it. A spot
+is not a new kind of node, it is a point light you aimed, so everything you know
+about lights still applies: the same emitter shapes, the same range, the same
+local shadows, the same budget. `spotAngle = 180` turns the cone off again, and
+from a script it is the same handle you already use. Nothing in your projects
+changes — a scene file is byte-for-byte what it was unless you actually aim
+something. **Pressing `F` on a node inside another node** now goes to that node.
+It was framing on the position relative to the parent, so selecting a door inside
+a building parked away from the origin flew the camera to empty space; anything
+unparented always worked, which is why it lasted. And **editor packages** got a
+lot bigger: a package can read and write a whole node (`scene.doc`, `scene.set`,
+`scene.add`, `scene.setParent`) instead of only reading a summary, read a mesh's
+actual **triangles** off a node, a map or a file with `mesh.read` instead of
+settling for a bounding box, **ship and use its own typeface**, follow a long
+server job live with `http.stream` so a progress bar moves rather than steps, and
+take you somewhere with `ed.lookAt(point)` rather than selecting a node in order
+to move a camera. `scene.info(id).ui` also says what a UI node actually is —
+button, slider, text — so a tool can stop guessing from names.
+
 **v0.63.0 "As Much As You Like"** — if your game builds its own world, it stops
 getting heavier the more world there is. Spawning a node used to do work
 proportional to how much scene already existed, in four places at once, so a

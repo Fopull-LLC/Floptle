@@ -58,6 +58,7 @@ pub(crate) fn build_env(
     env.set("selection", selection_table(lua, shared)?)?;
     env.set("handles", super::handles::bind(lua, shared)?)?;
     env.set("nav", nav_table(lua, shared)?)?;
+    env.set("mesh", mesh_table_api(lua, shared)?)?;
 
     if state.permissions.contains(&Permission::Network) {
         env.set("http", http_table(lua, shared)?)?;
@@ -84,6 +85,49 @@ pub(crate) fn build_env(
 fn nav_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     floptle_script::nav_api::install_mesh_reads(lua, &t, shared.nav.clone());
+    Ok(t)
+}
+
+/// `mesh` — the triangles behind a node or a model file.
+///
+/// A callback rather than a return value, for the same reason `http` is one:
+/// the first read of a model is a file off disk, and a binding has no route to
+/// the editor. The callback runs on a later frame, on the main thread.
+///
+/// No permission gates it. It reads geometry the same package can already see
+/// the bounding box of and can already draw — and a model's triangles are not a
+/// secret from a tool the author installed into their own editor. Reading a
+/// FILE outside the package still needs `Files`; this reads what is in the
+/// scene, by node.
+fn mesh_table_api(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    {
+        let shared = shared.clone();
+        t.set(
+            "read",
+            lua.create_function(move |lua, (what, cb): (Value, Function)| {
+                let source = match &what {
+                    Value::Integer(i) => crate::mesh_read::MeshSource::Node(*i as u32),
+                    Value::Number(n) => crate::mesh_read::MeshSource::Node(*n as u32),
+                    Value::String(s) => {
+                        crate::mesh_read::MeshSource::Asset(s.to_string_lossy().to_string())
+                    }
+                    _ => {
+                        return Err(mlua::Error::runtime(
+                            "mesh.read takes a node id or an asset path, then a callback",
+                        ))
+                    }
+                };
+                let key = lua.create_registry_value(cb)?;
+                shared
+                    .mesh_reqs
+                    .borrow_mut()
+                    .push(super::MeshReq { source, cb: key });
+                Ok(())
+            })?,
+        )?;
+    }
+    t.set("maxTriangles", crate::mesh_read::MAX_TRIANGLES)?;
     Ok(t)
 }
 
@@ -446,6 +490,29 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
         )?;
     }
     {
+        // Take the author to a place. Every tool that lists positions — a
+        // search result, a lint hit, a suggested placement — has somewhere it
+        // wants to show you, and until this the only way to get there was to
+        // select something, which is an edit to the author's selection made on
+        // their behalf just to move a camera.
+        let shared = shared.clone();
+        t.set(
+            "lookAt",
+            lua.create_function(move |_, (at, distance): (Value, Option<f64>)| {
+                let at = super::handles::vec3_of(&at)?;
+                if let Some(d) = distance
+                    && !(d.is_finite() && d > 0.0)
+                {
+                    return Err(mlua::Error::runtime(
+                        "ed.lookAt's distance must be a positive number of metres",
+                    ));
+                }
+                shared.cmds.borrow_mut().push(ExtCmd::LookAt { at, distance });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
         // Opening a URL is the Browser capability: it hands whatever is in the
         // string to the user's session, and the point of declaring it is that
         // somebody installing the package can see that coming.
@@ -796,6 +863,23 @@ fn require_fn(
 // scene
 // ---------------------------------------------------------------------------
 
+/// A Lua table as JSON, for the node-document commands.
+///
+/// JSON rather than the Lua table itself because the command queue outlives the
+/// call: a held `mlua::Table` costs one of LuaJIT's ~8000 registry slots, and a
+/// tool that queues a few hundred edits in a loop would run the state out of
+/// them ([[lua-table-vs-registrykey-ceiling]]). `serde_json::Value` is a plain
+/// owned tree with nothing of Lua's in it.
+///
+/// A Lua array and a Lua map are the same type, so the ambiguity is resolved the
+/// way the rest of this API resolves it: `{}` is an empty **object**, because
+/// every place a document takes a table it takes a named one.
+fn lua_to_json(lua: &Lua, t: Table) -> mlua::Result<serde_json::Value> {
+    use mlua::LuaSerdeExt;
+    let v = lua.to_value(&t)?;
+    serde_json::to_value(&v).map_err(|e| mlua::Error::runtime(format!("not encodable: {e}")))
+}
+
 fn scene_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
     let t = lua.create_table()?;
 
@@ -875,6 +959,17 @@ fn scene_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
                         None => Value::Nil,
                     },
                 )?;
+                // `ui` is present only on a node that IS one, so `if n.ui`
+                // is the test a package writes — a table of defaults on every
+                // node would make every folder look like a panel.
+                if let Some(u) = &n.ui {
+                    let ui = lua.create_table()?;
+                    ui.set("element", u.element)?;
+                    ui.set("text", u.text.clone())?;
+                    ui.set("interactive", u.interactive)?;
+                    ui.set("disabled", u.disabled)?;
+                    t.set("ui", ui)?;
+                }
                 t.set("tags", n.tags.clone())?;
                 t.set("layer", n.layer.clone())?;
                 t.set("visible", n.visible)?;
@@ -989,6 +1084,86 @@ fn scene_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
             "create",
             lua.create_function(move |_, (name, parent): (String, Option<u32>)| {
                 shared.cmds.borrow_mut().push(ExtCmd::NodeCreate { name, parent });
+                Ok(())
+            })?,
+        )?;
+    }
+    // ---- the node document -------------------------------------------------
+    // `scene.doc(id)` reads the whole node — everything `scene.set` can write.
+    //
+    // **Only for what is selected**, and that is a deliberate limit rather than
+    // an oversight. Serialising a node's every component costs far more than
+    // the rest of the mirror put together, and building the whole scene's
+    // documents would mean rebuilding them on every frame of a gizmo drag, in
+    // every project that has such a package installed. The selection is what a
+    // tool operates on, it is a handful of nodes, and its documents are free.
+    //
+    // A node that is not selected RAISES rather than answering nil: a read that
+    // quietly returns nothing is how a tool ends up placing an empty node and
+    // reporting success.
+    {
+        let shared = shared.clone();
+        t.set(
+            "doc",
+            lua.create_function(move |lua, id: u32| {
+                use mlua::LuaSerdeExt;
+                let scene = shared.scene.borrow();
+                match scene.doc(id) {
+                    Some(v) => lua.to_value(v),
+                    None if scene.get(id).is_none() => {
+                        Err(mlua::Error::runtime(format!("there is no node {id}")))
+                    }
+                    None => Err(mlua::Error::runtime(format!(
+                        "scene.doc({id}): a node's document is readable while it is selected. \
+                         Use selection.set({{{id}}}) first, or scene.info({id}) for the summary \
+                         that is always available"
+                    ))),
+                }
+            })?,
+        )?;
+    }
+    //
+    // The setters above name one property each, and that list will always be
+    // behind the node types: reads answer seventeen fields and writes answered
+    // five, which is the difference between a tool that can measure a level and
+    // one that can build it.
+    //
+    // These two take the node **document** instead — the same shape a `.ron`
+    // scene, a prefab and the clipboard all serialise, so a node type that gains
+    // a field is writable by every package the day it lands, with nothing here
+    // to update.
+    {
+        let shared = shared.clone();
+        t.set(
+            "set",
+            lua.create_function(move |lua, (id, patch): (u32, Table)| {
+                // PARTIAL, deliberately. A tool that wants to tint a light
+                // should not have to read the whole node back and write it out
+                // again — and a whole-document write is how a tool silently
+                // reverts a field it did not know about.
+                let patch = lua_to_json(lua, patch)?;
+                shared.cmds.borrow_mut().push(ExtCmd::NodeSet { id, patch });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let shared = shared.clone();
+        t.set(
+            "add",
+            lua.create_function(move |lua, (spec, parent): (Table, Option<u32>)| {
+                let spec = lua_to_json(lua, spec)?;
+                shared.cmds.borrow_mut().push(ExtCmd::NodeAdd { spec, parent });
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let shared = shared.clone();
+        t.set(
+            "setParent",
+            lua.create_function(move |_, (id, parent): (u32, Option<u32>)| {
+                shared.cmds.borrow_mut().push(ExtCmd::NodeSetParent { id, parent });
                 Ok(())
             })?,
         )?;
@@ -1121,7 +1296,76 @@ fn http_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
             })?,
         )?;
     }
+    // An open Server-Sent Events stream: `onFrame` is called once per frame,
+    // `onEnd` once when the connection closes for any reason.
+    //
+    // Two callbacks rather than one with a "kind" field, because the two are
+    // different jobs — one updates a bar, the other tidies up and decides
+    // whether to fall back. Conflating them is how a stream's cleanup ends up
+    // running on every frame.
+    {
+        let shared = shared.clone();
+        t.set(
+            "stream",
+            lua.create_function(
+                move |lua, (url, opts, on_frame, on_end): (String, Value, Value, Option<Function>)| {
+                    let (opts, on_frame, on_end) = match (opts, on_frame, on_end) {
+                        (Value::Function(f), Value::Function(e), None) => (None, f, Some(e)),
+                        (Value::Function(f), Value::Nil, None) => (None, f, None),
+                        (Value::Table(t), Value::Function(f), e) => (Some(t), f, e),
+                        (Value::Nil, Value::Function(f), e) => (None, f, e),
+                        _ => {
+                            return Err(mlua::Error::runtime(
+                                "expected (url, onFrame [, onEnd]) or \
+                                 (url, opts, onFrame [, onEnd])",
+                            ))
+                        }
+                    };
+                    let (headers, timeout) = super::http::read_opts(opts);
+                    let frame_key = lua.create_registry_value(on_frame)?;
+                    // `onEnd` is optional but the host always has one to call,
+                    // so an absent one becomes a callback that does nothing —
+                    // simpler than an `Option` threaded through the queue.
+                    let end_key = match on_end {
+                        Some(f) => lua.create_registry_value(f)?,
+                        None => lua.create_registry_value(lua.create_function(|_, _: Value| Ok(()))?)?,
+                    };
+                    let id = shared
+                        .web
+                        .borrow_mut()
+                        .stream(url, headers, timeout, frame_key, end_key)
+                        .map_err(mlua::Error::runtime)?;
+                    stream_handle(lua, shared.clone(), id)
+                },
+            )?,
+        )?;
+    }
     Ok(t)
+}
+
+/// What `http.stream` hands back: something to call `:cancel()` on.
+///
+/// A handle rather than a bare id, for the same reason `ed.after` returns one —
+/// an id is a number somebody has to remember what to do with, and a handle
+/// says what it is for.
+fn stream_handle(lua: &Lua, shared: Rc<Shared>, id: u64) -> mlua::Result<Table> {
+    let h = lua.create_table()?;
+    h.set("id", id)?;
+    {
+        let shared = shared.clone();
+        h.set(
+            "cancel",
+            lua.create_function(move |_, _: Value| {
+                shared.web.borrow_mut().stop_stream(id);
+                Ok(())
+            })?,
+        )?;
+    }
+    h.set(
+        "isOpen",
+        lua.create_function(move |_, _: Value| Ok(shared.web.borrow().is_streaming(id)))?,
+    )?;
+    Ok(h)
 }
 
 /// `http.get(url, cb)` and `http.get(url, opts, cb)` are both what people write.

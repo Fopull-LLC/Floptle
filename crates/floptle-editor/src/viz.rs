@@ -301,6 +301,8 @@ pub(crate) fn point_light_lines(
     scale: Vec3,
     range: f32,
     shape: floptle_core::LightShape,
+    // The FULL cone angle in degrees; `OMNI_ANGLE` and up draws no cone.
+    spot_angle: f32,
     cam_world: DVec3,
     vp: Mat4,
     w: f32,
@@ -386,6 +388,37 @@ pub(crate) fn point_light_lines(
         }
     }
     let r = range.clamp(0.2, 500.0) as f64;
+    // AN AIMED LAMP DRAWS ITS CONE, not a ring around itself. The ring says
+    // "this reaches this far in every direction", which for a spot is exactly
+    // the thing that is not true — and a spot pointed at the ceiling looks
+    // identical to one pointed at the floor if all you can see is a circle.
+    if floptle_core::is_spot(spot_angle) {
+        let half = (spot_angle.clamp(floptle_core::MIN_SPOT_ANGLE, floptle_core::OMNI_ANGLE) * 0.5)
+            as f64;
+        let fwd = ax(DVec3::NEG_Z);
+        let up = ax(DVec3::Y);
+        let right = ax(DVec3::X);
+        // The cone at its range: how wide the beam is where it stops.
+        let spread = half.to_radians().tan().min(64.0) * r;
+        let centre = pos + fwd * r;
+        // Four ribs at the diagonals as well as the axes, so the cone reads as a
+        // cone from any angle rather than collapsing to a triangle edge-on.
+        let mut prev: Option<Vec2> = None;
+        let segs = 24;
+        for i in 0..=segs {
+            let a = (i as f64 / segs as f64) * std::f64::consts::TAU;
+            let p = centre + right * (a.cos() * spread) + up * (a.sin() * spread);
+            let cp = project(p, cam_world, vp, w, h);
+            if let (Some(a0), Some(a1)) = (prev, cp) {
+                lines.push((a0, a1));
+            }
+            prev = cp;
+            if i % (segs / 4) == 0 {
+                seg(pos, p, &mut lines);
+            }
+        }
+        return lines;
+    }
     let segs = 28;
     let mut prev = project(pos + DVec3::new(r, 0.0, 0.0), cam_world, vp, w, h);
     for i in 1..=segs {

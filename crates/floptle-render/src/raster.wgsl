@@ -22,6 +22,10 @@ struct RasterGlobals {
     point_rot: array<vec4<f32>, 16>,   // the emitter's world orientation (xyzw quaternion)
     terrain_mask: vec4<f32>,           // y = triplanar scale (bitmasks moved to terrain_bits)
     terrain_bits: vec4<u32>,           // x = per-slot NEAREST bitmask, y = per-slot GLOW bitmask (bit-exact at 32 slots)
+    // Each lamp's CONE: x = cos(half angle where it reaches zero), y = cos(half
+    // angle where it is still full. x = -1 is NO cone. Appended at the END so
+    // this struct stays byte-identical to the Rust `Globals`.
+    point_cone: array<vec4<f32>, 16>,
 };
 
 @group(0) @binding(0) var<uniform> g: RasterGlobals;
@@ -690,9 +694,9 @@ fn point_diffuse(pos_rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         let lp = g.point_pos[i];
         // See `area_terms` in field.wgsl — an emitter with no size gives back
         // exactly the point light this used to compute inline.
-        let a = area_terms(g.point_shape[i], g.point_rot[i], lp.xyz - pos_rel, n, n);
+        let a = area_terms(g.point_shape[i], g.point_rot[i], g.point_cone[i], lp.xyz - pos_rel, n, n);
         let x = clamp(1.0 - a.dist / max(lp.w, 0.0001), 0.0, 1.0);
-        acc = acc + g.point_color[i].rgb * (a.ndl * x * x);
+        acc = acc + g.point_color[i].rgb * (a.ndl * x * x * a.atten);
     }
     return acc;
 }
@@ -710,10 +714,10 @@ fn point_diffuse_lit(pos_rel: vec3<f32>, n: vec3<f32>, pix: vec2<u32>) -> vec3<f
     let count = min(u32(g.point_count.x), 16u);
     for (var i = 0u; i < count; i = i + 1u) {
         let lp = g.point_pos[i];
-        let a = area_terms(g.point_shape[i], g.point_rot[i], lp.xyz - pos_rel, n, n);
+        let a = area_terms(g.point_shape[i], g.point_rot[i], g.point_cone[i], lp.xyz - pos_rel, n, n);
         let x = clamp(1.0 - a.dist / max(lp.w, 0.0001), 0.0, 1.0);
-        if (x <= 0.0) { continue; }
-        acc = acc + g.point_color[i].rgb * (a.ndl * x * x) * point_vis(pos_rel, n, i, pix);
+        if (x <= 0.0 || a.atten <= 0.0) { continue; }
+        acc = acc + g.point_color[i].rgb * (a.ndl * x * x * a.atten) * point_vis(pos_rel, n, i, pix);
     }
     return acc;
 }
@@ -1152,9 +1156,12 @@ fn point_ggx(pos_rel: vec3<f32>, n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>, roug
     let count = min(u32(g.point_count.x), 16u);
     for (var i = 0u; i < count; i = i + 1u) {
         let lp = g.point_pos[i];
-        let a = area_terms(g.point_shape[i], g.point_rot[i], lp.xyz - pos_rel, n, v);
+        let a = area_terms(g.point_shape[i], g.point_rot[i], g.point_cone[i], lp.xyz - pos_rel, n, v);
         let x = clamp(1.0 - a.dist / max(lp.w, 0.0001), 0.0, 1.0);
-        let atten = x * x;
+        // The cone rides the SAME factor the range falloff does, so it dims the
+        // diffuse and the highlight together. A spot whose highlight stayed
+        // outside its own cone would be the tell that this was bolted on.
+        let atten = x * x * a.atten;
         if (atten <= 0.0) { continue; }
         // A wide emitter smears its own highlight: the lobe is widened by how
         // big the light looks from here, and re-normalised so growing a light

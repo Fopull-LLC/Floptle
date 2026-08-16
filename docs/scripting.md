@@ -1055,10 +1055,36 @@ every step, so a change takes effect immediately with no reset or teleport.
 | `lock_x` `lock_y` `lock_z` | Freeze world-axis translation (e.g. lock Z for 2.5D). A lock engaging mid-play freezes the body **where it is right then**. |
 | `lock_rot_x` `lock_rot_y` `lock_rot_z` | Freeze rotation about an axis (keep a body upright). Holds the rotation the node has when the lock engages. |
 
-| `getcomponent("PointLight")` | Meaning (Inspector: ● Point Light) |
+| `getcomponent("PointLight")` | Meaning (Inspector: ● Point Light / ◤ Spot Light) |
 |---|---|
 | `intensity` / `range` | Brightness multiplier / reach in world units. |
 | `r` `g` `b` | Light color, 0..1 per channel. |
+| `shadows` | Stop this lamp at the walls between it and what it lights. |
+| `spotAngle` | **Aim it.** The FULL cone angle in degrees, down the node's local −Z. **180 or more is no cone** — an ordinary omnidirectional lamp, which is what every light reads until you change this. |
+| `spotSoftness` | How much of the cone's edge is falloff, 0..1. A *fraction* of the cone, so widening a beam keeps the edge you gave it. |
+| `shape` | The emitter: 0 point, 1 sphere, 2 rect, 3 disk, 4 tube. Switching keeps the size where two shapes share one. |
+| `radius` `width` `height` `length` `thickness` | The emitter's dimensions. Each reads 0 on a shape that has no such dimension, and a write lands only on a shape that has it. |
+| `twoSided` | A rect or disk that emits from both faces. |
+
+A spot is a point light that has been aimed — same node, same range, same emitter
+shapes, same slot in the sixteen. So there is no separate "is it a spot" flag to
+keep in step: `spotAngle` **is** the answer, and 180 turns the cone off.
+
+```lua
+-- A searchlight sweeping a yard, tightening as it locks on.
+local lamp
+function start(node) lamp = node:getcomponent("PointLight") end
+
+function update(node, dt)
+  node:rotate(0, 30 * dt, 0)                     -- the node's forward IS the beam
+  lamp.spotAngle = locked and 12 or 50
+  lamp.spotSoftness = locked and 0.05 or 0.4     -- tight and hard, or wide and soft
+end
+```
+
+> **Rotate the node to aim it.** The cone runs down local −Z, the same axis a
+> camera looks down, so pointing a lamp and pointing a camera are the same
+> gesture — and `node:lookAt(target)` aims a spot exactly as it aims a camera.
 
 | `getcomponent("Camera")` | Meaning (Inspector: ⌖ Camera) |
 |---|---|
