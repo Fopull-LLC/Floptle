@@ -169,6 +169,12 @@ distance stops being admissible the moment some ground costs *less* than ordinar
 ground, and an inadmissible heuristic quietly returns worse routes than the ones
 it walked past.
 
+`nav.ground()` lists them — `{ {name, cost}… }` — and every rectangle from
+`nav.areas()` carries a one-based index into it. Both were added because "areas
+are matched by name" is only true if a script can find out what the names *are*;
+without the list a filter is written by guessing, and a guess that misses reads
+as "nothing to avoid" rather than as an error.
+
 ## Links
 
 A navmesh is a surface, so it can only say "walk along the floor to there".
@@ -198,10 +204,29 @@ frame, with nothing rebaked — and anybody already halfway across finishes
 crossing, because halfway up a ladder is the one state nothing downstream can
 recover from.
 
+`nav.offLinks()` reads them all back as data — `{ id, name, from, to,
+bidirectional, cost, duration, enabled, ground }`, world space. **Careful with
+the two things called links:** that one is the handful an author placed;
+`nav.links()` is the thousands of portals the bake derived between neighbouring
+rectangles. The names are inherited from both genuinely being links, and are
+worth checking before reading either.
+
 **An end that lands on nothing leaves the link unresolved rather than dropped**,
 and the bake names it in the Console. A door that quietly does nothing is exactly
 the silent-failure shape this engine's own audit found again and again: the level
 looks right, the route goes the long way, and nothing anywhere says why.
+
+## Reading it from the editor
+
+An editor package gets the same `nav` table, minus everything that moves —
+[`docs/editor-scripting.md`](../editor-scripting.md). A level-analysis tool wants
+the shape of the walkable surface and nothing to do with driving anything around
+it, and there is no simulation running for an agent or an obstacle to act on
+anyway.
+
+It reads the **editor's** bake and not the running game's, which during Play may
+have obstacles carved out of it. Two mirrors of one navmesh drift, so there is
+one publish point (`Editor::publish_nav_mesh`) and both readers are fed from it.
 
 ## Runtime obstacles
 

@@ -28,7 +28,7 @@ each group, and meant to be searched.
 - [networking — net.*, synced](#networking--net-synced) — 31
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
 - [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 14
-- [pathfinding — nav.*](#pathfinding--nav) — 22
+- [pathfinding — nav.*](#pathfinding--nav) — 24
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
 - [2D — tilemaps & sprite batches](#2d--tilemaps--sprite-batches) — 22
@@ -1869,7 +1869,7 @@ Pathfinding over the scene's navmesh — where characters can walk, and how they
 
 ### `nav.AREA_STRIDE`
 
-How many numbers nav.areas() uses per area (10). Read it rather than writing the number, so a future field costs nothing.
+How many numbers nav.areas() uses per area (11). Read it rather than writing the number: fields are appended, never inserted, so code written against the constant keeps working.
 
 ### `nav.LINK_STRIDE`
 
@@ -1885,7 +1885,7 @@ nav.agents() — how many nav agents exist right now. For a HUD, a test, or chec
 
 ### `nav.areas`
 
-nav.areas() — every walkable area, as ONE FLAT ARRAY of numbers plus a count. Ten numbers each, in nav.AREA_STRIDE steps: minX, minZ, maxX, maxZ, yMin, yMax, region, centreX, centreY, centreZ — all world space. Flat rather than a table per area on purpose: a real bake is thousands of areas, and a held Lua table costs one of a few thousand mlua slots, so a table each exhausts them and panics the editor rather than raising something a script could catch. One array costs one slot however big the level is. Read it as: local a, n = nav.areas(); for i = 0, n - 1 do local o = i * nav.AREA_STRIDE ... end
+nav.areas() — every walkable area, as ONE FLAT ARRAY of numbers plus a count. Eleven numbers each, in nav.AREA_STRIDE steps: minX, minZ, maxX, maxZ, yMin, yMax, region, centreX, centreY, centreZ, ground — all world space, and ground is a one-based index into nav.ground(). Flat rather than a table per area on purpose: a real bake is thousands of areas, and a held Lua table costs one of a few thousand mlua slots, so a table each exhausts them and panics the editor rather than raising something a script could catch. One array costs one slot however big the level is. Read it as: local a, n = nav.areas(); for i = 0, n - 1 do local o = i * nav.AREA_STRIDE ... end
 
 ### `nav.budget`
 
@@ -1898,6 +1898,10 @@ nav.clearObstacles() — take every runtime obstacle away at once and give the w
 ### `nav.distance`
 
 nav.distance(from, to) — how far it is to WALK, in metres, or nil if there is no complete route. This is the number a decision should be made on: the straight-line distance to something on the far side of a wall is a lie, and "chase the nearest one" built on it picks the wrong one every time.
+
+### `nav.ground`
+
+nav.ground() — the kinds of ground this bake knows about, as { {name, cost}, ... } in the order an area's ground numbers them. These are the names a filter says: avoid = {'water'} means something only because the level called an area that, and this is how a script finds out which names the level offers instead of guessing at one and having a typo read as nothing to avoid. Tables rather than a flat array, unlike its neighbours — a level has a handful of these where it has thousands of areas, and a name cannot be a number. nil with no bake.
 
 ### `nav.link`
 
@@ -1918,6 +1922,10 @@ nav.obstacle(centre, size) — cut a box out of the baked navmesh, right now, an
 ### `nav.obstacles`
 
 nav.obstacles() — how many holes nav.obstacle has cut in the navmesh right now. Zero with no bake.
+
+### `nav.offLinks`
+
+nav.offLinks() — every Nav Link in the level as data: { id, name, from, to, bidirectional, cost, duration, enabled, ground }, world space. The ladders, jumps and doors somebody placed, as opposed to nav.links(), which is the thousands of portals the bake derived between neighbouring areas. Two things called links is inherited and worth knowing before reading either. Use nav.link(name, open) to change one; this only reads. nil with no bake.
 
 ### `nav.onMesh`
 

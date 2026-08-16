@@ -7623,7 +7623,7 @@ impl Editor {
             self.nav_overlay = None;
             self.nav_seconds = 0.0;
             self.nav_triangles = 0;
-            self.script_host.set_nav_mesh(None);
+            self.publish_nav_mesh();
         }
         if cmd.gi_cancel {
             self.cancel_gi_bake();

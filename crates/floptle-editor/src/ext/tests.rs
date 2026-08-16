@@ -661,6 +661,7 @@ fn every_name_in_the_environment_is_in_the_reference() {
         walk("scene.", scene)
         walk("selection.", selection)
         walk("handles.", handles)
+        walk("nav.", nav)
         walk("http.", http)
         walk("sys.", sys)
         walk("ed.prefs.", ed.prefs)
@@ -669,6 +670,40 @@ fn every_name_in_the_environment_is_in_the_reference() {
         "#,
     );
     let host = host_for(&proj);
+    // The walk above is written by hand, so it can quietly fall behind the
+    // environment it is meant to cover — a whole new table would simply not be
+    // visited and every name in it would pass undocumented. This builds the
+    // real environment and insists that the tables in it are the tables walked.
+    {
+        let lua = mlua::Lua::new();
+        let shared = Rc::new(Shared::default());
+        let state = PkgState {
+            id: "com.t.a".into(),
+            name: "t".into(),
+            version: "1.0.0".into(),
+            root: proj.clone(),
+            permissions: vec![Permission::Network, Permission::Browser, Permission::Files],
+            failed: None,
+        };
+        let env = super::api::build_env(&lua, &shared, 0, &state, None).unwrap();
+        let mut tables: Vec<String> = env
+            .pairs::<String, mlua::Value>()
+            .flatten()
+            .filter(|(_, v)| v.is_table())
+            .map(|(k, _)| k)
+            .collect();
+        // Lua's own, which the reference does not document because they are
+        // Lua's, and the two `os` carries.
+        tables.retain(|k| {
+            !matches!(k.as_str(), "string" | "table" | "math" | "coroutine" | "bit" | "os" | "json")
+        });
+        tables.sort();
+        assert_eq!(
+            tables,
+            ["ed", "handles", "http", "nav", "scene", "selection", "sys"],
+            "the environment has a table the coverage walk above does not visit"
+        );
+    }
     let log = host.take_log();
     assert!(!log.is_empty(), "the package did not run");
     let doc = std::fs::read_to_string(
@@ -871,5 +906,139 @@ fn a_package_can_raycast_the_scene() {
     );
     host.fire(HookKind::Update);
     assert_eq!(host.take_log()[0].msg, "nothing");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// A floor with a hole in it, baked — so there is more than one rectangle and
+/// a route has somewhere to go round.
+fn a_baked_floor() -> floptle_nav::NavMesh {
+    let quad = |x0: f32, x1: f32, z0: f32, z1: f32| {
+        vec![
+            floptle_nav::Tri::new([x0, 0.0, z0], [x1, 0.0, z0], [x0, 0.0, z1]),
+            floptle_nav::Tri::new([x1, 0.0, z0], [x1, 0.0, z1], [x0, 0.0, z1]),
+        ]
+    };
+    let mut tris = quad(0.0, 12.0, 0.0, 4.0);
+    tris.extend(quad(0.0, 12.0, 8.0, 12.0));
+    tris.extend(quad(0.0, 4.0, 4.0, 8.0));
+    tris.extend(quad(8.0, 12.0, 4.0, 8.0));
+    floptle_nav::bake(&tris, &floptle_nav::NavSettings::default()).expect("this floor bakes")
+}
+
+fn host_with_a_navmesh(proj: &Path) -> ExtHost {
+    let mut host = ExtHost::new();
+    host.begin_frame(
+        Snapshot { project_root: proj.to_path_buf(), ..Snapshot::default() },
+        SceneMirror::default(),
+    );
+    // Before the reload, because a package reads the level while it loads.
+    host.set_nav_mesh(Some(a_baked_floor()));
+    host.reload(proj, &engine());
+    host
+}
+
+/// An extension can read the level's navmesh — the shape of the floor, what
+/// kind of ground each piece is, and where the nearest standable point is.
+#[test]
+fn a_package_reads_the_baked_navmesh() {
+    let proj = temp("nav-read");
+    install(
+        &proj,
+        "com.t.nav",
+        "",
+        r#"
+        local a, n = nav.areas()
+        ed.log("ready " .. tostring(nav.ready()))
+        ed.log("rects " .. n .. " numbers " .. #a)
+        ed.log("ground " .. nav.ground()[1].name)
+        ed.log("stride " .. nav.AREA_STRIDE)
+        "#,
+    );
+    let host = host_with_a_navmesh(&proj);
+    assert!(host.packages[0].failed.is_none(), "{:?}", host.packages[0].failed);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log.contains(&"ready true".to_string()), "{log:?}");
+    assert!(log.contains(&"ground walkable".to_string()), "{log:?}");
+    assert!(log.contains(&"stride 11".to_string()), "{log:?}");
+    // Four rectangles at least — a floor with a hole cannot be one — and the
+    // flat array is exactly stride-many numbers per rectangle.
+    let rects = log.iter().find(|l| l.starts_with("rects ")).expect("{log:?}");
+    let parts: Vec<&str> = rects.split_whitespace().collect();
+    let (n, numbers): (usize, usize) = (parts[1].parse().unwrap(), parts[3].parse().unwrap());
+    assert!(n >= 4, "a floor with a hole in it baked into {n} rectangles");
+    assert_eq!(numbers, n * 11);
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// **The first thing anybody does with a navmesh is draw it.** `nav.*` answers
+/// in the scripting runtime's vector, which is userdata and not a table, and
+/// `handles.*` reads tables — so without the two agreeing, the obvious two-line
+/// package raises on its second line.
+#[test]
+fn a_point_from_nav_can_be_drawn_with_handles() {
+    let proj = temp("nav-draw");
+    install(
+        &proj,
+        "com.t.nav",
+        "",
+        r#"
+        local p = nav.nearest(vec3(1, 0, 1))
+        ed.log("nearest is " .. type(p))
+        handles.dot(p, 4)
+        handles.line(p, nav.nearest(vec3(11, 0, 11)))
+        "#,
+    );
+    let host = host_with_a_navmesh(&proj);
+    assert!(host.packages[0].failed.is_none(), "{:?}", host.packages[0].failed);
+    assert_eq!(host.shared.handles.borrow().len(), 2, "the drawing did not reach the queue");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// The editor gets the reading half and nothing that moves: there is no
+/// simulation for an agent to walk in, and an obstacle carved into the editor's
+/// own bake would be a level edit made by a panel.
+#[test]
+fn an_extension_cannot_drive_or_carve() {
+    let proj = temp("nav-half");
+    install(
+        &proj,
+        "com.t.nav",
+        "",
+        r#"
+        ed.log("agent " .. type(nav.agent))
+        ed.log("obstacle " .. type(nav.obstacle))
+        ed.log("link " .. type(nav.link))
+        ed.log("areas " .. type(nav.areas))
+        "#,
+    );
+    let host = host_with_a_navmesh(&proj);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log.contains(&"agent nil".to_string()), "{log:?}");
+    assert!(log.contains(&"obstacle nil".to_string()), "{log:?}");
+    assert!(log.contains(&"link nil".to_string()), "{log:?}");
+    assert!(log.contains(&"areas function".to_string()), "{log:?}");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// A project nobody has baked is the ordinary state of a new one, and a package
+/// that runs on every scene has to survive it.
+#[test]
+fn nav_answers_nothing_rather_than_raising_with_no_bake() {
+    let proj = temp("nav-none");
+    install(
+        &proj,
+        "com.t.nav",
+        "",
+        r#"
+        local a, n = nav.areas()
+        ed.log("ready " .. tostring(nav.ready()) .. " areas " .. type(a) .. " n " .. n)
+        ed.log("ground " .. type(nav.ground()) .. " links " .. type(nav.offLinks()))
+        "#,
+    );
+    let host = host_for(&proj);
+    assert!(host.packages[0].failed.is_none(), "{:?}", host.packages[0].failed);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log.contains(&"ready false areas nil n 0".to_string()), "{log:?}");
+    assert!(log.contains(&"ground nil links nil".to_string()), "{log:?}");
     let _ = std::fs::remove_dir_all(&proj);
 }

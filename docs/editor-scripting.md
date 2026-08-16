@@ -228,6 +228,80 @@ view, which is meant to show what a player would see.
 
 ---
 
+## `nav` — the baked navmesh
+
+Where a character can walk, as the level's bake describes it. `nav.ready()` is
+`false` until somebody adds a **Nav Mesh** node and presses Bake, and every call
+here answers `nil` until then — which is the ordinary state of a new project
+rather than an error, so a tool that runs on every scene has to cope with it.
+
+This is the reading half of the [scripting `nav`](scripting.md) API and nothing
+that moves: no `nav.agent`, no `nav.obstacle`, no opening and closing links.
+There is no simulation running for those to act on, and an obstacle carved into
+the editor's own bake would be a level edit made by a panel.
+
+Everything is in **world coordinates**, so a level a million units from the
+origin needs no arithmetic at your end.
+
+| | |
+| --- | --- |
+| `nav.ready()` | is there a bake to ask |
+| `nav.settings()` | the character it was baked for: `radius`, `height`, `maxSlope`, `stepHeight`, `cellSize`, plus `area` in square metres |
+| `nav.areas()` | the walkable surface — see below |
+| `nav.links()` | the portals between those rectangles |
+| `nav.ground()` | `{ {name, cost}… }`, the kinds of ground the level named |
+| `nav.offLinks()` | the ladders, jumps and doors somebody placed |
+| `nav.nearest(p [, max])` | the closest standable point, or `nil` |
+| `nav.onMesh(p)` · `nav.regionOf(p)` · `nav.reachable(a, b)` | |
+| `nav.path(a, b)` · `nav.distance(a, b)` · `nav.raycast(a, b)` | |
+| `nav.random(seed [, near, radius])` | repeatable for a given seed |
+
+### Reading the surface
+
+`nav.areas()` hands back **one flat array of numbers and a count**, not an array
+of tables. A real bake is thousands of rectangles, and one Lua table each
+exhausts mlua's auxiliary slots and takes the editor down with it. The stride is
+a constant so the arithmetic is written once:
+
+```lua
+local a, n = nav.areas()
+local ground = nav.ground()
+for i = 0, n - 1 do
+    local o = i * nav.AREA_STRIDE
+    local minX, minZ, maxX, maxZ = a[o+1], a[o+2], a[o+3], a[o+4]
+    local yMin, yMax, region     = a[o+5], a[o+6], a[o+7]
+    local cx, cy, cz             = a[o+8], a[o+9], a[o+10]
+    local kind = ground[a[o+11]].name        -- "walkable", "water", …
+end
+```
+
+`region` groups rectangles that can reach each other, so two with different
+regions are two places you cannot walk between. `nav.LINK_STRIDE` does the same
+job for `nav.links()`, whose entries are `from to leftX leftY leftZ rightX rightY
+rightZ` — `from` and `to` index the areas array, one-based.
+
+> **Two things are called links.** `nav.links()` is the thousands of portals the
+> bake derived between neighbouring rectangles. `nav.offLinks()` is the handful
+> an author placed by hand: `{ id, name, from, to, bidirectional, cost, duration,
+> enabled, ground }`. The names are inherited and worth checking before you read
+> either.
+
+Points come back as vectors you can hand straight to `handles`:
+
+```lua
+ed.onSceneDraw(function()
+    local a, n = nav.areas()
+    handles.color(0.3, 0.8, 1, 0.5)
+    for i = 0, n - 1 do
+        local o = i * nav.AREA_STRIDE
+        handles.wireCube(vec3(a[o+8], a[o+9], a[o+10]),
+                         vec3(a[o+3] - a[o+1], 0.05, a[o+4] - a[o+2]))
+    end
+end)
+```
+
+---
+
 ## `gui` — widgets
 
 Only inside a draw callback. Widgets **return their new value**:

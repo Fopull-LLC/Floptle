@@ -134,6 +134,17 @@ pub(crate) struct Shared {
     pub(crate) handles: RefCell<Vec<HandleCmd>>,
     pub(crate) scene: RefCell<SceneMirror>,
     pub(crate) snap: RefCell<Snapshot>,
+    /// The scene's baked navmesh, or `None` where nobody has baked one.
+    ///
+    /// Not rebuilt with the other mirrors: a navmesh changes when somebody
+    /// bakes it and at no other time, and a level's worth of polygons is not a
+    /// thing to copy sixty times a second. Written by
+    /// [`crate::Editor::publish_nav_mesh`].
+    ///
+    /// Deliberately the **editor's** bake and not the running game's, which
+    /// during Play may have obstacles carved out of it. A package reads the
+    /// level as it was authored.
+    pub(crate) nav: floptle_script::nav_api::NavShared,
     /// Per-package stores: user preferences, per-project state, per-session
     /// scratch.
     pub(crate) prefs: RefCell<prefs::Stores>,
@@ -476,6 +487,12 @@ impl ExtHost {
 
     /// Hand the extensions this frame's view of the editor. Call before the UI
     /// pass.
+    /// Hand the packages the scene's baked navmesh. See [`Shared::nav`] for why
+    /// this is not part of `begin_frame`.
+    pub(crate) fn set_nav_mesh(&self, mesh: Option<floptle_nav::NavMesh>) {
+        *self.shared.nav.borrow_mut() = mesh;
+    }
+
     pub(crate) fn begin_frame(&mut self, snap: Snapshot, scene: SceneMirror) {
         *self.shared.snap.borrow_mut() = snap;
         *self.shared.scene.borrow_mut() = scene;

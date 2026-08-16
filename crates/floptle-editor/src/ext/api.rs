@@ -57,6 +57,7 @@ pub(crate) fn build_env(
     env.set("scene", scene_table(lua, shared)?)?;
     env.set("selection", selection_table(lua, shared)?)?;
     env.set("handles", super::handles::bind(lua, shared)?)?;
+    env.set("nav", nav_table(lua, shared)?)?;
 
     if state.permissions.contains(&Permission::Network) {
         env.set("http", http_table(lua, shared)?)?;
@@ -68,6 +69,22 @@ pub(crate) fn build_env(
     // the first thing anybody wants and `dofile` would be a hole.
     env.set("require", require_fn(lua, shared, &env, state.root.clone(), id)?)?;
     Ok(env)
+}
+
+/// `nav` — the scene's baked navmesh, read-only.
+///
+/// The same calls a running script has, minus everything that moves: no
+/// `nav.agent`, no `nav.obstacle`, no opening and closing links. An extension
+/// looks at the level the author has open; it does not drive anything around
+/// it, and there is no simulation running for those to act on.
+///
+/// No permission gates it. It says less about the project than `scene` already
+/// does, and asking for a permission to read a shape the same package can
+/// measure itself out of `scene.nodes()` would be a warning that means nothing.
+fn nav_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    floptle_script::nav_api::install_mesh_reads(lua, &t, shared.nav.clone());
+    Ok(t)
 }
 
 /// The Lua that is safe to hand a package: values and pure functions, no I/O,

@@ -249,6 +249,13 @@ pub use http_api::open_in_browser;
 mod input_api;
 pub mod load_error;
 mod math_api;
+/// The vector [`nav_api`] hands back.
+///
+/// Exported because [`nav_api::install_mesh_reads`] can be installed into a host
+/// that is not this one — the editor's package environment is the other — and a
+/// public function that returns a private type leaves that host unable to read
+/// its own answers.
+pub use math_api::LuaVec3;
 pub mod nav_api;
 pub mod access_api;
 mod net_api;

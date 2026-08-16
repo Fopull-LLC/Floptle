@@ -59,8 +59,13 @@ pub type NavShared = Rc<RefCell<Option<floptle_nav::NavMesh>>>;
 
 /// Numbers per area in the flat array `nav.areas()` returns.
 ///
-/// `minX minZ maxX maxZ yMin yMax region centreX centreY centreZ`
-pub const AREA_STRIDE: usize = 10;
+/// `minX minZ maxX maxZ yMin yMax region centreX centreY centreZ ground`
+///
+/// `ground` is a one-based index into [`nav.ground`](install_mesh_reads) — which
+/// kind of ground this rectangle is, and so what a filter naming `"water"` is
+/// naming. New entries are appended, never inserted, so code that reads the
+/// first ten through the constant keeps working.
+pub const AREA_STRIDE: usize = 11;
 
 /// Numbers per link in the flat array `nav.links()` returns.
 ///
@@ -733,6 +738,22 @@ pub(crate) fn install_nav_api(
         let _ = t.set("clearObstacles", f);
     }
 
+    // Everything from here on only asks the baked mesh a question, and the
+    // editor's package host installs exactly that half and none of the rest.
+    install_mesh_reads(lua, &t, mesh);
+
+    let _ = lua.globals().set("nav", t);
+}
+
+/// Install the read-only half of `nav.*` onto an existing table: the calls that
+/// only ever *ask* the baked mesh something.
+///
+/// Split out because there are two callers with different rights. A running
+/// script gets the whole of [`install_nav_api`] — agents, doors, obstacles, the
+/// things that move. An **editor extension** gets only this: it reads the level
+/// the author has open, and `nav.agent` with no simulation running could only
+/// ever answer nothing.
+pub fn install_mesh_reads(lua: &Lua, t: &mlua::Table, mesh: NavShared) {
     let _ = t.set("AREA_STRIDE", AREA_STRIDE);
     let _ = t.set("LINK_STRIDE", LINK_STRIDE);
 
@@ -916,7 +937,18 @@ pub(crate) fn install_nav_api(
             let hi = mesh.to_world([p.max[0], p.y_max, p.max[1]]);
             let c = mesh.to_world(p.centre);
             for n in [
-                lo[0], lo[2], hi[0], hi[2], lo[1], hi[1], p.region as f64, c[0], c[1], c[2],
+                lo[0],
+                lo[2],
+                hi[0],
+                hi[2],
+                lo[1],
+                hi[1],
+                p.region as f64,
+                c[0],
+                c[1],
+                c[2],
+                // One-based, so it indexes `nav.ground()` directly.
+                p.area as f64 + 1.0,
             ] {
                 out.set(i, n)?;
                 i += 1;
@@ -964,7 +996,64 @@ pub(crate) fn install_nav_api(
         let _ = t.set("links", f);
     }
 
-    let _ = lua.globals().set("nav", t);
+    // nav.ground() -> {{name, cost}...}
+    //
+    // The kinds of ground this bake knows about, in the order a rectangle's
+    // `ground` numbers them. These are the names a filter says — `avoid =
+    // {"water"}` means something only because the level called an area that.
+    //
+    // Tables and not a flat array, unlike its neighbours: a level has a handful
+    // of these where it has thousands of rectangles, and a name cannot be a
+    // number anyway.
+    let m = mesh.clone();
+    if let Ok(f) = lua.create_function(move |lua, ()| {
+        let guard = m.borrow();
+        let Some(mesh) = guard.as_ref() else { return Ok(None) };
+        let out = lua.create_table_with_capacity(mesh.areas.len(), 0)?;
+        for (i, a) in mesh.areas.iter().enumerate() {
+            let e = lua.create_table()?;
+            e.set("name", a.name.clone())?;
+            e.set("cost", a.cost)?;
+            out.set(i + 1, e)?;
+        }
+        Ok(Some(out))
+    }) {
+        let _ = t.set("ground", f);
+    }
+
+    // nav.offLinks() -> {{...}...}
+    //
+    // Every off-mesh link in the level as data: the ladders, jumps and doors
+    // that connect two places the walking surface does not.
+    //
+    // Distinct from `nav.links()`, which is the portals *between* rectangles —
+    // an unfortunate pair of names inherited from the two things both being
+    // called links, and worth knowing about before reading either. This one is
+    // the handful of them an author placed; that one is the thousands the bake
+    // derived.
+    let m = mesh.clone();
+    if let Ok(f) = lua.create_function(move |lua, ()| {
+        let guard = m.borrow();
+        let Some(mesh) = guard.as_ref() else { return Ok(None) };
+        let out = lua.create_table_with_capacity(mesh.off_links.len(), 0)?;
+        for (i, l) in mesh.off_links.iter().enumerate() {
+            let e = lua.create_table()?;
+            e.set("id", l.id)?;
+            e.set("name", l.name.clone())?;
+            e.set("from", world_vec(mesh, l.from))?;
+            e.set("to", world_vec(mesh, l.to))?;
+            e.set("bidirectional", l.bidirectional)?;
+            e.set("cost", l.cost)?;
+            e.set("duration", l.duration)?;
+            e.set("enabled", l.enabled)?;
+            // One-based, matching a rectangle's `ground`.
+            e.set("ground", l.area as u32 + 1)?;
+            out.set(i + 1, e)?;
+        }
+        Ok(Some(out))
+    }) {
+        let _ = t.set("offLinks", f);
+    }
 }
 
 #[cfg(test)]
@@ -1006,6 +1095,113 @@ mod tests {
 
     fn eval<T: mlua::FromLuaMulti>(lua: &Lua, src: &str) -> T {
         lua.load(src).eval().unwrap_or_else(|e| panic!("{src}\n{e}"))
+    }
+
+    /// The same floor, given two named kinds of ground and one link across the
+    /// hole — so the two things a level says about itself beyond its shape have
+    /// something to be read out of.
+    fn scene_with_ground_and_a_link() -> Lua {
+        let quad = |x0: f32, x1: f32, z0: f32, z1: f32, y: f32| {
+            vec![
+                Tri::new([x0, y, z0], [x1, y, z0], [x0, y, z1]),
+                Tri::new([x1, y, z0], [x1, y, z1], [x0, y, z1]),
+            ]
+        };
+        let mut tris = quad(0.0, 12.0, 0.0, 4.0, 0.0);
+        tris.extend(quad(0.0, 12.0, 8.0, 12.0, 0.0));
+
+        let mesh = floptle_nav::bake(&tris, &NavSettings::default())
+            .expect("this floor bakes")
+            .with_areas(vec![
+                floptle_nav::Area::walkable(),
+                floptle_nav::Area::new("water", 4.0),
+            ])
+            .with_links(vec![floptle_nav::OffLink::new(
+                7,
+                "the plank",
+                [6.0, 0.0, 2.0],
+                [6.0, 0.0, 10.0],
+            )])
+            .anchored_at([1_000_000.0, 0.0, -250_000.0]);
+
+        let lua = Lua::new();
+        let _ = crate::math_api::install(&lua);
+        install_nav_api(
+            &lua,
+            Rc::new(RefCell::new(Some(mesh))),
+            Rc::new(RefCell::new(AgentWorld::default())),
+            Rc::new(RefCell::new(crate::SceneMirror::default())),
+        );
+        lua
+    }
+
+    /// A filter says `avoid = {"water"}`, and that means something only because
+    /// the bake carries the name. Without this there is no way to find out from
+    /// a script what names the level offers — you guess, and a typo reads as
+    /// "nothing to avoid".
+    #[test]
+    fn ground_lists_the_names_a_filter_can_say() {
+        let lua = scene_with_ground_and_a_link();
+        let (n, first, second, cost): (usize, String, String, f64) = eval(
+            &lua,
+            "local g = nav.ground() return #g, g[1].name, g[2].name, g[2].cost",
+        );
+        assert_eq!((n, first.as_str(), second.as_str()), (2, "walkable", "water"));
+        assert_eq!(cost, 4.0);
+    }
+
+    /// The rectangle's `ground` is an index into that list and not a raw id, so
+    /// `nav.ground()[a[o + 11]]` is the whole of the lookup.
+    #[test]
+    fn every_rectangle_names_its_ground_by_that_lists_index() {
+        let lua = scene_with_ground_and_a_link();
+        let ok: bool = eval(
+            &lua,
+            "local a, n = nav.areas()
+             local g = nav.ground()
+             for i = 0, n - 1 do
+                 local ground = a[i * nav.AREA_STRIDE + 11]
+                 if ground ~= math.floor(ground) then return false end
+                 if not g[ground] then return false end
+             end
+             return n > 0",
+        );
+        assert!(ok, "a rectangle named a kind of ground the mesh does not have");
+    }
+
+    /// Everything else in this module answers in world coordinates and a link
+    /// has to as well — the failure otherwise is a ladder drawn a million units
+    /// from the one it describes, on the levels that have an anchor at all.
+    #[test]
+    fn an_off_link_is_reported_in_world_space_like_everything_else() {
+        let lua = scene_with_ground_and_a_link();
+        let (n, id, name, x, bidir, on): (usize, u32, String, f64, bool, bool) = eval(
+            &lua,
+            "local l = nav.offLinks()
+             return #l, l[1].id, l[1].name, l[1].from.x, l[1].bidirectional, l[1].enabled",
+        );
+        assert_eq!((n, id, name.as_str()), (1, 7, "the plank"));
+        assert!((x - 1_000_006.0).abs() < 0.6, "the anchor was not applied: {x}");
+        assert!(!bidir, "a plank is one-way unless the level says otherwise");
+        assert!(on);
+    }
+
+    /// A scene with no bake answers nothing rather than raising: an extension
+    /// drawing a navmesh runs on every scene, including the ones nobody has
+    /// baked, and that is the ordinary state of a new project.
+    #[test]
+    fn ground_and_off_links_are_nil_with_no_bake() {
+        let lua = Lua::new();
+        let _ = crate::math_api::install(&lua);
+        install_nav_api(
+            &lua,
+            Rc::new(RefCell::new(None)),
+            Rc::new(RefCell::new(AgentWorld::default())),
+            Rc::new(RefCell::new(crate::SceneMirror::default())),
+        );
+        let (g, l): (Option<mlua::Table>, Option<mlua::Table>) =
+            eval(&lua, "return nav.ground(), nav.offLinks()");
+        assert!(g.is_none() && l.is_none());
     }
 
     /// The whole reason this is a flat array: a real bake is thousands of

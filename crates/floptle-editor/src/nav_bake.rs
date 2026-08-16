@@ -805,6 +805,18 @@ impl crate::Editor {
         p
     }
 
+    /// Hand the baked navmesh to everything that reads one.
+    ///
+    /// **One call site per reader is how the two drift.** There are two readers
+    /// — the running game's scripts and the editor's packages — and every place
+    /// that changes the bake has to reach both. Every place reaches this
+    /// instead, so adding a third reader is one line here rather than a search
+    /// for the five that were easy to find and the one that was not.
+    pub(crate) fn publish_nav_mesh(&mut self) {
+        self.script_host.set_nav_mesh(self.nav_baked.clone());
+        self.ext.set_nav_mesh(self.nav_baked.clone());
+    }
+
     /// Load this scene's navmesh, if it has one baked.
     pub(crate) fn load_nav(&mut self) {
         self.nav_baked = None;
@@ -813,7 +825,7 @@ impl crate::Editor {
         self.nav_triangles = 0;
         self.nav_coverage = None;
         let Some((_, Matter::NavMesh { id, .. })) = nav_node(&self.world) else {
-            self.script_host.set_nav_mesh(None);
+            self.publish_nav_mesh();
             return;
         };
         let path = self.nav_path(id);
@@ -844,7 +856,7 @@ impl crate::Editor {
             }
         }
         self.nav_overlay = None;
-        self.script_host.set_nav_mesh(self.nav_baked.clone());
+        self.publish_nav_mesh();
     }
 
     /// What the level currently looks like to a bake, as one number.
@@ -1150,8 +1162,8 @@ impl crate::Editor {
         // exactly as it was. So a play-time bake reaches the running game and
         // goes no further.
         if self.playing {
-            self.script_host.set_nav_mesh(Some(mesh.clone()));
             self.nav_baked = Some(mesh);
+            self.publish_nav_mesh();
             self.nav_overlay = None;
             self.nav_seconds = seconds;
             self.nav_triangles = triangles;
@@ -1211,8 +1223,8 @@ impl crate::Editor {
         }
         let crossings = mesh.off_links.len() - lost.len();
 
-        self.script_host.set_nav_mesh(Some(mesh.clone()));
         self.nav_baked = Some(mesh);
+        self.publish_nav_mesh();
         self.nav_overlay = None;
         self.nav_seconds = seconds;
         self.nav_triangles = triangles;
