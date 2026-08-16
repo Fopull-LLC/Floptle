@@ -11,7 +11,15 @@ workarounds — one parent per chunk, rotations baked into prefabs to avoid a
 callback, a spawn budget per frame — they all still work and you can start taking
 them out. Editor packages also get **`nav`**: the shape of the walkable surface,
 what each piece of ground is called, and every query a running script has, so a
-tool can read your level rather than guess at it. Plus two things every package
+tool can read your level rather than guess at it. Re-measuring a navmesh stopped re-reading every
+model off disk and decoding all of its textures to answer a question about vertex
+positions — one model went from **6.8 ms to 0.02 ms** on a second bake — and a
+prop with a static box body now bakes as the box your characters actually collide
+with, rather than as its detailed silhouette. And when your level changes shape,
+**`nav.rebake(centre, size)`** re-measures one box of it and splices the answer
+in, in the same frame — a 32 m chunk costs about the same whether the level
+around it is four chunks or sixteen, where a full rebake costs more every time
+you widen your streaming radius. Plus two things every package
 was writing by hand — **`ed.after`/`ed.every`** for waiting, and
 **`ed.randomBytes`** for the randomness a sign-in needs and `math.random` was
 never going to be.
