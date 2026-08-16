@@ -1,5 +1,21 @@
 ## Just shipped
 
+**v0.63.0 "As Much As You Like"** — if your game builds its own world, it stops
+getting heavier the more world there is. Spawning a node used to do work
+proportional to how much scene already existed, in four places at once, so a
+level that ran fine at the size you tested it stuttered at the size you shipped
+it. The same thousand-node chunk now costs **47 ms into a 1,000-node scene and
+54 ms into an 8,000-node one** — it was 1.2 s and 8.6 s. A chunk is the same
+chunk whatever it lands in, and now it costs the same too. If you built the usual
+workarounds — one parent per chunk, rotations baked into prefabs to avoid a
+callback, a spawn budget per frame — they all still work and you can start taking
+them out. Editor packages also get **`nav`**: the shape of the walkable surface,
+what each piece of ground is called, and every query a running script has, so a
+tool can read your level rather than guess at it. Plus two things every package
+was writing by hand — **`ed.after`/`ed.every`** for waiting, and
+**`ed.randomBytes`** for the randomness a sign-in needs and `math.random` was
+never going to be.
+
 **v0.62.1** — sun shadows over a plain floor. Turn them on in a scene made of
 meshes — a plane, a character standing on it — and the ground came out crawling
 with dark bands: not the shadow of anything, just stripes ruled across open
