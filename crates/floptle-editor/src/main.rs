@@ -1495,6 +1495,13 @@ struct Editor {
     /// The project's packages and the Lua they run in the editor. Present even
     /// with nothing installed, where every entry point is a no-op.
     ext: ext::ExtHost,
+    /// Have this session's packages been loaded yet?
+    ///
+    /// Startup assigns `project_root` directly instead of going through
+    /// `open_project`, so nothing ever called `ext_reload` for a project named
+    /// on the command line — which is how the Hub starts the editor. See
+    /// `ext_tick`, which does the one-shot load.
+    ext_booted: bool,
     /// This frame's `handles.*`, projected for the Scene view.
     ext_painted: Vec<ext::handles::Painted>,
     /// Seconds since the editor started — what `ed.time()` answers.

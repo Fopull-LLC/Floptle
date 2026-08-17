@@ -113,6 +113,24 @@ impl Editor {
     /// pieces of it. Running the hooks first also means a hook's `scene.setPos`
     /// is queued before anything reads the queue.
     pub(crate) fn ext_tick(&mut self) {
+        // **Load this project's packages once, however the project arrived.**
+        //
+        // Startup sets `project_root` directly rather than calling
+        // `open_project`, so `ext_reload` was never run for a project named on
+        // the command line: the editor came up with the level loaded and its
+        // packages simply absent — no menus, no panels, no error, because
+        // nothing had failed. The only way to get them was to toggle a package
+        // in 📦 Packages, which reloads as a side effect.
+        //
+        // The Hub launches the editor with the project as an argument, so this
+        // was every Hub-started session, not just a binary run by hand.
+        //
+        // Must sit ABOVE the `is_empty` early-out below: with nothing loaded
+        // yet, that return is exactly the branch this has to get past.
+        if !self.ext_booted && !self.project_root.as_os_str().is_empty() {
+            self.ext_booted = true;
+            self.ext_reload();
+        }
         if self.ext.is_empty() {
             self.ext_painted.clear();
             return;
