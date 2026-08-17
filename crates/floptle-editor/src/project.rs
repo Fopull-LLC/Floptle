@@ -844,35 +844,20 @@ impl Editor {
         );
     }
 
-    /// Open the OS's native file picker (multi-select) on a background thread and
-    /// import the chosen files into `dir` when the user confirms. This is the
-    /// reliable cross-platform import path: rfd's XDG-desktop-portal backend works
-    /// on Wayland — where winit delivers no drag-and-drop — as well as on X11,
-    /// Windows and macOS. The dialog runs off the UI thread (a channel delivers
-    /// the result), so the editor never freezes while it's open; the result is
+    /// Open the OS's native file picker (multi-select) and import the chosen
+    /// files into `dir` when the user confirms. This is the reliable
+    /// cross-platform import path: rfd's XDG-desktop-portal backend works on
+    /// Wayland — where winit delivers no drag-and-drop — as well as on X11,
+    /// Windows and macOS. The picker runs off the UI thread (see
+    /// [`crate::native_dialog`], which is also where the reason it *must* is
+    /// written down), so the editor never freezes while it's open; the result is
     /// drained each frame in `apply_frame_commands`.
     pub(crate) fn open_import_dialog(&mut self, dir: std::path::PathBuf) {
         if self.import_rx.is_some() {
             return; // one dialog at a time
         }
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            // ashpd/rfd's portal backend needs an async runtime; a tiny
-            // current-thread tokio runtime drives it on this worker thread.
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
-                return;
-            };
-            let picked = rt.block_on(async {
-                rfd::AsyncFileDialog::new().set_title("Import assets into the project").pick_files().await
-            });
-            if let Some(handles) = picked {
-                let paths: Vec<PathBuf> = handles.iter().map(|h| h.path().to_path_buf()).collect();
-                if !paths.is_empty() {
-                    let _ = tx.send((paths, dir));
-                }
-            }
-        });
-        self.import_rx = Some(rx);
+        self.import_rx =
+            Some((crate::native_dialog::pick_files("Import assets into the project"), dir));
     }
 
     /// Delete files/folders (recursively) and drop any references to them —

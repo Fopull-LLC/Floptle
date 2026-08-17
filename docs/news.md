@@ -1,5 +1,16 @@
 ## Just shipped
 
+**v0.64.3** — **adding a package from a folder works on Linux.** Window ⏵ 📦
+Packages ⏵ Add ⏵ 📂 Choose folder… and 🔗 Link folder… closed the editor the
+instant you clicked either one: no picker, no message, no crash report, just a
+window that vanished — which reads like a broken button rather than like
+something going wrong. The system file dialog was being asked for from the thread
+that draws the editor, which on a Linux desktop has no way to wait for the
+answer. Nothing was left half-done, because the editor stopped before it read a
+single file: no stray entry, no partial install. Windows and macOS were never
+affected. The editor also keeps drawing now while a picker is open, and the
+buttons grey out until you have answered it.
+
 **v0.64.2 "Point It At Something"** — **spot lights**. Add ⏵ ◤ Spot Light and
 rotate the node to aim it; the beam runs down the node's forward, the same axis a
 camera looks down. Two numbers: the **cone**, as the full angle a real fixture is

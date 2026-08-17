@@ -8652,14 +8652,15 @@ impl Editor {
             self.open_import_dialog(dir);
         }
         // Drain a completed native import dialog (see open_import_dialog).
-        if let Some(rx) = &self.import_rx {
-            match rx.try_recv() {
-                Ok((files, dir)) => {
-                    self.import_files(&files, &dir);
+        if let Some((rx, dir)) = &self.import_rx {
+            match crate::native_dialog::poll(rx) {
+                crate::native_dialog::Answer::Waiting => {}
+                crate::native_dialog::Answer::Chose(files) => {
+                    let dir = dir.clone();
                     self.import_rx = None;
+                    self.import_files(&files, &dir);
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.import_rx = None,
+                crate::native_dialog::Answer::Closed => self.import_rx = None,
             }
         }
         if let Some((roots, dir)) = cmd.save_prefab {

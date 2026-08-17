@@ -70,6 +70,13 @@ out.png
 # project open; the canonical copies live under each real project, e.g. solar/).
 assets/shaders/examples/ui/
 
+# A PROJECT's package registry. `Source::Linked` records an ABSOLUTE path on the
+# machine that linked it — "/home/someone/…" — so this file is developer state,
+# not project source: committing it hands everyone else a path that exists on
+# exactly one computer. Anchored one level down like the runtime dirs above, so
+# it covers every project in the repo without naming one.
+/*/packages.ron
+
 # Offscreen render-probe outputs (ui_shader_probe, etc.)
 *_probe.png
 

@@ -125,6 +125,10 @@ pub(crate) struct PackagesState {
     /// ✚ New Package.
     new_id: String,
     new_name: String,
+    /// The native folder picker while it is open, and which button opened it.
+    /// Drained in [`body`] rather than in the Add tab, so an answer still lands
+    /// if the user wanders off to another tab while the picker is up.
+    pending_folder: Option<(FolderPurpose, Receiver<PathBuf>)>,
     /// Browse's search box.
     search: String,
     /// Which shelves are being asked for, and what a package must hold. Both
@@ -213,6 +217,55 @@ pub(crate) struct PackagesAction {
     pub(crate) open_folder: Option<PathBuf>,
 }
 
+/// Which folder button is waiting on the picker. The two differ only in what
+/// they do with the answer — and that is the whole difference that matters:
+/// one copies the folder into the project, the other reads it where it lies.
+#[derive(Clone, Copy)]
+pub(crate) enum FolderPurpose {
+    Install,
+    Link,
+}
+
+/// Apply a folder the user picked, if they have picked one yet.
+///
+/// The picker runs off-thread (see [`crate::native_dialog`]), so the click and
+/// the answer are different frames. Everything after the answer arrives is the
+/// same work the button used to do inline.
+fn drain_folder_picker(
+    ctx: &PkgCtx<'_>,
+    state: &mut PackagesState,
+    action: &mut PackagesAction,
+) {
+    let Some((purpose, rx)) = state.pending_folder.as_ref() else { return };
+    let purpose = *purpose;
+    match crate::native_dialog::poll(rx) {
+        crate::native_dialog::Answer::Waiting => {}
+        crate::native_dialog::Answer::Closed => {
+            state.pending_folder = None;
+        }
+        crate::native_dialog::Answer::Chose(dir) => {
+            state.pending_folder = None;
+            let done = match purpose {
+                FolderPurpose::Install => {
+                    floptle_package::install::install_from_dir(ctx.project_root, &dir, false)
+                        .map(|e| format!("installed {} {}", e.id, e.version))
+                }
+                FolderPurpose::Link => {
+                    floptle_package::install::link_dir(ctx.project_root, &dir, false)
+                        .map(|e| format!("linked {}", e.id))
+                }
+            };
+            match done {
+                Ok(note) => {
+                    state.note = Some(note);
+                    action.reload = true;
+                }
+                Err(e) => state.error = Some(e.to_string()),
+            }
+        }
+    }
+}
+
 /// Draw the 📦 Packages tab. Returns what the editor should do next.
 pub(crate) fn body(
     ui: &mut egui::Ui,
@@ -225,6 +278,7 @@ pub(crate) fn body(
             ui.label("Open a project first — packages are installed into a project.");
             return action;
         }
+        drain_folder_picker(&ctx, state, &mut action);
 
         ui.horizontal(|ui| {
             for (tab, label) in [
@@ -510,37 +564,30 @@ fn add_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState, actio
                  gets it too.",
             ));
             ui.horizontal(|ui| {
-                if ui.button("📂 Choose folder…").clicked()
-                    && let Some(dir) = rfd::FileDialog::new().pick_folder()
-                {
-                    match floptle_package::install::install_from_dir(
-                        ctx.project_root,
-                        &dir,
-                        false,
-                    ) {
-                        Ok(e) => {
-                            state.note = Some(format!("installed {} {}", e.id, e.version));
-                            action.reload = true;
-                        }
-                        Err(e) => state.error = Some(e.to_string()),
-                    }
+                let open = state.pending_folder.is_some();
+                // Greyed while a picker is already up: a second one is two
+                // answers to a question that was asked once.
+                if ui.add_enabled(!open, egui::Button::new("📂 Choose folder…")).clicked() {
+                    state.pending_folder = Some((
+                        FolderPurpose::Install,
+                        crate::native_dialog::pick_folder("Choose a package folder to install"),
+                    ));
                 }
                 if ui
-                    .button("🔗 Link folder…")
+                    .add_enabled(!open, egui::Button::new("🔗 Link folder…"))
                     .on_hover_text(
                         "read it where it is, without copying — what you use while WRITING a \
                          package, so every edit shows up on Reload",
                     )
                     .clicked()
-                    && let Some(dir) = rfd::FileDialog::new().pick_folder()
                 {
-                    match floptle_package::install::link_dir(ctx.project_root, &dir, false) {
-                        Ok(e) => {
-                            state.note = Some(format!("linked {}", e.id));
-                            action.reload = true;
-                        }
-                        Err(e) => state.error = Some(e.to_string()),
-                    }
+                    state.pending_folder = Some((
+                        FolderPurpose::Link,
+                        crate::native_dialog::pick_folder("Link a package folder in place"),
+                    ));
+                }
+                if open {
+                    ui.label(look::fine(ui, "waiting for the folder picker…"));
                 }
             });
 

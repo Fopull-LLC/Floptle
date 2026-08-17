@@ -50,6 +50,7 @@ mod ext_wire;
 mod game_keys;
 mod gi_bake;
 mod nav_bake;
+mod native_dialog;
 mod reflect_capture;
 mod gizmo;
 mod hierarchy;
@@ -2393,11 +2394,11 @@ struct Editor {
     assets_grid: bool,
     /// The folder the icon grid is currently showing (grid view only).
     assets_grid_dir: PathBuf,
-    /// In-flight native "Import files…" dialog: the background thread sends the
-    /// picked (files, destination folder) here when the user confirms. `Some`
-    /// while a dialog is open (button disabled). Works on Wayland via the XDG
-    /// portal, where drag-and-drop from the file manager isn't delivered.
-    import_rx: Option<std::sync::mpsc::Receiver<(Vec<PathBuf>, PathBuf)>>,
+    /// In-flight native "Import files…" dialog: the picked files arrive on the
+    /// channel, paired here with the destination folder chosen when it opened.
+    /// `Some` while a dialog is open (button disabled). Works on Wayland via the
+    /// XDG portal, where drag-and-drop from the file manager isn't delivered.
+    import_rx: Option<(std::sync::mpsc::Receiver<Vec<PathBuf>>, PathBuf)>,
     /// Named material presets loaded from assets/materials/.
     materials: Vec<(String, floptle_scene::MaterialDoc)>,
     /// Whether the floating Material Editor window is open.
