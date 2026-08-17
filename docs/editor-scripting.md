@@ -252,10 +252,30 @@ local key = ed.prefs.get("apiKey", "")
 | | |
 | --- | --- |
 | `ed.read(rel)` | text, or `nil`. Your own folder always; elsewhere in the project needs `Files` |
+| `ed.readBytes(path)` | raw bytes, or `nil`. Same rule, **plus** anything `ed.pickFile` gave you |
 | `ed.exists(rel)` / `ed.list(rel)` | same rule |
 | `ed.write(rel, text)` | project-relative. Always needs `Files` |
 
 Nothing reaches outside the project, and nothing may climb out with `..`.
+
+`ed.read` is text: a PNG comes back as `nil`, the same answer you get for a file
+that is not there. Use `ed.readBytes` for anything binary — Lua strings are byte
+strings, so `#bytes` is the length and `string.byte` indexes it.
+
+**A file the user picked is a file you can open.** `ed.pickFile` returns paths
+from anywhere on the machine, and `ed.readBytes` accepts the ones it handed you
+during this session — the OS dialog is the permission, since the user chose that
+exact file for this purpose. Paths you make up are still scoped to your package
+and the project, and the grant is matched on the resolved path, so `..` cannot
+walk out of it.
+
+```lua
+ed.pickFile({ title = "Choose a floor plan", label = "Images",
+              extensions = { "png", "jpg" } }, function(paths)
+    if not paths then return end
+    local bytes = ed.readBytes(paths[1])   -- readable: the user picked it
+end)
+```
 
 `require("lib/helper")` loads another Lua file **from your own package**, once,
 into the same environment, and returns what it returned. Paths are relative to

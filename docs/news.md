@@ -1,5 +1,19 @@
 ## Just shipped
 
+**v0.65.3 "What You Picked"** — **a package can read a file's bytes, and a file
+the user picked is one it can open.** `ed.read` is text, so a PNG came back as
+`nil` — the same answer as for a file that is not there, which is the most
+confusing available way to be unreachable; `ed.readBytes` returns the raw bytes
+as a Lua string, so `#bytes` is the length and `string.byte` indexes it. And
+`ed.pickFile` returns paths from anywhere on the machine while `ed.read` scopes
+to the package and the project, so the picker could only ever tell a package the
+name of a file it had no way to open. `ed.readBytes` now also accepts anything
+the picker handed that package this session: the OS dialog is the permission,
+since the user chose that exact file for this purpose. The grant lands before
+your callback runs, so reading the file inside it — the obvious thing to write —
+is the thing that works, and it is matched on the resolved path so a `..` cannot
+walk out of it. Paths you make up are unchanged, and `ed.read` is untouched.
+
 **v0.65.2 "Fill It In"** — **a panel can fill a shape, and a field can be
 cleared rather than only set.** `gui.poly` fills a convex polygon in panel
 coordinates, which the scene side has had all along as `handles.poly`: without it

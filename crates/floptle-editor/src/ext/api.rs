@@ -651,6 +651,7 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
         )?;
     }
     t.set("read", read_fn(lua, shared, state)?)?;
+    t.set("readBytes", read_bytes_fn(lua, shared, state)?)?;
     t.set("write", write_fn(lua, shared, state)?)?;
     t.set("exists", exists_fn(lua, shared, state)?)?;
     t.set("list", list_fn(lua, shared, state)?)?;
@@ -893,6 +894,26 @@ impl FileScope {
             .ok_or_else(|| format!("`{rel}` reaches outside the project, which is never allowed"))
     }
 
+    /// Resolve a path for reading that may ALSO be one the user picked.
+    ///
+    /// Everything `read_path` allows, plus any absolute path `ed.pickFile`
+    /// handed this package during this session. **The picker is the grant**: a
+    /// path the package made up is scoped to the package and the project, but a
+    /// path the *user* chose in an OS dialog, for this purpose, is a file they
+    /// have already decided to hand over. Without this an image picker can only
+    /// tell a package the name of a file it cannot open.
+    ///
+    /// Checked against the canonicalised path, so `…/picked/../../etc/passwd`
+    /// is not the file that was granted.
+    fn any_read_path(&self, rel: &str) -> Result<PathBuf, String> {
+        if let Ok(c) = std::fs::canonicalize(rel)
+            && self.shared.picked_files.borrow().contains(&c)
+        {
+            return Ok(c);
+        }
+        self.read_path(rel)
+    }
+
     /// Resolve a project-relative path for WRITING. Writing is `Files`, full
     /// stop — including into the package's own folder. A package that edits
     /// itself is a package that survives being reinstalled in a shape nobody
@@ -931,6 +952,27 @@ fn read_fn(lua: &Lua, shared: &Rc<Shared>, state: &PkgState) -> mlua::Result<Fun
     lua.create_function(move |_, rel: String| {
         let path = scope.read_path(&rel).map_err(mlua::Error::runtime)?;
         Ok(std::fs::read_to_string(path).ok())
+    })
+}
+
+/// `ed.readBytes(path)` — a file's raw bytes as a Lua string, or `nil`.
+///
+/// `ed.read` is `read_to_string`, so a PNG comes back as **nil** rather than as
+/// an error: not valid UTF-8, `.ok()` swallows it, and the caller sees the same
+/// answer it would get for a file that is not there. Anything binary — an image
+/// to upload, a font to inspect — was unreachable, and unreachable in the most
+/// confusing available way.
+///
+/// Lua strings are byte strings, so there is nothing to encode: `#bytes` is the
+/// file's length and `string.byte` indexes it.
+fn read_bytes_fn(lua: &Lua, shared: &Rc<Shared>, state: &PkgState) -> mlua::Result<Function> {
+    let scope = FileScope::of(shared, state);
+    lua.create_function(move |lua, rel: String| {
+        let path = scope.any_read_path(&rel).map_err(mlua::Error::runtime)?;
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(lua.create_string(&bytes)?)),
+            Err(_) => Ok(None),
+        }
     })
 }
 

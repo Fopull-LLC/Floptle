@@ -459,6 +459,69 @@ fn reading_a_file_outside_the_package_needs_the_files_permission() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
+/// `ed.readBytes` reads bytes where `ed.read` reads text, and a file the user
+/// picked is readable wherever it lives.
+///
+/// Both halves are the point. `ed.read` is `read_to_string`, so a PNG comes back
+/// as **nil** — the same answer as for a file that is not there, which is the
+/// most confusing available way to be unreachable. And `ed.pickFile` returns
+/// paths from anywhere on the machine, so without the grant the picker can only
+/// tell a package the name of a file it cannot open.
+#[test]
+fn read_bytes_reads_binary_and_honours_what_the_user_picked() {
+    let proj = temp("readbytes");
+    std::fs::write(proj.join("project.ron"), "()").unwrap();
+
+    // Somewhere the package has no business reaching on its own.
+    let outside = std::env::temp_dir().join(format!("floptle-picked-{}.bin", std::process::id()));
+    // Bytes that are deliberately not valid UTF-8, which is what makes this a
+    // different function rather than a convenience.
+    std::fs::write(&outside, [0xffu8, 0x00, 0xfe, b'h', b'i']).unwrap();
+    let outside_s = outside.to_string_lossy().to_string();
+
+    install(
+        &proj,
+        "com.t.a",
+        "Files",
+        &format!(
+            r#"
+        local PICKED = "{}"
+        -- Not granted yet: the picker has not run. `Files` is held, and it is
+        -- still refused — the permission scopes to the PROJECT, and this is not
+        -- in it.
+        local ok = pcall(function() return ed.readBytes(PICKED) end)
+        ed.log("before", tostring(ok))
+        -- The package's own folder still works.
+        ed.log("own", tostring(#ed.readBytes("own.bin")))
+        -- Ask for it properly, and read it inside the callback — which is where
+        -- a package would naturally read it, and so the grant has to be in place
+        -- by then rather than a frame later.
+        ed.pickFile({{ title = "t" }}, function(paths)
+            local got = ed.readBytes(paths[1])
+            ed.log("after", tostring(got and #got), tostring(got and got:byte(1)))
+        end)
+        "#,
+            outside_s.replace('\\', "\\\\")
+        ),
+    );
+    std::fs::write(proj.join("packages/com.t.a/own.bin"), [0u8, 1, 2, 3]).unwrap();
+
+    let mut host = host_for(&proj);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert_eq!(log[0], "before\tfalse", "an unpicked path outside the project is refused");
+    assert_eq!(log[1], "own\t4", "bytes come back whole, NUL included");
+
+    // Answer the picker exactly as the editor does.
+    let reqs = host.take_pick_requests();
+    assert_eq!(reqs.len(), 1, "the package asked for a picker");
+    host.deliver_pick(reqs.into_iter().next().unwrap().cb, vec![outside_s.clone()]);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert_eq!(log[0], "after\t5\t255", "and a picked file is readable, bytes intact");
+
+    let _ = std::fs::remove_file(&outside);
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 #[test]
 fn with_the_files_permission_a_package_can_write_into_the_project() {
     let proj = temp("files2");

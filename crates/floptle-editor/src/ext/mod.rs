@@ -191,6 +191,18 @@ pub(crate) struct Shared {
     pub(crate) mesh_reqs: RefCell<Vec<MeshReq>>,
     /// Native file pickers a package asked for, waiting to be opened.
     pub(crate) pick_reqs: RefCell<Vec<PickReq>>,
+    /// Files the user has handed a package through `ed.pickFile` this session.
+    ///
+    /// **The picker IS the permission.** `ed.read` scopes to the package and the
+    /// project, which is right for a path a package makes up — but a path the
+    /// package did not make up, that the user chose in an OS dialog for this
+    /// exact purpose, is a different thing. Without this a package can open a
+    /// picker, be handed `/home/…/plan.png`, and have no way to read it: the
+    /// picker answers a question it cannot then act on.
+    ///
+    /// Grows only in [`ExtHost::deliver_pick`], so nothing a package computes
+    /// can get into it, and it is cleared with the rest of the state on reload.
+    pub(crate) picked_files: RefCell<std::collections::HashSet<PathBuf>>,
     /// Font names `gui.font` has already complained about, by scoped family.
     /// A panel draws every frame; the complaint is worth making once.
     pub(crate) warned_fonts: RefCell<std::collections::HashSet<String>>,
@@ -921,6 +933,20 @@ impl ExtHost {
     /// cancelled — reported as `nil` rather than as an empty table, because
     /// "no" and "nothing" read the same in Lua and only one of them is true.
     pub(crate) fn deliver_pick(&mut self, cb: RegistryKey, paths: Vec<String>) {
+        // **Handing the path over is what grants access to it.** Recorded before
+        // the callback runs, because a package's natural next move is to read
+        // the file inside that callback — a grant applied after would make the
+        // obvious code fail and the workaround (read it next frame) work.
+        {
+            let mut picked = self.shared.picked_files.borrow_mut();
+            for p in &paths {
+                // Canonicalised, so a package cannot reach a different file by
+                // spelling the granted one with a `..` in the middle.
+                if let Ok(c) = std::fs::canonicalize(p) {
+                    picked.insert(c);
+                }
+            }
+        }
         if let Some(func) = self.func(&cb) {
             let arg = if paths.is_empty() {
                 mlua::Value::Nil
