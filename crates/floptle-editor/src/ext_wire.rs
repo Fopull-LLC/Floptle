@@ -117,6 +117,16 @@ impl Editor {
             self.ext_painted.clear();
             return;
         }
+        // **Write a changed preference now, not at quit.** These used to be
+        // flushed only on project close and on shutdown, so anything a package
+        // stored — an API key somebody typed, a server address, a switch — was
+        // lost outright if the editor did not exit cleanly. Somebody signing in
+        // once and having to do it again is not a preference system.
+        //
+        // Cheap to call every frame: each store checks its own dirty flag and a
+        // clean one writes nothing, so this costs a walk over a handful of
+        // packages until something actually changes.
+        self.ext.save_prefs();
         // The mirror is a copy of the scene, and rebuilding it every frame was
         // work nobody asked for: the scene does not change while somebody is
         // reading a panel. `World::revision` moves on every spawn, despawn,

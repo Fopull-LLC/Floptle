@@ -232,7 +232,7 @@ pub(crate) enum Registration {
     Window { pkg: usize, id: u32, title: String, cb: RegistryKey, open: bool },
     Tab { pkg: usize, id: u32, title: String, cb: RegistryKey },
     Menu { pkg: usize, path: String, cb: RegistryKey },
-    Overlay { pkg: usize, id: u32, name: String, cb: RegistryKey, open: bool },
+    Overlay { pkg: usize, id: u32, name: String, cb: RegistryKey, open: bool, look: OverlayLook },
     Shortcut { pkg: usize, keys: String, cb: RegistryKey },
     Hook { pkg: usize, kind: HookKind, cb: RegistryKey },
     Timer { pkg: usize, id: u32, every: f64, repeat: bool, cb: RegistryKey },
@@ -341,6 +341,28 @@ pub(crate) fn tab_key(pkg_id: &str, title: &str) -> u64 {
     h
 }
 
+/// Where a Scene-view overlay sits and whether the editor draws anything
+/// around it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct OverlayLook {
+    /// Left edge rather than right. The left stack starts BELOW the viewport
+    /// toolbar, wherever the user has dragged it to.
+    pub(crate) left: bool,
+    /// **The editor draws no frame and no title.** For an overlay that paints
+    /// its own chrome: a panel background behind a heads-up display hides the
+    /// level the display is about, which is the one thing it must not do.
+    pub(crate) bare: bool,
+    pub(crate) width: f32,
+}
+
+impl Default for OverlayLook {
+    fn default() -> Self {
+        // The old behaviour, unchanged: a framed card down the right edge. An
+        // overlay written before this existed must look exactly as it did.
+        Self { left: false, bare: false, width: 260.0 }
+    }
+}
+
 /// A Scene-view overlay a package registered.
 pub(crate) struct OverlayReg {
     pub(crate) pkg: usize,
@@ -348,6 +370,7 @@ pub(crate) struct OverlayReg {
     pub(crate) name: String,
     pub(crate) cb: RegistryKey,
     pub(crate) open: bool,
+    pub(crate) look: OverlayLook,
     pub(crate) error: Option<String>,
 }
 
@@ -654,8 +677,9 @@ impl ExtHost {
                     self.shared.open_state.borrow_mut().insert(id, false);
                     self.tabs.push(TabReg { pkg, id, key, title, cb, error: None });
                 }
-                Registration::Overlay { pkg, id, name, cb, open } => {
-                    self.overlays.push(OverlayReg { pkg, id, name, cb, open, error: None });
+                Registration::Overlay { pkg, id, name, cb, open, look } => {
+                    self.overlays
+                        .push(OverlayReg { pkg, id, name, cb, open, look, error: None });
                 }
                 Registration::Shortcut { pkg, keys, cb } => {
                     self.shortcuts.push(ShortcutReg { pkg, keys, cb });
@@ -1052,7 +1076,8 @@ impl ExtHost {
         self.shared.repaint.get() || self.shared.web.borrow().in_flight() > 0
     }
 
-    /// Persist every package's stores. Called on project close and on quit.
+    /// Persist every package's stores. Called every frame from `ext_tick`
+    /// (a clean store writes nothing), and again on project close and on quit.
     pub(crate) fn save_prefs(&self) {
         self.shared.prefs.borrow_mut().save_all();
     }

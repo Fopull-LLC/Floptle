@@ -310,7 +310,36 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
         let shared = shared.clone();
         t.set(
             "overlay",
-            lua.create_function(move |lua, (name, cb): (String, Function)| {
+            // `ed.overlay(name, fn)` or `ed.overlay(name, opts, fn)`. The
+            // options are second so the callback stays last, which is where
+            // every other registration puts it and where a long inline
+            // function reads best.
+            lua.create_function(move |lua, (name, a, b): (String, Value, Option<Function>)| {
+                let (opts, cb) = match (a, b) {
+                    (Value::Function(f), _) => (None, f),
+                    (Value::Table(t), Some(f)) => (Some(t), f),
+                    _ => {
+                        return Err(mlua::Error::runtime(
+                            "ed.overlay wants (name, drawFn) or (name, options, drawFn)",
+                        ));
+                    }
+                };
+                let mut look = super::OverlayLook::default();
+                if let Some(t) = opts {
+                    if let Ok(c) = t.get::<String>("corner") {
+                        look.left = c.eq_ignore_ascii_case("topleft")
+                            || c.eq_ignore_ascii_case("left");
+                    }
+                    if let Ok(v) = t.get::<bool>("bare") {
+                        look.bare = v;
+                    }
+                    if let Ok(w) = t.get::<f32>("width")
+                        && w.is_finite()
+                        && w > 40.0
+                    {
+                        look.width = w.min(900.0);
+                    }
+                }
                 let id = shared.alloc_id();
                 let key = lua.create_registry_value(cb)?;
                 shared.pending.borrow_mut().push(Registration::Overlay {
@@ -318,6 +347,7 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
                     id,
                     name: name.clone(),
                     cb: key,
+                    look,
                     // An overlay is on as soon as it is registered: an extension
                     // that draws a region marker means it to be visible, and a
                     // panel you have to find a switch for is a panel nobody

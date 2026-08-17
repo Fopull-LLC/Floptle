@@ -1182,15 +1182,24 @@ impl EditorTabViewer<'_> {
         // each one carries its package's name so a stack of them can be told
         // apart.
         if !game && !self.ext.overlays.is_empty() {
-            let mut y = rect.top() + 8.0;
+            // Two stacks. The right one is where overlays have always gone. The
+            // left one starts BELOW the viewport toolbar — wherever the user
+            // dragged it to, which is why `tools_rect` is read rather than a
+            // constant guessed at.
+            let mut y_right = rect.top() + 8.0;
+            let mut y_left = (tools_rect.bottom() + 8.0).max(rect.top() + 8.0);
             for i in 0..self.ext.overlays.len() {
                 if !self.ext.overlays[i].open || self.ext.overlays[i].error.is_some() {
                     continue;
                 }
                 let name = self.ext.overlays[i].name.clone();
+                let look = self.ext.overlays[i].look;
+                let w = look.width;
+                let y = if look.left { y_left } else { y_right };
+                let x = if look.left { rect.left() + 8.0 } else { rect.right() - (w + 8.0) };
                 let area_rect = egui::Rect::from_min_size(
-                    egui::pos2(rect.right() - 268.0, y),
-                    egui::vec2(260.0, rect.bottom() - y - 8.0),
+                    egui::pos2(x, y),
+                    egui::vec2(w, rect.bottom() - y - 8.0),
                 );
                 if area_rect.height() < 40.0 {
                     break; // out of viewport; drawing them stacked off-screen helps nobody
@@ -1200,15 +1209,31 @@ impl EditorTabViewer<'_> {
                     .fixed_pos(area_rect.min)
                     .constrain_to(rect)
                     .show(ui.ctx(), |ui| {
-                        ui.set_max_width(260.0);
-                        let frame = egui::Frame::popup(ui.style());
-                        let r = frame.show(ui, |ui| {
-                            ui.label(egui::RichText::new(&name).small().strong());
-                            self.ext.draw_overlay(i, ui);
-                        });
-                        used = r.response.rect.height();
+                        ui.set_max_width(w);
+                        if look.bare {
+                            // **No frame and no title.** The package paints its
+                            // own chrome; anything the editor draws here would
+                            // be a grey slab over the level the overlay is
+                            // about. `Frame::NONE` still gives a layout to
+                            // measure, which is what the stacking needs.
+                            let r = egui::Frame::NONE.show(ui, |ui| {
+                                self.ext.draw_overlay(i, ui);
+                            });
+                            used = r.response.rect.height();
+                        } else {
+                            let frame = egui::Frame::popup(ui.style());
+                            let r = frame.show(ui, |ui| {
+                                ui.label(egui::RichText::new(&name).small().strong());
+                                self.ext.draw_overlay(i, ui);
+                            });
+                            used = r.response.rect.height();
+                        }
                     });
-                y += used + 6.0;
+                if look.left {
+                    y_left += used + 6.0;
+                } else {
+                    y_right += used + 6.0;
+                }
             }
         }
 

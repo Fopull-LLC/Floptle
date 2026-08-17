@@ -56,6 +56,7 @@ anything outside the package, and `load`/`dofile`.
 | `ed.window(title, drawFn)` | a floating panel. Returns a handle |
 | `ed.tab(title, drawFn)` | a **dock tab**, dragged and split like the editor's own panels. Returns a handle |
 | `ed.overlay(name, drawFn)` | a panel pinned inside the Scene view. Returns a handle; starts visible |
+| `ed.overlay(name, options, drawFn)` | the same, placed and framed the way you ask |
 | `ed.menu(path, fn)` | a menu item. `"Grass/Brush…"` puts *Brush…* under a *Grass* menu |
 | `ed.shortcut(keys, fn)` | `"Ctrl+L"`, `"Ctrl+Shift+F5"`. A bare letter is not accepted — the editor's own single-key bindings own the unmodified keyboard |
 
@@ -91,6 +92,27 @@ ed.menu("My Tool/Settings…", function() settings:show() end)
 A common pairing is an overlay that draws over the scene with a button that pops
 the same content out into a tab — draw into a shared function, and call it from
 both.
+
+### Overlay options
+
+| | |
+| --- | --- |
+| `corner` | `"topLeft"` or `"topRight"` (the default). The left stack starts **below the viewport toolbar**, wherever it has been dragged to |
+| `bare` | `true` draws **no frame and no title** — for an overlay that paints its own |
+| `width` | pixels, 40–900. Default 260 |
+
+```lua
+ed.overlay("My HUD", { corner = "topLeft", bare = true, width = 330 }, function()
+    gui.rectFilled(0, 0, 320, 40, 0.05, 0.06, 0.08, 0.9, 5)
+    gui.textAt(10, 12, "drawn, not themed", 13, 1, 1, 1, 1)
+    gui.reserve(320, 40)
+end)
+```
+
+Reach for `bare` when the overlay is a heads-up display rather than a panel: a
+grey slab behind it hides the level the readout is about, which is the one thing
+a Scene overlay must not do. If you take `bare`, you own the whole look — paint a
+background behind anything you expect to be readable over a bright scene.
 
 ### Hooks
 
