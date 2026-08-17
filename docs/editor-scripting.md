@@ -570,10 +570,18 @@ flat run of coordinate pairs. Fewer than three points draw nothing; a concave
 outline fills as its convex hull, so split one into triangles. The same rule as
 `handles.poly`, in a panel instead of the world. ·
 `textAt(x, y, text [, size [, r, g, b [, a]]])` ·
+`measure(text [, size]) → {w, h}` — how big that string will be, in the same
+font `textAt` would draw it in. Laying anything out by hand needs it: without a
+measurement the only option is characters × an assumed width, which is wrong for
+every proportional face and badly wrong for an `i` beside a `W`. ·
 `reserve(w, h)` — claim space so the next widget does not draw over what you
 painted, which is the call everybody forgets. ·
 `cursor() → {x, y}` — where the next widget would go, in these same
 coordinates.
+
+`textAt` and `measure` both draw in whatever face the enclosing
+[`font`](#your-own-typeface) scope selected, so painted text matches the widgets
+around it.
 
 **Painting more than one thing needs `cursor()`.** The origin is the panel's
 top-left and it does **not** move as widgets are added, so a second painted card

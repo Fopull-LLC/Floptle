@@ -1,5 +1,21 @@
 ## Just shipped
 
+**v0.67.0 "How Wide Is That"** — **`gui.measure(text [, size])` tells a package
+how wide a string will be**, in the same font `gui.textAt` would draw it in.
+Painting has never had this: a package laying out a chart axis, a legend, or a
+line of prose with one word emphasised places each piece at an `x` it works out
+itself, and with no way to ask, the only option was characters × an assumed
+width. That is wrong for every proportional face by a little and for an `i`
+beside a `W` by a lot, and the error accumulates along the line — so emphasis
+lands past the word it belongs to and the right edge goes ragged, which reads as
+a layout bug rather than a missing measurement. **And painted text now follows
+`gui.font`.** That scope has always set the face for widgets; `textAt` ignored
+it and drew in the editor's own type, so a package shipping a typeface could set
+it everywhere and still watch its hand-painted labels come out in something
+else. Both `textAt` and `measure` follow it now — a measurement taken in a
+different face than the drawing is worse than none, because it looks right until
+somebody changes the type.
+
 **v0.66.0 "Bring The Model You Have"** — **the Assets browser converts models
 the engine cannot open.** Right-click an `.fbx` and pick **⇄ Convert to .glb**,
 or just double-click it; `.obj` (with its `.mtl`), `.stl` and `.ply` too. Asset

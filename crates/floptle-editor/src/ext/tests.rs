@@ -666,6 +666,58 @@ fn draw_once(host: &mut ExtHost, which: usize) {
     });
 }
 
+/// **A package that paints has to be able to measure.**
+///
+/// Without `gui.measure` the only way to place a second piece of text after a
+/// first is characters × an assumed width. That is wrong for every proportional
+/// face by a little and for an `i` beside a `W` by a lot, so hand-laid-out text
+/// drifts — emphasis lands past the word it belongs to and the right edge goes
+/// ragged, which reads as a layout bug rather than as a missing measurement.
+#[test]
+fn painted_text_can_be_measured_before_it_is_drawn() {
+    let proj = temp("guimeasure");
+    install(
+        &proj,
+        "com.t.m",
+        "",
+        r#"
+        ed.window("P", function()
+            local narrow = gui.measure("i")
+            local wide   = gui.measure("W")
+            local one    = gui.measure("hello")
+            local twice  = gui.measure("hellohello")
+            local big    = gui.measure("hello", 26)
+            ed.log(tostring(narrow.w > 0), tostring(narrow.h > 0),
+                   tostring(wide.w > narrow.w),
+                   tostring(twice.w > one.w),
+                   tostring(big.w > one.w),
+                   tostring(gui.measure("").w == 0))
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    let idx = host.window_index(host.windows[0].id).unwrap();
+    host.set_window_open(idx, true);
+    host.take_log();
+    draw_once(&mut host, idx);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+
+    // Six trues: a measurement has a width and a height, `W` is wider than `i`,
+    // twice the text is wider than the text, a bigger size is wider again, and
+    // nothing measures as nothing.
+    //
+    // The `W` versus `i` one is the whole point — a proportional face is not a
+    // grid, and an assumed character width cannot tell them apart. That
+    // difference IS the drift this call exists to remove.
+    assert_eq!(
+        log,
+        vec!["true\ttrue\ttrue\ttrue\ttrue\ttrue".to_string()],
+        "{log:?}"
+    );
+    assert!(host.windows[0].error.is_none(), "{:?}", host.windows[0].error);
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 #[test]
 fn a_panel_draws_widgets_and_gets_their_values_back() {
     let proj = temp("guidraw");

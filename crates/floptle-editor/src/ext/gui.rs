@@ -112,6 +112,29 @@ fn is_bound(ui: &egui::Ui, family: &str) -> bool {
     ui.ctx().fonts(|f| f.families().contains(&want))
 }
 
+/// The font painted text is drawn in: the caller's size, in whatever family the
+/// enclosing `gui.font` scope selected.
+///
+/// **Painted text used to ignore `gui.font` entirely.** `textAt` hardcoded the
+/// proportional family, so a package that ships a typeface could set it for
+/// every widget and then watch its hand-painted chart labels come out in the
+/// editor's type — with no way to tell why. Reading the family back off the
+/// style is what makes `gui.font` mean the same thing for a button and for a
+/// label painted at a coordinate.
+///
+/// Only ever a family egui actually holds: `gui.font` refuses to set one that
+/// is not bound, because `FontFamily::Name` is a panic rather than a fallback
+/// when it is wrong.
+fn paint_font(ui: &egui::Ui, size: Option<f32>) -> egui::FontId {
+    let family = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Body)
+        .map(|f| f.family.clone())
+        .unwrap_or(egui::FontFamily::Proportional);
+    egui::FontId::new(size.unwrap_or(13.0), family)
+}
+
 fn color(r: f64, g: f64, b: f64, a: Option<f64>) -> egui::Color32 {
     let f = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     egui::Color32::from_rgba_unmultiplied(f(r), f(g), f(b), f(a.unwrap_or(1.0)))
@@ -755,16 +778,49 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
                         (Some(r), Some(g), Some(b)) => color(r, g, b, a),
                         _ => ui.visuals().text_color(),
                     };
+                    let font = paint_font(ui, size);
                     ui.painter().text(
                         egui::pos2(o.x + x, o.y + y),
                         egui::Align2::LEFT_TOP,
                         text,
-                        egui::FontId::proportional(size.unwrap_or(13.0)),
+                        font,
                         col,
                     );
                 })
             },
         )?,
+    )?;
+    // How wide a string is before drawing it.
+    //
+    // **Without this, laying anything out by hand is guesswork.** A package
+    // painting a chart axis, a legend, or a line of text with one word
+    // emphasised has to place each piece at an x it works out itself — and with
+    // no way to ask, the only option is characters × an assumed width. That is
+    // wrong for every proportional face by a little and for an `i` next to a
+    // `W` by a lot, so the drift shows up as emphasis landing in the wrong
+    // place and a ragged right edge that reads as a layout bug.
+    //
+    // Measured in the SAME font `textAt` would draw with, including the
+    // enclosing `gui.font` scope — a measurement taken in a different face than
+    // the drawing is worse than no measurement, because it looks right until
+    // somebody changes the type.
+    t.set(
+        "measure",
+        scope.create_function(move |lua, (text, size): (String, Option<f32>)| {
+            let (w, h) = with(slot, |ui| {
+                let font = paint_font(ui, size);
+                // Through the painter, which is how the rest of this editor
+                // measures — and is the same path `textAt` draws through.
+                let galley = ui
+                    .painter()
+                    .layout_no_wrap(text.clone(), font, egui::Color32::WHITE);
+                (galley.size().x, galley.size().y)
+            })?;
+            let t = lua.create_table()?;
+            t.set("w", w)?;
+            t.set("h", h)?;
+            Ok(t)
+        })?,
     )?;
     // Claim space so painted output is not drawn over by the next widget — the
     // one call a hand-painted chart needs and the one nobody remembers.
