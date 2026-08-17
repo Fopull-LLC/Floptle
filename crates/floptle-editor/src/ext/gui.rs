@@ -534,6 +534,28 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             Ok(t)
         })?,
     )?;
+    // **Where the next widget would go**, in the same coordinates the painting
+    // calls take — i.e. relative to the panel's top-left.
+    //
+    // Without this the painting calls can only draw one thing. Their origin is
+    // the panel's top-left and it does not move as widgets are added, so a
+    // second painted card lands exactly on top of the first no matter how much
+    // space was reserved between them. A list of painted rows — a chat log, a
+    // stack of cards — is not expressible until the cursor can be read.
+    t.set(
+        "cursor",
+        scope.create_function(move |lua, ()| {
+            let (x, y) = with(slot, |ui| {
+                let o = ui.min_rect().min;
+                let c = ui.cursor().min;
+                (c.x - o.x, c.y - o.y)
+            })?;
+            let t = lua.create_table()?;
+            t.set("x", x)?;
+            t.set("y", y)?;
+            Ok(t)
+        })?,
+    )?;
 
     // ---- feedback ----------------------------------------------------------
     t.set(

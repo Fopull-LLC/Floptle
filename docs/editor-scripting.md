@@ -522,7 +522,21 @@ Coordinates are pixels from the panel's top-left.
 `circle(x, y, radius, r, g, b [, a])` ·
 `textAt(x, y, text [, size [, r, g, b [, a]]])` ·
 `reserve(w, h)` — claim space so the next widget does not draw over what you
-painted, which is the call everybody forgets.
+painted, which is the call everybody forgets. ·
+`cursor() → {x, y}` — where the next widget would go, in these same
+coordinates.
+
+**Painting more than one thing needs `cursor()`.** The origin is the panel's
+top-left and it does **not** move as widgets are added, so a second painted card
+lands exactly on top of the first however much space you reserved between them.
+Offset everything you paint by the cursor and a list works:
+
+```lua
+local at = gui.cursor()
+gui.rectFilled(at.x, at.y, 200, 40, 0.05, 0.06, 0.08, 0.9, 4)
+gui.textAt(at.x + 8, at.y + 12, "one row of many", 13, 1, 1, 1, 1)
+gui.reserve(200, 40)   -- now the cursor has moved on
+```
 
 **Input** — `mouse() → {x, y, inside}` · `clicked()`
 
