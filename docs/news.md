@@ -1,5 +1,24 @@
 ## Just shipped
 
+**v0.65.0 "Make Yourself At Home"** — **an editor tool can now look like part of
+the editor.** A package gets its own **dock tabs** (`ed.tab`), dragged and split
+beside the viewport and remembered where you left them, instead of only floating
+windows. Scene **overlays choose their corner, their width, and whether the
+editor frames them at all** — `bare` hands the whole look to the package, which
+matters because a grey panel slab over the level hides the thing the overlay
+exists to annotate. `gui.cursor()` says where the next widget would go, which is
+what makes a *list* of painted rows possible: painting used to be anchored to the
+panel's top-left, so a second card landed on top of the first no matter how much
+space you reserved. `gui.keys()` and a second return from `gui.textField` let a
+package tell Enter from Shift+Enter, so a text box can send on one and break a
+line on the other. And `ed.pickFile` opens the system file picker, narrowed to
+the extensions you name, for packages holding the **Files** permission. Two fixes
+land with it: **a project opened from the command line loads its packages** — the
+way the Hub starts the editor, where they had simply been missing with no error —
+and **a package's saved settings are written when they change** rather than only
+on a clean exit, so a crash no longer signs you out. Nothing to do on upgrade;
+every existing package keeps working.
+
 **v0.64.3** — **adding a package from a folder works on Linux.** Window ⏵ 📦
 Packages ⏵ Add ⏵ 📂 Choose folder… and 🔗 Link folder… closed the editor the
 instant you clicked either one: no picker, no message, no crash report, just a
