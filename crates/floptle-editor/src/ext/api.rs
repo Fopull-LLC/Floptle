@@ -333,6 +333,9 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
                     if let Ok(v) = t.get::<bool>("bare") {
                         look.bare = v;
                     }
+                    if let Ok(v) = t.get::<bool>("fill") {
+                        look.fill = v;
+                    }
                     if let Ok(w) = t.get::<f32>("width")
                         && w.is_finite()
                         && w > 40.0

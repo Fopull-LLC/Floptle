@@ -1210,6 +1210,13 @@ impl EditorTabViewer<'_> {
                     .constrain_to(rect)
                     .show(ui.ctx(), |ui| {
                         ui.set_max_width(w);
+                        if look.fill {
+                            // Give the layout the whole column so the package
+                            // can size itself against real space rather than
+                            // against what it has drawn so far.
+                            ui.set_min_height(area_rect.height());
+                            ui.set_max_height(area_rect.height());
+                        }
                         if look.bare {
                             // **No frame and no title.** The package paints its
                             // own chrome; anything the editor draws here would
@@ -1229,7 +1236,15 @@ impl EditorTabViewer<'_> {
                             used = r.response.rect.height();
                         }
                     });
-                if look.left {
+                if look.fill {
+                    // It took the column. Push the rest of this stack past the
+                    // bottom so nothing draws underneath it.
+                    if look.left {
+                        y_left = rect.bottom();
+                    } else {
+                        y_right = rect.bottom();
+                    }
+                } else if look.left {
                     y_left += used + 6.0;
                 } else {
                     y_right += used + 6.0;

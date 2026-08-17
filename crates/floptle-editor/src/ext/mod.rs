@@ -370,13 +370,21 @@ pub(crate) struct OverlayLook {
     /// level the display is about, which is the one thing it must not do.
     pub(crate) bare: bool,
     pub(crate) width: f32,
+    /// **Take the whole height of the viewport.** Without this an overlay is as
+    /// tall as whatever it drew, so a panel that wants to fill the side of the
+    /// screen cannot find out how much room it has — `gui.available()` inside
+    /// an unsized area reports the content, not the space.
+    ///
+    /// One filling overlay ends its stack: anything after it would be pushed
+    /// off the bottom, and silently drawing it off-screen helps nobody.
+    pub(crate) fill: bool,
 }
 
 impl Default for OverlayLook {
     fn default() -> Self {
         // The old behaviour, unchanged: a framed card down the right edge. An
         // overlay written before this existed must look exactly as it did.
-        Self { left: false, bare: false, width: 260.0 }
+        Self { left: false, bare: false, width: 260.0, fill: false }
     }
 }
 

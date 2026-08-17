@@ -119,6 +119,7 @@ Absent entirely from a package that did not declare **Files**.
 | `corner` | `"topLeft"` or `"topRight"` (the default). The left stack starts **below the viewport toolbar**, wherever it has been dragged to |
 | `bare` | `true` draws **no frame and no title** — for an overlay that paints its own |
 | `width` | pixels, 40–900. Default 260 |
+| `fill` | `true` takes the full height of the viewport. One filling overlay ends its stack |
 
 ```lua
 ed.overlay("My HUD", { corner = "topLeft", bare = true, width = 330 }, function()
@@ -127,6 +128,11 @@ ed.overlay("My HUD", { corner = "topLeft", bare = true, width = 330 }, function(
     gui.reserve(320, 40)
 end)
 ```
+
+Reach for `fill` when the overlay is the tall thing on screen — a list, a log, a
+conversation. Without it an overlay is only as tall as what it drew, so
+`gui.available()` inside one reports the content rather than the room, and a
+panel cannot size itself to the space it has.
 
 Reach for `bare` when the overlay is a heads-up display rather than a panel: a
 grey slab behind it hides the level the readout is about, which is the one thing
