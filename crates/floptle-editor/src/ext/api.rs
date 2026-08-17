@@ -1565,7 +1565,31 @@ fn json_table(lua: &Lua) -> mlua::Result<Table> {
             Err(e) => Err(mlua::Error::runtime(format!("that is not JSON: {e}"))),
         })?,
     )?;
+    // `json.null` — a value that encodes to JSON `null`.
+    //
+    // Nil cannot do this job. `t.field = nil` does not put a null in the table,
+    // it REMOVES the key, so the encoder never sees it and the field simply is
+    // not in the output. That difference matters to any API that reads an
+    // absent field as "leave this alone" and an explicit null as "clear it" —
+    // without a sentinel, a package can set such a field and never unset it.
+    //
+    // **Decoding is deliberately not symmetric.** JSON `null` still arrives as
+    // Lua nil, because every package already reads an optional field with
+    // `if body.field then`, and handing them a sentinel that is truthy would
+    // silently turn every one of those tests the wrong way round.
+    t.set("null", json_null())?;
     Ok(t)
+}
+
+/// The identity behind `json.null`.
+///
+/// Its address is never read — only compared — so any unique static will do.
+/// Light userdata rather than a table so that `json.null == json.null` is a
+/// pointer comparison and nothing can accidentally construct a second one.
+static JSON_NULL: u8 = 0;
+
+fn json_null() -> mlua::LightUserData {
+    mlua::LightUserData(&JSON_NULL as *const u8 as *mut std::ffi::c_void)
 }
 
 /// How deep a table may nest before `json.encode` gives up. A table holding
@@ -1580,6 +1604,10 @@ fn to_json(v: &Value, depth: usize) -> mlua::Result<serde_json::Value> {
     }
     Ok(match v {
         Value::Nil => serde_json::Value::Null,
+        // Matched before the catch-all below, which would give the same answer
+        // for the wrong reason: that arm nulls a function or a thread too, and
+        // this one is the documented way to write a null on purpose.
+        Value::LightUserData(p) if *p == json_null() => serde_json::Value::Null,
         Value::Boolean(b) => (*b).into(),
         Value::Integer(i) => (*i).into(),
         Value::Number(n) => serde_json::Number::from_f64(*n)

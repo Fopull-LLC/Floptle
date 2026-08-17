@@ -703,6 +703,48 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             },
         )?,
     )?;
+    // A filled polygon, from a flat run of `x, y` pairs.
+    //
+    // The scene side has had `handles.poly` since the beginning; a panel could
+    // only outline. That gap is why hand-drawn charts here fill an area by
+    // stacking one-pixel rectangles under it — which costs a draw call per
+    // column, cannot follow a diagonal edge cleanly, and is impossible for a
+    // shape that is not a function of x at all. A radar chart is exactly that
+    // shape, and this painter's own promise above names one.
+    //
+    // Convex, matching `handles.poly`: egui fills a concave outline as its
+    // convex hull rather than failing, so a caller who needs a concave shape
+    // splits it into triangles — the same rule the scene side already has.
+    t.set(
+        "poly",
+        scope.create_function(
+            move |_, (pts, r, g, b, a): (Vec<f32>, f64, f64, f64, Option<f64>)| {
+                if pts.len() % 2 != 0 {
+                    return Err(mlua::Error::runtime(
+                        "gui.poly wants a flat list of x, y pairs, so an even number of \
+                         values — got an odd one",
+                    ));
+                }
+                with(slot, |ui| {
+                    let o = ui.min_rect().min;
+                    let points: Vec<egui::Pos2> = pts
+                        .chunks_exact(2)
+                        .map(|p| egui::pos2(o.x + p[0], o.y + p[1]))
+                        .collect();
+                    // Two points are a line and one is nothing: egui would draw
+                    // a degenerate shape rather than complain, and a silently
+                    // invisible fill reads as "the data was empty".
+                    if points.len() >= 3 {
+                        ui.painter().add(egui::Shape::convex_polygon(
+                            points,
+                            color(r, g, b, a),
+                            egui::Stroke::NONE,
+                        ));
+                    }
+                })
+            },
+        )?,
+    )?;
     t.set(
         "textAt",
         scope.create_function(

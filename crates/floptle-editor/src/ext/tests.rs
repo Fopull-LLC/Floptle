@@ -354,6 +354,39 @@ fn json_round_trips_a_table() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
+/// `json.null` writes a null; `nil` removes the key.
+///
+/// The distinction is the whole reason the sentinel exists — an API that reads
+/// an absent field as "leave this alone" and an explicit null as "clear it"
+/// cannot be told the second thing otherwise. The decode half is asserted too,
+/// because the asymmetry is deliberate and an accidental "fix" of it would turn
+/// every `if body.field then` in every package the wrong way round.
+#[test]
+fn json_null_writes_a_null_where_nil_removes_the_key() {
+    let proj = temp("jsonnull");
+    install(
+        &proj,
+        "com.t.a",
+        "",
+        r#"
+        local s = json.encode({ cleared = json.null, kept = 1, absent = nil })
+        ed.log(s)
+        -- Round trip: a null comes back as nil, so the key reads as absent.
+        local back = json.decode('{"a":null,"b":2}')
+        ed.log(tostring(back.a), tostring(back.b), tostring(back.a == nil))
+        ed.log(tostring(json.null == json.null), tostring(json.null == nil))
+        "#,
+    );
+    let host = host_for(&proj);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log[0].contains("\"cleared\":null"), "{}", log[0]);
+    assert!(log[0].contains("\"kept\":1"), "{}", log[0]);
+    assert!(!log[0].contains("absent"), "a nil field must not appear at all: {}", log[0]);
+    assert_eq!(log[1], "nil\t2\ttrue");
+    assert_eq!(log[2], "true\tfalse");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 #[test]
 fn a_package_can_require_its_own_files_and_nothing_else() {
     let proj = temp("require");
@@ -609,6 +642,47 @@ fn a_panel_draws_widgets_and_gets_their_values_back() {
     // `x = gui.slider(x, …)` the whole of the state management.
     assert_eq!(log, vec!["false\t3\thello\ttrue\t2\tfalse".to_string()], "{log:?}");
     assert!(host.windows[0].error.is_none(), "{:?}", host.windows[0].error);
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// `gui.poly` fills a convex shape, and says so when the coordinates cannot
+/// pair up.
+///
+/// The odd-length case is the one worth a test: a flat coordinate list is easy
+/// to build one element short, and egui would happily fill whatever the pairs
+/// came out as. A polygon quietly missing its last vertex looks like the data
+/// was wrong rather than the call.
+#[test]
+fn gui_poly_fills_and_rejects_an_odd_list() {
+    let proj = temp("guipoly");
+    install(
+        &proj,
+        "com.t.a",
+        "",
+        r#"
+        ed.window("Fill", function()
+            gui.poly({0, 0, 40, 0, 40, 30, 0, 30}, 0.2, 0.6, 0.9, 0.5)
+            gui.poly({0, 0, 10, 10}, 1, 1, 1)   -- two points: nothing, not an error
+            gui.reserve(40, 30)
+        end)
+        ed.window("Odd", function()
+            gui.poly({0, 0, 40, 0, 40}, 1, 0, 0)
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+
+    let good = host.window_index(host.windows[0].id).unwrap();
+    host.set_window_open(good, true);
+    draw_once(&mut host, good);
+    assert!(host.windows[good].error.is_none(), "{:?}", host.windows[good].error);
+
+    let odd = host.window_index(host.windows[1].id).unwrap();
+    host.set_window_open(odd, true);
+    draw_once(&mut host, odd);
+    let err = host.windows[odd].error.clone().expect("an odd coordinate list must be refused");
+    assert!(err.contains("even number"), "{err}");
+
     let _ = std::fs::remove_dir_all(&proj);
 }
 

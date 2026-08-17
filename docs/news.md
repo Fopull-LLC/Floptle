@@ -1,5 +1,19 @@
 ## Just shipped
 
+**v0.65.2 "Fill It In"** — **a panel can fill a shape, and a field can be
+cleared rather than only set.** `gui.poly` fills a convex polygon in panel
+coordinates, which the scene side has had all along as `handles.poly`: without it
+a hand-drawn chart filled an area by stacking one-pixel rectangles under it, a
+draw call per column, and could not fill a shape that is not a function of x at
+all — which a radar chart never is. Fewer than three points draw nothing and an
+odd number of coordinates raises, because a flat list is easy to build one short
+and a polygon missing its last vertex reads as bad data rather than a bad call.
+`json.null` encodes to JSON `null`: setting a field to Lua nil *removes the key*
+rather than nulling it, so any API that reads an absent field as "leave this
+alone" and a null as "clear it" could be set from a package and never unset.
+Decoding stays asymmetric on purpose — a JSON null still arrives as nil, so every
+existing `if body.field then` keeps meaning what it did. Both additive.
+
 **v0.65.1 "The Other Corner"** — **a Scene overlay can sit at the bottom of the
 viewport, and it can take the full height.** `corner` now takes `"bottomLeft"`
 and `"bottomRight"`; the bottom stacks grow upward and are independent of the top

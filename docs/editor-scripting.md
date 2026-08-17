@@ -545,6 +545,10 @@ Coordinates are pixels from the panel's top-left.
 `rectOutline(x, y, w, h, r, g, b [, a [, px]])` ·
 `line(x1, y1, x2, y2, r, g, b [, a [, px]])` ·
 `circle(x, y, radius, r, g, b [, a])` ·
+`poly({x1, y1, x2, y2, …}, r, g, b [, a])` — a filled **convex** polygon, from a
+flat run of coordinate pairs. Fewer than three points draw nothing; a concave
+outline fills as its convex hull, so split one into triangles. The same rule as
+`handles.poly`, in a panel instead of the world. ·
 `textAt(x, y, text [, size [, r, g, b [, a]]])` ·
 `reserve(w, h)` — claim space so the next widget does not draw over what you
 painted, which is the call everybody forgets. ·
@@ -766,7 +770,13 @@ how many when the stream ends.
 
 `vec3(x, y, z)` · `vec2(x, y)` — plain `{x=, y=, z=}` tables.
 
-`json.encode(value)` / `json.decode(text)`.
+`json.encode(value)` / `json.decode(text)` / `json.null`.
+
+`json.null` encodes to JSON `null`. Setting a field to Lua `nil` **removes the
+key** rather than nulling it, so an API that reads an absent field as "leave
+this alone" and a null as "clear it" needs the sentinel to say the second one.
+Decoding is not symmetric on purpose: a JSON `null` still arrives as `nil`, so
+`if body.field then` keeps meaning what it always did.
 
 `sys.openUrl(url)` and `sys.platform` — `Browser` permission.
 
