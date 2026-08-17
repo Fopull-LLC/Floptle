@@ -58,6 +58,7 @@ anything outside the package, and `load`/`dofile`.
 | `ed.overlay(name, drawFn)` | a panel pinned inside the Scene view. Returns a handle; starts visible |
 | `ed.overlay(name, options, drawFn)` | the same, placed and framed the way you ask |
 | `ed.menu(path, fn)` | a menu item. `"Grass/Brush…"` puts *Brush…* under a *Grass* menu |
+| `ed.pickFile(options, fn)` | the OS's file picker. `fn(paths)` gets a list, or `nil` if cancelled. Needs **Files** |
 | `ed.shortcut(keys, fn)` | `"Ctrl+L"`, `"Ctrl+Shift+F5"`. A bare letter is not accepted — the editor's own single-key bindings own the unmodified keyboard |
 
 A panel handle answers `:show()`, `:hide()`, `:toggle()`, `:isOpen()` and — for a
@@ -92,6 +93,24 @@ ed.menu("My Tool/Settings…", function() settings:show() end)
 A common pairing is an overlay that draws over the scene with a button that pops
 the same content out into a tab — draw into a shared function, and call it from
 both.
+
+### Asking for a file
+
+```lua
+ed.pickFile({ title = "Choose an image", label = "Images",
+              extensions = { "png", "jpg", "jpeg" } }, function(paths)
+    if not paths then return end        -- cancelled
+    local bytes = ed.read(paths[1])
+end)
+```
+
+`multiple = true` allows more than one. The callback runs on a later frame, on
+the main thread — the picker is the operating system's and takes as long as
+somebody takes, so this is a request rather than a call that returns a path.
+Cancelling gives `nil`, never an empty list: "no" and "nothing" read the same in
+Lua and only one of them is true.
+
+Absent entirely from a package that did not declare **Files**.
 
 ### Overlay options
 
@@ -538,7 +557,20 @@ gui.textAt(at.x + 8, at.y + 12, "one row of many", 13, 1, 1, 1, 1)
 gui.reserve(200, 40)   -- now the cursor has moved on
 ```
 
-**Input** — `mouse() → {x, y, inside}` · `clicked()`
+**Input** — `mouse() → {x, y, inside}` · `clicked()` ·
+`keys() → {shift, ctrl, alt, enter, escape}`
+
+`textField` returns **two** values: the text, and whether it was submitted with
+Enter. With `keys()` that is enough to build the usual chat behaviour — Enter
+for a newline, Shift+Enter to send, or the other way round:
+
+```lua
+local text, submitted = gui.textField(text, "Ask me anything…")
+local k = gui.keys()
+if submitted and (k.shift or k.ctrl) then send() end
+```
+
+Extra return values are dropped in Lua, so `x = gui.textField(x)` is unchanged.
 
 ### Your own typeface
 

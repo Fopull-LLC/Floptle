@@ -1495,6 +1495,9 @@ struct Editor {
     /// The project's packages and the Lua they run in the editor. Present even
     /// with nothing installed, where every entry point is a no-op.
     ext: ext::ExtHost,
+    /// Native file pickers a package opened, and who to hand the answer to.
+    /// More than one may be in flight — they are different packages' dialogs.
+    ext_picks: Vec<(std::sync::mpsc::Receiver<Vec<PathBuf>>, mlua::RegistryKey)>,
     /// Have this session's packages been loaded yet?
     ///
     /// Startup assigns `project_root` directly instead of going through

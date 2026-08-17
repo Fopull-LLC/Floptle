@@ -598,6 +598,51 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
     }
 
     // ---- files -------------------------------------------------------------
+    // **The OS's own file picker.** Gated on `Files`, because the paths it
+    // returns are outside the package and reading one is exactly what it is
+    // for. The dialog itself is the editor's — a package never touches rfd,
+    // whose synchronous API cannot run on this thread at all.
+    // **Absent without `Files`, not refused at the call.** Same rule as `http`:
+    // the failure belongs at the top of the file where an author sees it, not
+    // three menus deep in front of a user who cannot act on it.
+    if state.permissions.contains(&Permission::Files) {
+        let shared = shared.clone();
+        t.set(
+            "pickFile",
+            lua.create_function(move |lua, (opts, cb): (Value, Function)| {
+                let mut title = "Choose a file".to_string();
+                let mut filter = None;
+                let mut multiple = false;
+                if let Value::Table(o) = &opts {
+                    if let Ok(s) = o.get::<String>("title") {
+                        title = s;
+                    }
+                    if let Ok(m) = o.get::<bool>("multiple") {
+                        multiple = m;
+                    }
+                    if let Ok(exts) = o.get::<Table>("extensions") {
+                        let mut v = Vec::new();
+                        for e in exts.sequence_values::<String>().flatten() {
+                            v.push(e.trim_start_matches('.').to_lowercase());
+                        }
+                        if !v.is_empty() {
+                            let label =
+                                o.get::<String>("label").unwrap_or_else(|_| "Files".to_string());
+                            filter = Some((label, v));
+                        }
+                    }
+                } else if let Value::String(s) = &opts {
+                    title = s.to_string_lossy().to_string();
+                }
+                let cb = lua.create_registry_value(cb)?;
+                shared
+                    .pick_reqs
+                    .borrow_mut()
+                    .push(super::PickReq { title, filter, multiple, cb });
+                Ok(())
+            })?,
+        )?;
+    }
     t.set("read", read_fn(lua, shared, state)?)?;
     t.set("write", write_fn(lua, shared, state)?)?;
     t.set("exists", exists_fn(lua, shared, state)?)?;

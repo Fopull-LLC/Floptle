@@ -189,6 +189,8 @@ pub(crate) struct Shared {
     /// first read of a model is a file off disk, and a binding cannot reach the
     /// editor anyway. The callback runs on a later frame, on the main thread.
     pub(crate) mesh_reqs: RefCell<Vec<MeshReq>>,
+    /// Native file pickers a package asked for, waiting to be opened.
+    pub(crate) pick_reqs: RefCell<Vec<PickReq>>,
     /// Font names `gui.font` has already complained about, by scoped family.
     /// A panel draws every frame; the complaint is worth making once.
     pub(crate) warned_fonts: RefCell<std::collections::HashSet<String>>,
@@ -222,6 +224,21 @@ fn mesh_table(lua: &Lua, g: &crate::mesh_read::Geometry) -> mlua::Result<mlua::T
 }
 
 /// One `mesh.read` waiting on the editor.
+/// A package asked the user to choose a file.
+///
+/// A request rather than a call, for the same reason `mesh.read` is one: the
+/// picker is the OS's, it takes as long as somebody takes, and a binding has no
+/// route to the editor. The callback runs on a later frame, on the main thread.
+pub(crate) struct PickReq {
+    /// What the dialog's title bar says. A picker that does not say what it is
+    /// for is a picker somebody cancels.
+    pub(crate) title: String,
+    /// `(label, extensions)` — empty means any file.
+    pub(crate) filter: Option<(String, Vec<String>)>,
+    pub(crate) multiple: bool,
+    pub(crate) cb: RegistryKey,
+}
+
 pub(crate) struct MeshReq {
     pub(crate) source: crate::mesh_read::MeshSource,
     pub(crate) cb: RegistryKey,
@@ -542,6 +559,7 @@ impl ExtHost {
         self.shared.cancelled.borrow_mut().clear();
         self.shared.warned_fonts.borrow_mut().clear();
         self.shared.mesh_reqs.borrow_mut().clear();
+        self.shared.pick_reqs.borrow_mut().clear();
         self.shared.pending.borrow_mut().clear();
         self.shared.handles.borrow_mut().clear();
         self.shared.cmds.borrow_mut().clear();
@@ -871,6 +889,40 @@ impl ExtHost {
     }
 
     /// Everything a package asked to read this frame.
+    pub(crate) fn take_pick_requests(&self) -> Vec<PickReq> {
+        self.shared.pick_reqs.borrow_mut().drain(..).collect()
+    }
+
+    /// Hand a package the paths it asked for. An empty list means the user
+    /// cancelled — reported as `nil` rather than as an empty table, because
+    /// "no" and "nothing" read the same in Lua and only one of them is true.
+    pub(crate) fn deliver_pick(&mut self, cb: RegistryKey, paths: Vec<String>) {
+        if let Some(func) = self.func(&cb) {
+            let arg = if paths.is_empty() {
+                mlua::Value::Nil
+            } else {
+                match self.lua.create_table() {
+                    Ok(t) => {
+                        for (i, p) in paths.iter().enumerate() {
+                            let _ = t.set(i + 1, p.clone());
+                        }
+                        mlua::Value::Table(t)
+                    }
+                    Err(_) => mlua::Value::Nil,
+                }
+            };
+            if let Err(e) = func.call::<()>(arg) {
+                self.shared.log.borrow_mut().push(ExtLog {
+                    level: ExtLevel::Error,
+                    msg: format!("pickFile: {}", trim_lua_error(&e.to_string())),
+                    from: String::new(),
+                });
+            }
+        }
+        let _ = self.lua.remove_registry_value(cb);
+        self.drain_pending();
+    }
+
     pub(crate) fn take_mesh_requests(&self) -> Vec<MeshReq> {
         self.shared.mesh_reqs.borrow_mut().drain(..).collect()
     }

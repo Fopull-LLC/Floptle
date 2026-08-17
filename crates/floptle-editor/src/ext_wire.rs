@@ -386,6 +386,7 @@ impl Editor {
         }
         self.drain_ext_log();
         self.serve_mesh_reads();
+        self.serve_file_pickers();
     }
 
     /// Answer everything `mesh.read` asked for this frame.
@@ -393,6 +394,41 @@ impl Editor {
     /// After the commands, so a package that adds a node and reads it back in
     /// the same pass gets the node it just made rather than the one that was
     /// there before.
+    /// Open any picker a package asked for, and deliver any that has answered.
+    ///
+    /// Two halves because a native dialog takes as long as a person takes: the
+    /// request opens it, and a later frame hands back what they chose. The
+    /// dialog goes through [`crate::native_dialog`] like every other picker in
+    /// the editor — a package never reaches rfd, whose blocking API cannot run
+    /// on this thread at all.
+    fn serve_file_pickers(&mut self) {
+        for req in self.ext.take_pick_requests() {
+            let rx = crate::native_dialog::pick_files_filtered(
+                &req.title,
+                req.filter.as_ref().map(|(l, e)| (l.as_str(), e.as_slice())),
+                req.multiple,
+            );
+            self.ext_picks.push((rx, req.cb));
+        }
+        let mut done: Vec<(usize, Vec<String>)> = Vec::new();
+        for (i, (rx, _)) in self.ext_picks.iter().enumerate() {
+            match crate::native_dialog::poll(rx) {
+                crate::native_dialog::Answer::Waiting => {}
+                crate::native_dialog::Answer::Chose(paths) => {
+                    done.push((i, paths.iter().map(|p| p.display().to_string()).collect()));
+                }
+                // Cancelled, or the picker could not open. Either way the
+                // package is told "no" rather than left waiting forever.
+                crate::native_dialog::Answer::Closed => done.push((i, Vec::new())),
+            }
+        }
+        for (i, paths) in done.into_iter().rev() {
+            let (_, cb) = self.ext_picks.remove(i);
+            self.ext.deliver_pick(cb, paths);
+        }
+        self.drain_ext_log();
+    }
+
     fn serve_mesh_reads(&mut self) {
         let reqs = self.ext.take_mesh_requests();
         for req in reqs {

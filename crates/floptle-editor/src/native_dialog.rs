@@ -50,6 +50,35 @@ pub(crate) fn pick_files(title: &str) -> Receiver<Vec<PathBuf>> {
     })
 }
 
+/// Ask for files, optionally narrowed to one set of extensions.
+///
+/// The filter is the picker's, not ours: narrowing to `png, jpg` is what makes
+/// an image picker an image picker rather than a file browser somebody has to
+/// read carefully.
+pub(crate) fn pick_files_filtered(
+    title: &str,
+    filter: Option<(&str, &[String])>,
+    multiple: bool,
+) -> Receiver<Vec<PathBuf>> {
+    let title = title.to_string();
+    let filter = filter.map(|(l, e)| (l.to_string(), e.to_vec()));
+    spawn(move || async move {
+        let mut d = rfd::AsyncFileDialog::new().set_title(title);
+        if let Some((label, exts)) = &filter {
+            let refs: Vec<&str> = exts.iter().map(|s| s.as_str()).collect();
+            d = d.add_filter(label, &refs);
+        }
+        let picked = if multiple {
+            d.pick_files().await
+        } else {
+            d.pick_file().await.map(|h| vec![h])
+        };
+        picked
+            .map(|hs| hs.iter().map(|h| h.path().to_path_buf()).collect::<Vec<_>>())
+            .filter(|paths| !paths.is_empty())
+    })
+}
+
 /// Run a dialog on a thread that actually has a runtime, and hand back the
 /// channel its answer arrives on.
 ///

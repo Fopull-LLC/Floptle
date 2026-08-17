@@ -295,6 +295,12 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
     // gets clicked into every single time.
     t.set(
         "textField",
+        // Returns `value, submitted`. `submitted` is true on the frame the
+        // field was left by pressing Enter — the only way a package can know a
+        // question was finished, because a returned string looks identical
+        // whether somebody typed a character or pressed the key that means
+        // "send". Lua drops extra return values, so the one-value call sites
+        // that existed before are unaffected.
         scope.create_function(
             move |_, (value, hint, focus): (String, Option<String>, Option<bool>)| {
                 with(slot, |ui| {
@@ -307,7 +313,9 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
                     if focus.unwrap_or(false) {
                         r.request_focus();
                     }
-                    v
+                    let submitted = r.lost_focus()
+                        && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter));
+                    (v, submitted)
                 })
             },
         )?,
@@ -742,6 +750,35 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             t.set("x", x)?;
             t.set("y", y)?;
             t.set("inside", inside)?;
+            Ok(t)
+        })?,
+    )?;
+    // Which modifiers are held, and whether Enter/Escape went down this frame.
+    //
+    // A package cannot otherwise tell Shift+Enter from Enter, so it cannot
+    // offer "Enter for a newline, Shift+Enter to send" — the convention every
+    // chat box uses. Read-only and frame-local; it says nothing about the
+    // machine beyond which keys are down while its own panel is drawing.
+    t.set(
+        "keys",
+        scope.create_function(move |lua, ()| {
+            let (shift, ctrl, alt, enter, escape) = with(slot, |ui| {
+                ui.ctx().input(|i| {
+                    (
+                        i.modifiers.shift,
+                        i.modifiers.ctrl || i.modifiers.command,
+                        i.modifiers.alt,
+                        i.key_pressed(egui::Key::Enter),
+                        i.key_pressed(egui::Key::Escape),
+                    )
+                })
+            })?;
+            let t = lua.create_table()?;
+            t.set("shift", shift)?;
+            t.set("ctrl", ctrl)?;
+            t.set("alt", alt)?;
+            t.set("enter", enter)?;
+            t.set("escape", escape)?;
             Ok(t)
         })?,
     )?;
