@@ -328,7 +328,11 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
                 if let Some(t) = opts {
                     if let Ok(c) = t.get::<String>("corner") {
                         look.left = c.eq_ignore_ascii_case("topleft")
+                            || c.eq_ignore_ascii_case("bottomleft")
                             || c.eq_ignore_ascii_case("left");
+                        look.bottom = c.eq_ignore_ascii_case("bottomleft")
+                            || c.eq_ignore_ascii_case("bottomright")
+                            || c.eq_ignore_ascii_case("bottom");
                     }
                     if let Ok(v) = t.get::<bool>("bare") {
                         look.bare = v;

@@ -378,13 +378,21 @@ pub(crate) struct OverlayLook {
     /// One filling overlay ends its stack: anything after it would be pushed
     /// off the bottom, and silently drawing it off-screen helps nobody.
     pub(crate) fill: bool,
+    /// **Grow up from the bottom edge instead of down from the top.**
+    ///
+    /// A row of buttons and a readout that belongs out of the way want the
+    /// bottom of the viewport, and pinning them to the top meant they sat in
+    /// the middle of the level the moment anything above them changed height.
+    /// The bottom stacks are independent of the top ones, so a package can use
+    /// both corners on a side without either one moving the other.
+    pub(crate) bottom: bool,
 }
 
 impl Default for OverlayLook {
     fn default() -> Self {
         // The old behaviour, unchanged: a framed card down the right edge. An
         // overlay written before this existed must look exactly as it did.
-        Self { left: false, bare: false, width: 260.0, fill: false }
+        Self { left: false, bare: false, width: 260.0, fill: false, bottom: false }
     }
 }
 
@@ -397,6 +405,14 @@ pub(crate) struct OverlayReg {
     pub(crate) open: bool,
     pub(crate) look: OverlayLook,
     pub(crate) error: Option<String>,
+    /// How tall it came out last frame.
+    ///
+    /// Only the bottom stacks need this, and they cannot do without it: an
+    /// overlay is placed before it is drawn, so anchoring one to the bottom
+    /// edge means knowing its height a frame early. A row of buttons is the
+    /// same height every frame, so the estimate is exact from the second frame
+    /// on and one frame low on the first.
+    pub(crate) last_h: f32,
 }
 
 /// A menu item a package registered. `path` is `"Menu/Item"` or
@@ -705,7 +721,7 @@ impl ExtHost {
                 }
                 Registration::Overlay { pkg, id, name, cb, open, look } => {
                     self.overlays
-                        .push(OverlayReg { pkg, id, name, cb, open, look, error: None });
+                        .push(OverlayReg { pkg, id, name, cb, open, look, error: None, last_h: 0.0 });
                 }
                 Registration::Shortcut { pkg, keys, cb } => {
                     self.shortcuts.push(ShortcutReg { pkg, keys, cb });

@@ -1,5 +1,17 @@
 ## Just shipped
 
+**v0.65.1 "The Other Corner"** — **a Scene overlay can sit at the bottom of the
+viewport, and it can take the full height.** `corner` now takes `"bottomLeft"`
+and `"bottomRight"`; the bottom stacks grow upward and are independent of the top
+ones, so a package can use both corners on one side without either moving the
+other. A row of buttons wants the bottom edge — pinned to the top it sat over the
+level every time the readout above it changed height. `fill = true` gives an
+overlay the whole column instead, which is what a panel needs to size itself
+against the screen rather than against what it has drawn so far: without it,
+`gui.available()` reports the content, and a list written into one came out two
+rows tall. Both options are additive; an overlay that asks for neither draws
+exactly where it always did.
+
 **v0.65.0 "Make Yourself At Home"** — **an editor tool can now look like part of
 the editor.** A package gets its own **dock tabs** (`ed.tab`), dragged and split
 beside the viewport and remembered where you left them, instead of only floating

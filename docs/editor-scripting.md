@@ -116,7 +116,7 @@ Absent entirely from a package that did not declare **Files**.
 
 | | |
 | --- | --- |
-| `corner` | `"topLeft"` or `"topRight"` (the default). The left stack starts **below the viewport toolbar**, wherever it has been dragged to |
+| `corner` | `"topLeft"`, `"topRight"` (the default), `"bottomLeft"` or `"bottomRight"`. The left stacks start **below the viewport toolbar**, wherever it has been dragged to; the bottom stacks grow up from the bottom edge and are independent of the top ones, so both corners on one side can be used without either moving the other. `fill` is ignored on a bottom overlay — one pinned to the bottom that also took the whole column would be pinned to the top |
 | `bare` | `true` draws **no frame and no title** — for an overlay that paints its own |
 | `width` | pixels, 40–900. Default 260 |
 | `fill` | `true` takes the full height of the viewport. One filling overlay ends its stack |

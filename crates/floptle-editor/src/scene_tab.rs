@@ -1188,6 +1188,11 @@ impl EditorTabViewer<'_> {
             // constant guessed at.
             let mut y_right = rect.top() + 8.0;
             let mut y_left = (tools_rect.bottom() + 8.0).max(rect.top() + 8.0);
+            // The bottom stacks grow the other way. They are independent of the
+            // top ones so a package can put a readout in one corner and a row of
+            // buttons in the other without either moving the other.
+            let mut b_right = rect.bottom() - 8.0;
+            let mut b_left = rect.bottom() - 8.0;
             for i in 0..self.ext.overlays.len() {
                 if !self.ext.overlays[i].open || self.ext.overlays[i].error.is_some() {
                     continue;
@@ -1195,14 +1200,28 @@ impl EditorTabViewer<'_> {
                 let name = self.ext.overlays[i].name.clone();
                 let look = self.ext.overlays[i].look;
                 let w = look.width;
-                let y = if look.left { y_left } else { y_right };
                 let x = if look.left { rect.left() + 8.0 } else { rect.right() - (w + 8.0) };
-                let area_rect = egui::Rect::from_min_size(
-                    egui::pos2(x, y),
-                    egui::vec2(w, rect.bottom() - y - 8.0),
-                );
-                if area_rect.height() < 40.0 {
-                    break; // out of viewport; drawing them stacked off-screen helps nobody
+                let area_rect = if look.bottom {
+                    // Placed before it is drawn, so its height comes from last
+                    // frame. A first frame one row low beats a row that walks up
+                    // the screen as the layout settles.
+                    let h = self.ext.overlays[i].last_h.max(24.0);
+                    let base = if look.left { b_left } else { b_right };
+                    let top = (base - h).max(rect.top() + 8.0);
+                    egui::Rect::from_min_size(egui::pos2(x, top), egui::vec2(w, h))
+                } else {
+                    let y = if look.left { y_left } else { y_right };
+                    egui::Rect::from_min_size(
+                        egui::pos2(x, y),
+                        egui::vec2(w, rect.bottom() - y - 8.0),
+                    )
+                };
+                // Out of viewport; drawing them stacked off-screen helps nobody.
+                // `continue` rather than `break` now that the two directions are
+                // interleaved — a full top stack says nothing about the bottom.
+                let floor = if look.bottom { 24.0 } else { 40.0 };
+                if area_rect.height() < floor {
+                    continue;
                 }
                 let mut used = 0.0;
                 egui::Area::new(egui::Id::new(("ext_overlay", i)))
@@ -1236,7 +1255,17 @@ impl EditorTabViewer<'_> {
                             used = r.response.rect.height();
                         }
                     });
-                if look.fill {
+                self.ext.overlays[i].last_h = used;
+                if look.bottom {
+                    // Upward. `fill` means nothing here — an overlay pinned to
+                    // the bottom edge that also took the whole column would be
+                    // an overlay pinned to the top edge.
+                    if look.left {
+                        b_left -= used + 6.0;
+                    } else {
+                        b_right -= used + 6.0;
+                    }
+                } else if look.fill {
                     // It took the column. Push the rest of this stack past the
                     // bottom so nothing draws underneath it.
                     if look.left {
