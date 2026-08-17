@@ -7732,6 +7732,11 @@ impl Editor {
         if let Some(path) = cmd.drop_asset {
             self.drop_asset(&path);
         }
+        if let Some(path) = cmd.convert_model {
+            self.start_model_conversion(&path);
+        }
+        // Free until one is running: a `try_recv` on nothing is a branch.
+        self.poll_model_conversion();
         if let Some(path) = cmd.import_map {
             // The Assets browser's "Add to scene": no drop point, so the group
             // lands in front of the camera (the `add_node_at` convention).

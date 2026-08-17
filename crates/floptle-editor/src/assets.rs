@@ -25,6 +25,15 @@ pub(crate) fn is_model(path: &str) -> bool {
     p.ends_with(".glb") || p.ends_with(".gltf")
 }
 
+/// A model the engine cannot open, but can convert.
+///
+/// Kept beside [`is_model`] because the two together are the whole answer to
+/// "can I do anything with this file": one opens, the other becomes one that
+/// opens.
+pub(crate) fn is_convertible_model(path: &str) -> bool {
+    floptle_convert::is_convertible(std::path::Path::new(path))
+}
+
 pub(crate) fn is_script(path: &str) -> bool {
     path.to_ascii_lowercase().ends_with(".lua")
 }

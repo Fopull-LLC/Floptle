@@ -210,12 +210,50 @@ A panel ([`./editor.md`](./editor.md) §2) listing project assets by folder/kind
   sidecar panel edits `ImportSettings`.
 - **Open in VSCode** for `.flsl`/`.lua` ([ADR-0011](../decisions/0011-vscode-integration.md)).
 
-## 7. Out of scope
+## 7. Converting a model the engine cannot open
+
+Asset packs are FBX. Scans are PLY. Anything from CAD is STL. Telling somebody
+their model is the wrong kind of file is true and useless, so the Assets browser
+converts it: right-click ⏵ **⇄ Convert to .glb**, or just double-click it.
+
+The result is written beside the source and is **one self-contained `.glb`** —
+geometry, materials and embedded textures — with the source left untouched.
+Nothing is overwritten: if the `.glb` already exists, it says so instead.
+
+| From | Notes |
+|---|---|
+| `.fbx` | Binary and ASCII, every version. Read with [ufbx](https://github.com/ufbx/ufbx). |
+| `.obj` | With its `.mtl`, through the same reader, so the two cannot disagree. |
+| `.stl` | Binary and ASCII. Normals are recomputed — most STL files have wrong or zeroed ones. |
+| `.ply` | Per-vertex colour kept, which is a scan's whole value. A point cloud with no faces is refused with an explanation rather than converted to an empty model. |
+| `.gltf` | Not a format change — a **repack**. A loose `.gltf` is three to thirty files that have to travel together, and packing them into one is what stops half of them going missing. |
+
+**It normalises, it does not just re-encode.** Every one of these formats
+disagrees with glTF about something, and a converter that only re-encodes hands
+back a model that loads and is wrong:
+
+- **Axes** — FBX is Z-up from 3ds Max, Y-up from Maya; glTF is always Y-up.
+- **Units** — FBX records its own, and most exporters write centimetres. glTF is
+  metres, and a hundredfold error reads as a broken importer.
+- **Winding** — correcting handedness, or any mirrored node, inverts triangle
+  winding. A model with every face backwards is invisible from outside and solid
+  from within.
+- **N-gons** — FBX and OBJ have quads; glTF has triangles.
+
+**What is dropped is named, never silent.** Animation, skinning, cameras and
+lights do not come across; the Console says which, with counts. So does anything
+that went wrong but did not stop the conversion — a texture that could not be
+found, a scale that had to be assumed.
+
+## 8. Out of scope
 
 We are lightweight — **not a content-management platform.**
 
-- **FBX / USD import** — glTF only ([ADR-0006](../decisions/0006-asset-pipeline-gltf.md));
-  FBX is proprietary/messy, USD is overkill for our scope.
+- **FBX / USD as a runtime format** — the engine loads glTF and only glTF
+  ([ADR-0006](../decisions/0006-asset-pipeline-gltf.md)). That has not changed
+  and should not: one well-specified load path is worth more than four
+  half-supported ones. **Converting at authoring time is a different question,
+  and is now answered** — see §7. USD remains out of scope.
 - **A networked asset server** — assets are local files in a project dir; no
   remote/team asset service.
 - **Full asset-bundle / streaming system** at launch — export packs the whole

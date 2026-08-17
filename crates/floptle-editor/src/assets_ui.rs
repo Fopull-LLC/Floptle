@@ -401,6 +401,15 @@ impl<'a> EditorTabViewer<'a> {
             self.cmd.open_image = Some(path.to_string());
         } else if is_script(path) || is_markdown(path) {
             self.cmd.open_script_pref = Some(path.to_string());
+        } else if crate::assets::is_convertible_model(path) {
+            // **Double-clicking a model the engine cannot open converts it.**
+            // Before this it did nothing at all, which is the worst answer
+            // available: an .fbx looks like every other asset in the browser,
+            // and a double-click that does nothing reads as "this engine cannot
+            // use my asset pack" rather than "this needs one step first".
+            // Nothing is overwritten, so the worst case is a file appearing
+            // beside the one you clicked.
+            self.cmd.convert_model = Some(path.to_string());
         }
     }
 
@@ -449,6 +458,22 @@ impl<'a> EditorTabViewer<'a> {
             && ui.button("🖼 Edit image").clicked()
         {
             self.cmd.open_image = Some(path.to_string());
+            ui.close();
+        }
+        // **A model the engine cannot open, beside the action that fixes it.**
+        // The alternative is a person double-clicking an .fbx, getting nothing,
+        // and concluding the engine cannot read their asset pack — which is
+        // true, and fixable in one click they had no way to find.
+        if crate::assets::is_convertible_model(path)
+            && ui
+                .button("⇄ Convert to .glb")
+                .on_hover_text(
+                    "write a .glb beside this file — one self-contained model the engine \
+                     can open, with its textures inside it",
+                )
+                .clicked()
+        {
+            self.cmd.convert_model = Some(path.to_string());
             ui.close();
         }
         if crate::assets::is_shader(path) && ui.button("◈ Open in Shader Graph").clicked() {

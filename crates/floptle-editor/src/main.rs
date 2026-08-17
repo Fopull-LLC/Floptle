@@ -50,6 +50,7 @@ mod ext_wire;
 mod game_keys;
 mod gi_bake;
 mod nav_bake;
+mod model_convert;
 mod native_dialog;
 mod reflect_capture;
 mod gizmo;
@@ -229,6 +230,9 @@ struct EditorCmd {
     step_tick_back: bool,
     /// An asset was dropped (path) — spawn a model or attach a script.
     drop_asset: Option<String>,
+    /// Convert a model the engine cannot open (.fbx/.obj/.stl/.ply/.gltf) into a
+    /// `.glb` beside it.
+    convert_model: Option<String>,
     /// Import a map sidecar's geometry into the open scene (the Assets
     /// browser's "Add to scene" — placed in front of the camera; a viewport
     /// drop goes through `drop_asset` and lands at the cursor instead).
@@ -2437,6 +2441,17 @@ struct Editor {
     /// `Some` while a dialog is open (button disabled). Works on Wayland via the
     /// XDG portal, where drag-and-drop from the file manager isn't delivered.
     import_rx: Option<(std::sync::mpsc::Receiver<Vec<PathBuf>>, PathBuf)>,
+    /// A model conversion running on a worker thread, and the file it is about.
+    ///
+    /// **Off the main thread because the input is somebody else's file.** A
+    /// character FBX is tens of megabytes and there is no upper bound on what
+    /// somebody drops into a project; blocking the editor for an unknown
+    /// duration is reported as a freeze, not as a slow conversion.
+    #[allow(clippy::type_complexity)]
+    convert_rx: Option<(
+        std::sync::mpsc::Receiver<Result<(PathBuf, floptle_convert::Report), String>>,
+        String,
+    )>,
     /// Named material presets loaded from assets/materials/.
     materials: Vec<(String, floptle_scene::MaterialDoc)>,
     /// Whether the floating Material Editor window is open.

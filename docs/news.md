@@ -1,5 +1,27 @@
 ## Just shipped
 
+**v0.66.0 "Bring The Model You Have"** — **the Assets browser converts models
+the engine cannot open.** Right-click an `.fbx` and pick **⇄ Convert to .glb**,
+or just double-click it; `.obj` (with its `.mtl`), `.stl` and `.ply` too. Asset
+packs are FBX, scans are PLY, anything out of CAD is STL, and "export it as
+glTF first" is fine advice if you own the source file and useless if you bought
+the model. The result lands beside the original as one self-contained `.glb`
+with its textures inside it — nothing overwritten, nothing else touched. It
+**normalises rather than re-encodes**: FBX is Z-up out of 3ds Max and Y-up out
+of Maya where glTF is always Y-up; FBX records its own units and most exporters
+write centimetres where glTF is metres; correcting handedness (or any mirrored
+node) inverts triangle winding, which makes a model invisible from outside and
+solid from within; and FBX and OBJ have quads where glTF has triangles. All four
+are settled on the way through. A loose `.gltf` is **packed** rather than
+converted — it is JSON pointing at three to thirty other files that have to
+travel together, and half of them go missing in a zip. The Console gets the
+counts and everything that did not come across: animation and skinning are
+dropped and *named*, and a file with no meshes at all fails with "there is no
+geometry in that file" rather than writing an empty model that opens fine and
+shows nothing. Conversion runs off the main thread, so a large character does
+not freeze the editor. The engine still loads glTF and only glTF at runtime —
+this is the authoring step that gets you there.
+
 **v0.65.3 "What You Picked"** — **a package can read a file's bytes, and a file
 the user picked is one it can open.** `ed.read` is text, so a PNG came back as
 `nil` — the same answer as for a file that is not there, which is the most

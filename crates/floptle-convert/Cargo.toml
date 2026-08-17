@@ -1,0 +1,29 @@
+[package]
+name = "floptle-convert"
+description = "Model conversion: FBX / OBJ / STL / PLY / loose glTF into a single self-contained .glb."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+floptle-assets = { path = "../floptle-assets" } # the .glb writer, and TextureData
+floptle-render = { path = "../floptle-render" } # TextureData itself
+
+# **The FBX reader, and the OBJ one.** ufbx is a single-file C library built
+# here by `cc` — no system package, no CMake, which is what makes it usable in a
+# release that builds on four platforms unattended. It reads .obj/.mtl as well
+# as every FBX version people actually have, so those two formats share one code
+# path instead of disagreeing about winding or units.
+ufbx = "0.11.3"
+stl_io = "0.11.0" # STL: CAD and 3D-print exports, binary and ASCII
+# PLY is parsed in-crate (see src/ply.rs): the obvious dependency carries a
+# Markdown-based doc-test harness as a BUILD dependency, which is nine extra
+# crates on every clean build of every platform we ship.
+gltf = { workspace = true } # to re-pack a loose .gltf + .bin + textures into one file
+image = { workspace = true } # decode referenced/embedded textures so they can be embedded
+
+[dev-dependencies]
+serde_json = "1" # to split a .glb back into a loose .gltf pair in the tests

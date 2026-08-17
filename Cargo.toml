@@ -28,6 +28,7 @@ members = [
     "crates/floptle-ui",       # in-game UI (anchors, drag-drop layout, scripted behavior)
     "crates/floptle-assets",   # glTF import (Blender), textures, asset database
     "crates/floptle-image",    # image documents: layers, brushes, vectors, .flimg (the 🖼 Image tab)
+    "crates/floptle-convert",  # model conversion: FBX/OBJ/STL/PLY/loose glTF -> a single .glb
     "crates/floptle-script",   # Lua (LuaJIT/mlua) scripting host + hot reload
     "crates/floptle-net",      # networking (deferred; clean boundary stub for now)
     "crates/floptle-scene",    # data-driven scene/project model (RON) over the ECS
@@ -42,7 +43,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.65.3"
+version = "0.66.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"     # dual, Rust-ecosystem norm — docs/decisions/0009-license.md
 authors = ["Ty Johnston <tplordtp3@gmail.com>"]
