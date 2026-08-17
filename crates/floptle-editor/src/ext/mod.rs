@@ -103,6 +103,11 @@ pub(crate) enum ExtCmd {
     WindowOpen(u32, bool),
     WindowFocus(u32),
     OverlayOpen(u32, bool),
+    /// Show/hide a package's **dock tab** by its stable key. Opening one adds
+    /// it to the dock where the user is working and brings it to the front;
+    /// closing removes it from the layout. Unlike a window, the editor — not
+    /// the package — decides where it lives after that.
+    TabOpen(u64, bool),
     /// Glide the Scene camera until `at` is `distance` straight ahead, keeping
     /// the view direction. The same move the `F` key makes, aimed at a point
     /// rather than at the selection — a tool that lists places has to be able
@@ -225,6 +230,7 @@ pub(crate) struct MeshReq {
 /// A registration a package made while loading (or later, from a callback).
 pub(crate) enum Registration {
     Window { pkg: usize, id: u32, title: String, cb: RegistryKey, open: bool },
+    Tab { pkg: usize, id: u32, title: String, cb: RegistryKey },
     Menu { pkg: usize, path: String, cb: RegistryKey },
     Overlay { pkg: usize, id: u32, name: String, cb: RegistryKey, open: bool },
     Shortcut { pkg: usize, keys: String, cb: RegistryKey },
@@ -301,6 +307,40 @@ pub(crate) struct WindowReg {
     pub(crate) error: Option<String>,
 }
 
+/// A **dock tab** a package registered.
+///
+/// The difference from [`WindowReg`] is who decides where it goes. A window
+/// floats and the package can ask for it to be raised; a tab is handed to the
+/// dock, and from then on it is dragged, split and stacked like the editor's
+/// own panels — which is what you want for anything you keep open beside the
+/// scene rather than consult and dismiss.
+pub(crate) struct TabReg {
+    pub(crate) pkg: usize,
+    /// The id handed back to Lua, for `isOpen`/`toggle`.
+    pub(crate) id: u32,
+    /// **What the saved layout stores.** A hash of `<package id>::<title>`, so
+    /// the tab returns to its slot across a reload and across a restart. It is
+    /// a number because [`crate::dock::EditorTab`] has to stay `Copy`.
+    pub(crate) key: u64,
+    pub(crate) title: String,
+    pub(crate) cb: RegistryKey,
+    pub(crate) error: Option<String>,
+}
+
+/// The dock key for a package's tab.
+///
+/// FNV-1a over `<package id>::<title>`. Stable across runs and across machines,
+/// which a runtime-allocated id is not — a saved layout outlives the session
+/// that wrote it, so the key in it has to mean the same thing tomorrow.
+pub(crate) fn tab_key(pkg_id: &str, title: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in pkg_id.as_bytes().iter().chain(b"::").chain(title.as_bytes()) {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// A Scene-view overlay a package registered.
 pub(crate) struct OverlayReg {
     pub(crate) pkg: usize,
@@ -365,6 +405,9 @@ pub(crate) struct ExtHost {
     pub(crate) windows: Vec<WindowReg>,
     pub(crate) menus: Vec<MenuReg>,
     pub(crate) overlays: Vec<OverlayReg>,
+    /// Dock tabs packages registered. Keyed by [`tab_key`], not by index — the
+    /// dock holds the key across a reload that renumbers everything else.
+    pub(crate) tabs: Vec<TabReg>,
     pub(crate) shortcuts: Vec<ShortcutReg>,
     pub(crate) hooks: Vec<HookReg>,
     pub(crate) timers: Vec<TimerReg>,
@@ -409,6 +452,7 @@ impl ExtHost {
             windows: Vec::new(),
             menus: Vec::new(),
             overlays: Vec::new(),
+            tabs: Vec::new(),
             shortcuts: Vec::new(),
             hooks: Vec::new(),
             timers: Vec::new(),
@@ -460,6 +504,7 @@ impl ExtHost {
         self.windows.clear();
         self.menus.clear();
         self.overlays.clear();
+        self.tabs.clear();
         self.shortcuts.clear();
         self.hooks.clear();
         self.timers.clear();
@@ -597,6 +642,17 @@ impl ExtHost {
                 }
                 Registration::Menu { pkg, path, cb } => {
                     self.menus.push(MenuReg { pkg, path, cb });
+                }
+                Registration::Tab { pkg, id, title, cb } => {
+                    let key = tab_key(
+                        self.packages.get(pkg).map(|p| p.id.as_str()).unwrap_or("?"),
+                        &title,
+                    );
+                    // A tab's open-ness lives in the DOCK LAYOUT, not here: the
+                    // layout is what the user arranged and what was saved, so
+                    // asking the host would give a second, disagreeing answer.
+                    self.shared.open_state.borrow_mut().insert(id, false);
+                    self.tabs.push(TabReg { pkg, id, key, title, cb, error: None });
                 }
                 Registration::Overlay { pkg, id, name, cb, open } => {
                     self.overlays.push(OverlayReg { pkg, id, name, cb, open, error: None });
@@ -861,6 +917,48 @@ impl ExtHost {
             let msg = trim_lua_error(&e.to_string());
             self.windows[which].error = Some(msg.clone());
             self.fail(pkg, format!("panel: {msg}"));
+        }
+        self.drain_pending();
+    }
+
+    /// The title to put on a package's dock tab, if that package is loaded.
+    ///
+    /// `None` when a saved layout names a tab whose package is gone — the dock
+    /// still holds the key, because the package may come back and the user's
+    /// arrangement should survive its absence.
+    pub(crate) fn tab_title(&self, key: u64) -> Option<&str> {
+        self.tabs.iter().find(|t| t.key == key).map(|t| t.title.as_str())
+    }
+
+    /// The user closed a package's tab with the ✕. Record it, so the package's
+    /// own `isOpen()`/`toggle()` agree with what is on screen.
+    pub(crate) fn note_tab_closed(&mut self, key: u64) {
+        if let Some(t) = self.tabs.iter().find(|t| t.key == key) {
+            self.shared.open_state.borrow_mut().insert(t.id, false);
+        }
+    }
+
+    /// Draw a package's dock tab. Unknown keys draw a note rather than nothing,
+    /// so a tab left over from an uninstalled package explains itself instead of
+    /// looking like a panel that failed to paint.
+    pub(crate) fn draw_tab(&mut self, key: u64, ui: &mut egui::Ui) {
+        let Some(which) = self.tabs.iter().position(|t| t.key == key) else {
+            ui.weak("This tab belongs to a package that is not loaded.");
+            return;
+        };
+        if let Some(err) = self.tabs[which].error.clone() {
+            draw_failure(ui, &err);
+            return;
+        }
+        let pkg = self.tabs[which].pkg;
+        if self.packages.get(pkg).is_some_and(|p| p.failed.is_some()) {
+            return;
+        }
+        let Some(func) = self.func(&self.tabs[which].cb) else { return };
+        if let Err(e) = self.call_with_ui(pkg, &func, ui) {
+            let msg = trim_lua_error(&e.to_string());
+            self.tabs[which].error = Some(msg.clone());
+            self.fail(pkg, format!("tab: {msg}"));
         }
         self.drain_pending();
     }

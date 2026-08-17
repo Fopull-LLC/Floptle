@@ -340,6 +340,11 @@ impl Editor {
                         self.ext.set_overlay_open(i, open);
                     }
                 }
+                ExtCmd::TabOpen(key, open) => {
+                    if let Some(dock) = self.dock_state.as_mut() {
+                        crate::dock::set_package_tab_open(dock, key, open);
+                    }
+                }
                 ExtCmd::LookAt { at, distance } => {
                     // Ten metres when the package does not say. Close enough to
                     // read a room, far enough that the camera does not land

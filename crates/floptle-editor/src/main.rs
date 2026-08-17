@@ -943,11 +943,24 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
     type Tab = EditorTab;
 
     fn title(&mut self, tab: &mut EditorTab) -> egui::WidgetText {
+        // A package's tab is titled by the package, asked for each frame so a
+        // renamed tab is renamed rather than orphaned.
+        if let EditorTab::Package(key) = tab
+            && let Some(t) = self.ext.tab_title(*key)
+        {
+            return t.to_owned().into();
+        }
         tab.title().into()
     }
 
     fn id(&mut self, tab: &mut EditorTab) -> egui::Id {
-        egui::Id::new(("editor_tab", tab.title()))
+        match tab {
+            // Keyed by the package key, NOT the title: two packages may
+            // reasonably both call a tab "Settings", and an id collision docks
+            // one on top of the other.
+            EditorTab::Package(key) => egui::Id::new(("editor_tab_pkg", *key)),
+            _ => egui::Id::new(("editor_tab", tab.title())),
+        }
     }
 
     // Double-click a tab to maximize it full-window; double-click again to restore.
@@ -958,9 +971,20 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
         }
     }
 
-    // Core panels can't be closed (no way to bring them back yet).
-    fn is_closeable(&self, _tab: &EditorTab) -> bool {
-        false
+    // Core panels can't be closed (no way to bring them back yet). A package's
+    // tab CAN be: its own menu is the way back, which is the thing the core
+    // panels are missing.
+    fn is_closeable(&self, tab: &EditorTab) -> bool {
+        matches!(tab, EditorTab::Package(_))
+    }
+
+    // Closing a package tab has to tell the package, or its handle keeps
+    // reporting the tab as open and `toggle()` then does nothing visible.
+    fn on_close(&mut self, tab: &mut EditorTab) -> egui_dock::tab_viewer::OnCloseResponse {
+        if let EditorTab::Package(key) = tab {
+            self.ext.note_tab_closed(*key);
+        }
+        egui_dock::tab_viewer::OnCloseResponse::Close
     }
 
     // Keep every tab docked in the main surface: the 3D renders to the whole
@@ -1040,6 +1064,10 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
                 if out.access.is_some() {
                     self.cmd.access = out.access;
                 }
+            }
+            EditorTab::Package(key) => {
+                let key = *key;
+                self.ext.draw_tab(key, ui);
             }
             EditorTab::Packages => {
                 *self.packages_action = packages_ui::body(

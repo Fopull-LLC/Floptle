@@ -58,6 +58,40 @@ fn host_for(proj: &Path) -> ExtHost {
 }
 
 #[test]
+fn a_package_registers_a_dock_tab_and_its_key_survives_a_reload() {
+    let proj = temp("tabreg");
+    install(
+        &proj,
+        "com.t.tab",
+        "",
+        r#"
+        local t = ed.tab("Settings", function() end)
+        ed.menu("T/Settings", function() t:show() end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    assert!(host.packages[0].failed.is_none(), "{:?}", host.packages[0].failed);
+    assert_eq!(host.tabs.len(), 1);
+    assert_eq!(host.tabs[0].title, "Settings");
+    // A tab arrives CLOSED. One that opened itself would rearrange the user's
+    // dock every time the project opened.
+    assert_eq!(host.shared.open_state.borrow().get(&host.tabs[0].id).copied(), Some(false));
+
+    // The key is what a saved layout holds, so it has to be the same number
+    // after a reload — the runtime id is not.
+    let before = host.tabs[0].key;
+    host.reload(&proj, &engine());
+    assert_eq!(host.tabs.len(), 1);
+    assert_eq!(host.tabs[0].key, before, "a reload must not move the tab");
+    assert_eq!(host.tab_title(before), Some("Settings"));
+
+    // Two packages may both call a tab "Settings" without docking on top of
+    // each other.
+    assert_ne!(super::tab_key("com.t.tab", "Settings"), super::tab_key("com.other", "Settings"));
+    assert_ne!(super::tab_key("com.t.tab", "Settings"), super::tab_key("com.t.tab", "Chat"));
+}
+
+#[test]
 fn a_package_registers_a_panel_a_menu_and_a_hook() {
     let proj = temp("register");
     install(

@@ -285,6 +285,29 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
     }
     {
         let shared = shared.clone();
+        let pkg_id = state.id.clone();
+        t.set(
+            "tab",
+            lua.create_function(move |lua, (title, cb): (String, Function)| {
+                let id = shared.alloc_id();
+                let key = super::tab_key(&pkg_id, &title);
+                let cb = lua.create_registry_value(cb)?;
+                shared.pending.borrow_mut().push(Registration::Tab {
+                    pkg,
+                    id,
+                    title: title.clone(),
+                    cb,
+                });
+                // Closed until asked for. A tab that opened itself would push
+                // the user's own panels aside on every project open, which is
+                // the one thing a docked layout must never do.
+                shared.open_state.borrow_mut().insert(id, false);
+                tab_handle(lua, &shared, id, key)
+            })?,
+        )?;
+    }
+    {
+        let shared = shared.clone();
         t.set(
             "overlay",
             lua.create_function(move |lua, (name, cb): (String, Function)| {
@@ -569,6 +592,49 @@ fn timer_handle(lua: &Lua, shared: &Rc<Shared>, id: u32) -> mlua::Result<Table> 
             Ok(())
         })?,
     )?;
+    Ok(h)
+}
+
+/// The handle `ed.tab` gives back: `show`, `hide`, `toggle`, `isOpen`.
+///
+/// No `focus` — showing a tab already brings it to the front of whatever leaf it
+/// lives in, and there is nothing else a package could sensibly mean by focusing
+/// one. Where it sits is the user's arrangement, not the package's.
+fn tab_handle(lua: &Lua, shared: &Rc<Shared>, id: u32, key: u64) -> mlua::Result<Table> {
+    let h = lua.create_table()?;
+    h.set("id", id)?;
+    for (name, open) in [("show", true), ("hide", false)] {
+        let shared = shared.clone();
+        h.set(
+            name,
+            lua.create_function(move |_, _: Value| {
+                shared.cmds.borrow_mut().push(ExtCmd::TabOpen(key, open));
+                shared.open_state.borrow_mut().insert(id, open);
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let shared = shared.clone();
+        h.set(
+            "toggle",
+            lua.create_function(move |_, _: Value| {
+                let now = shared.open_state.borrow().get(&id).copied().unwrap_or(false);
+                shared.cmds.borrow_mut().push(ExtCmd::TabOpen(key, !now));
+                shared.open_state.borrow_mut().insert(id, !now);
+                Ok(())
+            })?,
+        )?;
+    }
+    {
+        let shared = shared.clone();
+        h.set(
+            "isOpen",
+            lua.create_function(move |_, _: Value| {
+                Ok(shared.open_state.borrow().get(&id).copied().unwrap_or(false))
+            })?,
+        )?;
+    }
     Ok(h)
 }
 

@@ -54,12 +54,43 @@ anything outside the package, and `load`/`dofile`.
 | | |
 | --- | --- |
 | `ed.window(title, drawFn)` | a floating panel. Returns a handle |
+| `ed.tab(title, drawFn)` | a **dock tab**, dragged and split like the editor's own panels. Returns a handle |
 | `ed.overlay(name, drawFn)` | a panel pinned inside the Scene view. Returns a handle; starts visible |
 | `ed.menu(path, fn)` | a menu item. `"Grass/Brush…"` puts *Brush…* under a *Grass* menu |
 | `ed.shortcut(keys, fn)` | `"Ctrl+L"`, `"Ctrl+Shift+F5"`. A bare letter is not accepted — the editor's own single-key bindings own the unmodified keyboard |
 
 A panel handle answers `:show()`, `:hide()`, `:toggle()`, `:isOpen()` and — for a
 window — `:focus()`. A window starts hidden; open it from your menu item.
+
+### Which of the three to reach for
+
+They are not three styles of the same thing.
+
+- **`ed.window`** floats above everything and can be moved anywhere. Right for
+  something you call up, act on, and dismiss.
+- **`ed.tab`** is handed to the dock. It can be dragged into any panel, split
+  beside the viewport, stacked with the Inspector, and it comes back where you
+  left it — across a reload of your package and across a restart of the editor.
+  Right for anything somebody keeps open *beside* the scene rather than in front
+  of it: settings, a list, a report.
+- **`ed.overlay`** draws inside the Scene view itself, over the level. Right for
+  something that is *about* what is on screen.
+
+A tab starts closed, and where it sits is the user's arrangement — your package
+can open and close it but cannot place it. The editor remembers the position by
+your package id and the tab's title, so renaming a tab renames it in place;
+changing your package's id gives it a new slot.
+
+```lua
+local settings = ed.tab("My Tool Settings", function()
+    gui.label("Everything here docks like a normal panel.")
+end)
+ed.menu("My Tool/Settings…", function() settings:show() end)
+```
+
+A common pairing is an overlay that draws over the scene with a button that pops
+the same content out into a tab — draw into a shared function, and call it from
+both.
 
 ### Hooks
 

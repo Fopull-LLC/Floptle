@@ -57,6 +57,14 @@ pub(crate) enum EditorTab {
     /// scene, look back — and a window that floats over the scene you are
     /// judging it against is a window you close to think and reopen to act.
     Packages,
+    /// A tab a **package** registered with `ed.tab`. The `u64` is
+    /// [`crate::ext::tab_key`] — a hash of `<package id>::<title>`, so the
+    /// saved layout survives a reload, a restart, and the package being
+    /// temporarily absent.
+    ///
+    /// The title is not stored: it is asked of the package at draw time, so
+    /// renaming a tab renames it rather than orphaning it.
+    Package(u64),
 }
 
 impl EditorTab {
@@ -83,6 +91,9 @@ impl EditorTab {
             EditorTab::Learn => "🎓 Learn",
             EditorTab::Settings => "⚙ Settings",
             EditorTab::Packages => "📦 Packages",
+            // Replaced by the package's own title in the tab bar — this is only
+            // the fallback for a tab whose package is not loaded.
+            EditorTab::Package(_) => "Package",
         }
     }
 
@@ -139,6 +150,22 @@ pub(crate) fn focus_settings_tab(dock: &mut egui_dock::DockState<EditorTab>) {
 /// default layout and appears where you are working when you ask for it.
 pub(crate) fn focus_packages_tab(dock: &mut egui_dock::DockState<EditorTab>) {
     focus(dock, EditorTab::Packages);
+}
+
+/// Show or hide a package's own tab. Showing adds it where the user is working
+/// and brings it forward; hiding takes it out of the layout entirely, which is
+/// what the ✕ on the tab does too.
+pub(crate) fn set_package_tab_open(
+    dock: &mut egui_dock::DockState<EditorTab>,
+    key: u64,
+    open: bool,
+) {
+    let tab = EditorTab::Package(key);
+    if open {
+        focus(dock, tab);
+    } else if let Some(path) = dock.find_tab(&tab) {
+        dock.remove_tab(path);
+    }
 }
 
 /// True when the Game tab is the front (active) tab of its dock leaf — i.e. the game
