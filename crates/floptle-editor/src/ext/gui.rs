@@ -123,34 +123,56 @@ fn nest(
 /// Before there is a measurement the spacer claims **nothing**. A spacer that
 /// guessed would overflow once, and once is all a ratchet needs.
 mod flex {
+    /// What a row measured last frame: the width before the spacer, and the
+    /// width after it.
+    ///
+    /// The **leading** half is a guard, not decoration. A row's id comes from
+    /// its position among its siblings, so a list that gains or loses a row
+    /// hands one row's remembered measurement to a different row — and a
+    /// trailing width that is too small by twenty pixels overflows by twenty,
+    /// which `Resize` banks permanently. Checking that the leading width still
+    /// matches is how a measurement is known to belong to THIS row.
+    #[derive(Clone, Copy)]
+    struct Row {
+        leading: f32,
+        trailing: f32,
+    }
+
     /// Where this row's spacer ended, and what the row measured last frame.
     fn ids(ui: &egui::Ui) -> (egui::Id, egui::Id) {
         let base = ui.id().with("flexibleSpace");
-        (base.with("trailing"), base.with("mark"))
+        (base.with("row"), base.with("mark"))
     }
 
     pub(super) fn spacer(ui: &mut egui::Ui) {
-        let (trailing_id, mark_id) = ids(ui);
-        let trailing: Option<f32> = ui.ctx().data(|d| d.get_temp(trailing_id));
-        // `None` is "not measured yet", and is not the same as `Some(0.0)` —
-        // which means the row really does end at the spacer, where claiming the
-        // rest of the width is right and costs nothing.
+        let (row_id, mark_id) = ids(ui);
+        let leading = ui.min_rect().width();
+        let last: Option<Row> = ui.ctx().data(|d| d.get_temp(row_id));
+        // Claim nothing unless there is a measurement that is known to describe
+        // this row. Not-measured-yet and measured-for-something-else both take
+        // the safe direction: a spacer that guesses overflows once, and once is
+        // all a ratchet needs.
+        let trailing = match last {
+            Some(r) if (r.leading - leading).abs() <= 0.5 => Some(r.trailing),
+            _ => None,
+        };
         let take = (ui.available_width() - trailing.unwrap_or(f32::INFINITY)).max(0.0);
         if take > 0.0 {
             ui.allocate_space(egui::vec2(take, 0.0));
         }
-        let ended = ui.min_rect().max.x;
-        ui.ctx().data_mut(|d| d.insert_temp(mark_id, ended));
+        ui.ctx().data_mut(|d| d.insert_temp(mark_id, (leading, ui.min_rect().max.x)));
     }
 
     /// Called when a row closes: how much width came after the spacer?
     pub(super) fn measure_trailing(ui: &egui::Ui) {
-        let (trailing_id, mark_id) = ids(ui);
-        let Some(mark) = ui.ctx().data(|d| d.get_temp::<f32>(mark_id)) else { return };
+        let (row_id, mark_id) = ids(ui);
+        let Some((leading, mark)) = ui.ctx().data(|d| d.get_temp::<(f32, f32)>(mark_id)) else {
+            return;
+        };
         let trailing = (ui.min_rect().max.x - mark).max(0.0);
         ui.ctx().data_mut(|d| {
-            d.remove::<f32>(mark_id);
-            d.insert_temp(trailing_id, trailing);
+            d.remove::<(f32, f32)>(mark_id);
+            d.insert_temp(row_id, Row { leading, trailing });
         });
     }
 }
@@ -590,6 +612,24 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
     t.set(
         "flexibleSpace",
         scope.create_function(move |_, ()| with(slot, flex::spacer))?,
+    )?;
+    // The exact way to put something at the right-hand end, for a row where it
+    // matters that it is exact.
+    //
+    // `flexibleSpace` has to be measured, and a measurement is one frame behind
+    // (see `mod flex`). This is laid out from the right edge instead, so there
+    // is nothing to measure and nothing to be behind — at the cost of the
+    // contents reading back to front, which is why both exist.
+    t.set(
+        "rightAligned",
+        scope.create_function(move |_, cb: Function| {
+            nest(slot, &cb, |ui, f| {
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |inner| f(inner),
+                );
+            })
+        })?,
     )?;
     t.set(
         "separator",

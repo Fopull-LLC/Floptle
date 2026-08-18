@@ -752,6 +752,95 @@ fn a_flexible_spacer_pushes_right_without_pushing_the_panel_wider() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
+/// **A remembered width belongs to a row, and rows move.**
+///
+/// A row's id comes from its position among its siblings, so a list that gains
+/// or loses one hands a row the measurement taken for a different row. Trusting
+/// it overflows by the difference — and `Resize` banks an overflow permanently,
+/// which is the whole failure this measurement exists to avoid.
+#[test]
+fn a_row_that_changed_does_not_reuse_another_rows_measurement() {
+    let proj = temp("guiflexmoved");
+    install(
+        &proj,
+        "com.t.flexmoved",
+        "",
+        r#"
+        local frame = 0
+        ed.window("P", function()
+            frame = frame + 1
+            -- BOTH ends change width every other frame, which is what a list
+            -- whose rows shift does to the row ids underneath it: the id now
+            -- names a different row, and the width remembered for it describes
+            -- something else. Trusting the trailing half is what overflows.
+            local lead  = (frame % 2 == 0) and "left" or "a much much longer left label"
+            local trail = (frame % 2 == 0) and "a much much longer right label" or "right"
+            gui.horizontal(function()
+                gui.small(lead)
+                gui.flexibleSpace()
+                gui.small(trail)
+            end)
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    let idx = host.window_index(host.windows[0].id).unwrap();
+    host.set_window_open(idx, true);
+
+    let widths = draw_bounded(&mut host, idx, 300.0, 6);
+    assert!(host.windows[idx].error.is_none(), "{:?}", host.windows[idx].error);
+    for (i, w) in widths.iter().enumerate() {
+        assert!(
+            *w <= 300.5,
+            "frame {i} laid out {w} wide inside 300 — a measurement from the other \
+             row was trusted: {widths:?}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// The exact right-alignment: laid out from the right edge, so a row whose
+/// trailing content changes width is never a frame behind and never overflows.
+#[test]
+fn right_aligned_content_sits_at_the_edge_on_the_very_first_frame() {
+    let proj = temp("guiright");
+    install(
+        &proj,
+        "com.t.right",
+        "",
+        r#"
+        local frame = 0
+        ed.window("P", function()
+            frame = frame + 1
+            gui.horizontal(function()
+                gui.small("left")
+                gui.rightAligned(function()
+                    -- Changing width every frame, which is the case
+                    -- flexibleSpace can only be right about one frame later.
+                    gui.small(frame % 2 == 0 and "12345678901234567890" or "1")
+                end)
+            end)
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    let idx = host.window_index(host.windows[0].id).unwrap();
+    host.set_window_open(idx, true);
+
+    let widths = draw_bounded(&mut host, idx, 300.0, 4);
+    assert!(host.windows[idx].error.is_none(), "{:?}", host.windows[idx].error);
+    for (i, w) in widths.iter().enumerate() {
+        assert!(*w <= 300.5, "frame {i} laid out {w} wide inside 300: {widths:?}");
+    }
+    // It FILLS the row from the first frame — which is the difference from the
+    // measured spacer, whose first frame claims nothing.
+    assert!(
+        widths[0] >= 299.0,
+        "the first frame should already reach the right edge: {widths:?}"
+    );
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 /// **A package that paints has to be able to measure.**
 ///
 /// Without `gui.measure` the only way to place a second piece of text after a

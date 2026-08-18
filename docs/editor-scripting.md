@@ -581,7 +581,32 @@ if gui.button("Go", "starts the thing") then go() end
 **Layout** — `horizontal(fn)` · `vertical(fn)` · `group(fn)` · `indent(fn)` ·
 `scroll(fn)` · `collapsing(title, fn)` · `enabled(on, fn)` · `width(px, fn)` ·
 `height(px, fn)` · `separator()` · `space([px])` · `flexibleSpace()` (pushes
-what follows to the far end of a row) · `available() → {w, h}`
+what follows to the far end of a row) · `rightAligned(fn)` ·
+`available() → {w, h}`
+
+> **Two ways to put something at the right-hand end of a row, and they differ.**
+> `flexibleSpace()` reads naturally — everything after it is pushed right — but
+> the space it can claim depends on how wide what follows turns out to be, which
+> is only knowable once the row has been laid out. It is measured at the end of
+> the row and used on the next frame, so a row whose trailing content has just
+> changed width is right one frame later.
+>
+> `rightAligned(fn)` lays its contents out **from the right edge**, so there is
+> nothing to measure and nothing to be a frame behind. The cost is that the
+> contents read back to front — the first thing you add sits furthest right:
+>
+> ```lua
+> gui.horizontal(function()
+>     gui.label(name)
+>     gui.rightAligned(function()
+>         if gui.smallButton("✕") then remove() end   -- furthest right
+>         gui.small(count .. " items")                -- to its left
+>     end)
+> end)
+> ```
+>
+> Reach for `rightAligned` when the trailing content changes width — a count, a
+> status, a time — and for `flexibleSpace` when it does not.
 
 **Feedback** — `progress(fraction [, text])` · `spinner()` ·
 `helpBox(text [, "info" | "warn" | "error"])`
