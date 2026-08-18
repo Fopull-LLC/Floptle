@@ -1,5 +1,29 @@
 ## Just shipped
 
+**v0.69.0 "Flat Out"** — **a release about making 2D games.** `▫ Sprite` is a
+node now: it measures its size in **pixels** against one cell of its sheet, it
+flips without mirroring its children, and it has a **pivot** — with a *feet*
+button, because a Y-sorted character sorted from its waist walks behind things it
+is plainly standing in front of. **Lower on the screen draws in front**: set a
+node's sorting mode to *by Y* and the order becomes sorting layer, then order,
+then Y — so a drop shadow stays under a crowd and a held lantern stays in front
+of whoever is carrying it. **Parallax** is a per-axis scroll factor, which works
+under an orthographic camera where moving a layer back in Z does not.
+**Sprite animation, from any sheet**: a frame names its own art, so one clip can
+use frames from different sheets and from plain PNGs that were never on a sheet.
+Right-click a sliced texture for a clip with one frame per cell, right-click an
+**Aseprite** `.json` to import its tags as clips with their timing kept, or key a
+sprite lane in the timeline beside position and rotation. **Record picks up what
+you actually changed** — changing a material's texture with ● Record on used to
+write nothing, and materials gained the rest of their surface, so fading one out
+is a lane rather than a script. **A 2D camera** follows a node with a dead zone,
+smoothing that is the same at 30 fps and 144, world limits and a shake that
+composes with all three. Menus are grouped so adding a node is a glance, and
+every form panel now shrinks, then wraps, then stacks — drag one as thin as you
+like and nothing goes past the edge. For package authors: **`json.array`**, so an
+empty list can be sent at all, and **`ed.copy`**, so a panel can have a copy
+button.
+
 **v0.68.0 "It Has To Be Clickable"** — **`gui.hasGlyph(text)` tells a package
 whether an icon will actually draw.** A glyph the editor's fonts do not have
 renders as an empty box, and nothing warns you: the character sits in your source
