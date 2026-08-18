@@ -1,5 +1,24 @@
 ## Just shipped
 
+**v0.68.0 "It Has To Be Clickable"** — **`gui.hasGlyph(text)` tells a package
+whether an icon will actually draw.** A glyph the editor's fonts do not have
+renders as an empty box, and nothing warns you: the character sits in your source
+looking perfectly fine and the button looks broken to whoever opens the editor.
+Two that look interchangeable and are not — `✕` and `✓` do not draw, `✖` and `✔`
+do. **A painted control can be hit-tested where it is about to be drawn.**
+`gui.mouse().inside` used to mean "inside the part of the panel already drawn",
+which is the wrong question by construction — a package asks before it draws, so
+the pointer was over a region that did not exist yet and the answer was always
+no. The effect was a painted button that could not be clicked, most often at the
+right-hand end of a row. **`scene.docs(ids, done)` reads any node's full
+document**, however many, without touching your selection — renaming across a
+level or collecting every user-facing string should not require selecting things
+first. And **panels stopped widening themselves**: a row using
+`gui.flexibleSpace()` grew a little every frame until it filled the screen, and
+never came back. `gui.rightAligned(fn)` is the exact version for a row whose
+trailing content changes width. [Full notes](releases/v0.68.0.md)
+
+
 **v0.67.0 "How Wide Is That"** — **`gui.measure(text [, size])` tells a package
 how wide a string will be**, in the same font `gui.textAt` would draw it in.
 Painting has never had this: a package laying out a chart axis, a legend, or a
