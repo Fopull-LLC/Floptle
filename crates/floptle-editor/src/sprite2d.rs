@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 
+use floptle_core::math::DVec3;
 use floptle_core::{Entity, Material, Matter, Sprites, World};
 use floptle_render::{InstanceRaw, MaterialParams, MeshId, TexId, instance_of_mat};
 
@@ -455,6 +456,97 @@ pub(crate) fn sprite_draws(
     }
 }
 
+/// The one quad a [`Matter::Sprite`] draws.
+///
+/// `tex_px` is the texture's pixel size, needed only for `ppu` — the whole
+/// point of pixels-per-unit is that the world size comes from the *image*, so
+/// it cannot be answered without it. With no texture loaded yet it falls back
+/// to the authored `size`, which draws something of about the right size rather
+/// than nothing at all: a sprite that vanishes until its texture streams in
+/// reads as a broken node.
+#[allow(clippy::too_many_arguments)]
+/// **How big one sprite is actually drawn**, in world units before its own scale.
+///
+/// One function because three things need the answer and they have to agree:
+/// the draw, the click test, and the culling bounds. When only the draw knew, a
+/// `ppu` sprite was drawn from its texture and picked and culled against its
+/// `size` field — so a 16-unit sprite could be clicked only within half a unit
+/// of its origin, and vanished at the screen edge while most of it was still on
+/// screen.
+///
+/// The size of ONE CELL, not of the whole image — a sheet's cell is what a
+/// sprite draws, and measuring the sheet makes every sprite in a 4×4 sheet come
+/// out four times too big. With no texture yet there is nothing to measure, so
+/// `size` is the answer, which is also the escape hatch for art that is not
+/// pixel art.
+pub(crate) fn sprite_world_size(
+    ppu: f32,
+    size: f32,
+    mat: Option<&Material>,
+    tex_px: Option<[f32; 2]>,
+) -> (f32, f32) {
+    let (sc, sr) = mat.map(|m| m.sheet()).unwrap_or((1, 1));
+    match (ppu > 0.0, tex_px) {
+        (true, Some([tw, th])) => (tw / sc.max(1) as f32 / ppu, th / sr.max(1) as f32 / ppu),
+        _ => (size, size),
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // one draw, one call shape — a param struct would just rename the args
+pub(crate) fn sprite_one_draw(
+    ppu: f32,
+    size: f32,
+    cell: u32,
+    flip_x: bool,
+    flip_y: bool,
+    pivot: [f32; 2],
+    model: floptle_core::math::Mat4,
+    mat: Option<&Material>,
+    tex_px: Option<[f32; 2]>,
+    texel: [f32; 2],
+) -> InstanceRaw {
+    use floptle_core::math::{Mat4, Vec3};
+
+    let (sc, sr) = mat.map(|m| m.sheet()).unwrap_or((1, 1));
+    let cells = (sc * sr).max(1);
+    let (w, h) = sprite_world_size(ppu, size, mat, tex_px);
+
+    let base = mat.map(crate::shading::material_params).unwrap_or_else(|| {
+        MaterialParams::flat([1.0, 1.0, 1.0])
+    });
+    let mut mp = base;
+    if cells > 1 {
+        let m = mat.cloned().unwrap_or_default();
+        let c = Material { cell: cell.min(cells - 1), ..m };
+        let packed = MaterialParams::from_material_inset(&c, texel);
+        mp.tile_mode = packed.tile_mode;
+        mp.tile = packed.tile;
+        mp.tile_rotation = packed.tile_rotation;
+    }
+
+    // Flipping is a negative SCALE ON THE QUAD, not on the node: a negative node
+    // scale would mirror the node's children and invert its normals too, and
+    // "face the other way" must not do either.
+    let sx = if flip_x { -w } else { w };
+    let sy = if flip_y { -h } else { h };
+    // The pivot moves the QUAD, not the node — the node's origin is where the
+    // author put it and where a Y-sort reads from. `0.5, 0.5` is the centre and
+    // shifts nothing.
+    let off = Vec3::new((0.5 - pivot[0]) * w, (0.5 - pivot[1]) * h, 0.0);
+    // The plane mesh is `2 * PRIMITIVE_HALF` across, not one unit — the trap
+    // this node type exists to stop every project walking into.
+    let unit = 2.0 * crate::matter_catalog::PRIMITIVE_HALF;
+    let local = Mat4::from_translation(off)
+        * Mat4::from_scale(Vec3::new(
+            (sx / unit).clamp(-1e6, 1e6),
+            (sy / unit).clamp(-1e6, 1e6),
+            // Flat, so its depth only has to stay non-degenerate; a zero would
+            // collapse the matrix rather than flatten the quad.
+            (w.max(h) / unit).max(1e-6),
+        ));
+    instance_of_mat(model * local, &mp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,6 +567,82 @@ mod tests {
         let h = crate::matter_catalog::PRIMITIVE_HALF;
         let (lo, hi) = (corner(-h, -h), corner(h, h));
         [(hi.x - lo.x).abs(), (hi.y - lo.y).abs()]
+    }
+
+    /// **`size` is the world edge length**, and that is the whole reason this
+    /// node type exists rather than "use a Plane". The plane mesh is
+    /// `2 × PRIMITIVE_HALF` = 1.4 units across, so a Plane at scale 1 is 1.4
+    /// units and every project that built a sprite out of one got sprites 40%
+    /// too big until somebody measured them.
+    #[test]
+    fn a_sprites_size_is_its_world_edge() {
+        let raw = super::sprite_one_draw(
+            0.0, 3.0, 0, false, false, [0.5, 0.5], Mat4::IDENTITY, None, None, [0.0; 2],
+        );
+        let [w, h] = drawn_extent(&raw);
+        assert!((w - 3.0).abs() < 1e-4, "{w}");
+        assert!((h - 3.0).abs() < 1e-4, "{h}");
+    }
+
+    /// **Pixels per unit measures ONE CELL, not the whole sheet.** A 128×128
+    /// image cut 4×4 is a 32-pixel cell, so at 32 ppu it is one unit — and
+    /// re-slicing the sheet finer must not resize every sprite on it.
+    #[test]
+    fn pixels_per_unit_measures_a_cell_not_the_sheet() {
+        let mat = Material { sheet_cols: 4, sheet_rows: 4, ..Default::default() };
+        let raw = super::sprite_one_draw(
+            32.0, 1.0, 0, false, false, [0.5, 0.5], Mat4::IDENTITY, Some(&mat),
+            Some([128.0, 128.0]), [1.0 / 128.0; 2],
+        );
+        let [w, _] = drawn_extent(&raw);
+        assert!((w - 1.0).abs() < 1e-4, "a 32px cell at 32 ppu must be one unit, got {w}");
+    }
+
+    /// With no texture loaded yet it falls back to `size` rather than drawing
+    /// nothing — a sprite that vanishes until its image streams in reads as a
+    /// broken node, not as a slow load.
+    #[test]
+    fn a_pixel_sized_sprite_without_its_texture_still_draws() {
+        let raw = super::sprite_one_draw(
+            32.0, 2.0, 0, false, false, [0.5, 0.5], Mat4::IDENTITY, None, None, [0.0; 2],
+        );
+        let [w, _] = drawn_extent(&raw);
+        assert!((w - 2.0).abs() < 1e-4, "{w}");
+    }
+
+    /// **The pivot moves the quad, not the node.** The node's origin is where
+    /// the author put it and where a Y-sort reads from; putting the pivot at
+    /// the feet must lift the picture, not drop the node.
+    #[test]
+    fn the_pivot_moves_the_picture_and_leaves_the_origin_alone() {
+        let centre = super::sprite_one_draw(
+            0.0, 2.0, 0, false, false, [0.5, 0.5], Mat4::IDENTITY, None, None, [0.0; 2],
+        );
+        let feet = super::sprite_one_draw(
+            0.0, 2.0, 0, false, false, [0.5, 0.0], Mat4::IDENTITY, None, None, [0.0; 2],
+        );
+        let mid = |raw: &InstanceRaw| Mat4::from_cols_array_2d(&raw.model).w_axis.y;
+        // Origin at the bottom of the sprite = the picture sits a half-height
+        // ABOVE the node.
+        assert!((mid(&feet) - mid(&centre) - 1.0).abs() < 1e-4, "{} {}", mid(&feet), mid(&centre));
+        // …and it is still the same size.
+        assert_eq!(drawn_extent(&centre), drawn_extent(&feet));
+    }
+
+    /// Flipping mirrors the picture. It is a negative scale on the QUAD and not
+    /// on the node, because a negative node scale would mirror the node's
+    /// children and invert its normals as well.
+    #[test]
+    fn flipping_mirrors_the_quad_without_resizing_it() {
+        let plain = super::sprite_one_draw(
+            0.0, 2.0, 0, false, false, [0.5, 0.5], Mat4::IDENTITY, None, None, [0.0; 2],
+        );
+        let flipped = super::sprite_one_draw(
+            0.0, 2.0, 0, true, false, [0.5, 0.5], Mat4::IDENTITY, None, None, [0.0; 2],
+        );
+        assert_eq!(drawn_extent(&plain), drawn_extent(&flipped));
+        let x_of = |raw: &InstanceRaw| Mat4::from_cols_array_2d(&raw.model).x_axis.x;
+        assert!(x_of(&plain) > 0.0 && x_of(&flipped) < 0.0, "the quad's X axis must invert");
     }
 
     /// A tilemap's page draws the sheet the PAGE names, and page 0 falls back
@@ -632,5 +800,426 @@ mod tests {
         let data: Vec<u32> = (0..16).collect();
         let out = page_squares(&data, 0, 16).expect("all page 0");
         assert_eq!(out, data);
+    }
+}
+
+/// **Every node's draw-time offset for this frame — the one answer both gathers use.**
+///
+/// Two 2D features write into this and neither moves anything real: a sorting
+/// layer is a nudge in **Z** (what draws in front) and parallax is a nudge in
+/// **X and Y** (how much of the camera's movement a layer keeps). Both apply to
+/// the *drawn* transform only, so a collider stays where it was authored and a
+/// script reads back the position it set.
+///
+/// One map because the draw loops borrow `raster` mutably and cannot call an
+/// `&self` helper once they are running, and because two maps would be two
+/// things to remember to add.
+///
+/// **One function, called twice.** The Scene view and every offscreen camera
+/// each gather the world separately, and those two gathers have drifted apart
+/// three times in this file's history — see
+/// `offscreen_draws_the_same_world.rs`, which exists because of it. Sorting is
+/// exactly the kind of thing that drifts silently: a scene that sorts one way in
+/// the Scene view and another in the Game view looks like a rendering bug in
+/// whichever one you are not looking at.
+///
+/// The camera is a parameter, and only parallax reads it. **Y-sorting deliberately
+/// does not**: it ranks a layer's nodes against each other rather than mapping
+/// their coordinates onto a scale, so the answer does not depend on where the
+/// camera is, how much of the world it can see, or where the level was built.
+/// Two views of one scene therefore cannot disagree about what is in front of
+/// what — a stronger guarantee than "we remembered to pass the same camera to
+/// both". Parallax is the opposite by definition: it is a function of the
+/// viewpoint, so the Scene view and the Game view *should* show it differently,
+/// each correct for its own camera.
+pub(crate) fn draw_offsets(
+    world: &World,
+    project: &floptle_scene::ProjectConfigDoc,
+    cam: DVec3,
+) -> HashMap<Entity, DVec3> {
+    use floptle_core::{SORT_LAYER_STEP, SortMode, Sorting, rank_offset, sorting_offset};
+
+    let mut out: HashMap<Entity, DVec3> = HashMap::new();
+    // Parallax first: it moves a node ACROSS the screen and sorting moves it
+    // through the stack, so the two never write the same axis and can share one
+    // map without either having to know about the other.
+    for (e, p) in world.query::<floptle_core::Parallax>() {
+        if p.is_identity() {
+            continue;
+        }
+        let [dx, dy] = p.offset(cam.x, cam.y);
+        let v = out.entry(e).or_default();
+        v.x += dx;
+        v.y += dy;
+    }
+
+    // Everything that takes part in 2D sorting, gathered per layer so a layer
+    // can be ranked as a whole.
+    //
+    // **Flat nodes with no `Sorting` component are in this too**, on the default
+    // layer at order 0 — which is exactly what they are. Leaving them out was a
+    // real bug: the ranked branch below re-spaces a layer by ordinal position,
+    // so a node left at z = 0 sat in the MIDDLE of the span its neighbours were
+    // spread across, and a sprite authored at `order = -1` could come out in
+    // front of the ground tilemap it was meant to be behind. Nothing about the
+    // tilemap had changed; somebody had switched one node in the layer to Y.
+    //
+    // Hidden and switched-off nodes are left out, because they spend the layer's
+    // depth budget without drawing anything: two hundred pooled projectiles
+    // waiting to be shown would push every visible character into the tie floor.
+    let mut layers: HashMap<u32, Vec<(Entity, i32, f64, bool)>> = HashMap::new();
+    let mut seen: std::collections::HashSet<Entity> = std::collections::HashSet::new();
+    for (e, s) in world.query::<Sorting>() {
+        if !floptle_core::is_drawn(world, e) {
+            continue;
+        }
+        let rank = project.sorting_rank(&s.layer);
+        let y = floptle_core::world_transform(world, e).translation.y;
+        layers.entry(rank).or_default().push((e, s.order, y, s.mode == SortMode::Y));
+        seen.insert(e);
+    }
+    let default_rank = project.sorting_rank(floptle_core::DEFAULT_SORTING_LAYER);
+    for (e, m) in world.query::<floptle_core::Matter>() {
+        if seen.contains(&e) || !is_flat_2d(m) || !floptle_core::is_drawn(world, e) {
+            continue;
+        }
+        let y = floptle_core::world_transform(world, e).translation.y;
+        layers.entry(default_rank).or_default().push((e, 0, y, false));
+    }
+
+    for (rank, mut nodes) in layers {
+        // A layer nobody Y-sorts is left exactly as it was: the fixed order
+        // step, the same Z it has had since sorting layers shipped. The whole
+        // ranking below exists for Y-sorting, and a scene that does not use it
+        // must not be re-spaced by its arrival.
+        if !nodes.iter().any(|n| n.3) {
+            for (e, order, _, _) in nodes {
+                out.entry(e).or_default().z += sorting_offset(rank, order) as f64;
+            }
+            continue;
+        }
+        // One node cannot be ranked against itself, and the arithmetic below
+        // divides by `n - 1`.
+        if nodes.len() == 1 {
+            let (e, order, _, _) = nodes[0];
+            out.entry(e).or_default().z += sorting_offset(rank, order) as f64;
+            continue;
+        }
+        // **Sorting layer, then order, then Y.** Order is not replaced by Y and
+        // never was meant to be: it is what lets a character Y-sort against the
+        // props around it while its shadow stays pinned below the lot. Y only
+        // decides between nodes that would otherwise be level, which is exactly
+        // the case that used to be settled by whatever the ECS yielded first.
+        //
+        // The entity index breaks a remaining exact tie so the answer is the
+        // same every frame — two nodes swapping places because the world was
+        // walked in a different order reads as flicker and cannot be reproduced
+        // on purpose.
+        nodes.sort_by(|a, b| {
+            a.1.cmp(&b.1).then(b.2.total_cmp(&a.2)).then(a.0.index().cmp(&b.0.index()))
+        });
+        // Spread across the whole layer, rather than into each order's own
+        // sub-step. The layer holds about `SORT_Y_BANDS` distinguishable depths
+        // in total (measured — see `sort_precision_probe`), and an order's share
+        // of that would be one or two. Ranking the layer as a whole spends the
+        // budget on the nodes that are actually in it, so the ordinary case —
+        // one or two orders and a crowd of characters — gets nearly all of it.
+        // Relative order is what is observable, and this preserves it exactly.
+        let n = nodes.len();
+        for (i, (e, _, _, _)) in nodes.into_iter().enumerate() {
+            out.entry(e).or_default().z +=
+                (rank as f32 * SORT_LAYER_STEP + rank_offset(i, n)) as f64;
+        }
+    }
+    out
+}
+
+/// Is this node's matter one of the flat 2D kinds — the ones that take part in
+/// sorting whether or not anybody gave them a layer?
+fn is_flat_2d(m: &floptle_core::Matter) -> bool {
+    matches!(
+        m,
+        floptle_core::Matter::Tilemap { .. }
+            | floptle_core::Matter::SpriteBatch { .. }
+            | floptle_core::Matter::Sprite { .. }
+    )
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use floptle_core::math::DVec3;
+    use floptle_core::{Entity, SortMode, Sorting, World};
+
+    /// Just the Z half, with the camera at the origin — every test below is
+    /// about sorting, and parallax is exercised on its own further down.
+    fn zs(
+        world: &World,
+        project: &floptle_scene::ProjectConfigDoc,
+    ) -> std::collections::HashMap<Entity, f64> {
+        super::draw_offsets(world, project, DVec3::ZERO)
+            .into_iter()
+            .map(|(e, v)| (e, v.z))
+            .collect()
+    }
+
+    /// One node per Y, each on its own ascending `order` — for the tests about
+    /// order rather than about Y.
+    fn scene(ys: &[f32], mode: SortMode) -> (World, Vec<Entity>, floptle_scene::ProjectConfigDoc) {
+        build(ys, |i| i as i32, mode)
+    }
+
+    /// One node per Y, all sharing `order` — for the tests about Y, where
+    /// anything else deciding would hide what is being asserted.
+    fn scene_at(
+        ys: &[f32],
+        order: i32,
+        mode: SortMode,
+    ) -> (World, Vec<Entity>, floptle_scene::ProjectConfigDoc) {
+        build(ys, |_| order, mode)
+    }
+
+    fn build(
+        ys: &[f32],
+        order: impl Fn(usize) -> i32,
+        mode: SortMode,
+    ) -> (World, Vec<Entity>, floptle_scene::ProjectConfigDoc) {
+        let mut world = World::default();
+        let mut es = Vec::new();
+        for (i, y) in ys.iter().enumerate() {
+            let e = world.spawn();
+            let mut t = floptle_core::Transform::default();
+            t.translation.y = *y as f64;
+            world.insert(e, t);
+            world.insert(e, Sorting { layer: String::new(), order: order(i), mode });
+            es.push(e);
+        }
+        (world, es, floptle_scene::ProjectConfigDoc::default())
+    }
+
+    /// Lower on the screen draws in FRONT — the whole claim of the feature,
+    /// at one order so nothing else is deciding.
+    #[test]
+    fn a_lower_node_gets_a_nearer_z() {
+        let (world, es, project) = scene_at(&[3.0, -1.0, 7.0], 0, SortMode::Y);
+        let z = zs(&world, &project);
+        let (top, middle, bottom) = (z[&es[2]], z[&es[0]], z[&es[1]]);
+        assert!(bottom > middle, "y=-1 must be in front of y=3");
+        assert!(middle > top, "y=3 must be in front of y=7");
+    }
+
+    /// **Order wins over Y.** The sort is sorting layer → order → Y, so a node
+    /// on a higher order is in front however far up the screen it is. Y decides
+    /// between nodes that would otherwise be level, and nothing else.
+    ///
+    /// This is the case that makes a character's shadow work: the shadow is on
+    /// `order = -1` under a Y-sorted crowd and stays under all of them, rather
+    /// than surfacing through whoever happens to be standing above it.
+    #[test]
+    fn order_wins_over_y() {
+        let mut world = World::default();
+        let project = floptle_scene::ProjectConfigDoc::default();
+        let put = |world: &mut World, y: f64, order: i32| {
+            let e = world.spawn();
+            let mut t = floptle_core::Transform::default();
+            t.translation.y = y;
+            world.insert(e, t);
+            world.insert(e, Sorting { layer: String::new(), order, mode: SortMode::Y });
+            e
+        };
+        // Right at the bottom of the screen (so Y wants it in FRONT of
+        // everything) but on the order below.
+        let shadow = put(&mut world, -100.0, -1);
+        // Right at the top (so Y wants it at the BACK) but on the order above.
+        let hat = put(&mut world, 100.0, 1);
+        let body = put(&mut world, 0.0, 0);
+        let z = zs(&world, &project);
+        assert!(z[&hat] > z[&body], "order 1 must beat order 0 whatever Y says");
+        assert!(z[&body] > z[&shadow], "order -1 must lose to order 0 whatever Y says");
+    }
+
+    /// …and *within* one order, Y is what decides.
+    #[test]
+    fn y_breaks_ties_inside_an_order() {
+        let (world, es, project) = scene_at(&[3.0, -1.0, 7.0], 4, SortMode::Y);
+        let z = zs(&world, &project);
+        assert!(z[&es[1]] > z[&es[0]], "y=-1 in front of y=3 at the same order");
+        assert!(z[&es[0]] > z[&es[2]], "y=3 in front of y=7 at the same order");
+    }
+
+    /// The default mode is the old behaviour, exactly.
+    #[test]
+    fn order_mode_is_unchanged() {
+        let (world, es, project) = scene(&[3.0, -1.0, 7.0], SortMode::Order);
+        let z = zs(&world, &project);
+        for (i, e) in es.iter().enumerate() {
+            assert_eq!(z[e], floptle_core::sorting_offset(0, i as i32) as f64);
+        }
+    }
+
+    /// Every Y-sorted node in a layer gets its own depth, and they all stay
+    /// inside the layer — a sorting layer that leaks is worse than none.
+    #[test]
+    fn a_full_layer_stays_inside_itself_and_never_ties() {
+        let ys: Vec<f32> = (0..floptle_core::SORT_Y_BANDS).map(|i| i as f32 * 0.5).collect();
+        let (world, es, project) = scene_at(&ys, 0, SortMode::Y);
+        let z = zs(&world, &project);
+        let half = (floptle_core::SORT_LAYER_STEP * 0.5) as f64;
+        let mut seen: Vec<f64> = es.iter().map(|e| z[e]).collect();
+        seen.sort_by(f64::total_cmp);
+        // **Separated by the MEASURED floor, not merely distinct as f64.** The
+        // first version of this asserted `w[1] > w[0]`, which is true for ten
+        // thousand nodes in a layer and says nothing at all about whether the
+        // depth buffer can tell them apart. `sort_precision_probe` measured the
+        // floor at one `SORT_ORDER_STEP`; anything closer than that is a tie on
+        // screen however different the numbers are.
+        let floor = floptle_core::SORT_ORDER_STEP as f64;
+        for w in seen.windows(2) {
+            assert!(
+                w[1] - w[0] >= floor * 0.999,
+                "two nodes are {} apart, under the {floor} the depth buffer resolves: {w:?}",
+                w[1] - w[0]
+            );
+        }
+        assert!(seen[0] >= -half && seen[seen.len() - 1] <= half, "a node left its layer");
+    }
+
+    /// The ground a 2D scene is built on carries no `Sorting` component, and it
+    /// still has to stay behind the things authored behind it.
+    ///
+    /// The bug: the ranked branch re-spaces a layer by ordinal position, so a
+    /// node left out of the ranking sat in the MIDDLE of the span everything
+    /// else was spread across. Switching one node in the layer to Y-sorting
+    /// therefore pushed a sprite at `order = -1` in FRONT of the tilemap it was
+    /// authored behind — with nothing about either of them having changed.
+    #[test]
+    fn un_layered_ground_stays_behind_what_was_put_behind_it() {
+        let mut world = World::new();
+        let project = floptle_scene::ProjectConfigDoc::default();
+        // A tilemap with no Sorting at all — the floor of the level.
+        let ground = world.spawn();
+        world.insert(ground, floptle_core::Transform::default());
+        world.insert(
+            ground,
+            floptle_core::Matter::Tilemap {
+                cols: 4,
+                rows: 4,
+                tile: 1.0,
+                data: vec![0; 16],
+                tileset: String::new(),
+            },
+        );
+        // Three sprites authored behind it, and one Y-sorted character.
+        let mut behind = Vec::new();
+        for (order, y, mode) in
+            [(-5, 0.0, SortMode::Order), (-3, 1.0, SortMode::Order), (-2, 2.0, SortMode::Y)]
+        {
+            let e = world.spawn();
+            let mut t = floptle_core::Transform::default();
+            t.translation.y = y;
+            world.insert(e, t);
+            world.insert(
+                e,
+                Sorting { layer: "Default".into(), order, mode },
+            );
+            behind.push(e);
+        }
+        let z = zs(&world, &project);
+        let gz = z.get(&ground).copied().unwrap_or(0.0);
+        for e in &behind {
+            assert!(
+                z[e] < gz,
+                "a node authored behind the ground came out in front of it: {} vs {gz}",
+                z[e]
+            );
+        }
+    }
+
+    /// Two nodes at the same Y still get an answer, and the same one every
+    /// frame — the alternative is a pair that swaps every time the ECS is
+    /// walked, which reads as flicker.
+    #[test]
+    fn an_exact_tie_is_broken_the_same_way_twice() {
+        let (world, es, project) = scene_at(&[2.0, 2.0, 2.0], 0, SortMode::Y);
+        let a = zs(&world, &project);
+        let b = zs(&world, &project);
+        for e in &es {
+            assert_eq!(a[e], b[e]);
+        }
+        assert!(a[&es[0]] != a[&es[1]], "tied nodes must still get distinct depths");
+    }
+
+    /// A parallax layer keeps `1 - factor` of the camera's movement, so a
+    /// factor of 1 keeps none of it and moves with the world.
+    #[test]
+    fn parallax_moves_a_layer_less_than_the_world() {
+        let mut world = World::default();
+        let project = floptle_scene::ProjectConfigDoc::default();
+        let make = |world: &mut World, fx: f32| {
+            let e = world.spawn();
+            world.insert(e, floptle_core::Transform::default());
+            world.insert(e, floptle_core::Parallax { factor: [fx, 1.0] });
+            e
+        };
+        let far = make(&mut world, 0.25);
+        let near = make(&mut world, 1.0);
+        let pinned = make(&mut world, 0.0);
+
+        let cam = DVec3::new(100.0, 0.0, 0.0);
+        let off = super::draw_offsets(&world, &project, cam);
+        // Moves with the world: no offset at all, and no entry either.
+        assert!(off.get(&near).is_none_or(|v| v.x == 0.0));
+        // A quarter-speed layer keeps three quarters of the camera's move.
+        assert_eq!(off[&far].x, 75.0);
+        // Pinned to the camera: it is exactly as far along as the camera is, so
+        // on screen it has not moved at all.
+        assert_eq!(off[&pinned].x, 100.0);
+        // …and the axis nobody asked about is untouched.
+        assert_eq!(off[&far].y, 0.0);
+    }
+
+    /// Parallax and sorting write different axes of one offset, so a node can
+    /// have both without either being lost.
+    #[test]
+    fn a_node_can_parallax_and_sort_at_once() {
+        let mut world = World::default();
+        let project = floptle_scene::ProjectConfigDoc::default();
+        let e = world.spawn();
+        world.insert(e, floptle_core::Transform::default());
+        world.insert(e, floptle_core::Parallax { factor: [0.5, 1.0] });
+        world.insert(e, Sorting { layer: String::new(), order: 4, mode: SortMode::Order });
+        let off = super::draw_offsets(&world, &project, DVec3::new(10.0, 0.0, 0.0));
+        assert_eq!(off[&e].x, 5.0);
+        assert_eq!(off[&e].z, floptle_core::sorting_offset(0, 4) as f64);
+    }
+
+    /// A node on a layer further forward is in front of a Y-sorted node on a
+    /// layer behind it, whatever their Ys are. Y-sorting orders WITHIN a layer;
+    /// it does not let anything climb out of one.
+    #[test]
+    fn y_sorting_cannot_climb_out_of_its_layer() {
+        let mut world = World::default();
+        let project = floptle_scene::ProjectConfigDoc {
+            sorting_layers: vec!["Characters".into()],
+            ..Default::default()
+        };
+        // Far up the screen (so it sorts to the BACK of its own layer), but on
+        // the front layer.
+        let front = world.spawn();
+        let mut t = floptle_core::Transform::default();
+        t.translation.y = 1000.0;
+        world.insert(front, t);
+        world.insert(
+            front,
+            Sorting { layer: "Characters".into(), order: 0, mode: SortMode::Y },
+        );
+        // Right at the bottom of the screen, but on the default layer behind it.
+        let back = world.spawn();
+        let mut t = floptle_core::Transform::default();
+        t.translation.y = -1000.0;
+        world.insert(back, t);
+        world.insert(back, Sorting { layer: String::new(), order: 0, mode: SortMode::Y });
+
+        let z = zs(&world, &project);
+        assert!(z[&front] > z[&back], "the front layer must win however low the other node is");
     }
 }

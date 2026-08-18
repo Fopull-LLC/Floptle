@@ -9,71 +9,105 @@
 //! label column so controls line up down the panel. Rarely-touched knobs live
 //! in collapsed disclosures so the common path stays short.
 //!
-//! Like every tab, this runs on `EditorTabViewer`'s disjoint borrows and
+//! Like every tab, this takes its state as explicit borrows ([`MapCtx`]) and
 //! records intents on `EditorCmd` — geometry ops need `&mut Editor` (undo
 //! snapshots + the store), so they apply after the frame.
 
+use crate::inspector;
 use crate::gizmo::Tool;
 use crate::map_edit::{MapOp, MapOrient, MapShape, MapSubMode, MapXform};
 use crate::map_keys::{MapCmd, reserved, save_map_keys};
-use crate::{EditorTabViewer, inspector};
+use crate::{map_edit, map_keys};
 use egui::{Color32, RichText, Vec2};
-use floptle_core::Matter;
+use floptle_core::math::Vec3;
+use floptle_core::{Entity, Matter, World};
 
 /// The measurements the panel is built on, so everything lines up without
-/// magic numbers scattered through the code.
-const LABEL_W: f32 = 58.0;
-const CHIP_W: f32 = 74.0;
-const BTN_H: f32 = 22.0;
+/// magic numbers scattered through the code. They live in [`crate::responsive`]
+/// now, shared with the ◫ Tiles tab, because the two panels are meant to look
+/// like one program and a second copy of `74.0` is how that stops being true.
+use crate::responsive::{BTN_H, CHIP_W, Chip, MIN_CONTENT_W, strip};
+
+
 const ACCENT: Color32 = Color32::from_rgb(255, 200, 80);
 const DRAW_ACCENT: Color32 = Color32::from_rgb(120, 220, 255);
 
 /// A titled section rule: `TITLE ─────────────`.
-fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(12.0);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(title).small().strong().color(ui.visuals().strong_text_color()));
-        let rect = ui.available_rect_before_wrap();
-        if rect.width() > 8.0 {
-            let y = rect.center().y;
-            ui.painter().line_segment(
-                [egui::pos2(rect.left() + 4.0, y), egui::pos2(rect.right(), y)],
-                ui.visuals().widgets.noninteractive.bg_stroke,
-            );
-        }
-    });
-    ui.add_space(4.0);
-}
+use crate::responsive::section;
 
-/// A labelled row: a fixed-width caption on the left, controls on the right.
+/// A labelled row: a caption on the left, controls on the right — until the
+/// panel gets too thin for both, at which point the caption moves above them.
+///
+/// The controls run in a **wrapped** horizontal either way, which is the whole
+/// reason this tab survives a narrow dock: a MODIFY row is four action buttons,
+/// and four buttons that cannot share a line now take two.
 fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.horizontal(|ui| {
-        ui.add_sized(
-            [LABEL_W, BTN_H],
-            egui::Label::new(RichText::new(label).weak()).selectable(false),
-        );
-        add(ui)
-    })
-    .inner
-}
-
-/// One chip of a segmented control.
-fn chip(ui: &mut egui::Ui, on: bool, text: &str, hover: &str) -> bool {
-    ui.add_sized([CHIP_W, BTN_H], egui::Button::selectable(on, text))
-        .on_hover_text(hover)
-        .clicked()
+    crate::responsive::row(ui, label, MIN_CONTENT_W, add)
 }
 
 /// An action button, sized like every other action button.
 fn action(ui: &mut egui::Ui, enabled: bool, text: &str, hover: &str) -> bool {
-    ui.add_enabled(enabled, egui::Button::new(text).min_size(Vec2::new(0.0, BTN_H)))
-        .on_hover_text(hover)
-        .on_disabled_hover_text(hover)
-        .clicked()
+    crate::responsive::action(ui, enabled, text, hover)
 }
 
-impl EditorTabViewer<'_> {
-    pub(crate) fn map_ui(&mut self, ui: &mut egui::Ui) {
+/// Everything the ▦ Model tab reads or writes, as borrows.
+///
+/// The tab used to render straight off `EditorTabViewer`, which holds around a
+/// hundred disjoint field borrows for the whole editor. That works, and it cost
+/// the tab the one thing every other tab has: **it could not be driven from a
+/// test.** `TileCtx` and `SettingsCtx` take exactly what they need, so ◫ Tiles
+/// and ⚙ Settings can be run headlessly and asserted on; ▦ Model could not, and
+/// so it was the one panel whose narrow-dock layout was checked only through the
+/// primitives it happens to use.
+///
+/// Taking the borrows explicitly is the whole fix. Nothing about the rendering
+/// changed — this is the same code reading the same state through a smaller
+/// door — and [`crate::responsive::tests::assert_fits`] can now drive it.
+///
+/// Changes go on [`EditorCmd`](crate::EditorCmd) and apply after the frame, the
+/// same deferral every other panel uses: geometry ops need `&mut Editor` for the
+/// undo snapshot and the store, and the frame is already borrowing those.
+pub(crate) struct MapCtx<'a> {
+    pub(crate) world: &'a mut World,
+    /// Read only — the tab acts on `selection.last()`, and changing the
+    /// selection is an `EditorCmd`.
+    pub(crate) selection: &'a [Entity],
+    pub(crate) maps: &'a map_edit::MapStore,
+    pub(crate) map_sel: &'a Option<map_edit::MapSel>,
+    pub(crate) map_mode: map_edit::MapSubMode,
+    pub(crate) map_slot_name: &'a mut String,
+    pub(crate) map_opts: &'a mut map_edit::MapOpts,
+    pub(crate) map_size_buf: &'a mut Option<Vec3>,
+    pub(crate) map_spec_buf: &'a mut Option<floptle_map::ShapeSpec>,
+    pub(crate) map_arm: Option<map_edit::MapShape>,
+    pub(crate) map_knife_on: bool,
+    pub(crate) map_orient: &'a mut map_edit::MapOrient,
+    pub(crate) map_xform: &'a mut map_edit::MapXform,
+    pub(crate) map_select_hidden: &'a mut bool,
+    pub(crate) map_bevel: &'a mut map_edit::BevelWidth,
+    /// True while the ▦ Map TOOL is active — every sub-object op needs it, so
+    /// the tab offers to turn it on rather than silently greying out.
+    pub(crate) map_tool_on: bool,
+    pub(crate) map_playing: bool,
+    /// The Map tool's keybinds — every hint in the UI reads its chord from
+    /// here, so a rebind can never leave the labels lying.
+    pub(crate) map_keys: &'a mut map_keys::MapKeys,
+    pub(crate) map_rebind: &'a mut Option<map_keys::MapCmd>,
+    pub(crate) map_rebind_err: &'a mut Option<String>,
+    // The FACE MATERIALS section drives the ordinary material inspector, which
+    // wants the project's asset and shader caches.
+    pub(crate) materials: &'a [(String, floptle_scene::MaterialDoc)],
+    pub(crate) mat_name_buf: &'a mut String,
+    pub(crate) flsl_cache: &'a crate::shaders::FlslCache,
+    pub(crate) sdf_cache: &'a crate::shaders::SdfCache,
+    pub(crate) asset_tree: &'a [crate::assets::AssetEntry],
+    pub(crate) texture_settings: &'a std::collections::HashMap<String, crate::assets::TexSetting>,
+    pub(crate) project_root: &'a std::path::Path,
+    pub(crate) cmd: &'a mut crate::EditorCmd,
+}
+
+impl MapCtx<'_> {
+    pub(crate) fn ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         if self.map_playing {
             ui.colored_label(ACCENT, "⏹  Stop the scene to edit model geometry");
@@ -87,8 +121,8 @@ impl EditorTabViewer<'_> {
         // once, at the top, with the button that fixes it — greying everything
         // out with no explanation is what made this feel broken.
         if !self.map_tool_on {
-            egui::Frame::group(ui.style()).fill(ui.visuals().faint_bg_color).show(ui, |ui| {
-                ui.horizontal(|ui| {
+            crate::responsive::group(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui
                         .button("▦  Turn on the Model tool")
                         .on_hover_text(
@@ -124,46 +158,53 @@ impl EditorTabViewer<'_> {
 
     fn map_draw_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "DRAW");
-        ui.horizontal_wrapped(|ui| {
-            for shape in MapShape::ALL {
-                let armed = self.map_arm == Some(shape);
-                let label = shape.label().trim_start_matches("Model ");
-                if ui
-                    .add_sized(
-                        [CHIP_W + 14.0, BTN_H + 2.0],
-                        egui::Button::selectable(
-                            armed,
-                            format!("{label}  {}", self.map_keys.label(shape.cmd())),
-                        ),
-                    )
-                    .on_hover_text(format!(
-                        "Drag out the footprint on the ground (or on any map surface you \
-                         aim at), release, then move to set the height and click.\n\
-                         {} / {} turn it 90°, {} turns it around, {} / {} change its \
-                         resolution, Esc cancels.\nShortcut: {}",
-                        self.map_keys.label(MapCmd::TurnLeft),
-                        self.map_keys.label(MapCmd::TurnRight),
-                        self.map_keys.label(MapCmd::TurnAround),
-                        self.map_keys.label(MapCmd::ResolutionDown),
-                        self.map_keys.label(MapCmd::ResolutionUp),
-                        self.map_keys.label(shape.cmd())
-                    ))
-                    .clicked()
-                {
-                    self.cmd.set_map_arm = Some(if armed { None } else { Some(shape) });
-                }
-            }
-        });
+        // A segmented strip rather than a row of fixed-width buttons: the shape
+        // chips carry their shortcut in the label, so they are the widest thing
+        // in the tab and the first to leave a narrow panel. `strip` shrinks them
+        // together, then wraps them together, and drops each one to its bare
+        // shape name when the shortcut no longer fits beside it.
+        let hover = format!(
+            "Drag out the footprint on the ground (or on any map surface you \
+             aim at), release, then move to set the height and click.\n\
+             {} / {} turn it 90°, {} turns it around, {} / {} change its \
+             resolution, Esc cancels.",
+            self.map_keys.label(MapCmd::TurnLeft),
+            self.map_keys.label(MapCmd::TurnRight),
+            self.map_keys.label(MapCmd::TurnAround),
+            self.map_keys.label(MapCmd::ResolutionDown),
+            self.map_keys.label(MapCmd::ResolutionUp),
+        );
+        let labels: Vec<(String, String, String)> = MapShape::ALL
+            .iter()
+            .map(|&shape| {
+                let short = shape.label().trim_start_matches("Model ").to_string();
+                let key = self.map_keys.label(shape.cmd());
+                (format!("{short}  {key}"), short, format!("{hover}\nShortcut: {key}"))
+            })
+            .collect();
+        let chips: Vec<Chip<'_>> = MapShape::ALL
+            .iter()
+            .zip(&labels)
+            .map(|(&shape, (long, short, hover))| {
+                Chip::mode(long, hover, self.map_arm == Some(shape)).short(short)
+            })
+            .collect();
+        if let Some(i) = strip(ui, &chips) {
+            let shape = MapShape::ALL[i];
+            let armed = self.map_arm == Some(shape);
+            self.cmd.set_map_arm = Some(if armed { None } else { Some(shape) });
+        }
         ui.add_space(2.0);
         match self.map_arm {
             Some(shape) => {
-                ui.horizontal(|ui| {
-                    ui.colored_label(
-                        DRAW_ACCENT,
-                        format!(
+                ui.horizontal_wrapped(|ui| {
+                    crate::responsive::para(
+                        ui,
+                        RichText::new(format!(
                             "✏  drag out a {} — base first, then height",
                             shape.label().trim_start_matches("Model ").to_lowercase()
-                        ),
+                        ))
+                        .color(DRAW_ACCENT),
                     );
                     if ui.small_button("stop (Esc)").clicked() {
                         self.cmd.set_map_arm = Some(None);
@@ -251,26 +292,39 @@ impl EditorTabViewer<'_> {
 
     fn map_select_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "SELECT");
-        row(ui, "mode", |ui| {
-            for mode in MapSubMode::ALL {
-                // Each chip carries its OWN key, not just "Tab cycles" — the
-                // direct binds existed all along and nothing said so.
-                if chip(
-                    ui,
-                    self.map_mode == mode,
-                    &format!("{}  {}", mode.glyph(), mode.label()),
-                    &format!(
+        // Each chip carries its OWN key, not just "Tab cycles" — the direct
+        // binds existed all along and nothing said so. Under pressure the chip
+        // falls back to the glyph, which is the one part of the label that is
+        // still unambiguous at 30 pixels.
+        let modes: Vec<(String, String, String)> = MapSubMode::ALL
+            .iter()
+            .map(|&mode| {
+                (
+                    format!("{}  {}", mode.glyph(), mode.label()),
+                    mode.glyph().to_string(),
+                    format!(
                         "select {} — {} (or {} to cycle).\nYour selection CONVERTS, it isn't \
                          dropped: pick a face, switch to vertex, and you're holding its corners.",
                         mode.plural(),
                         self.map_keys.label(mode.cmd()),
                         self.map_keys.label(MapCmd::ModeCycle),
                     ),
-                ) {
-                    self.cmd.set_map_mode = Some(mode);
-                }
-            }
+                )
+            })
+            .collect();
+        let picked = row(ui, "mode", |ui| {
+            let chips: Vec<Chip<'_>> = MapSubMode::ALL
+                .iter()
+                .zip(&modes)
+                .map(|(&mode, (long, glyph, hover))| {
+                    Chip::mode(long, hover, self.map_mode == mode).short(glyph)
+                })
+                .collect();
+            strip(ui, &chips)
         });
+        if let Some(i) = picked {
+            self.cmd.set_map_mode = Some(MapSubMode::ALL[i]);
+        }
 
         let counts = self.map_selection_counts();
         let (faces, edges, verts) = counts.unwrap_or((0, 0, 0));
@@ -382,28 +436,39 @@ impl EditorTabViewer<'_> {
 
     fn map_transform_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "TRANSFORM");
-        row(ui, "gizmo", |ui| {
-            for x in [MapXform::Move, MapXform::Rotate, MapXform::Scale] {
-                if chip(ui, *self.map_xform == x, x.label(), "what the gizmo does — X cycles") {
-                    *self.map_xform = x;
-                }
-            }
+        const XFORMS: [MapXform; 3] = [MapXform::Move, MapXform::Rotate, MapXform::Scale];
+        let picked = row(ui, "gizmo", |ui| {
+            let chips: Vec<Chip<'_>> = XFORMS
+                .iter()
+                .map(|&x| Chip::mode(x.label(), "what the gizmo does — X cycles", *self.map_xform == x))
+                .collect();
+            strip(ui, &chips)
         });
-        row(ui, "handles", |ui| {
-            for o in [MapOrient::Normal, MapOrient::Local, MapOrient::Global] {
-                let hover = match o {
-                    MapOrient::Normal => {
-                        "along the selection itself — a diagonal face pushes straight out of \
-                         its own surface in one drag (V cycles)"
-                    }
-                    MapOrient::Local => "the node's own axes (V cycles)",
-                    MapOrient::Global => "world axes (V cycles)",
-                };
-                if chip(ui, *self.map_orient == o, o.label(), hover) {
-                    *self.map_orient = o;
-                }
-            }
+        if let Some(i) = picked {
+            *self.map_xform = XFORMS[i];
+        }
+
+        const ORIENTS: [MapOrient; 3] = [MapOrient::Normal, MapOrient::Local, MapOrient::Global];
+        let picked = row(ui, "handles", |ui| {
+            let chips: Vec<Chip<'_>> = ORIENTS
+                .iter()
+                .map(|&o| {
+                    let hover = match o {
+                        MapOrient::Normal => {
+                            "along the selection itself — a diagonal face pushes straight out of \
+                             its own surface in one drag (V cycles)"
+                        }
+                        MapOrient::Local => "the node's own axes (V cycles)",
+                        MapOrient::Global => "world axes (V cycles)",
+                    };
+                    Chip::mode(o.label(), hover, *self.map_orient == o)
+                })
+                .collect();
+            strip(ui, &chips)
         });
+        if let Some(i) = picked {
+            *self.map_orient = ORIENTS[i];
+        }
     }
 
     // ---- MODIFY -------------------------------------------------------------
@@ -779,10 +844,11 @@ impl EditorTabViewer<'_> {
         let faces = self.map_selection_counts().map_or(0, |(f, _, _)| f);
         // The headline action. Previously this took "add slot" + "assign" +
         // "override" and read like it did nothing.
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let r = ui.add_enabled(
                 faces > 0,
                 egui::Button::new("◑  New material for selected faces")
+                    .truncate()
                     .min_size(Vec2::new(0.0, BTN_H + 2.0)),
             );
             let hover = if faces > 0 {
@@ -806,7 +872,7 @@ impl EditorTabViewer<'_> {
             ui.add(
                 egui::TextEdit::singleline(self.map_slot_name)
                     .hint_text("name (optional)")
-                    .desired_width(110.0),
+                    .desired_width(crate::responsive::fit_here(ui, 110.0)),
             );
         });
         ui.add_space(4.0);
@@ -821,10 +887,8 @@ impl EditorTabViewer<'_> {
                 .world
                 .get::<floptle_core::ObjectMaterials>(entity)
                 .is_some_and(|om| om.0.contains_key(name));
-            egui::Frame::group(ui.style())
-                .inner_margin(egui::Margin::symmetric(6, 4))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
+            crate::responsive::group(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new(name).strong());
                         ui.label(
                             RichText::new(format!("{} of this mesh's faces", counts[i]))
@@ -832,7 +896,12 @@ impl EditorTabViewer<'_> {
                                 .small(),
                         )
                         .on_hover_text("how many faces draw with this slot — not your selection");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Plain flow, not `right_to_left`. A right-aligned run
+                        // pins itself to the REGION's right edge and grows
+                        // leftwards from there, so in a narrow panel it walks off
+                        // the LEFT side instead of the right — same bug, harder
+                        // to recognise. These two buttons read fine in order.
+                        {
                             if ui
                                 .small_button("Select")
                                 .on_hover_text("select every face drawing with this slot")
@@ -850,7 +919,7 @@ impl EditorTabViewer<'_> {
                             {
                                 self.cmd.map_op = Some(MapOp::AssignSlot(i as u16));
                             }
-                        });
+                        }
                     });
                     // Per-node material override for this slot (the same
                     // ObjectMaterials machinery imported models use).
@@ -912,7 +981,7 @@ impl EditorTabViewer<'_> {
                 });
         }
         ui.add_space(2.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .small_button("✚ empty slot")
                 .on_hover_text("add a slot without assigning anything to it")
@@ -951,15 +1020,20 @@ impl EditorTabViewer<'_> {
     /// binding can't come into being.
     fn map_keys_section(&mut self, ui: &mut egui::Ui) {
         section(ui, "KEYS");
-        ui.horizontal(|ui| {
-            ui.label(
+        // Wrapped, and the button is simply next in the flow rather than pinned
+        // right: a `right_to_left` layout aligns to the REGION's right edge, and
+        // a region is exactly the thing that grows — so pinning right is how a
+        // button ends up outside a panel it was meant to sit inside.
+        ui.horizontal_wrapped(|ui| {
+            crate::responsive::para(
+                ui,
                 RichText::new(
                     "model keys only fire while the ▦ Model tool is active and you're not typing",
                 )
                 .weak()
                 .small(),
             );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            {
                 if ui
                     .small_button("Reset all")
                     .on_hover_text("back to the shipped bindings")
@@ -970,7 +1044,7 @@ impl EditorTabViewer<'_> {
                     *self.map_rebind_err = None;
                     save_map_keys(self.map_keys);
                 }
-            });
+            }
         });
         if let Some(err) = self.map_rebind_err.clone() {
             ui.colored_label(Color32::from_rgb(235, 120, 120), RichText::new(err).small());
@@ -1059,5 +1133,114 @@ impl EditorTabViewer<'_> {
 
     fn slot_count(&self, id: u32) -> usize {
         self.maps.meshes.get(&id).map_or(0, |m| m.slots.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use floptle_map::ShapeKind;
+
+    /// A scene with one model node selected, holding an ARCH — the shape with
+    /// the most parameters, so SHAPE, SIZE and FACE MATERIALS are all on screen
+    /// at once — with faces selected so every MODIFY button is live rather than
+    /// greyed, and a per-slot material override so the material inspector draws
+    /// too. The point is to render the panel at its WIDEST, since a section that
+    /// is not on screen cannot overflow.
+    fn arch_scene() -> (World, Entity, map_edit::MapStore, Option<map_edit::MapSel>) {
+        const ID: u32 = 1;
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, floptle_core::Name("Arch".into()));
+        world.insert(e, Matter::MapMesh { id: ID });
+
+        let spec = floptle_map::ShapeSpec::new(ShapeKind::Arch, Vec3::new(2.0, 3.0, 1.0));
+        let mut mesh = spec.build();
+        mesh.slots.push("Trim".into());
+
+        let mut om = floptle_core::ObjectMaterials::default();
+        om.0.insert("Trim".into(), floptle_core::Material::default());
+        world.insert(e, om);
+
+        let faces: std::collections::BTreeSet<u32> = (0..mesh.faces.len().min(3) as u32).collect();
+        let sel = map_edit::MapSel {
+            entity: e,
+            id: ID,
+            verts: Default::default(),
+            edges: [(0u32, 1u32)].into_iter().collect(),
+            faces,
+            anchor: None,
+        };
+
+        let mut maps = map_edit::MapStore::default();
+        maps.meshes.insert(ID, mesh);
+        (world, e, maps, Some(sel))
+    }
+
+    /// **The panel must survive being dragged thin.** The ▦ Model tab is the
+    /// widest form panel in the editor — seven titled sections of chips and
+    /// action buttons — and it is the one this guard was written for.
+    ///
+    /// It can be driven at all because the tab takes [`MapCtx`] rather than
+    /// rendering off `EditorTabViewer`'s hundred-field borrow. That is the whole
+    /// argument for the context struct: a panel that cannot be constructed
+    /// cannot be asserted on.
+    #[test]
+    fn the_panel_fits_however_thin_the_dock_gets() {
+        let (mut world, e, maps, map_sel) = arch_scene();
+        let selection = vec![e];
+        let mut slot_name = String::new();
+        let mut opts = map_edit::MapOpts::default();
+        let mut size_buf = None;
+        let mut spec_buf = None;
+        let mut orient = map_edit::MapOrient::default();
+        let mut xform = map_edit::MapXform::default();
+        let mut select_hidden = false;
+        let mut bevel = map_edit::BevelWidth::default();
+        let mut keys = map_keys::MapKeys::default();
+        let mut rebind = None;
+        let mut rebind_err = None;
+        let mut mat_name = String::new();
+        let flsl = crate::shaders::FlslCache::default();
+        let sdf = crate::shaders::SdfCache::default();
+        let tex = std::collections::HashMap::new();
+        let root = std::path::PathBuf::from(".");
+        let mut cmd = crate::EditorCmd::default();
+
+        crate::responsive::tests::assert_fits("the ▦ Model tab", |ui| {
+            MapCtx {
+                world: &mut world,
+                selection: &selection,
+                maps: &maps,
+                map_sel: &map_sel,
+                map_mode: map_edit::MapSubMode::default(),
+                map_slot_name: &mut slot_name,
+                map_opts: &mut opts,
+                map_size_buf: &mut size_buf,
+                map_spec_buf: &mut spec_buf,
+                // Armed, so the DRAW strip renders in its selected state and the
+                // "stop (Esc)" row is on screen too.
+                map_arm: Some(MapShape::Arch),
+                map_knife_on: true,
+                map_orient: &mut orient,
+                map_xform: &mut xform,
+                map_select_hidden: &mut select_hidden,
+                map_bevel: &mut bevel,
+                map_tool_on: false, // draws the "turn the tool on" banner as well
+                map_playing: false,
+                map_keys: &mut keys,
+                map_rebind: &mut rebind,
+                map_rebind_err: &mut rebind_err,
+                materials: &[],
+                mat_name_buf: &mut mat_name,
+                flsl_cache: &flsl,
+                sdf_cache: &sdf,
+                asset_tree: &[],
+                texture_settings: &tex,
+                project_root: &root,
+                cmd: &mut cmd,
+            }
+            .ui(ui);
+        });
     }
 }

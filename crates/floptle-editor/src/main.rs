@@ -37,6 +37,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 // subsystems live in their own modules — main.rs only wires them in.
 mod anim;
 mod anim_ui;
+mod aseprite;
 mod assets;
 mod audio;
 mod assets_ui;
@@ -95,6 +96,7 @@ mod pkg_thumbs;
 mod play;
 mod prefab;
 mod report;
+mod responsive;
 pub(crate) use report::{open_issue_tracker, DOCS_URL, ISSUES_URL};
 mod shader_graph;
 mod shader_preview;
@@ -336,11 +338,17 @@ struct EditorCmd {
     /// A node's sorting layer + order: what draws in front of what, for a flat
     /// scene. `(entity, layer name, order)`.
     set_sorting: Option<(Entity, String, i32)>,
+    /// The Inspector changed how a node sorts INSIDE its layer.
+    set_sort_mode: Option<(Entity, floptle_core::SortMode)>,
+    /// The Inspector changed a node's parallax scroll factor.
+    set_parallax: Option<(Entity, floptle_core::Parallax)>,
     /// A node's 2D lighting: the three-valued flag, and — for a light — which
     /// sorting layers it reaches.
     set_lighting_2d: Option<(Entity, floptle_core::Lighting2D)>,
     /// Whether a node blocks 2D light.
     set_shadow_2d: Option<(Entity, floptle_core::Cast2D)>,
+    /// Add, change or remove a node's 2D camera behaviour. `None` removes it.
+    set_camera_2d: Option<(Entity, Option<floptle_core::camera2d::Camera2D>)>,
     /// A project layer was renamed in Project Settings: (old, new). The open
     /// scene's nodes follow the rename (per keystroke, so they stay in sync).
     rename_layer: Option<(String, String)>,
@@ -466,6 +474,12 @@ struct EditorCmd {
     focus_image: bool,
     /// Open an image (or `.flimg`) in the 🖼 Image tab.
     open_image: Option<String>,
+    /// Write a `.spriteanim.ron` beside a sliced texture: (texture path, cols,
+    /// rows). One frame per cell, in reading order.
+    new_sprite_anim: Option<(String, u32, u32)>,
+    /// Import an Aseprite sheet JSON: its tags become clips, its grid becomes
+    /// the texture's slicing.
+    import_aseprite: Option<String>,
     /// Create a new image document from the New dialog.
     image_new: Option<image_edit::NewForm>,
     /// Write the open document (`.flimg` + the flattened `.png` beside it).
@@ -1009,11 +1023,35 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
     // that's off-screen. Vertical-only clamps rows to the panel width, so
     // "right-aligned" always means the VISIBLE right edge and long text
     // truncates instead of pushing controls out of view.
+    //
+    // This is one half of "nothing goes off the edge"; `crate::responsive` is
+    // the other. Vertical-only makes a `Ui`'s reported width *honest*, and the
+    // responsive primitives are what then shrink, wrap and stack to fit it.
+    // Either one alone leaves a hole: without this, a panel that reflows
+    // correctly still hands its widgets a width the user cannot see; without
+    // that, clamping the width just clips the controls instead of moving them.
+    //
+    // A CANVAS keeps both bars. A node graph, a timeline, a code editor and an
+    // image are things you pan around, and their content genuinely IS wider than
+    // the panel — there is no reflow that would help, and taking the bar away
+    // would be the bug. Everything laid out as a form is in the first arm.
     fn scroll_bars(&self, tab: &EditorTab) -> [bool; 2] {
         match tab {
-            EditorTab::Hierarchy | EditorTab::Inspector | EditorTab::Terrain | EditorTab::Paint => {
-                [false, true]
-            }
+            EditorTab::Hierarchy
+            | EditorTab::Inspector
+            | EditorTab::Terrain
+            | EditorTab::Paint
+            | EditorTab::Map
+            | EditorTab::Tiles
+            | EditorTab::Assets
+            | EditorTab::Settings
+            | EditorTab::Packages
+            | EditorTab::Mixer
+            | EditorTab::Particles
+            | EditorTab::Learn => [false, true],
+            // Canvases and code, which pan: ⌖ Scene, ⏵ Game, Scripting, Console,
+            // ⏱ Animating, ◎ Controller, ◈ Shaders, 🖼 Image, ◫ UI — and a
+            // package's own tab, whose layout is not ours to decide.
             _ => [true, true],
         }
     }
@@ -1044,7 +1082,39 @@ impl egui_dock::TabViewer for EditorTabViewer<'_> {
                 };
                 cx.ui(ui);
             }
-            EditorTab::Map => self.map_ui(ui),
+            EditorTab::Map => {
+                let mut cx = map_ui::MapCtx {
+                    world: self.world,
+                    selection: self.selection,
+                    maps: self.maps,
+                    map_sel: self.map_sel,
+                    map_mode: self.map_mode,
+                    map_slot_name: self.map_slot_name,
+                    map_opts: self.map_opts,
+                    map_size_buf: self.map_size_buf,
+                    map_spec_buf: self.map_spec_buf,
+                    map_arm: self.map_arm,
+                    map_knife_on: self.map_knife_on,
+                    map_orient: self.map_orient,
+                    map_xform: self.map_xform,
+                    map_select_hidden: self.map_select_hidden,
+                    map_bevel: self.map_bevel,
+                    map_tool_on: self.map_tool_on,
+                    map_playing: self.map_playing,
+                    map_keys: self.map_keys,
+                    map_rebind: self.map_rebind,
+                    map_rebind_err: self.map_rebind_err,
+                    materials: self.materials,
+                    mat_name_buf: self.mat_name_buf,
+                    flsl_cache: self.flsl_cache,
+                    sdf_cache: self.sdf_cache,
+                    asset_tree: self.asset_tree,
+                    texture_settings: self.texture_settings,
+                    project_root: self.project_root,
+                    cmd: self.cmd,
+                };
+                cx.ui(ui);
+            }
             EditorTab::Tiles => {
                 let mut cx = tile_ui::TileCtx {
                     store: self.tiles,
@@ -2404,6 +2474,10 @@ struct Editor {
     /// The OS clipboard (lazy) — node copies also land here as tagged RON, so
     /// paste works across scene switches, editor instances, and projects.
     os_clipboard: Option<egui_winit::clipboard::Clipboard>,
+    /// The last text a package put on the clipboard, so an identical repeat is
+    /// skipped. A package calling `ed.copy` every frame would otherwise take the
+    /// system selection sixty times a second.
+    last_ext_copy: Option<String>,
     /// An inspector/gizmo edit session is open — coalesces a drag into one undo step.
     editing: bool,
     /// The pre-edit scene snapshot captured at the start of this frame.

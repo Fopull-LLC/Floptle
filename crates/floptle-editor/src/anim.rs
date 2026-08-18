@@ -29,7 +29,7 @@ use floptle_core::transform::Transform;
 use floptle_core::{AnimController, BoneAttach, Entity, Matter, Name, World};
 use floptle_scene::{
     AnimChannelDoc, AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimPropTrackDoc, AnimPropValueDoc,
-    AnimTrackDoc3, AnimTrackDoc4, ANIM_CLIP_EXT, ANIM_CTL_EXT,
+    AnimTrackDoc3, AnimTrackDoc4, SpriteAnimDoc, ANIM_CLIP_EXT, ANIM_CTL_EXT,
 };
 
 use crate::MeshAsset;
@@ -243,7 +243,25 @@ pub struct AnimInstance {
 #[derive(Default)]
 pub struct AnimSystem {
     /// `*.anim.ron` clip assets: (key, doc), sorted by key.
+    ///
+    /// A `*.spriteanim.ron` is in here too, converted — that is what makes one
+    /// playable everywhere a baked clip is. `sprite_keys` is how the two are
+    /// told apart where it matters, which is *writing*.
     pub clips: Vec<(String, AnimClipDoc)>,
+    /// Anything the last rescan could not load or had to refuse, for the Console.
+    ///
+    /// Collected rather than printed here because `rescan` runs deep inside a
+    /// scan with no console in hand, and because a file that will not parse must
+    /// be REPORTED — dropping it silently leaves the key resolving by file stem
+    /// to a different clip, and everything downstream then looks fine.
+    pub load_errors: Vec<String>,
+    /// Which of `clips` came from a `.spriteanim.ron`.
+    ///
+    /// A sprite clip is a frame list with an fps and per-frame holds; a baked
+    /// clip is lanes of keys. Saving one as the other is a lossy conversion
+    /// onto a different filename, which would leave two files claiming the same
+    /// key. So these are read-only in the timeline, and edited as the file.
+    pub sprite_keys: std::collections::HashSet<String>,
     /// `*.actl.ron` controller assets: (key, doc), sorted by key.
     pub controllers: Vec<(String, AnimControllerDoc)>,
     /// Bumped on every save/rescan; instances rebind lazily when stale.
@@ -300,6 +318,8 @@ impl AnimSystem {
     pub fn rescan(&mut self, project_root: &Path) {
         self.clips.clear();
         self.controllers.clear();
+        self.sprite_keys.clear();
+        self.load_errors.clear();
         let root = project_root.to_path_buf();
         let mut stack = vec![root.clone()];
         while let Some(dir) = stack.pop() {
@@ -319,6 +339,31 @@ impl AnimSystem {
                     if let Ok(doc) = floptle_scene::load_anim_clip(&p) {
                         self.clips.push((asset_key(&p, &root, ANIM_CLIP_EXT), doc));
                     }
+                } else if fname.ends_with(floptle_scene::SPRITE_ANIM_EXT) {
+                    // (loaded below; the duplicate-key check follows the scan)
+                    // A sprite clip joins the SAME registry as a baked clip, so
+                    // it can go in a controller state, be crossfaded, carry
+                    // events and play from Lua with nothing knowing the
+                    // difference. Two ways to author, one thing to play.
+                    match floptle_scene::load_sprite_anim(&p) {
+                        Ok(doc) => {
+                            let key = asset_key(&p, &root, floptle_scene::SPRITE_ANIM_EXT);
+                            let name = key.rsplit('/').next().unwrap_or(&key).to_string();
+                            // The empty channel name is "the node this is playing
+                            // on" — a sprite clip is about one node by construction.
+                            self.clips.push((key.clone(), doc.to_clip(&name, "")));
+                            self.sprite_keys.insert(key);
+                        }
+                        // Hand-editing the file is the only way to change a sprite
+                        // animation, so a RON typo is the EXPECTED failure — and a
+                        // silent drop is the worst possible report of it, because
+                        // the clip key then resolves by file-stem to some other
+                        // clip and everything downstream looks healthy.
+                        Err(e) => self.load_errors.push(format!(
+                            "{}: {e}",
+                            p.strip_prefix(&root).unwrap_or(&p).display()
+                        )),
+                    }
                 } else if fname.ends_with(ANIM_CTL_EXT)
                     && let Ok(doc) = floptle_scene::load_anim_controller(&p) {
                         self.controllers.push((asset_key(&p, &root, ANIM_CTL_EXT), doc));
@@ -326,6 +371,25 @@ impl AnimSystem {
             }
         }
         self.clips.sort_by(|a, b| a.0.cmp(&b.0));
+        // **One key, one clip.** `walk.anim.ron` and `walk.spriteanim.ron` in one
+        // folder produce the same key, and with both registered the one that
+        // plays is whichever the directory scan reached first — different on
+        // another machine, and different again after a file is touched. The
+        // baked clip also becomes uneditable and unsavable, silently, because
+        // the key now answers "sprite clip". Keeping the first and naming the
+        // loser is the only answer that is the same everywhere.
+        let mut kept: Vec<(String, AnimClipDoc)> = Vec::with_capacity(self.clips.len());
+        for (k, doc) in std::mem::take(&mut self.clips) {
+            if kept.iter().any(|(seen, _)| *seen == k) {
+                self.load_errors.push(format!(
+                    "two animation files claim the key {k} — one of them is being ignored.                      Rename one: a .anim.ron and a .spriteanim.ron of the same name in the                      same folder cannot both be {k}."
+                ));
+                self.sprite_keys.remove(&k);
+                continue;
+            }
+            kept.push((k, doc));
+        }
+        self.clips = kept;
         self.controllers.sort_by(|a, b| a.0.cmp(&b.0));
         self.revision += 1;
     }
@@ -391,14 +455,50 @@ impl AnimSystem {
         }
     }
 
+    /// Is this clip key a `.spriteanim.ron` rather than a baked `.anim.ron`?
+    pub fn is_sprite_clip(&self, key: &str) -> bool {
+        self.resolve_clip_key(key).is_some_and(|k| self.sprite_keys.contains(&k))
+    }
+
     /// Save a clip doc back to disk + refresh the registry entry in place.
     pub fn save_clip(&mut self, project_root: &Path, key: &str, doc: &AnimClipDoc) {
+        if self.sprite_keys.contains(key) {
+            // `{key}.anim.ron` is a DIFFERENT file from the `{key}.spriteanim.ron`
+            // this came from, so writing it would leave two files claiming one
+            // key and the rescan picking whichever it read last. Refused here
+            // as well as in the UI: a save path that can invent a second source
+            // of truth should not depend on a screen being right.
+            eprintln!("  {key} is a sprite animation — edit the .spriteanim.ron file");
+            return;
+        }
         let path = project_root.join(format!("{key}{ANIM_CLIP_EXT}"));
         if let Err(e) = floptle_scene::save_anim_clip(doc, &path) {
             eprintln!("  save clip {key} failed: {e}");
             return;
         }
         self.register_clip(key, doc);
+    }
+
+    /// One frame per cell of a sliced sheet, in reading order — the clip a
+    /// person would have typed, generated from the grid the texture already
+    /// carries.
+    ///
+    /// Not a guess at the animation: a sheet is rarely one clip end to end, and
+    /// the frame list is meant to be cut down. It is a starting point that is
+    /// already correct about the two things easy to get wrong by hand — the
+    /// path, and which cell is which.
+    pub fn sprite_anim_from_sheet(texture: &str, cols: u32, rows: u32) -> SpriteAnimDoc {
+        let n = cols.max(1).saturating_mul(rows.max(1));
+        SpriteAnimDoc {
+            fps: 12.0,
+            looping: true,
+            cols: cols.max(1),
+            rows: rows.max(1),
+            texture: texture.to_string(),
+            frames: (0..n)
+                .map(|cell| floptle_scene::SpriteAnimFrameDoc { cell, ..Default::default() })
+                .collect(),
+        }
     }
 
     /// Save a controller doc back to disk + refresh the registry entry.
@@ -476,6 +576,32 @@ pub fn asset_key(path: &Path, project_root: &Path, ext: &str) -> String {
     s.strip_suffix(ext).unwrap_or(&s).to_string()
 }
 
+/// The registry key for a **clip** file, whichever of the two kinds it is.
+///
+/// A `.spriteanim.ron` lands in the same registry as an `.anim.ron`, so
+/// anything that turns a dropped file into a key has to know both — and there
+/// is exactly one such function rather than a `.anim.ron` assumption repeated
+/// at every drop target.
+/// Is either kind of clip file already sitting at this key?
+///
+/// Both, always. Probing only `.anim.ron` let ✚ New… hand back a key that a
+/// `.spriteanim.ron` already owned — and the save was then refused, leaving a
+/// controller state pointing at a clip file that does not exist.
+pub fn clip_file_exists(project_root: &Path, key: &str) -> bool {
+    project_root.join(format!("{key}{ANIM_CLIP_EXT}")).exists()
+        || project_root.join(format!("{key}{}", floptle_scene::SPRITE_ANIM_EXT)).exists()
+}
+
+pub fn clip_asset_key(path: &Path, project_root: &Path) -> String {
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let ext = if name.ends_with(floptle_scene::SPRITE_ANIM_EXT) {
+        floptle_scene::SPRITE_ANIM_EXT
+    } else {
+        ANIM_CLIP_EXT
+    };
+    asset_key(path, project_root, ext)
+}
+
 // ---- doc ↔ runtime conversion ------------------------------------------------
 
 /// Bind a clip doc to a skeleton: node names → indices (channel `""` = the
@@ -528,12 +654,21 @@ fn prop_value_from_doc(v: &AnimPropValueDoc) -> PropValue {
     match v {
         AnimPropValueDoc::Float(x) => PropValue::Float(*x),
         AnimPropValueDoc::Text(s) => PropValue::Text(s.clone()),
+        AnimPropValueDoc::Frame(f) => PropValue::Frame(floptle_anim::SpriteFrame {
+            texture: f.texture.clone(),
+            cols: f.cols.max(1),
+            rows: f.rows.max(1),
+            cell: f.cell,
+        }),
     }
 }
 
 fn prop_track_from_doc(d: &AnimPropTrackDoc) -> PropertyTrack {
     // String lanes never blend; force Step so a mis-set flag can't try to lerp.
-    let is_text = d.values.iter().any(|v| matches!(v, AnimPropValueDoc::Text(_)));
+    let is_text = d
+        .values
+        .iter()
+        .any(|v| matches!(v, AnimPropValueDoc::Text(_) | AnimPropValueDoc::Frame(_)));
     PropertyTrack {
         component: d.component.clone(),
         field: d.field.clone(),
@@ -592,6 +727,12 @@ fn prop_value_to_doc(v: &PropValue) -> AnimPropValueDoc {
     match v {
         PropValue::Float(x) => AnimPropValueDoc::Float(*x),
         PropValue::Text(s) => AnimPropValueDoc::Text(s.clone()),
+        PropValue::Frame(f) => AnimPropValueDoc::Frame(floptle_scene::SpriteFrameDoc {
+            texture: f.texture.clone(),
+            cols: f.cols.max(1),
+            rows: f.rows.max(1),
+            cell: f.cell,
+        }),
     }
 }
 
@@ -1061,6 +1202,11 @@ pub fn apply_instance(
                     PropValue::Text(t) => {
                         floptle_script::apply_component_field_str(world, ent, &s.component, &s.field, &t)
                     }
+                    // A sprite frame is four values written together — see
+                    // `apply_sprite_frame` for why they cannot be four lanes.
+                    PropValue::Frame(f) => floptle_script::apply_sprite_frame(
+                        world, ent, &f.texture, f.cols, f.rows, f.cell,
+                    ),
                 }
             }
         }
@@ -1698,7 +1844,9 @@ pub fn new_clip_key(project_root: &Path, name: &str) -> String {
     let _ = std::fs::create_dir_all(&dir);
     let mut key = format!("animations/{name}");
     let mut i = 2;
-    while project_root.join(format!("{key}{ANIM_CLIP_EXT}")).exists() {
+    // BOTH extensions, because both land in the one clip registry under the
+    // same key — see `clip_file_exists`.
+    while clip_file_exists(project_root, &key) {
         key = format!("animations/{name}{i}");
         i += 1;
     }
@@ -1706,9 +1854,240 @@ pub fn new_clip_key(project_root: &Path, name: &str) -> String {
 }
 
 
+impl crate::Editor {
+    /// Import an Aseprite sheet JSON: one `.spriteanim.ron` per tag, and the
+    /// sheet's grid onto the texture's import settings.
+    ///
+    /// The grid is the half that is easy to miss. A clip whose frames are right
+    /// draws nothing sensible if the texture beside it is not sliced the same
+    /// way, and the person who just imported has no reason to think they still
+    /// have a step to do — so the import does both, and says which texture it
+    /// touched.
+    pub(crate) fn import_aseprite_sheet(&mut self, json_path: &str) {
+        let path = std::path::Path::new(json_path);
+        let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.toast = Some((format!("⚠  could not read {stem}: {e}"), 6.0));
+                return;
+            }
+        };
+        let im = match crate::aseprite::parse(&text, &stem) {
+            Ok(im) => im,
+            Err(why) => {
+                // The Console, not just a toast: these messages name a checkbox
+                // in somebody else's export dialog and are worth re-reading.
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!("importing {stem}: {why}"),
+                    None,
+                );
+                self.toast = Some((format!("✖  {stem} — see the Console"), 8.0));
+                return;
+            }
+        };
+        let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| self.project_root.clone());
+        // The image the JSON names, beside the JSON. Falls back to the stem,
+        // which is what an export renamed after the fact looks like.
+        let png = dir.join(if im.image.is_empty() { format!("{stem}.png") } else { im.image.clone() });
+        let tex_rel = crate::assets::asset_rel_path(&png.to_string_lossy(), &self.project_root);
+        if !png.exists() {
+            self.console.push(
+                floptle_script::LogLevel::Warn,
+                format!(
+                    "importing {stem}: the sheet names {tex_rel}, which is not beside it — the clips are written and will draw nothing until that image is there"
+                ),
+                None,
+            );
+        }
+        // Slice the texture the way the sheet says. Without this the clips are
+        // correct and the picture is not.
+        let mut setting =
+            crate::assets::tex_setting(&self.texture_settings, &self.project_root, &tex_rel);
+        setting.sheet_cols = im.cols;
+        setting.sheet_rows = im.rows;
+        self.apply_texture_setting(&tex_rel, setting);
+
+        let mut written = Vec::new();
+        let mut failed = 0usize;
+        for (name, mut doc) in im.clips {
+            doc.texture = tex_rel.clone();
+            let safe: String = name
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+                .collect();
+            let mut out = dir.join(format!("{safe}{}", floptle_scene::SPRITE_ANIM_EXT));
+            let mut n = 2;
+            while out.exists()
+                || dir.join(format!("{safe}{ANIM_CLIP_EXT}")).exists()
+            {
+                out = dir.join(format!("{safe}{n}{}", floptle_scene::SPRITE_ANIM_EXT));
+                n += 1;
+            }
+            match floptle_scene::save_sprite_anim(&doc, &out) {
+                // The file that was ACTUALLY written, not the tag it came from.
+                // They differ whenever the import stepped over an existing file,
+                // which is exactly when somebody needs to be told.
+                Ok(()) => written.push(
+                    out.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or(safe),
+                ),
+                Err(e) => {
+                    failed += 1;
+                    self.console.push(
+                        floptle_script::LogLevel::Error,
+                        format!("importing {stem}: could not write {safe}: {e}"),
+                        None,
+                    )
+                }
+            }
+        }
+        self.anim.rescan(&self.project_root);
+        self.asset_tree = crate::assets::build_assets(&self.project_root);
+        self.console.push(
+            floptle_script::LogLevel::Debug,
+            format!(
+                "imported {stem}: {} clip(s) — {} — and sliced {tex_rel} {}×{}",
+                written.len(),
+                written.join(", "),
+                im.cols,
+                im.rows
+            ),
+            None,
+        );
+        // Honest about a partial import. A success toast over a missing sheet or
+        // a clip that would not write is the editor telling you it worked.
+        self.toast = Some(if failed > 0 || !png.exists() {
+            (format!("⚠  {stem} — {} clip(s), see the Console", written.len()), 8.0)
+        } else {
+            (format!("▦  {} clip(s) from {stem}", written.len()), 4.0)
+        });
+    }
+
+    /// Write a `.spriteanim.ron` beside a sliced texture, one frame per cell.
+    ///
+    /// Beside the image on purpose. A clip made from one sheet belongs next to
+    /// it — moving the sheet and leaving the clip behind is the failure this
+    /// avoids, and a folder that already holds the art is the folder somebody
+    /// looks in for the animation of it.
+    ///
+    /// Never overwrites: a second call writes `walk2`, `walk3`… The button is
+    /// one click from a context menu and a person who slices a sheet twice
+    /// should not lose the frame list they cut down in between.
+    pub(crate) fn write_sprite_anim(&mut self, texture: &str, cols: u32, rows: u32) {
+        let tex_rel = crate::assets::asset_rel_path(texture, &self.project_root);
+        let doc = AnimSystem::sprite_anim_from_sheet(&tex_rel, cols, rows);
+        let path = std::path::Path::new(texture);
+        let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| self.project_root.clone());
+        let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "sprite".into());
+        // Steps over a `.anim.ron` of the same name too: the two share one
+        // registry key, and two files claiming it makes which one plays depend
+        // on the order the folder was read in.
+        let taken = |p: &std::path::Path| {
+            p.exists()
+                || p.with_extension("")
+                    .with_extension("")
+                    .with_extension("anim.ron")
+                    .exists()
+        };
+        let mut out = dir.join(format!("{stem}{}", floptle_scene::SPRITE_ANIM_EXT));
+        let mut n = 2;
+        while taken(&out) {
+            out = dir.join(format!("{stem}{n}{}", floptle_scene::SPRITE_ANIM_EXT));
+            n += 1;
+        }
+        match floptle_scene::save_sprite_anim(&doc, &out) {
+            Ok(()) => {
+                let name = out.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                self.anim.rescan(&self.project_root);
+                self.asset_tree = crate::assets::build_assets(&self.project_root);
+                self.toast = Some((
+                    format!("▦  {name} — {} frames at 12 fps", doc.frames.len()),
+                    4.0,
+                ));
+            }
+            Err(e) => {
+                self.toast = Some((format!("⚠  could not write the sprite animation: {e}"), 6.0));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sprite lane survives the trip to the runtime and back, and is stepped
+    /// at the runtime end whatever the file said.
+    ///
+    /// The `step` flag is written by the editor and read from a file, so the
+    /// promise "a sprite frame never blends" cannot rest on it being right. The
+    /// conversion forces it, and this is the guard on that.
+    #[test]
+    fn a_sprite_lane_round_trips_and_arrives_stepped() {
+        let doc = AnimPropTrackDoc {
+            component: floptle_scene::SPRITE_COMPONENT.into(),
+            field: floptle_scene::SPRITE_FIELD.into(),
+            times: vec![0.0, 0.5],
+            values: vec![
+                AnimPropValueDoc::Frame(floptle_scene::SpriteFrameDoc {
+                    texture: "art/hero.png".into(),
+                    cols: 8,
+                    rows: 4,
+                    cell: 3,
+                }),
+                AnimPropValueDoc::Frame(floptle_scene::SpriteFrameDoc {
+                    texture: "art/other.png".into(),
+                    cols: 2,
+                    rows: 2,
+                    cell: 1,
+                }),
+            ],
+            // Deliberately WRONG: a file that says this lane may interpolate.
+            step: false,
+        };
+        let track = prop_track_from_doc(&doc);
+        assert_eq!(track.interp, Interp::Step, "a frame lane must arrive stepped regardless");
+        assert_eq!(
+            track.sample(0.49),
+            Some(PropValue::Frame(floptle_anim::SpriteFrame {
+                texture: "art/hero.png".into(),
+                cols: 8,
+                rows: 4,
+                cell: 3,
+            }))
+        );
+        // …and back out unchanged, so saving a clip that was loaded does not
+        // quietly rewrite its frames.
+        let back = prop_track_to_doc(&track);
+        assert_eq!(back.values, doc.values);
+        assert_eq!(back.times, doc.times);
+        assert!(back.step, "the flag is corrected on the way out, not left lying");
+    }
+
+    /// The generated clip is the sheet in reading order — the thing a person
+    /// then cuts down, not a guess at what the animation is.
+    #[test]
+    fn a_sheet_becomes_one_frame_per_cell() {
+        let doc = AnimSystem::sprite_anim_from_sheet("art/hero.png", 4, 3);
+        assert_eq!(doc.frames.len(), 12);
+        assert_eq!(doc.cols, 4);
+        assert_eq!(doc.rows, 3);
+        assert_eq!(doc.texture, "art/hero.png");
+        assert!(doc.looping);
+        let cells: Vec<u32> = doc.frames.iter().map(|f| f.cell).collect();
+        assert_eq!(cells, (0..12).collect::<Vec<_>>());
+        // Every frame inherits the clip's sheet, so the list is one line each.
+        assert!(doc.frames.iter().all(|f| f.texture.is_empty() && f.cols == 0 && f.rows == 0));
+        // And it converts to a clip that names the sheet on every key.
+        let clip = doc.to_clip("Hero", "");
+        let lane = &clip.channels[0].properties[0];
+        assert_eq!(lane.times.len(), 12);
+        assert!(lane.values.iter().all(|v| matches!(
+            v,
+            AnimPropValueDoc::Frame(f) if f.texture == "art/hero.png" && f.cols == 4 && f.rows == 3
+        )));
+    }
 
     /// The standard avatar shape — a Networked CAPSULE whose CHILD Model
     /// carries the Animation Controller — must be addressable for animator

@@ -51,6 +51,14 @@ pub(crate) struct Measured {
     /// origin, in local units, including its own scale. `None` on a batch that
     /// drew nothing.
     pub(crate) sprite_reach: Option<f32>,
+    /// One sprite's drawn edge, in world units before the node's own scale.
+    ///
+    /// Needed because under pixels-per-unit the drawn size comes from the
+    /// TEXTURE, not from the `size` field — a 512-pixel cell at `ppu = 32` draws
+    /// sixteen units across while `size` says one. Culling on `size` there is a
+    /// radius twenty times too small, and a cull radius that is too small is a
+    /// node that vanishes at the edge of the screen.
+    pub(crate) sprite_size: Option<(f32, f32)>,
 }
 
 /// The local bounding radius of a node's drawn geometry, or `None` for "always
@@ -78,6 +86,23 @@ pub(crate) fn local_radius(matter: &Matter, m: Measured) -> Option<f32> {
         // reach is measured from this frame's actual draws, which is the only
         // honest answer — and it is immediate-mode, so it is already to hand.
         Matter::SpriteBatch { .. } => m.sprite_reach,
+        // Unlike a batch, ONE sprite has a knowable extent: its own quad. The
+        // pivot can push the drawn quad up to a whole edge off the origin, so
+        // the radius is measured from the origin to the far corner in the worst
+        // case rather than from the sprite's centre.
+        Matter::Sprite { size, pivot, .. } => {
+            // The drawn size when it is known — which under pixels-per-unit is
+            // the only one that is right — and the authored `size` before the
+            // texture has loaded, which is the right order of magnitude and is
+            // corrected the moment it does.
+            let (w, h) = m.sprite_size.unwrap_or((*size, *size));
+            // The pivot can push the quad up to a whole edge off the origin, so
+            // the radius reaches the far corner in the worst case rather than
+            // the corner of a centred quad.
+            let dx = pivot[0].max(1.0 - pivot[0]).max(0.5) * w;
+            let dy = pivot[1].max(1.0 - pivot[1]).max(0.5) * h;
+            Some((dx * dx + dy * dy).sqrt())
+        }
         // A sea is a sphere of `radius`; a pool is a box of `half_extents`.
         Matter::WaterVolume { kind, radius, half_extents, .. } => match kind {
             floptle_core::WaterKind::Sea => Some(*radius),
@@ -149,6 +174,10 @@ pub(crate) fn node_is_off_screen(
     t: &floptle_core::transform::Transform,
     cam_world: floptle_core::math::DVec3,
     frustum: &floptle_render::Frustum,
+    // This node's base texture size in pixels, when the caller has one. The draw
+    // does, and it is what makes a pixels-per-unit sprite cullable at the size it
+    // is actually drawn rather than at its authored `size`.
+    tex_px: Option<[f32; 2]>,
 ) -> bool {
     let measured = Measured {
         model_size: match matter {
@@ -163,6 +192,15 @@ pub(crate) fn node_is_off_screen(
                 .get::<floptle_core::Sprites>(e)
                 .filter(|s| !s.0.is_empty())
                 .map(|s| sprite_reach(&s.0, *size)),
+            _ => None,
+        },
+        sprite_size: match matter {
+            Matter::Sprite { ppu, size, .. } => Some(crate::sprite2d::sprite_world_size(
+                *ppu,
+                *size,
+                world.get::<floptle_core::Material>(e),
+                tex_px,
+            )),
             _ => None,
         },
     };
@@ -282,7 +320,8 @@ mod tests {
     /// silently inheriting "always submit" and quietly costing a frame.
     #[test]
     fn every_drawing_matter_kind_has_an_answer() {
-        let measured = Measured { model_size: Some(2.0), sprite_reach: Some(5.0) };
+        let measured =
+            Measured { model_size: Some(2.0), sprite_reach: Some(5.0), sprite_size: None };
         let drawing: Vec<Matter> = vec![
             Matter::Primitive { shape: Shape::Cube, color: [1.0; 3] },
             Matter::Mesh { asset_path: "a.glb".into() },

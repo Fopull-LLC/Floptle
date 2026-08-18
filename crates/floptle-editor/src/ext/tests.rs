@@ -387,6 +387,68 @@ fn json_null_writes_a_null_where_nil_removes_the_key() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
+/// `json.array` is the only way to write `[]`, and a decoded list stays a list.
+///
+/// The case that forced it (`floptle/0152`): a package building a request body
+/// with a `selected_ids` list that is sometimes empty had no value it could put
+/// there. `{}` is an object, and the API on the other end reads an array — with
+/// nothing at the Lua end to tell the two apart. The workaround was to omit the
+/// key and hope an absent field read as "none".
+///
+/// The round-trip half is the part that has to hold without the package doing
+/// anything: read a body, empty one of its lists, send it back, and the field
+/// is still a list.
+#[test]
+fn json_array_says_list_where_the_shape_cannot() {
+    let proj = temp("jsonarray");
+    install(
+        &proj,
+        "com.t.a",
+        "",
+        r#"
+        -- The empty table stays an object; only the marked one is a list.
+        ed.log(json.encode({ a = {}, b = json.array{}, c = json.array{1, 2} }))
+        -- Read a body, empty one of its lists, send it back.
+        local body = json.decode('{"ids":[1,2,3],"opts":{}}')
+        for i = #body.ids, 1, -1 do body.ids[i] = nil end
+        ed.log(json.encode(body))
+        -- Replacing the field with a fresh `{}` throws the mark away with the
+        -- table that carried it. `json.array{}` is the replacement that keeps it.
+        local body2 = json.decode('{"ids":[1,2,3]}')
+        body2.ids = {}
+        local body3 = json.decode('{"ids":[1,2,3]}')
+        body3.ids = json.array{}
+        ed.log(json.encode(body2), json.encode(body3))
+        -- Decoded `[]` and decoded `{}` can be told apart.
+        ed.log(
+            tostring(json.isArray(json.decode('[]'))),
+            tostring(json.isArray(json.decode('{}')))
+        )
+        -- A list that is also a map is a mistake, and says which key.
+        local bad = json.array{1}
+        bad.name = "x"
+        local ok, why = pcall(json.encode, bad)
+        ed.log(tostring(ok), tostring(why))
+        "#,
+    );
+    let host = host_for(&proj);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log[0].contains("\"a\":{}"), "an unmarked empty table must stay an object: {}", log[0]);
+    assert!(log[0].contains("\"b\":[]"), "{}", log[0]);
+    assert!(log[0].contains("\"c\":[1,2]"), "{}", log[0]);
+    assert!(
+        log[1].contains("\"ids\":[]"),
+        "a decoded list emptied by the package must go back as a list: {}",
+        log[1]
+    );
+    assert!(log[1].contains("\"opts\":{}"), "a decoded object must stay an object: {}", log[1]);
+    assert_eq!(log[2], "{\"ids\":{}}\t{\"ids\":[]}", "a fresh table is not the one that was marked");
+    assert_eq!(log[3], "true\tfalse");
+    assert!(log[4].starts_with("false\t"), "{}", log[4]);
+    assert!(log[4].contains("\"name\""), "the error should name the stray key: {}", log[4]);
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 #[test]
 fn a_package_can_require_its_own_files_and_nothing_else() {
     let proj = temp("require");
@@ -1213,6 +1275,7 @@ fn every_name_in_the_environment_is_in_the_reference() {
         walk("http.", http)
         walk("sys.", sys)
         walk("ed.prefs.", ed.prefs)
+        walk("json.", json)
         table.sort(names)
         ed.log(table.concat(names, " "))
         "#,
@@ -1243,12 +1306,12 @@ fn every_name_in_the_environment_is_in_the_reference() {
         // Lua's own, which the reference does not document because they are
         // Lua's, and the two `os` carries.
         tables.retain(|k| {
-            !matches!(k.as_str(), "string" | "table" | "math" | "coroutine" | "bit" | "os" | "json")
+            !matches!(k.as_str(), "string" | "table" | "math" | "coroutine" | "bit" | "os")
         });
         tables.sort();
         assert_eq!(
             tables,
-            ["ed", "handles", "http", "mesh", "nav", "scene", "selection", "sys"],
+            ["ed", "handles", "http", "json", "mesh", "nav", "scene", "selection", "sys"],
             "the environment has a table the coverage walk above does not visit"
         );
     }
@@ -2391,6 +2454,60 @@ fn a_mesh_read_that_fails_still_calls_back_and_says_why() {
 
 /// `ed.lookAt` — a tool with a list of places has to be able to take you to one.
 ///
+/// A package can hand a string to the clipboard, and cannot take one from it.
+///
+/// The case that forced it (`floptle/0153`): a panel rendering a code block had
+/// no way to build a copy button, so the only exit for four lines of generated
+/// code was `ed.write` — a file, a path, an overwrite policy and a `Files`
+/// permission, for text somebody wanted to paste into a file already open.
+///
+/// The refusal on size is asserted because truncating would be worse than
+/// failing: half a snippet pastes without complaint and reads as the service
+/// having produced half a snippet.
+#[test]
+fn a_package_can_put_text_on_the_clipboard_and_never_read_it() {
+    let proj = temp("copy");
+    install(
+        &proj,
+        "com.t.copy",
+        "",
+        r#"
+        ed.onUpdate(function()
+            ed.copy("print('hi')")
+            -- Refused, not truncated.
+            local ok, why = pcall(ed.copy, string.rep("x", 2 * 1024 * 1024))
+            if ok then error("a two-megabyte string was accepted") end
+            ed.log(tostring(why))
+            -- There is no way back. If one is ever added it must be a decision,
+            -- not a side effect of adding something near it.
+            ed.log(tostring(ed.paste), tostring(ed.readClipboard), tostring(ed.clipboard))
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    host.begin_frame(
+        Snapshot { project_root: proj.clone(), ..Snapshot::default() },
+        SceneMirror::build(&floptle_core::World::new(), &|_, _| None, &|_, _| None),
+    );
+    host.fire(HookKind::Update);
+    assert!(host.packages[0].failed.is_none(), "{:?}", host.packages[0].failed);
+
+    let cmds = host.take_cmds();
+    assert!(
+        cmds.iter().any(|c| matches!(c, ExtCmd::Copy(t) if t == "print('hi')")),
+        "{cmds:?}"
+    );
+    assert_eq!(
+        cmds.iter().filter(|c| matches!(c, ExtCmd::Copy(_))).count(),
+        1,
+        "the oversized string must not have been queued at all: {cmds:?}"
+    );
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log[0].contains("ed.copy") && log[0].contains("2.0 MB"), "{}", log[0]);
+    assert_eq!(log[1], "nil\tnil\tnil", "nothing here reads the clipboard");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 /// The distance is checked because the failure is silent: a camera glided to
 /// zero metres from a point lands inside the geometry and reads as the editor
 /// having broken, not as a bad argument.

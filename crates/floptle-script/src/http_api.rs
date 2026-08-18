@@ -198,6 +198,10 @@ fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> mlua::Result<Value> {
             for (i, x) in a.iter().enumerate() {
                 t.raw_set(i + 1, json_to_lua(lua, x)?)?;
             }
+            // Marked as a list even when it has items in it, so a script that
+            // reads a reply, empties one of its lists and posts it back sends a
+            // list — without having to remember which fields were lists.
+            t.set_metatable(Some(crate::json_array::array_metatable(lua)?));
             Value::Table(t)
         }
         serde_json::Value::Object(o) => {
@@ -214,6 +218,23 @@ fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> mlua::Result<Value> {
 /// object. That is the only rule Lua's one table type can support, and stating
 /// it is better than guessing per call.
 pub(crate) fn lua_to_json(v: &Value) -> mlua::Result<serde_json::Value> {
+    lua_to_json_at(v, 0)
+}
+
+/// How deep a table may nest before `json.encode` gives up.
+///
+/// A table holding itself is a **stack overflow**, which on this path is a
+/// process crash rather than a Lua error — no message, no traceback, nothing to
+/// catch. `json.array` makes it a one-liner (`local t = json.array{} t[1] = t`),
+/// so the limit that the editor's encoder always had belongs here too.
+const JSON_MAX_DEPTH: usize = 64;
+
+fn lua_to_json_at(v: &Value, depth: usize) -> mlua::Result<serde_json::Value> {
+    if depth > JSON_MAX_DEPTH {
+        return Err(mlua::Error::RuntimeError(
+            "json.encode: this table nests more than 64 deep — does it contain itself?".into(),
+        ));
+    }
     Ok(match v {
         Value::Nil => serde_json::Value::Null,
         Value::Boolean(b) => serde_json::Value::Bool(*b),
@@ -223,10 +244,18 @@ pub(crate) fn lua_to_json(v: &Value) -> mlua::Result<serde_json::Value> {
             .unwrap_or(serde_json::Value::Null),
         Value::String(s) => serde_json::Value::String(s.to_string_lossy().to_string()),
         Value::Table(t) => {
-            if t.raw_len() > 0 || t.contains_key(1)? {
+            // The shape says array when it can; `json.array` says so when it
+            // cannot. An empty table is both an empty list and an empty object,
+            // and it stays an object — see `crate::json_array`.
+            if crate::json_array::encodes_as_array(t) {
+                if let Some(why) = crate::json_array::problem(t) {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "json.encode: this table is marked as a list (json.array) but {why}"
+                    )));
+                }
                 let mut a = Vec::new();
                 for x in t.clone().sequence_values::<Value>() {
-                    a.push(lua_to_json(&x?)?);
+                    a.push(lua_to_json_at(&x?, depth + 1)?);
                 }
                 serde_json::Value::Array(a)
             } else {
@@ -239,7 +268,7 @@ pub(crate) fn lua_to_json(v: &Value) -> mlua::Result<serde_json::Value> {
                         Value::Number(n) => crate::api::format_lua_number(n),
                         _ => continue,
                     };
-                    o.insert(k, lua_to_json(&x)?);
+                    o.insert(k, lua_to_json_at(&x, depth + 1)?);
                 }
                 serde_json::Value::Object(o)
             }
@@ -564,6 +593,14 @@ pub(crate) fn install_http_api(
         }) {
             let _ = t.set("decode", f);
         }
+        // `json.array` / `json.isArray`: the only way to send `[]`, and the way
+        // a decoded list stays a list through an edit. Same module the editor's
+        // package API installs, so the two cannot answer this differently.
+        if let Err(e) = crate::json_array::install(lua, &t) {
+            // Not silently: a missing `json.array` fails later as "attempt to
+            // call a nil value", pointing at the call site rather than the cause.
+            log(&logs, LogLevel::Error, format!("json.array could not be installed: {e}"));
+        }
         let _ = lua.globals().set("json", t);
     }
 
@@ -704,6 +741,39 @@ mod tests {
         // A value json can't represent is refused with a message that names it.
         let e = lua.load("return json.encode(print)").exec().unwrap_err().to_string();
         assert!(e.contains("cannot encode"), "{e}");
+    }
+
+    /// The empty list. `{}` is both an empty list and an empty object, and the
+    /// encoder has to pick one — it picks the object, because an empty body
+    /// posted to an API that reads objects has to stay an object. `json.array`
+    /// is how a script says the other thing (`floptle/0152`).
+    #[test]
+    fn an_empty_list_can_be_sent_and_a_decoded_list_stays_one() {
+        let (lua, _, _) = lua_with_http();
+        let s = |src: &str| -> String { lua.load(src).call::<String>(()).expect(src) };
+
+        assert_eq!(s("return json.encode{}"), "{}", "the default must not move");
+        assert_eq!(s("return json.encode(json.array{})"), "[]");
+        assert_eq!(s("return json.encode{ ids = json.array{} }"), r#"{"ids":[]}"#);
+        assert_eq!(s("return json.encode(json.array{1, 2})"), "[1,2]");
+        // The case from the card: read a reply, empty one of its lists, send it
+        // back — and it is still a list, with nothing remembered by the script.
+        assert_eq!(
+            s("local b = json.decode('{\"ids\":[1,2]}') \
+               for i = #b.ids, 1, -1 do b.ids[i] = nil end \
+               return json.encode(b)"),
+            r#"{"ids":[]}"#
+        );
+        // …and the two empties can be told apart after a decode.
+        assert!(lua.load("return json.isArray(json.decode('[]'))").call::<bool>(()).unwrap());
+        assert!(!lua.load("return json.isArray(json.decode('{}'))").call::<bool>(()).unwrap());
+        // A list carrying a name is a mistake, and the message says which name.
+        let e = lua
+            .load("local t = json.array{1} t.name = 'x' return json.encode(t)")
+            .exec()
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("marked as a list") && e.contains("\"name\""), "{e}");
     }
 
     /// Nothing opens a socket outside Play, and the refusal says why. An

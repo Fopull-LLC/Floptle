@@ -125,6 +125,38 @@ impl Editor {
     }
 
     /// Persist the per-texture sampling settings to `.floptle/textures.ron`.
+    /// Store one texture's import settings and make everything holding the old
+    /// ones let go.
+    ///
+    /// Its own function because there are two callers now — the Assets panel
+    /// and the Aseprite import, which slices a sheet on the person's behalf —
+    /// and the four things that have to happen after the write are exactly the
+    /// four somebody would forget.
+    pub(crate) fn apply_texture_setting(
+        &mut self,
+        path: &str,
+        setting: crate::assets::TexSetting,
+    ) {
+        // Stored under the PROJECT-RELATIVE key, which is how scenes and
+        // materials reference a texture; callers hand over absolute paths.
+        let path = crate::assets::asset_rel_path(path, &self.project_root);
+        self.texture_settings.insert(path.clone(), setting);
+        // Drop the cached registration so the texture re-uploads with the new
+        // sampler (and mips) on next use. The registry is keyed by the ref AS
+        // WRITTEN, so drop every spelling of this texture.
+        let root = self.project_root.clone();
+        let same = |k: &String| crate::assets::asset_rel_path(k, &root) == path;
+        self.texture_registry.retain(|k, _| !same(k));
+        self.texture_registry_setting.retain(|k, _| !same(k));
+        // The terrain palette bakes its own 256² copy at load, so a filter
+        // change has to re-RESAMPLE it — a sampler swap alone cannot un-blur a
+        // bilinear resize. Only re-upload if this texture is in the palette.
+        if self.terrain_textures.contains(&path) {
+            self.terrain_textures_dirty = true;
+        }
+        self.save_texture_settings();
+    }
+
     pub(crate) fn save_texture_settings(&self) {
         let dir = self.project_root.join(".floptle");
         let _ = std::fs::create_dir_all(&dir);
@@ -890,9 +922,17 @@ impl Editor {
                 && let Some(rel) = rel.to_str()
             {
                 self.mesh_registry.remove(rel); // model asset (a Matter::Mesh ref)
-                let clip_key = rel.strip_suffix(floptle_scene::ANIM_CLIP_EXT); // a `.anim.ron` clip
+                // A `.anim.ron` clip — or a `.spriteanim.ron`, which lands in
+                // the same registry and so has to leave it the same way.
+                let clip_key = rel
+                    .strip_suffix(floptle_scene::ANIM_CLIP_EXT)
+                    .or_else(|| rel.strip_suffix(floptle_scene::SPRITE_ANIM_EXT));
                 if let Some(ck) = clip_key {
                     self.anim.clips.retain(|(k, _)| k != ck);
+                    // …and it stops being a SPRITE key. Left behind, it refuses
+                    // every future save to that key — forever, against a file
+                    // that is no longer there.
+                    self.anim.sprite_keys.remove(ck);
                     // Stop the Animating tab from re-saving (and resurrecting) this clip.
                     if self.anim_ui.clip_doc.as_ref().map(|(k, _)| k.as_str()) == Some(ck) {
                         self.anim_ui.clip_doc = None;
@@ -1802,6 +1842,9 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
     let up = right.cross(fwd);
     let rot = Quat::from_mat3(&Mat3::from_cols(right, up, -fwd));
     floptle_scene::NodeDoc {
+        camera_2d: None,
+        sort_mode: None,
+        parallax: None,
         id: None,
         parent_id: None,
         terrain_gen: None,

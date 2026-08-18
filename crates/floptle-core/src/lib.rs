@@ -24,6 +24,7 @@
 // Phase 1 modules (the foundation the frame loop hangs on). `scene`, `pool`,
 // and `serde_ron` arrive in their roadmap phases; these are live.
 pub mod access;
+pub mod camera2d;
 pub mod ecs;
 pub mod event;
 pub mod frames;
@@ -46,16 +47,16 @@ pub use ecs::{Entity, World};
 pub use layers::Layers;
 pub use material::{Material, ObjectMaterials, Retro, Shading, Tiling};
 pub use matter::{
-    active_camera, is_disabled, is_persistent, is_spot, world_transform, MIN_SPOT_ANGLE, OMNI_ANGLE, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, Cast2D,
+    active_camera, is_disabled, is_drawn, is_persistent, is_spot, world_transform, MIN_SPOT_ANGLE, OMNI_ANGLE, AnimController, AoMode, BodyKind, BodyMode, BoneAttach, Cast2D,
     CastShadow,
     CelestialBody, Collidable, Disabled, GravityMode, Layer, Light, LightShape, Lighting2D, Lit2D, Lit2DFacts, Made, Matter,
     MeshCollider, Name, NavMeshExclude,
     Parent,
-    ParticleSystem, Persistent, RepeatIndex, RigidBody, SceneTag, ScreenShader, Shadow2D, Shape, Sorting, Spin, Sprite, Sprites,
+    Parallax, ParticleSystem, Persistent, RepeatIndex, RigidBody, SceneTag, ScreenShader, Shadow2D, Shape, SortMode, Sorting, Spin, Sprite, Sprites,
     Tags,
     TerrainGen, TexturePaint, Trigger, VertexPaint, WaterKind,
     Visible, DEFAULT_SORTING_LAYER, EMPTY_TILE, SORT_LAYER_STEP, SORT_ORDER_STEP,
-    infers_2d, resolve_2d, resolve_shadow_2d, sorting_offset,
+    SORT_Y_BANDS, infers_2d, rank_offset, resolve_2d, resolve_shadow_2d, sorting_offset,
 };
 pub use net::{NetId, Replicated, ReplicationMode};
 pub use tile::{

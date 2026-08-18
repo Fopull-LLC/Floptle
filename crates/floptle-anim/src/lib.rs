@@ -219,14 +219,44 @@ impl Track<f32> {
     }
 }
 
+/// One **sprite frame**: which image, how that image is cut, and which piece.
+///
+/// The whole point of it being one value is that its four numbers cannot be
+/// keyed apart. Sprite animation was always *possible* — point a material at a
+/// sheet and animate its `cell` — but the texture and the sheet's grid were
+/// separate lanes, so a clip could only ever live on **one sheet**, and getting
+/// the two out of step gave you a cell index read against the wrong grid, which
+/// draws a slice of the wrong picture rather than failing.
+///
+/// `cols`/`rows` of `1` (the default) is the whole image, which is what a
+/// folder of exported PNGs gives you and what a lone `cell` could not express.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct SpriteFrame {
+    /// Project-relative image path.
+    pub texture: String,
+    /// How the image is cut. `1 × 1` is the whole image.
+    pub cols: u32,
+    pub rows: u32,
+    /// Which cell, row-major from the top-left.
+    pub cell: u32,
+}
+
+impl SpriteFrame {
+    /// The whole of an image — no grid, no cell.
+    pub fn whole(texture: impl Into<String>) -> Self {
+        Self { texture: texture.into(), cols: 1, rows: 1, cell: 0 }
+    }
+}
+
 /// A value a [`PropertyTrack`] keyframe can hold. Numbers cover the bulk of
 /// animatable component fields (opacity, positions, colors, light intensity…);
-/// text covers path-like fields — the headline case being a UI image swapping
-/// its texture frame-by-frame (sprite animation).
+/// text covers path-like fields; a frame is a whole sprite state at once.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PropValue {
     Float(f32),
     Text(String),
+    /// A sprite frame — always stepped, see [`SpriteFrame`].
+    Frame(SpriteFrame),
 }
 
 /// A lane that animates one `(component, field)` on a node — the generic
@@ -264,7 +294,12 @@ impl PropertyTrack {
         let k = if tb > ta { ((t - ta) / (tb - ta)).clamp(0.0, 1.0) } else { 0.0 };
         match (&self.values[a], &self.values[b]) {
             (PropValue::Float(x), PropValue::Float(y)) => Some(PropValue::Float(x + (y - x) * k)),
-            // Text (or mismatched) values can't blend — hold the earlier key.
+            // Text, frames and mismatched pairs can't blend — hold the earlier
+            // key. For a frame this is not a fallback but the only meaning it
+            // has: half of one picture and half of the next is not a picture,
+            // and blending the *cell indices* — the shape a naive version on
+            // top of a numeric lane would take — plays every cell in between,
+            // which reads as the clip running at the wrong speed, not as a bug.
             _ => Some(self.values[a].clone()),
         }
     }
@@ -1197,6 +1232,42 @@ mod tests {
             interp: Interp::Linear,
         };
         assert_eq!(op.sample(0.25), Some(PropValue::Float(0.25)));
+    }
+
+    /// A frame lane holds, even when something has set it to `Linear`.
+    ///
+    /// Worth pinning rather than trusting: the lane's interp flag is written by
+    /// the editor and read from a file, so "always stepped" has to be a property
+    /// of the value, not a promise about the flag.
+    #[test]
+    fn a_sprite_frame_never_blends_however_the_lane_is_flagged() {
+        let f = |tex: &str, cell: u32| SpriteFrame {
+            texture: tex.into(),
+            cols: 4,
+            rows: 1,
+            cell,
+        };
+        let lane = PropertyTrack {
+            component: "Sprite".into(),
+            field: "frame".into(),
+            times: vec![0.0, 1.0],
+            values: vec![PropValue::Frame(f("a.png", 0)), PropValue::Frame(f("b.png", 3))],
+            interp: Interp::Linear,
+        };
+        assert_eq!(lane.sample(0.0), Some(PropValue::Frame(f("a.png", 0))));
+        assert_eq!(lane.sample(0.999), Some(PropValue::Frame(f("a.png", 0))));
+        assert_eq!(lane.sample(1.0), Some(PropValue::Frame(f("b.png", 3))));
+        // …and past the end it holds the last, like every other lane.
+        assert_eq!(lane.sample(99.0), Some(PropValue::Frame(f("b.png", 3))));
+    }
+
+    /// `whole` is the plain-image case a lone cell index could not express.
+    #[test]
+    fn a_whole_image_is_a_one_by_one_grid() {
+        let f = SpriteFrame::whole("art/shout.png");
+        assert_eq!(f.cols, 1);
+        assert_eq!(f.rows, 1);
+        assert_eq!(f.cell, 0);
     }
 
     #[test]

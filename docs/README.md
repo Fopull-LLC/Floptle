@@ -120,6 +120,8 @@ proposal is **not** documentation of what shipped — for that, use the guides a
 
 - [engine-roadmap.md](engine-roadmap.md) — the four workstreams from "great editor" to
   "ship a whole game".
+- [2d-release-proposal.md](2d-release-proposal.md) — where the 2D layer stands against
+  Godot's, and the release that closes the gap.
 - [game-roadmap.md](game-roadmap.md) — **Floptle Solar**, the space-company game built in
   the engine to prove the engine.
 - [solar-demo-plan.md](solar-demo-plan.md) — the KSP-class demo build order (superseded as

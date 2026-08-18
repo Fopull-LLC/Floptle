@@ -349,6 +349,7 @@ pub(crate) fn kind_name(m: &Matter) -> &'static str {
     match m {
         Matter::Primitive { .. } => "primitive",
         Matter::Blob { .. } => "blob",
+        Matter::Sprite { .. } => "sprite",
         Matter::Mesh { .. } => "mesh",
         Matter::Empty => "empty",
         Matter::MapMesh { .. } => "mapMesh",

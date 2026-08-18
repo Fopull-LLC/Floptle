@@ -247,6 +247,7 @@ mod host;
 mod http_api;
 pub use http_api::open_in_browser;
 mod input_api;
+pub mod json_array;
 pub mod load_error;
 mod math_api;
 /// The vector [`nav_api`] hands back.
@@ -279,7 +280,8 @@ pub(crate) use api::install_handle_api;
 /// `mirror_components` reads them back (numeric) — the animation recorder diffs
 /// it to auto-key changed properties.
 pub use api::{
-    apply_component_color, apply_component_field, apply_component_field_str,
+    apply_component_color, apply_component_field, apply_component_field_str, apply_sprite_frame,
+    mirror_component_strings, read_sprite_frame,
     mirror_component_colors, mirror_components, HANDLE_KEYS,
 };
 pub use input_api::{SharedDomain, SharedInput};
@@ -967,6 +969,15 @@ pub(crate) struct SceneMirror {
     /// that is not one instead of handing back a handle whose every draw is
     /// silently dropped.
     sprite_batches: std::collections::HashSet<u32>,
+    /// What each node said about sorting, so `node:sorting()` can READ it.
+    ///
+    /// `setSorting` shipped without a getter, which makes the obvious pattern —
+    /// nudge a node one in front of whatever it is standing next to — impossible
+    /// to write: you cannot add one to a number you cannot ask for. Absent means
+    /// the node carries no `Sorting`, which the getter answers as the default
+    /// rather than as nil, because "Default layer, order 0" is the true answer
+    /// and nil would make every caller write the same fallback.
+    pub(crate) sorting: HashMap<u32, (String, i32, &'static str)>,
     /// UI elements' current text (so a script can read `node.text`).
     ui_texts: HashMap<u32, String>,
     /// UI elements' current style name (so a script can read `node.style`).
@@ -1161,7 +1172,49 @@ pub enum RichSet {
     /// them, which makes the ordinary 2D moves impossible: a character stepping
     /// behind a counter, a card lifting above the hand, a pickup that must draw
     /// over the tiles it lands on.
-    MatterSorting { layer: Option<String>, order: Option<i32> },
+    MatterSorting { layer: Option<String>, order: Option<i32>, mode: Option<String> },
+    /// `node:setParallax{ x =, y = }` — the per-axis scroll factor.
+    MatterParallax { x: Option<f32>, y: Option<f32> },
+    /// `node:setCamera2D{ follow =, smoothing =, deadZoneX =, … }` — how an
+    /// orthographic camera follows.
+    ///
+    /// Settable from a script because the target is: a camera follows the
+    /// player, and which node that is may be spawned, chosen at a character
+    /// select, or handed over mid-level. `follow = ""` stops following without
+    /// throwing away the dead zone and limits set beside it.
+    /// Every axis is its OWN option. Collapsing a pair into `[x, y]` at the
+    /// binding — with `0.0` for the axis nobody mentioned — is how
+    /// `setCamera2D{ maxY = 80 }` used to set `maxX` to zero and park the
+    /// camera against a limit nobody wrote.
+    MatterCamera2D {
+        follow: Option<String>,
+        smoothing: Option<f32>,
+        dead_zone_x: Option<f32>,
+        dead_zone_y: Option<f32>,
+        limits_on: Option<bool>,
+        min_x: Option<f32>,
+        min_y: Option<f32>,
+        max_x: Option<f32>,
+        max_y: Option<f32>,
+        /// `off = true` removes the behaviour entirely.
+        off: bool,
+    },
+    /// `node:shake(amount, seconds)` — a screen shake on a 2D camera.
+    CameraShake { amount: f32, seconds: f32 },
+    /// `node:setSprite{ ppu =, size =, cell =, flipX =, flipY =, pivot = }` —
+    /// make this node one sprite, or retune one.
+    MatterSprite {
+        ppu: Option<f32>,
+        size: Option<f32>,
+        cell: Option<u32>,
+        flip_x: Option<bool>,
+        flip_y: Option<bool>,
+        /// Per axis, for the same reason the camera's pairs are: `setSprite{
+        /// pivotY = 0 }` used to put `pivotX` back to 0.5, and that call is the
+        /// documented way to move a character's origin to its feet.
+        pivot_x: Option<f32>,
+        pivot_y: Option<f32>,
+    },
     /// `node:setLighting2D{ mode =, layers =, blocks = }` — the 2D lighting flag,
     /// the layers a light reaches, and whether this node blocks light
     /// (`floptle/0113`).
@@ -6704,6 +6757,57 @@ end
         assert!(
             host.drain_logs().iter().any(|l| l.msg.contains("no lag-comp context")),
             "the fallback must be loud"
+        );
+    }
+
+    /// A sprite frame lands on whichever thing owns the cell.
+    ///
+    /// A `Matter::Sprite` carries its own `cell` and its Material's is unused,
+    /// so writing the Material's for a Sprite node would set a number the
+    /// Inspector shows and nothing draws — the worst kind of wrong, because it
+    /// looks like it worked.
+    #[test]
+    fn a_sprite_frame_writes_the_cell_the_node_actually_reads() {
+        use floptle_core::{Material, Matter};
+
+        // A plane wearing a material: the Material's cell is the live one.
+        let mut world = World::default();
+        let plane = world.spawn();
+        world.insert(plane, Transform::IDENTITY);
+        world.insert(plane, Matter::Primitive { shape: floptle_core::Shape::Plane, color: [1.0; 3] });
+        world.insert(plane, Material::default());
+        crate::apply_sprite_frame(&mut world, plane, "art/hero.png", 8, 4, 5);
+        let m = world.get::<Material>(plane).unwrap();
+        assert_eq!(m.texture.as_deref(), Some("art/hero.png"));
+        assert_eq!((m.sheet_cols, m.sheet_rows, m.cell), (8, 4, 5));
+
+        // A Sprite node: the cell is on the Matter, and the Material's must be
+        // left alone rather than set to a number nothing looks at.
+        let sprite = world.spawn();
+        world.insert(sprite, Transform::IDENTITY);
+        world.insert(
+            sprite,
+            Matter::Sprite { ppu: 32.0, size: 1.0, cell: 0, flip_x: false, flip_y: false, pivot: [0.5, 0.5] },
+        );
+        world.insert(sprite, Material::default());
+        crate::apply_sprite_frame(&mut world, sprite, "art/hero.png", 8, 4, 5);
+        let Some(Matter::Sprite { cell, .. }) = world.get::<Matter>(sprite) else {
+            panic!("not a sprite any more")
+        };
+        assert_eq!(*cell, 5, "the Sprite's own cell is the one that draws");
+        let m = world.get::<Material>(sprite).unwrap();
+        assert_eq!((m.sheet_cols, m.sheet_rows), (8, 4), "the grid is still the Material's");
+        assert_eq!(m.cell, 0, "the Material's cell is unused here and must not be written");
+
+        // …and reading it back gives what playing it put in — the two halves a
+        // record-then-play round trip depends on.
+        assert_eq!(
+            crate::read_sprite_frame(&world, sprite),
+            Some(("art/hero.png".to_string(), 8, 4, 5))
+        );
+        assert_eq!(
+            crate::read_sprite_frame(&world, plane),
+            Some(("art/hero.png".to_string(), 8, 4, 5))
         );
     }
 

@@ -900,13 +900,82 @@ how many when the stream ends.
 
 `vec3(x, y, z)` · `vec2(x, y)` — plain `{x=, y=, z=}` tables.
 
-`json.encode(value)` / `json.decode(text)` / `json.null`.
+`json.encode(value)` / `json.decode(text)` / `json.null` / `json.array(t)` /
+`json.isArray(v)`.
 
 `json.null` encodes to JSON `null`. Setting a field to Lua `nil` **removes the
 key** rather than nulling it, so an API that reads an absent field as "leave
 this alone" and a null as "clear it" needs the sentinel to say the second one.
 Decoding is not symmetric on purpose: a JSON `null` still arrives as `nil`, so
 `if body.field then` keeps meaning what it always did.
+
+`json.array(t)` marks a table as a **list**. Lua has one table type and JSON has
+two, so the encoder guesses from the shape: keys `1..n` and nothing else is an
+array. That is right for every list with something in it and cannot be right for
+the empty one — `{}` is both an empty list and an empty object. It stays an
+object, because an empty body posted to an API that reads objects has to. So the
+empty list needs saying out loud:
+
+```lua
+http.post(url, { decision = "reject", selected_ids = json.array{} })  -- []
+http.post(url, { decision = "reject", selected_ids = {} })            -- {} — wrong type
+```
+
+`json.array()` with no argument builds a new empty list. `json.array(t)` returns
+the same table it was given, so `local ids = json.array{}` then `ids[#ids+1] = x`
+reads normally and sends a list whether or not anything went in.
+
+**`json.decode` marks every array it builds**, so read → edit → send back keeps
+the types it was handed without your remembering which fields were lists:
+
+```lua
+local body = json.decode(res.body)
+for i = #body.ids, 1, -1 do body.ids[i] = nil end
+json.encode(body)                    --> {"ids":[]} — still a list
+```
+
+One thing to know: the mark lives on the table, so `body.ids = {}` throws it away
+along with the table that carried it. `body.ids = json.array{}` is the
+replacement that keeps it.
+
+`json.isArray(v)` answers the question the shape used to leave open: **would
+`json.encode` write this as a JSON array?** It is how `json.decode("[]")` and
+`json.decode("{}")` are told apart, which they could not be before.
+
+A table that is marked as a list and also carries a name (`t.name = "x"`) is
+refused by `json.encode` with a message naming the key, rather than having the
+key silently dropped.
+
+`ed.copy(text)` puts a string on the system clipboard — the thing a **copy
+button** is made of. Everything a panel computes that somebody wants elsewhere
+goes through it: a node path to paste into a search box, a request id for a bug
+report, a snippet from a service that belongs in a file your package never
+opened. Before it, the only exit was `ed.write` — a file, a path and an
+overwrite policy for four lines somebody wanted to paste.
+
+It needs **no permission**: nothing leaves the machine and nothing arrives.
+`Browser` guards `ed.openUrl` because that hands a string to the network; this
+hands it to the person at the keyboard, who asked for it by pressing the button.
+
+**It is a write and there is no read.** Nothing in this API can see what is on
+the clipboard, and that absence is a decision, not an oversight — the clipboard
+holds whatever the person last copied from anywhere, and a package that renders
+a panel has no claim on it.
+
+The editor shows a toast saying how much was copied, so a copy button confirms
+itself and you do not have to build the feedback. Text over 1 MB is refused with
+a message rather than truncated: half a snippet pastes without complaint, which
+is worse than a failure you can see.
+
+**It is the one system clipboard** — the same one Ctrl+C uses. Copying from a
+package replaces whatever was on it, including a set of scene nodes the person
+had copied to paste into another editor window. Only the last copy of a frame is
+written, and an identical repeat is skipped, so calling `ed.copy` from a hook
+that runs every frame does not fight with the rest of the machine.
+
+```lua
+gui.button(row, { text = "⎘ Copy", onClick = function() ed.copy(block.code) end })
+```
 
 `sys.openUrl(url)` and `sys.platform` — `Browser` permission.
 

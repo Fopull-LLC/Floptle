@@ -1077,7 +1077,7 @@ they'll fall. Press it again to put them back.",
             title: "Add a cube and name it",
             body: "\
 In the **Hierarchy** panel (top left), open the **✚ New** menu and pick
-**■ Cube**. It appears at the origin.
+**■ 3D ▸ ■ Cube**. It appears at the origin.
 
 Now rename it. Double-click its row in the Hierarchy, type `Spinner`, press
 Enter.
@@ -1287,7 +1287,7 @@ script, and what `update` and `params` are.
             body: "\
 Start from a new empty project, or clear the starter scene — either is fine.
 
-Add a cube (Hierarchy → **✚ New** → **■ Cube**), rename it `Ground`, and in
+Add a cube (Hierarchy → **✚ New** → **■ 3D** → **■ Cube**), rename it `Ground`, and in
 the Inspector set its **scale** to about `40, 1, 40`. That's a wide, thin slab.
 
 Now give it a body: in the Inspector, **➕ Add Component → Rigidbody**, and set

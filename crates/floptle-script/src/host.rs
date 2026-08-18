@@ -2084,6 +2084,28 @@ impl ScriptHost {
         out
     }
 
+    /// Every method a node handle answers to — `setSprite`, `sorting`, `shake`…
+    ///
+    /// [`api_surface`](Self::api_surface) walks the GLOBALS, so no `node:` method
+    /// has ever been in it: the whole handle surface was covered by no test at
+    /// all, and six 2D bindings were in the reference only because somebody
+    /// typed them there. Read off the metatable the handles actually use, so a
+    /// method that ships and is not documented is a build failure like any other.
+    pub fn node_methods() -> Vec<String> {
+        let host = Self::new();
+        let mut out: Vec<String> = Vec::new();
+        if let Ok(mt) = host.lua.named_registry_value::<mlua::Table>("floptle_node_methods") {
+            for pair in mt.pairs::<mlua::Value, mlua::Value>().flatten() {
+                if let (mlua::Value::String(k), mlua::Value::Function(_)) = pair {
+                    out.push(k.to_string_lossy().to_string());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Run one line of Lua against a real host, with `node` bound to a node
     /// handle — the harness `opts::TABLES`' guard test uses to call every option
     /// table for real (`floptle/0082`).
@@ -4715,6 +4737,7 @@ impl ScriptHost {
         let mut live_tilemaps: std::collections::HashSet<u32> =
             std::collections::HashSet::new();
         s.sprite_batches.clear();
+        s.sorting.clear();
         s.by_kind.clear();
         s.by_tag.clear();
         for (e, tr) in world.query::<Transform>() {
@@ -4810,6 +4833,13 @@ impl ScriptHost {
                     s.sprite_batches.insert(id);
                 }
                 _ => {}
+            }
+            if let Some(so) = world.get::<floptle_core::Sorting>(e) {
+                let mode = match so.mode {
+                    floptle_core::SortMode::Y => "y",
+                    floptle_core::SortMode::Order => "order",
+                };
+                s.sorting.insert(id, (so.layer.clone(), so.order, mode));
             }
             if let Some(spec) = world.get::<floptle_ui::ElementSpec>(e) {
                 if let Some(t) = spec.text.as_ref() {

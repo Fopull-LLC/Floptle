@@ -199,6 +199,7 @@ impl Editor {
                     crate::node_bounds::Measured {
                         model_size: model_size(m),
                         sprite_reach: None,
+                        sprite_size: None,
                     },
                 )
             },
@@ -251,6 +252,8 @@ impl Editor {
     /// edit to be undoable says so.
     pub(crate) fn apply_ext_commands(&mut self) {
         let cmds = self.ext.take_cmds();
+        // Collected rather than applied in the loop — see below.
+        let mut copies: Vec<String> = Vec::new();
         if cmds.is_empty() {
             return;
         }
@@ -382,8 +385,48 @@ impl Editor {
                 ExtCmd::Message { title, body } => {
                     self.ext_message = Some((title, body));
                 }
+                ExtCmd::Copy(text) => copies.push(text),
             }
         }
+        // **The last copy of the frame, once.** A clipboard holds one value, so
+        // applying every queued copy would write the same selection two or
+        // three times for no visible difference — and a package calling
+        // `ed.copy` from `onUpdate` would take the system selection sixty times
+        // a second, which makes the user's own clipboard unusable in every
+        // other application on the machine. Identical text is skipped for the
+        // same reason.
+        if let Some(text) = copies.pop()
+            && self.last_ext_copy.as_deref() != Some(text.as_str())
+        {
+                let n = text.chars().count();
+                self.ensure_os_clipboard();
+                // The editor's own clipboard, so a package's copy button and
+                // Ctrl+C put text in the same place — and so the answer is the
+                // same on all three platforms.
+                let took = match self.os_clipboard.as_mut() {
+                    Some(c) => {
+                        c.set_text(text.clone());
+                        self.window.is_some()
+                    }
+                    None => false,
+                };
+                self.last_ext_copy = Some(text);
+                // A copy button with no visible result is one people press three
+                // times, so the editor confirms it — but only when there was
+                // somewhere to put it. With no window there is no clipboard
+                // backend and `set_text` is a silent no-op; saying "copied"
+                // there would be the editor asserting something it did not do.
+                if took {
+                    let unit = if n == 1 { "character" } else { "characters" };
+                    self.toast = Some((format!("⎘  copied {n} {unit}"), 2.0));
+                } else {
+                    self.console.push(
+                        floptle_script::LogLevel::Warn,
+                        "ed.copy: there is no clipboard to write to here".into(),
+                        None,
+                    );
+                }
+            }
         self.drain_ext_log();
         self.serve_mesh_reads();
         self.serve_doc_reads();
@@ -803,19 +846,23 @@ fn known_doc_fields() -> &'static [&'static str] {
             layer,
             tags,
             sorting,
+            sort_mode,
+            parallax,
             lit_2d,
             light_layers,
             shadow_2d,
             light_inner,
             light_falloff,
             light_shadows,
+            camera_2d,
         } = d;
         let _ = (
             name, transform, matter, scripts, material, object_materials, rigidbody, celestial,
             mesh_collider, disabled, paint, tex_paint, terrain_gen, collidable, trigger,
             nav_exclude, visible, cast_shadow, anim_controller, particles, id, parent_id, parent,
-            attachment, net, ui_layer, ui, audio, layer, tags, sorting, lit_2d, light_layers,
-            shadow_2d, light_inner, light_falloff, light_shadows,
+            attachment, net, ui_layer, ui, audio, layer, tags, sorting, sort_mode, parallax, lit_2d,
+            light_layers,
+            shadow_2d, light_inner, light_falloff, light_shadows, camera_2d,
         );
     }
     &[
@@ -846,12 +893,15 @@ fn known_doc_fields() -> &'static [&'static str] {
         "layer",
         "tags",
         "sorting",
+        "sort_mode",
+        "parallax",
         "lit_2d",
         "light_layers",
         "shadow_2d",
         "light_inner",
         "light_falloff",
         "light_shadows",
+        "camera_2d",
         // `id`, `parent_id`, `parent` and `attachment` are the scene FILE's
         // linkage between nodes. A package addresses a node by the id `scene.*`
         // gave it and re-parents with `scene.setParent`; letting one write these

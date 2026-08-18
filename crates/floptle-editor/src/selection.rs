@@ -236,10 +236,16 @@ impl Editor {
         let ro = near.truncate() / near.w;
         let rd = (far.truncate() / far.w - ro).normalize();
 
+        // Where each node's picture actually is this frame. Clicking has to test
+        // against what is on screen: a sprite on a parallax layer is drawn a long
+        // way from its own transform, so without this the visible sprite picks
+        // nothing and empty space picks it.
+        let draws = crate::sprite2d::draw_offsets(&self.world, &self.project, cam.world_position);
         let mut best: Option<(Entity, f32)> = None;
         for (e, m) in self.world.query::<Matter>() {
             // Ray-test against the node's WORLD placement (so parented nodes pick).
-            let t = floptle_core::world_transform(&self.world, e);
+            let mut t = floptle_core::world_transform(&self.world, e);
+            t.translation += draws.get(&e).copied().unwrap_or_default();
             let hit = match m {
                 Matter::Primitive { shape, .. } => {
                     // Transform the ray into the object's local frame (the same `t`
@@ -311,6 +317,34 @@ impl Editor {
                 Matter::SpriteBatch { size } => {
                     let center = (t.translation - cam.world_position).as_vec3();
                     ray_sphere(ro, rd, center, (size * t.scale.max_element()).max(0.1))
+                }
+                // One sprite is a quad, and clicking it should feel like
+                // clicking the picture — so pick against a sphere around where
+                // the picture IS, at the size it is actually drawn.
+                //
+                // Two things that are easy to leave out and both make a sprite
+                // unclickable where it can plainly be seen: a `ppu` sprite's
+                // size comes from its texture, not from `size`; and the pivot
+                // moves the quad off the origin, so a feet-pivoted character is
+                // drawn entirely ABOVE the point a naive sphere is centred on.
+                Matter::Sprite { ppu, size, pivot, .. } => {
+                    let mat = self.world.get::<floptle_core::Material>(e);
+                    let px = mat
+                        .and_then(|m| m.texture.as_deref())
+                        .and_then(|p| self.texture_registry.get(p).copied())
+                        .and_then(|id| self.raster.as_ref().and_then(|r| r.texture_size(id)));
+                    let (w, h) = crate::sprite2d::sprite_world_size(*ppu, *size, mat, px);
+                    let s = t.scale;
+                    let (w, h) = (w * s.x.abs(), h * s.y.abs());
+                    // The quad's centre, from the pivot, in the node's own frame.
+                    let off = t.rotation
+                        * floptle_core::math::Vec3::new(
+                            (0.5 - pivot[0]) * w,
+                            (0.5 - pivot[1]) * h,
+                            0.0,
+                        );
+                    let center = (t.translation - cam.world_position).as_vec3() + off;
+                    ray_sphere(ro, rd, center, (w.max(h) * 0.5).max(0.05))
                 }
                 // no mesh — select via the hierarchy.
                 Matter::Empty

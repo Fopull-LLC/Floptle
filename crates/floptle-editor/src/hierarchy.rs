@@ -5,10 +5,8 @@
 use std::collections::HashMap;
 
 use floptle_core::{Entity, Matter};
-use floptle_scene::MatterDoc;
 
 use crate::assets::{is_script, AssetPayload};
-use crate::matter_catalog::{new_capsule, new_cube, new_plane, new_sphere};
 use crate::{EditorCmd, EditorTabViewer};
 
 /// What a hierarchy row carries while dragged — its entity, so dropping it on
@@ -256,216 +254,55 @@ impl<'a> EditorTabViewer<'a> {
     }
 }
 
-/// The shared node-creation catalog (Hierarchy ✚ New, ✚ Add child, and the
+/// The shared node-creation menu (Hierarchy ✚ New, ✚ Add child, and the
 /// menu-bar Add menu all list the same things).
+///
+/// The catalog itself is data — [`crate::matter_catalog::NEW_CATALOG`] — and
+/// this only renders it. That split is the point: the menu used to BE the
+/// catalog, a flat run of twenty `if ui.button(..)` arms in creation order, and
+/// there was nothing to check because a list has no shape. Now the shape is a
+/// value, the grouping is a decision written down once, and a new node type that
+/// nobody filed under a heading fails the build.
 pub(crate) fn node_new_menu(ui: &mut egui::Ui, cmd: &mut EditorCmd, parent: Option<Entity>) {
-        let mut pick: Option<MatterDoc> = None;
-        if ui.button("■ Cube").on_hover_text("a box primitive — the go-to building block (floors, walls, crates)").clicked() {
-            pick = Some(new_cube());
-            ui.close();
+    use crate::matter_catalog::{NEW_CATALOG, NEW_TOP_LEVEL, NewEntry, NewNode};
+
+    fn entry(ui: &mut egui::Ui, e: &NewEntry, cmd: &mut EditorCmd, parent: Option<Entity>) {
+        let mut b = ui.button(e.label);
+        if !e.hover.is_empty() {
+            b = b.on_hover_text(e.hover);
         }
-        if ui.button("○ Sphere").on_hover_text("a sphere primitive").clicked() {
-            pick = Some(new_sphere());
-            ui.close();
+        if !b.clicked() {
+            return;
         }
-        if ui.button("▪ Capsule").on_hover_text("a capsule primitive (ideal for a physics character body)").clicked() {
-            pick = Some(new_capsule());
-            ui.close();
-        }
-        if ui.button("▭ Plane").on_hover_text("a flat double-sided quad — add a Material to texture it, drop opacity below 1 for transparency").clicked() {
-            pick = Some(new_plane());
-            ui.close();
-        }
-        if ui
-            .button("▦ Tilemap")
-            .on_hover_text(
-                "a grid of spritesheet cells as ONE mesh — the 2D level primitive. \
-                 Give it a Material with a sheet, then fill the grid from a script \
-                 (node:setTilemap{…} / tm:set). Neighbouring tiles share an exact \
-                 edge, so no seams open up as the camera moves",
-            )
-            .clicked()
-        {
-            pick = Some(MatterDoc::Tilemap {
-                cols: 16,
-                rows: 16,
-                tile: 1.0,
-                data: Vec::new(),
-                tileset: String::new(),
-            });
-            ui.close();
-        }
-        if ui
-            .button("▪ Sprite Batch")
-            .on_hover_text(
-                "N sprites from one node, each with its own cell AND tint, drawn \
-                 per frame from a script (node:sprites() / b:draw(…)) — no scene \
-                 node per bullet and no pool to grow",
-            )
-            .clicked()
-        {
-            pick = Some(MatterDoc::SpriteBatch { size: 1.0 });
-            ui.close();
-        }
-        if ui.button("◑ Blob").on_hover_text("an SDF metaball — nearby blobs melt together (organic/surreal shapes)").clicked() {
-            pick = Some(MatterDoc::Blob { scale: 1.0 });
-            ui.close();
-        }
-        if ui
-            .button("🗀 Empty")
-            .on_hover_text("a blank node — just a transform. Build it up with the Inspector's ➕ Add Component (also groups / parents children).")
-            .clicked()
-        {
-            pick = Some(MatterDoc::Empty);
-            ui.close();
-        }
-        ui.menu_button("▦ Model shape", |ui| {
-            for shape in crate::map_edit::MapShape::ALL {
-                let label = shape.label().trim_start_matches("Model ");
-                if ui.button(format!("▦ {label}")).clicked() {
-                    cmd.add_map_shape = Some(shape);
-                    ui.close();
+        match e.make {
+            NewNode::Matter(make) => {
+                let m = make();
+                match parent {
+                    Some(p) => cmd.add_parented = Some((m, p)),
+                    None => cmd.add = Some(m),
                 }
+            }
+            NewNode::Terrain => cmd.open_new_terrain = true,
+            NewNode::Camera => cmd.add_camera = Some(parent),
+            NewNode::MapShape(shape) => cmd.add_map_shape = Some(shape),
+            NewNode::Ui(what) => cmd.add_ui = Some(what),
+        }
+        ui.close();
+    }
+
+    for e in NEW_TOP_LEVEL {
+        entry(ui, e, cmd, parent);
+    }
+    ui.separator();
+    for g in NEW_CATALOG {
+        ui.menu_button(g.title, |ui| {
+            for e in g.items {
+                entry(ui, e, cmd, parent);
             }
         })
         .response
-        .on_hover_text(
-            "editable blockout geometry — the ▦ Model tool (key 8) edits its \
-             faces/edges/verts, extrudes, and assigns per-face materials",
-        );
-        ui.separator();
-        if ui.button("Δ Terrain").on_hover_text("a sculptable SDF terrain node").clicked() {
-            cmd.open_new_terrain = true;
-            ui.close();
-        }
-        if ui.button("⌖ Camera").on_hover_text("a viewpoint you can give play-mode authority").clicked() {
-            cmd.add_camera = Some(parent);
-            ui.close();
-        }
-        if ui.button("● Point Light").on_hover_text("a placeable omni light (color / intensity / range)").clicked() {
-            pick = Some(MatterDoc::PointLight {
-                color: [1.0, 0.95, 0.85],
-                intensity: 1.0,
-                range: 10.0,
-                shape: Default::default(),
-                shadows: false,
-                spot: None,
-            });
-            ui.close();
-        }
-        if ui
-            .button("◤ Spot Light")
-            .on_hover_text("a point light aimed down the node's forward — rotate it to aim")
-            .clicked()
-        {
-            pick = Some(MatterDoc::PointLight {
-                color: [1.0, 0.95, 0.85],
-                intensity: 4.0,
-                range: 14.0,
-                shape: Default::default(),
-                // See `matter_catalog`: a spot is aimed at one thing, so it
-                // shadows by default where an omni lamp does not.
-                shadows: true,
-                spot: Some(floptle_scene::SpotDoc { angle: 45.0, softness: 0.25 }),
-            });
-            ui.close();
-        }
-        if ui.button("⬇ Gravity Volume").on_hover_text("physics gravity: Down (level) or Radial (planet)").clicked() {
-            pick = Some(MatterDoc::GravityVolume { radial: false, strength: 9.81, radius: 20.0 });
-            ui.close();
-        }
-        if ui
-            .button("◈ Field Shape")
-            .on_hover_text(
-                "an authored SDF shape: assign an sdf-stage .flsl on its Material and the \
-                 shader IS the geometry, raymarched into the scene field (up to 4 per scene)",
-            )
-            .clicked()
-        {
-            pick = Some(MatterDoc::FieldShape { radius: 1.5 });
-            ui.close();
-        }
-        if ui
-            .button("☀ Light Probes")
-            .on_hover_text(
-                "baked bounce light: a box you place over the space, then Bake in the \
-                 Inspector. Inside it, flat ambient is replaced by what the surrounding \
-                 surfaces actually reflect. Saved as a .fgi beside the scene.",
-            )
-            .clicked()
-        {
-            // One source of defaults (`Matter::default_light_probes`): a
-            // room-sized box at one probe per two metres and a fast first bake,
-            // which is the right thing to drop in and press Bake on.
-            pick = Some(MatterDoc::from(&Matter::default_light_probes()));
-            ui.close();
-        }
-        if ui
-            .button("⬚ Nav Mesh")
-            .on_hover_text(
-                "where characters can walk. Bakes what a character would collide with, \
-                 filtered by layer, and works its own bounds out. Saved as a .fnav beside \
-                 the scene.",
-            )
-            .clicked()
-        {
-            // The id is replaced with a fresh one on the way in — see `cmd.add`.
-            pick = Some(MatterDoc::from(&Matter::default_nav_mesh(1)));
-            ui.close();
-        }
-        if ui
-            .button("⇄ Nav Link")
-            .on_hover_text(
-                "a way across that is not walking: a ladder, a jump down, a vault, a door. \
-                 This node is one end and the far end is an offset from it; bake the navmesh \
-                 again to join them up.",
-            )
-            .clicked()
-        {
-            // The id is replaced with a fresh one on the way in — see `cmd.add`.
-            pick = Some(MatterDoc::from(&Matter::default_nav_link(1)));
-            ui.close();
-        }
-        if ui
-            .button("▨ Nav Area")
-            .on_hover_text(
-                "ground that means something: water, mud, a road, or nothing walkable at \
-                 all. Routes cost more (or less) through it, and one character can refuse it \
-                 while another wades in.",
-            )
-            .clicked()
-        {
-            pick = Some(MatterDoc::from(&Matter::default_nav_area()));
-            ui.close();
-        }
-        if ui.button("◎ Skybox").on_hover_text("the scene environment background (solid color or equirect texture)").clicked() {
-            pick = Some(MatterDoc::from(&Matter::default_skybox()));
-            ui.close();
-        }
-        ui.menu_button("🖼 UI", |ui| {
-        for (label, what, hover) in [
-            ("Layer", crate::ui_game::AddUi::Layer, "a screen-space UI canvas — elements go inside it"),
-            ("Panel", crate::ui_game::AddUi::Panel, "a rounded-rect shape (radius 0 = sharp, high = pill)"),
-            ("Text", crate::ui_game::AddUi::Text, "a text label (your fonts later; neutral fallback for now)"),
-            ("Image", crate::ui_game::AddUi::Image, "any texture from your assets — the engine ships no UI art"),
-            ("Slider", crate::ui_game::AddUi::Slider, "a value-driven bar (health, progress…): track + Fill + Handle parts you retexture and arrange freely"),
-            ("Button", crate::ui_game::AddUi::Button, "a clickable element — its scripts get hoverStart/pressed/clicked hooks"),
-            ("Scroll View", crate::ui_game::AddUi::Scroll, "a wheel-scrollable viewport — put more content inside than fits and it clips + scrolls"),
-            ("Text Field", crate::ui_game::AddUi::Field, "the player types into it — caret, selection, clipboard, and a `submitted` hook. Its value IS its text."),
-            ("Tooltip", crate::ui_game::AddUi::Tooltip, "this layer's tooltip box: the engine fills it and follows the pointer, you decide what it looks like"),
-        ] {
-            if ui.button(label).on_hover_text(hover).clicked() {
-                cmd.add_ui = Some(what);
-                ui.close();
-            }
-        }
-    });
-    if let Some(m) = pick {
-            match parent {
-                Some(p) => cmd.add_parented = Some((m, p)),
-                None => cmd.add = Some(m),
-            }
-        }
+        .on_hover_text(g.hover);
+    }
 }
 impl EditorTabViewer<'_> {
     /// Render one hierarchy row (indented by `depth`) + its children. The row is a

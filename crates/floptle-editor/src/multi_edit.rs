@@ -156,6 +156,13 @@ field_diff!(RigidBody {
     pushbox_only,
 });
 
+// The 2D layer settings. Sorting's `layer`/`order`/`mode` are one decision about
+// where a node draws, and a flat scene changes them for a whole selection at a
+// time.
+field_diff!(floptle_core::Sorting { layer, order, mode });
+field_diff!(floptle_core::Parallax { factor });
+field_diff!(floptle_core::Lighting2D { mode, layers, inner, falloff, shadows });
+
 field_diff!(CelestialBody {
     mu,
     body_radius,
@@ -322,6 +329,7 @@ fn matter_propagates(m: &Matter) -> bool {
         | Matter::FieldShape { .. }
         | Matter::Tilemap { .. }
         | Matter::SpriteBatch { .. }
+        | Matter::Sprite { .. }
         | Matter::LightProbes { .. }
         | Matter::ReflectionProbe { .. } => true,
     }
@@ -536,6 +544,20 @@ fn matter_diff(before: &Matter, after: &Matter, target: &mut Matter) -> bool {
             hit
         }
         (
+            Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot },
+            Matter::Sprite { ppu: bp, size: bs, cell: bc, flip_x: bfx, flip_y: bfy, pivot: bpv },
+            Matter::Sprite { ppu: tp, size: ts, cell: tc, flip_x: tfx, flip_y: tfy, pivot: tpv },
+        ) => {
+            let mut hit = false;
+            set(ppu, bp, tp, &mut hit);
+            set(size, bs, ts, &mut hit);
+            set(cell, bc, tc, &mut hit);
+            set(flip_x, bfx, tfx, &mut hit);
+            set(flip_y, bfy, tfy, &mut hit);
+            set(pivot, bpv, tpv, &mut hit);
+            hit
+        }
+        (
             Matter::LightProbes {
                 half_extents,
                 spacing,
@@ -606,6 +628,14 @@ pub(crate) struct Snapshot {
     audio: Option<floptle_audio::AudioSource>,
     scripts: Option<Scripts>,
     tags: Option<Tags>,
+    // **The 2D layer settings.** "Put these forty tiles on Background at
+    // parallax 0.3" is the defining bulk edit of a flat scene, and it was forty
+    // separate edits while the `enabled` box above and the `tags` row below both
+    // followed the selection.
+    sorting: Option<floptle_core::Sorting>,
+    parallax: Option<floptle_core::Parallax>,
+    lit_2d: Option<floptle_core::Lighting2D>,
+    shadow_2d: Option<floptle_core::Shadow2D>,
 }
 
 impl Snapshot {
@@ -626,6 +656,10 @@ impl Snapshot {
             audio: world.get::<floptle_audio::AudioSource>(primary).cloned(),
             scripts: world.get::<Scripts>(primary).cloned(),
             tags: world.get::<Tags>(primary).cloned(),
+            sorting: world.get::<floptle_core::Sorting>(primary).cloned(),
+            parallax: world.get::<floptle_core::Parallax>(primary).copied(),
+            lit_2d: world.get::<floptle_core::Lighting2D>(primary).cloned(),
+            shadow_2d: world.get::<floptle_core::Shadow2D>(primary).copied(),
         })
     }
 
@@ -650,6 +684,18 @@ impl Snapshot {
             );
             hit |= diff_component::<Scripts>(world, e, self.scripts.as_ref(), self.primary);
             hit |= diff_component::<Tags>(world, e, self.tags.as_ref(), self.primary);
+            hit |= diff_component::<floptle_core::Sorting>(world, e, self.sorting.as_ref(), self.primary);
+            hit |= diff_component::<floptle_core::Parallax>(world, e, self.parallax.as_ref(), self.primary);
+            hit |= diff_component::<floptle_core::Lighting2D>(world, e, self.lit_2d.as_ref(), self.primary);
+            // A newtype over one enum: there is no field list to diff, so it
+            // travels whole when the primary's differs from what it was.
+            if let (Some(before), Some(after)) =
+                (self.shadow_2d, world.get::<floptle_core::Shadow2D>(self.primary).copied())
+                && before.0 != after.0
+            {
+                world.insert(e, after);
+                hit = true;
+            }
             // Matter is an enum, so it diffs by variant rather than by field
             // list — same-kind nodes only.
             if let (Some(before), Some(after)) =

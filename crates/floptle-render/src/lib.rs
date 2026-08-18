@@ -48,7 +48,7 @@ pub use camera::{FlyCamera, Input, ViewLock};
 pub use cull::Frustum;
 pub use device::{Gpu, Vsync, take_gpu_errors};
 pub use env::{EnvMap, ENV_H, ENV_W};
-pub use frame::{Projection, RenderCamera};
+pub use frame::{ORTHO_DEPTH, Projection, RenderCamera};
 pub use gi::GiVolume;
 pub use grid::Grid;
 pub use light2d::{Light2d, Light2dInstance, Light2dUniform};

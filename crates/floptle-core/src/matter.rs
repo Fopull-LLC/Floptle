@@ -40,8 +40,68 @@ pub struct Layer(pub String);
 pub struct Sorting {
     /// The project sorting layer's NAME. Empty = the default layer.
     pub layer: String,
-    /// Position within the layer. Higher is nearer the camera.
+    /// Position within the layer. Higher is nearer the camera. Consulted under
+    /// **both** modes — [`SortMode::Y`] breaks ties *inside* an order rather
+    /// than replacing it.
     pub order: i32,
+    /// How the position *within* the layer is decided.
+    pub mode: SortMode,
+}
+
+/// How a node's place inside its sorting layer is decided.
+///
+/// Note what this does **not** change: the layer. A Y-sorted node still cannot
+/// climb out of its own layer, exactly as a big `order` cannot, so a background
+/// stays behind whatever the characters in front of it are doing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SortMode {
+    /// `order` says it, and nothing else. The default — a scene written before
+    /// this existed sorts exactly as it did, byte for byte.
+    #[default]
+    Order,
+    /// **Lower on the screen draws in front — after `order` has had its say.**
+    ///
+    /// The depth of a top-down game: a character standing below a table is in
+    /// front of it, and one standing above it is behind, with nobody authoring a
+    /// number for either.
+    ///
+    /// It is a **tiebreak, not a replacement**. The full sort is
+    /// *sorting layer → order → Y*, so `order` still means exactly what it
+    /// always did and Y only decides between nodes that would otherwise be
+    /// level. That ordering is what lets a character Y-sort against the props
+    /// around it while a shadow blob underneath them stays pinned below the lot
+    /// on `order = -1`.
+    Y,
+}
+
+impl SortMode {
+    pub const ALL: [SortMode; 2] = [SortMode::Order, SortMode::Y];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SortMode::Order => "order",
+            SortMode::Y => "by Y",
+        }
+    }
+
+    /// The serialized form. `None` for [`SortMode::Order`], because the default
+    /// must not write a field into a scene that never asked for one.
+    pub fn as_str(self) -> Option<&'static str> {
+        match self {
+            SortMode::Order => None,
+            SortMode::Y => Some("y"),
+        }
+    }
+
+    /// Parse a serialized form. Anything unrecognised reads as the default,
+    /// which is the same rule `Lit2D` and `Cast2D` follow: a scene hand-edited
+    /// to nonsense should load as the thing that changes nothing.
+    pub fn parse(s: &str) -> SortMode {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "y" => SortMode::Y,
+            _ => SortMode::Order,
+        }
+    }
 }
 
 /// The default sorting layer, which always exists and cannot be removed.
@@ -67,6 +127,116 @@ pub fn sorting_offset(rank: u32, order: i32) -> f32 {
     let span = (SORT_LAYER_STEP / SORT_ORDER_STEP) as i32; // orders per layer
     let order = order.clamp(-span / 2, span / 2 - 1);
     rank as f32 * SORT_LAYER_STEP + order as f32 * SORT_ORDER_STEP
+}
+
+/// How many distinct depths a sorting layer can hold — the number of nodes one
+/// layer can Y-sort before neighbours in the sort start to tie.
+///
+/// A budget for the whole layer, spent on the nodes actually in it rather than
+/// divided between the orders in advance. Dividing first would give each order
+/// one or two depths and make Y-sorting useless; ranking the layer as a whole
+/// gives the ordinary case — one or two orders and a crowd of characters —
+/// nearly all of it.
+///
+/// **Measured, not derived.** `sort_precision_probe` sweeps overlapping opaque
+/// quads under the orthographic camera the engine actually builds (depth
+/// `±ORTHO_DEPTH`, `Depth32Float`) and reports the smallest Z difference that
+/// puts the nearer one in front *drawn both ways round*. One `SORT_ORDER_STEP`
+/// separates; half a step does not.
+///
+/// **So the floor is one order step, and the honest capacity is 64.** A layer is
+/// 64 order steps wide; [`rank_offset`] spreads `n` nodes across 63 of them, so
+/// the gap between neighbours is `63 / (n - 1)` steps and reaches the floor at
+/// `n = 64`. The first number written here was 128, taken from the optimistic
+/// end of the measurement ("between a half step and a whole one") — which is the
+/// wrong end to take, because being wrong about it means ties, silently, in the
+/// crowd the feature exists for.
+///
+/// Deriving this from the depth format instead would have given 1/5 of the
+/// answer: the arithmetic says the play plane sits where an `f32` depth has
+/// about a thousandth of a unit of resolution, and the measurement says a
+/// quarter of that. Believe the measurement.
+pub const SORT_Y_BANDS: usize = 64;
+
+/// Where the `i`th of `n` ranked nodes sits inside its layer, back to front.
+///
+/// The nodes are **ranked**, not mapped through their coordinates: the sort has
+/// already put them in order and this only spaces them out. That is the whole
+/// reason there is no "Y sort range" setting to get wrong — a level built around
+/// the origin and one built at `y = 4000` sort identically, moving the camera
+/// changes nothing, and a layer's whole depth budget is spent on the nodes that
+/// are actually in it rather than on a coordinate range that might be empty.
+///
+/// Beyond [`SORT_Y_BANDS`] nodes in one layer the spacing drops under what the
+/// depth buffer resolves and *adjacent* nodes may tie. Adjacent in the sort is
+/// the least-bad place for a tie: the two that tie are the two it matters least
+/// between.
+pub fn rank_offset(i: usize, n: usize) -> f32 {
+    if n <= 1 {
+        return 0.0;
+    }
+    // Centred on the layer, so a ranked node and a plain `order 0` node on
+    // another layer keep the relationship their layers give them.
+    let t = i as f32 / (n - 1) as f32 - 0.5;
+    // A hair inside the slot: a node at the very edge must not round into the
+    // next layer, which is the one failure a sorting layer must never have.
+    t * (SORT_LAYER_STEP - SORT_ORDER_STEP)
+}
+
+/// **How much of the camera's movement this node is exempt from.**
+///
+/// A parallax layer moves *less* than the world does, and reads as further away
+/// for it. `1` moves with the world (no parallax at all, and the default), `0`
+/// is pinned to the camera as if infinitely distant, `0.3` is a distant range of
+/// hills. Per axis, because a side-scroller usually wants horizontal parallax
+/// and no vertical drift at all.
+///
+/// **Why this exists rather than "just use Z".** Under a perspective camera a
+/// layer further back is drawn smaller, and that *is* parallax — which is what
+/// this engine's docs used to recommend. But a 2D game wants an orthographic
+/// camera, because that is what makes pixels-per-unit constant, and under
+/// orthographic projection distance does nothing at all. So the two things a
+/// flat game wants most — crisp pixels and a moving background — could not be
+/// had together. This is a scroll factor rather than a distance, so it works
+/// under either projection and costs the game nothing.
+///
+/// Like a sorting layer, it is applied to the **drawn** transform only: the node
+/// stays where it was authored, a collider on it does not drift, and a script
+/// reads back the position it set.
+///
+/// The anchor is the world origin — a node sits exactly where it was authored
+/// when the camera is at `0`. That has to be *some* fixed point, and the origin
+/// is the one every other part of a flat scene is already built around.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Parallax {
+    /// Per-axis scroll factor, `[x, y]`. See the type docs.
+    pub factor: [f32; 2],
+}
+
+impl Default for Parallax {
+    fn default() -> Self {
+        // 1 is "no parallax". A component that defaulted to 0 would pin a layer
+        // to the camera the instant it was added, which reads as the node having
+        // been detached from the scene rather than as a setting to turn down.
+        Self { factor: [1.0, 1.0] }
+    }
+}
+
+impl Parallax {
+    /// Whether this changes anything. A layer at `1, 1` is the absence of the
+    /// component, so it neither serializes nor costs a lookup.
+    pub fn is_identity(&self) -> bool {
+        self.factor[0] == 1.0 && self.factor[1] == 1.0
+    }
+
+    /// Where this node draws, given the camera, as an offset from where it was
+    /// authored.
+    ///
+    /// The whole of the feature: a node keeps `1 - factor` of the camera's
+    /// movement, so at `factor = 1` it keeps none and moves with the world.
+    pub fn offset(&self, cam_x: f64, cam_y: f64) -> [f64; 2] {
+        [cam_x * (1.0 - self.factor[0] as f64), cam_y * (1.0 - self.factor[1] as f64)]
+    }
 }
 
 /// Three-valued opt-in for the 2D lighting path: nobody has said, yes, or no.
@@ -158,9 +328,9 @@ pub fn infers_2d(facts: Lit2DFacts) -> (bool, &'static str) {
         };
     }
     if facts.flat_matter {
-        (true, "a tilemap and a sprite batch are flat")
+        (true, "a sprite, a sprite batch and a tilemap are flat")
     } else {
-        (false, "only tilemaps and sprite batches are lit flat by default")
+        (false, "only sprites, sprite batches and tilemaps are lit flat by default")
     }
 }
 
@@ -1425,6 +1595,50 @@ pub enum Matter {
         /// World size of one sprite's edge, before its own scale.
         size: f32,
     },
+    /// **One sprite.** A flat quad wearing a cell of its Material's sheet.
+    ///
+    /// A [`SpriteBatch`](Self::SpriteBatch) of one, *named* — and the naming is
+    /// most of the point. A single sprite could always be built out of a Plane
+    /// primitive and a Material, and that is exactly what every 2D project did,
+    /// each of them re-deriving the same three things: that the plane mesh is
+    /// `2 × PRIMITIVE_HALF` across and not one unit (so every sprite came out
+    /// 40% too big until someone measured it), that flipping means a negative
+    /// node scale, and that a sheet cell is a Material field. A node type
+    /// answers all three once.
+    ///
+    /// It carries the two things a Plane genuinely cannot express:
+    ///
+    /// * **A size in pixels.** `ppu` is pixels per world unit measured against
+    ///   ONE CELL of the sheet, so a 32×32 cell at `ppu = 32` is one unit across
+    ///   however the sheet is sliced — re-slicing it finer does not resize every
+    ///   sprite on it. That is the number a pixel artist already has; world
+    ///   units are a number they would have to work out.
+    /// * **A pivot.** The origin defaults to the sprite's centre, and for a
+    ///   Y-sorted character it wants to be at the **feet** — otherwise the node
+    ///   sorts by a point floating at its waist and walks behind things it is
+    ///   standing in front of. `pivot: [0.5, 0.0]` is bottom-centre, and it is
+    ///   why this and Y-sorting shipped together.
+    Sprite {
+        /// Pixels per world unit. `0` means "use [`size`](Self::Sprite::size)"
+        /// — which is the escape hatch for art that is not pixel art, and for a
+        /// sprite whose size is a design number rather than a property of its
+        /// image.
+        ppu: f32,
+        /// World edge length, used when `ppu` is `0`.
+        size: f32,
+        /// Which cell of the Material's sheet. Out of range clamps rather than
+        /// drawing off the end of the image.
+        cell: u32,
+        /// Mirror horizontally / vertically. A flag rather than a negative node
+        /// scale, because a negative scale also inverts the node's children and
+        /// its normals, and "face the other way" should not do either.
+        flip_x: bool,
+        flip_y: bool,
+        /// Where the node's origin sits in the sprite, `0..1` from the
+        /// bottom-left. `[0.5, 0.5]` is the centre and the default; `[0.5, 0.0]`
+        /// puts it at the feet.
+        pivot: [f32; 2],
+    },
     /// The scene's environment background — a face-inverted sphere of radius `size`
     /// drawn behind everything. `color` is the solid sky color (grey by default); when
     /// `texture` is set it's sampled equirectangularly (seamless loop) and multiplied by
@@ -2158,6 +2372,16 @@ pub enum GravityMode {
 /// re-parent, spawn and paste to remember to recompute it, and the one that forgot
 /// would leave an invisible node nobody could turn back on. Walking up is cheap
 /// (scene depth, bounded like `world_transform`) and cannot go stale.
+/// Is this node actually drawn — visible, and not switched off with everything
+/// under it?
+///
+/// Sorting asks because a node that draws nothing still spends the depth budget
+/// of the layer it is on: a pool of two hundred hidden projectiles would push
+/// every visible character in that layer into the tie floor.
+pub fn is_drawn(world: &crate::ecs::World, e: crate::ecs::Entity) -> bool {
+    world.get::<crate::Visible>(e).is_none_or(|v| v.0) && !is_disabled(world, e)
+}
+
 pub fn is_disabled(world: &crate::ecs::World, e: crate::ecs::Entity) -> bool {
     let mut cur = e;
     for _ in 0..64 {

@@ -157,6 +157,23 @@ impl Editor {
             .world
             .get::<floptle_core::Sorting>(e)
             .map(|s| (s.layer.clone(), s.order));
+        // …and its sort MODE with it. A duplicated Y-sorted character that came
+        // back on plain `order` would draw at a fixed depth while its original
+        // kept following the player around, which reads as the copy being
+        // broken rather than as a setting having been dropped.
+        let sort_mode = self
+            .world
+            .get::<floptle_core::Sorting>(e)
+            .and_then(|s| s.mode.as_str())
+            .map(str::to_string);
+        // …and its parallax factor, for the same reason again: a duplicated
+        // background layer that came back moving with the world would sit on top
+        // of the one it was copied from and drift away from it.
+        let parallax = self
+            .world
+            .get::<floptle_core::Parallax>(e)
+            .filter(|p| !p.is_identity())
+            .map(|p| (p.factor[0], p.factor[1]));
         // …and so does its 2D lighting, for the same reason: a duplicated torch
         // that forgot which layers it lit would light the whole scene.
         let lit = self.world.get::<floptle_core::Lighting2D>(e);
@@ -172,6 +189,12 @@ impl Editor {
         Some(NodeDoc {
             id: None,
             parent_id: None,
+            // …and how it follows, so a duplicated 2D camera keeps its target,
+            // its dead zone and its limits rather than becoming a static one.
+            camera_2d: self
+                .world
+                .get::<floptle_core::camera2d::Camera2D>(e)
+                .map(floptle_scene::Camera2DDoc::from),
             terrain_gen,
             name,
             transform,
@@ -201,6 +224,8 @@ impl Editor {
             layer,
             tags,
             sorting,
+            sort_mode,
+            parallax,
             lit_2d,
             light_layers,
             shadow_2d,
@@ -320,6 +345,51 @@ impl Editor {
         if !node.tags.is_empty() {
             self.world.insert(e, floptle_core::Tags(node.tags.clone()));
         }
+        // **The 2D half of a node document.** These were collected into the doc
+        // and never written back, so duplicate, paste and prefab-instance all
+        // dropped them — a copied background lost its parallax and sat on top of
+        // the one it was copied from, and a copied 2D camera stopped following.
+        // `clear_doc_components` above already removes them, so a package doing
+        // a read-modify-write on any node was destroying them outright.
+        if let Some(c) = node.camera_2d.as_ref() {
+            self.world.insert(e, floptle_core::camera2d::Camera2D::from(c));
+        }
+        if let Some((x, y)) = node.parallax {
+            let p = floptle_core::Parallax { factor: [x, y] };
+            if !p.is_identity() {
+                self.world.insert(e, p);
+            }
+        }
+        let mode = node.sort_mode.as_deref().map(floptle_core::SortMode::parse).unwrap_or_default();
+        if node.sorting.is_some() || mode != floptle_core::SortMode::default() {
+            let (layer, order) = node.sorting.clone().unwrap_or_default();
+            self.world.insert(e, floptle_core::Sorting { layer, order, mode });
+        }
+        if let Some(c) = node.shadow_2d.as_deref().and_then(floptle_core::Cast2D::parse) {
+            self.world.insert(e, floptle_core::Shadow2D(c));
+        }
+        if node.lit_2d.is_some()
+            || !node.light_layers.is_empty()
+            || node.light_inner.is_some()
+            || node.light_falloff.is_some()
+            || node.light_shadows.is_some()
+        {
+            let d = floptle_core::Lighting2D::default();
+            self.world.insert(
+                e,
+                floptle_core::Lighting2D {
+                    mode: node
+                        .lit_2d
+                        .as_deref()
+                        .and_then(floptle_core::Lit2D::parse)
+                        .unwrap_or(d.mode),
+                    layers: node.light_layers.clone(),
+                    inner: node.light_inner.unwrap_or(d.inner),
+                    falloff: node.light_falloff.unwrap_or(d.falloff),
+                    shadows: node.light_shadows.unwrap_or(d.shadows),
+                },
+            );
+        }
     }
 
     /// Take off everything a node document can put on, so that writing a
@@ -365,12 +435,15 @@ impl Editor {
             layer,
             tags,
             sorting,
+            sort_mode,
+            parallax,
             lit_2d,
             light_layers,
             shadow_2d,
             light_inner,
             light_falloff,
             light_shadows,
+            camera_2d,
         } = doc;
 
         // `name`, `transform` and `matter` are always written by `insert_doc`,
@@ -391,6 +464,11 @@ impl Editor {
         self.world.remove::<floptle_core::ParticleSystem>(e);
         self.world.remove::<floptle_core::Layer>(e);
         self.world.remove::<floptle_core::Tags>(e);
+        self.world.remove::<floptle_core::camera2d::Camera2D>(e);
+        self.world.remove::<floptle_core::Sorting>(e);
+        self.world.remove::<floptle_core::Parallax>(e);
+        self.world.remove::<floptle_core::Lighting2D>(e);
+        self.world.remove::<floptle_core::Shadow2D>(e);
         // `paint`, `tex_paint` and `terrain_gen` are KEYS into per-scene stores
         // and not components; `id`, `parent_id`, `parent` and `attachment` are
         // the scene file's linkage, owned by save/load. None of them is a
@@ -469,6 +547,7 @@ impl Editor {
         let node = NodeDoc {
             id: None,
             parent_id: None,
+            camera_2d: None,
             terrain_gen: None,
             name: name.into(),
             transform,
@@ -498,6 +577,8 @@ impl Editor {
             layer: None,
             tags: Vec::new(),
             sorting: None,
+            sort_mode: None,
+            parallax: None,
             lit_2d: None,
             light_layers: Vec::new(),
             shadow_2d: None,
@@ -518,6 +599,47 @@ impl Editor {
         } else if crate::assets::is_map_sidecar(path) {
             let at = self.cursor_world();
             self.import_map_file(path, Some(at));
+        // **A texture becomes a Sprite.** Dropping a model makes a Mesh node, so
+        // dropping a sprite doing nothing at all — no node, no toast, no Console
+        // line — is the least expected outcome available, and in a 2D project it
+        // is the very first thing anybody tries.
+        } else if crate::assets::is_texture(path) {
+            self.record();
+            let pos = self.cursor_world();
+            let rel = crate::assets::asset_rel_path(path, &self.project_root);
+            let name = std::path::Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Sprite".into());
+            self.add_node_at(
+                &name,
+                MatterDoc::Sprite {
+                    ppu: 32.0,
+                    size: 1.0,
+                    cell: 0,
+                    flip_x: false,
+                    flip_y: false,
+                    pivot: [0.5, 0.5],
+                },
+                Some(floptle_core::Transform {
+                    translation: pos,
+                    ..Default::default()
+                }),
+            );
+            // …wearing the texture that was dropped, which is the whole point.
+            if let Some(&e) = self.selection.first() {
+                let mut m = floptle_core::Material::default();
+                let (c, r) = crate::assets::tex_setting(
+                    &self.texture_settings,
+                    &self.project_root,
+                    &rel,
+                )
+                .sheet();
+                m.texture = Some(rel);
+                m.sheet_cols = c;
+                m.sheet_rows = r;
+                self.world.insert(e, m);
+            }
         } else if is_model(path) {
             if !self.import_model(path) {
                 return;
@@ -531,6 +653,7 @@ impl Editor {
             let node = NodeDoc {
                 id: None,
                 parent_id: None,
+                camera_2d: None,
                 terrain_gen: None,
                 name,
                 transform: TransformDoc {
@@ -563,6 +686,8 @@ impl Editor {
                 layer: None,
                 tags: Vec::new(),
                 sorting: None,
+                sort_mode: None,
+                parallax: None,
                 lit_2d: None,
                 light_layers: Vec::new(),
                 shadow_2d: None,

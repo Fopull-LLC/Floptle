@@ -41,7 +41,7 @@ they'll fall. Press it again to put them back.
 ## 2. Add a cube and name it
 
 In the **Hierarchy** panel (top left), open the **✚ New** menu and pick
-**■ Cube**. It appears at the origin.
+**■ 3D ▸ ■ Cube**. It appears at the origin.
 
 Now rename it. Double-click its row in the Hierarchy, type `Spinner`, press
 Enter.

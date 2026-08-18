@@ -22,7 +22,7 @@ each group, and meant to be searched.
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
 - [input — keyboard & mouse](#input--keyboard--mouse) — 42
 - [drawing — draw.*](#drawing--draw) — 13
-- [the web — http.*, json.*](#the-web--http-json) — 9
+- [the web — http.*, json.*](#the-web--http-json) — 11
 - [the player's account — account.*](#the-players-account--account) — 13
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
 - [networking — net.*, synced](#networking--net-synced) — 31
@@ -31,7 +31,7 @@ each group, and meant to be searched.
 - [pathfinding — nav.*](#pathfinding--nav) — 25
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
-- [2D — tilemaps & sprite batches](#2d--tilemaps--sprite-batches) — 22
+- [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 28
 - [vessels — assembly.*](#vessels--assembly) — 14
 - [the camera & the screen](#the-camera--the-screen) — 7
 - [physics controls — pause & step](#physics-controls--pause--step) — 4
@@ -571,10 +571,6 @@ node:setShaderTexture("decal", damaged and "textures/scorch.png" or "")
 node:setShaderTexture("screen", "rt:securityCam")
 ```
 
-### `node:setSorting`
-
-node:setSorting{layer="Terrain", order=3} — where this 2D node draws in the stack. `layer` is one of the project's sorting layers by name; `order` places it within that layer, higher being nearer the camera. Both optional and both keep what the node had. This is how a character steps behind a counter, or a picked-up card lifts above the hand.
-
 ### `node:setTerrain`
 
 node:setTerrain(id) — make the node a Terrain volume with that id; fill it with terrain.generatePlanet(id, opts).
@@ -586,6 +582,10 @@ node:setTerrainGen(opts) — attach an ON-DEMAND generation spec (the same opts 
 ### `node:sound`
 
 node:sound() — the handle for this node's Audio Source component. :play() (restarts), :stop(), :pause(), :resume(), :setClip("audio/x.ogg"), :seek(secs), :isPlaying(), :position(). Tunables (volume/pitch/distances/…) live on node:getcomponent("AudioSource").
+
+### `node:uiRect`
+
+node:uiRect() -> x, y, w, h — where this UI element was actually laid out on screen this frame, in pixels, or nil if it is not a UI element or has not been drawn yet. The layout is the engine's, so this is the only way to find out where a Stack or a Pin put something — for a tooltip that follows a button, an arrow pointing at it, or a hit test of your own.
 
 ## vectors, directions & easing
 
@@ -1249,6 +1249,10 @@ end)
 
 http.put(url, body [, opts], function(res) end) — as http.post, with PUT.
 
+### `json.array`
+
+json.array(t) -> t — mark a table as a JSON LIST, and return it. The encoder guesses from the shape (keys 1..n and nothing else is an array), which is right for every list with something in it and cannot be right for the empty one: {} is both an empty list and an empty object, and it stays an object. So json.encode{ ids = json.array{} } sends "ids":[] where a plain {} would send "ids":{} and the server would read the wrong type. json.array() with no argument builds a new empty list, and json.array(t) returns the SAME table it was given, so `local ids = json.array{}` then `ids[#ids+1] = x` reads normally. json.decode marks every array it builds, so read -> edit -> send back keeps its lists as lists; note that body.ids = {} throws the mark away with the table, and body.ids = json.array{} is the replacement that keeps it. A marked table that also carries a name, or that has a hole in it, is REFUSED by json.encode with a message saying which.
+
 ### `json.decode`
 
 json.decode(s) -> value, err — parse JSON. Bad input returns nil AND a message rather than raising: a reply from someone else's server is data, not a bug in your script. JSON null becomes nil, so a null field reads exactly like a missing one.
@@ -1261,7 +1265,11 @@ if not save then return log("corrupt save: " .. why) end
 
 ### `json.encode`
 
-json.encode(value) — a Lua value as a JSON string. A table with a [1] is an ARRAY, anything else is an object (that is the only rule Lua's single table type can support). http.post takes a table body directly, so you rarely need this by hand.
+json.encode(value) — a Lua value as a JSON string. A table with a [1] is an ARRAY, anything else is an object (that is the only rule Lua's single table type can support), and json.array(t) says list for the empty case the shape cannot answer. http.post takes a table body directly, so you rarely need this by hand.
+
+### `json.isArray`
+
+json.isArray(v) -> bool — would json.encode write this as a JSON array? True for a table marked by json.array, and for any table whose keys are exactly 1..n with n at least 1. FALSE for an empty unmarked table, which is the whole point: this is how json.decode('[]') and json.decode('{}') are told apart, and before it they were the same empty table.
 
 ### `openUrl`
 
@@ -2023,7 +2031,7 @@ scatter.removed(sourceId) — the sorted ids this source has lost. A game that w
 
 scatter.restore(sourceId [, instanceId]) — put one prop back, or all of them when the instance is omitted (returns how many). This is what "the forest regrows after fifteen minutes" is, without your game having to remember what it cut.
 
-## 2D — tilemaps & sprite batches
+## 2D — sprites, sorting & the flat camera
 
 ### `EMPTY_TILE`
 
@@ -2033,6 +2041,22 @@ EMPTY_TILE — the tilemap cell value that leaves a square empty (u32::MAX, 4294
 
 b:draw(x, y [, z] [, scale] [, rot] [, cell] [, r, g, b, a]) — draw one sprite THIS FRAME, positioned in the batch node's local space. Immediate mode, exactly like draw.* : what you draw this frame is what shows, and next frame starts empty — there is no pool to grow and no clear() to forget. `scale` is one number, or a vec2 for squash-and-stretch: b:draw(x, y, 0, vec2(1.4, 0.6)). The tint is the thing a shared Material could never give one sprite: flash one enemy red without blinking it off.
 
+### `node:setCamera2D`
+
+node:setCamera2D{follow="Player", smoothing=0.12, deadZoneX=1.5, deadZoneY=0.75, limits=true, minX=0, minY=0, maxX=200, maxY=40} — how this ORTHOGRAPHIC camera follows. Every key is optional and keeps what the node had, per axis; off=true removes the behaviour. The order is dead zone, then smoothing, then limits: the camera does not move until the target leaves the box, closes the rest exponentially (smoothing is SECONDS to cover about two thirds of the gap, the same at 30fps and 144), then clamps inside the rectangle so it never shows outside the level. Setting `follow` to a DIFFERENT node restarts the follow where the camera is, so handing the camera to a second character does not send it travelling between them; follow="" stops following and keeps the limits, and with no target the camera's position is left to whatever else is moving it. It does nothing on anything that is not an orthographic camera.
+
+### `node:setParallax`
+
+node:setParallax{x=0.3, y=1} — how much of the camera's movement this layer KEEPS, per axis. 1 moves with the world (no parallax, and the default), 0 pins it to the camera as if infinitely far away, 0.3 is a distant range of hills. Both keys optional and both keep what the node had. This exists because the other way of getting parallax — putting a layer further back in Z — only works under a PERSPECTIVE camera, and a flat game wants an orthographic one so its pixels-per-unit holds still; a scroll factor works under either. Like a sorting layer it offsets the DRAWN transform only, so the collider stays where you put it and node.x reads back what you set.
+
+### `node:setSorting`
+
+node:setSorting{layer="Terrain", order=3} — where this 2D node draws in the stack. `layer` is one of the project's sorting layers by name; `order` places it within that layer, higher being nearer the camera. Both optional and both keep what the node had. This is how a character steps behind a counter, or a picked-up card lifts above the hand.
+
+### `node:setSprite`
+
+node:setSprite{ppu=32, size=1, cell=0, flipX=false, flipY=false, pivotX=0.5, pivotY=0} — make this node one sprite, or retune one. Every key is optional and keeps what the node had, including one pivot axis without the other. `ppu` is pixels per unit measured against ONE CELL of the Material's sheet, so re-slicing a sheet finer does not resize every sprite on it; ppu=0 falls back to `size`, a world edge length. flipX/flipY mirror the picture and not the node, so children and normals are left alone. pivotY=0 puts the origin at the sprite's feet, which is what a Y-sorted character wants — sorting reads the node's Y, and a centred origin sorts by a point floating at the character's waist.
+
 ### `node:setSpriteBatch`
 
 node:setSpriteBatch{size=1.0} — make this node a SPRITE BATCH, so node:sprites() can draw into it. The counterpart of node:setTilemap: a game's sprite styles are data (one batch per material), so the nodes that draw them are made from the same script that declares them rather than authored one at a time into the scene. `size` is the quad's edge length; every sprite scales it. The sheet is the node's own Material.
@@ -2040,6 +2064,14 @@ node:setSpriteBatch{size=1.0} — make this node a SPRITE BATCH, so node:sprites
 ### `node:setTilemap`
 
 node:setTilemap{cols=13, rows=7, tile=1.5 [, data={…}] [, tileset="tilesets/bricks.tileset.ron"]} — make this node a TILEMAP: a grid of spritesheet cells drawn as one mesh, one draw call. The sheet is the node's own Material (texture + sheetCols/sheetRows). Neighbouring tiles share an exact edge, so the hairline gaps a grid of separate quads opens up as the camera moves cannot happen. `data` is row-major from the top-left; leave it out for an empty grid you fill with tm:set.
+
+### `node:shake`
+
+node:shake(amount, seconds) — shake a 2D camera. `amount` is a distance in world units, `seconds` defaults to 0.3, and it fades out over that time. Added to what is DRAWN and never fed back into the follow, so it composes with a chase and with the world limits instead of fighting them — a shake at the edge of a level still shakes, and a camera being driven by a script keeps being driven by it. Calling it again takes the LOUDER amplitude and the LONGER time, each independently, so shaking every frame while something explodes cannot build an unbounded shake and a bang cannot cut a long rumble short. It is a function of the play clock, not of a random number, so two machines simulating the same frame see the same camera. On anything that is not an orthographic camera it does nothing.
+
+### `node:sorting`
+
+node:sorting() -> { layer =, order =, mode = } — where this node sits in the 2D stack. A node that has never said anything about sorting answers with the DEFAULT ("Default", 0, "order") rather than nil, because that IS the true answer for it and nil would make every caller write the same three lines of fallback before it could add one to a number.
 
 ### `node:sprites`
 

@@ -369,6 +369,13 @@ impl<'a> EditorTabViewer<'a> {
         // to win or a prefab there would be handed to the scene loader.
         if is_prefab(path) {
             self.cmd.open_prefab = Some(path.to_string());
+        // …and a `.spriteanim.ron` for the same reason: it can sit beside its art
+        // anywhere, including under `scenes/`, and handing one to the scene
+        // loader is how double-clicking a sprite animation used to try to open a
+        // level.
+        } else if anim_ui::is_sprite_anim(path) {
+            self.cmd.open_script = Some(path.to_string());
+            self.cmd.focus_scripting = true;
         } else if is_scene(path) {
             self.cmd.open_scene = Some(path.to_string());
         } else if crate::assets::is_map_sidecar(path) {
@@ -460,6 +467,55 @@ impl<'a> EditorTabViewer<'a> {
             self.cmd.open_image = Some(path.to_string());
             ui.close();
         }
+        // **From a sliced sheet straight to a clip.** The alternative is writing
+        // a frame list by hand for a grid the editor already knows the shape of,
+        // which is the step where somebody decides sprite animation is not worth
+        // it. Offered greyed-out on an unsliced texture rather than hidden: the
+        // reason it is unavailable is a thing you can fix, and hiding it hides
+        // that too.
+        // **The sheet's JSON is where the work is.** Aseprite writes a .png and a
+        // .json together; the PNG the engine could always read, and the JSON
+        // holds the two things somebody actually did — how the sheet is cut, and
+        // which frames are which animation. Re-entering both by eye against a
+        // picture is where a pixel artist decides the engine is not worth it.
+        if path.to_ascii_lowercase().ends_with(".json")
+            && ui
+                .button("▦ Import Aseprite sheet")
+                .on_hover_text(
+                    "read the tags as clips and the frames as cells: one .spriteanim.ron per \
+                     tag beside this file, and the sheet's grid onto the .png's import \
+                     settings so it slices the same way",
+                )
+                .clicked()
+        {
+            self.cmd.import_aseprite = Some(path.to_string());
+            ui.close();
+        }
+        if crate::assets::is_texture(path) {
+            let (cols, rows) =
+                crate::assets::tex_setting(self.texture_settings, self.project_root, path).sheet();
+            let n = cols.saturating_mul(rows);
+            let btn = egui::Button::new("▦ New sprite animation");
+            let r = if n > 1 {
+                ui.add(btn).on_hover_text(format!(
+                    "write a .spriteanim.ron beside this file with one frame per cell — \
+                     {n} frames at 12 fps, looping. Edit the list to reorder, drop frames, \
+                     hold one longer, or pull a frame in from another sheet."
+                ))
+            } else {
+                // `on_hover_text` does not fire on a DISABLED widget — egui only
+                // opens that tooltip for an enabled response — so the one
+                // explanation that matters here would never have been seen.
+                ui.add_enabled(false, btn).on_disabled_hover_text(
+                    "slice this texture into a grid first — the sheet cols/rows in its import \
+                     settings, above. A clip needs to know where its frames are.",
+                )
+            };
+            if r.clicked() {
+                self.cmd.new_sprite_anim = Some((path.to_string(), cols, rows));
+                ui.close();
+            }
+        }
         // **A model the engine cannot open, beside the action that fixes it.**
         // The alternative is a person double-clicking an .fbx, getting nothing,
         // and concluding the engine cannot read their asset pack — which is
@@ -480,7 +536,14 @@ impl<'a> EditorTabViewer<'a> {
             self.cmd.open_shader_graph = Some(path.to_string());
             ui.close();
         }
-        let openable = is_script(path) || is_markdown(path) || crate::assets::is_shader(path);
+        // A `.spriteanim.ron` is edited as its file and by no other route — the
+        // Animating tab plays it and deliberately will not write it — so the
+        // editor telling you to hand-edit a file it refuses to open was a dead
+        // end with no way out of it.
+        let openable = is_script(path)
+            || is_markdown(path)
+            || crate::assets::is_shader(path)
+            || anim_ui::is_sprite_anim(path);
         if openable && ui.button("🖊 Open in Scripting tab").clicked() {
             self.cmd.open_script = Some(path.to_string());
             self.cmd.focus_scripting = true;

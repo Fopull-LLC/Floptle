@@ -32,6 +32,13 @@ pub(crate) fn asset_picker(
     width: f32,
 ) -> Option<Option<String>> {
     let mut picked: Option<Option<String>> = None;
+    // Whatever width the call site asked for, capped at what is still on screen.
+    // Every picker in the editor comes through here, so this is the one place
+    // that has to know: an inspector field is authored at 160 px and a docked
+    // Inspector is regularly narrower than that. The POPUP is deliberately not
+    // capped — it is an overlay, it is allowed to be wider than its panel, and
+    // shrinking it would make browsing worse for no gain.
+    let width = crate::responsive::fit_here(ui, width);
     // The button stays as narrow as its inspector field, but the popup wants
     // real room to browse — enough for ~4 grid tiles across. A ComboBox can't do
     // this: its popup width is hard-wired to the button width, and forcing it
@@ -391,13 +398,43 @@ pub(crate) fn sheet_cell_picker(
     rows: u32,
     cell: &mut u32,
 ) -> bool {
-    if cols * rows <= 1 {
+    if cols.saturating_mul(rows) <= 1 {
+        return false;
+    }
+    // **A grid nobody can use, and a frame nobody gets back.** This draws one
+    // button per cell with no virtualisation, so a 256×256 sheet is 65,536
+    // allocations, strokes and format! calls EVERY frame — an effective freeze
+    // reached by dragging a number. Past this the numbers still work; only the
+    // picture is withheld, with a line saying so.
+    const MAX_PICKER_CELLS: u32 = 64 * 64;
+    if cols.saturating_mul(rows) > MAX_PICKER_CELLS {
+        crate::responsive::para(
+            ui,
+            egui::RichText::new(format!(
+                "{cols}×{rows} is too many cells to show — set the cell number by hand"
+            ))
+            .weak()
+            .small(),
+        );
         return false;
     }
     let mut changed = false;
     ui.label(format!("sprite cell ({cols}×{rows} sheet)"));
     if let Some(sheet) = asset_thumb(ui, texture, 256) {
-        let cell_px = (240.0 / cols as f32).clamp(16.0, 48.0);
+        // The grid is a GRID: row 3 of the sheet has to stay row 3, so it cannot
+        // reflow the way a tool strip does. What it can do is shrink, and it has
+        // to shrink all the way — a floor here would be a floor the panel is
+        // allowed to go below, and then the right-hand columns are simply not on
+        // screen. A 6 px cell in a sliver of a panel is honest and comes back the
+        // moment the panel widens; a cropped sheet is not.
+        // The gap between cells counts. Dividing the room by the column count
+        // alone leaves `(cols - 1) × item_spacing` of overhang — 56 px for an
+        // 8-wide sheet in a 160 px panel, which in the Inspector (no horizontal
+        // scrollbar) is right-hand columns that simply are not on screen.
+        let gap = ui.spacing().item_spacing.x;
+        let room = crate::responsive::fit_here(ui, f32::INFINITY);
+        let per = (room - gap * (cols.saturating_sub(1)) as f32) / cols as f32;
+        let cell_px = per.clamp(2.0, 48.0);
         egui::ScrollArea::vertical().max_height(180.0).id_salt(id).show(ui, |ui| {
             for r in 0..rows {
                 ui.horizontal(|ui| {
@@ -433,14 +470,19 @@ pub(crate) fn sheet_cell_picker(
             }
         });
     }
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("cell");
         let mut n = *cell;
         if ui.add(egui::DragValue::new(&mut n).range(0..=(cols * rows - 1))).changed() {
             *cell = n;
             changed = true;
         }
-        ui.small("animate this (stepped property track) for sprite animation");
+        crate::responsive::para(
+            ui,
+            egui::RichText::new("animate this (stepped property track) for sprite animation")
+                .weak()
+                .small(),
+        );
     });
     changed
 }

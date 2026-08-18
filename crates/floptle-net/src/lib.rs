@@ -269,6 +269,9 @@ mod tests {
 
         // Spawn a runtime node and move it, BEFORE any client exists.
         let node = floptle_scene::NodeDoc {
+            camera_2d: None,
+            sort_mode: None,
+            parallax: None,
             id: None,
             parent_id: None,
             terrain_gen: None,

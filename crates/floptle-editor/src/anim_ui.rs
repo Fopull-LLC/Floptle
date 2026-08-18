@@ -94,9 +94,23 @@ pub struct AnimUiState {
     /// diffing) — entity → component → field → value. A change since last frame
     /// auto-keys the field (e.g. a spritesheet `cell`).
     pub last_scene_props: HashMap<Entity, HashMap<String, HashMap<String, f64>>>,
+    /// The same baseline for path-and-name fields (a material's texture, a UI
+    /// element's image). Separate because a mirror of numbers cannot hold one,
+    /// which is precisely why a texture swap was invisible to record.
+    pub last_scene_prop_strs: HashMap<Entity, HashMap<String, HashMap<String, String>>>,
+    /// …and for whole sprite frames, which are four values at once.
+    pub last_scene_frames: HashMap<Entity, floptle_scene::SpriteFrameDoc>,
     /// Pre-record numeric property values, re-applied when ● Record turns off so
     /// recording authors the CLIP not the scene: (entity, component, field, value).
     pub record_restore_props: Vec<(Entity, String, String, f64)>,
+    /// The same, for the path-and-name fields — so ● Record off puts a swapped
+    /// texture back rather than leaving the scene edited.
+    pub record_restore_prop_strs: Vec<(Entity, String, String, String)>,
+    /// …and for a sprite frame, whose CELL lives on `Matter::Sprite` rather than
+    /// on any component the two lists above can reach. Without it, scrubbing a
+    /// sprite lane with record on left the node wearing whichever frame you
+    /// stopped on, and that is what got saved.
+    pub record_restore_frames: Vec<(Entity, floptle_scene::SpriteFrameDoc)>,
     /// New-animation name prompt buffer (`Some` = prompt open).
     pub new_anim_buf: Option<String>,
 
@@ -206,7 +220,11 @@ impl Default for AnimUiState {
             record_restore: Vec::new(),
             last_scene_local: HashMap::new(),
             last_scene_props: HashMap::new(),
+            last_scene_prop_strs: HashMap::new(),
+            last_scene_frames: HashMap::new(),
             record_restore_props: Vec::new(),
+            record_restore_prop_strs: Vec::new(),
+            record_restore_frames: Vec::new(),
             new_anim_buf: None,
             clip_undo: Vec::new(),
             clip_redo: Vec::new(),
@@ -261,9 +279,17 @@ pub(crate) fn clip_undo_redo(st: &mut AnimUiState, redo: bool) -> bool {
     true
 }
 
-/// `path` is a baked animation clip asset.
+/// `path` is an animation clip asset — a baked `.anim.ron`, or a frame-listed
+/// `.spriteanim.ron`, which plays as one and so drags as one.
 pub fn is_anim_clip(path: &str) -> bool {
-    path.to_ascii_lowercase().ends_with(".anim.ron")
+    let p = path.to_ascii_lowercase();
+    p.ends_with(ANIM_CLIP_EXT) || p.ends_with(floptle_scene::SPRITE_ANIM_EXT)
+}
+
+/// `path` is specifically a **sprite** clip — a list of frames rather than a
+/// baked set of lanes. The Animating tab edits the two differently.
+pub fn is_sprite_anim(path: &str) -> bool {
+    path.to_ascii_lowercase().ends_with(floptle_scene::SPRITE_ANIM_EXT)
 }
 
 /// `path` is an animation controller asset.
@@ -327,8 +353,9 @@ impl EditorTabViewer<'_> {
     // Inspector: selected CLIP asset — summary + events hint.
     // =========================================================================
     pub fn clip_asset_ui(&mut self, ui: &mut egui::Ui, path: &str) {
-        let key = anim::asset_key(Path::new(path), self.project_root, ANIM_CLIP_EXT);
-        ui.label("animation clip");
+        let key = anim::clip_asset_key(Path::new(path), self.project_root);
+        let sprite = is_sprite_anim(path);
+        ui.label(if sprite { "sprite animation" } else { "animation clip" });
         if let Some(doc) = self.anim.clip(&key) {
             ui.small(format!(
                 "{} · {:.2}s · {} channel(s) · {} event(s)",
@@ -340,7 +367,20 @@ impl EditorTabViewer<'_> {
             if !doc.source_model.is_empty() {
                 ui.small(format!("from {}", doc.source_model));
             }
-            ui.small("add it to a controller (drag into the graph window), then edit keys/events in the Animating tab");
+            if sprite {
+                // Editing it in the timeline would mean saving an .anim.ron over
+                // a .spriteanim.ron — the same clip in the other shape, and the
+                // frame list, the fps and the holds gone. Better to say so than
+                // to open a doc whose save destroys the file it came from.
+                ui.small(
+                    "a list of frames — edit the .spriteanim.ron file itself, or drag it into a \
+                     controller and it plays like any other clip",
+                );
+            } else {
+                ui.small("add it to a controller (drag into the graph window), then edit keys/events in the Animating tab");
+            }
+        } else if sprite {
+            ui.small("(unreadable sprite animation — check fps, loop and frames)");
         } else {
             ui.small("(unreadable clip file)");
         }
@@ -386,10 +426,16 @@ pub fn anim_component_ui(
     }
     ui.indent("anim_ctl_props", |ui| {
         let missing = anim.controller(&key).is_none();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("controller");
             let label = if missing { format!("⚠ {key}") } else { key.clone() };
+            // A ComboBox's `.width()` is a MINIMUM and its default wrap mode is
+            // Extend, so an asset key like `anim/characters/player_locomotion`
+            // sized the button to the whole path — off the edge of a panel that
+            // has no horizontal scrollbar, leaving the caption and nothing else.
             egui::ComboBox::from_id_salt("anim-ctl-pick")
+                .width(crate::responsive::fit_here(ui, 220.0))
+                .wrap_mode(egui::TextWrapMode::Truncate)
                 .selected_text(label)
                 .show_ui(ui, |ui| {
                     for (k, _) in anim.controllers.iter() {
@@ -483,6 +529,20 @@ impl EditorTabViewer<'_> {
                     None => !claimed.insert(res.clone()),
                 };
                 if !take_copy {
+                    continue;
+                }
+                // **A sprite animation cannot be copied this way.** Its file is a
+                // frame list with a frame rate and per-frame holds; the copy
+                // would be written as a baked `.anim.ron` with none of those,
+                // and the state would silently move to a different, lesser
+                // clip. Sharing a sprite clip between states is fine — it is
+                // one animation, which is what sharing means — so this is left
+                // shared and said out loud.
+                if self.anim.is_sprite_clip(&res) {
+                    self.anim_ui.status_note = Some((
+                        format!("{res} is a sprite animation — copy the .spriteanim.ron file itself"),
+                        6.0,
+                    ));
                     continue;
                 }
                 let Some(mut doc) = self.anim.clip(&res).cloned() else { continue };
@@ -998,8 +1058,7 @@ impl EditorTabViewer<'_> {
                             ACCENT,
                         );
                         if ui.input(|i| i.pointer.any_released()) {
-                            let key =
-                                anim::asset_key(Path::new(&p.path), project_root, ANIM_CLIP_EXT);
+                            let key = anim::clip_asset_key(Path::new(&p.path), project_root);
                             let base = key.rsplit('/').next().unwrap_or("Anim").to_string();
                             let mut name = base.clone();
                             let mut n = 2;
@@ -1030,7 +1089,7 @@ impl EditorTabViewer<'_> {
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
-                "drag animation clips (▶ .anim.ron) from Assets here",
+                "drag animation clips (▶ .anim.ron / .spriteanim.ron) from Assets here",
                 FontId::proportional(13.0),
                 ui.visuals().weak_text_color(),
             );
@@ -1418,7 +1477,9 @@ impl EditorTabViewer<'_> {
                                     .map(|t| (*e, *t))
                             })
                             .collect();
-                        // Snapshot pre-record property values too (for restore on stop).
+                        // Snapshot pre-record property values too (for restore
+                        // on stop) — numbers AND paths. Without the second half,
+                        // recording a texture swap leaves the swap in the scene.
                         self.anim_ui.record_restore_props = scene_channel_names(self.world, target)
                             .into_iter()
                             .flat_map(|(e, _)| {
@@ -1427,6 +1488,25 @@ impl EditorTabViewer<'_> {
                                     .map(move |(c, f, v)| (e, c.to_string(), f.to_string(), v))
                             })
                             .collect();
+                        self.anim_ui.record_restore_frames = scene_channel_names(self.world, target)
+                            .into_iter()
+                            .filter_map(|(e, _)| {
+                                let (texture, cols, rows, cell) =
+                                    floptle_script::read_sprite_frame(self.world, e)?;
+                                Some((e, floptle_scene::SpriteFrameDoc { texture, cols, rows, cell }))
+                            })
+                            .collect();
+                        self.anim_ui.record_restore_prop_strs =
+                            scene_channel_names(self.world, target)
+                                .into_iter()
+                                .flat_map(|(e, _)| {
+                                    string_props_of(self.world, e)
+                                        .into_iter()
+                                        .map(move |(c, f, v)| {
+                                            (e, c.to_string(), f.to_string(), v)
+                                        })
+                                })
+                                .collect();
                         refresh_record_baseline(self.world, self.anim_ui, target);
                     }
                 }
@@ -1611,6 +1691,41 @@ impl EditorTabViewer<'_> {
         // Resolve to the REGISTRY key (handles stem-fallback for moved files) so
         // edits save onto the right file, and reload the working copy on change.
         let resolved = clip_key.as_ref().and_then(|k| self.anim.resolve_clip_key(k));
+        // A sprite clip is a frame list, not lanes of keys, and the timeline can
+        // only write the second shape — onto a different filename, leaving two
+        // files claiming one key. So it plays here and is edited as its file.
+        if let Some(res) = resolved.as_ref().filter(|k| self.anim.is_sprite_clip(k)) {
+            let frames = self.anim.clip(res).map_or(0, |c| {
+                c.channels.first().and_then(|ch| ch.properties.first()).map_or(0, |p| p.times.len())
+            });
+            self.anim_ui.clip_doc = None;
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(
+                        ACCENT,
+                        format!("▦ {res} — a sprite animation, {frames} frame(s)"),
+                    );
+                });
+                crate::responsive::para(
+                    ui,
+                    "It plays here like any other clip, and blends and crossfades like one. Its \
+                     frames, its frame rate and its holds live in the .spriteanim.ron file — the \
+                     timeline below writes keyed lanes, which is a different shape and a \
+                     different file, so it does not edit this one.",
+                );
+                if ui
+                    .button("🗀 Show the file")
+                    .on_hover_text("open the folder it is in")
+                    .clicked()
+                {
+                    let p = self
+                        .project_root
+                        .join(format!("{res}{}", floptle_scene::SPRITE_ANIM_EXT));
+                    crate::assets::reveal_in_explorer(&p);
+                }
+            });
+            return;
+        }
         if self.anim_ui.clip_doc.as_ref().map(|(k, _)| k.as_str()) != resolved.as_deref() {
             self.anim_ui.clip_doc = resolved
                 .as_ref()
@@ -1751,7 +1866,9 @@ const RECORD_RED: Color32 = Color32::from_rgb(235, 80, 80);
 const STRETCH_COL: Color32 = Color32::from_rgb(235, 170, 90);
 
 /// One ✚ Property menu entry: (channel name, display name, [(component, field)]).
-type NodeFieldMenu = (String, String, Vec<(String, String)>);
+/// One node's entry in the ✚ Property cascade: `(channel, display name,
+/// [(component, field, submenu group)])`.
+type NodeFieldMenu = (String, String, Vec<(String, String, &'static str)>);
 
 /// Draw a dopesheet key diamond centred at `c`.
 fn key_diamond(painter: &egui::Painter, c: Pos2, col: Color32) {
@@ -1812,71 +1929,159 @@ enum PropKind {
     Float,
     /// A path/text field — image swap (the headline case), material texture, text.
     Text,
+    /// A whole sprite frame: image, sheet grid and cell, keyed as one value.
+    /// Always stepped — see `floptle_anim::SpriteFrame`.
+    Frame,
 }
 
 /// The component fields the Animating tab can key with a property track, grouped
 /// by component. Mirrors the ECS setters in `floptle_script::apply_component_field`
 /// (+ `_str`); a field here must have a matching arm there or the key is inert.
-const ANIMATABLE_PROPS: &[(&str, &[(&str, PropKind)])] = &[
+/// One animatable field: its name, what kind of value it holds, and which
+/// submenu of ✚ Property it lives in (`""` = the component's top level).
+///
+/// The group exists because the list got long. A component with twenty-five
+/// fields as one flat menu is a wall somebody scrolls past — and the fields
+/// people actually reach for (a texture, an opacity) are the ones that get
+/// lost in it. Top level is the short list; everything else is one step in.
+type PropField = (&'static str, PropKind, &'static str);
+
+/// The component fields the Animating tab can key with a property track, grouped
+/// by component. Mirrors the ECS setters in `floptle_script::apply_component_field`
+/// (+ `_str`); a field here must have a matching arm there or the key is inert.
+///
+/// It must also be **readable** — `floptle_script::mirror_components` for a
+/// number, `mirror_component_strings` for a path — or record will never notice
+/// it change. That was the gap that made recording a sprite animation write
+/// nothing: `texture` was in this list and in the string setter, and there was
+/// no string mirror at all, so the one gesture the feature is for was invisible.
+const ANIMATABLE_PROPS: &[(&str, &[PropField])] = &[
     (
         "UiElement",
         &[
-            ("image", PropKind::Text), // sprite-swap: the texture path, frame by frame
-            ("opacity", PropKind::Float),
-            ("visible", PropKind::Float),
-            ("posX", PropKind::Float),
-            ("posY", PropKind::Float),
-            ("width", PropKind::Float),
-            ("height", PropKind::Float),
-            ("radius", PropKind::Float),
-            ("border", PropKind::Float),
-            ("fillR", PropKind::Float),
-            ("fillG", PropKind::Float),
-            ("fillB", PropKind::Float),
-            ("fillA", PropKind::Float),
-            ("textSize", PropKind::Float),
-            ("textR", PropKind::Float),
-            ("textG", PropKind::Float),
-            ("textB", PropKind::Float),
-            ("textA", PropKind::Float),
-            ("tintR", PropKind::Float),
-            ("tintG", PropKind::Float),
-            ("tintB", PropKind::Float),
-            ("tintA", PropKind::Float),
-            ("cell", PropKind::Float), // spritesheet frame index — key with Step
-            ("text", PropKind::Text),
+            // The four somebody actually reaches for, at the top.
+            ("image", PropKind::Text, ""), // sprite-swap: the texture path, frame by frame
+            ("opacity", PropKind::Float, ""),
+            ("visible", PropKind::Float, ""),
+            ("text", PropKind::Text, ""),
+            ("posX", PropKind::Float, "Layout"),
+            ("posY", PropKind::Float, "Layout"),
+            ("width", PropKind::Float, "Layout"),
+            ("height", PropKind::Float, "Layout"),
+            ("radius", PropKind::Float, "Layout"),
+            ("border", PropKind::Float, "Layout"),
+            ("fillR", PropKind::Float, "Colour"),
+            ("fillG", PropKind::Float, "Colour"),
+            ("fillB", PropKind::Float, "Colour"),
+            ("fillA", PropKind::Float, "Colour"),
+            ("textR", PropKind::Float, "Colour"),
+            ("textG", PropKind::Float, "Colour"),
+            ("textB", PropKind::Float, "Colour"),
+            ("textA", PropKind::Float, "Colour"),
+            ("tintR", PropKind::Float, "Colour"),
+            ("tintG", PropKind::Float, "Colour"),
+            ("tintB", PropKind::Float, "Colour"),
+            ("tintA", PropKind::Float, "Colour"),
+            ("textSize", PropKind::Float, "Text"),
+            ("style", PropKind::Text, "Text"),
+            ("cell", PropKind::Float, "Sheet"), // spritesheet frame index — stepped
         ],
     ),
     (
         "UiSlider",
-        &[("value", PropKind::Float), ("min", PropKind::Float), ("max", PropKind::Float)],
+        &[
+            ("value", PropKind::Float, ""),
+            ("min", PropKind::Float, ""),
+            ("max", PropKind::Float, ""),
+        ],
     ),
     (
         "PointLight",
         &[
-            ("intensity", PropKind::Float),
-            ("range", PropKind::Float),
-            ("r", PropKind::Float),
-            ("g", PropKind::Float),
-            ("b", PropKind::Float),
+            ("intensity", PropKind::Float, ""),
+            ("range", PropKind::Float, ""),
+            ("r", PropKind::Float, "Colour"),
+            ("g", PropKind::Float, "Colour"),
+            ("b", PropKind::Float, "Colour"),
         ],
     ),
     (
         "Material",
         &[
-            ("texture", PropKind::Text),
-            ("cell", PropKind::Float), // spritesheet frame index — key with Step
+            ("texture", PropKind::Text, ""),
+            // The headline miss before this pass: a material could be faded
+            // from a script and not from a clip.
+            ("opacity", PropKind::Float, ""),
+            ("ambient", PropKind::Float, ""),
+            ("r", PropKind::Float, "Colour"),
+            ("g", PropKind::Float, "Colour"),
+            ("b", PropKind::Float, "Colour"),
+            ("emissiveR", PropKind::Float, "Colour"),
+            ("emissiveG", PropKind::Float, "Colour"),
+            ("emissiveB", PropKind::Float, "Colour"),
+            ("emissiveStrength", PropKind::Float, "Colour"),
+            ("specularR", PropKind::Float, "Colour"),
+            ("specularG", PropKind::Float, "Colour"),
+            ("specularB", PropKind::Float, "Colour"),
+            ("specularStrength", PropKind::Float, "Colour"),
+            ("shininess", PropKind::Float, "Colour"),
+            ("rimR", PropKind::Float, "Colour"),
+            ("rimG", PropKind::Float, "Colour"),
+            ("rimB", PropKind::Float, "Colour"),
+            ("rimStrength", PropKind::Float, "Colour"),
+            ("cell", PropKind::Float, "Sheet"), // spritesheet frame index — stepped
+            ("sheetCols", PropKind::Float, "Sheet"),
+            ("sheetRows", PropKind::Float, "Sheet"),
+            ("normalMap", PropKind::Text, "Surface"),
+            ("normalStrength", PropKind::Float, "Surface"),
+            ("roughnessMap", PropKind::Text, "Surface"),
+            ("roughness", PropKind::Float, "Surface"),
+            ("metallicMap", PropKind::Text, "Surface"),
+            ("metallic", PropKind::Float, "Surface"),
+            ("occlusionMap", PropKind::Text, "Surface"),
+            ("occlusionStrength", PropKind::Float, "Surface"),
+            ("reflectivity", PropKind::Float, "Surface"),
+            ("transmission", PropKind::Float, "Surface"),
+            ("ior", PropKind::Float, "Surface"),
+            ("thickness", PropKind::Float, "Surface"),
+            ("unlit", PropKind::Float, "Flags"),
+            ("fog", PropKind::Float, "Flags"),
+            ("shading", PropKind::Text, "Flags"),
+            ("jitter", PropKind::Float, "Flags"),
         ],
     ),
-    ("Camera", &[("fovY", PropKind::Float)]),
+    // `orthoHeight` is a 2D camera's ZOOM; `fovY` is the perspective one. Both
+    // are offered because a Camera node can be either, and the Inspector says
+    // which one it is.
+    ("Camera", &[("fovY", PropKind::Float, ""), ("orthoHeight", PropKind::Float, "")]),
+    // Not a real component. One key writes the material's texture, its sheet
+    // grid AND the cell, which is what lets a clip walk between sheets — and
+    // what stops the texture and the grid landing on different frames, which
+    // draws a slice of the wrong picture and says nothing.
+    (
+        floptle_scene::SPRITE_COMPONENT,
+        &[(floptle_scene::SPRITE_FIELD, PropKind::Frame, "")],
+    ),
 ];
+
+/// Is this field one a `Sprite ▸ frame` lane already writes?
+///
+/// A sprite frame is the texture, the sheet grid and the cell together. Where a
+/// sprite lane exists it OWNS those four, and the individual Material lanes for
+/// them must be neither offered nor recorded — two lanes writing the same values
+/// is not a duplicate but a conflict, settled by whichever happens to be applied
+/// second.
+fn owned_by_sprite(component: &str, field: &str) -> bool {
+    component == "Material"
+        && matches!(field, "texture" | "cell" | "sheetCols" | "sheetRows")
+}
 
 fn prop_kind(component: &str, field: &str) -> PropKind {
     ANIMATABLE_PROPS
         .iter()
         .find(|(c, _)| *c == component)
-        .and_then(|(_, fs)| fs.iter().find(|(f, _)| *f == field))
-        .map(|(_, k)| *k)
+        .and_then(|(_, fs)| fs.iter().find(|(f, _, _)| *f == field))
+        .map(|(_, k, _)| *k)
         .unwrap_or(PropKind::Float)
 }
 
@@ -1895,6 +2100,9 @@ impl EditorTabViewer<'_> {
 
         // ---- selected key: edit its value + time inline (image picker / number) ----
         let mut del_selected: Option<(usize, usize, usize)> = None;
+        // A sprite frame is edited BELOW the header row, not inside it — see the
+        // Frame arm.
+        let mut frame_key: Option<(usize, usize, usize)> = None;
         if let Some((ci, ti, ki)) = st.sel_prop {
             let valid = doc
                 .channels
@@ -1923,7 +2131,18 @@ impl EditorTabViewer<'_> {
                             .add(egui::DragValue::new(&mut t).speed(0.01).range(0.0..=dur).suffix("s"))
                             .changed()
                         {
-                            doc.channels[ci].properties[ti].times[ki] = t;
+                            // Through the retime path, which REMOVES and
+                            // re-inserts. Writing the slot in place left the
+                            // times unsorted, and the lane is binary-searched:
+                            // an unsorted lane plays the wrong frames, and saves
+                            // that way.
+                            let old = doc.channels[ci].properties[ti].times[ki];
+                            retime_property_key(&mut doc.channels[ci].properties[ti], old, t);
+                            st.sel_prop = doc.channels[ci].properties[ti]
+                                .times
+                                .iter()
+                                .position(|&x| (x - t).abs() < 1e-4)
+                                .map(|k| (ci, ti, k));
                             st.clip_dirty = true;
                         }
                         ui.label("value");
@@ -1959,11 +2178,87 @@ impl EditorTabViewer<'_> {
                                     st.clip_dirty = true;
                                 }
                             }
+                            // One key, four values — the image, how it is cut and
+                            // which piece. They are edited together because they
+                            // are drawn together: a texture and a grid that
+                            // disagree do not fail, they draw a slice of the
+                            // wrong picture.
+                            // **Its own rows, not a column nested in this one.**
+                            // `ui.vertical` reserves nothing up front and measures
+                            // from the cursor, so nested inside the header's
+                            // wrapped row the whole sub-editor was squeezed into
+                            // whatever was left of that line — 60–80 px in a
+                            // narrow panel, with the rest of the panel blank
+                            // beside it. Ending the row first gives it the region.
+                            AnimPropValueDoc::Frame(_) => frame_key = Some((ci, ti, ki)),
                         }
                         if ui.button("🗑 key").on_hover_text("delete this key (or press Del)").clicked() {
                             del_selected = Some((ci, ti, ki));
                         }
                     });
+                    // The sprite frame's own rows, with the whole group's width
+                    // to lay out in rather than the tail of the row above.
+                    if let Some((ci, ti, ki)) = frame_key
+                        && let AnimPropValueDoc::Frame(f) =
+                            &mut doc.channels[ci].properties[ti].values[ki]
+                    {
+
+                                ui.horizontal_wrapped(|ui| {
+                                    let label = if f.texture.is_empty() {
+                                        "(pick image)".to_string()
+                                    } else {
+                                        f.texture.clone()
+                                    };
+                                    if let Some(pick) = crate::ui_widgets::asset_picker(
+                                        ui,
+                                        egui::Id::new(("prop-frame-tex", ci, ti)),
+                                        self.project_root,
+                                        &label,
+                                        Some("(clear)"),
+                                        tree,
+                                        crate::assets::is_texture,
+                                        190.0,
+                                    ) {
+                                        f.texture = pick.unwrap_or_default();
+                                        st.clip_dirty = true;
+                                    }
+                                    for (name, v, hover) in [
+                                        ("cols", &mut f.cols, "how many columns this image is cut into — 1 is the whole image"),
+                                        ("rows", &mut f.rows, "how many rows this image is cut into — 1 is the whole image"),
+                                    ] {
+                                        ui.label(name);
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(v)
+                                                    .speed(0.2)
+                                                    .range(1..=256),
+                                            )
+                                            .on_hover_text(hover)
+                                            .changed()
+                                        {
+                                            st.clip_dirty = true;
+                                        }
+                                    }
+                                    let last = f.cols.saturating_mul(f.rows).saturating_sub(1);
+                                    ui.label("cell");
+                                    if ui
+                                        .add(egui::DragValue::new(&mut f.cell).speed(0.25).range(0..=last))
+                                        .changed()
+                                    {
+                                        st.clip_dirty = true;
+                                    }
+                                });
+                                if crate::ui_widgets::sheet_cell_picker(
+                                    ui,
+                                    egui::Id::new(("prop-frame-cell", ci, ti)),
+                                    &f.texture,
+                                    f.cols,
+                                    f.rows,
+                                    &mut f.cell,
+                                ) {
+                                    st.clip_dirty = true;
+                                }
+                    }
                 });
             }
         }
@@ -1988,6 +2283,12 @@ impl EditorTabViewer<'_> {
         // ✚ Property menus list only real components, Unity-style).
         let mut live_trs: HashMap<String, TransformTRS> = HashMap::new();
         let mut live_vals: HashMap<(String, String, String), f64> = HashMap::new();
+        // A sprite frame is four values, so it cannot ride `live_vals`. One per
+        // channel — a node has one sprite.
+        let mut live_frames: HashMap<String, floptle_scene::SpriteFrameDoc> = HashMap::new();
+        // …and a texture path is not a number either. Same key shape as
+        // `live_vals` so the two read alike at the call sites.
+        let mut live_strs: HashMap<(String, String, String), String> = HashMap::new();
         let mut node_fields: Vec<NodeFieldMenu> = Vec::new();
         // channel name → the scene entity it drives (for click-track-to-select).
         let mut chan_entity: HashMap<String, Entity> = HashMap::new();
@@ -2003,9 +2304,11 @@ impl EditorTabViewer<'_> {
                 );
             }
             let mir = floptle_script::mirror_components(self.world, e);
-            let mut fields: Vec<(String, String)> = Vec::new();
+            let strs = floptle_script::mirror_component_strings(self.world, e);
+            let mut fields: Vec<(String, String, &'static str)> = Vec::new();
+            // (kept out of `live_vals`, which is f64 — a frame is four values)
             for (comp, fs) in ANIMATABLE_PROPS {
-                for (f, kind) in fs.iter() {
+                for (f, kind, group) in fs.iter() {
                     let present = match kind {
                         // The mirror is already presence-filtered (cell/tints only
                         // when the element has an image, textSize with text…).
@@ -2020,22 +2323,41 @@ impl EditorTabViewer<'_> {
                                 false
                             }
                         }
-                        PropKind::Text => match (*comp, *f) {
-                            ("UiElement", "image") => {
-                                self.world.get::<floptle_ui::ElementSpec>(e).is_some()
+                        // Presence used to be a hand-written list of three
+                        // special cases, so a text field not on it could never
+                        // be added as a lane at all. The string mirror answers
+                        // it the same way the number mirror does — is the field
+                        // there — and records the live value for keying while it
+                        // is at it.
+                        PropKind::Text => {
+                            if let Some(v) = strs.get(*comp).and_then(|m| m.get(*f)) {
+                                live_strs.insert(
+                                    (chan.clone(), comp.to_string(), f.to_string()),
+                                    v.clone(),
+                                );
+                                true
+                            } else {
+                                false
                             }
-                            ("UiElement", "text") => self
-                                .world
-                                .get::<floptle_ui::ElementSpec>(e)
-                                .is_some_and(|s| s.text.is_some()),
-                            ("Material", "texture") => {
-                                self.world.get::<floptle_core::Material>(e).is_some()
+                        }
+                        // Anything wearing a Material can wear a sprite frame —
+                        // a Sprite node, and the Plane-plus-Material every 2D
+                        // project built before there was one.
+                        PropKind::Frame => {
+                            match floptle_script::read_sprite_frame(self.world, e) {
+                                Some((texture, cols, rows, cell)) => {
+                                    live_frames.insert(
+                                        chan.clone(),
+                                        floptle_scene::SpriteFrameDoc { texture, cols, rows, cell },
+                                    );
+                                    true
+                                }
+                                None => false,
                             }
-                            _ => false,
-                        },
+                        }
                     };
                     if present {
-                        fields.push((comp.to_string(), f.to_string()));
+                        fields.push((comp.to_string(), f.to_string(), group));
                     }
                 }
             }
@@ -2128,26 +2450,25 @@ impl EditorTabViewer<'_> {
             // you *why* nothing is going to happen before you press it.
             let has_sel = !st.sel_keys.is_empty() || st.sel_prop.is_some();
             let n_sel = st.sel_keys.len() + usize::from(st.sel_prop.is_some());
+            // The `if has_sel { … } else { … }` shape these used to have could
+            // never show its second half: egui opens `on_hover_text` only for an
+            // ENABLED response, so the "…select some keyframes first" branch —
+            // the only one anybody needs — was unreachable by construction. The
+            // reason a button is greyed out belongs on `on_disabled_hover_text`.
             if ui.add_enabled(has_sel, egui::Button::new("⎘"))
-                .on_hover_text(if has_sel {
-                    format!("Copy {} (Ctrl+C)", plural_keys(n_sel))
-                } else {
-                    "Copy keys (Ctrl+C) — select some keyframes first".into()
-                })
+                .on_hover_text(format!("Copy {} (Ctrl+C)", plural_keys(n_sel)))
+                .on_disabled_hover_text("Copy keys (Ctrl+C) — select some keyframes first")
                 .clicked() { copy_keys = true; }
             if ui.add_enabled(has_sel, egui::Button::new("✂"))
-                .on_hover_text(if has_sel {
-                    format!("Cut {} (Ctrl+X)", plural_keys(n_sel))
-                } else {
-                    "Cut keys (Ctrl+X) — select some keyframes first".into()
-                })
+                .on_hover_text(format!("Cut {} (Ctrl+X)", plural_keys(n_sel)))
+                .on_disabled_hover_text("Cut keys (Ctrl+X) — select some keyframes first")
                 .clicked() { copy_keys = true; cut_keys = true; }
             if ui.add_enabled(!st.key_clipboard.is_empty(), egui::Button::new("📋"))
-                .on_hover_text(if st.key_clipboard.is_empty() {
-                    "Paste keys (Ctrl+V) — nothing copied yet".into()
-                } else {
-                    format!("Paste {} at the playhead (Ctrl+V)", plural_keys(st.key_clipboard.len()))
-                })
+                .on_hover_text(format!(
+                    "Paste {} at the playhead (Ctrl+V)",
+                    plural_keys(st.key_clipboard.len())
+                ))
+                .on_disabled_hover_text("Paste keys (Ctrl+V) — nothing copied yet")
                 .clicked() { paste_keys = true; }
             if let Some((msg, _)) = st.status_note.as_ref() {
                 ui.label(egui::RichText::new(msg).weak());
@@ -2195,39 +2516,112 @@ impl EditorTabViewer<'_> {
                             (pt.component.clone(), pt.field.clone())
                         };
                         let kind = prop_kind(&comp, &field);
-                        let live = live_vals.get(&(name.clone(), comp, field)).copied();
-                        key_property_current(&mut doc.channels[ci].properties[ti], ph, kind, live);
+                        let key = (name.clone(), comp, field);
+                        let live = live_vals.get(&key).copied();
+                        key_property_current(
+                            &mut doc.channels[ci].properties[ti],
+                            ph,
+                            kind,
+                            live,
+                            live_strs.get(&key),
+                            live_frames.get(&name),
+                        );
                     }
                 }
                 st.clip_dirty = true;
             }
             ui.separator();
-            // ✚ Property: node ▸ field cascade listing only components actually on
-            // each node (Unity's "Add Property"). Adds an empty lane to key into.
+            // ✚ Property: node ▸ component ▸ [group ▸] field, listing only the
+            // components actually on each node (Unity's "Add Property"). Adds an
+            // empty lane to key into.
+            //
+            // Grouped rather than one flat list per node, because a material has
+            // three dozen animatable fields and a UI element two dozen. Flat,
+            // the four anybody reaches for — a texture, an opacity — are lost in
+            // a wall of surface maps, which is the same as not having them.
             ui.menu_button("✚ Property", |ui| {
                 if node_fields.is_empty() {
                     ui.weak("no animatable components in this subtree");
                 }
                 for (chan, disp, fields) in &node_fields {
                     ui.menu_button(disp, |ui| {
-                        for (comp, field) in fields {
-                            let exists = doc.channels.iter().any(|c| {
-                                &c.node == chan
-                                    && c.properties
-                                        .iter()
-                                        .any(|p| &p.component == comp && &p.field == field)
-                            });
-                            if ui
-                                .add_enabled(
-                                    !exists,
-                                    egui::Button::new(format!("{comp}.{field}")),
-                                )
-                                .clicked()
-                            {
-                                add_property_track(doc, chan, comp, field);
-                                st.clip_dirty = true;
-                                ui.close();
+                        // Component order follows ANIMATABLE_PROPS, not the order
+                        // fields happened to be collected in, so the menu is in
+                        // the same place every time.
+                        let mut comps: Vec<&str> = Vec::new();
+                        for (c, _, _) in fields {
+                            if !comps.contains(&c.as_str()) {
+                                comps.push(c.as_str());
                             }
+                        }
+                        for comp in comps {
+                            let mine: Vec<&(String, String, &'static str)> =
+                                fields.iter().filter(|(c, _, _)| c == comp).collect();
+                            // Does this channel already have a sprite lane? It
+                            // writes the texture, the grid AND the cell, so
+                            // offering those Material fields beside it would let
+                            // two lanes write the same four values — and which
+                            // one won would depend on the order they were added.
+                            let sprite_lane = doc.channels.iter().any(|c| {
+                                &c.node == chan
+                                    && c.properties.iter().any(|p| {
+                                        p.component == floptle_scene::SPRITE_COMPONENT
+                                            && p.field == floptle_scene::SPRITE_FIELD
+                                    })
+                            });
+                            let mut lane = |ui: &mut egui::Ui, field: &str| {
+                                let owned = sprite_lane && owned_by_sprite(comp, field);
+                                let exists = owned
+                                    || doc.channels.iter().any(|c| {
+                                        &c.node == chan
+                                            && c.properties
+                                                .iter()
+                                                .any(|p| p.component == comp && p.field == field)
+                                    });
+                                if ui
+                                    .add_enabled(!exists, egui::Button::new(field))
+                                    .on_hover_text(
+                                        "adds an empty lane — then key it, or ● Record and \
+                                         change the value",
+                                    )
+                                    // A DISABLED widget never shows `on_hover_text`: egui
+                                    // opens that tooltip only for an enabled response. So
+                                    // the one explanation that matters — why it is greyed
+                                    // out — has to go on the other call.
+                                    .on_disabled_hover_text(if owned {
+                                        "the Sprite ▸ frame lane on this node already writes it"
+                                    } else {
+                                        "this node already has a lane for it"
+                                    })
+                                    .clicked()
+                                {
+                                    add_property_track(doc, chan, comp, field);
+                                    st.clip_dirty = true;
+                                    ui.close();
+                                }
+                            };
+                            ui.menu_button(comp, |ui| {
+                                for (_, field, group) in mine.iter().filter(|(_, _, g)| g.is_empty())
+                                {
+                                    lane(ui, field);
+                                    let _ = group;
+                                }
+                                let mut groups: Vec<&str> = Vec::new();
+                                for (_, _, g) in &mine {
+                                    if !g.is_empty() && !groups.contains(g) {
+                                        groups.push(g);
+                                    }
+                                }
+                                for g in groups {
+                                    ui.menu_button(g, |ui| {
+                                        for (_, field, _) in
+                                            mine.iter().filter(|(_, _, fg)| *fg == g)
+                                        {
+                                            lane(ui, field);
+                                        }
+                                    });
+                                }
+                            });
                         }
                     });
                 }
@@ -2480,25 +2874,56 @@ impl EditorTabViewer<'_> {
                         if let Some((_, _, fields)) =
                             node_fields.iter().find(|(c, _, _)| *c == chan_name)
                         {
+                            // Same cascade as the header's ✚ Property, for the
+                            // same reason: flat, a material's three dozen fields
+                            // bury the four anybody wants.
                             ui.menu_button("✚ Add property", |ui| {
-                                for (comp, field) in fields {
-                                    let has = existing
-                                        .iter()
-                                        .any(|(c, f)| c == comp && f == field);
-                                    if ui
-                                        .add_enabled(
-                                            !has,
-                                            egui::Button::new(format!("{comp}.{field}")),
-                                        )
-                                        .clicked()
-                                    {
-                                        add_track_for = Some((
-                                            chan_name.clone(),
-                                            comp.clone(),
-                                            field.clone(),
-                                        ));
-                                        ui.close();
+                                let mut comps: Vec<&str> = Vec::new();
+                                for (c, _, _) in fields {
+                                    if !comps.contains(&c.as_str()) {
+                                        comps.push(c.as_str());
                                     }
+                                }
+                                for comp in comps {
+                                    let mine: Vec<&(String, String, &'static str)> =
+                                        fields.iter().filter(|(c, _, _)| c == comp).collect();
+                                    let mut lane = |ui: &mut egui::Ui, field: &String| {
+                                        let has =
+                                            existing.iter().any(|(c, f)| c == comp && f == field);
+                                        if ui
+                                            .add_enabled(!has, egui::Button::new(field))
+                                            .clicked()
+                                        {
+                                            add_track_for = Some((
+                                                chan_name.clone(),
+                                                comp.to_string(),
+                                                field.clone(),
+                                            ));
+                                            ui.close();
+                                        }
+                                    };
+                                    ui.menu_button(comp, |ui| {
+                                        for (_, field, _) in
+                                            mine.iter().filter(|(_, _, g)| g.is_empty())
+                                        {
+                                            lane(ui, field);
+                                        }
+                                        let mut groups: Vec<&str> = Vec::new();
+                                        for (_, _, g) in &mine {
+                                            if !g.is_empty() && !groups.contains(g) {
+                                                groups.push(g);
+                                            }
+                                        }
+                                        for g in groups {
+                                            ui.menu_button(g, |ui| {
+                                                for (_, field, _) in
+                                                    mine.iter().filter(|(_, _, fg)| *fg == g)
+                                                {
+                                                    lane(ui, field);
+                                                }
+                                            });
+                                        }
+                                    });
                                 }
                             });
                         }
@@ -2698,7 +3123,11 @@ impl EditorTabViewer<'_> {
                             prop_key_at = Some((ci, ti, ph));
                             ui.close();
                         }
-                        if prop_kind(&comp, &field) != PropKind::Text
+                        // Text and frames cannot blend at all, so offering the
+                        // toggle there is a control that does nothing: the
+                        // conversion forces Step back on load, so all it did was
+                        // persist a lie into the file.
+                        if !matches!(prop_kind(&comp, &field), PropKind::Text | PropKind::Frame)
                             && ui
                                 .selectable_label(step, "Step (hold each key)")
                                 .on_hover_text(
@@ -2885,12 +3314,15 @@ impl EditorTabViewer<'_> {
                     (doc.channels[ci].node.clone(), pt.component.clone(), pt.field.clone())
                 };
                 let kind = prop_kind(&comp, &field);
-                let live = live_vals.get(&(chan, comp, field)).copied();
+                let key = (chan.clone(), comp, field);
+                let live = live_vals.get(&key).copied();
                 let ki = key_property_current(
                     &mut doc.channels[ci].properties[ti],
                     t,
                     kind,
                     live,
+                    live_strs.get(&key),
+                    live_frames.get(&chan),
                 );
                 // Select the fresh key so its value is instantly editable below.
                 st.sel_prop = Some((ci, ti, ki));
@@ -3354,8 +3786,18 @@ pub fn stop_record_ui(world: &mut floptle_core::World, st: &mut AnimUiState) {
     for (e, comp, field, val) in std::mem::take(&mut st.record_restore_props) {
         floptle_script::apply_component_field(world, e, &comp, &field, val);
     }
+    for (e, comp, field, val) in std::mem::take(&mut st.record_restore_prop_strs) {
+        floptle_script::apply_component_field_str(world, e, &comp, &field, &val);
+    }
+    // Last, because it writes the texture AND the grid AND the cell together and
+    // must not be partly undone by the two loops above.
+    for (e, f) in std::mem::take(&mut st.record_restore_frames) {
+        floptle_script::apply_sprite_frame(world, e, &f.texture, f.cols, f.rows, f.cell);
+    }
     st.last_scene_local.clear();
     st.last_scene_props.clear();
+    st.last_scene_prop_strs.clear();
+    st.last_scene_frames.clear();
 }
 
 /// Record mode (called from the render loop BEFORE the preview applies): any
@@ -3387,33 +3829,108 @@ pub fn record_scan(world: &floptle_core::World, st: &mut AnimUiState, target: En
             }
             st.last_scene_local.insert(*e, cur);
         }
-        // --- property diff → auto-key numeric fields (cell, opacity, colors…) that
-        // changed since the baseline, creating the track on first touch. This is
-        // what makes "record, then change the spritesheet cell" land a key. ---
+        // --- property diff → auto-key any animatable field that changed since
+        // the baseline, creating the lane on first touch. ---
+        //
+        // Numbers, TEXT and whole sprite frames. Text used to be skipped
+        // outright (`if kind != Float { continue }`), which is why recording a
+        // sprite animation the obvious way — press ● Record, change the
+        // material's texture — wrote nothing at all, with no lane, no key and
+        // no message. The feature was unreachable by its own front door.
         let mir = floptle_script::mirror_components(world, *e);
+        let strs = floptle_script::mirror_component_strings(world, *e);
+
+        // Does this channel already own a sprite lane? If so it is the single
+        // owner of the texture, the grid and the cell, and the individual
+        // Material fields must NOT also be keyed — two lanes writing the same
+        // four values would fight, and which one won would depend on lane order.
+        let sprite_lane = st.clip_doc.as_ref().is_some_and(|(_, d)| {
+            d.channels.iter().any(|c| {
+                c.node == *chan_name
+                    && c.properties.iter().any(|p| {
+                        p.component == floptle_scene::SPRITE_COMPONENT
+                            && p.field == floptle_scene::SPRITE_FIELD
+                    })
+            })
+        });
+
+
         for (comp, fields) in ANIMATABLE_PROPS.iter() {
-            let Some(cm) = mir.get(*comp) else { continue };
-            for (field, kind) in fields.iter() {
-                if *kind != PropKind::Float {
+            for (field, kind, _) in fields.iter() {
+                if sprite_lane && owned_by_sprite(comp, field) {
                     continue;
                 }
-                let Some(&v) = cm.get(*field) else { continue };
-                let prev = st
-                    .last_scene_props
-                    .get(e)
-                    .and_then(|m| m.get(*comp))
-                    .and_then(|m| m.get(*field))
-                    .copied();
-                if let Some(pv) = prev
-                    && (pv - v).abs() > 1e-4
-                    && let Some((_, doc)) = st.clip_doc.as_mut()
-                {
-                    write_property_key(doc, chan_name, comp, field, playhead, v);
-                    wrote = true;
+                match kind {
+                    PropKind::Float => {
+                        let Some(&v) = mir.get(*comp).and_then(|m| m.get(*field)) else {
+                            continue;
+                        };
+                        let prev = st
+                            .last_scene_props
+                            .get(e)
+                            .and_then(|m| m.get(*comp))
+                            .and_then(|m| m.get(*field))
+                            .copied();
+                        if let Some(pv) = prev
+                            && (pv - v).abs() > 1e-4
+                            && let Some((_, doc)) = st.clip_doc.as_mut()
+                        {
+                            write_property_key(doc, chan_name, comp, field, playhead, v);
+                            wrote = true;
+                        }
+                    }
+                    PropKind::Text => {
+                        let Some(v) = strs.get(*comp).and_then(|m| m.get(*field)) else {
+                            continue;
+                        };
+                        let prev = st
+                            .last_scene_prop_strs
+                            .get(e)
+                            .and_then(|m| m.get(*comp))
+                            .and_then(|m| m.get(*field));
+                        if let Some(pv) = prev
+                            && pv != v
+                            && let Some((_, doc)) = st.clip_doc.as_mut()
+                        {
+                            write_property_key_text(doc, chan_name, comp, field, playhead, v);
+                            wrote = true;
+                        }
+                    }
+                    // A sprite lane is only keyed when it EXISTS. Unlike the
+                    // others it is not auto-created, because it overlaps the
+                    // Material fields above: creating one from a texture change
+                    // would silently change what the other lanes mean. Adding it
+                    // is a decision (✚ Property ▸ Sprite ▸ frame), and once made
+                    // record honours it.
+                    PropKind::Frame => {
+                        if !sprite_lane {
+                            continue;
+                        }
+                        let Some((texture, cols, rows, cell)) =
+                            floptle_script::read_sprite_frame(world, *e)
+                        else {
+                            continue;
+                        };
+                        let cur =
+                            floptle_scene::SpriteFrameDoc { texture, cols, rows, cell };
+                        let changed =
+                            st.last_scene_frames.get(e).is_some_and(|prev| *prev != cur);
+                        if changed
+                            && let Some((_, doc)) = st.clip_doc.as_mut()
+                        {
+                            write_property_key_frame(doc, chan_name, comp, field, playhead, &cur);
+                            wrote = true;
+                        }
+                    }
                 }
             }
         }
         st.last_scene_props.insert(*e, mir);
+        st.last_scene_prop_strs.insert(*e, strs);
+        if let Some((texture, cols, rows, cell)) = floptle_script::read_sprite_frame(world, *e) {
+            st.last_scene_frames
+                .insert(*e, floptle_scene::SpriteFrameDoc { texture, cols, rows, cell });
+        }
     }
     if wrote {
         st.clip_dirty = true;
@@ -3435,8 +3952,16 @@ pub fn refresh_record_baseline(
                 TransformTRS { t: tr.translation.as_vec3(), r: tr.rotation, s: tr.scale },
             );
         }
-        // Seed the property baseline too, so the first scan keys only real edits.
+        // Seed the property baselines too, so the first scan keys only real
+        // edits. All three of them — a baseline that covers the numbers and not
+        // the paths makes the first texture change after a scrub read as an edit
+        // that never happened.
         st.last_scene_props.insert(e, floptle_script::mirror_components(world, e));
+        st.last_scene_prop_strs.insert(e, floptle_script::mirror_component_strings(world, e));
+        if let Some((texture, cols, rows, cell)) = floptle_script::read_sprite_frame(world, e) {
+            st.last_scene_frames
+                .insert(e, floptle_scene::SpriteFrameDoc { texture, cols, rows, cell });
+        }
     }
 }
 
@@ -3447,11 +3972,37 @@ fn numeric_props_of(world: &floptle_core::World, e: Entity) -> Vec<(&'static str
     let mut out = Vec::new();
     for (comp, fields) in ANIMATABLE_PROPS.iter() {
         let Some(m) = mir.get(*comp) else { continue };
-        for (field, kind) in fields.iter() {
+        for (field, kind, _) in fields.iter() {
             if *kind == PropKind::Float
                 && let Some(&v) = m.get(*field)
             {
                 out.push((*comp, *field, v));
+            }
+        }
+    }
+    out
+}
+
+/// The same, for path-and-name fields.
+///
+/// Its own function for one reason: **recording authors the clip, never the
+/// scene.** Turning record off puts back every value it captured, and a capture
+/// that covered the numbers and not the paths would leave a material wearing
+/// whichever texture you happened to stop on — an edit nobody made, to the file
+/// on disk, from a mode whose whole promise is that it does not do that.
+fn string_props_of(
+    world: &floptle_core::World,
+    e: Entity,
+) -> Vec<(&'static str, &'static str, String)> {
+    let mir = floptle_script::mirror_component_strings(world, e);
+    let mut out = Vec::new();
+    for (comp, fields) in ANIMATABLE_PROPS.iter() {
+        let Some(m) = mir.get(*comp) else { continue };
+        for (field, kind, _) in fields.iter() {
+            if *kind == PropKind::Text
+                && let Some(v) = m.get(*field)
+            {
+                out.push((*comp, *field, v.clone()));
             }
         }
     }
@@ -3844,6 +4395,57 @@ fn write_property_key(
     t: f32,
     value: f64,
 ) {
+    write_property_value(doc, chan_name, comp, field, t, AnimPropValueDoc::Float(value as f32));
+}
+
+/// The text half — a texture path, a style name, a line of text.
+fn write_property_key_text(
+    doc: &mut AnimClipDoc,
+    chan_name: &str,
+    comp: &str,
+    field: &str,
+    t: f32,
+    value: &str,
+) {
+    write_property_value(
+        doc,
+        chan_name,
+        comp,
+        field,
+        t,
+        AnimPropValueDoc::Text(value.to_string()),
+    );
+}
+
+/// …and the whole-sprite-frame half.
+fn write_property_key_frame(
+    doc: &mut AnimClipDoc,
+    chan_name: &str,
+    comp: &str,
+    field: &str,
+    t: f32,
+    value: &floptle_scene::SpriteFrameDoc,
+) {
+    write_property_value(
+        doc,
+        chan_name,
+        comp,
+        field,
+        t,
+        AnimPropValueDoc::Frame(value.clone()),
+    );
+}
+
+/// Put `value` on `(node, component, field)` at `t`, creating the channel and
+/// the lane if this is the first key on them.
+fn write_property_value(
+    doc: &mut AnimClipDoc,
+    chan_name: &str,
+    comp: &str,
+    field: &str,
+    t: f32,
+    value: AnimPropValueDoc,
+) {
     let ci = match doc.channels.iter().position(|c| c.node == chan_name) {
         Some(i) => i,
         None => {
@@ -3861,14 +4463,13 @@ fn write_property_key(
                 field: field.to_string(),
                 times: Vec::new(),
                 values: Vec::new(),
-                // The spritesheet frame index holds each key (no blend).
-                step: comp == "UiElement" && field == "cell",
+                step: steps_by_nature(comp, field),
             });
             props.len() - 1
         }
     };
     let pt = &mut props[ti];
-    let v = AnimPropValueDoc::Float(value as f32);
+    let v = value;
     if let Some(i) = pt.times.iter().position(|&x| (x - t).abs() < 1e-4) {
         pt.values[i] = v;
     } else {
@@ -3901,10 +4502,34 @@ fn add_property_track(doc: &mut AnimClipDoc, node: &str, component: &str, field:
         field: field.to_string(),
         times: Vec::new(),
         values: Vec::new(),
-        // Text swaps and the spritesheet frame index hold each key (no blend).
-        step: prop_kind(component, field) == PropKind::Text
-            || (component == "UiElement" && field == "cell"),
+        step: steps_by_nature(component, field),
     });
+}
+
+/// Does this field hold each key rather than blend between them?
+///
+/// One function because there are three places that create a lane — ✚ Property,
+/// a lane context menu, and record's first touch — and a lane created stepped by
+/// one and smooth by another is a clip that plays differently depending on how
+/// its first key got there.
+///
+/// Text and frames can only step. The rest is the fields whose numbers are
+/// **indices and flags rather than quantities**: half a spritesheet cell is not
+/// a cell, and a material half unlit is a material at 0.5 that reads as neither.
+fn steps_by_nature(component: &str, field: &str) -> bool {
+    if matches!(prop_kind(component, field), PropKind::Text | PropKind::Frame) {
+        return true;
+    }
+    matches!(
+        (component, field),
+        ("UiElement", "cell")
+            | ("UiElement", "visible")
+            | ("Material", "cell")
+            | ("Material", "sheetCols")
+            | ("Material", "sheetRows")
+            | ("Material", "unlit")
+            | ("Material", "fog")
+    )
 }
 
 /// Key a property at `t` with the node's LIVE value when we have one (numeric
@@ -3915,6 +4540,8 @@ fn key_property_current(
     t: f32,
     kind: PropKind,
     live: Option<f64>,
+    live_str: Option<&String>,
+    live_frame: Option<&floptle_scene::SpriteFrameDoc>,
 ) -> usize {
     key_property_at(pt, t, kind);
     let i = pt
@@ -3924,6 +4551,16 @@ fn key_property_current(
         .unwrap_or(0);
     if let (Some(v), PropKind::Float) = (live, kind) {
         pt.values[i] = AnimPropValueDoc::Float(v as f32);
+    }
+    if let (Some(f), PropKind::Frame) = (live_frame, kind) {
+        pt.values[i] = AnimPropValueDoc::Frame(f.clone());
+    }
+    // A texture lane keyed at the playhead takes the texture that is ON the node
+    // right now, the same as every other lane takes its live value. Carrying the
+    // previous key forward instead makes "key here" produce a duplicate of the
+    // key before it, which reads as the button not working.
+    if let (Some(v), PropKind::Text) = (live_str, kind) {
+        pt.values[i] = AnimPropValueDoc::Text(v.clone());
     }
     i
 }
@@ -3943,6 +4580,16 @@ fn key_property_at(pt: &mut AnimPropTrackDoc, t: f32, kind: PropKind) {
         PropKind::Text => {
             let at = pt.times.partition_point(|&x| x < t);
             pt.values.get(at.saturating_sub(1)).cloned().unwrap_or(AnimPropValueDoc::Text(String::new()))
+        }
+        // Carry the previous frame forward, so a new key on a sprite lane shows
+        // the picture that was already there rather than an empty texture —
+        // which draws nothing and reads as the key having broken the node.
+        PropKind::Frame => {
+            let at = pt.times.partition_point(|&x| x < t);
+            pt.values
+                .get(at.saturating_sub(1))
+                .cloned()
+                .unwrap_or_else(|| AnimPropValueDoc::Frame(floptle_scene::SpriteFrameDoc::default()))
         }
     };
     if let Some(i) = pt.times.iter().position(|&x| (x - t).abs() < 1e-4) {
@@ -4011,6 +4658,371 @@ mod tests {
             source_model: String::new(),
             channels: Vec::new(),
             events: Vec::new(),
+        }
+    }
+
+    /// A node with a Material and a Sprite, and a record baseline seeded from
+    /// it — the shape every record test below starts from.
+    fn sprite_world() -> (floptle_core::World, Entity) {
+        let mut w = floptle_core::World::new();
+        let e = w.spawn();
+        w.insert(e, floptle_core::Transform::default());
+        w.insert(e, floptle_core::Name("Sprite".into()));
+        w.insert(
+            e,
+            Matter::Sprite {
+                ppu: 32.0,
+                size: 1.0,
+                cell: 0,
+                flip_x: false,
+                flip_y: false,
+                pivot: [0.5, 0.5],
+            },
+        );
+        w.insert(
+            e,
+            floptle_core::Material {
+                texture: Some("art/a.png".into()),
+                alpha: 1.0,
+                ..Default::default()
+            },
+        );
+        (w, e)
+    }
+
+    fn recording_state(w: &floptle_core::World, e: Entity) -> AnimUiState {
+        let mut st =
+            AnimUiState { clip_doc: Some(("clip".into(), empty_clip())), ..Default::default() };
+        refresh_record_baseline(w, &mut st, e);
+        st
+    }
+
+    fn lane<'a>(doc: &'a AnimClipDoc, comp: &str, field: &str) -> Option<&'a AnimPropTrackDoc> {
+        doc.channels
+            .iter()
+            .flat_map(|c| c.properties.iter())
+            .find(|p| p.component == comp && p.field == field)
+    }
+
+    /// **The reported bug.** ● Record, then change the material's texture, and
+    /// the animator wrote nothing at all — no lane, no key, no message. The
+    /// record pass diffed `mirror_components`, which is `f64` by construction,
+    /// so a path could not be compared and text fields were skipped outright.
+    ///
+    /// This is the front door of sprite animation. Recording it the obvious way
+    /// silently did nothing, which reads as the feature not existing.
+    #[test]
+    fn recording_a_texture_swap_writes_a_key() {
+        let (mut w, e) = sprite_world();
+        let mut st = recording_state(&w, e);
+
+        // Nothing has changed yet: a scan must not invent a key.
+        assert!(!record_scan(&w, &mut st, e), "a scan with no edit wrote something");
+
+        floptle_script::apply_component_field_str(&mut w, e, "Material", "texture", "art/b.png");
+        st.playhead = 0.5;
+        assert!(record_scan(&w, &mut st, e), "changing the texture wrote nothing");
+
+        let doc = &st.clip_doc.as_ref().unwrap().1;
+        let l = lane(doc, "Material", "texture").expect("no Material.texture lane was created");
+        assert_eq!(l.times, vec![0.5]);
+        assert_eq!(l.values, vec![AnimPropValueDoc::Text("art/b.png".into())]);
+        assert!(l.step, "a texture lane that could interpolate is not a texture lane");
+    }
+
+    /// The other half of what was asked for: tweening a material's transparency.
+    ///
+    /// `opacity` was reachable from `node:setMaterial` and from nowhere the
+    /// animation system could see — the numeric mirror carried three
+    /// spritesheet fields and nothing else — so fading a material out, which is
+    /// the most ordinary thing anybody animates, had no route at all.
+    #[test]
+    fn recording_a_material_fade_writes_a_key_that_can_blend() {
+        let (mut w, e) = sprite_world();
+        let mut st = recording_state(&w, e);
+
+        floptle_script::apply_component_field(&mut w, e, "Material", "opacity", 0.25);
+        st.playhead = 1.0;
+        assert!(record_scan(&w, &mut st, e), "changing the opacity wrote nothing");
+
+        let doc = &st.clip_doc.as_ref().unwrap().1;
+        let l = lane(doc, "Material", "opacity").expect("no Material.opacity lane");
+        assert_eq!(l.values, vec![AnimPropValueDoc::Float(0.25)]);
+        assert!(!l.step, "a fade has to interpolate — a stepped opacity is a blink");
+    }
+
+    /// Recording authors the clip, never the scene.
+    ///
+    /// The restore snapshot covered numbers only, so recording a texture swap
+    /// left the swap in the scene after ● Record off — an edit nobody made, to
+    /// the file on disk, from the one mode that promises it does not do that.
+    #[test]
+    fn turning_record_off_puts_a_swapped_texture_back() {
+        let (mut w, e) = sprite_world();
+        let mut st = recording_state(&w, e);
+        st.record_restore_prop_strs = string_props_of(&w, e)
+            .into_iter()
+            .map(|(c, f, v)| (e, c.to_string(), f.to_string(), v))
+            .collect();
+        st.record_restore_props = numeric_props_of(&w, e)
+            .into_iter()
+            .map(|(c, f, v)| (e, c.to_string(), f.to_string(), v))
+            .collect();
+
+        floptle_script::apply_component_field_str(&mut w, e, "Material", "texture", "art/b.png");
+        floptle_script::apply_component_field(&mut w, e, "Material", "opacity", 0.1);
+        record_scan(&w, &mut st, e);
+        stop_record_ui(&mut w, &mut st);
+
+        let m = w.get::<floptle_core::Material>(e).unwrap();
+        assert_eq!(m.texture.as_deref(), Some("art/a.png"), "the scene kept the recorded texture");
+        assert_eq!(m.alpha, 1.0, "the scene kept the recorded opacity");
+        // …and the clip still holds what was recorded.
+        let doc = &st.clip_doc.as_ref().unwrap().1;
+        assert!(lane(doc, "Material", "texture").is_some());
+    }
+
+    /// A Sprite node's `cell` lives on its **Matter**, not on any component the
+    /// numeric or string restore lists can reach — so scrubbing a sprite lane
+    /// with record on left the node wearing whichever frame you stopped on, and
+    /// that is what got saved.
+    #[test]
+    fn turning_record_off_puts_a_scrubbed_sprite_frame_back() {
+        let (mut w, e) = sprite_world();
+        let mut st = recording_state(&w, e);
+        st.record_restore_frames = floptle_script::read_sprite_frame(&w, e)
+            .map(|(texture, cols, rows, cell)| {
+                (e, floptle_scene::SpriteFrameDoc { texture, cols, rows, cell })
+            })
+            .into_iter()
+            .collect();
+
+        // What a scrub does: the preview writes the frame straight onto the node.
+        floptle_script::apply_sprite_frame(&mut w, e, "art/b.png", 4, 2, 3);
+        stop_record_ui(&mut w, &mut st);
+
+        assert_eq!(
+            floptle_script::read_sprite_frame(&w, e),
+            Some(("art/a.png".to_string(), 1, 1, 0)),
+            "the scene kept the frame the preview left on it"
+        );
+    }
+
+    /// A sprite lane owns the four values it covers.
+    ///
+    /// Both a `Sprite.frame` lane and the individual `Material.texture` /
+    /// `cell` lanes can write the same fields. Two lanes writing them is not a
+    /// duplicate but a conflict, and which one wins depends on lane order —
+    /// so where the sprite lane exists, record keys it and leaves the parts
+    /// alone.
+    #[test]
+    fn a_sprite_lane_takes_over_the_material_fields_it_covers() {
+        let (mut w, e) = sprite_world();
+        let mut st = recording_state(&w, e);
+        add_property_track(
+            &mut st.clip_doc.as_mut().unwrap().1,
+            "",
+            floptle_scene::SPRITE_COMPONENT,
+            floptle_scene::SPRITE_FIELD,
+        );
+
+        floptle_script::apply_sprite_frame(&mut w, e, "art/b.png", 4, 2, 3);
+        st.playhead = 0.25;
+        assert!(record_scan(&w, &mut st, e), "the sprite lane was not keyed");
+
+        let doc = &st.clip_doc.as_ref().unwrap().1;
+        let l = lane(doc, floptle_scene::SPRITE_COMPONENT, floptle_scene::SPRITE_FIELD).unwrap();
+        assert_eq!(
+            l.values,
+            vec![AnimPropValueDoc::Frame(floptle_scene::SpriteFrameDoc {
+                texture: "art/b.png".into(),
+                cols: 4,
+                rows: 2,
+                cell: 3,
+            })]
+        );
+        for f in ["texture", "cell", "sheetCols", "sheetRows"] {
+            assert!(
+                lane(doc, "Material", f).is_none(),
+                "Material.{f} was keyed too — two lanes now write the same value"
+            );
+        }
+    }
+
+    /// **Every animatable field must be readable and writable.** The guard on
+    /// the class of bug rather than on one instance of it.
+    ///
+    /// A field the timeline offers and the mirror cannot read is a lane record
+    /// will never key. One the mirror reads and the setter cannot write is a key
+    /// that plays back as nothing. Both fail in silence, which is why the
+    /// texture case survived a release: `Material.texture` was in the menu, in
+    /// the setter, and in no mirror at all.
+    #[test]
+    fn every_animatable_field_can_be_both_read_and_written() {
+        let (mut w, e) = sprite_world();
+        // Everything ANIMATABLE_PROPS names has to be present on SOME node for
+        // this to test anything, so build one wearing the lot.
+        w.insert(e, floptle_ui::ElementSpec {
+            image: Some(floptle_ui::ImageSpec::default()),
+            text: Some(floptle_ui::TextSpec::default()),
+            shape: Some(Default::default()),
+            ..Default::default()
+        });
+        // A Camera and a UiSlider too, so the guard's claim to cover the whole
+        // list is true rather than a comment. The first version said these were
+        // "covered by their own tests"; there were no such tests.
+        let cam = w.spawn();
+        w.insert(cam, floptle_core::Transform::default());
+        w.insert(
+            cam,
+            Matter::Camera {
+                fov_y: 1.0,
+                active: false,
+                target: String::new(),
+                cull_mask: !0,
+                target_w: 0,
+                target_h: 0,
+                target_hz: 0.0,
+                ortho: true,
+                ortho_height: 10.0,
+            },
+        );
+        let slider = w.spawn();
+        w.insert(slider, floptle_core::Transform::default());
+        w.insert(
+            slider,
+            floptle_ui::ElementSpec {
+                slider: Some(floptle_ui::SliderSpec::default()),
+                ..Default::default()
+            },
+        );
+        let light = w.spawn();
+        w.insert(light, floptle_core::Transform::default());
+        w.insert(
+            light,
+            Matter::PointLight {
+                color: [1.0; 3],
+                intensity: 1.0,
+                range: 5.0,
+                shape: floptle_core::LightShape::Point,
+                shadows: false,
+                spot_angle: 180.0,
+                spot_softness: 0.0,
+            },
+        );
+
+        let mut unreadable = Vec::new();
+        let mut unwritable = Vec::new();
+        for (comp, fields) in ANIMATABLE_PROPS.iter() {
+            // The sprite lane is a pseudo-component with its own applier, so it
+            // is checked below rather than through the two mirrors.
+            if *comp == floptle_scene::SPRITE_COMPONENT {
+                continue;
+            }
+            for (field, kind, _) in fields.iter() {
+                for target in [e, light, cam, slider] {
+                    let nums = floptle_script::mirror_components(&w, target);
+                    let strs = floptle_script::mirror_component_strings(&w, target);
+                    let present_num = nums.get(*comp).is_some_and(|m| m.contains_key(*field));
+                    let present_str = strs.get(*comp).is_some_and(|m| m.contains_key(*field));
+                    if !present_num && !present_str {
+                        continue; // this component is not on this node
+                    }
+                    match kind {
+                        PropKind::Float => {
+                            if !present_num {
+                                unreadable.push(format!("{comp}.{field}"));
+                                continue;
+                            }
+                            let before = nums[*comp][*field];
+                            let probe = if before == 0.0 { 1.0 } else { 0.0 };
+                            floptle_script::apply_component_field(
+                                &mut w, target, comp, field, probe,
+                            );
+                            let after = floptle_script::mirror_components(&w, target)[*comp]
+                                [*field];
+                            if (after - before).abs() < 1e-9 {
+                                unwritable.push(format!("{comp}.{field}"));
+                            }
+                            floptle_script::apply_component_field(
+                                &mut w, target, comp, field, before,
+                            );
+                        }
+                        PropKind::Text => {
+                            if !present_str {
+                                unreadable.push(format!("{comp}.{field}"));
+                                continue;
+                            }
+                            let before = strs[*comp][*field].clone();
+                            // `shading` takes names, not paths — probe it with
+                            // one it accepts, or a refused value reads as an
+                            // unwritable field.
+                            let probe = if *field == "shading" {
+                                if before == "pbr" { "classic" } else { "pbr" }
+                            } else if before == "probe/x.png" {
+                                "probe/y.png"
+                            } else {
+                                "probe/x.png"
+                            };
+                            floptle_script::apply_component_field_str(
+                                &mut w, target, comp, field, probe,
+                            );
+                            let after = floptle_script::mirror_component_strings(&w, target)
+                                [*comp][*field]
+                                .clone();
+                            if after == before {
+                                unwritable.push(format!("{comp}.{field}"));
+                            }
+                            floptle_script::apply_component_field_str(
+                                &mut w, target, comp, field, &before,
+                            );
+                        }
+                        PropKind::Frame => {}
+                    }
+                }
+            }
+        }
+        assert!(
+            unreadable.is_empty(),
+            "record can never notice these change — no mirror reads them: {}",
+            unreadable.join(", ")
+        );
+        assert!(
+            unwritable.is_empty(),
+            "keys on these play back as nothing — no setter writes them: {}",
+            unwritable.join(", ")
+        );
+
+        // …and the sprite lane, whose applier is its own and whose reader has to
+        // give back exactly what it put in. Without this the one PropKind the
+        // guard exists for was the one it skipped.
+        floptle_script::apply_sprite_frame(&mut w, e, "probe/x.png", 4, 2, 5);
+        assert_eq!(
+            floptle_script::read_sprite_frame(&w, e),
+            Some(("probe/x.png".to_string(), 4, 2, 5)),
+            "a sprite frame does not read back as it was written"
+        );
+    }
+
+    /// The ✚ Property menu stays readable however many fields a component gains.
+    #[test]
+    fn no_component_shows_more_than_a_glance_of_fields_at_once() {
+        for (comp, fields) in ANIMATABLE_PROPS.iter() {
+            let top = fields.iter().filter(|(_, _, g)| g.is_empty()).count();
+            assert!(
+                top <= 8,
+                "{comp} puts {top} fields at its menu's top level — group the rest"
+            );
+            let mut groups: Vec<&str> = Vec::new();
+            for (_, _, g) in fields.iter() {
+                if !g.is_empty() && !groups.contains(g) {
+                    groups.push(g);
+                }
+            }
+            for g in groups {
+                let n = fields.iter().filter(|(_, _, fg)| fg == &g).count();
+                assert!(n <= 20, "{comp} ▸ {g} has {n} fields");
+            }
         }
     }
 

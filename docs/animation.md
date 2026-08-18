@@ -14,7 +14,7 @@ Floptle's animation system is built around three ideas:
    transitions or events.
 
 > Everything below is reachable from the **Window** menu: *Animation Controller*
-> (the graph editor) and *✎ Animating* (the timeline).
+> (the graph editor) and *⏱ Animating* (the timeline).
 
 ---
 
@@ -32,7 +32,7 @@ A rigged model **plays without any setup**: drop it into the scene, press Play,
 and its `Idle` (or first) clip loops. Scripts can drive the embedded clips via
 `node:animator()` immediately. Once a clip is **extracted**, the `.anim.ron`
 with the same name takes over from the embedded copy everywhere — playback,
-preview, and the ✎ Animating timeline (keys + events become editable) — still
+preview, and the ⏱ Animating timeline (keys + events become editable) — still
 with no controller required. For real control, add a controller:
 
 ## 2. Animation Controllers
@@ -68,10 +68,10 @@ a script calls `anim:play("Slash")`, the attack takes over; when the one-shot
 finishes, the layer releases automatically and movement shows again. If the
 attack clip only animates the arms, the legs keep walking.
 
-## 3. The ✎ Animating tab (timeline)
+## 3. The ⏱ Animating tab (timeline)
 
 Select a node that has a controller (or a rigged model) and open **Window →
-✎ Animating**:
+⏱ Animating**:
 
 - Pick the **animation** from the dropdown (the controller's states).
 - **Scrub** the ruler to preview; **⏵** plays a live preview; **⏹** restores the
@@ -92,6 +92,72 @@ Select a node that has a controller (or a rigged model) and open **Window →
   when you turned it on. Use **✚ New…** to start a fresh empty clip (it's added
   to the controller too).
 
+### Property lanes — what can be keyed
+
+**✚ Property ▸ node ▸ component ▸ field.** Components are grouped, and each
+component puts the handful of fields people reach for at its top level with the
+rest one step in (*Colour*, *Surface*, *Sheet*, *Layout*, *Flags*), so a
+material's three dozen animatable fields do not bury its texture and its opacity.
+
+| Component | What you get |
+|---|---|
+| **Material** | `texture`, `opacity`, `ambient`; **Colour** — base `r/g/b`, emissive, specular, shininess, rim; **Sheet** — `cell`, `sheetCols`, `sheetRows`; **Surface** — the maps and their strengths, roughness, metallic, reflectivity, transmission, ior, thickness; **Flags** — `unlit`, `fog`, `shading`, `jitter` |
+| **UiElement** | `image`, `opacity`, `visible`, `text`; **Layout**, **Colour**, **Text**, **Sheet** |
+| **PointLight** | `intensity`, `range`, colour |
+| **UiSlider** | `value`, `min`, `max` |
+| **Camera** | `fovY` |
+| **Sprite** | `frame` — see below |
+
+The names in the table are the groups; the **field names** are what a `.anim.ron`
+stores, and are what you type if you hand-edit one. Colours are per channel:
+`r` `g` `b` for a material's base colour, `emissiveR/G/B` + `emissiveStrength`,
+`specularR/G/B` + `specularStrength` + `shininess`, `rimR/G/B` + `rimStrength`.
+A UI element's are `fillR/G/B/A`, `textR/G/B/A`, `tintR/G/B/A`. `opacity` is a
+material's alpha, and `orthoHeight` is a 2D camera's zoom.
+
+`visible`, `unlit` and `fog` are numbers because a keyframe holds one: **0 is
+off and 1 is on**, and they are created as stepped lanes so nothing is ever half
+on.
+
+**● Record picks all of them up**, not just the numbers: change a material's
+texture with record on and a stepped `Material.texture` lane appears with a key
+at the playhead, exactly as changing its opacity gives you a smooth
+`Material.opacity` lane. Fields whose numbers are indices or flags rather than
+quantities — a spritesheet `cell`, `unlit` — are created **stepped**, because
+half a cell is not a cell.
+
+Recording authors the clip and never the scene: turning record off puts every
+value back, paths included.
+
+> A field is only animatable if the engine can both **read** and **write** it —
+> read so record notices it change, write so a key plays back. A test walks the
+> whole list and asserts both, because each half fails silently on its own.
+
+### Sprite lanes
+
+**✚ Property ▸ Sprite.frame** adds a sprite lane, on any node wearing a
+material. Each key holds a **whole frame** — the image, how it is cut, and which
+cell — picked together, because they are drawn together: a texture and a grid
+that land on different keys give you a cell index read against the wrong grid,
+which draws a slice of the wrong picture and reports nothing.
+
+A sprite lane is a **step** lane and cannot be anything else — the conversion
+forces it whatever the file says. Interpolating two frame references is
+meaningless, and interpolating two cell *indices* plays every cell in between,
+which reads as the clip running at the wrong speed rather than as a bug.
+
+The other way to author sprite animation is a
+[`.spriteanim.ron`](2d.md#sprite-animation--a-frame-names-its-own-art) — a frame
+list with a frame rate, which is how a walk cycle is actually written down. It
+loads as an ordinary clip, so both ways end up in the same controller, the same
+crossfades and the same script API. Use a lane when the sprite is *part* of what
+is animated (a character whose picture changes and whose node moves is one clip,
+not two); use the file when the clip is frames and nothing else.
+
+The Animating tab plays a `.spriteanim.ron` but does not edit it: the timeline
+writes keyed lanes, which is a different shape and a different filename, so
+saving one as the other would leave two files claiming one clip.
+
 ### Two states, one clip
 
 A **state** in a controller is a name plus a pointer to a clip *file*. Nothing
@@ -99,7 +165,7 @@ stops two states pointing at the same file — that is how you reuse one `Hit`
 clip across three attacks, and it is a real authoring choice. But it also means
 those states are **one animation**: key it under either name and both change.
 
-So the ✎ Animating tab says so. A shared clip is marked **⚠ shared** in the
+So the ⏱ Animating tab says so. A shared clip is marked **⚠ shared** in the
 animation dropdown, and selecting one shows a banner naming every state that
 plays it, with two fixes:
 
@@ -192,8 +258,9 @@ frame grid — the classic hand-animated choppiness. Override per state (a snapp
 |---|---|---|---|
 | Animation clip | `.anim.ron` | `animations/<Model>/` | self-contained keys + events, name-bound |
 | Animation controller | `.actl.ron` | `animation_controllers/` | layers, states, fade table, stepped fps |
+| Sprite animation | `.spriteanim.ron` | beside the art | a frame list with an fps — loads **as a clip** |
 
-Both are plain RON — hand-editable, diff-able, and discovered anywhere under
+All three are plain RON — hand-editable, diff-able, and discovered anywhere under
 `assets/` by extension.
 
 ## Skinning happens on the GPU

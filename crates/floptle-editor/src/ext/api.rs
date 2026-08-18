@@ -558,6 +558,32 @@ fn ed_table(lua: &Lua, shared: &Rc<Shared>, pkg: usize, state: &PkgState) -> mlu
         )?;
     }
     {
+        // **A write, never a read.** Putting a string somewhere the person can
+        // paste it is them asking for it — the package had the string already.
+        // Reading the clipboard is a different question with a real answer
+        // owed (it holds whatever they last copied, from anywhere), and
+        // nothing in this API can do it. That absence is a decision.
+        //
+        // No permission for the same reason: nothing leaves the machine and
+        // nothing arrives. `Browser` guards `openUrl` because that hands a
+        // string to the network; this hands it to the person at the keyboard.
+        let shared = shared.clone();
+        t.set(
+            "copy",
+            lua.create_function(move |_, text: String| {
+                if text.len() > MAX_COPY_BYTES {
+                    return Err(mlua::Error::runtime(format!(
+                        "ed.copy: that is {:.1} MB of text and the clipboard takes at most 1 MB \
+                         — something that big wants ed.write and a file",
+                        text.len() as f64 / (1024.0 * 1024.0)
+                    )));
+                }
+                shared.cmds.borrow_mut().push(ExtCmd::Copy(text));
+                Ok(())
+            })?,
+        )?;
+    }
+    {
         // Take the author to a place. Every tool that lists positions — a
         // search result, a lint hit, a suggested placement — has somewhere it
         // wants to show you, and until this the only way to get there was to
@@ -1072,10 +1098,16 @@ fn require_fn(
 /// A Lua array and a Lua map are the same type, so the ambiguity is resolved the
 /// way the rest of this API resolves it: `{}` is an empty **object**, because
 /// every place a document takes a table it takes a named one.
-fn lua_to_json(lua: &Lua, t: Table) -> mlua::Result<serde_json::Value> {
-    use mlua::LuaSerdeExt;
-    let v = lua.to_value(&t)?;
-    serde_json::to_value(&v).map_err(|e| mlua::Error::runtime(format!("not encodable: {e}")))
+fn lua_to_json(_lua: &Lua, t: Table) -> mlua::Result<serde_json::Value> {
+    // **The same encoder `json.encode` uses**, deliberately. It used to go
+    // through mlua's serde conversion, which decides array-vs-object by its own
+    // rule and knows nothing about `json.array` — so `scene.set(id, { scripts =
+    // json.array{} })` wrote `{}` and the document then failed to parse with
+    // "invalid type: map, expected a sequence". There was no expression a
+    // package could write to clear a list field of a node, which is the exact
+    // thing `json.array` exists for. Routing it here also brings the recursion
+    // limit and `json.null` to `scene.set`, which had neither.
+    to_json(&Value::Table(t), 0)
 }
 
 fn scene_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
@@ -1674,6 +1706,12 @@ fn json_table(lua: &Lua) -> mlua::Result<Table> {
     // `if body.field then`, and handing them a sentinel that is truthy would
     // silently turn every one of those tests the wrong way round.
     t.set("null", json_null())?;
+    // `json.array(t)` / `json.isArray(v)` — the same class of problem as
+    // `json.null`, one step along: a value Lua cannot say that the wire needs.
+    // An empty table is both an empty list and an empty object and the encoder
+    // has to pick; it picks the object, so without this there is no way to
+    // send `[]` at all. See `floptle_script::json_array`.
+    floptle_script::json_array::install(lua, &t)?;
     Ok(t)
 }
 
@@ -1687,6 +1725,14 @@ static JSON_NULL: u8 = 0;
 fn json_null() -> mlua::LightUserData {
     mlua::LightUserData(&JSON_NULL as *const u8 as *mut std::ffi::c_void)
 }
+
+/// The most text `ed.copy` will put on the clipboard.
+///
+/// A megabyte is far past anything a person pastes and far short of anything
+/// that costs the editor a frame. Refused with a sentence rather than
+/// truncated: half a snippet on the clipboard is worse than none, because it
+/// pastes without complaint.
+const MAX_COPY_BYTES: usize = 1 << 20;
 
 /// How deep a table may nest before `json.encode` gives up. A table holding
 /// itself is a hang, not an error, without a limit.
@@ -1712,10 +1758,16 @@ fn to_json(v: &Value, depth: usize) -> mlua::Result<serde_json::Value> {
         Value::String(s) => s.to_string_lossy().to_string().into(),
         Value::Table(t) => {
             // A Lua table is both a list and a map; `raw_len > 0` with no other
-            // keys is the only shape that is unambiguously an array.
+            // keys is the only shape that is unambiguously an array. `json.array`
+            // marks the ones the shape cannot answer for — an empty list, and
+            // any list a decode handed over so it survives being sent back.
             let len = t.raw_len();
-            let keys = t.clone().pairs::<Value, Value>().count();
-            if len > 0 && keys == len {
+            if floptle_script::json_array::encodes_as_array(t) {
+                if let Some(why) = floptle_script::json_array::problem(t) {
+                    return Err(mlua::Error::runtime(format!(
+                        "json.encode: this table is marked as a list (json.array) but {why}"
+                    )));
+                }
                 let mut arr = Vec::with_capacity(len);
                 for i in 1..=len {
                     arr.push(to_json(&t.get::<Value>(i)?, depth + 1)?);
@@ -1751,6 +1803,10 @@ fn from_json(lua: &Lua, v: &serde_json::Value) -> mlua::Result<Value> {
             for (i, item) in a.iter().enumerate() {
                 t.set(i + 1, from_json(lua, item)?)?;
             }
+            // Tagged even when it has items in it: a package that reads a body,
+            // empties one of its lists and posts it back must not have to
+            // remember which fields were lists to keep them lists.
+            t.set_metatable(Some(floptle_script::json_array::array_metatable(lua)?));
             Value::Table(t)
         }
         serde_json::Value::Object(o) => {

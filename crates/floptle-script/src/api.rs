@@ -430,10 +430,23 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             ]),
         );
     }
-    // A material's SPRITESHEET frame — the mesh-side twin of a UI image's
-    // `cell`. Only the sheet fields live here: everything else about a material
-    // is set through `node:setMaterial{...}` (colors and paths a f64 can't
-    // carry), while `cell` wants the cheap per-frame write a mirror field is.
+    // A material's numbers, **every one of them**.
+    //
+    // This used to be the three spritesheet fields alone, on the reasoning that
+    // everything else was set through `node:setMaterial{...}`. That reasoning
+    // holds for a script, which can name any key it likes — and it silently
+    // decided what the animation system can key, because the timeline's record
+    // pass reads THIS map to notice a change. A material's opacity could be set
+    // from Lua and could not be animated, and the Animating tab said nothing
+    // about why: the field was simply not in the list.
+    //
+    // So the rule is now: **anything `apply_component_field` can write, this can
+    // read.** The two are a pair — a field readable but not writable keys and
+    // never plays back, and one writable but not readable can be keyed by hand
+    // and never picked up by record. Both failures are silent.
+    //
+    // Colours come out per channel, the spelling `PointLight` and `UiElement`
+    // already use, because a keyframe holds one number.
     if let Some(m) = world.get::<floptle_core::Material>(e) {
         out.insert(
             "Material".to_string(),
@@ -441,6 +454,38 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("cell".to_string(), m.cell as f64),
                 ("sheetCols".to_string(), m.sheet_cols as f64),
                 ("sheetRows".to_string(), m.sheet_rows as f64),
+                // The look.
+                ("alpha".to_string(), m.alpha as f64),
+                ("opacity".to_string(), m.alpha as f64),
+                ("r".to_string(), m.color[0] as f64),
+                ("g".to_string(), m.color[1] as f64),
+                ("b".to_string(), m.color[2] as f64),
+                ("ambient".to_string(), m.ambient as f64),
+                ("emissiveR".to_string(), m.emissive[0] as f64),
+                ("emissiveG".to_string(), m.emissive[1] as f64),
+                ("emissiveB".to_string(), m.emissive[2] as f64),
+                ("emissiveStrength".to_string(), m.emissive_strength as f64),
+                ("specularR".to_string(), m.specular[0] as f64),
+                ("specularG".to_string(), m.specular[1] as f64),
+                ("specularB".to_string(), m.specular[2] as f64),
+                ("specularStrength".to_string(), m.specular_strength as f64),
+                ("shininess".to_string(), m.shininess as f64),
+                ("rimR".to_string(), m.rim[0] as f64),
+                ("rimG".to_string(), m.rim[1] as f64),
+                ("rimB".to_string(), m.rim[2] as f64),
+                ("rimStrength".to_string(), m.rim_strength as f64),
+                ("unlit".to_string(), f64::from(m.unlit)),
+                ("fog".to_string(), f64::from(m.fog)),
+                // The surface.
+                ("normalStrength".to_string(), m.normal_strength as f64),
+                ("roughness".to_string(), m.roughness as f64),
+                ("metallic".to_string(), m.metallic as f64),
+                ("occlusionStrength".to_string(), m.occlusion_strength as f64),
+                ("reflectivity".to_string(), m.reflectivity as f64),
+                ("transmission".to_string(), m.transmission as f64),
+                ("ior".to_string(), m.ior as f64),
+                ("thickness".to_string(), m.thickness as f64),
+                ("jitter".to_string(), m.retro.jitter as f64),
             ]),
         );
     }
@@ -682,8 +727,15 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             );
         }
     }
-    if let Some(Matter::Camera { fov_y, active, target_w, target_h, target_hz, .. }) =
-        world.get::<Matter>(e)
+    if let Some(Matter::Camera {
+        fov_y,
+        active,
+        target_w,
+        target_h,
+        target_hz,
+        ortho_height,
+        ..
+    }) = world.get::<Matter>(e)
     {
         out.insert(
             "Camera".to_string(),
@@ -695,6 +747,10 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 ("width".to_string(), f64::from(*target_w)),
                 ("height".to_string(), f64::from(*target_h)),
                 ("hz".to_string(), f64::from(*target_hz)),
+                // How much world an orthographic camera covers, top to bottom —
+                // a 2D game's zoom, and the only camera number a flat game
+                // animates.
+                ("orthoHeight".to_string(), *ortho_height as f64),
             ]),
         );
     }
@@ -959,11 +1015,17 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 target_w,
                 target_h,
                 target_hz,
+                ortho_height,
                 ..
             }) = world.get_mut::<Matter>(ent)
             {
                 match field {
                     "fovY" => *fov_y = (val as f32).clamp(0.05, 3.0),
+                    // A 2D camera's ZOOM. `fovY` is what an orthographic camera
+                    // does not have, so without this the one thing a flat game
+                    // wants to animate about its camera had no route at all —
+                    // and `fovY` was offered where it does nothing.
+                    "orthoHeight" => *ortho_height = Matter::clamp_ortho_height(val as f32),
                     "active" => *active = val != 0.0,
                     // The live-mirror spelling of the same three fields
                     // `node:setCamera{...}` sets (`floptle/0078`), so a game can
@@ -1016,8 +1078,12 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 let n = val.max(0.0) as u32;
                 match field {
                     "cell" => m.cell = n,
-                    "sheetCols" => m.sheet_cols = n,
-                    "sheetRows" => m.sheet_rows = n,
+                    // At least one, like every reader of these. Stored as 0 they
+                    // read back as 1 through `Material::sheet()`, which leaves a
+                    // permanent difference between what was written and what is
+                    // read — and record diffs the two every frame.
+                    "sheetCols" => m.sheet_cols = n.max(1),
+                    "sheetRows" => m.sheet_rows = n.max(1),
                     // The PBR scalars, on the same cheap per-tick write path —
                     // so a script can rust a surface over, wet a floor down, or
                     // key roughness on a property track.
@@ -1030,6 +1096,39 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     "ior" => m.ior = (val as f32).clamp(1.0, 3.0),
                     "thickness" => m.thickness = (val as f32).clamp(0.0, 100.0),
                     "jitter" => m.retro.jitter = val as f32,
+                    // The look. These were reachable from `setMaterial` and
+                    // from nowhere else, which quietly meant **not animatable**
+                    // — the timeline keys what this function can write. Fading a
+                    // material out is the ordinary case and had no route.
+                    // Two spellings on purpose. The Inspector says "opacity",
+                    // `node:setMaterial` says `alpha`, and neither is going to
+                    // be renamed for the other — so both are accepted here
+                    // rather than a translation layer sitting between the
+                    // animation system and the ECS, which is a thing to get
+                    // wrong at every call site instead of once.
+                    "alpha" | "opacity" => m.alpha = (val as f32).clamp(0.0, 1.0),
+                    "ambient" => m.ambient = val as f32,
+                    "r" => m.color[0] = val as f32,
+                    "g" => m.color[1] = val as f32,
+                    "b" => m.color[2] = val as f32,
+                    "emissiveR" => m.emissive[0] = val as f32,
+                    "emissiveG" => m.emissive[1] = val as f32,
+                    "emissiveB" => m.emissive[2] = val as f32,
+                    "emissiveStrength" => m.emissive_strength = val as f32,
+                    "specularR" => m.specular[0] = val as f32,
+                    "specularG" => m.specular[1] = val as f32,
+                    "specularB" => m.specular[2] = val as f32,
+                    "specularStrength" => m.specular_strength = val as f32,
+                    "shininess" => m.shininess = val as f32,
+                    "rimR" => m.rim[0] = val as f32,
+                    "rimG" => m.rim[1] = val as f32,
+                    "rimB" => m.rim[2] = val as f32,
+                    "rimStrength" => m.rim_strength = val as f32,
+                    // Flags, as 0/1. Keyed on a STEP lane they are a switch on
+                    // the timeline — a material that goes fullbright for three
+                    // frames is a hit flash.
+                    "unlit" => m.unlit = val != 0.0,
+                    "fog" => m.fog = val != 0.0,
                     _ => {}
                 }
             }
@@ -1691,13 +1790,21 @@ pub(crate) fn apply_rich_sets(
             // `floptle/0109`. Absent = the default layer at order 0, which is
             // also how the component is stored: a node back at the default
             // carries no Sorting at all, so its scene mentions none.
-            RichSet::MatterSorting { layer, order } => {
+            RichSet::MatterSorting { layer, order, mode } => {
                 let cur = world.get::<floptle_core::Sorting>(e).cloned().unwrap_or_default();
                 let next = floptle_core::Sorting {
                     layer: layer.unwrap_or(cur.layer),
                     order: order.unwrap_or(cur.order),
+                    mode: mode.as_deref().map(floptle_core::SortMode::parse).unwrap_or(cur.mode),
                 };
+                // Back at the default in EVERY respect = no component at all.
+                // The mode has to be part of that test: a node put back to
+                // `order` on the default layer should stop carrying sorting, and
+                // a node left on `y` must keep it even at order 0 on Default —
+                // which is the ordinary top-down case and would otherwise be
+                // dropped the moment a script touched it.
                 if next.order == 0
+                    && next.mode == floptle_core::SortMode::default()
                     && (next.layer.is_empty()
                         || next.layer == floptle_core::DEFAULT_SORTING_LAYER)
                 {
@@ -1705,6 +1812,118 @@ pub(crate) fn apply_rich_sets(
                 } else {
                     world.insert(e, next);
                 }
+            }
+            RichSet::MatterSprite { ppu, size, cell, flip_x, flip_y, pivot_x, pivot_y } => {
+                // Keep whatever the node already had, so retuning one field
+                // never resets the rest — the same rule `setTilemap` follows
+                // for its tileset.
+                let cur = match world.get::<Matter>(e) {
+                    Some(Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot }) => {
+                        (*ppu, *size, *cell, *flip_x, *flip_y, *pivot)
+                    }
+                    _ => (32.0, 1.0, 0, false, false, [0.5, 0.5]),
+                };
+                world.insert(
+                    e,
+                    Matter::Sprite {
+                        ppu: ppu.unwrap_or(cur.0).max(0.0),
+                        size: size.unwrap_or(cur.1).max(1e-4),
+                        cell: cell.unwrap_or(cur.2),
+                        flip_x: flip_x.unwrap_or(cur.3),
+                        flip_y: flip_y.unwrap_or(cur.4),
+                        pivot: [pivot_x.unwrap_or(cur.5[0]), pivot_y.unwrap_or(cur.5[1])],
+                    },
+                );
+            }
+            RichSet::MatterParallax { x, y } => {
+                let cur = world.get::<floptle_core::Parallax>(e).copied().unwrap_or_default();
+                let next = floptle_core::Parallax {
+                    factor: [x.unwrap_or(cur.factor[0]), y.unwrap_or(cur.factor[1])],
+                };
+                // Identity IS the absence of the component, the same rule the
+                // sorting arm above follows.
+                if next.is_identity() {
+                    world.remove::<floptle_core::Parallax>(e);
+                } else {
+                    world.insert(e, next);
+                }
+            }
+            RichSet::MatterCamera2D {
+                follow,
+                smoothing,
+                dead_zone_x,
+                dead_zone_y,
+                limits_on,
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+                off,
+            } => {
+                if off {
+                    world.remove::<floptle_core::camera2d::Camera2D>(e);
+                } else {
+                    let mut c = world
+                        .get::<floptle_core::camera2d::Camera2D>(e)
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Some(f) = follow {
+                        // Only when it actually CHANGED. Setting the follow every
+                        // frame (`update(dt) cam:setCamera2D{follow=target} end`)
+                        // is an ordinary thing to write, and re-seeding on every
+                        // one of those calls re-reads the camera's own transform
+                        // sixty times a second — which, mid-shake, walks the
+                        // follow away from its target.
+                        if c.follow != f {
+                            // A new target restarts the follow from where the
+                            // camera is, not from wherever the last one left it
+                            // — otherwise handing the camera to a second
+                            // character makes it travel between them through the
+                            // level.
+                            c.started = false;
+                            c.follow = f;
+                        }
+                    }
+                    if let Some(v) = smoothing {
+                        c.smoothing = v.max(0.0);
+                    }
+                    // Per axis, so naming one keeps the other.
+                    let dz = |v: Option<f32>, slot: &mut f32| {
+                        if let Some(v) = v.filter(|v| v.is_finite()) {
+                            *slot = v.max(0.0);
+                        }
+                    };
+                    dz(dead_zone_x, &mut c.dead_zone[0]);
+                    dz(dead_zone_y, &mut c.dead_zone[1]);
+                    if let Some(v) = limits_on {
+                        c.limits_on = v;
+                    }
+                    // A limit that is not a number would make the camera NaN for
+                    // the rest of the session, with nothing to put it back.
+                    // Ignored rather than stored.
+                    let lim = |v: Option<f32>, slot: &mut f32| {
+                        if let Some(v) = v.filter(|v| v.is_finite()) {
+                            *slot = v;
+                        }
+                    };
+                    lim(min_x, &mut c.limit_min[0]);
+                    lim(min_y, &mut c.limit_min[1]);
+                    lim(max_x, &mut c.limit_max[0]);
+                    lim(max_y, &mut c.limit_max[1]);
+                    world.insert(e, c);
+                }
+            }
+            RichSet::CameraShake { amount, seconds } => {
+                // On a camera that has no 2D behaviour, this makes one — a shake
+                // is a complete thing to want on its own, and refusing it
+                // because there is no follow target would be the engine
+                // insisting on a feature nobody asked for.
+                let mut c = world
+                    .get::<floptle_core::camera2d::Camera2D>(e)
+                    .cloned()
+                    .unwrap_or_default();
+                c.shake(amount, seconds);
+                world.insert(e, c);
             }
             // `floptle/0113`. Same rule: `auto` with no layer list IS the
             // default, so a node put back to it stops carrying the component and
@@ -1943,7 +2162,26 @@ pub(crate) const CELESTIAL_KEYS: &[&str] = &[
 pub(crate) const TILEMAP_KEYS: &[&str] = &["cols", "rows", "tile", "data", "tileset"];
 
 /// Every key `node:setSorting{...}` reads (`floptle/0082`).
-pub(crate) const SORTING_KEYS: &[&str] = &["layer", "order"];
+pub(crate) const SORTING_KEYS: &[&str] = &["layer", "order", "mode"];
+
+/// Every key `node:setParallax{...}` reads.
+pub(crate) const PARALLAX_KEYS: &[&str] = &["x", "y"];
+pub(crate) const CAMERA_2D_KEYS: &[&str] = &[
+    "follow",
+    "smoothing",
+    "deadZoneX",
+    "deadZoneY",
+    "limits",
+    "minX",
+    "minY",
+    "maxX",
+    "maxY",
+    "off",
+];
+
+/// Every key `node:setSprite{...}` reads.
+pub(crate) const SPRITE_KEYS: &[&str] =
+    &["ppu", "size", "cell", "flipX", "flipY", "pivotX", "pivotY"];
 
 /// Every key `node:setLighting2D{...}` reads (`floptle/0082`).
 pub(crate) const LIGHTING_2D_KEYS: &[&str] =
@@ -2535,6 +2773,103 @@ pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, fie
         }
         _ => {}
     }
+}
+
+/// The **text** half of [`mirror_components`]: every path-or-name field a
+/// property lane can write, read back.
+///
+/// It exists because there was no way to notice one had changed. `mirror_components`
+/// is `f64` by construction, so the timeline's record pass — which works by
+/// diffing that map against a baseline — could see a number move and could not
+/// see a texture swap. Recording a sprite animation by changing the material's
+/// texture therefore wrote **nothing at all**, with no error and no lane: the
+/// one gesture the feature is for.
+///
+/// Kept in step with [`apply_component_field_str`] deliberately. A field this
+/// reads and that cannot write is a key that never plays back; one that writes
+/// and this cannot read is a lane record will never notice. Both are silent, so
+/// the two lists are the same list.
+pub fn mirror_component_strings(
+    world: &World,
+    e: Entity,
+) -> HashMap<String, HashMap<String, String>> {
+    let mut out: HashMap<String, HashMap<String, String>> = HashMap::new();
+    if let Some(m) = world.get::<floptle_core::Material>(e) {
+        // A cleared slot reads as `""`, which is the same spelling that clears
+        // one — so a lane can key "no texture here" rather than only ever being
+        // able to key a path.
+        let p = |o: &Option<String>| o.clone().unwrap_or_default();
+        out.insert(
+            "Material".to_string(),
+            HashMap::from([
+                ("texture".to_string(), p(&m.texture)),
+                ("normalMap".to_string(), p(&m.normal_map)),
+                ("roughnessMap".to_string(), p(&m.roughness_map)),
+                ("metallicMap".to_string(), p(&m.metallic_map)),
+                ("occlusionMap".to_string(), p(&m.ao_map)),
+                ("shading".to_string(), m.shading.as_str().to_string()),
+            ]),
+        );
+    }
+    if let Some(spec) = world.get::<floptle_ui::ElementSpec>(e) {
+        let mut fields = HashMap::from([("style".to_string(), spec.style.clone())]);
+        if let Some(img) = &spec.image {
+            fields.insert("image".to_string(), img.texture.clone());
+        }
+        if let Some(t) = &spec.text {
+            fields.insert("text".to_string(), t.text.clone());
+        }
+        out.insert("UiElement".to_string(), fields);
+    }
+    out
+}
+
+/// Put one **sprite frame** on a node: the image, how it is cut, and which
+/// piece — written together.
+///
+/// Four values, one act. Animating them as four lanes is what confined a clip
+/// to a single sheet: a texture key and a grid key that land on different
+/// frames give you a cell index read against the wrong grid, which draws a
+/// slice of the wrong picture and never reports anything.
+///
+/// The cell lands on whichever thing owns it. A [`Matter::Sprite`] carries its
+/// own `cell` and its Material's is unused, so writing the Material's for a
+/// Sprite node would set a number the Inspector shows and nothing draws.
+pub fn apply_sprite_frame(
+    world: &mut World,
+    ent: Entity,
+    texture: &str,
+    cols: u32,
+    rows: u32,
+    cell: u32,
+) {
+    let is_sprite = matches!(world.get::<floptle_core::Matter>(ent), Some(Matter::Sprite { .. }));
+    if let Some(m) = world.get_mut::<floptle_core::Material>(ent) {
+        m.texture = (!texture.is_empty()).then(|| texture.to_string());
+        m.sheet_cols = cols.max(1);
+        m.sheet_rows = rows.max(1);
+        if !is_sprite {
+            m.cell = cell;
+        }
+    }
+    if is_sprite
+        && let Some(Matter::Sprite { cell: c, .. }) = world.get_mut::<floptle_core::Matter>(ent)
+    {
+        *c = cell;
+    }
+}
+
+/// Read a node's current sprite frame — the inverse of [`apply_sprite_frame`].
+///
+/// Used to key "what it looks like now", so recording a sprite lane takes the
+/// same four values back out that playing one puts in.
+pub fn read_sprite_frame(world: &World, ent: Entity) -> Option<(String, u32, u32, u32)> {
+    let m = world.get::<floptle_core::Material>(ent)?;
+    let cell = match world.get::<floptle_core::Matter>(ent) {
+        Some(Matter::Sprite { cell, .. }) => *cell,
+        _ => m.cell,
+    };
+    Some((m.texture.clone().unwrap_or_default(), m.sheet_cols.max(1), m.sheet_rows.max(1), cell))
 }
 
 /// Install the cross-node / cross-script reference layer into the Lua state: the `node`
@@ -3735,11 +4070,162 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         crate::RichSet::MatterSorting {
                             layer: t.get::<Option<String>>("layer")?,
                             order: t.get::<Option<i32>>("order")?,
+                            mode: t.get::<Option<String>>("mode")?,
                         },
                     ));
                     Ok(())
                 })?,
             )?;
+        }
+        {
+            let q = q.clone();
+            // node:setSprite{ ppu = 32, cell = 3, pivotY = 0 } — make this node
+            // one sprite, or retune one. Every key optional and every key keeps
+            // what the node had.
+            methods.set(
+                "setSprite",
+                lua.create_function(move |_, (this, t): (Table, Table)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    crate::opts::check_keys(&t, SPRITE_KEYS, "node:setSprite")?;
+                    let px = t.get::<Option<f32>>("pivotX")?;
+                    let py = t.get::<Option<f32>>("pivotY")?;
+                    q.borrow_mut().push((
+                        e,
+                        crate::RichSet::MatterSprite {
+                            ppu: t.get::<Option<f32>>("ppu")?,
+                            size: t.get::<Option<f32>>("size")?,
+                            cell: t.get::<Option<u32>>("cell")?,
+                            flip_x: t.get::<Option<bool>>("flipX")?,
+                            flip_y: t.get::<Option<bool>>("flipY")?,
+                            // One axis at a time is allowed: a game flips a
+                            // sprite far more often than it moves a pivot, and
+                            // requiring both would make the common call carry a
+                            // number it does not care about.
+                            // One axis at a time, and the other KEEPS what the
+                            // node had. Defaulting the unmentioned axis to 0.5
+                            // here made `setSprite{ pivotY = 0 }` — the
+                            // documented way to put a character's origin at its
+                            // feet — silently recentre it horizontally.
+                            pivot_x: px,
+                            pivot_y: py,
+                        },
+                    ));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let q = q.clone();
+            // node:setParallax{ x = 0.3 } — how much of the camera's movement
+            // this layer keeps. The one 2D feature that could not be had at all
+            // before: distance parallaxes under a perspective camera and does
+            // nothing under an orthographic one, and a flat game wants
+            // orthographic for its pixels.
+            methods.set(
+                "setParallax",
+                lua.create_function(move |_, (this, t): (Table, Table)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    crate::opts::check_keys(&t, PARALLAX_KEYS, "node:setParallax")?;
+                    q.borrow_mut().push((
+                        e,
+                        crate::RichSet::MatterParallax {
+                            x: t.get::<Option<f32>>("x")?,
+                            y: t.get::<Option<f32>>("y")?,
+                        },
+                    ));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let q = q.clone();
+            // node:setCamera2D{ follow = "Player", smoothing = 0.12 } — how this
+            // orthographic camera follows. The target is the reason this is a
+            // script call and not only an Inspector one: which node the camera
+            // chases is a game decision, made at a character select or when a
+            // level hands control to something else.
+            methods.set(
+                "setCamera2D",
+                lua.create_function(move |_, (this, t): (Table, Table)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    crate::opts::check_keys(&t, CAMERA_2D_KEYS, "node:setCamera2D")?;
+                    q.borrow_mut().push((
+                        e,
+                        crate::RichSet::MatterCamera2D {
+                            follow: t.get::<Option<String>>("follow")?,
+                            smoothing: t.get::<Option<f32>>("smoothing")?,
+                            dead_zone_x: t.get::<Option<f32>>("deadZoneX")?,
+                            dead_zone_y: t.get::<Option<f32>>("deadZoneY")?,
+                            limits_on: t.get::<Option<bool>>("limits")?,
+                            min_x: t.get::<Option<f32>>("minX")?,
+                            min_y: t.get::<Option<f32>>("minY")?,
+                            max_x: t.get::<Option<f32>>("maxX")?,
+                            max_y: t.get::<Option<f32>>("maxY")?,
+                            off: t.get::<Option<bool>>("off")?.unwrap_or(false),
+                        },
+                    ));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let q = q.clone();
+            // node:shake(amount, seconds) — the one camera move every 2D game
+            // wants and nobody should have to write. It is added to what is
+            // DRAWN and never fed back into the follow, so it composes with a
+            // chase and with the world limits instead of fighting them.
+            methods.set(
+                "shake",
+                lua.create_function(move |_, (this, amount, seconds): (Table, f32, Option<f32>)| {
+                    let e: u32 = this.raw_get("__id")?;
+                    if !amount.is_finite() || amount < 0.0 {
+                        return Err(mlua::Error::RuntimeError(
+                            "node:shake(amount, seconds): amount is a distance in world units and cannot be negative"
+                                .into(),
+                        ));
+                    }
+                    q.borrow_mut().push((
+                        e,
+                        crate::RichSet::CameraShake {
+                            amount,
+                            seconds: seconds.unwrap_or(0.3).max(0.0),
+                        },
+                    ));
+                    Ok(())
+                })?,
+            )?;
+        }
+        {
+            let scene = shared.scene.clone();
+            // node:sorting() -> { layer =, order =, mode = } — the read half of
+            // the pair above, which shipped without one.
+            //
+            // A node that has said nothing about sorting answers with the
+            // DEFAULT rather than nil. "Default layer, order 0, order mode" is
+            // the true answer for such a node, and nil would make every caller
+            // that wants to nudge something one in front write the same three
+            // lines of fallback before it could add 1.
+            let f = lua.create_function(move |lua, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                let (layer, order, mode) = scene
+                    .borrow()
+                    .sorting
+                    .get(&e)
+                    .cloned()
+                    .unwrap_or_else(|| (String::new(), 0, "order"));
+                let t = lua.create_table()?;
+                let layer = if layer.trim().is_empty() {
+                    floptle_core::DEFAULT_SORTING_LAYER.to_string()
+                } else {
+                    layer
+                };
+                t.set("layer", layer)?;
+                t.set("order", order)?;
+                t.set("mode", mode)?;
+                Ok(t)
+            })?;
+            methods.set("sorting", f.clone())?;
+            methods.set("getsorting", f)?;
         }
         {
             let q = q.clone();

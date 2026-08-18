@@ -22,7 +22,9 @@ pub mod anim;
 pub use anim::{
     load_anim_clip, load_anim_controller, save_anim_clip, save_anim_controller, AnimChannelDoc,
     AnimClipDoc, AnimControllerDoc, AnimEventDoc, AnimLayerDoc, AnimPropTrackDoc, AnimPropValueDoc,
-    AnimStateDoc, AnimTrackDoc3, AnimTrackDoc4, AnimTransitionDoc, ANIM_CLIP_EXT, ANIM_CTL_EXT,
+    load_sprite_anim, save_sprite_anim, AnimStateDoc, AnimTrackDoc3, AnimTrackDoc4,
+    AnimTransitionDoc, SpriteAnimDoc, SpriteAnimFrameDoc, SpriteFrameDoc, ANIM_CLIP_EXT,
+    ANIM_CTL_EXT, SPRITE_ANIM_EXT, SPRITE_COMPONENT, SPRITE_FIELD,
 };
 pub mod vfx;
 pub use vfx::{
@@ -197,6 +199,25 @@ pub struct NodeDoc {
     /// use it. See [`floptle_core::Sorting`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sorting: Option<(String, i32)>,
+    /// How the node's place *within* its sorting layer is decided: `"y"` for
+    /// Y-sorting, absent for the ordinary `order`. See [`floptle_core::SortMode`].
+    ///
+    /// **Its own field rather than a third element of `sorting`.** A tuple that
+    /// grew a slot would stop every scene written before this from loading, and
+    /// a mode is meaningful on a node that has said nothing else about sorting
+    /// (Y-sorting on the Default layer is the ordinary top-down case), so it
+    /// could not be folded in as an option on the tuple either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_mode: Option<String>,
+    /// Per-axis parallax scroll factor. `None` = `(1, 1)`, which is no parallax
+    /// and is every node that has not opted in — so this writes nothing to a
+    /// scene that does not use it. See [`floptle_core::Parallax`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallax: Option<(f32, f32)>,
+    /// How this (orthographic) Camera follows. `None` = it does not, which is
+    /// every camera that has not opted in. See [`floptle_core::camera2d::Camera2D`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_2d: Option<Camera2DDoc>,
     /// Whether this node is on the 2D lighting path: `"auto"`, `"2d"` or
     /// `"3d"`. `None` = `auto`, which is every node that has not opted in, so
     /// this writes nothing to a scene that does not use 2D lighting.
@@ -488,6 +509,79 @@ impl RigidBodyDoc {
             mass: rb.mass,
             assembly: rb.assembly,
             pushbox_only: rb.pushbox_only,
+        }
+    }
+}
+
+/// Serializable 2D camera behaviour, mirroring
+/// [`floptle_core::camera2d::Camera2D`] — the saved half of it.
+///
+/// The live half (where the follow has got to, and any shake in progress) is
+/// deliberately absent: a scene records the *rule*, and a camera that reloaded
+/// mid-shake would be recording a moment.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Camera2DDoc {
+    /// Name of the node to follow. Empty = none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub follow: String,
+    /// Seconds to close the gap; `0` snaps.
+    #[serde(default = "default_smoothing")]
+    pub smoothing: f32,
+    /// Half-size of the box the target moves in before the camera does.
+    #[serde(default, skip_serializing_if = "is_zero2")]
+    pub dead_zone: (f32, f32),
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub limits_on: bool,
+    #[serde(default, skip_serializing_if = "is_zero2")]
+    pub limit_min: (f32, f32),
+    #[serde(default, skip_serializing_if = "is_zero2")]
+    pub limit_max: (f32, f32),
+}
+
+fn default_smoothing() -> f32 {
+    0.15
+}
+
+fn is_zero2(v: &(f32, f32)) -> bool {
+    v.0 == 0.0 && v.1 == 0.0
+}
+
+impl Default for Camera2DDoc {
+    fn default() -> Self {
+        Self {
+            follow: String::new(),
+            smoothing: default_smoothing(),
+            dead_zone: (0.0, 0.0),
+            limits_on: false,
+            limit_min: (0.0, 0.0),
+            limit_max: (0.0, 0.0),
+        }
+    }
+}
+
+impl From<&floptle_core::camera2d::Camera2D> for Camera2DDoc {
+    fn from(c: &floptle_core::camera2d::Camera2D) -> Self {
+        Self {
+            follow: c.follow.clone(),
+            smoothing: c.smoothing,
+            dead_zone: (c.dead_zone[0], c.dead_zone[1]),
+            limits_on: c.limits_on,
+            limit_min: (c.limit_min[0], c.limit_min[1]),
+            limit_max: (c.limit_max[0], c.limit_max[1]),
+        }
+    }
+}
+
+impl From<&Camera2DDoc> for floptle_core::camera2d::Camera2D {
+    fn from(d: &Camera2DDoc) -> Self {
+        floptle_core::camera2d::Camera2D {
+            follow: d.follow.clone(),
+            smoothing: d.smoothing,
+            dead_zone: [d.dead_zone.0, d.dead_zone.1],
+            limits_on: d.limits_on,
+            limit_min: [d.limit_min.0, d.limit_min.1],
+            limit_max: [d.limit_max.0, d.limit_max.1],
+            ..Default::default()
         }
     }
 }
@@ -826,6 +920,25 @@ pub enum MatterDoc {
     SpriteBatch {
         #[serde(default = "one_f32")]
         size: f32,
+    },
+    /// One sprite — see [`floptle_core::Matter::Sprite`]. Every field defaults,
+    /// so a hand-written `Sprite()` is a one-unit centred quad on cell 0.
+    Sprite {
+        /// Pixels per world unit; `0` = use `size`.
+        #[serde(default)]
+        ppu: f32,
+        #[serde(default = "one_f32")]
+        size: f32,
+        #[serde(default)]
+        cell: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        flip_x: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        flip_y: bool,
+        /// Origin within the sprite, `0..1` from the bottom-left. Skipped at the
+        /// centre so a sprite that never moved its pivot writes nothing.
+        #[serde(default = "centre_pivot", skip_serializing_if = "is_centre_pivot")]
+        pivot: [f32; 2],
     },
     /// The scene's environment background (solid color or equirect texture + tint).
     Skybox {
@@ -1532,6 +1645,14 @@ impl From<&Matter> for MatterDoc {
                 tileset: tileset.clone(),
             },
             Matter::SpriteBatch { size } => MatterDoc::SpriteBatch { size: *size },
+            Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot } => MatterDoc::Sprite {
+                ppu: *ppu,
+                size: *size,
+                cell: *cell,
+                flip_x: *flip_x,
+                flip_y: *flip_y,
+                pivot: *pivot,
+            },
             Matter::Skybox { color, size, texture, tint, shader, shader_params } => {
                 MatterDoc::Skybox {
                     color: *color,
@@ -1798,6 +1919,14 @@ impl MatterDoc {
                 tileset: tileset.clone(),
             },
             MatterDoc::SpriteBatch { size } => Matter::SpriteBatch { size: *size },
+            MatterDoc::Sprite { ppu, size, cell, flip_x, flip_y, pivot } => Matter::Sprite {
+                ppu: *ppu,
+                size: *size,
+                cell: *cell,
+                flip_x: *flip_x,
+                flip_y: *flip_y,
+                pivot: *pivot,
+            },
             MatterDoc::Skybox { color, size, texture, tint, shader, shader_params } => {
                 Matter::Skybox {
                     color: *color,
@@ -2890,6 +3019,14 @@ fn default_thickness() -> f32 {
 fn is_default_thickness(v: &f32) -> bool {
     (*v - 0.5).abs() < f32::EPSILON
 }
+/// A sprite's default pivot: its centre.
+fn centre_pivot() -> [f32; 2] {
+    [0.5, 0.5]
+}
+fn is_centre_pivot(p: &[f32; 2]) -> bool {
+    *p == centre_pivot()
+}
+
 fn one_f32() -> f32 {
     1.0
 }
@@ -3286,8 +3423,21 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
     if let Some(c) = node.shadow_2d.as_deref().and_then(floptle_core::Cast2D::parse) {
         world.insert(e, floptle_core::Shadow2D(c));
     }
-    if let Some((layer, order)) = &node.sorting {
-        world.insert(e, floptle_core::Sorting { layer: layer.clone(), order: *order });
+    // The mode stands alone: a node can Y-sort on the Default layer at order 0,
+    // which writes no `sorting` tuple at all.
+    if let Some((x, y)) = node.parallax {
+        let p = floptle_core::Parallax { factor: [x, y] };
+        if !p.is_identity() {
+            world.insert(e, p);
+        }
+    }
+    if let Some(c) = node.camera_2d.as_ref() {
+        world.insert(e, floptle_core::camera2d::Camera2D::from(c));
+    }
+    let sort_mode = node.sort_mode.as_deref().map(floptle_core::SortMode::parse).unwrap_or_default();
+    if node.sorting.is_some() || sort_mode != floptle_core::SortMode::default() {
+        let (layer, order) = node.sorting.clone().unwrap_or_default();
+        world.insert(e, floptle_core::Sorting { layer, order, mode: sort_mode });
     }
     e
 }
@@ -3509,6 +3659,16 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             (name != floptle_core::DEFAULT_SORTING_LAYER || s.order != 0)
                 .then(|| (name.to_string(), s.order))
         });
+        // Same rule again: identity IS the default, so it writes nothing.
+        let parallax = world
+            .get::<floptle_core::Parallax>(e)
+            .filter(|p| !p.is_identity())
+            .map(|p| (p.factor[0], p.factor[1]));
+        // Same rule again: `Order` IS the default, so it writes nothing.
+        let sort_mode = world
+            .get::<floptle_core::Sorting>(e)
+            .and_then(|s| s.mode.as_str())
+            .map(str::to_string);
         // Same rule as `sorting` above: `Auto` with no layer list IS the
         // default, so a scene that has never touched 2D lighting is written
         // byte for byte as it always was.
@@ -3534,6 +3694,9 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             parent_id,
             name,
             transform,
+            sort_mode,
+            parallax,
+            camera_2d: world.get::<floptle_core::camera2d::Camera2D>(e).map(Camera2DDoc::from),
             matter: MatterDoc::from(matter),
             scripts,
             material,
@@ -3590,6 +3753,94 @@ mod tests {
         n.ui = None;
         n.visible = true;
         n
+    }
+
+    /// A 2D camera survives a save/load, and a camera without one writes nothing
+    /// — so adding this cannot churn every scene file in a project's diff.
+    ///
+    /// The live half is asserted absent on purpose: a scene records the *rule*,
+    /// and a camera that came back mid-shake, or already halfway to a target it
+    /// has not been given yet, would be recording a moment.
+    #[test]
+    fn a_2d_camera_round_trips_and_stays_out_of_scenes_without_one() {
+        use floptle_core::camera2d::Camera2D;
+        let mut world = floptle_core::World::new();
+
+        let plain = world.spawn();
+        world.insert(plain, floptle_core::Transform::default());
+        world.insert(plain, floptle_core::Name("Plain".into()));
+        world.insert(
+            plain,
+            floptle_core::Matter::Camera {
+                fov_y: 1.0,
+                active: true,
+                target: String::new(),
+                cull_mask: !0,
+                target_w: 0,
+                target_h: 0,
+                target_hz: 0.0,
+                ortho: true,
+                ortho_height: 10.0,
+            },
+        );
+
+        let follower = world.spawn();
+        world.insert(follower, floptle_core::Transform::default());
+        world.insert(follower, floptle_core::Name("Follower".into()));
+        world.insert(
+            follower,
+            floptle_core::Matter::Camera {
+                fov_y: 1.0,
+                active: false,
+                target: String::new(),
+                cull_mask: !0,
+                target_w: 0,
+                target_h: 0,
+                target_hz: 0.0,
+                ortho: true,
+                ortho_height: 10.0,
+            },
+        );
+        let mut c = Camera2D {
+            follow: "Player".into(),
+            smoothing: 0.2,
+            dead_zone: [1.5, 0.75],
+            limits_on: true,
+            limit_min: [0.0, -5.0],
+            limit_max: [200.0, 40.0],
+            ..Default::default()
+        };
+        // Live state that must NOT be written.
+        c.pos = floptle_core::math::DVec2::new(123.0, 456.0);
+        c.started = true;
+        c.shake(9.0, 9.0);
+        world.insert(follower, c);
+
+        let doc = to_doc("test", &world);
+        let text = ron::ser::to_string_pretty(&doc, Default::default()).unwrap();
+        assert_eq!(
+            text.matches("camera_2d").count(),
+            1,
+            "only the camera that has one should write one:\n{text}"
+        );
+        assert!(!text.contains("123"), "the live follow position was saved:\n{text}");
+        assert!(!text.contains("shake"), "a shake in progress was saved:\n{text}");
+
+        let back: SceneDoc = ron::from_str(&text).unwrap();
+        let mut world2 = floptle_core::World::new();
+        spawn_into(&back, &mut world2);
+        let got: Vec<Camera2D> =
+            world2.query::<Camera2D>().map(|(_, c)| c.clone()).collect();
+        assert_eq!(got.len(), 1);
+        let g = &got[0];
+        assert_eq!(g.follow, "Player");
+        assert_eq!(g.smoothing, 0.2);
+        assert_eq!(g.dead_zone, [1.5, 0.75]);
+        assert!(g.limits_on);
+        assert_eq!(g.limit_min, [0.0, -5.0]);
+        assert_eq!(g.limit_max, [200.0, 40.0]);
+        assert!(!g.started, "a loaded camera has not started following yet");
+        assert!(!g.shaking(), "a loaded camera is not mid-shake");
     }
 
     /// A material's spritesheet survives a save/load, and a material that isn't a
@@ -3811,6 +4062,9 @@ mod tests {
             },
             nodes: vec![
                 NodeDoc {
+                    camera_2d: None,
+                    sort_mode: None,
+                    parallax: None,
                     id: None,
                     parent_id: None,
                     name: "cube".into(),
@@ -3951,6 +4205,9 @@ mod tests {
                     light_shadows: None,
                 },
                 NodeDoc {
+                    camera_2d: None,
+                    sort_mode: None,
+                    parallax: None,
                     id: None,
                     parent_id: None,
                     terrain_gen: None,
@@ -3993,6 +4250,9 @@ mod tests {
                     light_shadows: None,
                 },
                 NodeDoc {
+                    camera_2d: None,
+                    sort_mode: None,
+                    parallax: None,
                     id: None,
                     parent_id: None,
                     terrain_gen: None,
@@ -4032,6 +4292,9 @@ mod tests {
                     light_shadows: None,
                 },
                 NodeDoc {
+                    camera_2d: None,
+                    sort_mode: None,
+                    parallax: None,
                     id: None,
                     parent_id: None,
                     terrain_gen: None,

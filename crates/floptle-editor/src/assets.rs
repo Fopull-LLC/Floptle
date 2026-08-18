@@ -136,6 +136,8 @@ pub(crate) fn asset_kind_icon(path: &str) -> (&'static str, egui::Color32) {
         ("🖼", egui::Color32::from_rgb(140, 210, 140))
     } else if is_material(path) {
         ("◑", egui::Color32::from_rgb(240, 180, 110))
+    } else if anim_ui::is_sprite_anim(path) {
+        ("▦", egui::Color32::from_rgb(235, 200, 110)) // sprite animation (frames)
     } else if anim_ui::is_anim_clip(path) {
         ("▶", egui::Color32::from_rgb(235, 200, 110)) // baked animation clip
     } else if anim_ui::is_anim_ctl(path) {

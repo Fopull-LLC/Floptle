@@ -115,6 +115,12 @@ pub(crate) enum ExtCmd {
     LookAt { at: [f64; 3], distance: Option<f64> },
     /// A modal message, shown by the editor next frame.
     Message { title: String, body: String },
+    /// Put a string on the system clipboard.
+    ///
+    /// Deliberately one-way: there is no command that reads it. What is on the
+    /// clipboard is whatever the person last copied, from anywhere, and a
+    /// package having asked for `Files` is no reason to hand it that.
+    Copy(String),
 }
 
 /// A line an extension logged.

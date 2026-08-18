@@ -234,7 +234,16 @@ fn lit_2d_ranks(
     }
     world
         .query::<Matter>()
-        .filter(|(_, m)| matches!(m, Matter::Tilemap { .. } | Matter::SpriteBatch { .. }))
+        // A Sprite joins the flat set for the same reason the other two are in
+        // it: it IS flat, so a 2D light should reach it. Leaving it out would
+        // make the one node type actually called "Sprite" the one a torch does
+        // not touch.
+        .filter(|(_, m)| {
+            matches!(
+                m,
+                Matter::Tilemap { .. } | Matter::SpriteBatch { .. } | Matter::Sprite { .. }
+            )
+        })
         .filter_map(|(e, _)| {
             lit_2d_rank(world, project, e, flat_camera, reach).map(|r| (e, (r, casts_2d(world, e))))
         })
@@ -1762,13 +1771,8 @@ impl Editor {
         // Every node's sorting-layer Z, resolved before the draw loop borrows
         // `raster` mutably. Empty for a scene that uses no sorting layers, which
         // is every scene until one opts in.
-        let sort_z: std::collections::HashMap<Entity, f64> = self
-            .world
-            .query::<floptle_core::Sorting>()
-            .map(|(e, s)| {
-                (e, floptle_core::sorting_offset(self.project.sorting_rank(&s.layer), s.order) as f64)
-            })
-            .collect();
+        let sort_z = crate::sprite2d::draw_offsets(&self.world, &self.project, cam.world_position);
+
         // This frame's 2D lights, built ONCE. The pass below is handed this very
         // value, so what the gather filtered by and what the shader accumulates
         // cannot be two different answers.
@@ -1864,14 +1868,25 @@ impl Editor {
             // A sorting layer is a Z nudge on the DRAWN transform, so ordering a
             // flat scene never moves anything the physics or a script can see.
             // Resolved before the loop (`raster` is borrowed mutably in here).
-            t.translation.z += sort_z.get(e).copied().unwrap_or(0.0);
+            t.translation += sort_z.get(e).copied().unwrap_or_default();
             // Off screen? Skip the whole node — the material lookups, the matrix,
             // every arm below (`floptle/0075`). Answers false for anything whose
             // extent the scene does not know, and for the Blob, which is an SDF
             // primitive that shadows things it is not itself beside.
+            // A pixels-per-unit sprite is drawn at its TEXTURE's size, not at
+            // its `size` field, so culling has to know the texture — otherwise a
+            // sixteen-unit sprite is culled on a radius of half a unit and pops
+            // out of existence at the edge of the screen.
+            let sprite_px = matches!(matter, Matter::Sprite { .. })
+                .then(|| {
+                    let p = self.world.get::<Material>(*e)?.texture.clone()?;
+                    let id = self.texture_registry.get(&p).copied()?;
+                    raster.texture_size(id)
+                })
+                .flatten();
             if crate::node_bounds::node_is_off_screen(
                 &self.world, &self.mesh_registry, &self.anim.poses,
-                *e, matter, &t, cam.world_position, &frustum,
+                *e, matter, &t, cam.world_position, &frustum, sprite_px,
             ) {
                 culled_nodes += 1;
                 continue;
@@ -1966,6 +1981,34 @@ impl Editor {
                         match flsl {
                             Some(b) => flsl_draws.push((draw.0, draw.1, b, draw.2)),
                             None => instances.push(draw),
+                        }
+                    }
+                }
+                Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot } => {
+                    if let Some(&mesh) = self.mesh_ids.get(floptle_core::Shape::Plane as usize) {
+                        let model = t.render_matrix(cam.world_position);
+                        let px = tex.and_then(|id| raster.texture_size(id));
+                        let texel = px
+                            .map(|[w, h]| [1.0 / w.max(1.0), 1.0 / h.max(1.0)])
+                            .unwrap_or([0.0, 0.0]);
+                        let mut raw = crate::sprite2d::sprite_one_draw(
+                            *ppu, *size, *cell, *flip_x, *flip_y, *pivot,
+                            model, mat.as_ref(), px, texel,
+                        );
+                        // Same as a batch: unlit in the raster pass and
+                        // corrected by the 2D lighting pass, so the two never
+                        // light it twice.
+                        if let Some(&(rank, casts)) = lit2d.get(e) {
+                            raw.force_unlit();
+                            flat2d.push((
+                                mesh,
+                                tex,
+                                floptle_render::Light2dInstance::from_raster(&raw, rank, casts),
+                            ));
+                        }
+                        match flsl {
+                            Some(b) => flsl_draws.push((mesh, tex, b, raw)),
+                            None => instances.push((mesh, tex, raw)),
                         }
                     }
                 }
@@ -2392,7 +2435,12 @@ impl Editor {
             let mut sel_shapes: Vec<Entity> = Vec::new();
             for &e in &self.selection {
                 let Some(m) = self.world.get::<Matter>(e) else { continue };
-                let t = floptle_core::world_transform(&self.world, e);
+                // The SAME offset the draw uses. Without it the outline of a
+                // parallaxed or sorted sprite is drawn where the node is rather
+                // than where its picture is — which for a background layer is
+                // most of the screen away from the thing it is outlining.
+                let mut t = floptle_core::world_transform(&self.world, e);
+                t.translation += sort_z.get(&e).copied().unwrap_or_default();
                 match m {
                     Matter::Primitive { shape, .. } => {
                         if let Some(&mesh) = self.mesh_ids.get(*shape as usize) {
@@ -2414,6 +2462,20 @@ impl Editor {
                     // would trace whatever happened to be alive when you
                     // clicked. The Hierarchy row is the selection you want.
                     Matter::SpriteBatch { .. } => {}
+                    // One sprite IS a quad, so it can be outlined — unlike a
+                    // batch, whose sprites are this frame's and would trace
+                    // whatever happened to be alive when you clicked.
+                    Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot } => {
+                        if let Some(&mesh) = self.mesh_ids.get(floptle_core::Shape::Plane as usize)
+                        {
+                            let model = t.render_matrix(cam.world_position);
+                            let raw = crate::sprite2d::sprite_one_draw(
+                                *ppu, *size, *cell, *flip_x, *flip_y, *pivot,
+                                model, None, None, [0.0, 0.0],
+                            );
+                            mask_mesh.push((mesh, raw));
+                        }
+                    }
                     Matter::Mesh { asset_path } => {
                         if let Some(asset) = self.mesh_registry.get(asset_path) {
                             let model = t.render_matrix(cam.world_position);
@@ -3169,7 +3231,7 @@ impl Editor {
                             cmd.focus_anim_graph = true;
                             ui.close();
                         }
-                        if ui.button("✏ Animating").on_hover_text("the animation timeline: preview, keys, events").clicked() {
+                        if ui.button("⏱ Animating").on_hover_text("the animation timeline: preview, keys, events").clicked() {
                             cmd.focus_animating = true;
                             ui.close();
                         }
@@ -7045,6 +7107,10 @@ impl Editor {
             // character body), while animation only bent the bones — so a weapon on a
             // bone must read the POST-physics mesh world or it swims a frame behind.
             anim::resolve_attachments(&self.anim, &mut self.world, &self.mesh_registry);
+            // 2D cameras follow AFTER all of that, for the same reason bone
+            // attachments do: a camera chasing a player has to read where the
+            // player ended up this frame, not where they started it.
+            floptle_core::camera2d::step_all(&mut self.world, sdt, self.play_t as f64);
             // Particles tick last: emitter node transforms are final for the frame
             // (scripts → animation → physics → attachments → particles). Apply any
             // play/stop/restart a script queued this frame first, so it lands now.
@@ -7367,6 +7433,7 @@ impl Editor {
                 MatterDoc::FieldShape { .. } => "Field Shape",
                 MatterDoc::Tilemap { .. } => "Tilemap",
                 MatterDoc::SpriteBatch { .. } => "Sprite Batch",
+                MatterDoc::Sprite { .. } => "Sprite",
                 MatterDoc::Skybox { .. } => "Skybox",
                 MatterDoc::PostProcess { .. } => "Post Processing",
                 MatterDoc::LightProbes { .. } => "Light Probes",
@@ -7976,11 +8043,52 @@ impl Editor {
             // Default-at-0 is the absence of the component, so a node put back
             // to the default stops carrying one and its scene stops mentioning
             // sorting at all.
-            if layer == floptle_core::DEFAULT_SORTING_LAYER && order == 0 {
+            // The MODE is not this command's to change — it has its own control
+            // — so it is carried over rather than reset. And it joins the
+            // default test: a Y-sorted node on the Default layer at order 0 is
+            // NOT the default, and dropping its component would silently turn
+            // Y-sorting off the first time somebody touched the layer picker.
+            let mode = self
+                .world
+                .get::<floptle_core::Sorting>(e)
+                .map(|s| s.mode)
+                .unwrap_or_default();
+            if layer == floptle_core::DEFAULT_SORTING_LAYER
+                && order == 0
+                && mode == floptle_core::SortMode::default()
+            {
                 self.world.remove::<floptle_core::Sorting>(e);
             } else {
-                self.world.insert(e, floptle_core::Sorting { layer, order });
+                self.world.insert(e, floptle_core::Sorting { layer, order, mode });
             }
+        }
+        if let Some((e, mode)) = cmd.set_sort_mode {
+            self.record();
+            let cur = self.world.get::<floptle_core::Sorting>(e).cloned().unwrap_or_default();
+            // Same default test as the layer/order path above, with the mode in
+            // it: back to `order` on the Default layer at 0 = no component, so
+            // the scene stops mentioning sorting entirely.
+            if mode == floptle_core::SortMode::default()
+                && cur.order == 0
+                && (cur.layer.is_empty() || cur.layer == floptle_core::DEFAULT_SORTING_LAYER)
+            {
+                self.world.remove::<floptle_core::Sorting>(e);
+            } else {
+                self.world.insert(e, floptle_core::Sorting { mode, ..cur });
+            }
+            self.scene_dirty = true;
+        }
+        if let Some((e, p)) = cmd.set_parallax {
+            self.record();
+            // Identity IS the absence of the component, the same rule sorting
+            // and 2D lighting follow — so a layer put back to 1,1 stops carrying
+            // one and its scene stops mentioning parallax.
+            if p.is_identity() {
+                self.world.remove::<floptle_core::Parallax>(e);
+            } else {
+                self.world.insert(e, p);
+            }
+            self.scene_dirty = true;
         }
         if let Some((e, lit)) = cmd.set_lighting_2d {
             self.record();
@@ -7999,6 +8107,20 @@ impl Editor {
                 self.world.remove::<floptle_core::Shadow2D>(e);
             } else {
                 self.world.insert(e, floptle_core::Shadow2D(cast));
+            }
+        }
+        if let Some((e, c)) = cmd.set_camera_2d {
+            self.record();
+            match c {
+                // The live half (where the follow has got to, any shake running)
+                // is deliberately left at its default here: this is an EDIT to
+                // the rule, and inheriting a play session's position into an
+                // authored camera is how a camera moves when you change its
+                // dead zone.
+                Some(c) => self.world.insert(e, c),
+                None => {
+                    self.world.remove::<floptle_core::camera2d::Camera2D>(e);
+                }
             }
         }
         if let Some((e, layer)) = cmd.set_layer {
@@ -8287,6 +8409,12 @@ impl Editor {
         if let Some(path) = cmd.open_shader_graph {
             self.open_shader_in_graph(&path);
         }
+        if let Some(path) = cmd.import_aseprite {
+            self.import_aseprite_sheet(&path);
+        }
+        if let Some((path, cols, rows)) = cmd.new_sprite_anim {
+            self.write_sprite_anim(&path, cols, rows);
+        }
         if let Some(path) = cmd.open_image {
             self.open_image_doc(&path);
         }
@@ -8402,24 +8530,7 @@ impl Editor {
             self.add_camera_node(parent);
         }
         if let Some((path, setting)) = cmd.set_texture_setting.take() {
-            // Store under the PROJECT-RELATIVE key, which is how scenes and materials
-            // reference a texture; the Assets browser hands us an absolute path.
-            let path = crate::assets::asset_rel_path(&path, &self.project_root);
-            self.texture_settings.insert(path.clone(), setting);
-            // Drop the cached registration so the texture re-uploads with the new
-            // sampler (and mips) on next use, and persist the change. The registry is
-            // keyed by the ref AS WRITTEN, so drop every spelling of this texture.
-            let root = self.project_root.clone();
-            let same = |k: &String| crate::assets::asset_rel_path(k, &root) == path;
-            self.texture_registry.retain(|k, _| !same(k));
-            self.texture_registry_setting.retain(|k, _| !same(k));
-            // The terrain palette bakes its own 256² copy at load, so a filter change
-            // has to re-RESAMPLE it — a sampler swap alone can't un-blur a bilinear
-            // resize. Only re-upload if this texture is actually in the palette.
-            if self.terrain_textures.contains(&path) {
-                self.terrain_textures_dirty = true;
-            }
-            self.save_texture_settings();
+            self.apply_texture_setting(&path, setting);
         }
         if let Some(e) = cmd.set_active_camera {
             self.set_active_camera(e);
@@ -8965,13 +9076,8 @@ impl Editor {
         // `raster` mutably. Empty for a scene that uses no sorting layers, which
         // is every scene until one opts in. (`flat_camera` was asked above, with
         // the light split that needs it.)
-        let sort_z: std::collections::HashMap<Entity, f64> = self
-            .world
-            .query::<floptle_core::Sorting>()
-            .map(|(e, s)| {
-                (e, floptle_core::sorting_offset(self.project.sorting_rank(&s.layer), s.order) as f64)
-            })
-            .collect();
+        let sort_z = crate::sprite2d::draw_offsets(&self.world, &self.project, cam.world_position);
+
         // The same one value the pass is handed below, from the same split — and
         // the same helper the Scene view uses, so this view cannot decide a
         // different set of lit surfaces from that one (`floptle/0122`).
@@ -9022,13 +9128,24 @@ impl Editor {
             // …and the same nudge here, or the Game view would sort differently
             // from the Scene view — the drift this file has already had three
             // times over.
-            t.translation.z += sort_z.get(ent).copied().unwrap_or(0.0);
+            t.translation += sort_z.get(ent).copied().unwrap_or_default();
             // …and the same cull the screen uses (`floptle/0075`), against THIS
             // camera's frustum. An offscreen target that culled differently from
             // the window would be a mirror showing a different room.
+            // A pixels-per-unit sprite is drawn at its TEXTURE's size, not at
+            // its `size` field, so culling has to know the texture — otherwise a
+            // sixteen-unit sprite is culled on a radius of half a unit and pops
+            // out of existence at the edge of the screen.
+            let sprite_px = matches!(matter, Matter::Sprite { .. })
+                .then(|| {
+                    let p = self.world.get::<Material>(*ent)?.texture.clone()?;
+                    let id = self.texture_registry.get(&p).copied()?;
+                    self.raster.as_ref()?.texture_size(id)
+                })
+                .flatten();
             if crate::node_bounds::node_is_off_screen(
                 &self.world, &self.mesh_registry, &self.anim.poses,
-                *ent, matter, &t, cam.world_position, &off_frustum,
+                *ent, matter, &t, cam.world_position, &off_frustum, sprite_px,
             ) {
                 continue;
             }
@@ -9173,6 +9290,38 @@ impl Editor {
                         match flsl {
                             Some(b) => flsl_draws.push((draw.0, draw.1, b, draw.2)),
                             None => instances.push(draw),
+                        }
+                    }
+                }
+                Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot } => {
+                    if let Some(&mesh) = self.mesh_ids.get(floptle_core::Shape::Plane as usize) {
+                        let model = t.render_matrix(cam.world_position);
+                        let px = self
+                            .raster
+                            .as_ref()
+                            .zip(tex)
+                            .and_then(|(r, id)| r.texture_size(id));
+                        let texel = px
+                            .map(|[w, h]| [1.0 / w.max(1.0), 1.0 / h.max(1.0)])
+                            .unwrap_or([0.0, 0.0]);
+                        let mut raw = crate::sprite2d::sprite_one_draw(
+                            *ppu, *size, *cell, *flip_x, *flip_y, *pivot,
+                            model, mat.as_ref(), px, texel,
+                        );
+                        // Same as a batch: unlit in the raster pass and
+                        // corrected by the 2D lighting pass, so the two never
+                        // light it twice.
+                        if let Some(&(rank, casts)) = lit2d.get(ent) {
+                            raw.force_unlit();
+                            flat2d.push((
+                                mesh,
+                                tex,
+                                floptle_render::Light2dInstance::from_raster(&raw, rank, casts),
+                            ));
+                        }
+                        match flsl {
+                            Some(b) => flsl_draws.push((mesh, tex, b, raw)),
+                            None => instances.push((mesh, tex, raw)),
                         }
                     }
                 }
@@ -9931,7 +10080,7 @@ mod lit_2d_tests {
     fn batch_on(world: &mut World, layer: &str, mode: Lit2D) -> Entity {
         let e = world.spawn();
         world.insert(e, Matter::SpriteBatch { size: 1.0 });
-        world.insert(e, Sorting { layer: layer.into(), order: 0 });
+        world.insert(e, Sorting { layer: layer.into(), order: 0, ..Default::default() });
         world.insert(e, Lighting2D { mode, ..Default::default() });
         e
     }

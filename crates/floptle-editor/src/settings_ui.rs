@@ -12,6 +12,7 @@
 //! having to know which topic owns a setting.
 
 use crate::icons;
+use crate::responsive::{check, fit, fit_here, para, slider};
 
 /// One topic in the left-hand nav.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -117,16 +118,23 @@ pub(crate) fn row<R>(
     help: Option<&str>,
     add: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
-    let mut out = None;
-    ui.horizontal(|ui| {
+    // 120 px of caption, until the panel is too thin to spare it — then the
+    // caption moves above its control and the control gets the full width.
+    // `crate::responsive::row_with` also runs the body in a WRAPPED horizontal,
+    // so a settings row with three controls on it folds rather than leaves.
+    // 150 px of content, not the 96 the tile-ish tabs use: a settings control is
+    // a checkbox with a sentence on it or a slider with a unit, and neither
+    // truncates. Below that the caption moves above the control instead, which
+    // gives it the whole column.
+    const CONTENT_W: f32 = 150.0;
+    crate::responsive::row_with(ui, label, 120.0, CONTENT_W, |ui| {
         ui.set_min_height(24.0);
-        let l = ui.add_sized([120.0, 20.0], egui::Label::new(label).selectable(false));
+        let out = add(ui);
         if let Some(h) = help {
-            l.on_hover_text(h);
+            ui.response().on_hover_text(h);
         }
-        out = Some(add(ui));
-    });
-    out.expect("row body runs")
+        out
+    })
 }
 
 /// Everything the Settings tab reads or writes, as borrows.
@@ -231,62 +239,118 @@ impl<'a> SettingsCtx<'a> {
         // A manual two-column split rather than nested panels: this tab docks
         // anywhere, and a panel inside a dock leaf fights the leaf's own layout
         // when the tab is narrow.
-        ui.horizontal_top(|ui| {
-            let col_h = ui.available_height();
-            ui.allocate_ui_with_layout(
-                egui::vec2(146.0, col_h),
-                egui::Layout::top_down_justified(egui::Align::Min),
-                |ui| {
-                    ui.add_space(2.0);
-                    for sec in SettingsSection::ALL.iter().copied() {
-                        let is_hit = hits.contains(&sec);
-                        let label = format!("{}  {}", sec.icon(), sec.title());
-                        let text = if is_hit {
-                            egui::RichText::new(label)
-                        } else {
-                            egui::RichText::new(label).weak()
-                        };
-                        let resp = ui.selectable_label(sec == selected, text);
-                        if resp.clicked() {
-                            want_section = sec;
-                        }
-                        resp.on_hover_text(sec.blurb());
+        //
+        // **The nav column collapses.** A 146 px sidebar in a 200 px dock leaves
+        // twenty pixels of settings, which is not a narrow layout — it is a
+        // broken one, and it is what the tab used to do. Below the threshold the
+        // sections become a wrapped strip of chips ABOVE the content and the
+        // content gets the whole panel. Nothing is hidden either way: every
+        // section is still one click from here, it is just reading across
+        // instead of down.
+        const NAV_W: f32 = 146.0;
+        // The narrowest content column worth having beside the nav: a 120 px
+        // caption plus a control. Under that, the two-column layout is costing
+        // more than it gives.
+        const NAV_NEEDS: f32 = NAV_W + 120.0 + crate::responsive::MIN_CONTENT_W;
+        let wide = crate::responsive::usable_width(ui) >= NAV_NEEDS;
+
+        let nav = |ui: &mut egui::Ui, want: &mut SettingsSection| {
+            for sec in SettingsSection::ALL.iter().copied() {
+                let is_hit = hits.contains(&sec);
+                let label = format!("{}  {}", sec.icon(), sec.title());
+                let text = if is_hit {
+                    egui::RichText::new(label)
+                } else {
+                    egui::RichText::new(label).weak()
+                };
+                let resp = ui.selectable_label(sec == selected, text);
+                if resp.clicked() {
+                    *want = sec;
+                }
+                resp.on_hover_text(sec.blurb());
+                if !wide {
+                    continue;
+                }
+                ui.add_space(2.0);
+            }
+        };
+
+        let mut body = |ui: &mut egui::Ui, out: &mut SettingsOut| {
+            heading(ui, selected);
+            match selected {
+                SettingsSection::Game => self.settings_game(ui, project, out),
+                SettingsSection::Rendering => self.settings_rendering(ui, project, out),
+                SettingsSection::Layers => self.settings_layers(ui, project, out),
+                SettingsSection::Input => self.settings_input(ui, &query, out),
+                SettingsSection::Access => self.settings_access(ui, out),
+            }
+            ui.add_space(16.0);
+        };
+
+        if wide {
+            ui.horizontal_top(|ui| {
+                let col_h = ui.available_height();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(NAV_W, col_h),
+                    egui::Layout::top_down_justified(egui::Align::Min),
+                    |ui| {
                         ui.add_space(2.0);
-                    }
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("project.ron").weak().small());
-                    if selected == SettingsSection::Input {
-                        ui.label(egui::RichText::new("input.ron").weak().small());
-                    }
-                },
-            );
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .id_salt("settings_body")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.add_space(6.0);
-                    // Breathing room down the left of the content column.
-                    ui.horizontal(|ui| {
+                        nav(ui, &mut want_section);
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("project.ron").weak().small());
+                        if selected == SettingsSection::Input {
+                            ui.label(egui::RichText::new("input.ron").weak().small());
+                        }
+                    },
+                );
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_salt("settings_body")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
                         ui.add_space(6.0);
-                        ui.vertical(|ui| {
-                            heading(ui, selected);
-                            match selected {
-                                SettingsSection::Game => self.settings_game(ui, project, &mut out),
-                                SettingsSection::Rendering => {
-                                    self.settings_rendering(ui, project, &mut out)
-                                }
-                                SettingsSection::Layers => self.settings_layers(ui, project, &mut out),
-                                SettingsSection::Input => self.settings_input(ui, &query, &mut out),
-                                SettingsSection::Access => self.settings_access(ui, &mut out),
-                            }
-                            ui.add_space(16.0);
-                        });
+                        // Breathing room down the left of the content column —
+                        // as a MARGIN, not as a `horizontal` wrapper. A
+                        // horizontal layout hands its children an unbounded
+                        // width, and the content column is the one place that
+                        // must not be unbounded: everything in it then lays out
+                        // against an edge past the panel. (This is the same
+                        // failure `responsive::usable_width` documents, and the
+                        // clamp below is the belt to the margin's braces.)
+                        // The explicit `vertical` is not decoration: a
+                        // `ScrollArea` inherits its parent's layout, and this one
+                        // is inside the `horizontal_top` that puts the nav beside
+                        // the content — so without it every settings row lays out
+                        // left-to-right and the column is one row wide.
+                        egui::Frame::new()
+                            .inner_margin(egui::Margin { left: 6, ..Default::default() })
+                            .show(ui, |ui| {
+                                ui.vertical(|ui| {
+                                    // A fresh scope, so `max_rect.left` is where
+                                    // the cursor actually is — then clamp its
+                                    // right edge to the panel. Measured from the
+                                    // CLIP rect because a scrolled content region
+                                    // reports a width that grows with whatever
+                                    // was put in it, and every paragraph in the
+                                    // section wraps against this number.
+                                    ui.scope(|ui| {
+                                        let w = ui.clip_rect().right() - ui.max_rect().left();
+                                        ui.set_max_width(w.max(48.0));
+                                        body(ui, &mut out);
+                                    });
+                                });
+                            });
                     });
-                });
-        });
+            });
+        } else {
+            ui.horizontal_wrapped(|ui| nav(ui, &mut want_section));
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+            body(ui, &mut out);
+        }
 
         *self.section = want_section;
         out
@@ -307,16 +371,16 @@ impl<'a> SettingsCtx<'a> {
 
         row(ui, "Text scale", Some("multiplies every UI text size; layouts reflow"), |ui| {
             let mut v = a.text_scale;
-            if ui
-                .add(
-                    egui::Slider::new(
-                        &mut v,
-                        Accessibility::TEXT_SCALE_MIN..=Accessibility::TEXT_SCALE_MAX,
-                    )
-                    .fixed_decimals(2)
-                    .suffix("×"),
+            if slider(
+                ui,
+                egui::Slider::new(
+                    &mut v,
+                    Accessibility::TEXT_SCALE_MIN..=Accessibility::TEXT_SCALE_MAX,
                 )
-                .changed()
+                .fixed_decimals(2)
+                .suffix("×"),
+            )
+            .changed()
             {
                 a.text_scale = v;
                 changed = true;
@@ -329,7 +393,7 @@ impl<'a> SettingsCtx<'a> {
 
         row(ui, "Colour vision", Some("corrects the picture for a colour deficiency"), |ui| {
             egui::ComboBox::from_id_salt("access_filter")
-                .width(220.0)
+                .width(fit_here(ui, 220.0))
                 .selected_text(a.color_filter.label())
                 .show_ui(ui, |ui| {
                     for f in ColorFilter::ALL {
@@ -346,7 +410,7 @@ impl<'a> SettingsCtx<'a> {
         if a.color_filter != ColorFilter::None {
             row(ui, "Strength", Some("how far the correction goes"), |ui| {
                 let mut v = a.color_filter_strength;
-                if ui.add(egui::Slider::new(&mut v, 0.0..=1.0).fixed_decimals(2)).changed() {
+                if slider(ui, egui::Slider::new(&mut v, 0.0..=1.0).fixed_decimals(2)).changed() {
                     a.color_filter_strength = v;
                     changed = true;
                 }
@@ -356,7 +420,7 @@ impl<'a> SettingsCtx<'a> {
                 "Simulate instead",
                 Some("show the deficiency rather than correcting it — for you, not for a player"),
                 |ui| {
-                    if ui.checkbox(&mut a.simulate_deficiency, "see what they see").changed() {
+                    if check(ui, &mut a.simulate_deficiency, "see what they see").changed() {
                         changed = true;
                     }
                 },
@@ -364,11 +428,12 @@ impl<'a> SettingsCtx<'a> {
         }
 
         row(ui, "Reduced motion", Some("UI transitions snap; your shake should too"), |ui| {
-            if ui.checkbox(&mut a.reduced_motion, "less movement").changed() {
+            if check(ui, &mut a.reduced_motion, "less movement").changed() {
                 changed = true;
             }
         });
-        ui.label(
+        para(
+            ui,
             egui::RichText::new(
                 "The engine snaps its own UI transitions. A camera shake your game \
                  drives has to read access.reducedMotion() and skip it — the engine \
@@ -380,7 +445,7 @@ impl<'a> SettingsCtx<'a> {
         ui.add_space(6.0);
 
         row(ui, "Captions", Some("caption(text) draws nothing while this is off"), |ui| {
-            if ui.checkbox(&mut a.captions, "show captions").changed() {
+            if check(ui, &mut a.captions, "show captions").changed() {
                 changed = true;
             }
         });
@@ -388,7 +453,8 @@ impl<'a> SettingsCtx<'a> {
         ui.add_space(10.0);
         ui.separator();
         ui.add_space(6.0);
-        ui.label(
+        para(
+            ui,
             egui::RichText::new(
                 "These are the PLAYER's settings, so they belong in the player's save: \
                  read them back with access.* and store them with save.set. See \
@@ -409,7 +475,7 @@ impl<'a> SettingsCtx<'a> {
         row(ui, "Title", Some("names the exported binary and its window"), |ui| {
             let mut t = project.title.clone().unwrap_or_default();
             if ui
-                .add_sized([220.0, 20.0], egui::TextEdit::singleline(&mut t).hint_text("My Game"))
+                .add_sized([fit(ui, 220.0), 20.0], egui::TextEdit::singleline(&mut t).hint_text("My Game"))
                 .changed()
             {
                 project.title = (!t.trim().is_empty()).then_some(t);
@@ -427,7 +493,7 @@ impl<'a> SettingsCtx<'a> {
             let current =
                 project.entry_scene.clone().unwrap_or_else(|| "scenes/first.ron".into());
             egui::ComboBox::from_id_salt("entry_scene_pick")
-                .width(220.0)
+                .width(fit_here(ui, 220.0))
                 .selected_text(stem(&current))
                 .show_ui(ui, |ui| {
                     for s in self.scene_files {
@@ -439,7 +505,8 @@ impl<'a> SettingsCtx<'a> {
                 });
         });
         ui.add_space(2.0);
-        ui.label(
+        para(
+            ui,
             egui::RichText::new(
                 "The editor opens this scene on project load too, so what you see is what ships.",
             )
@@ -468,6 +535,7 @@ impl<'a> SettingsCtx<'a> {
                 use floptle_scene::VsyncDoc as V;
                 let mut v = project.vsync;
                 egui::ComboBox::from_id_salt("project-vsync")
+                    .width(fit_here(ui, 220.0))
                     .selected_text(match v {
                         V::On => "smooth (vsync)",
                         V::Adaptive => "uncapped, no tearing",
@@ -512,6 +580,7 @@ impl<'a> SettingsCtx<'a> {
                 use floptle_scene::ProbeDetailDoc as D;
                 let mut d = project.probe_detail;
                 egui::ComboBox::from_id_salt("project-probe-detail")
+                    .width(fit_here(ui, 220.0))
                     .selected_text(match d {
                         D::Low => "low",
                         D::Medium => "medium",
@@ -540,16 +609,13 @@ impl<'a> SettingsCtx<'a> {
             },
         );
         row(ui, "Retro", Some("render at a low resolution and upscale"), |ui| {
-            out.save_project |= ui.checkbox(&mut project.retro, "pixelization").changed();
+            out.save_project |= check(ui, &mut project.retro, "pixelization").changed();
         });
         ui.add_enabled_ui(project.retro, |ui| {
             row(ui, "Pixel rows", Some("vertical resolution before the upscale"), |ui| {
-                out.save_project |= ui
-                    .add_sized(
-                        [220.0, 20.0],
-                        egui::Slider::new(&mut project.retro_height, 80u32..=1080),
-                    )
-                    .changed();
+                out.save_project |=
+                    slider(ui, egui::Slider::new(&mut project.retro_height, 80u32..=1080))
+                        .changed();
             });
             row(
                 ui,
@@ -559,14 +625,14 @@ impl<'a> SettingsCtx<'a> {
                 |ui| {
                     out.save_project |= ui
                         .add_sized(
-                            [220.0, 20.0],
+                            [fit(ui, 220.0), 20.0],
                             egui::DragValue::new(&mut project.retro_width)
                                 .range(0u32..=1920)
                                 .speed(1.0),
                         )
                         .changed();
                     if project.retro_width == 0 {
-                        ui.label(egui::RichText::new("from the window").weak().small());
+                        para(ui, egui::RichText::new("from the window").weak().small());
                     }
                 },
             );
@@ -577,13 +643,14 @@ impl<'a> SettingsCtx<'a> {
                       same size at every window size"),
                 |ui| {
                     out.save_project |=
-                        ui.checkbox(&mut project.retro_integer_scale, "integer scale").changed();
+                        check(ui, &mut project.retro_integer_scale, "integer scale").changed();
                 },
             );
         });
         ui.add_space(8.0);
         ui.label(egui::RichText::new("Era artefacts").strong());
-        ui.label(
+        para(
+            ui,
             egui::RichText::new(
                 "The hardware limits of the PS1/N64 era, asked for once for the whole project \
                  instead of on every material. A material can still dial in its own, or opt out \
@@ -610,27 +677,36 @@ impl<'a> SettingsCtx<'a> {
                   perfectly still, which is exactly what the hardware did. Move something to \
                   see it."),
             |ui| {
-                ui.horizontal(|ui| {
-                    for (name, steps, what) in presets {
-                        // Float comparison is exact on purpose: these ARE the
-                        // values the buttons write, so a highlighted button
-                        // means the setting is that preset and not near it.
-                        let on = project.retro_jitter == steps;
-                        if ui
-                            .selectable_label(on, name)
-                            .on_hover_text(if steps > 0.0 {
-                                format!("{what}\n\n(grid steps: {steps:.0})")
-                            } else {
-                                what.to_string()
-                            })
-                            .clicked()
-                            && !on
-                        {
-                            project.retro_jitter = steps;
-                            out.save_project = true;
+                // A segmented strip, so four presets shrink together and then
+                // wrap together rather than the last one leaving the panel.
+                //
+                // Float comparison is exact on purpose: these ARE the values the
+                // buttons write, so a highlighted chip means the setting is that
+                // preset and not near it.
+                let hovers: Vec<String> = presets
+                    .iter()
+                    .map(|(_, steps, what)| {
+                        if *steps > 0.0 {
+                            format!("{what}\n\n(grid steps: {steps:.0})")
+                        } else {
+                            what.to_string()
                         }
+                    })
+                    .collect();
+                let chips: Vec<crate::responsive::Chip<'_>> = presets
+                    .iter()
+                    .zip(&hovers)
+                    .map(|((name, steps, _), hover)| {
+                        crate::responsive::Chip::mode(name, hover, project.retro_jitter == *steps)
+                    })
+                    .collect();
+                if let Some(i) = crate::responsive::strip(ui, &chips) {
+                    let (_, steps, _) = presets[i];
+                    if project.retro_jitter != steps {
+                        project.retro_jitter = steps;
+                        out.save_project = true;
                     }
-                });
+                }
             },
         );
         if project.retro_jitter > 0.0 {
@@ -643,7 +719,7 @@ impl<'a> SettingsCtx<'a> {
                 |ui| {
                     out.save_project |= ui
                         .add_sized(
-                            [220.0, 20.0],
+                            [fit(ui, 220.0), 20.0],
                             egui::Slider::new(&mut project.retro_jitter, 20.0..=512.0)
                                 .step_by(1.0),
                         )
@@ -658,7 +734,7 @@ impl<'a> SettingsCtx<'a> {
                   swimming textures on big surfaces near the camera"),
             |ui| {
                 out.save_project |=
-                    ui.checkbox(&mut project.retro_affine_uv, "warp near the camera").changed();
+                    check(ui, &mut project.retro_affine_uv, "warp near the camera").changed();
             },
         );
         row(
@@ -668,7 +744,7 @@ impl<'a> SettingsCtx<'a> {
                   look. Normal maps are ignored while this is on."),
             |ui| {
                 out.save_project |=
-                    ui.checkbox(&mut project.retro_vertex_lit, "Gouraud shading").changed();
+                    check(ui, &mut project.retro_vertex_lit, "Gouraud shading").changed();
             },
         );
         row(
@@ -685,11 +761,12 @@ impl<'a> SettingsCtx<'a> {
 
         ui.add_space(8.0);
         row(ui, "Matter", Some("the SDF raymarched geometry pass"), |ui| {
-            out.save_project |= ui.checkbox(&mut project.matter, "SDF matter").changed();
+            out.save_project |= check(ui, &mut project.matter, "SDF matter").changed();
         });
 
         ui.add_space(10.0);
-        ui.label(
+        para(
+            ui,
             egui::RichText::new(
                 "Post-processing (bloom, vignette, ambient occlusion) is per-scene: select the \
                  Post Processing node in the Hierarchy.",
@@ -755,7 +832,7 @@ impl<'a> SettingsCtx<'a> {
         });
         ui.add_space(8.0);
 
-        ui.collapsing("Sorting layers (2D draw order)", |ui| {
+        ui.collapsing(crate::responsive::header_text(ui, "Sorting layers (2D draw order)"), |ui| {
             ui.label(
                 egui::RichText::new(
                     "Back to front: the last one draws in front of everything above it. A \
@@ -768,7 +845,7 @@ impl<'a> SettingsCtx<'a> {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.set_min_height(22.0);
-                ui.add_sized([200.0, 20.0], egui::Label::new(egui::RichText::new("Default").weak()));
+                ui.add_sized([fit(ui, 200.0), 20.0], egui::Label::new(egui::RichText::new("Default").weak()));
                 ui.small("always first");
             });
             // An explicit action rather than an integer encoding a swap: the
@@ -784,7 +861,7 @@ impl<'a> SettingsCtx<'a> {
             for i in 0..n {
                 ui.horizontal(|ui| {
                     ui.set_min_height(22.0);
-                    ui.add_sized([200.0, 20.0], egui::TextEdit::singleline(&mut project.sorting_layers[i]));
+                    ui.add_sized([fit(ui, 200.0), 20.0], egui::TextEdit::singleline(&mut project.sorting_layers[i]));
                     // Reordering is the whole point of the list, so it is two
                     // buttons rather than a drag nobody discovers.
                     if ui.add_enabled(i > 0, egui::Button::new("▲")).on_hover_text("further back").clicked() {
@@ -826,7 +903,7 @@ impl<'a> SettingsCtx<'a> {
                 ui.set_min_height(24.0);
                 let before = project.layers[i].clone();
                 let resp = ui.add_sized(
-                    [200.0, 20.0],
+                    [fit(ui, 200.0), 20.0],
                     egui::TextEdit::singleline(&mut project.layers[i]),
                 );
                 if resp.changed() {
@@ -883,7 +960,7 @@ impl<'a> SettingsCtx<'a> {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let resp = ui.add_sized(
-                [200.0, 20.0],
+                [fit(ui, 200.0), 20.0],
                 egui::TextEdit::singleline(&mut *self.layer_new).hint_text("new layer…"),
             );
             let commit = (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
@@ -929,7 +1006,7 @@ impl<'a> SettingsCtx<'a> {
                             continue;
                         }
                         let mut on = resolved.collides(i as u8, j as u8);
-                        if ui.checkbox(&mut on, "").on_hover_text(format!("{a} × {b}")).changed() {
+                        if check(ui, &mut on, "").on_hover_text(format!("{a} × {b}")).changed() {
                             if on {
                                 project.no_collide.retain(|(x, y)| {
                                     !((x == a && y == b) || (x == b && y == a))
@@ -965,6 +1042,47 @@ impl<'a> SettingsCtx<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Every section must survive a thin dock.** ⚙ Settings is the widest
+    /// panel in the editor — a layer matrix, a rebind table and a page of
+    /// checkboxes — so it is the one most likely to put a control past the
+    /// border, and the one where doing so is least visible (the section you
+    /// broke may not be the section you are looking at).
+    ///
+    /// Driven per section, because they share almost no layout.
+    #[test]
+    fn every_section_fits_however_thin_the_dock_gets() {
+        for section in SettingsSection::ALL {
+            let mut project = floptle_scene::ProjectConfigDoc::default();
+            let mut layer_new = String::new();
+            let mut section = *section;
+            let mut search = String::new();
+            let mut new_action = String::new();
+            let input_map = floptle_input::InputMap::default();
+            let scan = crate::input_scan::InputScan::default();
+            let test = floptle_input::ActionState::default();
+            let pads: [Option<String>; 0] = [];
+            crate::responsive::tests::assert_fits(
+                &format!("⚙ Settings ▸ {section:?}"),
+                |ui| {
+                    SettingsCtx {
+                        scene_files: &[],
+                        layer_new: &mut layer_new,
+                        section: &mut section,
+                        search: &mut search,
+                        input_map: &input_map,
+                        input_pending: None,
+                        input_scan: &scan,
+                        input_test: &test,
+                        pad_names: &pads,
+                        input_new_action: &mut new_action,
+                        access: Default::default(),
+                    }
+                    .ui(ui, &mut project);
+                },
+            );
+        }
+    }
 
     #[test]
     fn search_is_case_insensitive_and_empty_matches_all() {

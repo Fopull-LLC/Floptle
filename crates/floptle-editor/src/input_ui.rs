@@ -228,7 +228,7 @@ fn primer(ui: &mut egui::Ui) {
         .weak(),
     );
     ui.add_space(4.0);
-    egui::CollapsingHeader::new("How do I use this?").id_salt("input_howto").show(ui, |ui| {
+    egui::CollapsingHeader::new(crate::responsive::header_text(ui, "How do I use this?")).id_salt("input_howto").show(ui, |ui| {
         ui.label("1.  In a script, read the action by name:");
         ui.add_space(2.0);
         ui.horizontal(|ui| {
@@ -720,9 +720,10 @@ fn live_tester(
     ui.add_space(14.0);
     ui.separator();
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new("LIVE").strong());
-        ui.label(
+        crate::responsive::para(
+            ui,
             egui::RichText::new("press something — this updates without entering Play")
                 .weak()
                 .small(),

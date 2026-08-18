@@ -32,7 +32,7 @@ script, and what `update` and `params` are.
 
 Start from a new empty project, or clear the starter scene — either is fine.
 
-Add a cube (Hierarchy → **✚ New** → **■ Cube**), rename it `Ground`, and in
+Add a cube (Hierarchy → **✚ New** → **■ 3D** → **■ Cube**), rename it `Ground`, and in
 the Inspector set its **scale** to about `40, 1, 40`. That's a wide, thin slab.
 
 Now give it a body: in the Inspector, **➕ Add Component → Rigidbody**, and set

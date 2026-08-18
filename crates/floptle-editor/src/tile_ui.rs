@@ -42,11 +42,11 @@ use floptle_tiles::{
 
 use crate::tile_edit::{TileStore, TileTool, TileTools};
 
-/// The measurements the panel is built on — matched to the ▦ Model tab so the two
-/// tile-ish panels do not look like they came from different programs.
-const LABEL_W: f32 = 58.0;
-const CHIP_W: f32 = 74.0;
-const BTN_H: f32 = 22.0;
+/// The measurements the panel is built on — shared with the ▦ Model tab through
+/// [`crate::responsive`] so the two tile-ish panels cannot drift into looking
+/// like they came from different programs.
+use crate::responsive::{BTN_H, CHIP_W, MIN_CONTENT_W, fit, para, section};
+
 const ACCENT: Color32 = Color32::from_rgb(255, 200, 80);
 
 /// An action the tab wants that needs `&mut Editor` — undo snapshots, the world,
@@ -134,28 +134,12 @@ pub(crate) struct TileCtx<'a> {
     pub(crate) playing: bool,
 }
 
-/// A titled section rule: `TITLE ─────────────`.
-fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(12.0);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(title).small().strong().color(ui.visuals().strong_text_color()));
-        let rect = ui.available_rect_before_wrap();
-        if rect.width() > 8.0 {
-            let y = rect.center().y;
-            ui.painter().line_segment(
-                [egui::pos2(rect.left() + 4.0, y), egui::pos2(rect.right(), y)],
-                egui::Stroke::new(1.0, ui.visuals().weak_text_color()),
-            );
-        }
-    });
-    ui.add_space(4.0);
-}
-
+/// A labelled row: caption on the left, controls on the right — and caption
+/// *above* controls once the dock gets too thin for both. The controls run in a
+/// wrapped horizontal either way, so a tool strip folds onto a second line
+/// instead of leaving the panel.
 fn labelled(ui: &mut egui::Ui, label: &str, body: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        ui.add_sized([LABEL_W, BTN_H], egui::Label::new(RichText::new(label).small()));
-        body(ui);
-    });
+    crate::responsive::row(ui, label, MIN_CONTENT_W, body);
 }
 
 /// The cut to start a freshly-dropped sheet on: `(cols, rows)`.
@@ -261,7 +245,7 @@ fn short_texture(tex: &str, page: u32) -> String {
 /// the feature, in the words somebody would go looking for it under.
 fn needs_tileset(ui: &mut egui::Ui, what: &str, cmds: &mut Vec<TileCmd>) {
     ui.small(what);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.colored_label(ACCENT, "⚠ needs a tileset");
         if ui
             .small_button("+ New tileset")
@@ -335,7 +319,7 @@ impl TileCtx<'_> {
                 // this one are the same switch, so they cannot disagree.
                 let hidden = floptle_core::is_disabled(self.world, *e)
                     || self.world.get::<floptle_core::Visible>(*e).is_some_and(|v| !v.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let active = self.tools.layer == Some(*e);
                     let label = if hidden {
                         RichText::new(format!("◌ {name}")).weak()
@@ -356,7 +340,7 @@ impl TileCtx<'_> {
             }
         });
         if ui
-            .add_sized([CHIP_W * 2.0, BTN_H], egui::Button::new("+ Add layer"))
+            .add_sized([fit(ui, CHIP_W * 2.0), BTN_H], egui::Button::new("+ Add layer"))
             .on_hover_text("a new ▦ Tilemap node, in front of the last one")
             .clicked()
         {
@@ -391,7 +375,7 @@ impl TileCtx<'_> {
         let has_sel = self.tools.selection.is_some();
         labelled(ui, "orient", |ui| {
             if ui
-                .add_sized([32.0, BTN_H], egui::Button::new("↻"))
+                .add_sized([fit(ui, 32.0), BTN_H], egui::Button::new("↻"))
                 .on_hover_text(if has_sel {
                     "turn the selection a quarter-turn clockwise"
                 } else {
@@ -402,14 +386,14 @@ impl TileCtx<'_> {
                 self.cmds.push(TileCmd::Reorient { turn: true, flip_x: false, flip_y: false });
             }
             if ui
-                .add_sized([32.0, BTN_H], egui::Button::new("⇔"))
+                .add_sized([fit(ui, 32.0), BTN_H], egui::Button::new("⇔"))
                 .on_hover_text("mirror left-to-right")
                 .clicked()
             {
                 self.cmds.push(TileCmd::Reorient { turn: false, flip_x: true, flip_y: false });
             }
             if ui
-                .add_sized([32.0, BTN_H], egui::Button::new("⇕"))
+                .add_sized([fit(ui, 32.0), BTN_H], egui::Button::new("⇕"))
                 .on_hover_text("mirror top-to-bottom")
                 .clicked()
             {
@@ -455,26 +439,26 @@ impl TileCtx<'_> {
                 ui.small(format!("{}×{} at {x0},{y0}", x1 - x0 + 1, y1 - y0 + 1));
             });
             ui.horizontal_wrapped(|ui| {
-                if ui.add_sized([CHIP_W, BTN_H], egui::Button::new("Copy")).clicked() {
+                if ui.add_sized([fit(ui, CHIP_W), BTN_H], egui::Button::new("Copy")).clicked() {
                     self.cmds.push(TileCmd::Copy);
                 }
                 if ui
-                    .add_sized([CHIP_W, BTN_H], egui::Button::new("Paste"))
+                    .add_sized([fit(ui, CHIP_W), BTN_H], egui::Button::new("Paste"))
                     .on_hover_text("put the clipboard on the brush, so the next click places it")
                     .clicked()
                 {
                     self.cmds.push(TileCmd::Paste);
                 }
-                if ui.add_sized([CHIP_W, BTN_H], egui::Button::new("Clear")).clicked() {
+                if ui.add_sized([fit(ui, CHIP_W), BTN_H], egui::Button::new("Clear")).clicked() {
                     self.cmds.push(TileCmd::ClearSelection);
                 }
-                if ui.add_sized([CHIP_W, BTN_H], egui::Button::new("Deselect")).clicked() {
+                if ui.add_sized([fit(ui, CHIP_W), BTN_H], egui::Button::new("Deselect")).clicked() {
                     self.tools.selection = None;
                 }
             });
         } else if self.tools.clipboard.is_some()
             && ui
-                .add_sized([CHIP_W * 2.0, BTN_H], egui::Button::new("Paste to brush"))
+                .add_sized([fit(ui, CHIP_W * 2.0), BTN_H], egui::Button::new("Paste to brush"))
                 .clicked()
         {
             self.cmds.push(TileCmd::Paste);
@@ -514,7 +498,7 @@ impl TileCtx<'_> {
         });
         ui.data_mut(|d| d.insert_temp(id, want));
         let changed = (want.0, want.1) != (cols, rows) || want.2 != 0 || want.3 != 0;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(changed, egui::Button::new("Apply size").min_size([CHIP_W, BTN_H].into()))
                 .on_hover_text("keeps whatever overlaps; anything outside the new grid is dropped")
@@ -525,7 +509,7 @@ impl TileCtx<'_> {
             }
             ui.small(format!("{tile} units / tile"));
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.tools.show_grid, "Grid").on_hover_text(
                 "draw the layer's tile lines in the Scene view",
             );
@@ -576,14 +560,14 @@ impl TileCtx<'_> {
             );
             ui.horizontal_wrapped(|ui| {
                 if ui
-                    .add_sized([CHIP_W * 2.0, BTN_H], egui::Button::new("+ New tileset"))
+                    .add_sized([fit(ui, CHIP_W * 2.0), BTN_H], egui::Button::new("+ New tileset"))
                     .on_hover_text("for this layer's own sheet, sized from its material")
                     .clicked()
                 {
                     self.cmds.push(TileCmd::NewTilesetForLayer);
                 }
                 for path in self.store.paths() {
-                    if ui.add_sized([CHIP_W * 2.0, BTN_H], egui::Button::new(short(&path))).clicked()
+                    if ui.add_sized([fit(ui, CHIP_W * 2.0), BTN_H], egui::Button::new(short(&path))).clicked()
                     {
                         self.cmds.push(TileCmd::AttachTileset(path.clone()));
                     }
@@ -664,7 +648,7 @@ impl TileCtx<'_> {
     /// stops there too. Pages put them on one layer.
     fn pages_ui(&mut self, ui: &mut egui::Ui, set: &TileSet) {
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.small(RichText::new("SHEETS").strong());
             ui.small(format!("{}", set.page_count()));
             if set.page_count() < floptle_core::TILE_MAX_PAGES
@@ -727,13 +711,18 @@ impl TileCtx<'_> {
     fn sheet_row(&mut self, ui: &mut egui::Ui, p: u32, tex: &str, c: u32, r: u32) {
         let (mut path, mut cols, mut rows) = (tex.to_string(), c, r);
         let mut changed = false;
+        // Wrapped: a path field and two cut fields is more than a narrow dock can
+        // hold on one line, and this row is the FIRST thing in the tab — an
+        // over-wide row here grows the content region and every paragraph below
+        // it then wraps against an edge that is off-screen (see
+        // `responsive::usable_width`).
         let resp = ui
-            .horizontal(|ui| {
+            .horizontal_wrapped(|ui| {
                 ui.small(format!("{p}"));
                 changed |= ui
                     .add(
                         egui::TextEdit::singleline(&mut path)
-                            .desired_width(120.0)
+                            .desired_width(fit(ui, 120.0))
                             .hint_text("drop or type textures/…png"),
                     )
                     .on_hover_text("project-relative image for this sheet — or drag one in")
@@ -786,7 +775,7 @@ impl TileCtx<'_> {
         {
             labelled(ui, "brush", |ui| {
                 if ui
-                    .add_sized([CHIP_W * 0.7, BTN_H], egui::Button::new("Tile").selected(self.tools.group.is_none()))
+                    .add_sized([fit(ui, CHIP_W * 0.7), BTN_H], egui::Button::new("Tile").selected(self.tools.group.is_none()))
                     .on_hover_text("place the tile you click in the palette, exactly as it is")
                     .clicked()
                 {
@@ -801,7 +790,7 @@ impl TileCtx<'_> {
                         group.name.clone()
                     };
                     if ui
-                        .add_sized([CHIP_W * 0.9, BTN_H], egui::Button::new(format!("▦ {name}")).selected(on))
+                        .add_sized([fit(ui, CHIP_W * 0.9), BTN_H], egui::Button::new(format!("▦ {name}")).selected(on))
                         .on_hover_text(
                             "paint this autotile: every square works out which of the \
                              group's tiles fits its neighbours",
@@ -1105,7 +1094,7 @@ impl TileCtx<'_> {
             for (label, want) in [("none", TileCollision::None), ("full", TileCollision::Full)] {
                 let on = sel(coll == want);
                 if ui
-                    .add_sized([CHIP_W * 0.55, BTN_H], egui::Button::new(label).selected(on))
+                    .add_sized([fit(ui, CHIP_W * 0.55), BTN_H], egui::Button::new(label).selected(on))
                     .clicked()
                 {
                     self.cmds.push(TileCmd::BulkCollision(cells.clone(), want));
@@ -1113,7 +1102,7 @@ impl TileCtx<'_> {
             }
             let is_half = matches!(coll, TileCollision::Half(_));
             if ui
-                .add_sized([CHIP_W * 0.55, BTN_H], egui::Button::new("half").selected(sel(is_half)))
+                .add_sized([fit(ui, CHIP_W * 0.55), BTN_H], egui::Button::new("half").selected(sel(is_half)))
                 .clicked()
                 && !is_half
             {
@@ -1124,7 +1113,7 @@ impl TileCtx<'_> {
             }
             let is_rect = matches!(coll, TileCollision::Custom { .. });
             if ui
-                .add_sized([CHIP_W * 0.55, BTN_H], egui::Button::new("rect").selected(sel(is_rect)))
+                .add_sized([fit(ui, CHIP_W * 0.55), BTN_H], egui::Button::new("rect").selected(sel(is_rect)))
                 .clicked()
                 && !is_rect
             {
@@ -1135,7 +1124,7 @@ impl TileCtx<'_> {
             }
             let is_poly = matches!(coll, TileCollision::Poly(_));
             if ui
-                .add_sized([CHIP_W * 0.55, BTN_H], egui::Button::new("shape").selected(sel(is_poly)))
+                .add_sized([fit(ui, CHIP_W * 0.55), BTN_H], egui::Button::new("shape").selected(sel(is_poly)))
                 .on_hover_text(
                     "draw the collider yourself, point by point, snapped to the art's pixels — \
                      what a SLOPE is. It collides as the shape you drew, not as the box \
@@ -1208,7 +1197,7 @@ impl TileCtx<'_> {
         }
         labelled(ui, "tags", |ui| {
             if ui
-                .add(egui::TextEdit::singleline(&mut text).desired_width(150.0))
+                .add(egui::TextEdit::singleline(&mut text).desired_width(fit(ui, 150.0)))
                 .on_hover_text("comma-separated. A script reads them with tm:hasTag(x, y, \"ice\")")
                 .lost_focus()
             {
@@ -1239,7 +1228,7 @@ impl TileCtx<'_> {
         let mut fps = info.anim_fps;
         labelled(ui, "frames", |ui| {
             let done = ui
-                .add(egui::TextEdit::singleline(&mut ftext).desired_width(110.0))
+                .add(egui::TextEdit::singleline(&mut ftext).desired_width(fit(ui, 110.0)))
                 .on_hover_text(
                     "extra cells this tile cycles through, comma-separated. This tile is \
                      frame 0 and is not repeated.",
@@ -1445,7 +1434,7 @@ impl TileCtx<'_> {
         labelled(ui, "ramps", |ui| {
             for (glyph, shape, tip) in RAMPS {
                 if ui
-                    .add_sized([BTN_H * 1.4, BTN_H], egui::Button::new(*glyph))
+                    .add_sized([fit(ui, BTN_H * 1.4), BTN_H], egui::Button::new(*glyph))
                     .on_hover_text(*tip)
                     .clicked()
                 {
@@ -1456,7 +1445,7 @@ impl TileCtx<'_> {
         });
         labelled(ui, "shape", |ui| {
             if ui
-                .add_sized([CHIP_W * 0.8, BTN_H], egui::Button::new("Square"))
+                .add_sized([fit(ui, CHIP_W * 0.8), BTN_H], egui::Button::new("Square"))
                 .on_hover_text("back to the whole tile — a starting point to cut corners off")
                 .clicked()
             {
@@ -1464,7 +1453,7 @@ impl TileCtx<'_> {
                 changed = true;
             }
             if ui
-                .add_sized([CHIP_W * 0.8, BTN_H], egui::Button::new("Flip ⇔"))
+                .add_sized([fit(ui, CHIP_W * 0.8), BTN_H], egui::Button::new("Flip ⇔"))
                 .on_hover_text("mirror the shape left-to-right")
                 .clicked()
             {
@@ -1520,13 +1509,13 @@ impl TileCtx<'_> {
                  several tiles — those take turns, so a field of grass varies.",
             );
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.tools.auto_retile, "Retile as I paint").on_hover_text(
                 "recompute the neighbours after every stroke. Off, painting places one \
                  fixed tile of the group.",
             );
             if ui
-                .add_sized([CHIP_W, BTN_H], egui::Button::new("Retile all"))
+                .add_sized([fit(ui, CHIP_W), BTN_H], egui::Button::new("Retile all"))
                 .on_hover_text("fix the whole layer after changing the rules")
                 .clicked()
             {
@@ -1540,17 +1529,16 @@ impl TileCtx<'_> {
             let cells = set.group_cells(g);
             let missing = at.missing(g).len();
             let want = autotile::preset_len(group.kind);
-            egui::CollapsingHeader::new(format!(
-                "{} — {} of {want} drawn",
-                group.name,
-                want - missing
+            egui::CollapsingHeader::new(crate::responsive::header_text(
+                ui,
+                &format!("{} — {} of {want} drawn", group.name, want - missing),
             ))
             .id_salt(("tile_group", i))
             .default_open(self.tools.group == Some(g))
             .show(ui, |ui| {
                 let mut name = group.name.clone();
                 labelled(ui, "name", |ui| {
-                    if ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0)).lost_focus()
+                    if ui.add(egui::TextEdit::singleline(&mut name).desired_width(fit(ui, 120.0))).lost_focus()
                     {
                         self.cmds.push(TileCmd::RenameGroup(g, name.clone()));
                     }
@@ -1598,7 +1586,8 @@ impl TileCtx<'_> {
                         .add_enabled(
                             n > 1,
                             egui::Button::new(format!("Assign preset to {n} selected"))
-                                .min_size([CHIP_W * 2.0, BTN_H].into()),
+                                .truncate()
+                                .min_size([fit(ui, CHIP_W * 2.0), BTN_H].into()),
                         )
                         .on_hover_text(
                             "put the palette selection in this group and hand each tile its \
@@ -1611,13 +1600,13 @@ impl TileCtx<'_> {
                         self.cmds.push(TileCmd::ApplyPreset(g));
                     }
                     if ui
-                        .add_sized([CHIP_W, BTN_H], egui::Button::new("Paint this"))
+                        .add_sized([fit(ui, CHIP_W), BTN_H], egui::Button::new("Paint this"))
                         .clicked()
                     {
                         self.tools.group = Some(g);
                         self.tools.tool = TileTool::Brush;
                     }
-                    if ui.add_sized([CHIP_W, BTN_H], egui::Button::new("Remove")).clicked() {
+                    if ui.add_sized([fit(ui, CHIP_W), BTN_H], egui::Button::new("Remove")).clicked() {
                         self.cmds.push(TileCmd::RemoveGroup(g));
                     }
                 });
@@ -1686,10 +1675,15 @@ impl TileCtx<'_> {
                 }
             });
         }
-        ui.horizontal(|ui| {
+        // Wrapped, not fixed: the preset names are long ("Blob (47 tiles)") and
+        // three of them side by side is wider than a narrow dock.
+        ui.horizontal_wrapped(|ui| {
             for kind in AutotileKind::ALL {
                 if ui
-                    .add_sized([CHIP_W * 1.6, BTN_H], egui::Button::new(format!("+ {}", kind.label())))
+                    .add_sized(
+                        [fit(ui, CHIP_W * 1.6), BTN_H],
+                        egui::Button::new(format!("+ {}", kind.label())).truncate(),
+                    )
                     .clicked()
                 {
                     self.cmds.push(TileCmd::AddGroup(kind));
@@ -1724,7 +1718,7 @@ impl TileCtx<'_> {
         let masks = autotile::preset_masks(kind);
         let armed = self.tools.fill_mask.filter(|(ag, _)| *ag == g).map(|(_, m)| m);
         ui.add_space(2.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.small(RichText::new("RULES").strong());
             if armed.is_some() {
                 ui.colored_label(
@@ -1736,7 +1730,7 @@ impl TileCtx<'_> {
                     self.tools.fill_mask = None;
                 }
             } else {
-                ui.small("click a shape, then click the tile that draws it");
+                para(ui, RichText::new("click a shape, then click the tile that draws it").small());
             }
         });
         // Which piece of the shape the armed slot is waiting for, spelled out.
@@ -1752,7 +1746,7 @@ impl TileCtx<'_> {
             );
             ui.small(describe_mask(m, kind));
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.tools.fill_advance, "next shape after the first tile")
                 .on_hover_text(
                     "on: filling a preset is one run of alternating clicks. off: stay on \
@@ -2695,6 +2689,40 @@ mod tests {
             walk(&cs.shape, &mut text);
         }
         text
+    }
+
+    /// **The panel must survive being dragged thin.** A dock splitter has no
+    /// minimum and a user is allowed to put this tab in a 140 px column; what
+    /// they must never get is a tool strip whose right-hand half is past the
+    /// border with nothing saying so.
+    ///
+    /// Driven through [`crate::responsive::tests::assert_fits`], which walks the
+    /// frame's shapes and flags anything its own clip rect cuts off. Run over a
+    /// tileset-bearing layer so the palette, the per-tile editor and the
+    /// autotile grid are all on screen — the sections with the most controls
+    /// per row are the ones that overflow first.
+    #[test]
+    fn the_panel_fits_however_thin_the_dock_gets() {
+        let (world, e, path, mut store) = grouped_world(AutotileKind::Blob8);
+        let mut tools = TileTools {
+            layer: Some(e),
+            editing: Some(path),
+            group: Some(0),
+            ..Default::default()
+        };
+        let root = std::path::PathBuf::from(".");
+        crate::responsive::tests::assert_fits("the ◫ Tiles tab", |ui| {
+            let mut cmds = Vec::new();
+            TileCtx {
+                store: &mut store,
+                tools: &mut tools,
+                world: &world,
+                project_root: &root,
+                cmds: &mut cmds,
+                playing: false,
+            }
+            .ui(ui);
+        });
     }
 
     fn layer_world(tileset: &str) -> (floptle_core::World, Entity) {
