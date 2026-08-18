@@ -56,6 +56,10 @@ pollster = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 egui = { workspace = true }
+# Reading the bundled fonts' character maps directly — the only reliable answer
+# to "will this icon draw?" (see `icons.rs`), and what `gui.hasGlyph` answers
+# with. Same crate epaint resolves glyphs with, so it is already in the graph.
+skrifa = "0.42"
 egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
 egui_dock = { workspace = true }
@@ -82,6 +86,3 @@ tar = "0.4"
 image = { workspace = true }
 # `examples/vfx_shot.rs` writes contact sheets of rendered effects.
 png = "0.18"
-# Reading the bundled fonts' character maps directly — the only reliable answer
-# to "will this icon draw?" (see `icons.rs`). Same crate epaint resolves with.
-skrifa = "0.42"

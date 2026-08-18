@@ -145,30 +145,10 @@ mod tests {
     /// This is the ground truth the renderer acts on. See the module docs for
     /// why `Fonts::has_glyph` can't be used instead.
     fn drawable() -> std::collections::HashSet<char> {
-        // The editor's real stack, from the one builder that makes it.
-        let defs = crate::fonts::definitions(&[]);
-        let names: Vec<String> = defs
-            .families
-            .get(&egui::FontFamily::Proportional)
-            .cloned()
-            .unwrap_or_default();
-
-        let mut out = std::collections::HashSet::new();
-        for name in &names {
-            let data = defs
-                .font_data
-                .get(name)
-                .unwrap_or_else(|| panic!("the font stack names {name:?} but egui has no such font"));
-            let font = skrifa::FontRef::from_index(&data.font, data.index)
-                .unwrap_or_else(|e| panic!("{name} is not a readable font: {e}"));
-            let charmap = skrifa::MetadataProvider::charmap(&font);
-            for (cp, _) in charmap.mappings() {
-                if let Some(c) = char::from_u32(cp) {
-                    out.insert(c);
-                }
-            }
-        }
-        out
+        // The editor's real stack, from the one builder that makes it — and the
+        // same function `gui.hasGlyph` answers packages with, so the guard here
+        // and the answer a package gets can never drift apart.
+        crate::fonts::drawable(&crate::fonts::definitions(&[]))
     }
 
     /// **Every** non-ASCII character in a string literal anywhere in the editor

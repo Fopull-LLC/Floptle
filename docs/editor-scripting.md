@@ -657,6 +657,27 @@ gui.reserve(200, 40)   -- now the cursor has moved on
 **Input** — `mouse() → {x, y, inside}` · `clicked()` ·
 `keys() → {shift, ctrl, alt, enter, escape}`
 
+`mouse()` gives the pointer in the same coordinates the painting calls take —
+relative to the panel's top-left — so a painted control can be hit-tested
+against where it was drawn. `inside` is whether the pointer is over the area
+this layout may draw into, which is the question worth asking *before* drawing
+the thing being tested:
+
+```lua
+local at = gui.cursor()
+local cx, cy = at.x + 9, at.y + 9
+local m = gui.mouse()
+local over = m.inside and ((m.x - cx)^2 + (m.y - cy)^2) <= 81
+gui.circle(cx, cy, 9, 1, 0.3, 0.3, over and 1.0 or 0.85)
+if over and gui.clicked() then clear() end
+gui.reserve(18, 18)   -- claim the space, or the next widget paints over it
+```
+
+Hit-test **before** reserving — `cursor()` is where the control is about to go,
+and reserving first moves it out from under the pointer. And do reserve
+afterwards: a control drawn under something else cannot be clicked however
+correct its geometry is.
+
 `textField` returns **two** values: the text, and whether it was submitted with
 Enter. With `keys()` that is enough to build the usual chat behaviour — Enter
 for a newline, Shift+Enter to send, or the other way round:
@@ -668,6 +689,28 @@ if submitted and (k.shift or k.ctrl) then send() end
 ```
 
 Extra return values are dropped in Lua, so `x = gui.textField(x)` is unchanged.
+
+### Will this icon draw?
+
+`gui.hasGlyph(text)` — whether every character in `text` has an outline in the
+editor's font stack.
+
+A glyph no bundled font maps renders as a **tofu square**, and nothing warns
+you: the label just looks broken to whoever opens the editor. There is no way to
+tell by looking at your own source, because the character is right there in it.
+
+```lua
+local CLEAR = gui.hasGlyph("✖") and "✖" or "clear"
+```
+
+Answered from the fonts' **character maps** — the fact the renderer acts on.
+Plain ASCII is always true, so a fallback never has to be checked before it is
+used. It reports on the editor's proportional stack rather than on a face your
+package ships, which makes it conservative in the safe direction: a word where
+an icon would have worked, never a box where a word would have.
+
+> Two characters that look interchangeable often are not. On the bundled stack
+> `✕` (U+2715) and `✓` (U+2713) do not draw; `✖` (U+2716) and `✔` (U+2714) do.
 
 ### Your own typeface
 

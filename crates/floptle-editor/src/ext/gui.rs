@@ -223,6 +223,12 @@ fn color(r: f64, g: f64, b: f64, a: Option<f64>) -> egui::Color32 {
 pub(crate) struct FontScope<'a> {
     pub(crate) pkg_id: &'a str,
     pub(crate) faces: &'a [crate::fonts::PackageFont],
+    /// Every character the editor's proportional stack can draw, from the
+    /// fonts' own character maps — what `gui.hasGlyph` answers with.
+    ///
+    /// Built once per draw rather than per call: it is a few thousand entries
+    /// and a panel may ask about a dozen icons a frame.
+    pub(crate) drawable: &'a std::collections::HashSet<char>,
     /// Names already complained about, so a panel drawing at 60 Hz costs one
     /// Console line and not sixty a second.
     pub(crate) warned: &'a RefCell<std::collections::HashSet<String>>,
@@ -585,6 +591,24 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
     // Did the face this package named actually load? A brand-conscious tool
     // can draw a wordmark as type when it has the face and as an image when it
     // does not, rather than guessing.
+    // **Will this actually draw, or will it be an empty box?**
+    //
+    // A package picks an icon by typing it, and a glyph no bundled font maps
+    // renders as tofu with nothing to say so — the label just looks broken to
+    // whoever opens the editor. This package shipped `✕` on its clear button
+    // for weeks that way.
+    //
+    // Answered from the fonts' CHARACTER MAPS, which is the fact the renderer
+    // acts on. `epaint::Fonts::has_glyph` is not usable for it: it resolves a
+    // character to a face and compares that face against the one holding the
+    // replacement glyph, so a character whose real home is that face reports
+    // missing. It calls ⚠ ✔ ⚡ 🌐 💾 dead, and all of them draw.
+    t.set(
+        "hasGlyph",
+        scope.create_function(move |_, text: String| {
+            Ok(text.chars().all(|c| c.is_ascii() || fonts.drawable.contains(&c)))
+        })?,
+    )?;
     t.set(
         "hasFont",
         scope.create_function(move |_, name: String| {
@@ -928,8 +952,20 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
         scope.create_function(move |lua, ()| {
             let (x, y, inside) = with(slot, |ui| {
                 let o = ui.min_rect().min;
+                // **`inside` is about the area this layout may draw into, not
+                // about what it has drawn so far.**
+                //
+                // `min_rect` is a record of the widgets already added, and it is
+                // the wrong question by construction: a package hit-testing
+                // something it is ABOUT to draw asks before drawing it, so the
+                // pointer is over a region `min_rect` does not cover yet and
+                // `inside` came back false exactly where the control was. A
+                // painted button at the right-hand end of a row was unclickable
+                // for that reason and no other — the geometry was right, the
+                // gate in front of it was not.
+                let area = ui.clip_rect();
                 match ui.ctx().pointer_latest_pos() {
-                    Some(p) => (p.x - o.x, p.y - o.y, ui.min_rect().contains(p)),
+                    Some(p) => (p.x - o.x, p.y - o.y, area.contains(p)),
                     None => (0.0, 0.0, false),
                 }
             })?;

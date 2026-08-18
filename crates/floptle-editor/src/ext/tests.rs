@@ -841,6 +841,151 @@ fn right_aligned_content_sits_at_the_edge_on_the_very_first_frame() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
+/// **A package needs to know whether its icon will draw.**
+///
+/// A glyph no bundled font maps renders as a tofu square with nothing to say
+/// so, and the label just looks broken to whoever opens the editor. The editor
+/// guards its own glyphs with a build-failing test; before this a package had
+/// no way to ask the same question, and shipped `✕` as an empty box.
+#[test]
+fn a_package_can_ask_whether_a_glyph_will_draw() {
+    let proj = temp("guiglyph");
+    install(
+        &proj,
+        "com.t.g",
+        "",
+        r#"
+        ed.window("P", function()
+            -- Written as UTF-8 byte escapes, not as the characters themselves.
+            -- The editor's own `every_glyph_in_the_editor_renders` scans every
+            -- string literal in every source file, so a test ABOUT undrawable
+            -- glyphs that typed them would fail that guard -- correctly. The
+            -- bytes reaching the binding are the same either way.
+            local CROSS      = "\226\156\149"   -- U+2715, not mapped
+            local HEAVYCROSS = "\226\156\150"   -- U+2716, mapped
+            local TICK       = "\226\156\147"   -- U+2713, not mapped
+            local HEAVYTICK  = "\226\156\148"   -- U+2714, mapped
+            local WARN       = "\226\154\160"   -- U+26A0, mapped
+            local BOLT       = "\226\154\161"   -- U+26A1, mapped
+            ed.log("cross " .. tostring(gui.hasGlyph(CROSS)))
+            ed.log("heavy " .. tostring(gui.hasGlyph(HEAVYCROSS)))
+            ed.log("tick " .. tostring(gui.hasGlyph(TICK)))
+            ed.log("heavytick " .. tostring(gui.hasGlyph(HEAVYTICK)))
+            -- The last two are ones epaint's own has_glyph calls dead. Both draw.
+            ed.log("warn " .. tostring(gui.hasGlyph(WARN)))
+            ed.log("bolt " .. tostring(gui.hasGlyph(BOLT)))
+            -- Plain text is always drawable, so a fallback never has to be
+            -- checked before it is used.
+            ed.log("word " .. tostring(gui.hasGlyph("clear")))
+            -- A whole string is only drawable when every character is.
+            ed.log("mixed " .. tostring(gui.hasGlyph("ok " .. CROSS)))
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    let idx = host.window_index(host.windows[0].id).unwrap();
+    host.set_window_open(idx, true);
+    host.take_log();
+    draw_once(&mut host, idx);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(host.windows[idx].error.is_none(), "{:?}", host.windows[idx].error);
+
+    for expected in [
+        "cross false",
+        "heavy true",
+        "tick false",
+        "heavytick true",
+        "warn true",
+        "bolt true",
+        "word true",
+        "mixed false",
+    ] {
+        assert!(log.contains(&expected.to_string()), "expected {expected:?} in {log:?}");
+    }
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// Draw one package window with the pointer at a known place inside it.
+fn draw_with_pointer(host: &mut ExtHost, which: usize, width: f32, at: egui::Pos2, frames: usize) {
+    let ctx = egui::Context::default();
+    ctx.set_fonts(crate::fonts::definitions(&host.fonts));
+    for _ in 0..frames {
+        let input = egui::RawInput {
+            events: vec![egui::Event::PointerMoved(at)],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            ui.allocate_ui(egui::vec2(width, 400.0), |inner| host.draw_window(which, inner));
+        });
+    }
+}
+
+/// **A painted control has to be hit-testable before it is drawn.**
+///
+/// `mouse().inside` used to answer against `min_rect` — the widgets already
+/// added — so a package asking about a control it was ABOUT to paint was asking
+/// about a region that did not exist yet, and got `false` exactly where the
+/// control was. A red ✖ at the right-hand end of a row was unclickable for that
+/// reason and no other: the geometry was right and the gate in front of it was
+/// not.
+#[test]
+fn a_painted_control_can_be_hit_tested_where_it_is_about_to_be_drawn() {
+    let proj = temp("guihit");
+    install(
+        &proj,
+        "com.t.hit",
+        "",
+        r#"
+        ed.window("P", function()
+            gui.horizontal(function()
+                gui.small("Tools")
+                gui.flexibleSpace()
+                -- Exactly what a painted icon button does: ask where it is
+                -- going, ask where the pointer is, THEN draw and reserve.
+                local at = gui.cursor()
+                local m = gui.mouse()
+                local cx, cy = at.x + 9, at.y + 9
+                local dx, dy = m.x - cx, m.y - cy
+                ed.log(("at %.0f,%.0f mouse %.0f,%.0f inside %s")
+                    :format(cx, cy, m.x, m.y, tostring(m.inside)))
+                if m.inside and (dx * dx + dy * dy) <= 81 then ed.log("OVER") end
+                gui.circle(cx, cy, 9, 1, 0.3, 0.3, 1)
+                gui.reserve(18, 18)
+            end)
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    let idx = host.window_index(host.windows[0].id).unwrap();
+    host.set_window_open(idx, true);
+
+    // Two frames, then read the second: the spacer needs one frame to learn
+    // how wide the trailing content is, which is where the button ends up.
+    draw_with_pointer(&mut host, idx, 300.0, egui::pos2(1000.0, 1000.0), 2);
+    let away: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(host.windows[idx].error.is_none(), "{:?}", host.windows[idx].error);
+    assert!(!away.iter().any(|l| l == "OVER"), "pointer far away is not over it: {away:?}");
+
+    // Where the button actually is. Read it off the panel's own report rather
+    // than assuming — the whole point is that the two agree.
+    let last = away.last().expect("the panel logged nothing");
+    let (cx, cy) = {
+        let rest = last.strip_prefix("at ").unwrap();
+        let coords = rest.split(' ').next().unwrap();
+        let (a, b) = coords.split_once(',').unwrap();
+        (a.parse::<f32>().unwrap(), b.parse::<f32>().unwrap())
+    };
+    assert!(cx > 200.0, "the button should sit at the right-hand end, not at {cx}");
+
+    draw_with_pointer(&mut host, idx, 300.0, egui::pos2(cx, cy), 2);
+    let over: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(
+        over.iter().any(|l| l == "OVER"),
+        "the pointer is on the control and the panel cannot tell: {over:?}"
+    );
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 /// **A package that paints has to be able to measure.**
 ///
 /// Without `gui.measure` the only way to place a second piece of text after a

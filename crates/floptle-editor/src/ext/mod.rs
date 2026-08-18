@@ -519,6 +519,10 @@ pub(crate) struct ExtHost {
     pub(crate) fonts: Vec<crate::fonts::PackageFont>,
     /// Set when [`fonts`](Self::fonts) changed and egui has not been told yet.
     pub(crate) fonts_dirty: bool,
+    /// What `gui.hasGlyph` answers with — see `drawable_glyphs`. Cleared
+    /// alongside `fonts`, because a package face joining the stack adds
+    /// characters to it.
+    glyphs: std::cell::OnceCell<std::collections::HashSet<char>>,
     /// The one table every package's environment falls through to.
     ///
     /// This is how `gui` can exist for the length of one callback and not a
@@ -554,6 +558,7 @@ impl ExtHost {
             reopen: HashMap::new(),
             fonts: Vec::new(),
             fonts_dirty: false,
+            glyphs: std::cell::OnceCell::new(),
             dynamic: None,
         }
     }
@@ -610,6 +615,7 @@ impl ExtHost {
             self.fonts.clear();
             self.fonts_dirty = true;
         }
+        self.glyphs.take();
         self.shared.cancelled.borrow_mut().clear();
         self.shared.warned_fonts.borrow_mut().clear();
         self.shared.mesh_reqs.borrow_mut().clear();
@@ -1188,6 +1194,16 @@ impl ExtHost {
     /// Call `func` with `gui.*` bound to `ui` for exactly the length of the
     /// call. See the module docs: this is the one place an extension touches
     /// anything of the editor's directly, and it is undone before returning.
+    /// The characters the current stack can draw, built once and kept.
+    ///
+    /// Rebuilt when the package faces change, because a package's own face can
+    /// only add to the set — never on an ordinary frame, where reading four
+    /// fonts' character maps sixty times a second would be the most expensive
+    /// thing a panel did.
+    fn drawable_glyphs(&self) -> &std::collections::HashSet<char> {
+        self.glyphs.get_or_init(|| crate::fonts::drawable(&crate::fonts::definitions(&self.fonts)))
+    }
+
     fn call_with_ui(&self, pkg: usize, func: &mlua::Function, ui: &mut egui::Ui) -> mlua::Result<()> {
         let Some(dynamic) = self.dynamic_table() else {
             return Err(mlua::Error::runtime("the extension host has no environment"));
@@ -1200,6 +1216,7 @@ impl ExtHost {
             pkg_id,
             pkg_name,
             faces: &self.fonts,
+            drawable: self.drawable_glyphs(),
             warned: &self.shared.warned_fonts,
             log: &self.shared.log,
         };

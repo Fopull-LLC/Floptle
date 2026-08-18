@@ -39,6 +39,40 @@ pub(crate) fn family_key(pkg_id: &str, name: &str) -> String {
     format!("{pkg_id}:{name}")
 }
 
+/// Every character the editor's proportional stack can actually draw.
+///
+/// **Read from the fonts' character maps, not from `epaint::Fonts::has_glyph`.**
+/// That call resolves a character to a face and compares it against the face
+/// holding the replacement glyph, so a character whose real home happens to be
+/// that face reports missing — upstream marks the case with a TODO. Acting on
+/// it has already cost this repo one round of swapping away icons that were
+/// fine (see `icons.rs`). The charmap is the fact the renderer acts on.
+///
+/// The **proportional chain only**, deliberately. A package face is checked
+/// against the stack it falls back to rather than against itself, so a package
+/// shipping a rare glyph in its own face is told `false` for it. That is the
+/// conservative direction: the answer is used to pick between an icon and a
+/// word, and a word where an icon would have worked is a smaller failure than a
+/// box where a word would have worked.
+pub(crate) fn drawable(defs: &egui::FontDefinitions) -> std::collections::HashSet<char> {
+    let mut out = std::collections::HashSet::new();
+    let names = defs
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    for name in &names {
+        let Some(data) = defs.font_data.get(name) else { continue };
+        let Ok(font) = skrifa::FontRef::from_index(&data.font, data.index) else { continue };
+        for (cp, _) in skrifa::MetadataProvider::charmap(&font).mappings() {
+            if let Some(c) = char::from_u32(cp) {
+                out.insert(c);
+            }
+        }
+    }
+    out
+}
+
 /// The editor's own stack, plus any package faces.
 ///
 /// egui's proportional fallback (Ubuntu + the two emoji fonts) is missing many
