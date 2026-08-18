@@ -103,6 +103,58 @@ fn nest(
     }
 }
 
+/// `gui.flexibleSpace()` — the spacer that pushes the rest of a row right.
+///
+/// **The naive spacer grows the window it is in, without end.** Claiming
+/// `available_width()` is the obvious way to write one, and it is wrong the
+/// moment anything follows it: the trailing widget is laid out past the right
+/// edge, egui's `Resize` reads the overflowing content back as the size the
+/// panel wants, and — because `desired_size` only ever grows — the panel is a
+/// little wider next frame, with the same amount of room to overflow again.
+/// The result is a window that walks out to the full width of the screen on its
+/// own while somebody watches, and never comes back.
+///
+/// So the spacer takes the room that is left *after* what follows it. That
+/// width is not knowable while the row is still being built, so it is measured
+/// at the end of the row and remembered for the next frame — one frame behind,
+/// which is invisible, and which is exactly the information a single-pass
+/// layout cannot have any other way.
+///
+/// Before there is a measurement the spacer claims **nothing**. A spacer that
+/// guessed would overflow once, and once is all a ratchet needs.
+mod flex {
+    /// Where this row's spacer ended, and what the row measured last frame.
+    fn ids(ui: &egui::Ui) -> (egui::Id, egui::Id) {
+        let base = ui.id().with("flexibleSpace");
+        (base.with("trailing"), base.with("mark"))
+    }
+
+    pub(super) fn spacer(ui: &mut egui::Ui) {
+        let (trailing_id, mark_id) = ids(ui);
+        let trailing: Option<f32> = ui.ctx().data(|d| d.get_temp(trailing_id));
+        // `None` is "not measured yet", and is not the same as `Some(0.0)` —
+        // which means the row really does end at the spacer, where claiming the
+        // rest of the width is right and costs nothing.
+        let take = (ui.available_width() - trailing.unwrap_or(f32::INFINITY)).max(0.0);
+        if take > 0.0 {
+            ui.allocate_space(egui::vec2(take, 0.0));
+        }
+        let ended = ui.min_rect().max.x;
+        ui.ctx().data_mut(|d| d.insert_temp(mark_id, ended));
+    }
+
+    /// Called when a row closes: how much width came after the spacer?
+    pub(super) fn measure_trailing(ui: &egui::Ui) {
+        let (trailing_id, mark_id) = ids(ui);
+        let Some(mark) = ui.ctx().data(|d| d.get_temp::<f32>(mark_id)) else { return };
+        let trailing = (ui.min_rect().max.x - mark).max(0.0);
+        ui.ctx().data_mut(|d| {
+            d.remove::<f32>(mark_id);
+            d.insert_temp(trailing_id, trailing);
+        });
+    }
+}
+
 /// Does egui actually hold this family?
 ///
 /// Asked of egui rather than assumed, because `FontFamily::Name` is a panic and
@@ -400,7 +452,10 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
         "horizontal",
         scope.create_function(move |_, cb: Function| {
             nest(slot, &cb, |ui, f| {
-                ui.horizontal(|inner| f(inner));
+                ui.horizontal(|inner| {
+                    f(inner);
+                    flex::measure_trailing(inner);
+                });
             })
         })?,
     )?;
@@ -531,16 +586,10 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
             })
         })?,
     )?;
-    // Push everything after this to the far end of the row. egui has no
-    // flexible spacer of its own, but claiming the remaining width is exactly
-    // what one is.
+    // Push everything after this to the far end of the row.
     t.set(
         "flexibleSpace",
-        scope.create_function(move |_, ()| {
-            with(slot, |ui| {
-                ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
-            })
-        })?,
+        scope.create_function(move |_, ()| with(slot, flex::spacer))?,
     )?;
     t.set(
         "separator",

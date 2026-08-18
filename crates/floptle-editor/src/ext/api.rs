@@ -99,6 +99,14 @@ fn nav_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
 /// secret from a tool the author installed into their own editor. Reading a
 /// FILE outside the package still needs `Files`; this reads what is in the
 /// scene, by node.
+/// How many node documents one `scene.docs` call serves.
+///
+/// A bound rather than a budget: the read happens in one go, on the frame after
+/// the ask, and a level big enough to exceed this is a level where doing it all
+/// at once would be a visible hitch. The error names the number and says to
+/// batch, which is a loop the caller can write and the engine cannot.
+const MAX_DOCS: usize = 4096;
+
 fn mesh_table_api(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     {
@@ -1305,12 +1313,58 @@ fn scene_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
                     }
                     None => Err(mlua::Error::runtime(format!(
                         "scene.doc({id}): a node's document is readable while it is selected. \
-                         Use selection.set({{{id}}}) first, or scene.info({id}) for the summary \
-                         that is always available"
+                         Use scene.docs({{{id}}}, fn) to read any node without touching the \
+                         selection, selection.set({{{id}}}) first, or scene.info({id}) for the \
+                         summary that is always available"
                     ))),
                 }
             })?,
         )?;
+    }
+    // `scene.docs(ids, done)` reads the documents of ANY nodes, however many,
+    // without touching the selection.
+    //
+    // The selection rule above is right for the mirror and wrong as the only
+    // way in. A tool that renames across a level, collects every user-facing
+    // string, or proposes a reorganisation has to read the documents of nodes
+    // nobody has selected — and `selection.set` is not a workaround, it is an
+    // edit to somebody's selection made in order to perform a read.
+    //
+    // The cost that made the mirror selection-only was **per frame**: rebuilding
+    // every document on every frame of a gizmo drag. This is not that. It is one
+    // read of the ids that were asked for, served after the frame like
+    // `mesh.read`, costing nothing until somebody asks and nothing again
+    // afterwards.
+    //
+    // The callback takes `(docs, missing)` — `docs` keyed by id, and the ids
+    // that had no node. A batch read that quietly answers with fewer nodes than
+    // it was given is how a tool reports renaming forty having renamed
+    // thirty-eight.
+    {
+        let shared = shared.clone();
+        t.set(
+            "docs",
+            lua.create_function(move |lua, (ids, cb): (Table, Function)| {
+                let mut want: Vec<u32> = Vec::new();
+                for v in ids.sequence_values::<u32>() {
+                    want.push(v?);
+                }
+                if want.len() > MAX_DOCS {
+                    return Err(mlua::Error::runtime(format!(
+                        "scene.docs: {} ids is more than the {MAX_DOCS} one read serves — ask \
+                         in batches, so a level with a hundred thousand nodes in it costs a \
+                         series of frames rather than one long one",
+                        want.len()
+                    )));
+                }
+                want.sort_unstable();
+                want.dedup();
+                let key = lua.create_registry_value(cb)?;
+                shared.doc_reqs.borrow_mut().push(super::DocReq { ids: want, cb: key });
+                Ok(())
+            })?,
+        )?;
+        t.set("maxDocs", MAX_DOCS)?;
     }
     //
     // The setters above name one property each, and that list will always be

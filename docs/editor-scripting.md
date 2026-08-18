@@ -373,8 +373,42 @@ scene.add(doc)          -- a real copy: its mesh, material, collider, tags
 >
 > Asking for one that is not selected **raises**, saying so, rather than
 > answering nil — a read that quietly returns nothing is how a tool places an
-> empty node and reports success. `selection.set({id})` first, or use
-> `scene.info(id)` for the summary, which is always available for every node.
+> empty node and reports success. Use `scene.docs` below, `selection.set({id})`
+> first, or `scene.info(id)` for the summary, which is always available for
+> every node.
+
+### Reading many nodes' documents
+
+`scene.docs(ids, done)` reads the document of **any** node, however many, without
+touching the selection.
+
+```lua
+scene.docs(scene.all(), function(docs, missing)
+    for id, doc in pairs(docs) do
+        if doc.name:match("^GameObject") then rename(id, doc) end
+    end
+end)
+```
+
+A tool that renames across a level, collects every user-facing string, or
+proposes a reorganisation has to read nodes nobody has selected, and
+`selection.set` is not a way around that — it is an edit to somebody's selection
+made in order to perform a read.
+
+The cost that keeps `scene.doc` to the selection is a **per-frame** one:
+rebuilding every document on every frame of a gizmo drag. This is not that. It
+is one read of the ids you asked for, served on the next frame like `mesh.read`,
+costing nothing until you ask and nothing again afterwards — so it belongs on a
+button, not in `onUpdate`.
+
+`done(docs, missing)` — `docs` keyed by id, and `missing` listing the ids that
+had no node. **The missing ones are reported rather than dropped**: a node
+destroyed between the ask and the answer is an ordinary thing that happens, and
+a batch that quietly answers with fewer nodes than it was given is how a tool
+reports renaming forty having renamed thirty-eight.
+
+`scene.maxDocs` is how many one call serves; more than that raises rather than
+hitching, and says to ask in batches.
 
 ```lua
 -- Change what you name, and nothing else.

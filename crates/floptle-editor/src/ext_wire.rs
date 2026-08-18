@@ -386,6 +386,7 @@ impl Editor {
         }
         self.drain_ext_log();
         self.serve_mesh_reads();
+        self.serve_doc_reads();
         self.serve_file_pickers();
     }
 
@@ -425,6 +426,30 @@ impl Editor {
         for (i, paths) in done.into_iter().rev() {
             let (_, cb) = self.ext_picks.remove(i);
             self.ext.deliver_pick(cb, paths);
+        }
+        self.drain_ext_log();
+    }
+
+    /// The node documents a package asked for, by id — see `scene.docs`.
+    ///
+    /// Served here rather than out of the mirror because the mirror carries the
+    /// selection's documents and rebuilds them whenever the scene changes; this
+    /// is a one-shot read that must not join that per-frame cost.
+    fn serve_doc_reads(&mut self) {
+        let reqs = self.ext.take_doc_requests();
+        for req in reqs {
+            let mut docs = Vec::with_capacity(req.ids.len());
+            let mut missing = Vec::new();
+            for id in req.ids {
+                match self.entity_of(id).and_then(|e| self.node_of(e)) {
+                    Some(doc) => match serde_json::to_value(&doc) {
+                        Ok(v) => docs.push((id, v)),
+                        Err(_) => missing.push(id),
+                    },
+                    None => missing.push(id),
+                }
+            }
+            self.ext.deliver_docs(req.cb, docs, missing);
         }
         self.drain_ext_log();
     }

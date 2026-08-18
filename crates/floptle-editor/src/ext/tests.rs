@@ -666,6 +666,92 @@ fn draw_once(host: &mut ExtHost, which: usize) {
     });
 }
 
+/// Draw one package window inside a ui of exactly `width`, and answer how wide
+/// the content actually came out.
+///
+/// The width is the whole point: a spacer that claims the room that is left has
+/// nothing to overflow until there is a definite edge to overflow past.
+/// ONE context across all the frames, as the editor has. A fresh context per
+/// frame is a fresh memory, which quietly hides anything that spans frames —
+/// and a ratchet is precisely a thing that spans frames.
+fn draw_bounded(host: &mut ExtHost, which: usize, width: f32, frames: usize) -> Vec<f32> {
+    let ctx = egui::Context::default();
+    ctx.set_fonts(crate::fonts::definitions(&host.fonts));
+    let mut out = Vec::new();
+    for _ in 0..frames {
+        let mut got = 0.0;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.allocate_ui(egui::vec2(width, 400.0), |inner| {
+                host.draw_window(which, inner);
+                got = inner.min_rect().width();
+            });
+        });
+        out.push(got);
+    }
+    out
+}
+
+/// **A flexible spacer must not grow the panel it is in.**
+///
+/// Claiming `available_width()` is the obvious way to write one and it is wrong
+/// the moment anything follows it: the trailing widget lands past the right
+/// edge, egui reads the overflow back as the size the panel wants, and — since
+/// that size only ever grows — the panel is wider next frame with the same room
+/// to overflow again. That is a window that walks out to the full width of the
+/// screen while somebody watches, and never comes back.
+#[test]
+fn a_flexible_spacer_pushes_right_without_pushing_the_panel_wider() {
+    let proj = temp("guiflex");
+    install(
+        &proj,
+        "com.t.flex",
+        "",
+        r#"
+        ed.window("P", function()
+            gui.horizontal(function()
+                gui.small("left")
+                gui.flexibleSpace()
+                local at = gui.cursor()
+                ed.log(("gap %.0f"):format(300 - (at.x + gui.measure("right", 12).w)))
+                gui.small("right")
+            end)
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    let idx = host.window_index(host.windows[0].id).unwrap();
+    host.set_window_open(idx, true);
+
+    // Three frames: the ratchet needs more than one to show, and a fix that
+    // only holds for the first frame is not a fix.
+    let widths = draw_bounded(&mut host, idx, 300.0, 3);
+    assert!(host.windows[idx].error.is_none(), "{:?}", host.windows[idx].error);
+    for (i, w) in widths.iter().enumerate() {
+        assert!(
+            *w <= 300.5,
+            "frame {i} laid out {w} wide inside 300 — that overflow is what makes the \
+             panel grow: {widths:?}"
+        );
+    }
+
+    // And it still does its job: by the second frame the trailing label sits
+    // against the right edge, which is the whole reason to write one.
+    let gaps: Vec<f32> = host
+        .take_log()
+        .into_iter()
+        .filter_map(|l| l.msg.strip_prefix("gap ").and_then(|n| n.parse::<f32>().ok()))
+        .collect();
+    assert_eq!(gaps.len(), 3, "one reading per frame");
+    // Frame one has no measurement yet and claims nothing — deliberately, since
+    // a spacer that guessed would overflow once, and once is all a ratchet needs.
+    assert!(gaps[0] > 100.0, "first frame should not have guessed: {gaps:?}");
+    assert!(
+        gaps[1].abs() <= 8.0 && gaps[2].abs() <= 8.0,
+        "from the second frame the trailing label should sit at the right edge: {gaps:?}"
+    );
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 /// **A package that paints has to be able to measure.**
 ///
 /// Without `gui.measure` the only way to place a second piece of text after a
@@ -941,6 +1027,7 @@ fn every_name_in_the_environment_is_in_the_reference() {
 
     // The hooks are documented as a table of `ed.onX(fn)` rows and the stores as
     // one shared row, so the bare member name is what has to appear.
+    let doc = documented_code(&doc);
     let mut missing: Vec<String> = Vec::new();
     for full in log[0].msg.split_whitespace() {
         let short = full.rsplit('.').next().unwrap_or(full);
@@ -955,6 +1042,38 @@ fn every_name_in_the_environment_is_in_the_reference() {
         missing.join(", ")
     );
     let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// The reference's **code** — everything inside backticks, fenced blocks
+/// included — and nothing else.
+///
+/// The coverage tests below used to search the whole file, which passes any
+/// binding whose name is also an ordinary English word: `measure` is
+/// "documented" by the sentence explaining why measurement matters, and `docs`
+/// by every mention of `docs/scripting.md`. A guard that a word in the prose
+/// satisfies is not a guard, and this is meant to be a build failure.
+#[cfg(test)]
+fn documented_code(doc: &str) -> String {
+    let mut out = String::new();
+    let mut rest = doc;
+    while let Some(open) = rest.find('`') {
+        rest = &rest[open + 1..];
+        // A fence is three backticks; its content runs to the closing fence.
+        let (fence, body) = if let Some(after) = rest.strip_prefix("``") {
+            ("```", after)
+        } else {
+            ("`", rest)
+        };
+        match body.find(fence) {
+            Some(end) => {
+                out.push_str(&body[..end]);
+                out.push('\n');
+                rest = &body[end + fence.len()..];
+            }
+            None => break,
+        }
+    }
+    out
 }
 
 /// …and the same for `gui`, which only exists while drawing.
@@ -985,6 +1104,7 @@ fn every_gui_widget_is_in_the_reference() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/editor-scripting.md"),
     )
     .unwrap();
+    let doc = documented_code(&doc);
     let missing: Vec<&str> =
         log[0].msg.split_whitespace().filter(|n| !doc.contains(*n)).collect();
     assert!(
@@ -1773,6 +1893,112 @@ fn reading_the_document_of_an_unselected_node_says_why_rather_than_answering_nil
         log.iter().any(|l| l.contains("selected") || l.contains("no node")),
         "the message has to say what to do about it: {log:?}"
     );
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// **A tool that acts on a level has to be able to read one.**
+///
+/// `scene.doc` answers for the selection, which is right for the mirror and
+/// wrong as the only way in: renaming across a level, collecting every
+/// user-facing string, or proposing a reorganisation all mean reading nodes
+/// nobody has selected — and `selection.set` is not a workaround, it is an edit
+/// to somebody's selection made in order to perform a read.
+#[test]
+fn a_package_can_read_the_documents_of_nodes_that_are_not_selected() {
+    let proj = temp("docsbatch");
+    install(
+        &proj,
+        "com.t.docs",
+        "",
+        r#"
+        ed.onUpdate(function()
+            scene.docs({ 1, 2, 99 }, function(docs, missing)
+                local names = {}
+                for id, d in pairs(docs) do names[#names + 1] = id .. "=" .. d.name end
+                table.sort(names)
+                ed.log("docs " .. table.concat(names, ","))
+                ed.log("missing " .. table.concat(missing, ","))
+            end)
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    // Nothing selected, deliberately: the whole point is that this does not
+    // need one.
+    host.begin_frame(
+        Snapshot { project_root: proj.clone(), ..Snapshot::default() },
+        SceneMirror::default(),
+    );
+    host.fire(HookKind::Update);
+
+    let reqs = host.take_doc_requests();
+    assert_eq!(reqs.len(), 1, "the read should have queued");
+    assert_eq!(reqs[0].ids, vec![1, 2, 99], "sorted, deduped, in one batch");
+
+    // What the editor does, without an editor.
+    for req in reqs {
+        let mut docs = Vec::new();
+        let mut missing = Vec::new();
+        for id in &req.ids {
+            match id {
+                1 => docs.push((
+                    1u32,
+                    serde_json::to_value(floptle_scene::NodeDoc {
+                        name: "Crate".into(),
+                        ..blank_doc()
+                    })
+                    .unwrap(),
+                )),
+                2 => docs.push((
+                    2u32,
+                    serde_json::to_value(floptle_scene::NodeDoc {
+                        name: "Door".into(),
+                        ..blank_doc()
+                    })
+                    .unwrap(),
+                )),
+                other => missing.push(*other),
+            }
+        }
+        host.deliver_docs(req.cb, docs, missing);
+    }
+
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log.contains(&"docs 1=Crate,2=Door".to_string()), "{log:?}");
+    // **Reported, not dropped.** A node destroyed between the ask and the
+    // answer is ordinary; a batch that quietly returns fewer nodes than it was
+    // given is how a tool reports renaming three having renamed two.
+    assert!(log.contains(&"missing 99".to_string()), "{log:?}");
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
+/// Asking for more than one read serves says the number rather than hitching.
+#[test]
+fn a_document_read_too_big_to_serve_at_once_says_so() {
+    let proj = temp("docscap");
+    install(
+        &proj,
+        "com.t.docsbig",
+        "",
+        r#"
+        ed.onUpdate(function()
+            local ids = {}
+            for i = 1, scene.maxDocs + 1 do ids[i] = i end
+            local ok, err = pcall(scene.docs, ids, function() end)
+            ed.log("ok " .. tostring(ok))
+            ed.log("err " .. tostring(err))
+        end)
+        "#,
+    );
+    let mut host = host_for(&proj);
+    host.fire(HookKind::Update);
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(log.contains(&"ok false".to_string()), "{log:?}");
+    assert!(
+        log.iter().any(|l| l.contains("batches")),
+        "the message has to say what to do about it: {log:?}"
+    );
+    assert!(host.take_doc_requests().is_empty(), "nothing should have queued");
     let _ = std::fs::remove_dir_all(&proj);
 }
 

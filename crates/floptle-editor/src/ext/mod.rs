@@ -189,6 +189,14 @@ pub(crate) struct Shared {
     /// first read of a model is a file off disk, and a binding cannot reach the
     /// editor anyway. The callback runs on a later frame, on the main thread.
     pub(crate) mesh_reqs: RefCell<Vec<MeshReq>>,
+    /// Batches of node documents a package asked for, drained after the frame.
+    ///
+    /// Separate from the mirror's `docs` on purpose. The mirror carries the
+    /// SELECTION's documents because those are rebuilt whenever the scene
+    /// changes and must stay cheap; this is a one-shot read of whatever ids
+    /// were asked for, which costs nothing until somebody asks and is not
+    /// repeated on the next frame.
+    pub(crate) doc_reqs: RefCell<Vec<DocReq>>,
     /// Native file pickers a package asked for, waiting to be opened.
     pub(crate) pick_reqs: RefCell<Vec<PickReq>>,
     /// Files the user has handed a package through `ed.pickFile` this session.
@@ -253,6 +261,16 @@ pub(crate) struct PickReq {
 
 pub(crate) struct MeshReq {
     pub(crate) source: crate::mesh_read::MeshSource,
+    pub(crate) cb: RegistryKey,
+}
+
+/// A batch of node documents a package asked for, by id.
+///
+/// A request rather than a read for the same reason `mesh.read` is one: a
+/// document is serialised out of the world, and a binding has no route to it.
+/// The callback runs on a later frame, on the main thread.
+pub(crate) struct DocReq {
+    pub(crate) ids: Vec<u32>,
     pub(crate) cb: RegistryKey,
 }
 
@@ -595,6 +613,7 @@ impl ExtHost {
         self.shared.cancelled.borrow_mut().clear();
         self.shared.warned_fonts.borrow_mut().clear();
         self.shared.mesh_reqs.borrow_mut().clear();
+        self.shared.doc_reqs.borrow_mut().clear();
         self.shared.pick_reqs.borrow_mut().clear();
         self.shared.pending.borrow_mut().clear();
         self.shared.handles.borrow_mut().clear();
@@ -1008,6 +1027,42 @@ impl ExtHost {
             self.shared.log.borrow_mut().push(ExtLog {
                 level: ExtLevel::Error,
                 msg: format!("a mesh read raised: {}", trim_lua_error(&e.to_string())),
+                from: String::new(),
+            });
+        }
+        self.lua.remove_registry_value(cb).ok();
+        self.drain_pending();
+    }
+
+    pub(crate) fn take_doc_requests(&self) -> Vec<DocReq> {
+        self.shared.doc_reqs.borrow_mut().drain(..).collect()
+    }
+
+    /// Hand one batch of node documents back to the Lua that asked for it.
+    ///
+    /// `missing` is reported rather than dropped. A node destroyed between the
+    /// ask and the answer is an ordinary thing that happens, not a programming
+    /// error — and a batch read that quietly returns fewer nodes than it was
+    /// given is how a tool reports "renamed 40" having renamed 38.
+    pub(crate) fn deliver_docs(
+        &mut self,
+        cb: RegistryKey,
+        docs: Vec<(u32, serde_json::Value)>,
+        missing: Vec<u32>,
+    ) {
+        use mlua::LuaSerdeExt;
+        let called = self.func(&cb).map(|func| {
+            let by_id = self.lua.create_table()?;
+            for (id, v) in &docs {
+                by_id.set(*id, self.lua.to_value(v)?)?;
+            }
+            let gone = self.lua.create_sequence_from(missing.iter().copied())?;
+            func.call::<()>((by_id, gone))
+        });
+        if let Some(Err(e)) = called {
+            self.shared.log.borrow_mut().push(ExtLog {
+                level: ExtLevel::Error,
+                msg: format!("a document read raised: {}", trim_lua_error(&e.to_string())),
                 from: String::new(),
             });
         }
