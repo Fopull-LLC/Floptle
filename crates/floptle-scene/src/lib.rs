@@ -3880,6 +3880,9 @@ mod tests {
             limits_on: true,
             limit_min: [0.0, -5.0],
             limit_max: [200.0, 40.0],
+            // A saved setting like any other, and one it would be easy to add
+            // to the component and forget to add to the doc.
+            pixel_snap: 32.0,
             ..Default::default()
         };
         // Live state that must NOT be written.
@@ -3911,6 +3914,7 @@ mod tests {
         assert!(g.limits_on);
         assert_eq!(g.limit_min, [0.0, -5.0]);
         assert_eq!(g.limit_max, [200.0, 40.0]);
+        assert_eq!(g.pixel_snap, 32.0, "the pixel snap did not survive the file");
         assert!(!g.started, "a loaded camera has not started following yet");
         assert!(!g.shaking(), "a loaded camera is not mid-shake");
     }
