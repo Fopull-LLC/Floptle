@@ -47,6 +47,34 @@ floptle inspect --select Player --json     # the whole node document, ready to p
 floptle api node:setSprite                 # what a call does, before you write it
 ```
 
+## Seeing whether it actually works
+
+```sh
+floptle run --frames 120           # play it headlessly; reports what raised, and where
+floptle shot --out look.png        # one frame through the active camera, as a PNG
+```
+
+Neither needs you to open the editor. `run` executes the real scripts and
+physics for a fixed number of steps and reports every warning, error and
+`print` with its file and line — a `.ron` that loads is not a game that runs.
+`shot` renders through the same path the editor's Game view uses, so the picture
+is what the editor would show. **Look at it.** A render that came out wrong is
+something no assertion will tell you.
+
+## Changing it from a script
+
+```sh
+floptle exec fix.lua               # the editor's own API, headless
+```
+
+`scene.find`, `scene.setPos`, `scene.add`, `scene.destroy`, `ed.saveScene()` and
+the rest of `docs/editor-scripting.md`. Use this instead of hand-editing `.ron`
+when the change is structural — it goes through the same code the editor's own
+panels do, so node ids, parent links and defaults come out right.
+
+**It does not save unless you call `ed.saveScene()`.** If you change something
+and forget, the run says so rather than losing it quietly.
+
 **`floptle check` is the one to build a habit around.** A `.ron` file that parses
 is not a scene that works: a parent link can point at the wrong node, a material
 can name a texture that is not there, a node can carry a script with no file
