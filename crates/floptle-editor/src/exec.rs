@@ -63,18 +63,13 @@ pub(crate) fn run(root: &Path, script: &Path, json: bool) -> i32 {
     // the editor through: exactly what a package gets on a frame.
     ed.refresh_ext_frame();
 
-    // `World::revision` moves on every spawn, despawn, insert, remove and
-    // mutable access, so comparing it either side of the script answers "did
-    // this change anything" exactly.
-    let before = ed.world.revision();
-
     let raised = ed.ext.run_file(script, root);
     ed.drain_ext_log();
     // What a terminal cannot do, said rather than silently not done.
-    for call in ed.ext.refuse_windowed() {
+    for (call, why) in ed.ext.refuse_windowed() {
         ed.console.push(
             floptle_script::LogLevel::Warn,
-            format!("`{call}` needs a window, and this is a terminal — the call did nothing"),
+            format!("`{call}` did nothing — {why}"),
             None,
         );
     }
@@ -83,7 +78,7 @@ pub(crate) fn run(root: &Path, script: &Path, json: bool) -> i32 {
     ed.apply_ext_commands();
     ed.drain_ext_log();
 
-    // **Changed the world and never saved it?** Say so, loudly.
+    // **Left work unsaved?** Say so, loudly.
     //
     // In the editor an extension leaves the scene dirty and a person presses
     // Ctrl+S. Here the process exits, and a silent exit takes the work with it:
@@ -91,14 +86,24 @@ pub(crate) fn run(root: &Path, script: &Path, json: bool) -> i32 {
     // failure the Console's stderr mirror was added to stop — a correction
     // nobody is told about is one they cannot act on.
     //
+    // **The editor's own answer, asked at the end.** `unsaved_work` reads the
+    // dirty flags the applier itself sets and `save_scene` clears only on a
+    // write that succeeded. The first version of this compared the world
+    // revision either side of the script against a "a save happened at some
+    // point" latch, and that is wrong in both directions a mutating script
+    // actually goes: an edit made AFTER the save is lost in silence, and so is
+    // an edit in a second scene the script opened — because commands apply in
+    // order and the save is one of them, not a line drawn under all of them.
+    //
     // A warning rather than an automatic save, because a script that only reads
     // must not rewrite the scene as a side effect of having looked at it, and
     // `ed.saveScene()` is one line for a script that means it.
-    if ed.world.revision() != before && !ed.saved_this_session {
+    if ed.unsaved_work() {
         ed.console.push(
             floptle_script::LogLevel::Warn,
-            "this script changed the scene and never called `ed.saveScene()`, so nothing was \
-             written — the change lived and died in this process"
+            "this script left unsaved changes and the process is about to exit — call \
+             `ed.saveScene()` after the last edit, and after opening a second scene, or the \
+             change lives and dies in here"
                 .into(),
             None,
         );

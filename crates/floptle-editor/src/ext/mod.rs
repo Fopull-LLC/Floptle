@@ -615,6 +615,13 @@ impl ExtHost {
     /// command line is the user's own code, run on purpose, the way `python
     /// script.py` is. The trust boundary here is having typed the command, not
     /// what a manifest claims — and a manifest is exactly what this has none of.
+    /// **One shot, and it assumes it.** The synthetic package is pushed onto
+    /// `packages` and never removed, and `dynamic` is replaced outright rather
+    /// than merged — so a project's own packages, which loaded before this
+    /// runs, lose whatever they put there. That is harmless today because
+    /// nothing runs after this in the process and every package's environment
+    /// captured its table already, but it is a landmine for any second caller:
+    /// running two scripts in one process would need this to save and restore.
     pub(crate) fn run_file(&mut self, path: &Path, project_root: &Path) -> Result<(), String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         self.dynamic = self
@@ -1305,24 +1312,46 @@ impl ExtHost {
     /// mirror follows: a correction nobody is told about is one they cannot act
     /// on.
     ///
-    /// Returns one name per refusal, in the order the script asked.
-    pub(crate) fn refuse_windowed(&mut self) -> Vec<&'static str> {
+    /// Returns `(call, why)` per refusal, in the order the script asked.
+    pub(crate) fn refuse_windowed(&mut self) -> Vec<(&'static str, &'static str)> {
+        const NO_WINDOW: &str = "it needs a window, and this is a terminal";
         let mut refused = Vec::new();
         self.shared.cmds.borrow_mut().retain(|c| {
-            let name = match c {
-                ExtCmd::WindowOpen(..) | ExtCmd::WindowFocus(..) => "ed.window",
-                ExtCmd::OverlayOpen(..) => "ed.overlay",
-                ExtCmd::TabOpen(..) => "ed.tab",
-                ExtCmd::Message { .. } => "ed.message",
-                ExtCmd::LookAt { .. } => "ed.lookAt",
-                ExtCmd::OpenUrl(_) => "ed.openUrl",
+            let pair = match c {
+                ExtCmd::WindowOpen(..) | ExtCmd::WindowFocus(..) => ("ed.window", NO_WINDOW),
+                ExtCmd::OverlayOpen(..) => ("ed.overlay", NO_WINDOW),
+                ExtCmd::TabOpen(..) => ("ed.tab", NO_WINDOW),
+                ExtCmd::Message { .. } => ("ed.message", NO_WINDOW),
+                ExtCmd::LookAt { .. } => ("ed.lookAt", NO_WINDOW),
+                ExtCmd::OpenUrl(_) => (
+                    "ed.openUrl",
+                    "there is no browser to hand a link to from here",
+                ),
+                // **Play, refused for a different reason and a worse one.**
+                //
+                // Applying this calls `toggle_play`, which CLEARS the Console —
+                // and outside the editor the Console is the entire report. A
+                // script that logged and then asked to play had its output
+                // deleted by the request and exited 0 saying nothing was raised.
+                // It would also leave the process in Play mode, where
+                // `save_scene` refuses to write at all.
+                ExtCmd::SetPlaying(..) => (
+                    "ed.play",
+                    "there is no Play mode without the editor; `floptle run` is how a project \
+                     is played from a terminal",
+                ),
                 // `Copy` is deliberately NOT here: the applier already refuses
                 // it with a better line than this one could ("there is no
                 // clipboard to write to here"). Replacing a specific message
                 // with a generic one is not coverage.
+                //
+                // `SelectionSet` and `Undo` are not here either, and that is a
+                // decision rather than an omission: both do exactly what they
+                // say to a world with no window, and a later command in the same
+                // script can depend on having made them.
                 _ => return true,
             };
-            refused.push(name);
+            refused.push(pair);
             false
         });
         refused

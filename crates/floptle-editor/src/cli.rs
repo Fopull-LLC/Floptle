@@ -150,7 +150,10 @@ impl Verb {
 /// its own row, and both halves reach `help --json` together.
 pub(crate) const COMMON_EXITS: &[(i32, &str)] = &[
     (0, "the operation succeeded"),
-    (2, "the command line was wrong"),
+    // Including a PROJECT that is not one. Said here rather than in each row
+    // because every verb taking a project answers it the same way, and "your
+    // path is wrong" must not share a code with "your project is broken".
+    (2, "the command line was wrong, including a PROJECT that is not a project directory"),
 ];
 
 const TEMPLATE_HELP: &str = "which starter project to write (see `floptle templates`)";
@@ -378,7 +381,11 @@ pub(crate) const VERBS: &[Verb] = &[
                  It looks through the scene's ACTIVE camera, or one named with --camera. A \
                  scene with no camera has no view and says so rather than inventing an angle.\n\n\
                  The scene is not played: nothing has moved and no `start` has run. That is \
-                 the right frame for \"what did my edit do\"; use `run` for what happens next.",
+                 the right frame for \"what did my edit do\"; use `run` for what happens next.\n\n\
+                 The project's post-processing is applied — bloom, vignette, ambient \
+                 occlusion, posterise, colour grading, depth of field, its own `stage post` \
+                 shaders, and the retro presentation at its own resolution. Motion blur is \
+                 not: a single frame has no previous one to smear against.",
         args: &[
             Arg {
                 name: "PROJECT",
@@ -688,13 +695,7 @@ pub(crate) fn dispatch(args: &[String]) -> Outcome {
     // Only on the verb path, deliberately. The flags the Hub drives keep exactly
     // the behaviour they shipped with, and this binary is also a GUI: a window
     // whose stdout pipe closes should not take the editor down with it.
-    #[cfg(unix)]
-    // SAFETY: setting a signal disposition to SIG_DFL before any thread has been
-    // spawned, which is the disposition the process would have had if Rust had
-    // not changed it at startup.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
+    sigpipe(SigPipe::Fatal);
     let m = match command().try_get_matches_from(args) {
         Ok(m) => m,
         Err(e) => {
@@ -705,7 +706,44 @@ pub(crate) fn dispatch(args: &[String]) -> Outcome {
             return Outcome::Exit(if e.use_stderr() { 2 } else { 0 });
         }
     };
-    run(&m)
+    let out = run(&m);
+    // **…and three verbs are not command-line tools at all.** `open`, `play` and
+    // `bake gi` go on to run the whole editor, and the paragraph above says why
+    // that must not die on a closed pipe — but the reset happened before the
+    // parse, so it had been reaching them. `floptle play game | head -5` killed
+    // the game the moment `head` left. Nothing has been printed yet on this
+    // path, so putting it back here costs nothing.
+    if matches!(out, Outcome::Launch { .. }) {
+        sigpipe(SigPipe::Ignored);
+    }
+    out
+}
+
+/// What a write to a closed pipe does.
+enum SigPipe {
+    /// The default disposition, and what every other command-line tool has:
+    /// the process dies quietly.
+    Fatal,
+    /// What Rust sets at startup, which turns the write into an error, which
+    /// `println!` turns into a panic, which this binary turns into a crash
+    /// report.
+    Ignored,
+}
+
+fn sigpipe(#[allow(unused_variables)] how: SigPipe) {
+    #[cfg(unix)]
+    // SAFETY: setting a signal disposition on the main thread before any of the
+    // editor's threads exist. `SIG_DFL` is what the process would have had if
+    // Rust had not changed it at startup.
+    unsafe {
+        libc::signal(
+            libc::SIGPIPE,
+            match how {
+                SigPipe::Fatal => libc::SIG_DFL,
+                SigPipe::Ignored => libc::SIG_IGN,
+            },
+        );
+    }
 }
 
 /// Build the parser from [`VERBS`].
@@ -876,40 +914,51 @@ fn run(m: &clap::ArgMatches) -> Outcome {
         }
         Some(("run", a)) => {
             let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
-            // Parsed here rather than by clap's value parser so a bad number
-            // reads as a usage error with the flag named, which is what the
-            // caller has to fix.
-            let num = |id: &str| -> Result<Option<f32>, String> {
-                match text(a, id) {
-                    None => Ok(None),
-                    Some(v) => v
-                        .parse::<f32>()
-                        .map(Some)
-                        .map_err(|_| format!("--{id} wants a number, not {v:?}")),
-                }
+            // **Parsed here, and parsed as what it is.** Not by clap's value
+            // parser, so a bad number reads as a usage error with the flag
+            // named — and `--frames` as a whole number rather than a float,
+            // because every float that is not one is a silent wrong answer:
+            // `nan` passes any comparison you write and casts to 0, so the verb
+            // ran nothing and exited 0; `inf` casts to `u32::MAX`, which is
+            // eight hundred days of simulated time and reads as a hang; and
+            // `2.7` quietly becomes 2. A frame count is an integer.
+            let frames = match text(a, "frames") {
+                None => None,
+                Some(v) => match v.parse::<u32>() {
+                    Ok(0) => {
+                        eprintln!("--frames wants at least one frame");
+                        return Outcome::Exit(2);
+                    }
+                    Ok(n) => Some(n),
+                    Err(_) => {
+                        eprintln!("--frames wants a whole number of frames, not {v:?}");
+                        return Outcome::Exit(2);
+                    }
+                },
             };
-            let (frames, seconds) = match (num("frames"), num("seconds")) {
-                (Ok(f), Ok(s)) => (f, s),
-                (Err(e), _) | (_, Err(e)) => {
-                    eprintln!("{e}");
-                    return Outcome::Exit(2);
-                }
+            // Seconds really is a float — half a second is a fair thing to ask
+            // for — so the check is that it names a length: finite, positive.
+            let seconds = match text(a, "seconds") {
+                None => None,
+                Some(v) => match v.parse::<f32>() {
+                    Ok(s) if s.is_finite() && s > 0.0 => Some(s),
+                    Ok(_) => {
+                        eprintln!("--seconds wants a positive length of time, not {v:?}");
+                        return Outcome::Exit(2);
+                    }
+                    Err(_) => {
+                        eprintln!("--seconds wants a number, not {v:?}");
+                        return Outcome::Exit(2);
+                    }
+                },
             };
             if frames.is_some() && seconds.is_some() {
                 eprintln!("--frames and --seconds both say how long to run; pick one");
                 return Outcome::Exit(2);
             }
             let span = match (frames, seconds) {
-                (_, Some(s)) if s <= 0.0 => {
-                    eprintln!("--seconds wants a positive number");
-                    return Outcome::Exit(2);
-                }
-                (Some(f), _) if f < 1.0 => {
-                    eprintln!("--frames wants at least one frame");
-                    return Outcome::Exit(2);
-                }
                 (_, Some(s)) => crate::run::Span::Seconds(s),
-                (Some(f), _) => crate::run::Span::Frames(f as u32),
+                (Some(f), _) => crate::run::Span::Frames(f),
                 // Two seconds of simulated time: long enough for a `start` to
                 // run, a body to fall and a script to raise, short enough to
                 // sit through after every edit.
@@ -977,7 +1026,13 @@ fn help_text(verb: Option<&str>) -> Outcome {
     };
     // A nested verb can be asked for either way: `help bake` or `help "bake gi"`.
     let mut parts = name.split_whitespace();
-    let Some(head) = parts.next() else { return Outcome::Exit(2) };
+    // `floptle help " "` is a verb name made only of spaces. It used to exit 2
+    // saying nothing at all, which is the one thing a help command must never
+    // do.
+    let Some(head) = parts.next() else {
+        eprintln!("`{name}` is not a verb name — try `floptle help`");
+        return Outcome::Exit(1);
+    };
     let Some(mut sub) = cmd.find_subcommand_mut(head).cloned() else {
         eprintln!("no such verb: {name} — try `floptle help`");
         return Outcome::Exit(1);
@@ -1194,7 +1249,10 @@ mod tests {
         assert_eq!(j["name"], "export");
         assert_eq!(j["needsGpu"], false, "export runs with no window and no GPU");
         assert_eq!(j["exitCodes"]["0"], "the operation succeeded");
-        assert_eq!(j["exitCodes"]["2"], "the command line was wrong");
+        assert_eq!(
+            j["exitCodes"]["2"],
+            "the command line was wrong, including a PROJECT that is not a project directory"
+        );
         assert!(j["exitCodes"]["1"].is_string(), "export can fail and must say so");
         assert_eq!(j["replaces"][0], "--export");
         let plat = j["args"]
