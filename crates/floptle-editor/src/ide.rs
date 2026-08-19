@@ -5170,6 +5170,57 @@ mod tests {
         );
     }
 
+    /// **The VSCode stub library must know every node method the engine has.**
+    ///
+    /// `LUA_ANNOTATIONS` is what an external editor reads: with a member absent
+    /// from it, the method works at runtime and the editor marks the call as an
+    /// error on an unknown field — which reads as the API not existing, on the
+    /// one surface a developer is looking at while they write the line. The
+    /// whole 2D surface shipped that way, along with a dozen older methods.
+    ///
+    /// The reverse direction — stub member with no reference entry — is
+    /// `lua_api_reference_covers_every_handle_member`. Between them the two
+    /// spellings of the API cannot drift apart in either direction.
+    #[test]
+    fn the_vscode_stub_library_knows_every_node_method() {
+        let stub = stub_node_members();
+        assert!(
+            stub.len() > 40,
+            "only {} Node members parsed from the stub",
+            stub.len()
+        );
+        let missing: Vec<String> = floptle_script::ScriptHost::node_methods()
+            .into_iter()
+            .filter(|m| !stub.contains(m.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} node method(s) are missing from ---@class Node in LUA_ANNOTATIONS, so VSCode \
+             flags every call to them as an error on an unknown field:\n  {}",
+            missing.len(),
+            missing.join("\n  ")
+        );
+    }
+
+    /// Every `---@field` name on the stub's `---@class Node`.
+    fn stub_node_members() -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        let mut inside = false;
+        for line in crate::lua_support::LUA_ANNOTATIONS.lines() {
+            if let Some(rest) = line.strip_prefix("---@class ") {
+                inside = rest.split_whitespace().next() == Some("Node");
+                continue;
+            }
+            if inside
+                && let Some(rest) = line.strip_prefix("---@field ")
+                && let Some(name) = rest.split_whitespace().next()
+            {
+                out.insert(name.to_string());
+            }
+        }
+        out
+    }
+
     /// Everything reachable through a HANDLE must have a reference entry too.
     ///
     /// `api_surface()` walks the globals, so it cannot see a method that lives

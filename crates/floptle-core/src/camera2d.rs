@@ -244,23 +244,46 @@ pub fn step_all(world: &mut crate::ecs::World, dt: f32, t: f64) {
         .filter(|(e, _)| is_ortho_camera(world, *e) && !crate::matter::is_disabled(world, *e))
         .map(|(e, c)| (e, c.follow.clone()))
         .collect();
+    // **Every followed name resolved once, not once per camera.** The lookup was
+    // a scan of every `Name` in the world per camera per frame, which is fine
+    // for the one camera a 2D game usually has and is quadratic in the case
+    // somebody eventually builds — split screen, a minimap, a set of render
+    // targets. Built only when something is actually being followed, so a scene
+    // whose cameras are all placed by hand pays nothing.
+    //
+    // **A duplicate name resolves to the lowest entity index**, which is stable
+    // for a scene loaded from a file (entities are allocated in document order)
+    // and is at least always the same answer within a session. Two nodes sharing
+    // a name is still ambiguous by construction — this makes the ambiguity
+    // deterministic rather than dependent on how the world happened to be walked.
+    let mut by_name: std::collections::HashMap<String, crate::ecs::Entity> =
+        std::collections::HashMap::new();
+    if jobs.iter().any(|(_, f)| !f.is_empty()) {
+        for (te, n) in world.query::<crate::matter::Name>() {
+            // A switched-off node is not somewhere to take the camera: it draws
+            // nothing and its scripts do not run, so chasing it looks like the
+            // camera wandering off on its own.
+            if crate::matter::is_disabled(world, te) {
+                continue;
+            }
+            match by_name.get_mut(&n.0) {
+                Some(prev) if te.index() < prev.index() => *prev = te,
+                Some(_) => {}
+                None => {
+                    by_name.insert(n.0.clone(), te);
+                }
+            }
+        }
+    }
     for (e, follow) in jobs {
         // The camera's own place, and the frame its `translation` is written in.
         // A camera under a parent is unusual and legal; doing the arithmetic in
         // world space and converting back is what makes it work rather than
         // drifting by the parent's transform.
         let cam_world = crate::matter::world_transform(world, e);
-        // A switched-off node is not somewhere to take the camera: it draws
-        // nothing and its scripts do not run, so chasing it looks like the
-        // camera wandering off on its own.
-        let target = (!follow.is_empty())
-            .then(|| {
-                world
-                    .query::<crate::matter::Name>()
-                    .find(|(te, n)| n.0 == follow && !crate::matter::is_disabled(world, *te))
-                    .map(|(te, _)| crate::matter::world_transform(world, te).translation)
-            })
-            .flatten();
+        let target = by_name
+            .get(follow.as_str())
+            .map(|te| crate::matter::world_transform(world, *te).translation);
         let parent_world = world
             .get::<crate::matter::Parent>(e)
             .map(|p| p.0)
@@ -445,5 +468,81 @@ mod tests {
             c.step(at(0.0, 0.0), None, 1.0 / 60.0, 12.345)
         };
         assert_eq!(run(), run());
+    }
+    /// **Two nodes with the same name resolve to the same one every frame.**
+    /// Following was a linear scan that took whichever `Name` the world yielded
+    /// first, so a scene with a duplicate name — a prefab dropped in twice, a
+    /// spawned copy — could hand the camera a different target from one frame to
+    /// the next and the picture jumped between two places with nothing in the
+    /// scene changing.
+    ///
+    /// It is still ambiguous by construction. The guarantee is that it is
+    /// ambiguous the same way each time: the lowest entity index wins, which for
+    /// a scene loaded from a file is the one written first.
+    #[test]
+    fn a_duplicated_follow_target_resolves_to_the_same_node_every_frame() {
+        let mut world = crate::ecs::World::default();
+        let named = |world: &mut crate::ecs::World, name: &str, x: f64| {
+            let e = world.spawn();
+            let mut t = crate::transform::Transform::default();
+            t.translation.x = x;
+            world.insert(e, t);
+            world.insert(e, crate::matter::Name(name.to_string()));
+            e
+        };
+        // Two "Player"s. The first one spawned is the one to follow.
+        let _first = named(&mut world, "Player", 100.0);
+        let _second = named(&mut world, "Player", -100.0);
+        let cam = world.spawn();
+        world.insert(cam, crate::transform::Transform::default());
+        world.insert(
+            cam,
+            crate::matter::Matter::Camera {
+                fov_y: 1.0,
+                active: true,
+                target: String::new(),
+                cull_mask: u32::MAX,
+                target_w: 0,
+                target_h: 0,
+                target_hz: 0.0,
+                ortho: true,
+                ortho_height: 10.0,
+            },
+        );
+        world.insert(cam, Camera2D { follow: "Player".into(), smoothing: 0.0, ..Default::default() });
+        for _ in 0..4 {
+            step_all(&mut world, 0.016, 0.0);
+            let x = world.get::<crate::transform::Transform>(cam).unwrap().translation.x;
+            assert_eq!(x, 100.0, "the camera followed the other Player");
+        }
+    }
+
+    /// A camera that follows nothing is not moved by this at all — the position
+    /// is somebody else's, and stepping it would be the engine editing a node
+    /// a script or the editor owns.
+    #[test]
+    fn a_camera_following_nothing_is_left_where_it_is() {
+        let mut world = crate::ecs::World::default();
+        let cam = world.spawn();
+        let mut t = crate::transform::Transform::default();
+        t.translation.x = 7.0;
+        world.insert(cam, t);
+        world.insert(
+            cam,
+            crate::matter::Matter::Camera {
+                fov_y: 1.0,
+                active: true,
+                target: String::new(),
+                cull_mask: u32::MAX,
+                target_w: 0,
+                target_h: 0,
+                target_hz: 0.0,
+                ortho: true,
+                ortho_height: 10.0,
+            },
+        );
+        world.insert(cam, Camera2D::default());
+        step_all(&mut world, 0.016, 0.0);
+        assert_eq!(world.get::<crate::transform::Transform>(cam).unwrap().translation.x, 7.0);
     }
 }

@@ -218,6 +218,7 @@ impl MapCtx<'_> {
 
         egui::CollapsingHeader::new(RichText::new("Defaults for NEW shapes").small())
             .id_salt("map_shape_opts")
+            .default_open(crate::responsive::start_open(false))
             .show(ui, |ui| {
                 ui.label(
                     RichText::new(
@@ -623,7 +624,7 @@ impl MapCtx<'_> {
                 self.cmd.map_op = Some(MapOp::SnapToGrid);
             }
         });
-        egui::CollapsingHeader::new(RichText::new("Amounts").small()).id_salt("map_amounts").show(
+        egui::CollapsingHeader::new(RichText::new("Amounts").small()).id_salt("map_amounts").default_open(crate::responsive::start_open(false)).show(
             ui,
             |ui| {
                 row(ui, "extrude", |ui| {
@@ -1053,44 +1054,62 @@ impl MapCtx<'_> {
         for group in ["Draw", "Select", "Transform", "Modify"] {
             egui::CollapsingHeader::new(RichText::new(group).small())
                 .id_salt(("map_keys", group))
+                .default_open(crate::responsive::start_open(false))
                 .show(ui, |ui| {
-                    egui::Grid::new(("map_keys_grid", group))
-                        .num_columns(2)
-                        .spacing([8.0, 2.0])
-                        .striped(true)
-                        .show(ui, |ui| {
-                            for cmd in MapCmd::ALL.into_iter().filter(|c| c.group() == group) {
-                                ui.label(RichText::new(cmd.label()).small());
-                                let waiting = listening == Some(cmd);
-                                let text = if waiting {
-                                    "press a key…".to_string()
-                                } else {
-                                    self.map_keys.label(cmd)
-                                };
-                                if ui
-                                    .add_sized(
-                                        [110.0, BTN_H],
-                                        egui::Button::selectable(waiting, text),
-                                    )
-                                    .on_hover_text(
-                                        "click, then press the key (Shift is part of the                                          chord; Ctrl belongs to the application). Esc cancels.",
-                                    )
-                                    .clicked()
-                                {
-                                    *self.map_rebind = if waiting { None } else { Some(cmd) };
-                                    *self.map_rebind_err = None;
-                                }
-                                ui.end_row();
+                    // Through `responsive::grid`, which bounds the column widths
+                    // and falls through to a wrapped flow when the dock is too
+                    // thin for two columns. A bare `egui::Grid` sizes itself from
+                    // its content and grows past the panel — and the panel then
+                    // wraps everything AFTER it against an edge off screen.
+                    crate::responsive::grid(ui, ("map_keys_grid", group), |ui| {
+                        for cmd in MapCmd::ALL.into_iter().filter(|c| c.group() == group) {
+                            // `para`, not `label`: below two columns this grid
+                            // lays out as a wrapped flow, and a caption there is
+                            // a line of prose that has to wrap like one.
+                            crate::responsive::para(
+                                ui,
+                                RichText::new(cmd.label()).small(),
+                            );
+                            let waiting = listening == Some(cmd);
+                            let text = if waiting {
+                                "press a key…".to_string()
+                            } else {
+                                self.map_keys.label(cmd)
+                            };
+                            // Elided to the button: a `Button`'s label extends
+                            // rather than truncating, so "Shift+/" in a thin dock
+                            // ran past a box that was itself inside the panel.
+                            let bw = crate::responsive::fit_here_wrapping(ui, 110.0);
+                            let pad = ui.spacing().button_padding.x * 2.0 + 4.0;
+                            let shown = crate::responsive::elide(ui, &text, (bw - pad).max(8.0));
+                            if ui
+                                .add_sized(
+                                    [bw, BTN_H],
+                                    egui::Button::selectable(waiting, shown),
+                                )
+                                .on_hover_text(format!(
+                                    "{text}\n\nclick, then press the key (Shift is part of \
+                                     the chord; Ctrl belongs to the application). Esc cancels."
+                                ))
+                                .clicked()
+                            {
+                                *self.map_rebind = if waiting { None } else { Some(cmd) };
+                                *self.map_rebind_err = None;
                             }
-                        });
+                            ui.end_row();
+                        }
+                    });
                 });
         }
         egui::CollapsingHeader::new(RichText::new("Keys the editor keeps").small())
             .id_salt("map_keys_reserved")
+            .default_open(crate::responsive::start_open(false))
             .show(ui, |ui| {
-                ui.label(
+                crate::responsive::para(
+                    ui,
                     RichText::new(
-                        "these answer whatever modifiers are held, so the Model tool won't take                          them:",
+                        "these answer whatever modifiers are held, so the Model tool won't \
+                         take them:",
                     )
                     .weak()
                     .small(),
@@ -1106,7 +1125,10 @@ impl MapCtx<'_> {
                     }
                 }
                 for (what, keys) in listed {
-                    ui.label(RichText::new(format!("{}  —  {what}", keys.join(" "))).small().weak());
+                    crate::responsive::para(
+                        ui,
+                        RichText::new(format!("{}  —  {what}", keys.join(" "))).small().weak(),
+                    );
                 }
             });
     }

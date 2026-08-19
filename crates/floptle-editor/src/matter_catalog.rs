@@ -128,9 +128,9 @@ pub(crate) fn matter_icon(m: &Matter) -> &'static str {
         Matter::WaterVolume { .. } => "≈",
         Matter::FieldShape { .. } => "◈",
         Matter::LightProbes { .. } => "☀",
-        Matter::ReflectionProbe { .. } => "◐",
-        Matter::Tilemap { .. } => "▦",
-        Matter::SpriteBatch { .. } => "▪",
+        Matter::ReflectionProbe { .. } => "◍",
+        Matter::Tilemap { .. } => "▩",
+        Matter::SpriteBatch { .. } => "▧",
         Matter::Sprite { .. } => "▫",
         Matter::Skybox { .. } => "◎",
         Matter::PostProcess { .. } => "✨",
@@ -139,8 +139,14 @@ pub(crate) fn matter_icon(m: &Matter) -> &'static str {
 
 /// The set of node "types" the Inspector's Add Component menu can switch a node to
 /// (icon-labeled). Mutually exclusive — picking one replaces the node's current
-/// `Matter`. Terrain (a special SDF field) and Mesh (needs an asset) are omitted,
-/// as is PostProcess (the mandatory per-scene node — every scene already has one).
+/// `Matter`.
+///
+/// What is left out, and why, is `NOT_IN_THE_TYPE_MENU` beside the test that
+/// holds this list against `Matter`'s own variants. It is a test rather than a
+/// comment because this list had silently fallen four types behind: a node could
+/// be made into a Sprite, a Tilemap or a Sprite Batch from ✚ New and never
+/// switched into one afterwards, so the flat half of the engine was reachable
+/// only by creating a fresh node and moving the work across.
 pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
     use floptle_core::GravityMode;
     vec![
@@ -194,8 +200,29 @@ pub(crate) fn type_catalog() -> Vec<(&'static str, Matter)> {
         ("◈  Field Shape", Matter::FieldShape { radius: 1.5 }),
         ("⬚  Nav Mesh", Matter::default_nav_mesh(1)),
         ("☀  Light Probes", Matter::default_light_probes()),
-        ("◐  Reflection Probe", Matter::default_reflection_probe()),
+        ("◍  Reflection Probe", Matter::default_reflection_probe()),
         ("◎  Skybox", Matter::default_skybox()),
+        ("⇄  Nav Link", Matter::default_nav_link(1)),
+        ("▨  Nav Area", Matter::default_nav_area()),
+        // The flat three. Same defaults as ✚ New builds, so a node switched into
+        // a Sprite is the node ✚ New would have made — 32 pixels per unit, a
+        // centred pivot, cell 0.
+        ("▫  Sprite", Matter::Sprite {
+            ppu: 32.0,
+            size: 1.0,
+            cell: 0,
+            flip_x: false,
+            flip_y: false,
+            pivot: [0.5, 0.5],
+        }),
+        ("▩  Tilemap", Matter::Tilemap {
+            cols: 16,
+            rows: 16,
+            tile: 1.0,
+            data: Vec::new(),
+            tileset: String::new(),
+        }),
+        ("▧  Sprite Batch", Matter::SpriteBatch { size: 1.0 }),
     ]
 }
 
@@ -268,7 +295,7 @@ pub(crate) const NEW_CATALOG: &[NewGroup] = &[
                 thousand of them at once",
         items: &[
             NewEntry {
-                label: "▦ Tilemap",
+                label: "▩ Tilemap",
                 hover: "a grid of spritesheet cells as ONE mesh — the 2D level primitive. \
                         Give it a Material with a sheet, then paint it in the ◫ Tiles tab \
                         or fill it from a script (node:setTilemap{…} / tm:set). \
@@ -285,7 +312,7 @@ pub(crate) const NEW_CATALOG: &[NewGroup] = &[
                 make: NewNode::Matter(new_sprite),
             },
             NewEntry {
-                label: "▪ Sprite Batch",
+                label: "▧ Sprite Batch",
                 hover: "N sprites from one node, each with its own cell AND tint, drawn \
                         per frame from a script (node:sprites() / b:draw(…)) — no scene \
                         node per bullet and no pool to grow",
@@ -590,6 +617,52 @@ mod new_menu_tests {
         ("Skybox", "every scene already has one, and a second cannot be deleted"),
     ];
 
+    /// Every variant name declared on `MatterDoc`, read out of the scene crate's
+    /// own source.
+    ///
+    /// Read from the source rather than from a list kept here, for the same
+    /// reason the docs coverage tests do: a list maintained beside the thing it
+    /// describes is a list that drifts, and the variant that goes missing is
+    /// always the one nobody remembered to register.
+    fn declared_matter_variants() -> BTreeSet<&'static str> {
+        // Leaked so the parsed names can be `&'static str` like everything else
+        // they are compared against. One allocation, in a test.
+        let src: &'static str = Box::leak(
+            std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../floptle-scene/src/lib.rs"),
+            )
+            .expect("read floptle-scene")
+            .into_boxed_str(),
+        );
+        let body = {
+            let at = src.find("pub enum MatterDoc {").expect("MatterDoc enum");
+            let rest = &src[at..];
+            let end = rest.find("\n}").expect("end of MatterDoc");
+            &rest[..end]
+        };
+        // Variant names sit at ONE indent level (four spaces) and start with a
+        // capital; the name is the leading identifier, whatever follows it on
+        // the line (`Mesh { asset_path: String },` is one line, `Camera {` is
+        // another). Attributes and doc comments do not start with a capital.
+        let declared: BTreeSet<&str> = body
+            .lines()
+            .filter(|l| {
+                let indent = l.len() - l.trim_start().len();
+                indent == 4
+            })
+            .map(|l| l.trim())
+            .filter(|l| l.starts_with(|c: char| c.is_ascii_uppercase()))
+            .map(|l| {
+                let n = l.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(l.len());
+                &l[..n]
+            })
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert!(declared.len() > 15, "parsed too few variants: {declared:?}");
+        declared
+    }
+
     fn offered() -> BTreeSet<&'static str> {
         NEW_CATALOG
             .iter()
@@ -612,38 +685,7 @@ mod new_menu_tests {
     /// always the one nobody remembered to register.
     #[test]
     fn every_node_type_is_in_the_new_menu() {
-        let src = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../floptle-scene/src/lib.rs"),
-        )
-        .expect("read floptle-scene");
-        let body = {
-            let at = src.find("pub enum MatterDoc {").expect("MatterDoc enum");
-            let rest = &src[at..];
-            let end = rest.find("\n}").expect("end of MatterDoc");
-            &rest[..end]
-        };
-        // Variant names sit at ONE indent level (four spaces) and start with a
-        // capital; the
-        // name is the leading identifier, whatever follows it on the line
-        // (`Mesh { asset_path: String },` is one line, `Camera {` is another).
-        // Attributes and doc comments do not start with a capital.
-        let declared: BTreeSet<&str> = body
-            .lines()
-            .filter(|l| {
-                let indent = l.len() - l.trim_start().len();
-                indent == 4
-            })
-            .map(|l| l.trim())
-            .filter(|l| l.starts_with(|c: char| c.is_ascii_uppercase()))
-            .map(|l| {
-                let n = l.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(l.len());
-                &l[..n]
-            })
-            .filter(|l| !l.is_empty())
-            .collect();
-        assert!(declared.len() > 15, "parsed too few variants: {declared:?}");
-
+        let declared = declared_matter_variants();
         let offered = offered();
         let exempt: BTreeSet<&str> = NOT_IN_THE_MENU.iter().map(|(k, _)| *k).collect();
         let missing: Vec<&str> =
@@ -659,6 +701,135 @@ mod new_menu_tests {
         let stale: Vec<&str> =
             exempt.iter().copied().filter(|k| !declared.contains(k)).collect();
         assert!(stale.is_empty(), "NOT_IN_THE_MENU names variants that are gone: {stale:?}");
+    }
+
+    /// Node types the Inspector's Add Component ▸ Type menu deliberately cannot
+    /// switch a node into, and why. A reason per line, for the same reason as
+    /// `NOT_IN_THE_MENU`: "it wasn't on the list" is not something anybody can
+    /// check later.
+    const NOT_IN_THE_TYPE_MENU: &[(&str, &str)] = &[
+        ("Mesh", "needs a model asset — drag one in from Assets, there is nothing to pick"),
+        ("Terrain", "an SDF field with volumes of its own; ✚ New builds one as an intent"),
+        ("MapMesh", "blockout geometry the Map tools own, and switching to it has no shape to be"),
+        ("PostProcess", "every scene already has exactly one, and it refuses to be deleted"),
+    ];
+
+    /// A `Matter`'s VARIANT name — the runtime twin of [`matter_doc_variant`],
+    /// and exhaustive for the same reason: a new variant stops compiling here,
+    /// which is where the author is asked "and can a node be switched into it?".
+    fn matter_variant(m: &Matter) -> &'static str {
+        match m {
+            Matter::Primitive { .. } => "Primitive",
+            Matter::Blob { .. } => "Blob",
+            Matter::Mesh { .. } => "Mesh",
+            Matter::Empty => "Empty",
+            Matter::MapMesh { .. } => "MapMesh",
+            Matter::Terrain { .. } => "Terrain",
+            Matter::Camera { .. } => "Camera",
+            Matter::PointLight { .. } => "PointLight",
+            Matter::GravityVolume { .. } => "GravityVolume",
+            Matter::NavMesh { .. } => "NavMesh",
+            Matter::NavLink { .. } => "NavLink",
+            Matter::NavArea { .. } => "NavArea",
+            Matter::WaterVolume { .. } => "WaterVolume",
+            Matter::FieldShape { .. } => "FieldShape",
+            Matter::LightProbes { .. } => "LightProbes",
+            Matter::ReflectionProbe { .. } => "ReflectionProbe",
+            Matter::Tilemap { .. } => "Tilemap",
+            Matter::SpriteBatch { .. } => "SpriteBatch",
+            Matter::Sprite { .. } => "Sprite",
+            Matter::Skybox { .. } => "Skybox",
+            Matter::PostProcess { .. } => "PostProcess",
+        }
+    }
+
+    /// **A node can be switched into every type it can be created as.** The two
+    /// menus are written in different places and nothing connected them, so they
+    /// drifted: ✚ New grew the flat three and Add Component ▸ Type did not, and
+    /// the only way to turn an existing node into a Sprite was to make a new one
+    /// and move the work across.
+    ///
+    /// Held against `Matter`'s own variants rather than against a list kept here,
+    /// so the type that goes missing is the one nobody remembered to register.
+    #[test]
+    fn every_node_type_can_be_switched_into_or_is_named_as_left_out() {
+        let declared = declared_matter_variants();
+        let offered: BTreeSet<&str> =
+            type_catalog().iter().map(|(_, m)| matter_variant(m)).collect();
+        let exempt: BTreeSet<&str> = NOT_IN_THE_TYPE_MENU.iter().map(|(k, _)| *k).collect();
+        let missing: Vec<&str> = declared
+            .iter()
+            .copied()
+            .filter(|k| !offered.contains(k) && !exempt.contains(k))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these node types cannot be reached from Add Component ▸ Type: {missing:?}\n\
+             Add each to type_catalog(), or list it in NOT_IN_THE_TYPE_MENU with a reason."
+        );
+        let stale: Vec<&str> =
+            exempt.iter().copied().filter(|k| !declared.contains(k)).collect();
+        assert!(stale.is_empty(), "NOT_IN_THE_TYPE_MENU names variants that are gone: {stale:?}");
+    }
+
+    /// **One glyph, one node type.** The icon is how a node is identified at a
+    /// glance in the Hierarchy and in the Inspector header, so two types wearing
+    /// the same one is not a cosmetic clash: it makes the picture lie. Three
+    /// pairs had collided — Capsule with Sprite Batch, Model Mesh with Tilemap,
+    /// and Reflection Probe wore one glyph in the Inspector and another in the
+    /// ✚ New menu, which reads as two different things.
+    #[test]
+    fn no_two_node_types_share_an_icon() {
+        // A primitive is one variant with a shape inside it, and each shape has
+        // its own glyph, so the key has to name the shape too.
+        fn key(m: &Matter) -> String {
+            match m {
+                Matter::Primitive { shape, .. } => format!("Primitive::{shape:?}"),
+                other => matter_variant(other).to_string(),
+            }
+        }
+        // A type can wear more than one glyph on purpose — Spot Light IS a point
+        // light, aimed, and the menu says so with its own arrow — so a type maps
+        // to a SET. What must not happen is one glyph meaning two types.
+        let mut icons_of: std::collections::BTreeMap<String, BTreeSet<&str>> = Default::default();
+        for (label, m) in type_catalog() {
+            let set = icons_of.entry(key(&m)).or_default();
+            set.insert(label.split_whitespace().next().unwrap_or_default());
+            // The Inspector header's glyph counts too, and it is per TYPE rather
+            // than per menu entry: a spot light's row says ◤ and its header says
+            // ●, and both have to be unique against every other type.
+            set.insert(matter_icon(&m));
+        }
+        let mut by_icon: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+        for (k, icons) in &icons_of {
+            for icon in icons {
+                by_icon.entry(icon).or_default().push(k.as_str());
+            }
+        }
+        let clashes: Vec<String> = by_icon
+            .iter()
+            .filter(|(_, v)| v.len() > 1)
+            .map(|(k, v)| format!("{k} is {}", v.join(" AND ")))
+            .collect();
+        assert!(clashes.is_empty(), "two node types share a glyph: {clashes:?}");
+
+        // And the ✚ New menu has to agree with the Inspector about each one: the
+        // same node called two different things in two menus is how somebody
+        // concludes they are two features.
+        for entry in NEW_CATALOG.iter().flat_map(|g| g.items.iter()).chain(NEW_TOP_LEVEL.iter()) {
+            let NewNode::Matter(make) = entry.make else { continue };
+            let doc = make();
+            let k = match &doc {
+                MatterDoc::Primitive { shape, .. } => format!("Primitive::{shape:?}"),
+                other => matter_doc_variant(other).to_string(),
+            };
+            let Some(want) = icons_of.get(&k) else { continue };
+            let icon = entry.label.split_whitespace().next().unwrap_or_default();
+            assert!(
+                want.contains(icon),
+                "✚ New draws {k} as {icon} and Add Component ▸ Type as {want:?}"
+            );
+        }
     }
 
     /// **No group is a wall of text.** The whole point of grouping was that a

@@ -38,7 +38,7 @@ pub(crate) fn asset_picker(
     // Inspector is regularly narrower than that. The POPUP is deliberately not
     // capped — it is an overlay, it is allowed to be wider than its panel, and
     // shrinking it would make browsing worse for no gain.
-    let width = crate::responsive::fit_here(ui, width);
+    let width = crate::responsive::fit_here_wrapping(ui, width);
     // The button stays as narrow as its inspector field, but the popup wants
     // real room to browse — enough for ~4 grid tiles across. A ComboBox can't do
     // this: its popup width is hard-wired to the button width, and forcing it

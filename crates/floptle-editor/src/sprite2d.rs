@@ -867,15 +867,17 @@ pub(crate) fn draw_offsets(
     // Hidden and switched-off nodes are left out, because they spend the layer's
     // depth budget without drawing anything: two hundred pooled projectiles
     // waiting to be shown would push every visible character into the tie floor.
-    let mut layers: HashMap<u32, Vec<(Entity, i32, f64, bool)>> = HashMap::new();
+    /// One node's place in the sort: `(node, order, Y, X, does it Y-sort)`.
+    type Ranked = (Entity, i32, f64, f64, bool);
+    let mut layers: HashMap<u32, Vec<Ranked>> = HashMap::new();
     let mut seen: std::collections::HashSet<Entity> = std::collections::HashSet::new();
     for (e, s) in world.query::<Sorting>() {
         if !floptle_core::is_drawn(world, e) {
             continue;
         }
         let rank = project.sorting_rank(&s.layer);
-        let y = floptle_core::world_transform(world, e).translation.y;
-        layers.entry(rank).or_default().push((e, s.order, y, s.mode == SortMode::Y));
+        let at = floptle_core::world_transform(world, e).translation;
+        layers.entry(rank).or_default().push((e, s.order, at.y, at.x, s.mode == SortMode::Y));
         seen.insert(e);
     }
     let default_rank = project.sorting_rank(floptle_core::DEFAULT_SORTING_LAYER);
@@ -883,8 +885,8 @@ pub(crate) fn draw_offsets(
         if seen.contains(&e) || !is_flat_2d(m) || !floptle_core::is_drawn(world, e) {
             continue;
         }
-        let y = floptle_core::world_transform(world, e).translation.y;
-        layers.entry(default_rank).or_default().push((e, 0, y, false));
+        let at = floptle_core::world_transform(world, e).translation;
+        layers.entry(default_rank).or_default().push((e, 0, at.y, at.x, false));
     }
 
     for (rank, mut nodes) in layers {
@@ -892,8 +894,8 @@ pub(crate) fn draw_offsets(
         // step, the same Z it has had since sorting layers shipped. The whole
         // ranking below exists for Y-sorting, and a scene that does not use it
         // must not be re-spaced by its arrival.
-        if !nodes.iter().any(|n| n.3) {
-            for (e, order, _, _) in nodes {
+        if !nodes.iter().any(|n| n.4) {
+            for (e, order, _, _, _) in nodes {
                 out.entry(e).or_default().z += sorting_offset(rank, order) as f64;
             }
             continue;
@@ -901,7 +903,7 @@ pub(crate) fn draw_offsets(
         // One node cannot be ranked against itself, and the arithmetic below
         // divides by `n - 1`.
         if nodes.len() == 1 {
-            let (e, order, _, _) = nodes[0];
+            let (e, order, _, _, _) = nodes[0];
             out.entry(e).or_default().z += sorting_offset(rank, order) as f64;
             continue;
         }
@@ -911,12 +913,22 @@ pub(crate) fn draw_offsets(
         // decides between nodes that would otherwise be level, which is exactly
         // the case that used to be settled by whatever the ECS yielded first.
         //
-        // The entity index breaks a remaining exact tie so the answer is the
-        // same every frame — two nodes swapping places because the world was
-        // walked in a different order reads as flicker and cannot be reproduced
-        // on purpose.
+        // **X, then the entity index, break a remaining exact tie.** The
+        // answer has to be the same every frame — two nodes swapping places
+        // because the world was walked in a different order reads as flicker and
+        // cannot be reproduced on purpose — and X is the tiebreak that is also
+        // the same next *session*. The index alone is stable within a run and
+        // not across one: destroy a node and spawn it again and it can come back
+        // with a lower index than the sibling it used to sit behind, so a scene
+        // reloaded, or a pooled enemy respawned, quietly restacked. X is
+        // ascending, so the node further right draws in front. Two nodes at the
+        // same X and the same Y are in the same place, where nothing is
+        // observable either way, and the index settles those.
         nodes.sort_by(|a, b| {
-            a.1.cmp(&b.1).then(b.2.total_cmp(&a.2)).then(a.0.index().cmp(&b.0.index()))
+            a.1.cmp(&b.1)
+                .then(b.2.total_cmp(&a.2))
+                .then(a.3.total_cmp(&b.3))
+                .then(a.0.index().cmp(&b.0.index()))
         });
         // Spread across the whole layer, rather than into each order's own
         // sub-step. The layer holds about `SORT_Y_BANDS` distinguishable depths
@@ -926,7 +938,7 @@ pub(crate) fn draw_offsets(
         // one or two orders and a crowd of characters — gets nearly all of it.
         // Relative order is what is observable, and this preserves it exactly.
         let n = nodes.len();
-        for (i, (e, _, _, _)) in nodes.into_iter().enumerate() {
+        for (i, (e, _, _, _, _)) in nodes.into_iter().enumerate() {
             out.entry(e).or_default().z +=
                 (rank as f32 * SORT_LAYER_STEP + rank_offset(i, n)) as f64;
         }
@@ -1005,6 +1017,49 @@ mod sort_tests {
         let (top, middle, bottom) = (z[&es[2]], z[&es[0]], z[&es[1]]);
         assert!(bottom > middle, "y=-1 must be in front of y=3");
         assert!(middle > top, "y=3 must be in front of y=7");
+    }
+
+    /// **Two nodes level in Y stack the same way next session.** The last
+    /// tiebreak used to be the entity index alone, which is stable within a run
+    /// and not across one: a pooled enemy destroyed and respawned comes back
+    /// with whatever index was free, so a scene reloaded — or a bullet reused —
+    /// could quietly restack against a sibling standing at the same height.
+    ///
+    /// Driven by building the same scene twice with the spawn order reversed,
+    /// because that is what a respawn actually does to the indices, and by
+    /// asserting the two runs agree rather than asserting either answer.
+    #[test]
+    fn nodes_level_in_y_stack_the_same_way_whatever_order_they_were_spawned_in() {
+        let put = |world: &mut World, x: f64, y: f64| {
+            let e = world.spawn();
+            let mut t = floptle_core::Transform::default();
+            t.translation.x = x;
+            t.translation.y = y;
+            world.insert(e, t);
+            world.insert(e, Sorting { layer: String::new(), order: 0, mode: SortMode::Y });
+            e
+        };
+        let project = floptle_scene::ProjectConfigDoc::default();
+        // Same three places, spawned in opposite orders.
+        let places = [(-4.0, 2.0), (0.0, 2.0), (6.0, 2.0)];
+        let mut first = World::default();
+        let a: Vec<_> = places.iter().map(|&(x, y)| put(&mut first, x, y)).collect();
+        let mut second = World::default();
+        let b: Vec<_> = places.iter().rev().map(|&(x, y)| put(&mut second, x, y)).collect();
+        let (za, zb) = (zs(&first, &project), zs(&second, &project));
+        // Compare by PLACE, not by handle: `b` is in reverse place order.
+        for (i, _) in places.iter().enumerate() {
+            let (ea, eb) = (a[i], b[places.len() - 1 - i]);
+            assert_eq!(
+                za[&ea], zb[&eb],
+                "the node at {:?} landed at a different depth once respawned",
+                places[i]
+            );
+        }
+        // And the tiebreak reads left to right — the node further right draws in
+        // front — so it is a decision somebody can see in the scene rather than
+        // an internal number they cannot.
+        assert!(za[&a[2]] > za[&a[1]] && za[&a[1]] > za[&a[0]], "not ordered by x: {za:?}");
     }
 
     /// **Order wins over Y.** The sort is sorting layer → order → Y, so a node

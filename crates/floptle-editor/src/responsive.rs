@@ -132,7 +132,13 @@ pub(crate) fn fit(ui: &Ui, want: f32) -> f32 {
 /// wide dock says "grass — 0 of…" in a narrow one instead of running past the
 /// border.
 pub(crate) fn elide(ui: &Ui, text: &str, width: f32) -> String {
-    if text_w(ui, text) <= width {
+    elide_in(ui, egui::TextStyle::Button, text, width)
+}
+
+/// [`elide`], measured in a font of your choosing — a chip is monospace, and
+/// eliding it against the button font shortens it to the wrong length.
+pub(crate) fn elide_in(ui: &Ui, style: egui::TextStyle, text: &str, width: f32) -> String {
+    if text_w_in(ui, style.clone(), text) <= width {
         return text.to_string();
     }
     let mut end = text.len();
@@ -142,7 +148,7 @@ pub(crate) fn elide(ui: &Ui, text: &str, width: f32) -> String {
             end -= 1;
         }
         let candidate = format!("{}…", &text[..end]);
-        if text_w(ui, &candidate) <= width {
+        if text_w_in(ui, style.clone(), &candidate) <= width {
             return candidate;
         }
     }
@@ -157,6 +163,21 @@ pub(crate) fn header_text(ui: &Ui, title: &str) -> String {
     elide(ui, title, (usable_width(ui) - ARROW).max(8.0))
 }
 
+/// A disclosure's default-open state, forced **open under test**.
+///
+/// A closed `CollapsingHeader` does not run its body at all. Every overflow
+/// guard in the editor was therefore green on the *closed* state of every
+/// disclosure it drove: the ▦ Model tab's per-slot material override, the
+/// Inspector's surface maps and retro artefacts, the ◫ Tiles tab's autotile
+/// editor. Those are a page of controls each, and "this panel fits" meant "its
+/// triangles fit".
+///
+/// Only the DEFAULT is forced, so nothing about the product changes and a
+/// person's own choice to fold a section shut is still remembered.
+pub(crate) fn start_open(when: bool) -> bool {
+    when || cfg!(test)
+}
+
 /// Like [`fit`], but measured from where the control will actually start.
 ///
 /// For a widget that does **not** take part in a wrapped layout's line
@@ -168,6 +189,22 @@ pub(crate) fn fit_here(ui: &Ui, want: f32) -> f32 {
     want.min(edge(ui) - ui.cursor().left() - 1.0).floor().max(1.0)
 }
 
+/// [`fit_here`], having first **broken the line** when what is left of one is
+/// too narrow for a control to be worth putting on it.
+///
+/// Shrinking is the fallback for a widget that cannot wrap, and shrinking has a
+/// floor: a fourteen-pixel dropdown is not a narrower dropdown, it is a
+/// dropdown whose text starts past the border. Between the two there is a third
+/// answer — put it on the next line — and in a wrapped layout `end_row` is how
+/// to ask for it. Outside one it does nothing, so this is safe wherever
+/// `fit_here` was.
+pub(crate) fn fit_here_wrapping(ui: &mut Ui, want: f32) -> f32 {
+    if fit_here(ui, f32::INFINITY) < MIN_CONTROL {
+        ui.end_row();
+    }
+    fit_here(ui, want)
+}
+
 /// A checkbox whose label is laid out inside the panel.
 ///
 /// [`egui::Checkbox`] offers no wrap control and takes its natural width, which
@@ -176,7 +213,7 @@ pub(crate) fn fit_here(ui: &Ui, want: f32) -> f32 {
 /// screen. Clamping the width it is laid out in is the only lever the widget
 /// leaves.
 pub(crate) fn check(ui: &mut Ui, on: &mut bool, text: &str) -> egui::Response {
-    let w = fit_here(ui, f32::INFINITY);
+    let w = fit_here_wrapping(ui, f32::INFINITY);
     // The tick and the gap egui puts between it and the label, so the elide
     // budget is the room the TEXT actually gets.
     const BOX: f32 = 26.0;
@@ -214,8 +251,19 @@ pub(crate) fn slider(ui: &mut Ui, s: egui::Slider<'_>) -> egui::Response {
     // panel's region from 160 px to 239 px, and the give-away was that 200 px
     // and 120 px both passed while 160 px failed. A layout bug that is not
     // monotonic in width is a threshold being crossed, not a size being wrong.
+    //
+    // **Only where the layout actually wraps.** Asking for a block wider than
+    // the rest of the line is a request to be moved down, and a layout that does
+    // not wrap has nowhere to move it to: it draws the block from where the
+    // cursor already is, which is the overflow this was meant to prevent, only
+    // bigger. Inside a two-column grid the honest answer is the cramped one —
+    // take what is left of the line and let the track be short.
     let line = fit_here(ui, f32::INFINITY);
-    let w = if line >= MIN_CONTROL { line } else { fit(ui, f32::INFINITY) };
+    let w = if line >= MIN_CONTROL || !ui.layout().main_wrap {
+        line
+    } else {
+        fit(ui, f32::INFINITY)
+    };
     // `allocate_ui` and not `scope`: a scope reserves nothing up front, so the
     // wrapped parent never learns how much room this wanted and never wraps it.
     // Reserving `w` is what makes the request visible — and a request larger
@@ -300,7 +348,15 @@ pub(crate) fn grid<R>(
         egui::Grid::new(id)
             .num_columns(2)
             .spacing([8.0, 5.0])
-            .max_col_width((w - CAPTION).max(36.0))
+            // Capped so the CONTROL column is guaranteed its minimum, not so the
+            // caption column is guaranteed its preference. `egui::Grid` sizes a
+            // column from its widest cell and this cap is the only bound on it,
+            // so `w - CAPTION` let one long caption take everything but 78px and
+            // leave the control 24 — at which point a slider is a number box
+            // hanging over the border, because a slider has a floor and cannot
+            // shrink to nothing. Bounding the caption instead makes the caption
+            // wrap, which is the one of the two that degrades gracefully.
+            .max_col_width((w - MIN_CONTROL).max(36.0))
             .show(ui, add)
             .inner
     })
@@ -488,9 +544,19 @@ pub(crate) fn action(ui: &mut Ui, enabled: bool, text: &str, hover: &str) -> boo
     .clicked()
 }
 
-fn text_w(ui: &Ui, text: &str) -> f32 {
-    let font = egui::TextStyle::Button.resolve(ui.style());
+/// How wide `text` lays out in `style`'s font, unwrapped.
+///
+/// The measurement a caller needs to decide whether a variable-width control
+/// will fit before it places it — egui's wrapped layouts only break *between*
+/// widgets, so a control wider than what is left of the line is drawn past the
+/// edge rather than moved down.
+pub(crate) fn text_w_in(ui: &Ui, style: egui::TextStyle, text: &str) -> f32 {
+    let font = style.resolve(ui.style());
     ui.painter().layout_no_wrap(text.to_owned(), font, egui::Color32::WHITE).size().x
+}
+
+fn text_w(ui: &Ui, text: &str) -> f32 {
+    text_w_in(ui, egui::TextStyle::Button, text)
 }
 
 #[cfg(test)]
@@ -521,12 +587,20 @@ pub(crate) mod tests {
     /// never fire at all. That mistake was caught by
     /// `the_old_fixed_width_layout_does_not_fit_and_the_harness_says_so`, which
     /// is the entire reason to keep a test whose job is to fail.
+    /// Tall enough that no panel this drives is cut off at the bottom.
+    ///
+    /// It was 2000, and a tab with every disclosure open runs to twice that: the
+    /// part below the fold was never laid out, so it was never checked — and the
+    /// scroll area's own clipped bottom edge showed up as an overflow of its
+    /// own, which is a false positive on top of the blind spot.
+    const PANEL_H: f32 = 8000.0;
+
     pub(crate) fn overflow(width: f32, mut add: impl FnMut(&mut Ui)) -> Vec<String> {
         let ctx = egui::Context::default();
         let input = || egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
-                egui::vec2(width, 2000.0),
+                egui::vec2(width, PANEL_H),
             )),
             ..Default::default()
         };
@@ -555,7 +629,7 @@ pub(crate) mod tests {
         // actually loses content.
         const EPS_RIGHT: f32 = 2.0;
         const EPS_LEFT: f32 = 2.0;
-        let panel = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 2000.0));
+        let panel = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, PANEL_H));
         let mut bad = Vec::new();
         for cs in out.expect("ran at least one frame").shapes {
             let r = cs.shape.visual_bounding_rect();

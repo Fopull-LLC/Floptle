@@ -204,11 +204,20 @@ pub(crate) fn collect_texture_paths(entries: &[AssetEntry], out: &mut Vec<String
 
 /// The path the dev types after `Assets/` — `path` with the project root stripped, so it
 /// round-trips through `assets.getFile(...)` in a script. Falls back to the full path.
+///
+/// **Separators come out as `/`, whichever way they went in.** An asset ref is
+/// written into a scene, a material or a script, and those files move between
+/// machines: a `textures\ui\Fill.png` saved on Windows is not the same string
+/// as the `textures/ui/Fill.png` every lookup is keyed by, so the texture
+/// resolved on the machine that authored it and nowhere else. Normalising here
+/// rather than at each of the dozen call sites is what makes that one rule
+/// instead of twelve — `asset_key` has always done the same.
 pub(crate) fn asset_rel_path(path: &str, project_root: &Path) -> String {
-    Path::new(path)
+    let slashed = path.replace('\\', "/");
+    Path::new(&slashed)
         .strip_prefix(project_root)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or(slashed)
 }
 
 /// A texture's sampling settings, looked up by a path in EITHER form.
@@ -265,6 +274,40 @@ pub(crate) fn collect_script_names(entries: &[AssetEntry], out: &mut Vec<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **An asset ref written on Windows has to resolve everywhere else.** The
+    /// settings map, every material and every scene key a texture by its
+    /// project-relative path with forward slashes; a backslash ref missed every
+    /// one of them, so the texture drew with default sampling on any machine
+    /// but the one that saved it — with the right setting plainly selected in
+    /// the Inspector.
+    #[test]
+    fn a_windows_asset_ref_normalises_to_the_key_everything_looks_up() {
+        let root = std::path::Path::new("/proj");
+        assert_eq!(
+            asset_rel_path("/proj/textures/ui/Fill.png", root),
+            "textures/ui/Fill.png"
+        );
+        // Already relative, backslashed: still the key.
+        assert_eq!(
+            asset_rel_path("textures\\ui\\Fill.png", root),
+            "textures/ui/Fill.png"
+        );
+        // Already the key: unchanged.
+        assert_eq!(
+            asset_rel_path("textures/ui/Fill.png", root),
+            "textures/ui/Fill.png"
+        );
+        // And the lookup it exists for finds the setting either way round.
+        let mut settings = std::collections::HashMap::new();
+        settings.insert("textures/ui/Fill.png".to_string(), TexSetting::default());
+        for probe in ["/proj/textures/ui/Fill.png", "textures\\ui\\Fill.png"] {
+            assert!(
+                settings.contains_key(asset_rel_path(probe, root).as_str()),
+                "{probe} missed the settings map"
+            );
+        }
+    }
 
     #[test]
     fn script_kind_preserves_nested_paths_relative_to_scripts_dir() {

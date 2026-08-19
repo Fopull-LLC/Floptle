@@ -570,7 +570,7 @@ impl<'a> SettingsCtx<'a> {
             ui,
             "Reflection detail",
             Some(
-                "how much detail a ◐ Reflection Probe's capture keeps. A probe's picture spans a \
+                "how much detail a ◍ Reflection Probe's capture keeps. A probe's picture spans a \
                  whole turn across its width, so this IS the finest thing a mirror in that room \
                  can show — below it no roughness setting helps, and a polished surface reads as \
                  frosted however it is authored. The cost is paid when a probe captures, not \
@@ -983,7 +983,8 @@ impl<'a> SettingsCtx<'a> {
         if resolved.names.len() > 1 {
             ui.add_space(12.0);
             ui.label(egui::RichText::new("Collision matrix").strong());
-            ui.label(
+            crate::responsive::para(
+                ui,
                 egui::RichText::new(
                     "An unchecked pair passes through each other. Unfiltered rays still hit \
                      everything — rays only filter when a script asks.",
@@ -992,34 +993,48 @@ impl<'a> SettingsCtx<'a> {
                 .small(),
             );
             ui.add_space(6.0);
-            egui::Grid::new("layer_matrix").spacing([6.0, 4.0]).show(ui, |ui| {
-                ui.label("");
-                for (j, name) in resolved.names.iter().enumerate() {
-                    ui.label(egui::RichText::new(format!("{j}")).weak()).on_hover_text(name);
-                }
-                ui.end_row();
-                for (i, a) in resolved.names.iter().enumerate() {
-                    ui.label(format!("{i}  {a}"));
-                    for (j, b) in resolved.names.iter().enumerate() {
-                        if j < i {
-                            ui.label("");
-                            continue;
+            // **The matrix scrolls sideways rather than shrinking.** It is one
+            // checkbox per layer PAIR, so its width is decided by the project and
+            // not by the panel: sixteen layers cannot be made to fit a docked
+            // Settings pane, and squeezing them would put two adjacent
+            // checkboxes under one click. Scrolling keeps every pair reachable
+            // and every row label legible, which is the pair of properties that
+            // matters. Inset by a couple of pixels so the scrollbar sits inside
+            // the panel rather than on its border.
+            let matrix_w = (crate::responsive::usable_width(ui) - 2.0).max(1.0);
+            egui::ScrollArea::horizontal()
+                .id_salt("layer_matrix_scroll")
+                .max_width(matrix_w)
+                .show(ui, |ui| {
+                    egui::Grid::new("layer_matrix").spacing([6.0, 4.0]).show(ui, |ui| {
+                        ui.label("");
+                        for (j, name) in resolved.names.iter().enumerate() {
+                            ui.label(egui::RichText::new(format!("{j}")).weak()).on_hover_text(name);
                         }
-                        let mut on = resolved.collides(i as u8, j as u8);
-                        if check(ui, &mut on, "").on_hover_text(format!("{a} × {b}")).changed() {
-                            if on {
-                                project.no_collide.retain(|(x, y)| {
-                                    !((x == a && y == b) || (x == b && y == a))
-                                });
-                            } else {
-                                project.no_collide.push((a.clone(), b.clone()));
+                        ui.end_row();
+                        for (i, a) in resolved.names.iter().enumerate() {
+                            ui.label(format!("{i}  {a}"));
+                            for (j, b) in resolved.names.iter().enumerate() {
+                                if j < i {
+                                    ui.label("");
+                                    continue;
+                                }
+                                let mut on = resolved.collides(i as u8, j as u8);
+                                if check(ui, &mut on, "").on_hover_text(format!("{a} × {b}")).changed() {
+                                    if on {
+                                        project.no_collide.retain(|(x, y)| {
+                                            !((x == a && y == b) || (x == b && y == a))
+                                        });
+                                    } else {
+                                        project.no_collide.push((a.clone(), b.clone()));
+                                    }
+                                    out.save_project = true;
+                                }
                             }
-                            out.save_project = true;
+                            ui.end_row();
                         }
-                    }
-                    ui.end_row();
-                }
-            });
+                    });
+                });
         }
 
     }
@@ -1050,15 +1065,38 @@ mod tests {
     /// broke may not be the section you are looking at).
     ///
     /// Driven per section, because they share almost no layout.
+    ///
+    /// **With content in every one of them.** This used to drive Input with a
+    /// bare `InputMap::default()` — no actions, no axes, no rebind table — so
+    /// the section with the widest layout in the panel contributed one heading
+    /// and a button, and the guard passed on a page that was empty. Same for the
+    /// project's own lists: a layer matrix with no layers is a caption. A guard
+    /// that is green because its fixture is empty reports on a panel nobody is
+    /// looking at, and this one was hiding a real overflow in the collision
+    /// matrix.
     #[test]
     fn every_section_fits_however_thin_the_dock_gets() {
         for section in SettingsSection::ALL {
-            let mut project = floptle_scene::ProjectConfigDoc::default();
+            // Long names on purpose: a name that fits at every width proves
+            // nothing about a panel whose job is to shrink one that does not.
+            let names = |xs: [&str; 5]| xs.iter().map(|s| s.to_string()).collect();
+            let mut project = floptle_scene::ProjectConfigDoc {
+                layers: names(["Default", "Player", "Enemy", "Projectile", "TransparentFX"]),
+                sorting_layers: names([
+                    "Background",
+                    "Terrain",
+                    "Characters",
+                    "Foreground",
+                    "UI",
+                ]),
+                ..Default::default()
+            };
             let mut layer_new = String::new();
             let mut section = *section;
             let mut search = String::new();
             let mut new_action = String::new();
-            let input_map = floptle_input::InputMap::default();
+            let mut input_map = floptle_input::InputMap::starter();
+            input_map.actions.push(floptle_input::Action::new("InteractWithTheThingInFront"));
             let scan = crate::input_scan::InputScan::default();
             let test = floptle_input::ActionState::default();
             let pads: [Option<String>; 0] = [];

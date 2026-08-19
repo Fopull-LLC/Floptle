@@ -335,11 +335,11 @@ impl AnimSystem {
                     continue;
                 }
                 let Some(fname) = p.file_name().and_then(|s| s.to_str()) else { continue };
-                if fname.ends_with(ANIM_CLIP_EXT) {
+                if has_ext(fname, ANIM_CLIP_EXT) {
                     if let Ok(doc) = floptle_scene::load_anim_clip(&p) {
                         self.clips.push((asset_key(&p, &root, ANIM_CLIP_EXT), doc));
                     }
-                } else if fname.ends_with(floptle_scene::SPRITE_ANIM_EXT) {
+                } else if has_ext(fname, floptle_scene::SPRITE_ANIM_EXT) {
                     // (loaded below; the duplicate-key check follows the scan)
                     // A sprite clip joins the SAME registry as a baked clip, so
                     // it can go in a controller state, be crossfaded, carry
@@ -364,7 +364,7 @@ impl AnimSystem {
                             p.strip_prefix(&root).unwrap_or(&p).display()
                         )),
                     }
-                } else if fname.ends_with(ANIM_CTL_EXT)
+                } else if has_ext(fname, ANIM_CTL_EXT)
                     && let Ok(doc) = floptle_scene::load_anim_controller(&p) {
                         self.controllers.push((asset_key(&p, &root, ANIM_CTL_EXT), doc));
                     }
@@ -569,19 +569,38 @@ impl AnimSystem {
     }
 }
 
+/// Does this path end in `ext`, however the disk spelled the case?
+///
+/// **Case-insensitively, everywhere, or not at all.** An asset extension is
+/// typed by a person into a save dialog, and `Walk.SpriteAnim.ron` is the same
+/// file as `walk.spriteanim.ron` on Windows and on a default macOS volume. The
+/// editor used to be of two minds about it: the Assets browser's "is this a
+/// clip" lowercased first, and the scan that actually loads clips compared
+/// exactly — so a capitalised clip appeared in the browser, dragged onto a
+/// state, and resolved to nothing, because the registry it was being looked up
+/// in had never loaded it.
+pub fn has_ext(path: &str, ext: &str) -> bool {
+    path.len() >= ext.len()
+        && path.is_char_boundary(path.len() - ext.len())
+        && path[path.len() - ext.len()..].eq_ignore_ascii_case(ext)
+}
+
+/// `path` with `ext` taken off, if it ends in it — [`has_ext`]'s rule as a strip.
+pub fn strip_ext<'a>(path: &'a str, ext: &str) -> Option<&'a str> {
+    has_ext(path, ext).then(|| &path[..path.len() - ext.len()])
+}
+
 /// `path` → registry key: project-relative, forward slashes, extension off.
+///
+/// The extension comes off case-insensitively for the reason in [`has_ext`]:
+/// stripping it exactly would leave `.SpriteAnim.ron` **in** the key, and a key
+/// that still carries its extension matches nothing that the scan produced.
 pub fn asset_key(path: &Path, project_root: &Path, ext: &str) -> String {
     let rel = path.strip_prefix(project_root).unwrap_or(path);
     let s = rel.to_string_lossy().replace('\\', "/");
-    s.strip_suffix(ext).unwrap_or(&s).to_string()
+    strip_ext(&s, ext).map(str::to_string).unwrap_or(s)
 }
 
-/// The registry key for a **clip** file, whichever of the two kinds it is.
-///
-/// A `.spriteanim.ron` lands in the same registry as an `.anim.ron`, so
-/// anything that turns a dropped file into a key has to know both — and there
-/// is exactly one such function rather than a `.anim.ron` assumption repeated
-/// at every drop target.
 /// Is either kind of clip file already sitting at this key?
 ///
 /// Both, always. Probing only `.anim.ron` let ✚ New… hand back a key that a
@@ -592,9 +611,15 @@ pub fn clip_file_exists(project_root: &Path, key: &str) -> bool {
         || project_root.join(format!("{key}{}", floptle_scene::SPRITE_ANIM_EXT)).exists()
 }
 
+/// The registry key for a **clip** file, whichever of the two kinds it is.
+///
+/// A `.spriteanim.ron` lands in the same registry as an `.anim.ron`, so
+/// anything that turns a dropped file into a key has to know both — and there
+/// is exactly one such function rather than a `.anim.ron` assumption repeated
+/// at every drop target.
 pub fn clip_asset_key(path: &Path, project_root: &Path) -> String {
-    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default().to_ascii_lowercase();
-    let ext = if name.ends_with(floptle_scene::SPRITE_ANIM_EXT) {
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+    let ext = if has_ext(name, floptle_scene::SPRITE_ANIM_EXT) {
         floptle_scene::SPRITE_ANIM_EXT
     } else {
         ANIM_CLIP_EXT
@@ -2592,5 +2617,43 @@ mod tests {
             .iter()
             .find(|&&pn| re.skeleton.nodes[pn].name == "Forearm");
         assert_eq!(forearm_part, Some(&fi2), "part→node remap survived the re-sort");
+    }
+    /// **A clip file's extension is matched however it was capitalised.** The
+    /// browser lowercased before testing and the scan that loads clips compared
+    /// exactly, so `Walk.SpriteAnim.ron` appeared in the Assets tree, dragged
+    /// onto a controller state, and resolved to nothing at all — the registry it
+    /// was looked up in had never loaded it.
+    ///
+    /// Asserted on the two halves agreeing rather than on either alone, because
+    /// either one being case-insensitive by itself is what produced the bug.
+    #[test]
+    fn a_capitalised_clip_extension_is_still_a_clip() {
+        let root = std::path::Path::new("/proj");
+        for (file, want) in [
+            ("anims/Walk.spriteanim.ron", "anims/Walk"),
+            ("anims/Walk.SpriteAnim.ron", "anims/Walk"),
+            ("anims/Walk.SPRITEANIM.RON", "anims/Walk"),
+            ("anims/Walk.Anim.ron", "anims/Walk"),
+        ] {
+            let p = root.join(file);
+            assert_eq!(clip_asset_key(&p, root), want, "{file} keyed wrong");
+            let name = p.file_name().unwrap().to_str().unwrap();
+            assert!(
+                has_ext(name, ANIM_CLIP_EXT) || has_ext(name, floptle_scene::SPRITE_ANIM_EXT),
+                "{file} would not be picked up by the scan that fills the registry"
+            );
+            assert!(
+                crate::anim_ui::is_anim_clip(file),
+                "{file} would not show in the Assets browser as a clip"
+            );
+        }
+        // A `.ron` that is not a clip stays not a clip.
+        assert!(!crate::anim_ui::is_anim_clip("scenes/first.ron"));
+        assert!(!has_ext("scenes/first.ron", ANIM_CLIP_EXT));
+        // Shorter than the extension must not panic or match.
+        assert!(!has_ext("a", ANIM_CLIP_EXT));
+        assert!(!has_ext("", ANIM_CLIP_EXT));
+        // A multi-byte tail must not split a character.
+        assert!(!has_ext("\u{e9}\u{e9}", ".ron"));
     }
 }

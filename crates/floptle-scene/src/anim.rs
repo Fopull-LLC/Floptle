@@ -306,6 +306,13 @@ pub struct SpriteAnimFrameDoc {
     /// Here because a hand animator's timing is not a constant frame rate, and
     /// the alternative — repeating a frame four times — makes the list unread­able
     /// exactly where the timing is the interesting part.
+    ///
+    /// **Zero, negative and not-a-number all mean one slot.** A frame that
+    /// occupies no time is not a shorter frame, it is a frame nobody can ever
+    /// see: it lands on the same instant as the one after it, and a stepped lane
+    /// resolves that in favour of the later key. Fractions above zero are kept
+    /// as written — half a slot is a real thing to ask for — so the floor is on
+    /// "no time at all", not on "quick".
     #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
     pub hold: f32,
 }
@@ -356,7 +363,10 @@ impl SpriteAnimDoc {
                 rows: if f.rows > 0 { f.rows } else { self.rows.max(1) },
                 cell: f.cell,
             }));
-            t += f.hold.max(0.0).max(f32::MIN_POSITIVE) / fps;
+            // See `SpriteAnimFrameDoc::hold`: no time at all is one slot, not a
+            // zero-length frame nothing can ever land on.
+            let hold = if f.hold.is_finite() && f.hold > 0.0 { f.hold } else { 1.0 };
+            t += hold / fps;
         }
         AnimClipDoc {
             name: name.to_string(),
@@ -623,5 +633,43 @@ mod tests {
             assert!(clip.duration > 0.0, "fps {fps} gave a zero-length clip");
             assert_eq!(clip.channels[0].properties[0].times.len(), 3);
         }
+    }
+
+    /// **A frame that occupies no time is a frame nobody can see.** `hold: 0`
+    /// used to advance the clock by `f32::MIN_POSITIVE`, which puts two keys on
+    /// the same instant — and a stepped lane resolving a tie in favour of the
+    /// later key means the frame is not merely brief, it never draws at all.
+    ///
+    /// Asserted on distinct times rather than on the number itself, because the
+    /// property that matters is reachability.
+    #[test]
+    fn a_frame_held_for_no_time_still_gets_a_slot() {
+        for hold in [0.0, -3.0, f32::NAN] {
+            let doc = SpriteAnimDoc {
+                fps: 10.0,
+                frames: vec![
+                    SpriteAnimFrameDoc { cell: 0, hold, ..Default::default() },
+                    SpriteAnimFrameDoc { cell: 1, ..Default::default() },
+                ],
+                ..Default::default()
+            };
+            let times = doc.to_clip("X", "").channels[0].properties[0].times.clone();
+            assert!(
+                times[1] - times[0] >= 0.099,
+                "hold {hold} left frame 0 unreachable: {times:?}"
+            );
+        }
+        // A fraction above zero is a real request and is kept as written — the
+        // floor is on "no time at all", not on "quick".
+        let doc = SpriteAnimDoc {
+            fps: 10.0,
+            frames: vec![
+                SpriteAnimFrameDoc { cell: 0, hold: 0.5, ..Default::default() },
+                SpriteAnimFrameDoc { cell: 1, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let times = doc.to_clip("X", "").channels[0].properties[0].times.clone();
+        assert!((times[1] - 0.05).abs() < 1e-6, "half a slot was not kept: {times:?}");
     }
 }

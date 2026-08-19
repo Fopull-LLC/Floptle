@@ -98,6 +98,42 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field setPrimitive fun(self: Node, shape: string, color?: table) Construction API: make this node a primitive (\"Cube\"/\"Sphere\"/\"Capsule\"/\"Plane\") with an optional {r,g,b} color.
 ---@field setCamera fun(self: Node, t: table) Construction API: aim a camera and point it at a RENDER TARGET. Fields: fovY (RADIANS, 0.05–3), active (bool — true clears every other camera's authority), target (a bare name; the picture is the texture \"rt:<name>\", usable on any material or UI image), width/height (the target's pixels, 8–4096), hz (redraws per second, 0 = every frame), cullMask (layer bitmask). A node that is not a camera becomes one. Minimaps, mirrors, security monitors, scopes, split-screen.
 ---@field sound fun(self: Node): AudioSourceHandle The sound handle for this node's Audio Source: play / stop / pause / swap clips and read playback state.
+---@field parent Node|nil The parent node handle, or nil at the root.
+---@field getparent fun(self: Node): Node|nil The parent node handle, or nil (same as node.parent).
+---@field children fun(self: Node): Node[] An array of this node's child handles.
+---@field getchild fun(self: Node, name: string): Node|nil The first CHILD with that name, or nil.
+---@field child fun(self: Node, name: string): Node|nil Short alias of getchild.
+---@field find fun(self: Node, name: string): Node|nil The first DESCENDANT at any depth with that name, or nil. getchild only looks one level down.
+---@field getscript fun(self: Node, name: string): table|nil A script handle for that script on this node, or nil: read/write its state, call its methods, reach .node / .params.
+---@field script fun(self: Node, name: string): table|nil Short alias of getscript.
+---@field component fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|LightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Short alias of getcomponent.
+---@field animator fun(self: Node): table The animation handle for this node's Animation Controller (or a rigged model's embedded clips): :play / :restart / :crossfade / :stop / :setSpeed / :setLayerWeight / :seek, and :state / :time / :finished / :isPlaying.
+---@field toWorld fun(self: Node, v: Vec3): Vec3 A point in this node's own frame converted to world space \u{2014} position, rotation AND scale, composed up the whole parent chain. \"Where is the muzzle?\" is gun:toWorld(vec3(0, 0, -1.2)).
+---@field toLocal fun(self: Node, v: Vec3): Vec3 The inverse of toWorld: a world point expressed in this node's frame.
+---@field setWorldPos fun(self: Node, v: Vec3) Put this node at a WORLD point, whatever it is parented to, without deriving the parent inverse by hand.
+---@field worldForward fun(self: Node): Vec3 The node's forward AFTER the parent chain. node.forward is the LOCAL one, so a barrel parented to a swinging arm points where the ARM says.
+---@field worldRight fun(self: Node): Vec3 The node's +X axis after the parent chain.
+---@field worldUp fun(self: Node): Vec3 The node's +Y axis after the parent chain (not node.up, which is the body's -gravity up).
+---@field distanceTo fun(self: Node, other: Node|Vec3): number Distance to a node or a world point, measured in WORLD space. distance(a, b) compares LOCAL positions, which stops being the same answer the moment one of the two is parented.
+---@field distanceFlat fun(self: Node, other: Node|Vec3, up?: Vec3): number Distance ignoring the up axis (default +Y): the \"have I arrived?\" test for anything walking on ground it does not control the height of. Pass an up for a planet.
+---@field lookAt fun(self: Node, target: Node|Vec3, up?: Vec3) Point this node at another node or a world point. Sets yaw + pitch and leaves roll alone; pass an up and it sets roll too.
+---@field turnTowards fun(self: Node, target: Node|Vec3, maxRadians: number) Turn toward something by at most that much, the SHORT way round. Pass rate * dt for a frame-rate-independent turn.
+---@field moveTowards fun(self: Node, target: Node|Vec3, maxDelta: number) The method spelling of moveTowards(node, ...). World-space and placed through the parent inverse, so a node under a container arrives where you pointed.
+---@field setSprite fun(self: Node, t: table) Construction API: make this node one SPRITE, or retune one. Keys (all optional, each keeping what the node had): ppu, size, cell, flipX, flipY, pivotX, pivotY. ppu is pixels per unit measured against ONE CELL of the Material's sheet; ppu=0 falls back to size, a world edge length. pivotY=0 puts the origin at the sprite's feet, which is what a Y-sorted character wants.
+---@field setSpriteBatch fun(self: Node, t?: table) Construction API: make this node a SPRITE BATCH, so node:sprites() can draw into it. Key: size (the world edge length one sprite gets before its own scale).
+---@field sprites fun(self: Node): table A handle to this node's SpriteBatch (make it one with setSpriteBatch first): b:draw(...) queues one sprite for this frame, each with its own position, rotation, scale, cell and tint.
+---@field setTilemap fun(self: Node, t: table) Construction API: make this node a TILEMAP \u{2014} a grid of spritesheet cells drawn as one mesh. Keys: cols, rows, tile, data, tileset.
+---@field tilemap fun(self: Node): TilemapHandle A handle to this node's tilemap grid: tm:set / tm:get / tm:at / tm:fill / tm:fillRect / tm:size / tm:resize, and tm:cellAt / tm:worldAt / tm:tileSize in world space.
+---@field setSorting fun(self: Node, t: table) Where this 2D node draws in the stack. Keys (both optional): layer, one of the project's sorting layers by NAME, and order, higher being nearer the camera.
+---@field sorting fun(self: Node): table Where this node sits in the 2D stack: { layer =, order =, mode = }. A node that has never said anything about sorting answers with the DEFAULT rather than nil, because that IS where it draws.
+---@field getsorting fun(self: Node): table Short alias of sorting.
+---@field setParallax fun(self: Node, t: table) How much of the camera's movement this layer KEEPS, per axis: x and y. 1 moves with the world (the default), 0 pins it to the camera as if infinitely far away.
+---@field setCamera2D fun(self: Node, t: table) How this ORTHOGRAPHIC camera follows. Keys (all optional, each per axis): follow, smoothing, deadZoneX, deadZoneY, limits, minX, minY, maxX, maxY, off. Dead zone, then smoothing, then limits. Does nothing on anything that is not an orthographic camera.
+---@field shake fun(self: Node, amount: number, seconds?: number) Shake a 2D camera: amount is a distance in world units, seconds defaults to 0.3, and it fades out. Added to what is DRAWN and never fed back into the follow. Calling it again takes the LOUDER amplitude and the LONGER time, each independently.
+---@field setLighting2D fun(self: Node, t: table) 2D lighting, from a script. Keys: mode (auto/2d/3d), layers (the sorting layers a light reaches), blocks (auto/on/off, whether a receiver occludes), inner, falloff, shadows.
+---@field setPointLight fun(self: Node, t: table) Construction API: make this node a light, or retune one. Keys (all optional, each keeping what the node had, INCLUDING its emitter shape): color, intensity, range.
+---@field setScreenShader fun(self: Node, name: string, on: boolean) Switch one of the Post Processing node's screen shaders on or off. The name is the file without its extension, the one the Inspector lists.
+---@field uiRect fun(self: Node): number, number, number, number Where this UI element was actually laid out on screen this frame \u{2014} x, y, w, h in pixels \u{2014} or nil if it is not a UI element or has not been drawn yet.
 
 ---A Rigidbody's live tunables (every Inspector field). Assign to change while playing;
 ---booleans may be written true/false and read back as 1/0.

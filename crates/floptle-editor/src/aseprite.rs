@@ -188,7 +188,19 @@ pub(crate) fn parse(text: &str, stem: &str) -> Result<Import, String> {
 
     let mut clips = Vec::new();
     for (name, from, to) in spans {
-        let (from, to) = (from.min(frames.len() - 1), to.min(frames.len() - 1));
+        // **A tag naming a frame the sheet does not have is refused, not
+        // trimmed.** It means the JSON and the PNG came from different exports,
+        // and clamping hands back a clip that is quietly short — which reads as
+        // the animation having lost frames and sends the search to the
+        // renderer. Say which tag and what it asked for.
+        if from >= frames.len() || to >= frames.len() {
+            return Err(format!(
+                "the tag \"{name}\" names frames {from} to {to}, but this sheet only has \
+                 {} of them. The .json and the .png are from different exports \u{2014} \
+                 re-export both together.",
+                frames.len(),
+            ));
+        }
         if to < from {
             continue;
         }
@@ -368,5 +380,26 @@ mod tests {
         assert!(parse("{}", "x").unwrap_err().contains("no `frames`"));
         assert!(parse("not json", "x").unwrap_err().contains("not an Aseprite sheet"));
         assert!(parse(r#"{"frames":[]}"#, "x").unwrap_err().contains("no frames"));
+    }
+    /// **A tag naming frames the sheet does not have is refused.** It only
+    /// happens when the `.json` and the `.png` came from different exports, and
+    /// clamping it produced a clip that was silently short — the failure then
+    /// looks like the animation losing frames, which is the wrong place to
+    /// start looking.
+    #[test]
+    fn a_tag_past_the_end_of_the_sheet_is_refused() {
+        let json = TAGGED.replace("\"to\": 2", "\"to\": 9");
+        let err = parse(&json, "hero").expect_err("a tag past the end must not import");
+        assert!(
+            err.contains("walk"),
+            "the message has to name the tag: {err}"
+        );
+        assert!(
+            err.contains("4"),
+            "the message has to say how many there are: {err}"
+        );
+        // The in-range file still imports — the guard is on out of range, not
+        // on tags.
+        assert!(parse(TAGGED, "hero").is_ok());
     }
 }

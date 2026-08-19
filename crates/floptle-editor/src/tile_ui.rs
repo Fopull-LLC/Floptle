@@ -272,7 +272,7 @@ impl TileCtx<'_> {
             ui.add_space(10.0);
             ui.label(RichText::new("no tile layer yet").italics());
             ui.small(
-                "A tile layer is an ordinary ▦ Tilemap node — it has a transform, a \
+                "A tile layer is an ordinary ▩ Tilemap node — it has a transform, a \
                  material (its sheet), and a place in the Hierarchy. Add one above.",
             );
             return;
@@ -341,7 +341,7 @@ impl TileCtx<'_> {
         });
         if ui
             .add_sized([fit(ui, CHIP_W * 2.0), BTN_H], egui::Button::new("+ Add layer"))
-            .on_hover_text("a new ▦ Tilemap node, in front of the last one")
+            .on_hover_text("a new ▩ Tilemap node, in front of the last one")
             .clicked()
         {
             self.cmds.push(TileCmd::AddLayer);
@@ -1534,7 +1534,7 @@ impl TileCtx<'_> {
                 &format!("{} — {} of {want} drawn", group.name, want - missing),
             ))
             .id_salt(("tile_group", i))
-            .default_open(self.tools.group == Some(g))
+            .default_open(crate::responsive::start_open(self.tools.group == Some(g)))
             .show(ui, |ui| {
                 let mut name = group.name.clone();
                 labelled(ui, "name", |ui| {

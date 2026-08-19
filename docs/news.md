@@ -1,5 +1,23 @@
 ## Just shipped
 
+**v0.69.1 "Fits The Dock"** — **a sprite's own numbers can be keyframed now.**
+⏱ Animating ▸ ✚ Property ▸ **Sprite ▸ Node** keys `ppu` and `size` for squash and
+stretch, the pivot for a crouch, and the flips for a turn — so a whole
+turn-and-swing is one clip and none of it needs a script. **Add Component ▸ Type**
+finally offers ▫ Sprite, ▩ Tilemap and ▧ Sprite Batch, so you can make a node you
+already have into one instead of building a new one and moving the work across.
+**Every form panel fits a narrow dock**: ⚙ Settings ▸ Input wraps its bindings
+rather than pushing the delete button off the edge, the collision matrix scrolls
+sideways, and the ▦ Model tab's per-slot material fits with every section open.
+Icons mean one thing each — Tilemap is ▩, Sprite Batch is ▧, Reflection Probe is
+◍ — and the **VSCode** stub library knows the whole 2D API, which it did not, so
+every `node:setSprite` was flagged as an error while working perfectly. Fixes: a
+sprite frame with `hold: 0` never appeared, a capitalised clip filename resolved
+to nothing, a texture path saved on Windows found its import settings nowhere
+else, an Aseprite sheet whose tags overran it imported quietly short, Y-sorted
+nodes at the same height could restack after a reload, and a camera following a
+name two nodes shared jumped between them.
+
 **v0.69.0 "Flat Out"** — **a release about making 2D games.** `▫ Sprite` is a
 node now: it measures its size in **pixels** against one cell of its sheet, it
 flips without mirroring its children, and it has a **pivot** — with a *feet*

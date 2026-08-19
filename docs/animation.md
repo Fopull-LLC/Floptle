@@ -105,8 +105,8 @@ material's three dozen animatable fields do not bury its texture and its opacity
 | **UiElement** | `image`, `opacity`, `visible`, `text`; **Layout**, **Colour**, **Text**, **Sheet** |
 | **PointLight** | `intensity`, `range`, colour |
 | **UiSlider** | `value`, `min`, `max` |
-| **Camera** | `fovY` |
-| **Sprite** | `frame` — see below |
+| **Camera** | `fovY`, `orthoHeight` |
+| **Sprite** | `frame` — see below; **Node** — `ppu`, `size`, `pivotX`, `pivotY`, `flipX`, `flipY` |
 
 The names in the table are the groups; the **field names** are what a `.anim.ron`
 stores, and are what you type if you hand-edit one. Colours are per channel:
@@ -135,6 +135,9 @@ value back, paths included.
 
 ### Sprite lanes
 
+**Sprite** is one heading with two halves. `frame` is the picture; **Node** is
+what a ▫ Sprite node does with it.
+
 **✚ Property ▸ Sprite.frame** adds a sprite lane, on any node wearing a
 material. Each key holds a **whole frame** — the image, how it is cut, and which
 cell — picked together, because they are drawn together: a texture and a grid
@@ -145,6 +148,16 @@ A sprite lane is a **step** lane and cannot be anything else — the conversion
 forces it whatever the file says. Interpolating two frame references is
 meaningless, and interpolating two cell *indices* plays every cell in between,
 which reads as the clip running at the wrong speed rather than as a bug.
+
+**✚ Property ▸ Sprite ▸ Node** keys the ▫ Sprite node's own numbers: `ppu` and
+`size` (squash and stretch), `pivotX`/`pivotY` (shift the origin for a crouch),
+and `flipX`/`flipY` (face the other way on a turn). These do nothing on a node
+that is not a ▫ Sprite, and `frame` — which writes the *material* — works on
+anything wearing one.
+
+The flips are **stepped**, like every other on/off lane: **0 is left alone and 1
+is mirrored**. An eased flip would turn the sprite round exactly halfway between
+two keys, at a moment nobody authored.
 
 The other way to author sprite animation is a
 [`.spriteanim.ron`](2d.md#sprite-animation--a-frame-names-its-own-art) — a frame

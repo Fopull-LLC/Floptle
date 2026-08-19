@@ -164,14 +164,16 @@ pub(crate) fn input_section(
                 let dirs: Vec<String> = m.dirs.iter().map(|d| d.to_string()).collect();
                 let charge =
                     if m.charge > 0 { format!("\nhold {} for {} ticks first", m.dirs[0], m.charge) } else { String::new() };
-                ui.label(egui::RichText::new(&m.name).monospace()).on_hover_text(format!(
+                let shown = wrap_before_chip(ui, &m.name);
+                ui.label(egui::RichText::new(shown).monospace()).on_hover_text(format!(
                     "{} within {} ticks{charge}\n\nNumpad directions: 5 is neutral, 6 is forward.",
                     dirs.join(" → "),
                     m.window
                 ));
             }
         });
-        ui.label(
+        crate::responsive::para(
+            ui,
             egui::RichText::new("Edit their directions and windows in input.ron.").weak().small(),
         );
     }
@@ -228,33 +230,42 @@ fn primer(ui: &mut egui::Ui) {
         .weak(),
     );
     ui.add_space(4.0);
-    egui::CollapsingHeader::new(crate::responsive::header_text(ui, "How do I use this?")).id_salt("input_howto").show(ui, |ui| {
-        ui.label("1.  In a script, read the action by name:");
+    egui::CollapsingHeader::new(crate::responsive::header_text(ui, "How do I use this?")).id_salt("input_howto").default_open(crate::responsive::start_open(false)).show(ui, |ui| {
+        // Every line through `para`: this is a page of prose, and a bare label
+        // extends rather than wraps.
+        crate::responsive::para(ui, "1.  In a script, read the action by name:");
         ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            ui.label(egui::RichText::new("if input.justPressed(\"Jump\") then …").monospace());
-        });
+        crate::responsive::para(
+            ui,
+            egui::RichText::new("     if input.justPressed(\"Jump\") then …").monospace(),
+        );
         ui.add_space(6.0);
-        ui.label(format!(
-            "2.  It appears in the list below (this page reads your scripts). If it's new it \
-             shows a {} — nothing is bound to it yet.",
-            icons::WARN
-        ));
+        crate::responsive::para(
+            ui,
+            format!(
+                "2.  It appears in the list below (this page reads your scripts). If it's new \
+                 it shows a {} — nothing is bound to it yet.",
+                icons::WARN
+            ),
+        );
         ui.add_space(6.0);
-        ui.label(format!(
-            "3.  Click {}  to bind by PRESSING a key or button, or {} to pick one from a \
-             list — the list needs no controller plugged in.",
-            icons::ADD,
-            icons::MENU
-        ));
+        crate::responsive::para(
+            ui,
+            format!(
+                "3.  Click {}  to bind by PRESSING a key or button, or {} to pick one from a \
+                 list — the list needs no controller plugged in.",
+                icons::ADD,
+                icons::MENU
+            ),
+        );
         ui.add_space(6.0);
-        ui.label(
+        crate::responsive::para(
+            ui,
             "4.  Bind it twice: once on the keyboard, once on a pad. Both trigger the same \
              action, so the script never asks which you're using.",
         );
         ui.add_space(6.0);
-        ui.label("5.  Mash the control and watch the LIVE strip at the bottom light up.");
+        crate::responsive::para(ui, "5.  Mash the control and watch the LIVE strip at the bottom light up.");
     });
     ui.add_space(8.0);
 }
@@ -334,7 +345,9 @@ const STARTER_TIP: &str = "Adds Move / Look / Jump / Fire / Interact / Sprint / 
 fn group_header(ui: &mut egui::Ui, title: &str, blurb: &str) {
     ui.add_space(12.0);
     ui.label(egui::RichText::new(title).strong());
-    ui.label(egui::RichText::new(blurb).weak().small());
+    // Through `para`, which wraps to the panel: these blurbs carry a Lua call
+    // in them and are therefore long by nature, and a bare label extends.
+    crate::responsive::para(ui, egui::RichText::new(blurb).weak().small());
     ui.add_space(4.0);
 }
 
@@ -360,7 +373,13 @@ fn action_row(
     // two rows' menus share an egui id and fight — which is exactly why the
     // pickers refused to stay open.
     ui.push_id(("action", &action.name), |ui| {
-        ui.horizontal(|ui| {
+        // **Wrapped.** A row is a fixed prefix (the live dot and the action's
+        // name) followed by however many bindings the action has, each as wide
+        // as the input it names — "◉ R-Trigger" is three times "◉ A". That is
+        // not a width a panel can be sized for, so past the edge the chips go
+        // onto the next line rather than out of the dock. Two bindings and a
+        // docked Settings pane was enough to lose the ✕ that deletes the action.
+        ui.horizontal_wrapped(|ui| {
             ui.set_min_height(ROW_H);
 
             // Live state, then the name.
@@ -376,12 +395,17 @@ fn action_row(
             .on_hover_text("lights up while the action is triggered");
 
             let used = scan.entries().any(|u| u.name == action.name && u.kind == UsageKind::Action);
+            // Elided rather than allowed to extend: a `Label` draws its whole
+            // string however wide the box it was given is, so a long action name
+            // pushed the ✕ that deletes it off the edge of a docked panel.
+            let w = crate::responsive::usable_width(ui).min(NAME_W - 20.0);
+            let shown = crate::responsive::elide(ui, &action.name, w);
             let name = if used {
-                egui::RichText::new(&action.name)
+                egui::RichText::new(&shown)
             } else {
-                egui::RichText::new(&action.name).weak()
+                egui::RichText::new(&shown).weak()
             };
-            ui.add_sized([NAME_W - 20.0, 20.0], egui::Label::new(name).selectable(false))
+            ui.add_sized([w, 20.0], egui::Label::new(name).selectable(false))
                 .on_hover_text(usage_hint(
                     scan,
                     &action.name,
@@ -412,6 +436,9 @@ fn action_row(
 
             binding_chips(ui, &action.bindings, &action.name, players, edits);
             bind_buttons(ui, &action.name, multiplayer, edits);
+            // The one control that must never be pushed off the edge: it is how
+            // an action is deleted, and there is no other route to it.
+            wrap_before(ui, 28.0);
             if ui
                 .small_button(icons::REMOVE)
                 .on_hover_text("delete this action from the map")
@@ -445,7 +472,9 @@ fn axis2_row(
     edits: &mut InputEdits,
 ) {
     ui.push_id(("axis2", &ax.name), |ui| {
-        ui.horizontal(|ui| {
+        // Wrapped, for the reason in `action_row`: a row's width is the sum of
+        // its bindings, and a binding is as wide as the control it names.
+        ui.horizontal_wrapped(|ui| {
             ui.set_min_height(ROW_H);
             let (x, y) = test.axis2(i);
             let live = x.abs() > 0.01 || y.abs() > 0.01;
@@ -456,7 +485,15 @@ fn axis2_row(
                     ui.visuals().weak_text_color()
                 }),
             );
-            ui.add_sized([NAME_W - 20.0, 20.0], egui::Label::new(&ax.name).selectable(false))
+            ui.add_sized(
+                [crate::responsive::usable_width(ui).min(NAME_W - 20.0), 20.0],
+                egui::Label::new(crate::responsive::elide(
+                    ui,
+                    &ax.name,
+                    crate::responsive::usable_width(ui).min(NAME_W - 20.0),
+                ))
+                .selectable(false),
+            )
                 .on_hover_text(usage_hint(
                     scan,
                     &ax.name,
@@ -470,11 +507,19 @@ fn axis2_row(
                 );
             }
             for b in &ax.bindings {
-                ui.label(chip_frame(ui, &axis2_chip(b)));
+                chip_label(ui, &axis2_chip(b));
             }
             let mut socd = ax.socd;
+            // `ComboBox::width` is the TEXT width; egui adds its arrow and the
+            // button's padding outside it, so the box asked for is wider than
+            // the number given. Take that off before asking, and break the line
+            // first if the whole thing will not fit on what is left of it.
+            const COMBO_CHROME: f32 = 20.0;
+            let socd_w = crate::responsive::usable_width(ui).min(92.0);
+            wrap_before(ui, socd_w + ui.spacing().item_spacing.x);
+            let socd_w = crate::responsive::usable_width(ui).min(92.0);
             egui::ComboBox::from_id_salt("socd")
-                .width(92.0)
+                .width((socd_w - COMBO_CHROME).max(24.0))
                 .selected_text(socd_label(socd))
                 .show_ui(ui, |ui| {
                     for s in [Socd::Neutral, Socd::LastWins, Socd::Positive, Socd::Negative] {
@@ -504,7 +549,8 @@ fn axis1_row(
     _edits: &mut InputEdits,
 ) {
     ui.push_id(("axis1", &ax.name), |ui| {
-        ui.horizontal(|ui| {
+        // Wrapped, for the reason in `action_row`.
+        ui.horizontal_wrapped(|ui| {
             ui.set_min_height(ROW_H);
             let v = test.axis1(i);
             let live = v.abs() > 0.01;
@@ -515,7 +561,15 @@ fn axis1_row(
                     ui.visuals().weak_text_color()
                 }),
             );
-            ui.add_sized([NAME_W - 20.0, 20.0], egui::Label::new(&ax.name).selectable(false))
+            ui.add_sized(
+                [crate::responsive::usable_width(ui).min(NAME_W - 20.0), 20.0],
+                egui::Label::new(crate::responsive::elide(
+                    ui,
+                    &ax.name,
+                    crate::responsive::usable_width(ui).min(NAME_W - 20.0),
+                ))
+                .selectable(false),
+            )
                 .on_hover_text(usage_hint(
                     scan,
                     &ax.name,
@@ -529,7 +583,7 @@ fn axis1_row(
                 );
             }
             for b in &ax.bindings {
-                ui.label(chip_frame(ui, &axis1_chip(b)));
+                chip_label(ui, &axis1_chip(b));
             }
         });
     });
@@ -538,6 +592,66 @@ fn axis1_row(
 /// Chips read better as monospace — they're device labels, not prose.
 fn chip_frame(ui: &egui::Ui, text: &str) -> egui::RichText {
     egui::RichText::new(text).monospace().background_color(ui.visuals().faint_bg_color)
+}
+
+/// How wide a chip carrying `text` will be, including the padding a button puts
+/// round it and the gap before the next widget.
+fn chip_w(ui: &egui::Ui, text: &str) -> f32 {
+    crate::responsive::text_w_in(ui, egui::TextStyle::Monospace, text)
+        + ui.spacing().button_padding.x * 2.0
+        + ui.spacing().item_spacing.x
+}
+
+/// Break the line first if something `want` wide will not fit on what is left
+/// of it.
+///
+/// See `binding_chips` for why measuring is necessary rather than trusting the
+/// wrapped layout to break by itself.
+fn wrap_before(ui: &mut egui::Ui, want: f32) {
+    if crate::responsive::usable_width(ui) < want {
+        ui.end_row();
+    }
+}
+
+/// Make room for a chip: break the line if it will not fit on what is left of
+/// one, and shorten it if it will not fit on a whole one.
+///
+/// Returns what to actually draw. A binding's chip names a control and some
+/// controls have long names — "🖱 Motion x0.006 (hold RMB)" is wider than a
+/// 200px docked panel is, so there is no line for it to move to and the only
+/// remaining lever is the string. The hover text carries the full name.
+fn wrap_before_chip(ui: &mut egui::Ui, text: &str) -> String {
+    let room = crate::responsive::usable_width(ui);
+    if room < chip_w(ui, text) {
+        ui.end_row();
+    }
+    let line = crate::responsive::usable_width(ui);
+    let pad = ui.spacing().button_padding.x * 2.0 + ui.spacing().item_spacing.x;
+    crate::responsive::elide_in(
+        ui,
+        egui::TextStyle::Monospace,
+        text,
+        (line - pad).max(8.0),
+    )
+}
+
+/// A label in a wrapped row, moved to the next line if it will not fit.
+fn wrapped_label(ui: &mut egui::Ui, text: egui::RichText, plain: &str) -> egui::Response {
+    wrap_before(
+        ui,
+        crate::responsive::text_w_in(ui, egui::TextStyle::Body, plain)
+            + ui.spacing().item_spacing.x,
+    );
+    ui.label(text)
+}
+
+/// A read-only chip — what an axis binding is, since it is edited elsewhere.
+fn chip_label(ui: &mut egui::Ui, text: &str) {
+    let shown = wrap_before_chip(ui, text);
+    let r = ui.label(chip_frame(ui, &shown));
+    if shown != text {
+        r.on_hover_text(text);
+    }
 }
 
 fn binding_chips(
@@ -557,14 +671,30 @@ fn binding_chips(
     for (i, b) in bindings.iter().enumerate() {
         // Namespaced per index: two identical chips on one row would otherwise
         // share an id and the wrong one would answer the click.
+        let label = match b.player {
+            Some(p) => format!("{}  P{}", b.chip(), p + 1),
+            None => b.chip(),
+        };
+        // **Break the line before a chip that will not fit on it.** A wrapped
+        // layout only breaks BETWEEN widgets it can size, and a button sizes
+        // itself from its own text: past the edge egui wraps the label inside
+        // the chip and draws the chip over the border anyway. Measuring first is
+        // what turns "nearly fits" into "next line", and the chips are exactly
+        // the widgets whose width the panel cannot be sized for — "◉ R-Trigger"
+        // is three times "◉ A".
+        //
+        // Measured on THIS ui and not inside the `push_id` below: a child ui
+        // reports the whole panel as available. And measured with
+        // `usable_width`, not `available_width` — in a wrapped horizontal layout
+        // the latter answers with the row's whole width however far along the
+        // row the cursor already is, so it says "240 left" with sixteen pixels
+        // to the border.
+        let shown = wrap_before_chip(ui, &label);
         let resp = ui.push_id(i, |ui| {
-            let label = match b.player {
-                Some(p) => format!("{}  P{}", b.chip(), p + 1),
-                None => b.chip(),
-            };
-            let resp = ui.button(chip_frame(ui, &label)).on_hover_text(
-                "click to remove this binding · right-click to scope it to one player",
-            );
+            let resp = ui.button(chip_frame(ui, &shown)).on_hover_text(format!(
+                "{label}\n\nclick to remove this binding · right-click to scope it to \
+                 one player"
+            ));
             // Which player a binding belongs to only exists as a question with more
             // than one of them — and it's the answer to "why does P2's key punch for
             // both fighters", since there is only ever one keyboard.
@@ -620,10 +750,14 @@ fn add_action_row(
     edits: &mut InputEdits,
 ) {
     let full = map.actions.len() >= floptle_input::MAX_ACTIONS;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.add_space(NAME_W);
+        // Capped at what is left of the line: the field is a fixed 160 in a wide
+        // dock and whatever remains in a narrow one, rather than 160 that starts
+        // past the border.
+        let w = crate::responsive::usable_width(ui).clamp(40.0, 160.0);
         let resp = ui.add_sized(
-            [160.0, 20.0],
+            [w, 20.0],
             egui::TextEdit::singleline(new_action).hint_text("new action…"),
         );
         let commit = (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
@@ -666,7 +800,15 @@ fn missing_entries(
             ui.horizontal(|ui| {
                 ui.set_min_height(ROW_H);
                 ui.colored_label(egui::Color32::from_rgb(224, 168, 64), icons::WARN);
-                ui.add_sized([NAME_W - 20.0, 20.0], egui::Label::new(&u.name).selectable(false))
+                ui.add_sized(
+                    [crate::responsive::usable_width(ui).min(NAME_W - 20.0), 20.0],
+                    egui::Label::new(crate::responsive::elide(
+                        ui,
+                        &u.name,
+                        crate::responsive::usable_width(ui).min(NAME_W - 20.0),
+                    ))
+                    .selectable(false),
+                )
                     .on_hover_text(format!("{}:{} — {} use(s)", u.file, u.line, u.count));
                 ui.label(egui::RichText::new(u.kind.label()).weak().small());
                 if ui.button("Add it").clicked() {
@@ -689,6 +831,7 @@ fn raw_key_notice(ui: &mut egui::Ui, scan: &InputScan) {
     ui.add_space(12.0);
     egui::CollapsingHeader::new(format!("{} script(s) still poll raw keys", raw.len()))
         .id_salt("raw_key_uses")
+        .default_open(crate::responsive::start_open(false))
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(
@@ -701,7 +844,9 @@ fn raw_key_notice(ui: &mut egui::Ui, scan: &InputScan) {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 for u in raw.iter().take(40) {
-                    ui.label(egui::RichText::new(format!("\"{}\"", u.name)).monospace())
+                    let text = format!("\"{}\"", u.name);
+                    let shown = wrap_before_chip(ui, &text);
+                    ui.label(egui::RichText::new(shown).monospace())
                         .on_hover_text(format!("{}:{} — {} use(s)", u.file, u.line, u.count));
                 }
                 if raw.len() > 40 {
@@ -747,7 +892,8 @@ fn live_tester(
             );
         } else {
             for p in pads {
-                ui.label(egui::RichText::new(p).monospace());
+                let shown = wrap_before_chip(ui, &p);
+                ui.label(egui::RichText::new(shown).monospace()).on_hover_text(p);
             }
         }
     });
@@ -755,31 +901,27 @@ fn live_tester(
     ui.horizontal_wrapped(|ui| {
         for (i, a) in map.actions.iter().enumerate() {
             let on = test.is_held(i);
-            ui.label(
-                egui::RichText::new(format!(
-                    "{} {}",
-                    if on { icons::ON } else { icons::OFF },
-                    a.name
-                ))
-                .color(if on {
-                    egui::Color32::LIGHT_GREEN
-                } else {
-                    ui.visuals().weak_text_color()
-                }),
-            );
+            let text =
+                format!("{} {}", if on { icons::ON } else { icons::OFF }, a.name);
+            let colored = egui::RichText::new(&text).color(if on {
+                egui::Color32::LIGHT_GREEN
+            } else {
+                ui.visuals().weak_text_color()
+            });
+            wrapped_label(ui, colored, &text);
         }
     });
     ui.horizontal_wrapped(|ui| {
         for (i, ax) in map.axes2.iter().enumerate() {
             let (x, y) = test.axis2(i);
-            ui.label(
-                egui::RichText::new(format!("{}: ({x:+.2}, {y:+.2})", ax.name)).monospace(),
-            );
+            let text = format!("{}: ({x:+.2}, {y:+.2})", ax.name);
+            let shown = wrap_before_chip(ui, &text);
+            ui.label(egui::RichText::new(shown).monospace());
         }
         for (i, ax) in map.axes1.iter().enumerate() {
-            ui.label(
-                egui::RichText::new(format!("{}: {:+.2}", ax.name, test.axis1(i))).monospace(),
-            );
+            let text = format!("{}: {:+.2}", ax.name, test.axis1(i));
+            let shown = wrap_before_chip(ui, &text);
+            ui.label(egui::RichText::new(shown).monospace());
         }
     });
 }

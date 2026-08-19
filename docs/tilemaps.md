@@ -5,7 +5,7 @@ Everything for building a 2D level: the **◫ Tiles** tab, tilesets (what each t
 
 New here? The three-minute version:
 
-1. Add a **▦ Tilemap** node (◫ Tiles ⏵ *Add layer*, or the Hierarchy's Add menu).
+1. Add a **▩ Tilemap** node (◫ Tiles ⏵ *Add layer*, or the Hierarchy's Add menu).
 2. Give it a spritesheet in the Inspector — a texture, and `sheetCols` /
    `sheetRows` so the engine knows how it is cut.
 3. Press **9** for the tile tool and paint in the ⌖ Scene view.

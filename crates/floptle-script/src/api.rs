@@ -754,6 +754,33 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             ]),
         );
     }
+    // **The Sprite node's own numbers.** The `Sprite ▸ frame` lane writes the
+    // MATERIAL — which image and which cell — and works on anything wearing one.
+    // These are the other half: what the node does with that picture. Without
+    // them a squash-and-stretch, a flip on a turn, or a pivot shifted for a
+    // crouch were things a script could do and a clip could not, which is the
+    // wrong way round for a 2D game where the clip IS the character.
+    //
+    // Same component name as the frame lane on purpose: one `Sprite` heading in
+    // the ✚ Property menu holds everything about drawing a sprite, and the field
+    // names cannot collide because `frame` is the only one the lane owns.
+    if let Some(Matter::Sprite { ppu, size, flip_x, flip_y, pivot, .. }) = world.get::<Matter>(e) {
+        // "Sprite" is `floptle_scene::SPRITE_COMPONENT`, spelled out because this
+        // crate does not depend on the scene crate. `cell` is deliberately NOT
+        // here: it belongs to the `frame` lane, and two lanes writing one value
+        // is a conflict settled by whichever is applied second.
+        out.insert(
+            "Sprite".to_string(),
+            HashMap::from([
+                ("ppu".to_string(), *ppu as f64),
+                ("size".to_string(), *size as f64),
+                ("flipX".to_string(), f64::from(*flip_x)),
+                ("flipY".to_string(), f64::from(*flip_y)),
+                ("pivotX".to_string(), pivot[0] as f64),
+                ("pivotY".to_string(), pivot[1] as f64),
+            ]),
+        );
+    }
     if let Some(l) = world.get::<floptle_ui::UiLayer>(e) {
         out.insert(
             "UiLayer".to_string(),
@@ -1039,6 +1066,32 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                         *target_h = h;
                     }
                     "hz" => *target_hz = (val as f32).clamp(0.0, 240.0),
+                    _ => {}
+                }
+            }
+        }
+        // The Sprite node's own numbers — see the matching arm in
+        // `mirror_components`.
+        // "Sprite" is `floptle_scene::SPRITE_COMPONENT` — see `mirror_components`.
+        "Sprite" => {
+            if let Some(Matter::Sprite { ppu, size, flip_x, flip_y, pivot, .. }) =
+                world.get_mut::<Matter>(ent)
+            {
+                let v = val as f32;
+                match field {
+                    // Zero is meaningful: it is "size me by `size` instead", the
+                    // escape hatch for art that is not pixel art. Negative is
+                    // not, and a lane easing through zero would otherwise mirror
+                    // the sprite at the halfway point.
+                    "ppu" => *ppu = if v.is_finite() { v.max(0.0) } else { *ppu },
+                    "size" => *size = if v.is_finite() { v.max(1e-4) } else { *size },
+                    // Written as a number because every lane is: anything past
+                    // the halfway point is flipped, so a stepped key of 0 or 1
+                    // does the obvious thing and an eased one flips once.
+                    "flipX" => *flip_x = val >= 0.5,
+                    "flipY" => *flip_y = val >= 0.5,
+                    "pivotX" => pivot[0] = v,
+                    "pivotY" => pivot[1] = v,
                     _ => {}
                 }
             }

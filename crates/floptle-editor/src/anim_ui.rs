@@ -282,19 +282,19 @@ pub(crate) fn clip_undo_redo(st: &mut AnimUiState, redo: bool) -> bool {
 /// `path` is an animation clip asset — a baked `.anim.ron`, or a frame-listed
 /// `.spriteanim.ron`, which plays as one and so drags as one.
 pub fn is_anim_clip(path: &str) -> bool {
-    let p = path.to_ascii_lowercase();
-    p.ends_with(ANIM_CLIP_EXT) || p.ends_with(floptle_scene::SPRITE_ANIM_EXT)
+    crate::anim::has_ext(path, ANIM_CLIP_EXT)
+        || crate::anim::has_ext(path, floptle_scene::SPRITE_ANIM_EXT)
 }
 
 /// `path` is specifically a **sprite** clip — a list of frames rather than a
 /// baked set of lanes. The Animating tab edits the two differently.
 pub fn is_sprite_anim(path: &str) -> bool {
-    path.to_ascii_lowercase().ends_with(floptle_scene::SPRITE_ANIM_EXT)
+    crate::anim::has_ext(path, floptle_scene::SPRITE_ANIM_EXT)
 }
 
 /// `path` is an animation controller asset.
 pub fn is_anim_ctl(path: &str) -> bool {
-    path.to_ascii_lowercase().ends_with(".actl.ron")
+    crate::anim::has_ext(path, floptle_scene::ANIM_CTL_EXT)
 }
 
 use crate::timeline::{draw_ruler, ACCENT, EVENT_COLOR, KEY_COLOR, PLAYHEAD};
@@ -2054,13 +2054,27 @@ const ANIMATABLE_PROPS: &[(&str, &[PropField])] = &[
     // are offered because a Camera node can be either, and the Inspector says
     // which one it is.
     ("Camera", &[("fovY", PropKind::Float, ""), ("orthoHeight", PropKind::Float, "")]),
-    // Not a real component. One key writes the material's texture, its sheet
-    // grid AND the cell, which is what lets a clip walk between sheets — and
-    // what stops the texture and the grid landing on different frames, which
-    // draws a slice of the wrong picture and says nothing.
+    // Two halves of one heading. `frame` is not a real component field: one key
+    // writes the material's texture, its sheet grid AND the cell, which is what
+    // lets a clip walk between sheets — and what stops the texture and the grid
+    // landing on different frames, which draws a slice of the wrong picture and
+    // says nothing.
+    //
+    // The rest are the ▫ Sprite NODE's own numbers, under "Node" so the two are
+    // not mistaken for each other. They are what the node does with the picture
+    // rather than which picture it is, and they only do anything on a Sprite
+    // node — where `frame` works on anything wearing a Material.
     (
         floptle_scene::SPRITE_COMPONENT,
-        &[(floptle_scene::SPRITE_FIELD, PropKind::Frame, "")],
+        &[
+            (floptle_scene::SPRITE_FIELD, PropKind::Frame, ""),
+            ("ppu", PropKind::Float, "Node"),
+            ("size", PropKind::Float, "Node"),
+            ("pivotX", PropKind::Float, "Node"),
+            ("pivotY", PropKind::Float, "Node"),
+            ("flipX", PropKind::Float, "Node"),
+            ("flipY", PropKind::Float, "Node"),
+        ],
     ),
 ];
 
@@ -4528,6 +4542,10 @@ fn steps_by_nature(component: &str, field: &str) -> bool {
             | ("Material", "sheetRows")
             | ("Material", "unlit")
             | ("Material", "fog")
+            // A mirror is on or off. Easing one would flip the sprite exactly
+            // halfway through the ease, at a moment nobody keyed.
+            | (floptle_scene::SPRITE_COMPONENT, "flipX")
+            | (floptle_scene::SPRITE_COMPONENT, "flipY")
     )
 }
 
@@ -4750,6 +4768,41 @@ mod tests {
         assert!(!l.step, "a fade has to interpolate — a stepped opacity is a blink");
     }
 
+    /// **A sprite's own numbers are keyable too.** The `Sprite ▸ frame` lane
+    /// says which picture; these say what the node does with it — squash and
+    /// stretch, a flip on a turn, a pivot shifted for a crouch. Every one was
+    /// reachable from a script and from no clip, which is the wrong way round in
+    /// a 2D game where the clip IS the character.
+    ///
+    /// The flip is asserted STEPPED on purpose: an eased mirror turns the sprite
+    /// round exactly halfway between two keys, at a moment nobody authored.
+    #[test]
+    fn recording_a_sprite_nodes_own_numbers_writes_keys() {
+        let (mut w, e) = sprite_world();
+        let mut st = recording_state(&w, e);
+
+        floptle_script::apply_component_field(&mut w, e, "Sprite", "pivotY", 0.0);
+        floptle_script::apply_component_field(&mut w, e, "Sprite", "flipX", 1.0);
+        st.playhead = 0.25;
+        assert!(record_scan(&w, &mut st, e), "moving the pivot wrote nothing");
+
+        let doc = &st.clip_doc.as_ref().unwrap().1;
+        let pivot = lane(doc, "Sprite", "pivotY").expect("no Sprite.pivotY lane");
+        assert_eq!(pivot.values, vec![AnimPropValueDoc::Float(0.0)]);
+        assert!(!pivot.step, "a pivot has to interpolate — it is a position");
+        let flip = lane(doc, "Sprite", "flipX").expect("no Sprite.flipX lane");
+        assert_eq!(flip.values, vec![AnimPropValueDoc::Float(1.0)]);
+        assert!(flip.step, "a mirror eased through its halfway point flips where nobody keyed it");
+
+        // And the key plays back onto the node it came from.
+        floptle_script::apply_component_field(&mut w, e, "Sprite", "pivotY", 0.75);
+        floptle_script::apply_component_field(&mut w, e, "Sprite", "flipX", 0.0);
+        assert!(matches!(
+            w.get::<Matter>(e),
+            Some(Matter::Sprite { pivot: [_, y], flip_x: false, .. }) if (*y - 0.75).abs() < 1e-6
+        ));
+    }
+
     /// Recording authors the clip, never the scene.
     ///
     /// The restore snapshot covered numbers only, so recording a texture swap
@@ -4913,12 +4966,16 @@ mod tests {
         let mut unreadable = Vec::new();
         let mut unwritable = Vec::new();
         for (comp, fields) in ANIMATABLE_PROPS.iter() {
-            // The sprite lane is a pseudo-component with its own applier, so it
-            // is checked below rather than through the two mirrors.
-            if *comp == floptle_scene::SPRITE_COMPONENT {
-                continue;
-            }
             for (field, kind, _) in fields.iter() {
+                // `Sprite ▸ frame` is a pseudo-field with its own applier, so it
+                // is checked below rather than through the two mirrors. The rest
+                // of the Sprite heading is the NODE's own numbers and goes
+                // through them like everything else.
+                if *comp == floptle_scene::SPRITE_COMPONENT
+                    && *field == floptle_scene::SPRITE_FIELD
+                {
+                    continue;
+                }
                 for target in [e, light, cam, slider] {
                     let nums = floptle_script::mirror_components(&w, target);
                     let strs = floptle_script::mirror_component_strings(&w, target);

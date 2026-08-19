@@ -954,7 +954,7 @@ pub(crate) fn material_props_ui(
     ui.add_enabled_ui(!m.unlit, |ui| {
         egui::CollapsingHeader::new(crate::responsive::header_text(ui, "Surface maps"))
             .id_salt(salt.with("mat_maps"))
-            .default_open(m.has_maps())
+            .default_open(crate::responsive::start_open(m.has_maps()))
             .show(ui, |ui| {
                             crate::responsive::grid(ui, "mat_maps_rows", |ui| {
                     let map_row =
@@ -1168,7 +1168,7 @@ pub(crate) fn material_props_ui(
     ui.add_enabled_ui(true, |ui| {
         egui::CollapsingHeader::new(crate::responsive::header_text(ui, "Retro artefacts"))
             .id_salt(salt.with("mat_retro"))
-            .default_open(m.retro.any() || m.retro.exempt)
+            .default_open(crate::responsive::start_open(m.retro.any() || m.retro.exempt))
             .show(ui, |ui| {
                 crate::responsive::grid(ui, "mat_retro_rows", |ui| {
                     ui.label("vertex jitter").on_hover_text(
@@ -1907,7 +1907,7 @@ impl EditorTabViewer<'_> {
                                 .changed();
                             ui.small("reflects the PREVIOUS frame, so a reflection is one frame behind — invisible except on a mirror under a whipping camera");
                         });
-                        ui.small("off screen, a reflection falls back to the SKY — place a ◐ Reflection Probe to give a room something else to show");
+                        ui.small("off screen, a reflection falls back to the SKY — place a ◍ Reflection Probe to give a room something else to show");
                         // Glass, in the same place as reflections and for the
                         // same reason: it is what a surface shows of the scene
                         // when the light goes THROUGH it rather than off it, and
@@ -4917,6 +4917,7 @@ impl EditorTabViewer<'_> {
                         if overridden {
                             egui::CollapsingHeader::new(crate::responsive::header_text(ui, "edit"))
                                 .id_salt(("model_mat", e, &key))
+                                .default_open(crate::responsive::start_open(false))
                                 .show(ui, |ui| {
                                     let mut save_as = None;
                                     if let Some(mat) = world
@@ -7103,6 +7104,48 @@ mod tests {
         assert!(!after.reaches("Background"));
     }
 
+    /// **The 2D camera section must survive a thin dock too.** It is a page of
+    /// paired X/Y numbers with a per-axis on/off, which is the shape that runs
+    /// out of room first, and it shipped with no width guard at all.
+    #[test]
+    fn the_2d_camera_section_fits_however_thin_the_dock_gets() {
+        let mut world = floptle_core::World::new();
+        let e = world.spawn();
+        world.insert(e, floptle_core::Transform::default());
+        world.insert(
+            e,
+            Matter::Camera {
+                fov_y: 1.0,
+                active: true,
+                target: String::new(),
+                cull_mask: !0,
+                target_w: 0,
+                target_h: 0,
+                target_hz: 0.0,
+                ortho: true,
+                ortho_height: 10.0,
+            },
+        );
+        // Every optional part on: a follow target, a dead zone and limits. With
+        // them off the section is three rows, which is not the section.
+        world.insert(
+            e,
+            floptle_core::camera2d::Camera2D {
+                follow: "PlayerCharacter".into(),
+                smoothing: 0.12,
+                dead_zone: [1.5, 0.75],
+                limits_on: true,
+                limit_min: [-100.0, -20.0],
+                limit_max: [200.0, 40.0],
+                ..Default::default()
+            },
+        );
+        let mut cmd = crate::EditorCmd::default();
+        crate::responsive::tests::assert_fits("the 2D camera section", |ui| {
+            camera_2d_section(ui, &world, e, &mut cmd);
+        });
+    }
+
     /// **The material editor must survive a thin dock.** It is the widest
     /// shared component in the editor — sliders, dropdowns, checkboxes and
     /// texture pickers — and it is drawn in two places at once: the Inspector,
@@ -7113,6 +7156,13 @@ mod tests {
     /// Driven with every optional section open, because a section that is not
     /// on screen cannot overflow and a guard that only sees the closed state
     /// proves nothing about the open one.
+    ///
+    /// **And with the texture settings a sheet needs.** This passed an EMPTY
+    /// settings map, so `sheet_of` answered 1×1 and the spritesheet cell picker
+    /// — the widest geometry in the component, a full-width grid of one button
+    /// per cell — was never constructed by the guard at all. A guard that is
+    /// green because its fixture is empty is worse than none: it reports on a
+    /// panel nobody is looking at.
     #[test]
     fn the_material_editor_fits_however_thin_the_dock_gets() {
         let mut m = floptle_core::Material {
@@ -7125,7 +7175,17 @@ mod tests {
         let mut name_buf = String::new();
         let flsl = crate::shaders::FlslCache::default();
         let sdf = crate::shaders::SdfCache::default();
-        let tex = std::collections::HashMap::new();
+        // A real sheet, so the cell picker is drawn. Wide rather than square:
+        // the grid's own width is what has to fit, and a 12-column sheet is an
+        // ordinary character strip.
+        let tex = std::collections::HashMap::from([(
+            "textures/tiles.png".to_string(),
+            crate::assets::TexSetting {
+                sheet_cols: 12,
+                sheet_rows: 3,
+                ..Default::default()
+            },
+        )]);
         let root = std::path::PathBuf::from(".");
         crate::responsive::tests::assert_fits("the material editor", |ui| {
             material_props_ui(ui, &mut m, &[], &[], &root, &mut name_buf, &flsl, &sdf, &tex);

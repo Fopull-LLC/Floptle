@@ -924,9 +924,11 @@ impl Editor {
                 self.mesh_registry.remove(rel); // model asset (a Matter::Mesh ref)
                 // A `.anim.ron` clip — or a `.spriteanim.ron`, which lands in
                 // the same registry and so has to leave it the same way.
-                let clip_key = rel
-                    .strip_suffix(floptle_scene::ANIM_CLIP_EXT)
-                    .or_else(|| rel.strip_suffix(floptle_scene::SPRITE_ANIM_EXT));
+                // Case-insensitively, matching the scan that put the key
+                // there: stripping exactly would leave the extension on and
+                // the deleted clip would stay in the registry forever.
+                let clip_key = crate::anim::strip_ext(rel, floptle_scene::ANIM_CLIP_EXT)
+                    .or_else(|| crate::anim::strip_ext(rel, floptle_scene::SPRITE_ANIM_EXT));
                 if let Some(ck) = clip_key {
                     self.anim.clips.retain(|(k, _)| k != ck);
                     // …and it stops being a SPRITE key. Left behind, it refuses
