@@ -114,6 +114,22 @@ fn components(n: &NodeDoc) -> Vec<&'static str> {
 }
 
 /// Every scene file under `<root>/scenes`, sorted so two runs agree.
+/// **`--scene` means the same thing to every verb that takes it.**
+///
+/// A path as typed, a path relative to the project, or the stem of a scene
+/// anywhere under `scenes/` — case-insensitively, because `--scene Arena` and
+/// `--scene arena` are the same request. Shared, because `inspect` and `run`
+/// having their own resolvers meant `--scene arena` worked in one and exited 1
+/// in the other while both helps said "by path or by name".
+pub(crate) fn resolve_scene(root: &Path, s: &str) -> Option<PathBuf> {
+    for candidate in [PathBuf::from(s), root.join(s)] {
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    scene_files(root).into_iter().find(|f| f.file_stem().is_some_and(|st| st.eq_ignore_ascii_case(s)))
+}
+
 fn scene_files(root: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -140,35 +156,24 @@ fn rel(root: &Path, path: &Path) -> String {
 
 /// Run the verb. Returns the process exit code.
 pub(crate) fn run(root: &Path, scene: Option<&str>, select: Option<&str>, json: bool) -> i32 {
-    if !root.is_dir() {
-        eprintln!("{} is not a directory", root.display());
-        return 1;
+    // The same refusal, in the same words, with the same code as every other
+    // verb that takes a PROJECT. This used to print "no readable project.ron"
+    // as though it were an answer and exit 0 — so a caller pointed at the wrong
+    // directory was told the run had succeeded.
+    if !root.join("project.ron").is_file() {
+        eprintln!("{} is not a project directory (no project.ron)", root.display());
+        return 2;
     }
 
     // Which scenes are in scope: one named, or all of them.
     let files: Vec<PathBuf> = match scene {
-        Some(s) => {
-            let direct = PathBuf::from(s);
-            let joined = root.join(s);
-            let p = if direct.is_file() {
-                direct
-            } else if joined.is_file() {
-                joined
-            } else {
-                // Named by stem — `--scene first` for `scenes/first.ron`, which
-                // is how a person and a script both say it.
-                match scene_files(root).into_iter().find(|f| {
-                    f.file_stem().is_some_and(|st| st.eq_ignore_ascii_case(s))
-                }) {
-                    Some(f) => f,
-                    None => {
-                        eprintln!("no scene called {s} under {}", root.join("scenes").display());
-                        return 1;
-                    }
-                }
-            };
-            vec![p]
-        }
+        Some(s) => match resolve_scene(root, s) {
+            Some(p) => vec![p],
+            None => {
+                eprintln!("no scene called {s} under {}", root.join("scenes").display());
+                return 1;
+            }
+        },
         None => scene_files(root),
     };
 

@@ -19,9 +19,17 @@
 //! line ADR-0027 asks to be drawn deliberately, and a verb that wanted to
 //! render a thumbnail would be on the other side of it.
 //!
-//! What it does not check yet, said out loud so nobody reads silence as a pass:
-//! animation controllers, audio references, shader references, and anything
-//! inside an installed package.
+//! **What it looks at**, since a checker's silence is read as a pass: every
+//! scene, prefab, effect and standalone material; every node's material maps
+//! (colour, normal, roughness, metallic, ambient occlusion), its surface shader
+//! and that shader's own textures, its model and its scripts; every effect
+//! track's texture, mesh and trail; and the entry scene `project.ron` names.
+//!
+//! **What it does not**, said as plainly: animation controllers, audio
+//! references, and anything inside an installed package. The first list was
+//! shorter than the code's actual coverage in one direction and longer in the
+//! other — a material's surface maps went unchecked while the prose implied
+//! textures were done — so treat both lists as part of the behaviour.
 
 use std::path::{Path, PathBuf};
 
@@ -30,6 +38,7 @@ use std::path::{Path, PathBuf};
 /// The two levels the Console uses for the same checks. An error means the
 /// project is wrong; a warning means it is suspicious and still loads.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
 pub(crate) enum Level {
     Error,
     Warning,
@@ -45,6 +54,7 @@ impl Level {
 }
 
 /// One finding, in the shape every verb reports diagnostics in.
+#[cfg_attr(test, derive(Debug))]
 pub(crate) struct Finding {
     pub(crate) level: Level,
     pub(crate) message: String,
@@ -119,8 +129,18 @@ fn rel(root: &Path, path: &Path) -> String {
     path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
 }
 
-/// Check `root`. Returns the process exit code: 0 clean, 1 something is wrong.
+/// Check `root`. Returns the process exit code: 0 clean, 1 something is wrong
+/// with the project, 2 the thing named is not a project.
+///
+/// **Those last two are worth keeping apart**, and they used to share an exit
+/// code here while `run`, `shot` and `exec` all answered 2. "your path is wrong"
+/// and "your project is broken" are the exact distinction this verb exists to
+/// draw, so a caller must not have to read the prose to tell them apart.
 pub(crate) fn run(root: &Path, json: bool) -> i32 {
+    if !root.join("project.ron").is_file() {
+        eprintln!("{} is not a project directory (no project.ron)", root.display());
+        return 2;
+    }
     let report = examine(root);
     if json {
         print_json(&report);
@@ -142,7 +162,21 @@ pub(crate) fn examine(root: &Path) -> Report {
     // The project file first: everything else is read relative to what it says.
     let cfg_path = root.join("project.ron");
     match floptle_scene::try_load_project(&cfg_path) {
-        Ok(Some(_)) => {}
+        Ok(Some(c)) => {
+            // **The scene the game starts in.** Nothing else in a project points
+            // at it, so a rename or a delete leaves a project that checks clean
+            // and opens on nothing.
+            if let Some(entry) = c.entry_scene.as_deref().filter(|e| !e.is_empty())
+                && crate::inspect::resolve_scene(root, entry).is_none()
+            {
+                r.error(
+                    Some("project.ron".into()),
+                    format!("entry_scene names {entry}, and there is no such scene"),
+                );
+            }
+        }
+        // `run` refuses this before it gets here (exit 2, not a finding); kept
+        // because `examine` is also called directly.
         Ok(None) => r.error(
             Some("project.ron".into()),
             "no project.ron here — this is not a project directory",
@@ -158,12 +192,13 @@ pub(crate) fn examine(root: &Path) -> Report {
         let where_ = rel(root, path);
         if name.ends_with(".vfx.ron") {
             r.effects += 1;
-            if let Err(e) = floptle_scene::load_vfx_effect(path) {
-                r.error(Some(where_), format!("{e}"));
+            match floptle_scene::load_vfx_effect(path) {
+                Ok(doc) => check_effect(root, &doc, &where_, &mut r),
+                Err(e) => r.error(Some(where_), format!("{e}")),
             }
         } else if name.ends_with(".prefab.ron") {
             r.prefabs += 1;
-            check_prefab(path, &where_, &mut r);
+            check_prefab(root, path, &where_, &mut r);
         } else if name.ends_with(".ron") && in_dir(root, path, "scenes") {
             r.scenes += 1;
             check_scene(root, path, &where_, &mut r);
@@ -180,9 +215,43 @@ fn in_dir(root: &Path, path: &Path, dir: &str) -> bool {
     path.strip_prefix(root.join(dir)).is_ok()
 }
 
+/// **What an effect draws with.** Parsing one only proved it was a well-formed
+/// effect; a track whose billboard texture, instanced mesh or trail texture is
+/// missing still parses, still emits, and draws as untextured quads — which
+/// reads on screen as "the effect is wrong" rather than "a file is gone".
+fn check_effect(root: &Path, doc: &floptle_scene::VfxEffectDoc, where_: &str, r: &mut Report) {
+    for t in &doc.tracks {
+        let who = if t.name.is_empty() { "an unnamed track" } else { &t.name };
+        let named: [(&str, Option<&str>); 3] = [
+            (
+                "texture",
+                match &t.render {
+                    floptle_scene::VfxRenderDoc::Billboard { texture }
+                    | floptle_scene::VfxRenderDoc::Beam { texture } => texture.as_deref(),
+                    floptle_scene::VfxRenderDoc::Mesh { .. } => None,
+                },
+            ),
+            (
+                "model",
+                match &t.render {
+                    floptle_scene::VfxRenderDoc::Mesh { asset_path } => Some(asset_path.as_str()),
+                    _ => None,
+                },
+            ),
+            ("trail texture", t.trail.as_ref().and_then(|tr| tr.texture.as_deref())),
+        ];
+        for (what, path) in named {
+            let Some(path) = path.filter(|p| !p.is_empty()) else { continue };
+            if !exists(root, path) {
+                r.error(Some(where_.into()), format!("{who}: no {what} at {path}"));
+            }
+        }
+    }
+}
+
 /// A prefab is the flat node list the clipboard writes, and it may carry the
 /// clipboard's own tag line.
-fn check_prefab(path: &Path, where_: &str, r: &mut Report) {
+fn check_prefab(root: &Path, path: &Path, where_: &str, r: &mut Report) {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => return r.error(Some(where_.into()), format!("{e}")),
@@ -201,6 +270,10 @@ fn check_prefab(path: &Path, where_: &str, r: &mut Report) {
                     format!("parent index {i} is past the end of a {}-node prefab", docs.len()),
                 );
             }
+            for node in &docs {
+                check_node_refs(root, node, where_, r);
+            }
+
         }
         Err(e) => r.error(Some(where_.into()), format!("not a prefab: {e}")),
     }
@@ -221,22 +294,32 @@ fn check_scene(root: &Path, path: &Path, where_: &str, r: &mut Report) {
         r.warn(Some(where_.into()), line);
     }
     for node in &doc.nodes {
-        let who = if node.name.is_empty() { "an unnamed node" } else { &node.name };
-        if let Some(m) = &node.material {
-            check_texture(root, m, who, where_, r);
-        }
-        for m in node.object_materials.values() {
-            check_texture(root, m, who, where_, r);
-        }
-        if let floptle_scene::MatterDoc::Mesh { asset_path } = &node.matter
-            && !asset_path.is_empty()
-            && !exists(root, asset_path)
-        {
-            r.error(Some(where_.into()), format!("{who}: no model at {asset_path}"));
-        }
-        for s in &node.scripts {
-            check_script(root, &s.kind, who, where_, r);
-        }
+        check_node_refs(root, node, where_, r);
+    }
+}
+
+/// Everything one node names: its materials, its model, its scripts.
+///
+/// Shared with the prefab pass. A prefab is nodes — the same nodes, written by
+/// the same clipboard — so a prefab whose material points at a deleted texture
+/// is the same defect as a scene's, and it was going unreported because only
+/// the parent indices were being read.
+fn check_node_refs(root: &Path, node: &floptle_scene::NodeDoc, where_: &str, r: &mut Report) {
+    let who = if node.name.is_empty() { "an unnamed node" } else { &node.name };
+    if let Some(m) = &node.material {
+        check_texture(root, m, who, where_, r);
+    }
+    for m in node.object_materials.values() {
+        check_texture(root, m, who, where_, r);
+    }
+    if let floptle_scene::MatterDoc::Mesh { asset_path } = &node.matter
+        && !asset_path.is_empty()
+        && !exists(root, asset_path)
+    {
+        r.error(Some(where_.into()), format!("{who}: no model at {asset_path}"));
+    }
+    for s in &node.scripts {
+        check_script(root, &s.kind, who, where_, r);
     }
 }
 
@@ -252,6 +335,13 @@ fn check_material_file(root: &Path, path: &Path, where_: &str, r: &mut Report) {
     }
 }
 
+/// **Every file a material names**, not just its colour map.
+///
+/// This checked `texture` alone, which meant a surface map pointing at nothing
+/// passed — and a missing normal map is exactly the reference a person cannot
+/// spot by reading the `.ron`, because the material still loads and the surface
+/// still draws, just flat. The same went for a `stage surface` shader and the
+/// textures it binds by name.
 fn check_texture(
     root: &Path,
     m: &floptle_scene::MaterialDoc,
@@ -259,9 +349,29 @@ fn check_texture(
     where_: &str,
     r: &mut Report,
 ) {
-    let Some(tex) = m.texture.as_deref().filter(|t| !t.is_empty()) else { return };
-    if !exists(root, tex) {
-        r.error(Some(where_.into()), format!("{who}: no texture at {tex}"));
+    let named = [
+        ("texture", m.texture.as_deref()),
+        ("normal map", m.normal_map.as_deref()),
+        ("roughness map", m.roughness_map.as_deref()),
+        ("metallic map", m.metallic_map.as_deref()),
+        ("ambient occlusion map", m.ao_map.as_deref()),
+    ];
+    for (what, path) in named {
+        let Some(path) = path.filter(|t| !t.is_empty()) else { continue };
+        if !exists(root, path) {
+            r.error(Some(where_.into()), format!("{who}: no {what} at {path}"));
+        }
+    }
+    // A shader's own textures, bound by the name the shader declares them under.
+    for (slot, path) in &m.shader_textures {
+        if !path.is_empty() && !exists(root, path) {
+            r.error(Some(where_.into()), format!("{who}: no texture at {path} for `{slot}`"));
+        }
+    }
+    if let Some(sh) = m.shader.as_deref().filter(|s| !s.is_empty())
+        && !exists(root, sh)
+    {
+        r.error(Some(where_.into()), format!("{who}: no shader at {sh}"));
     }
 }
 
@@ -392,6 +502,84 @@ mod tests {
         let r = examine(&d);
         assert_eq!(r.errors(), 0, "a clean project reported an error");
         assert_eq!(r.scenes, 1, "the scene was not examined");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **Everything a material names, not just its colour map.**
+    ///
+    /// `texture` was checked and the four surface maps were not, so a normal map
+    /// pointing at a deleted file passed — and that is the reference nobody
+    /// spots by reading the `.ron`, because the material still loads and the
+    /// surface still draws, only flat.
+    #[test]
+    fn a_missing_surface_map_or_shader_texture_is_an_error() {
+        let d = temp("maps");
+        std::fs::write(
+            d.join("scenes/first.ron"),
+            scene(
+                "(name: \"Hero\", material: Some((\
+                   normal_map: Some(\"textures/gone-n.png\"), \
+                   roughness_map: Some(\"textures/gone-r.png\"), \
+                   metallic_map: Some(\"textures/gone-m.png\"), \
+                   ao_map: Some(\"textures/gone-ao.png\"), \
+                   shader: Some(\"shaders/gone.flsl\"), \
+                   shader_textures: {\"noise\": \"textures/gone-x.png\"})))",
+            ),
+        )
+        .unwrap();
+        let r = examine(&d);
+        assert_eq!(r.errors(), 6, "not every reference was checked: {:?}", r.findings);
+        for want in ["gone-n.png", "gone-r.png", "gone-m.png", "gone-ao.png", "gone.flsl", "gone-x.png"] {
+            assert!(
+                r.findings.iter().any(|f| f.message.contains(want)),
+                "{want} went unreported"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **A prefab is nodes.** Only its parent indices were being read, so a
+    /// prefab whose material points at a deleted texture checked clean — and a
+    /// prefab is the thing a project spawns most copies of.
+    #[test]
+    fn a_prefab_is_checked_the_way_a_scene_is() {
+        let d = temp("prefab");
+        std::fs::write(
+            d.join("scenes/Thing.prefab.ron"),
+            "//floptle-nodes-v1\n[(name: \"Hero\", scripts: [(kind: \"nowhere\")])]",
+        )
+        .unwrap();
+        let r = examine(&d);
+        assert_eq!(r.prefabs, 1, "the prefab was not examined");
+        assert_eq!(r.errors(), 1, "a prefab's own references went unchecked: {:?}", r.findings);
+        assert!(r.findings[0].message.contains("nowhere"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **The scene the game starts in.** Nothing else in a project points at it,
+    /// so a rename leaves a project that checks clean and opens on nothing.
+    #[test]
+    fn an_entry_scene_that_is_not_there_is_an_error() {
+        let d = temp("entry");
+        std::fs::write(d.join("scenes/first.ron"), scene("")).unwrap();
+        std::fs::write(
+            d.join("project.ron"),
+            "(title: Some(\"t\"), entry_scene: Some(\"scenes/renamed.ron\"))",
+        )
+        .unwrap();
+        let r = examine(&d);
+        assert_eq!(r.errors(), 1, "{:?}", r.findings);
+        assert!(r.findings[0].message.contains("renamed"));
+
+        // …and naming the scene that IS there passes, by stem as well as by path.
+        for spelling in ["scenes/first.ron", "first"] {
+            std::fs::write(
+                d.join("project.ron"),
+                format!("(title: Some(\"t\"), entry_scene: Some(\"{spelling}\"))"),
+            )
+            .unwrap();
+            assert_eq!(examine(&d).errors(), 0, "entry_scene {spelling:?} was rejected");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

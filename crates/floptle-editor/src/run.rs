@@ -82,11 +82,11 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool) -> i
     };
     ed.open_project(root.to_path_buf());
     if let Some(s) = scene {
-        let Some(path) = resolve_scene(root, s) else {
+        let Some(path) = crate::inspect::resolve_scene(root, s) else {
             eprintln!("no scene called {s} under {}", root.join("scenes").display());
             return 1;
         };
-        ed.open_scene_file(&path);
+        ed.open_scene_file(&path.to_string_lossy());
     }
 
     // **Take the open phase out, do not count it.** Everything the open said —
@@ -103,9 +103,16 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool) -> i
         eprintln!("the project did not enter play mode");
         return 1;
     }
-    let steps = span.steps();
-    for _ in 0..steps {
+    let asked = span.steps();
+    // **Counted, not assumed.** The report used to publish the number that was
+    // asked for, which is an echo of the command line rather than an
+    // observation — and the loop can end early, so the two are not the same
+    // number. A field a caller reads to know how far the run got has to have
+    // been measured by the thing that got there.
+    let mut steps = 0u32;
+    for _ in 0..asked {
         ed.play_step(DT, true);
+        steps += 1;
         // The same drain the editor's frame does, for the same reason it does it
         // per frame rather than at the end: the host holds every line until
         // somebody asks, and a long run of a script that logs each step would
@@ -133,19 +140,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool) -> i
     // …and once more, for anything the teardown itself said.
     ed.drain_script_logs();
 
-    report(&opened, &ed.console, steps, json)
-}
-
-/// A scene named by path, by project-relative path, or by name. Shared with
-/// `shot`, so `--scene arena` means the same thing to both.
-pub(crate) fn resolve_scene(root: &Path, s: &str) -> Option<String> {
-    for candidate in [std::path::PathBuf::from(s), root.join(s)] {
-        if candidate.is_file() {
-            return Some(candidate.to_string_lossy().into_owned());
-        }
-    }
-    let named = root.join("scenes").join(format!("{s}.ron"));
-    named.is_file().then(|| named.to_string_lossy().into_owned())
+    report(&opened, &ed.console, steps, asked, json)
 }
 
 fn level_str(l: floptle_script::LogLevel) -> &'static str {
@@ -163,6 +158,7 @@ fn report(
     opened: &[crate::console::ConsoleEntry],
     console: &ConsoleState,
     steps: u32,
+    asked: u32,
     json: bool,
 ) -> i32 {
     use floptle_script::LogLevel;
@@ -192,7 +188,11 @@ fn report(
             .collect();
         let doc = serde_json::json!({
             "ok": errors == 0,
+            // What actually ran, and what was asked for. They differ when the
+            // session ended early, and a caller reading only the first number
+            // would think it got the run it requested.
             "steps": steps,
+            "requested": asked,
             "seconds": steps as f32 * DT,
             "errors": errors,
             "warnings": warnings,
@@ -224,7 +224,13 @@ fn report(
             None => println!("{}: {phase}: {}{repeat}", level_str(e.level), e.msg),
         }
     }
-    let ran = format!("ran {steps} step(s), {:.2}s of simulated time", steps as f32 * DT);
+    let mut ran = format!("ran {steps} step(s), {:.2}s of simulated time", steps as f32 * DT);
+    if steps < asked {
+        // The session ended before the span did. Said out loud, because a run
+        // that stopped early and a run that finished report the same way
+        // otherwise, and only one of them answered the question that was asked.
+        ran.push_str(&format!(" — the session ended after {steps} of {asked}"));
+    }
     match (errors, warnings) {
         (0, 0) => println!("{ran} — nothing raised"),
         (0, w) => println!("{ran} — {w} warning(s)"),
