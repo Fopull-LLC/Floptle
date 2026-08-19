@@ -110,8 +110,21 @@ fn main_path() -> &'static str {
 /// The shared helpers are defined above the offscreen gather, so a plain
 /// `contains` would count `fn water_draw(` on the main path and report a call
 /// that is not there. Only occurrences that are not the `fn` item count.
+/// Is this name actually *called* in `hay`?
+///
+/// Comments are stripped first. A name that appears only in a `//` line is
+/// somebody explaining why the call is not there — and reading that as the call
+/// itself makes this test pass on exactly the code it exists to catch.
 fn calls(hay: &str, name: &str) -> bool {
-    hay.match_indices(name).any(|(i, _)| !hay[..i].trim_end().ends_with("fn"))
+    let code: String = hay
+        .lines()
+        .map(|l| match l.find("//") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    code.match_indices(name).any(|(i, _)| !code[..i].trim_end().ends_with("fn"))
 }
 
 #[test]
