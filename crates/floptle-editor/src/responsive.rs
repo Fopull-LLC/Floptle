@@ -204,7 +204,7 @@ pub(crate) fn fit_here_wrapping(ui: &mut Ui, want: f32) -> f32 {
     // unguarded break there would not move a control to the next line, it would
     // move every control after it into the wrong column. `main_wrap` is the one
     // question that separates "start a new line" from "start a new row".
-    if fit_here(ui, f32::INFINITY) < MIN_CONTROL {
+    if ui.layout().main_wrap && fit_here(ui, f32::INFINITY) < MIN_CONTROL {
         ui.end_row();
     }
     fit_here(ui, want)
