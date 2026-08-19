@@ -46,6 +46,7 @@ floptle-account = { path = "../floptle-account" }
 # reload can throw the whole state away.
 mlua = { version = "0.10", features = ["luajit", "vendored", "serialize"] }
 serde_json = { workspace = true } # the registry catalogue + an extension's json.*
+clap = { workspace = true }       # the command line — ADR-0027 (builder, not derive)
 ureq = { workspace = true }       # edit-time http.* for extensions that declared Network
 # Decoding package thumbnails for the 📦 catalogue grid (crates/.../pkg_thumbs.rs).
 image = { workspace = true }

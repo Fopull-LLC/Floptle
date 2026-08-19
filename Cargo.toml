@@ -79,6 +79,14 @@ naga = { version = "29", features = ["wgsl-in"] }        # .flsl → WGSL valida
 gilrs = "0.11.2"                                         # gamepads: buttons/sticks/hot-plug — ADR-0024
 serde_json = "1"                                         # JSON for the Lua http/json API + the Hub
 ureq = { version = "2", features = ["json", "tls"] }     # blocking HTTP on worker threads — floptle-script's http.*
+# The command line — ADR-0027. BUILDER api only, never the derive: the verb table
+# in `cli.rs` is the source of truth and carries what a derive has nowhere to put
+# (needs-GPU, writes-project, exit codes, output schema). `suggestions` is the
+# feature that earns the dependency — a caller that cannot see the source gets
+# "did you mean --platform?" instead of a guess.
+clap = { version = "4.5", default-features = false, features = [
+    "std", "help", "usage", "error-context", "suggestions", "color", "wrap_help", "string",
+] }
 
 # Promoted in later phases:
 # mlua        = "*"    # Lua host (LuaJIT) — Phase 5, ADR-0003

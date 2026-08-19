@@ -41,6 +41,7 @@ mod aseprite;
 mod assets;
 mod audio;
 mod assets_ui;
+mod cli;
 mod console;
 mod curve_edit;
 mod dock;
@@ -1189,6 +1190,18 @@ fn main() {
     // HEADLESS (no window or GPU) and exit; a positional path opens that project instead
     // of the default `assets/`.
     let args: Vec<String> = std::env::args().collect();
+    // **Verbs first, flags after** (ADR-0027). `cli::dispatch` claims the
+    // command line only when the first argument is a verb; everything else —
+    // a bare path, every flag the Hub and CI have always passed — falls through
+    // to the loop below, which is the code that has always served them.
+    let mut verb_launch: Option<(Option<PathBuf>, bool, bool)> = None;
+    match cli::dispatch(&args) {
+        cli::Outcome::Exit(code) => std::process::exit(code),
+        cli::Outcome::Launch { project, player, bake_gi } => {
+            verb_launch = Some((project, player, bake_gi));
+        }
+        cli::Outcome::Legacy => {}
+    }
     // The version to stamp into a scaffolded/migrated project. Defaults to this build's
     // distribution version, but the Hub passes `--engine-version <v>` to pin the EXACT
     // install it chose (the authority is the Hub's `versions/<v>/` dir name, not the
@@ -1220,7 +1233,9 @@ fn main() {
     }
     let mut project_path: Option<PathBuf> = None;
     let mut player_mode = false;
-    let mut i = 1;
+    // A verb has already said what to launch, so skip the flag loop rather than
+    // let it re-read a command line it does not own.
+    let mut i = if verb_launch.is_some() { args.len() } else { 1 };
     while i < args.len() {
         match args[i].as_str() {
             "--version" | "-V" => {
@@ -1228,10 +1243,7 @@ fn main() {
                 return;
             }
             "--help" | "-h" => {
-                println!(
-                    "{} editor {}\n\nUSAGE:\n  floptle-editor [PROJECT_DIR]              open a project (default: assets/)\n  floptle-editor --play [PROJECT_DIR]      run the project as a GAME (no editor UI; F1 = multiplayer menu)\n  floptle-editor --new <DIR>               scaffold a new project and exit\n  floptle-editor --template <NAME>         which starter project --new scaffolds\n                                           (with --new; see --list-templates)\n  floptle-editor --list-templates          print the starter templates and exit\n  floptle-editor --export <PROJ> <OUT> <PLATFORM> [TITLE]  stamp a build and exit\n                                           PLATFORM: host | windows-x86_64 | linux-x86_64 | macos-aarch64 | macos-x86_64\n  floptle-editor --bake-gi [PROJECT_DIR]   bake the open scene's light probes and exit\n  floptle-editor --migrate <DIR>           migrate a project's assets to this version and exit\n  floptle-editor --extract-clips <DIR> <MODEL>  re-bake a model's embedded glTF clips and exit\n  floptle-editor --engine-version <V>      version to stamp for --new/--migrate (Hub-driven)\n  floptle-editor --version                 print the engine version and exit\n\nA floptle-game.ron manifest next to the binary (File \u{2192} Export Game\u{2026}) implies --play.",
-                    floptle_core::ENGINE_NAME, distribution_version()
-                );
+                cli::print_help_and_flags();
                 return;
             }
             // Consumed by the pre-scan above; skip the flag and its value.
@@ -1252,11 +1264,7 @@ fn main() {
                 continue;
             }
             "--list-templates" => {
-                println!("Starter projects for --new <dir> --template <name>:\n");
-                println!("  {:<12}  a blank project (the default)", templates::EMPTY);
-                for t in templates::TEMPLATES {
-                    println!("  {:<12}  {}", t.name, t.blurb);
-                }
+                print_templates();
                 return;
             }
             "--migrate" => {
@@ -1277,20 +1285,7 @@ fn main() {
                     eprintln!("--extract-clips needs <project_dir> <model_path>");
                     std::process::exit(2);
                 };
-                let mut system = anim::AnimSystem::default();
-                match anim::extract_clips(&mut system, Path::new(proj), model) {
-                    Ok(keys) => {
-                        for k in &keys {
-                            println!("extracted {k}");
-                        }
-                        println!("{} clip(s) written", keys.len());
-                        std::process::exit(0);
-                    }
-                    Err(e) => {
-                        eprintln!("extract-clips failed: {e}");
-                        std::process::exit(1);
-                    }
-                }
+                std::process::exit(extract_clips_cmd(Path::new(proj), model));
             }
             // Headless build: no window, no GPU. Scriptable, and the path CI
             // uses to prove exporting for another platform actually works.
@@ -1332,6 +1327,16 @@ fn main() {
         i += 1;
     }
 
+    // Whether to bake GI on load: the `--bake-gi` flag, or the verb that
+    // replaced it. Read here rather than at the Editor literal so a verb and a
+    // flag reach the same field by the same route.
+    let mut bake_gi_on_load = args.iter().any(|a| a == "--bake-gi");
+    if let Some((project, player, bake)) = verb_launch {
+        project_path = project;
+        player_mode = player;
+        bake_gi_on_load = bake;
+    }
+
     // An exported build: a `floptle-game.ron` manifest next to the binary makes
     // this process a GAME, not an editor — the project rides alongside it.
     let mut game_title = String::new();
@@ -1360,7 +1365,7 @@ fn main() {
     let mut editor = Editor {
         show_gizmos: !player_mode,
         player_mode,
-        auto_bake_gi: args.iter().any(|a| a == "--bake-gi").then_some(false),
+        auto_bake_gi: bake_gi_on_load.then_some(false),
         game_title,
         crash_prompt: (!player_mode).then(report::take_last_crash).flatten(),
         // No Console tab in a build, so warnings and errors go to stderr
@@ -1372,6 +1377,40 @@ fn main() {
         editor.project_root = p;
     }
     event_loop.run_app(&mut editor).expect("run editor");
+}
+
+/// The starter projects, printed once for both `floptle templates` and the
+/// `--list-templates` flag it replaces — one list, so the two cannot disagree
+/// about what is on offer.
+fn print_templates() {
+    println!("Starter projects for `floptle new <dir> --template <name>`:\n");
+    println!("  {:<12}  a blank project (the default)", templates::EMPTY);
+    for t in templates::TEMPLATES {
+        println!("  {:<12}  {}", t.name, t.blurb);
+    }
+}
+
+/// Re-bake a model's embedded glTF clips into `<project>/animations/<Stem>/`.
+/// Headless. Returns the process exit code.
+///
+/// One function for `floptle bake clips` and the `--extract-clips` flag it
+/// replaces: the flag is a shipped interface and has to keep behaving exactly
+/// as it did, which is only guaranteed while there is one body to behave.
+fn extract_clips_cmd(project: &Path, model: &str) -> i32 {
+    let mut system = anim::AnimSystem::default();
+    match anim::extract_clips(&mut system, project, model) {
+        Ok(keys) => {
+            for k in &keys {
+                println!("extracted {k}");
+            }
+            println!("{} clip(s) written", keys.len());
+            0
+        }
+        Err(e) => {
+            eprintln!("extract-clips failed: {e}");
+            1
+        }
+    }
 }
 
 /// Headless `--new <dir>`: scaffold a project (dirs + default materials/scripts, a starter
