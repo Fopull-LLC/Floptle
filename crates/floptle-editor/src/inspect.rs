@@ -325,14 +325,15 @@ fn report_selection(
             .collect();
         let doc = serde_json::json!({ "query": typed, "matched": nodes.len(), "nodes": nodes });
         println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
-        // Nothing found is not an error: "is there a node called X" is a
-        // question, and "no" is an answer. `matched` says so.
-        return 0;
+        // Nothing found exits 1, the way `grep` answers — "is there a node
+        // called X" is worth being able to ask from a script, and `matched`
+        // still says so for a caller reading the document.
+        return i32::from(nodes.is_empty());
     }
 
     if hits.is_empty() {
         println!("nothing matched {typed}");
-        return 0;
+        return 1;
     }
     for (l, i, n) in &hits {
         println!("{}:{}", l.file, node_line(l, *i, n).trim_start());

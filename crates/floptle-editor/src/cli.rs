@@ -331,6 +331,35 @@ pub(crate) const VERBS: &[Verb] = &[
         legacy: &["--bake-gi"],
     },
     Verb {
+        name: "api",
+        summary: "search what a script can call, and exit",
+        detail: "Reads the same table the editor's Docs tab, its autocomplete and its hover \
+                 docs read, and that `docs/lua-api.md` is generated from — so the answer here \
+                 is the answer the tool gives.\n\n\
+                 With no query it prints every name there is, grouped. With one it prints the \
+                 matches best-first: an exact name, then the part after the last dot or colon, \
+                 then a prefix, then anything containing it, then a match in the description.",
+        args: &[
+            Arg {
+                name: "QUERY",
+                value: Value::Text,
+                required: false,
+                help: "a name, part of one, or a word from its description",
+            },
+            Arg {
+                name: "--json",
+                value: Value::Flag,
+                required: false,
+                help: "answer as JSON",
+            },
+        ],
+        needs_gpu: false,
+        writes_project: false,
+        exits: &[(1, "nothing matched — the way `grep` answers")],
+        output: "the matching entries; with --json an object with `matched` and `entries`",
+        legacy: &[],
+    },
+    Verb {
         name: "inspect",
         summary: "print what is in a project, or in one scene, and exit",
         detail: "With no options it describes the project: what it is called, what version it \
@@ -370,7 +399,11 @@ pub(crate) const VERBS: &[Verb] = &[
         ],
         needs_gpu: false,
         writes_project: false,
-        exits: &[(1, "the project or the named scene could not be read")],
+        exits: &[(
+            1,
+            "the project or the named scene could not be read, or --select matched nothing \
+             (the way `grep` answers)",
+        )],
         output: "a description on stdout; with --json an object whose shape depends on \
                  whether --scene or --select was given",
         legacy: &[],
@@ -661,6 +694,10 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             }
             _ => Outcome::Exit(2),
         },
+        Some(("api", a)) => Outcome::Exit(crate::ide::cli_reference(
+            text(a, "QUERY").as_deref(),
+            a.get_flag("json"),
+        )),
         Some(("inspect", a)) => {
             let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
             Outcome::Exit(crate::inspect::run(

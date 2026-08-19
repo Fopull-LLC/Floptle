@@ -3240,6 +3240,99 @@ fn api_category(label: &str) -> &'static str {
     }
 }
 
+/// `floptle api [QUERY]` — **what can a script call?**
+///
+/// Reads [`LUA_API`], ranks with [`api_rank`] and groups with [`api_category`]:
+/// the same table, the same ranking and the same grouping the editor's **Docs**
+/// tab and its autocomplete use, and that `docs/lua-api.md` is generated from.
+/// So the answer a terminal gets is the answer the tool gives, and neither can
+/// go stale against the other — which is the whole reason this reads a table
+/// rather than the 3,300-line Markdown page the table produces.
+///
+/// Nothing matched exits 1, the way `grep` does: "is `node:setSprite` a real
+/// call?" is a question worth being able to ask from a script.
+pub(crate) fn cli_reference(query: Option<&str>, json: bool) -> i32 {
+    let Some(q) = query.map(|q| q.trim().to_ascii_lowercase()).filter(|q| !q.is_empty()) else {
+        return reference_index(json);
+    };
+
+    let mut hits: Vec<(u8, &ApiEntry)> =
+        LUA_API.iter().filter_map(|e| api_rank(e, &q).map(|r| (r, e))).collect();
+    // Best first, then alphabetical inside a rank so two runs agree.
+    hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.label.cmp(b.1.label)));
+
+    if json {
+        let doc = serde_json::json!({
+            "query": q,
+            "matched": hits.len(),
+            "entries": hits.iter().map(|(_, e)| entry_json(e)).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        return i32::from(hits.is_empty());
+    }
+
+    if hits.is_empty() {
+        println!("nothing in the API matches {q}");
+        return 1;
+    }
+    for (_, e) in &hits {
+        println!("{}", e.label);
+        println!("  {}", e.doc);
+        if let Some(ex) = api_example(e.label) {
+            for line in ex.lines() {
+                println!("    {line}");
+            }
+        }
+        println!("  ({})", api_category(e.label));
+        println!();
+    }
+    println!("{} entr(ies) matched {q}", hits.len());
+    0
+}
+
+/// One entry, as `--json` publishes it.
+fn entry_json(e: &ApiEntry) -> serde_json::Value {
+    let mut o = serde_json::json!({
+        "name": e.label,
+        "insert": e.insert,
+        "doc": e.doc,
+        "group": api_category(e.label),
+    });
+    if let Some(ex) = api_example(e.label) {
+        o["example"] = serde_json::json!(ex);
+    }
+    o
+}
+
+/// `floptle api` with no query: every name there is, grouped.
+fn reference_index(json: bool) -> i32 {
+    if json {
+        let doc = serde_json::json!({
+            "count": LUA_API.len(),
+            "entries": LUA_API.iter().map(entry_json).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        return 0;
+    }
+    for cat in API_CATEGORIES {
+        let names: Vec<&str> = LUA_API
+            .iter()
+            .filter(|e| api_category(e.label) == *cat)
+            .map(|e| e.label)
+            .collect();
+        if names.is_empty() {
+            continue;
+        }
+        println!("{cat}");
+        for chunk in names.chunks(4) {
+            println!("  {}", chunk.join("  "));
+        }
+        println!();
+    }
+    println!("{} name(s). `floptle api <query>` for what one of them does.", LUA_API.len());
+    0
+}
+
 /// Render the whole API reference as Markdown, for `docs/lua-api.md`.
 ///
 /// Same table, same grouping and same examples as the editor's Docs tab, so
@@ -5338,6 +5431,35 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!doc_only.is_empty(), "a word that only appears in prose must still match");
     }
+
+    /// **The ranking `floptle api` sorts by, tier by tier.**
+    ///
+    /// Asserted against constructed entries rather than against the live table,
+    /// because the table cannot tell the tiers apart: `node:setSprite` sorts
+    /// ahead of `node:setSpriteBatch` alphabetically whether or not the
+    /// exact-name tier exists, so an end-to-end check here passes with the
+    /// ranking removed. It was written that way first and proved nothing.
+    #[test]
+    fn the_command_line_reference_ranks_by_tier() {
+        let e = |label: &'static str, doc: &'static str| ApiEntry { label, insert: "", doc };
+        let q = "setsprite";
+        assert_eq!(api_rank(&e("setSprite", ""), q), Some(0), "an exact name is first");
+        assert_eq!(
+            api_rank(&e("node:setSprite", ""), q),
+            Some(1),
+            "then the leaf after the last dot or colon — what somebody types when they do \
+             not remember which table it hangs off"
+        );
+        assert_eq!(api_rank(&e("setSpriteBatch", ""), q), Some(2), "then a prefix");
+        assert_eq!(api_rank(&e("resetSpriteThing", ""), q), Some(3), "then anything containing it");
+        assert_eq!(
+            api_rank(&e("unrelated", "makes a setSprite call"), q),
+            Some(4),
+            "then a match in the description, which is how you find a name you never knew"
+        );
+        assert_eq!(api_rank(&e("unrelated", "nothing to do with it"), q), None);
+    }
+
 
     /// `docs/lua-api.md` is generated from [`LUA_API`] — this keeps it current.
     ///
