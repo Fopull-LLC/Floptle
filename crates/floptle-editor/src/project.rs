@@ -1353,6 +1353,10 @@ impl Editor {
     /// (the old path printed to stderr and callers cleared `scene_dirty`
     /// unconditionally, which could silently lose work).
     pub(crate) fn save_scene(&mut self) -> bool {
+        // Noted for `floptle exec`, which warns about a script that changed the
+        // world and never wrote it. Set here rather than at the call site so
+        // every route to a save counts, including the extension command.
+        self.saved_this_session = true;
         // NEVER save during Play: the world holds simulation state (moved
         // bodies, script spawns), and a mid-play `scene.load(...)` may have
         // swapped in ANOTHER scene entirely — writing that over the edited

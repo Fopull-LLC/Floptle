@@ -600,6 +600,56 @@ impl ExtHost {
         self.drain_pending();
     }
 
+    /// Run one standalone script through the extension environment — the
+    /// `floptle exec` verb.
+    ///
+    /// It goes through `api::build_env` and the same `ExtCmd` queue a package
+    /// uses, so a script run from a terminal can do exactly what a package can
+    /// do and nothing else. What it is NOT is a package: it has no manifest, no
+    /// folder, no prefs and no hooks, and it runs once instead of registering
+    /// callbacks for later.
+    ///
+    /// **It is granted every permission**, and that is deliberate. The
+    /// permission model exists because an installed package is somebody else's
+    /// code arriving with a project; a script the user named on their own
+    /// command line is the user's own code, run on purpose, the way `python
+    /// script.py` is. The trust boundary here is having typed the command, not
+    /// what a manifest claims — and a manifest is exactly what this has none of.
+    pub(crate) fn run_file(&mut self, path: &Path, project_root: &Path) -> Result<(), String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        self.dynamic = self
+            .lua
+            .create_table()
+            .and_then(|t| self.lua.create_registry_value(t))
+            .ok();
+        let idx = self.packages.len();
+        self.packages.push(PkgState {
+            id: "com.floptle.exec".into(),
+            name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            root: project_root.to_path_buf(),
+            permissions: vec![
+                floptle_package::Permission::Network,
+                floptle_package::Permission::Files,
+                floptle_package::Permission::Browser,
+            ],
+            failed: None,
+        });
+        self.shared.prefs.borrow_mut().open("com.floptle.exec", project_root);
+        let dynamic = self.dynamic_table();
+        let env = api::build_env(&self.lua, &self.shared, idx, self.packages.last().unwrap(), dynamic)
+            .map_err(|e| format!("could not build the script environment: {e}"))?;
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let res = self
+            .lua
+            .load(&text)
+            .set_name(&name)
+            .set_environment(env)
+            .exec();
+        self.drain_pending();
+        res.map_err(|e| e.to_string())
+    }
+
     /// Drop every package and the Lua state with them.
     pub(crate) fn teardown(&mut self) {
         if !self.hooks.is_empty() {
@@ -1242,6 +1292,40 @@ impl ExtHost {
 
     pub(crate) fn take_log(&self) -> Vec<ExtLog> {
         self.shared.log.borrow_mut().drain(..).collect()
+    }
+
+    /// Drop the queued commands that mean nothing without a window, and name
+    /// them.
+    ///
+    /// For `floptle exec`. A script can ask for a panel, a dialog, a camera
+    /// move or the clipboard, and in a terminal there is nothing to ask. Left
+    /// in the queue they would be "applied" to editor state no window will ever
+    /// show — which is indistinguishable, from the script's side, from having
+    /// worked. Refusing them out loud is the same rule the Console's stderr
+    /// mirror follows: a correction nobody is told about is one they cannot act
+    /// on.
+    ///
+    /// Returns one name per refusal, in the order the script asked.
+    pub(crate) fn refuse_windowed(&mut self) -> Vec<&'static str> {
+        let mut refused = Vec::new();
+        self.shared.cmds.borrow_mut().retain(|c| {
+            let name = match c {
+                ExtCmd::WindowOpen(..) | ExtCmd::WindowFocus(..) => "ed.window",
+                ExtCmd::OverlayOpen(..) => "ed.overlay",
+                ExtCmd::TabOpen(..) => "ed.tab",
+                ExtCmd::Message { .. } => "ed.message",
+                ExtCmd::LookAt { .. } => "ed.lookAt",
+                ExtCmd::OpenUrl(_) => "ed.openUrl",
+                // `Copy` is deliberately NOT here: the applier already refuses
+                // it with a better line than this one could ("there is no
+                // clipboard to write to here"). Replacing a specific message
+                // with a generic one is not coverage.
+                _ => return true,
+            };
+            refused.push(name);
+            false
+        });
+        refused
     }
 
     pub(crate) fn take_cmds(&self) -> Vec<ExtCmd> {

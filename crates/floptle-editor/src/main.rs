@@ -47,6 +47,7 @@ mod cli;
 mod console;
 mod curve_edit;
 mod dock;
+mod exec;
 mod export;
 mod ext;
 mod fonts;
@@ -2285,6 +2286,9 @@ struct Editor {
     /// authored in single frames, and "is this jab 4 frames of startup or 5" cannot be
     /// answered by watching it at full speed.
     tick_steps: u32,
+    /// Has `save_scene` run since this editor was built? Read by `floptle exec`
+    /// to notice a script that changed the world and never wrote it.
+    saved_this_session: bool,
     /// Said once, if a scene render ever finds its device incomplete. See the
     /// `else` at the end of `render_world_into`'s six-way bind.
     warned_incomplete_device: bool,

@@ -176,3 +176,79 @@ fn a_raising_script_is_reported_and_the_document_still_parses() {
 
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// **`exec` changes the project, and never loses the change quietly.**
+///
+/// The editor leaves a scene dirty and a person presses Ctrl+S; here the process
+/// exits, so a script that edits and forgets to save takes its work with it and
+/// reports "nothing raised". That is the worst shape a mutating tool can have,
+/// so the unsaved case is a warning naming the call that was missing — and the
+/// saved case has to actually land on disk, which only a second process can
+/// confirm.
+#[test]
+fn exec_writes_when_it_is_told_to_and_says_so_when_it_is_not() {
+    let d = temp("exec");
+    scaffold(&d);
+    let p = d.to_string_lossy().into_owned();
+    let script = d.join("rename.lua");
+
+    // 1. Edit and DON'T save.
+    std::fs::write(
+        &script,
+        "local id = scene.find(\"Player\")\nscene.setName(id, \"Hero\")\n",
+    )
+    .expect("write");
+    let doc = json_of(&["exec", &script.to_string_lossy(), &p, "--json"]);
+    assert_eq!(doc["ok"], true, "editing without saving is not an error: {doc}");
+    let log = doc["log"].as_array().expect("log");
+    assert!(
+        log.iter().any(|l| l["level"] == "warning"
+            && l["message"].as_str().is_some_and(|m| m.contains("saveScene"))),
+        "a change that was never written went unmentioned: {doc}"
+    );
+    // …and it really did not write.
+    assert_eq!(
+        json_of(&["inspect", &p, "--select", "Hero", "--json"])["matched"],
+        0,
+        "the scene was written by a script that never asked for it"
+    );
+
+    // 2. The same edit, saved.
+    std::fs::write(
+        &script,
+        "local id = scene.find(\"Player\")\nscene.setName(id, \"Hero\")\ned.saveScene()\n",
+    )
+    .expect("write");
+    let doc = json_of(&["exec", &script.to_string_lossy(), &p, "--json"]);
+    assert_eq!(doc["ok"], true, "{doc}");
+    assert_eq!(
+        json_of(&["inspect", &p, "--select", "Hero", "--json"])["matched"],
+        1,
+        "the rename did not survive the process that made it"
+    );
+
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A call that needs a window is refused by name, not quietly skipped. A script
+/// that thinks it asked a question and got no answer carries on as though the
+/// answer were no.
+#[test]
+fn exec_names_the_calls_a_terminal_cannot_serve() {
+    let d = temp("exec-win");
+    scaffold(&d);
+    let script = d.join("win.lua");
+    std::fs::write(&script, "ed.message(\"a\", \"b\")\ned.copy(\"x\")\n").expect("write");
+
+    let doc = json_of(&["exec", &script.to_string_lossy(), &d.to_string_lossy(), "--json"]);
+    let said: Vec<&str> =
+        doc["log"].as_array().expect("log").iter().filter_map(|l| l["message"].as_str()).collect();
+    for call in ["ed.message", "ed.copy"] {
+        assert!(
+            said.iter().any(|m| m.contains(call)),
+            "{call} did nothing and said nothing: {doc}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&d);
+}

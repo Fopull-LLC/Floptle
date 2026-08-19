@@ -331,6 +331,45 @@ pub(crate) const VERBS: &[Verb] = &[
         legacy: &["--bake-gi"],
     },
     Verb {
+        name: "exec",
+        summary: "run a Lua script against a project, and exit",
+        detail: "The editor's own extension API, headless: `scene.*` to read and write the \
+                 node graph, `ed.*` to ask the editor about itself, plus `mesh.*`, `nav.*`, \
+                 `json.*` and `http.*`. Everything a package can do, a script here can do — \
+                 `docs/editor-scripting.md` is the reference, and a test holds it against the \
+                 live bindings.\n\n\
+                 Calls that need a window — a panel, a dialog, a camera move, the clipboard — \
+                 are REFUSED with a line naming them, never dropped.\n\n\
+                 A script you named on your own command line is your own code, so it is \
+                 granted every permission a package would have to declare.",
+        args: &[
+            Arg {
+                name: "SCRIPT",
+                value: Value::Path,
+                required: true,
+                help: "the .lua file to run",
+            },
+            Arg {
+                name: "PROJECT",
+                value: Value::Path,
+                required: false,
+                help: "the project directory (default: assets/)",
+            },
+            Arg {
+                name: "--json",
+                value: Value::Flag,
+                required: false,
+                help: "answer as JSON",
+            },
+        ],
+        needs_gpu: false,
+        writes_project: true,
+        exits: &[(1, "the script raised, or something it did reported an error")],
+        output: "one line per log entry, then a summary; with --json an object with \
+                 `ok`, `errors`, `warnings`, `raised` and `log`",
+        legacy: &[],
+    },
+    Verb {
         name: "shot",
         summary: "render a scene to a PNG, and exit",
         detail: "Draws one frame through the editor's own offscreen path — the same one the \
@@ -806,6 +845,11 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             }
             _ => Outcome::Exit(2),
         },
+        Some(("exec", a)) => {
+            let script = path(a, "SCRIPT").expect("required");
+            let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
+            Outcome::Exit(crate::exec::run(&project, &script, a.get_flag("json")))
+        }
         Some(("shot", a)) => {
             let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
             let scene = text(a, "scene");
