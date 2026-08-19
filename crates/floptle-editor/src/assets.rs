@@ -239,10 +239,11 @@ pub(crate) fn reslice_materials(
     project_root: &Path,
     rel_path: &str,
     setting: TexSetting,
-) {
+) -> bool {
     let (sc, sr) = setting.sheet();
     let last = (sc * sr).saturating_sub(1);
     let mut wearing: Vec<floptle_core::Entity> = Vec::new();
+    let mut changed = false;
     for (e, m) in world.query_mut::<floptle_core::Material>() {
         let wears = m
             .texture
@@ -251,18 +252,23 @@ pub(crate) fn reslice_materials(
         if !wears {
             continue;
         }
+        let was = (m.sheet_cols, m.sheet_rows, m.cell);
         m.sheet_cols = sc;
         m.sheet_rows = sr;
         m.cell = m.cell.min(last);
+        changed |= was != (m.sheet_cols, m.sheet_rows, m.cell);
         wearing.push(e);
     }
     for e in wearing {
         if let Some(floptle_core::Matter::Sprite { cell, .. }) =
             world.get_mut::<floptle_core::Matter>(e)
         {
+            let was = *cell;
             *cell = (*cell).min(last);
+            changed |= was != *cell;
         }
     }
+    changed
 }
 
 /// Put EVERY texture's sheet grid onto every material that wears it.
@@ -275,11 +281,13 @@ pub(crate) fn reslice_materials(
 ///
 /// Cheap enough to run on load and nowhere near cheap enough to run per frame:
 /// it is a string normalisation per material.
+/// Returns whether anything actually moved — the caller uses that to say so,
+/// because a correction the person is not told about is one they cannot save.
 pub(crate) fn sync_sheet_grids(
     world: &mut floptle_core::World,
     settings: &std::collections::HashMap<String, TexSetting>,
     project_root: &Path,
-) {
+) -> bool {
     let stale: Vec<(String, TexSetting)> = world
         .query::<floptle_core::Material>()
         .filter_map(|(_, m)| m.texture.as_deref())
@@ -288,9 +296,11 @@ pub(crate) fn sync_sheet_grids(
         .into_iter()
         .filter_map(|rel| settings.get(&rel).map(|s| (rel, *s)))
         .collect();
+    let mut changed = false;
     for (rel, setting) in stale {
-        reslice_materials(world, project_root, &rel, setting);
+        changed |= reslice_materials(world, project_root, &rel, setting);
     }
+    changed
 }
 
 /// A texture's sampling settings, looked up by a path in EITHER form.

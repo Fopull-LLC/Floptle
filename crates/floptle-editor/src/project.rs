@@ -461,7 +461,7 @@ impl Editor {
         // script built — carries a sheet grid that disagrees with the project's
         // import settings, and that disagreement draws as a sprite showing its
         // whole sheet stretched across itself.
-        crate::assets::sync_sheet_grids(
+        let corrected = crate::assets::sync_sheet_grids(
             &mut self.world,
             &self.texture_settings,
             &self.project_root.clone(),
@@ -470,6 +470,20 @@ impl Editor {
         self.selected_asset = None;
         self.history = History::default();
         self.scene_dirty = false;
+        // …and if it DID correct something, say so and leave the scene dirty. A
+        // correction the person is not told about is one they cannot save, and
+        // an exported build ships the scene FILE — so a grid fixed only in
+        // memory is a grid the build does not get.
+        if corrected {
+            self.scene_dirty = true;
+            self.console.push(
+                floptle_script::LogLevel::Debug,
+                "some materials disagreed with their texture's spritesheet grid and were put \
+                 back in step — save the scene to keep it"
+                    .to_string(),
+                None,
+            );
+        }
         self.check_autosave(); // offer crash recovery if an autosave is newer
         println!("  opened scene: {}", p.display());
     }
