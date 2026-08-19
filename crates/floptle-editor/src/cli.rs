@@ -331,6 +331,34 @@ pub(crate) const VERBS: &[Verb] = &[
         legacy: &["--bake-gi"],
     },
     Verb {
+        name: "check",
+        summary: "report anything wrong with a project, and exit",
+        detail: "Loads every scene, prefab, effect and material, runs the engine's own wiring \
+                 checks, and reports every reference that does not resolve to a file. No window \
+                 and no GPU. A `.ron` file that parses is not a scene that works, and this is \
+                 the difference.",
+        args: &[
+            Arg {
+                name: "PROJECT",
+                value: Value::Path,
+                required: false,
+                help: "the project directory (default: assets/)",
+            },
+            Arg {
+                name: "--json",
+                value: Value::Flag,
+                required: false,
+                help: "answer as JSON",
+            },
+        ],
+        needs_gpu: false,
+        writes_project: false,
+        exits: &[(1, "something in the project is wrong")],
+        output: "one line per finding, then a count; with --json an object with \
+                 `ok`, `examined`, `errors`, `warnings` and `findings`",
+        legacy: &[],
+    },
+    Verb {
         name: "version",
         summary: "print the engine version and exit",
         detail: "",
@@ -571,6 +599,10 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             }
             _ => Outcome::Exit(2),
         },
+        Some(("check", a)) => {
+            let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
+            Outcome::Exit(crate::check::run(&project, a.get_flag("json")))
+        }
         Some(("version", a)) => {
             if a.get_flag("json") {
                 println!(

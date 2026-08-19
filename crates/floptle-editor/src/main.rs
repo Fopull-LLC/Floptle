@@ -41,6 +41,7 @@ mod aseprite;
 mod assets;
 mod audio;
 mod assets_ui;
+mod check;
 mod cli;
 mod console;
 mod curve_edit;
