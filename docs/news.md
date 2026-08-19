@@ -1,5 +1,19 @@
 ## Just shipped
 
+**v0.69.2 "Just That Frame"** — **a lit sprite draws one frame, not the whole
+sheet.** With 2D lighting in the scene, a ▫ Sprite on a spritesheet drew its
+correct frame *and* a squashed copy of the entire sheet on top of it, crowded
+into whichever corner that sheet's filled cells landed in; changing the frame
+moved the sprite underneath and left the ghost where it was. 2D lighting works by
+measuring the difference between what is on screen and what the lights say should
+be, and adding that difference back — and it was measuring against the whole
+sheet rather than the one frame, so what it added back was the rest of the sheet.
+The same reading decided which pixels of a sprite block light, so a sprite's
+shadow was cast by the shape of the sheet rather than by the frame you can see.
+Separate from the sheet fix in v0.69.1: if you upgraded and a stretched sheet was
+still sitting over your sprites, this is the other half of it. Nothing to do on
+upgrade.
+
 **v0.69.1 "One Whole Pixel"** — **spritesheets now reach the sprites wearing
 them.** Slicing a texture in the Assets panel only ever reached the one material
 whose Inspector was open, so every other sprite drew the entire sheet stretched
