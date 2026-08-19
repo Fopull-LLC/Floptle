@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.70.0 "From The Terminal"** — **Floptle has a command line.** You can find
+**v0.70.1 "From The Terminal"** — **Floptle has a command line.** You can find
 out whether a project loads, whether it runs, what it looks like and what is
 inside it — and change it correctly — without opening the editor, which means
 your CI can do those things and so can an AI assistant working in your project
