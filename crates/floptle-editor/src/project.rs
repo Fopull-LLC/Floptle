@@ -457,6 +457,15 @@ impl Editor {
         self.load_gi();
         self.load_nav();
         self.register_scene_meshes();
+        // A scene saved before its textures were sliced — or whose materials a
+        // script built — carries a sheet grid that disagrees with the project's
+        // import settings, and that disagreement draws as a sprite showing its
+        // whole sheet stretched across itself.
+        crate::assets::sync_sheet_grids(
+            &mut self.world,
+            &self.texture_settings,
+            &self.project_root.clone(),
+        );
         self.selection.clear();
         self.selected_asset = None;
         self.history = History::default();

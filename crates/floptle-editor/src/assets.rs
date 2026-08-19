@@ -265,6 +265,34 @@ pub(crate) fn reslice_materials(
     }
 }
 
+/// Put EVERY texture's sheet grid onto every material that wears it.
+///
+/// [`reslice_materials`] answers "this texture was re-sliced"; this answers "a
+/// world just arrived". A scene saved before its textures were sliced — or one
+/// whose materials were built by a script, which never goes near the Inspector —
+/// carries materials that disagree with the project's own import settings, and
+/// the disagreement draws as a sprite showing its whole sheet.
+///
+/// Cheap enough to run on load and nowhere near cheap enough to run per frame:
+/// it is a string normalisation per material.
+pub(crate) fn sync_sheet_grids(
+    world: &mut floptle_core::World,
+    settings: &std::collections::HashMap<String, TexSetting>,
+    project_root: &Path,
+) {
+    let stale: Vec<(String, TexSetting)> = world
+        .query::<floptle_core::Material>()
+        .filter_map(|(_, m)| m.texture.as_deref())
+        .map(|t| asset_rel_path(t, project_root))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|rel| settings.get(&rel).map(|s| (rel, *s)))
+        .collect();
+    for (rel, setting) in stale {
+        reslice_materials(world, project_root, &rel, setting);
+    }
+}
+
 /// A texture's sampling settings, looked up by a path in EITHER form.
 ///
 /// `texture_settings` is keyed the way scenes and materials reference a texture:
@@ -390,6 +418,38 @@ mod tests {
         ));
         // A material on another texture is untouched.
         let m = world.get::<floptle_core::Material>(elsewhere).unwrap();
+        assert_eq!((m.sheet_cols, m.sheet_rows), (0, 0));
+    }
+
+    /// **A scene that arrives disagreeing with the project is put in step.** A
+    /// scene saved before its textures were sliced, or whose materials a script
+    /// built, has no route through the Inspector at all — and the disagreement
+    /// draws as a sprite showing its whole sheet.
+    #[test]
+    fn loading_a_world_puts_every_material_in_step_with_its_texture() {
+        let root = std::path::Path::new("/proj");
+        let mut world = floptle_core::World::new();
+        let e = world.spawn();
+        world.insert(
+            e,
+            floptle_core::Material { texture: Some("art/hero.png".into()), ..Default::default() },
+        );
+        let untouched = world.spawn();
+        world.insert(
+            untouched,
+            floptle_core::Material { texture: Some("art/sky.png".into()), ..Default::default() },
+        );
+        let settings = std::collections::HashMap::from([(
+            "art/hero.png".to_string(),
+            TexSetting { sheet_cols: 4, sheet_rows: 4, ..Default::default() },
+        )]);
+
+        sync_sheet_grids(&mut world, &settings, root);
+
+        let m = world.get::<floptle_core::Material>(e).unwrap();
+        assert_eq!((m.sheet_cols, m.sheet_rows), (4, 4), "a loaded material kept a stale grid");
+        // A texture with no settings of its own is left exactly as authored.
+        let m = world.get::<floptle_core::Material>(untouched).unwrap();
         assert_eq!((m.sheet_cols, m.sheet_rows), (0, 0));
     }
 
