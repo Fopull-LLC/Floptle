@@ -78,6 +78,13 @@ floptle-net = { path = "../floptle-net" }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 tokio = { version = "1", features = ["rt", "net", "time"] }
 
+# One call, for one reason: restoring the DEFAULT SIGPIPE disposition on the
+# command-line verbs. Rust ignores SIGPIPE, so `floptle inspect … | head` makes
+# `println!` fail, panic, and — because the editor files a crash report on panic
+# — tell somebody to open a GitHub issue about having used `head`. See `cli.rs`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Building template-bundle fixtures for the export tests (no network involved).
 [dev-dependencies]
 sha2 = "0.10"

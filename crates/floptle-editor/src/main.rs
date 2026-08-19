@@ -69,6 +69,7 @@ mod image_ui;
 mod input_actions;
 mod input_scan;
 mod input_ui;
+mod inspect;
 mod inspector;
 mod learn;
 mod learn_content;

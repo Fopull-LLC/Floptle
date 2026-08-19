@@ -331,6 +331,51 @@ pub(crate) const VERBS: &[Verb] = &[
         legacy: &["--bake-gi"],
     },
     Verb {
+        name: "inspect",
+        summary: "print what is in a project, or in one scene, and exit",
+        detail: "With no options it describes the project: what it is called, what version it \
+                 was stamped with, and every scene with a node count. With --scene it prints \
+                 that scene's nodes as a tree. With --select it prints the nodes that match, \
+                 and under --json each one carries its whole document — which is what to read \
+                 before patching a scene by hand.\n\n\
+                 A --select query is a name by default (case-insensitive, any part of it), or \
+                 one of `id:N`, `type:Sprite`, `script:player`.\n\n\
+                 It reads the FILES, not a running world: the caller is usually about to edit \
+                 them.",
+        args: &[
+            Arg {
+                name: "PROJECT",
+                value: Value::Path,
+                required: false,
+                help: "the project directory (default: assets/)",
+            },
+            Arg {
+                name: "--scene",
+                value: Value::Text,
+                required: false,
+                help: "one scene, by path or by name",
+            },
+            Arg {
+                name: "--select",
+                value: Value::Text,
+                required: false,
+                help: "only nodes matching this: a name, or id:N / type:T / script:K",
+            },
+            Arg {
+                name: "--json",
+                value: Value::Flag,
+                required: false,
+                help: "answer as JSON",
+            },
+        ],
+        needs_gpu: false,
+        writes_project: false,
+        exits: &[(1, "the project or the named scene could not be read")],
+        output: "a description on stdout; with --json an object whose shape depends on \
+                 whether --scene or --select was given",
+        legacy: &[],
+    },
+    Verb {
         name: "check",
         summary: "report anything wrong with a project, and exit",
         detail: "Loads every scene, prefab, effect and material, runs the engine's own wiring \
@@ -448,6 +493,23 @@ pub(crate) fn dispatch(args: &[String]) -> Outcome {
     let Some(first) = args.get(1) else { return Outcome::Legacy };
     if !is_verb_head(first) {
         return Outcome::Legacy;
+    }
+    // **A closed pipe is not a crash.** Rust starts every process with SIGPIPE
+    // ignored, so `floptle inspect … | head` makes `println!` return EPIPE,
+    // which panics — and this binary files a crash report on panic, so using
+    // `head` ends with a note asking the user to report a bug. Restoring the
+    // default disposition makes the process die quietly the way every other
+    // command-line tool does.
+    //
+    // Only on the verb path, deliberately. The flags the Hub drives keep exactly
+    // the behaviour they shipped with, and this binary is also a GUI: a window
+    // whose stdout pipe closes should not take the editor down with it.
+    #[cfg(unix)]
+    // SAFETY: setting a signal disposition to SIG_DFL before any thread has been
+    // spawned, which is the disposition the process would have had if Rust had
+    // not changed it at startup.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     let m = match command().try_get_matches_from(args) {
         Ok(m) => m,
@@ -599,6 +661,15 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             }
             _ => Outcome::Exit(2),
         },
+        Some(("inspect", a)) => {
+            let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
+            Outcome::Exit(crate::inspect::run(
+                &project,
+                text(a, "scene").as_deref(),
+                text(a, "select").as_deref(),
+                a.get_flag("json"),
+            ))
+        }
         Some(("check", a)) => {
             let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
             Outcome::Exit(crate::check::run(&project, a.get_flag("json")))
