@@ -48,6 +48,21 @@ pub struct Camera2D {
     pub limits_on: bool,
     pub limit_min: [f32; 2],
     pub limit_max: [f32; 2],
+    /// Land the DRAWN camera position on a whole pixel of this many per world
+    /// unit. `0` is off.
+    ///
+    /// The number is `camera.pixelsPerUnit()` — a sprite drawn at 32 pixels per
+    /// unit wants `32`. Without it a camera that stops between two pixels
+    /// resamples every sprite in the scene by a fraction of one, and pixel art
+    /// shimmers along its edges while nothing in the scene is moving. Every 2D
+    /// project ends up writing this by hand, against a constant the engine
+    /// already knows.
+    ///
+    /// Applied to what is drawn and not to [`pos`](Self::pos), for the same
+    /// reason the shake is: the follow has to keep its sub-pixel place or the
+    /// rounding is re-applied to an already-rounded number every frame and the
+    /// camera cannot creep at less than a pixel per frame at all.
+    pub pixel_snap: f32,
 
     // ---- live state, never saved ----
     /// Where the follow has got to. Seeded from the node's transform the first
@@ -62,13 +77,16 @@ pub struct Camera2D {
     pub shake_amp: f32,
     pub shake_left: f32,
     pub shake_total: f32,
-    /// The offset the last frame added for the shake.
+    /// Everything the last frame added on top of [`pos`](Self::pos) before
+    /// writing the transform — the shake, and the pixel snap.
     ///
-    /// Kept because the shake is written into the node's transform and the
+    /// Kept because that sum is written into the node's transform and the
     /// transform is what a re-seed reads back. Without it, adopting the camera's
     /// current position mid-shake bakes that frame's shake into the follow —
     /// permanently, and asymmetrically at a world limit, which is exactly the
-    /// drift this module is arranged to avoid.
+    /// drift this module is arranged to avoid. The snap is in it for the same
+    /// reason: a rounding read back as a position is a rounding applied to an
+    /// already-rounded number, every frame, forever.
     pub last_shake: DVec2,
 }
 
@@ -81,6 +99,7 @@ impl Default for Camera2D {
             limits_on: false,
             limit_min: [0.0, 0.0],
             limit_max: [0.0, 0.0],
+            pixel_snap: 0.0,
             pos: DVec2::ZERO,
             started: false,
             shake_amp: 0.0,
@@ -201,23 +220,32 @@ impl Camera2D {
         }
         // 4. Shake, added to what is drawn and NEVER written back into `pos`.
         let mut out = self.pos;
-        self.last_shake = DVec2::ZERO;
         if self.shaking() {
             let left = (self.shake_left / self.shake_total.max(1e-6)).clamp(0.0, 1.0) as f64;
             let amp = self.shake_amp as f64 * left;
             let phase = t * SHAKE_HZ * std::f64::consts::TAU;
-            self.last_shake = DVec2::new(
+            out += DVec2::new(
                 amp * phase.sin(),
                 // A different rate on Y, so the motion is a jitter rather than a
                 // line through the corners.
                 amp * (phase * 1.37 + 1.7).sin(),
             );
-            out += self.last_shake;
             self.shake_left = (self.shake_left - dt.max(0.0)).max(0.0);
             if self.shake_left <= 0.0 {
                 self.shake_amp = 0.0;
             }
         }
+        // 5. Pixel snap, LAST — so it is the drawn position that lands on the
+        // grid, shake included. Snapping before the shake would put the camera
+        // on a whole pixel and then move it off one again, which is the entire
+        // problem.
+        if self.pixel_snap.is_finite() && self.pixel_snap > 0.0 {
+            let ppu = self.pixel_snap as f64;
+            out = DVec2::new((out.x * ppu).round() / ppu, (out.y * ppu).round() / ppu);
+        }
+        // Whatever those two added is what the transform will carry, and what
+        // the next frame has to take back off before it reads a position.
+        self.last_shake = out - self.pos;
         out
     }
 }
@@ -472,6 +500,37 @@ mod tests {
             c.step(at(0.0, 0.0), None, 1.0 / 60.0, 12.345)
         };
         assert_eq!(run(), run());
+    }
+
+    /// **A pixel-art camera must land on whole pixels.** A camera that stops
+    /// between two of them resamples every sprite in the scene by a fraction of
+    /// one, and the art shimmers along its edges while nothing is moving. Every
+    /// 2D project writes this by hand against a constant the engine already
+    /// knows.
+    ///
+    /// Snapping the DRAWN position and not `pos` is the part that matters: round
+    /// the state and the rounding is re-applied to an already-rounded number
+    /// every frame, and the camera cannot creep at less than a pixel per frame
+    /// at all.
+    #[test]
+    fn a_snapped_camera_draws_on_whole_pixels_and_still_creeps_between_them() {
+        let mut c = Camera2D { smoothing: 0.0, pixel_snap: 32.0, ..Default::default() };
+        // Seed at the origin, then ask for somewhere a third of a pixel along.
+        c.step(at(0.0, 0.0), Some(at(0.0, 0.0)), 0.016, 0.0);
+        let step = 1.0 / 32.0;
+        let out = c.step(at(0.0, 0.0), Some(at(step / 3.0, 0.0)), 0.016, 0.0);
+        assert_eq!(out.x, 0.0, "a third of a pixel should draw at the same pixel");
+        // The follow kept the sub-pixel place, so three of those cross one.
+        assert!((c.pos.x - step / 3.0).abs() < 1e-9, "the snap was written into the follow");
+        c.step(out, Some(at(step * 0.7, 0.0)), 0.016, 0.0);
+        let out = c.step(c.pos + c.last_shake, Some(at(step * 1.1, 0.0)), 0.016, 0.0);
+        assert!((out.x - step).abs() < 1e-9, "the camera never crossed a pixel: {}", out.x);
+
+        // Off is off.
+        let mut plain = Camera2D { smoothing: 0.0, ..Default::default() };
+        plain.step(at(0.0, 0.0), Some(at(0.0, 0.0)), 0.016, 0.0);
+        let out = plain.step(at(0.0, 0.0), Some(at(step / 3.0, 0.0)), 0.016, 0.0);
+        assert!((out.x - step / 3.0).abs() < 1e-9, "an unsnapped camera was rounded");
     }
 
     /// **Two nodes with the same name resolve to the same one every frame.**

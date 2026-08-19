@@ -1914,6 +1914,7 @@ pub(crate) fn apply_rich_sets(
                 min_y,
                 max_x,
                 max_y,
+                pixel_snap,
                 off,
             } => {
                 if off {
@@ -1966,6 +1967,11 @@ pub(crate) fn apply_rich_sets(
                     lim(min_y, &mut c.limit_min[1]);
                     lim(max_x, &mut c.limit_max[0]);
                     lim(max_y, &mut c.limit_max[1]);
+                    // Negative and not-a-number are not grids. Zero IS the off
+                    // switch, so it goes through.
+                    if let Some(v) = pixel_snap.filter(|v| v.is_finite() && *v >= 0.0) {
+                        c.pixel_snap = v;
+                    }
                     world.insert(e, c);
                 }
             }
@@ -2232,6 +2238,7 @@ pub(crate) const CAMERA_2D_KEYS: &[&str] = &[
     "minY",
     "maxX",
     "maxY",
+    "pixelSnap",
     "off",
 ];
 
@@ -4217,6 +4224,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                             min_y: t.get::<Option<f32>>("minY")?,
                             max_x: t.get::<Option<f32>>("maxX")?,
                             max_y: t.get::<Option<f32>>("maxY")?,
+                            pixel_snap: t.get::<Option<f32>>("pixelSnap")?,
                             off: t.get::<Option<bool>>("off")?.unwrap_or(false),
                         },
                     ));

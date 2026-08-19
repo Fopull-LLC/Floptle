@@ -154,6 +154,11 @@ impl Editor {
         if self.terrain_textures.contains(&path) {
             self.terrain_textures_dirty = true;
         }
+        // **Re-slicing a texture re-slices every material using it.** That is
+        // what the sheet grid living on the TEXTURE is for, and it was only true
+        // of the one material whose Inspector happened to be open — see
+        // `assets::reslice_materials`.
+        crate::assets::reslice_materials(&mut self.world, &root, &path, setting);
         self.save_texture_settings();
     }
 

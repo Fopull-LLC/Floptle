@@ -128,7 +128,7 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field sorting fun(self: Node): table Where this node sits in the 2D stack: { layer =, order =, mode = }. A node that has never said anything about sorting answers with the DEFAULT rather than nil, because that IS where it draws.
 ---@field getsorting fun(self: Node): table Short alias of sorting.
 ---@field setParallax fun(self: Node, t: table) How much of the camera's movement this layer KEEPS, per axis: x and y. 1 moves with the world (the default), 0 pins it to the camera as if infinitely far away.
----@field setCamera2D fun(self: Node, t: table) How this ORTHOGRAPHIC camera follows. Keys (all optional, each per axis): follow, smoothing, deadZoneX, deadZoneY, limits, minX, minY, maxX, maxY, off. Dead zone, then smoothing, then limits. Does nothing on anything that is not an orthographic camera.
+---@field setCamera2D fun(self: Node, t: table) How this ORTHOGRAPHIC camera follows. Keys (all optional, each per axis): follow, smoothing, deadZoneX, deadZoneY, limits, minX, minY, maxX, maxY, pixelSnap, off. pixelSnap is pixels per world unit and lands the DRAWN camera on a whole pixel of that grid (0 = off), which is what stops pixel art shimmering when the camera stops between two. Dead zone, then smoothing, then limits. Does nothing on anything that is not an orthographic camera.
 ---@field shake fun(self: Node, amount: number, seconds?: number) Shake a 2D camera: amount is a distance in world units, seconds defaults to 0.3, and it fades out. Added to what is DRAWN and never fed back into the follow. Calling it again takes the LOUDER amplitude and the LONGER time, each independently.
 ---@field setLighting2D fun(self: Node, t: table) 2D lighting, from a script. Keys: mode (auto/2d/3d), layers (the sorting layers a light reaches), blocks (auto/on/off, whether a receiver occludes), inner, falloff, shadows.
 ---@field setPointLight fun(self: Node, t: table) Construction API: make this node a light, or retune one. Keys (all optional, each keeping what the node had, INCLUDING its emitter shape): color, intensity, range.
@@ -1050,6 +1050,24 @@ function camera.exists() end
 ---The game viewport size in pixels: `local w, h = camera.screenSize()`.
 ---@return number, number
 function camera.screenSize() end
+---The game viewport rect in the SAME space as `input.mouse()`: `x, y, w, h`.
+---`screenSize` alone cannot answer \"is the cursor over the game view?\" — in the
+---editor the view is a dock panel, so the cursor's x carries whatever is to its
+---left.
+---@return number, number, number, number
+function camera.screenRect() end
+---How many screen pixels one world unit covers.
+---
+---Under an ORTHOGRAPHIC camera the answer is the same everywhere and `distance`
+---is ignored — that is what an orthographic projection means, and it is the case
+---a flat game is in. Under a perspective one it is measured at `distance`,
+---defaulting to the camera's distance from the origin.
+---
+---The number to size a pixel-art world by. A 2D camera can do the snapping for
+---you: `node:setCamera2D{ pixelSnap = camera.pixelsPerUnit() }`.
+---@param distance? number
+---@return number
+function camera.pixelsPerUnit(distance) end
 ---Project a world point to the game view: `sx, sy, depth, onscreen`. `onscreen`
 ---is false for points behind the camera or outside the frustum — skip those.
 ---@param x number

@@ -4788,8 +4788,27 @@ impl EditorTabViewer<'_> {
                         cmd.remove_material = Some(e);
                     }
                     ui.indent("material_props", |ui| {
+                        // **On a ▫ Sprite the NODE owns the cell, not the
+                        // material.** The picker below edits `Material::cell`,
+                        // which a Sprite node's draw does not read — so clicking
+                        // a frame in the grid changed a number and nothing on
+                        // screen, which is indistinguishable from spritesheets
+                        // being broken. Seed the picker from the node before it
+                        // is drawn and push any change back after, so the one
+                        // control people reach for is the one that draws.
+                        let sprite_cell = match world.get::<Matter>(e) {
+                            Some(Matter::Sprite { cell, .. }) => Some(*cell),
+                            _ => None,
+                        };
+                        if let (Some(c), Some(mat)) = (sprite_cell, world.get_mut::<Material>(e))
+                            && mat.cell != c
+                        {
+                            mat.cell = c;
+                        }
+                        let mut picked_cell = None;
                         if let Some(mat) = world.get_mut::<Material>(e) {
                             let res = material_props_ui(ui, mat, self.materials, self.asset_tree, self.project_root, self.mat_name_buf, self.flsl_cache, self.sdf_cache, self.texture_settings);
+                            picked_cell = Some(mat.cell);
                             cmd.inspector_changed |= res.changed;
                             cmd.open_shader_graph = res.open_shader.or(cmd.open_shader_graph.take());
                             if res.remove {
@@ -4802,6 +4821,14 @@ impl EditorTabViewer<'_> {
                             if ui.button("⛶ Open in Material Editor").clicked() {
                                 *self.show_material_editor = true;
                             }
+                        }
+                        // …and back onto the node, which is what draws.
+                        if let (Some(before), Some(after)) = (sprite_cell, picked_cell)
+                            && before != after
+                            && let Some(Matter::Sprite { cell, .. }) = world.get_mut::<Matter>(e)
+                        {
+                            *cell = after;
+                            cmd.inspector_changed = true;
                         }
                     });
                 }
@@ -6774,6 +6801,35 @@ fn camera_2d_section(
                 );
             }
         }
+        // Pixel snap: the reason a pixel-art camera stops shimmering.
+        let mut snap_on = next.pixel_snap > 0.0;
+        changed |= crate::responsive::check(ui, &mut snap_on, "snap to whole pixels")
+            .on_hover_text(
+                "Land the DRAWN camera on a whole pixel, so a sprite never gets resampled \
+                 by a fraction of one.\n\nWithout it, a camera that stops between two \
+                 pixels makes pixel art shimmer along its edges while nothing in the scene \
+                 is moving. The number is pixels per world unit — the same one a Sprite's \
+                 `pixels per unit` uses, and the one camera.pixelsPerUnit() answers.",
+            )
+            .changed();
+        if snap_on {
+            if next.pixel_snap <= 0.0 {
+                next.pixel_snap = 32.0;
+            }
+            crate::responsive::row(ui, "pixels per unit", 80.0, |ui| {
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut next.pixel_snap)
+                            .speed(1.0)
+                            .range(1.0..=1024.0),
+                    )
+                    .on_hover_text("match the sprites' own pixels per unit")
+                    .changed();
+            });
+        } else if next.pixel_snap > 0.0 {
+            next.pixel_snap = 0.0;
+            changed = true;
+        }
         crate::responsive::para(
             ui,
             egui::RichText::new("shake it from a script: node:shake(amount, seconds)")
@@ -7137,6 +7193,7 @@ mod tests {
                 limits_on: true,
                 limit_min: [-100.0, -20.0],
                 limit_max: [200.0, 40.0],
+                pixel_snap: 32.0,
                 ..Default::default()
             },
         );

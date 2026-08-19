@@ -536,6 +536,10 @@ pub struct Camera2DDoc {
     pub limit_min: (f32, f32),
     #[serde(default, skip_serializing_if = "is_zero2")]
     pub limit_max: (f32, f32),
+    /// Land the drawn camera on a whole pixel of this many per world unit;
+    /// `0` = off. See `Camera2D::pixel_snap`.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub pixel_snap: f32,
 }
 
 fn default_smoothing() -> f32 {
@@ -555,6 +559,7 @@ impl Default for Camera2DDoc {
             limits_on: false,
             limit_min: (0.0, 0.0),
             limit_max: (0.0, 0.0),
+            pixel_snap: 0.0,
         }
     }
 }
@@ -568,6 +573,7 @@ impl From<&floptle_core::camera2d::Camera2D> for Camera2DDoc {
             limits_on: c.limits_on,
             limit_min: (c.limit_min[0], c.limit_min[1]),
             limit_max: (c.limit_max[0], c.limit_max[1]),
+            pixel_snap: c.pixel_snap,
         }
     }
 }
@@ -581,6 +587,7 @@ impl From<&Camera2DDoc> for floptle_core::camera2d::Camera2D {
             limits_on: d.limits_on,
             limit_min: [d.limit_min.0, d.limit_min.1],
             limit_max: [d.limit_max.0, d.limit_max.1],
+            pixel_snap: d.pixel_snap,
             ..Default::default()
         }
     }
@@ -2602,6 +2609,31 @@ impl ProjectConfigDoc {
         (w, h)
     }
 
+    /// The aspect the CAMERA must project at, given the aspect of the panel or
+    /// window the frame ends up on.
+    ///
+    /// **The projection follows the target the scene composites into, not the
+    /// surface it is eventually shown on.** With a pinned `retro_width` those are
+    /// two different shapes: the scene is rendered into a fixed
+    /// `retro_width × retro_height` target and then blitted, letterboxed, into
+    /// whatever the panel is. Projecting at the panel's aspect and rendering into
+    /// the target's squashes the picture horizontally — and it defeats the entire
+    /// reason for pinning a width, which is that the framing stops depending on
+    /// the window.
+    ///
+    /// Unpinned, the target is derived FROM the panel aspect, so this is the
+    /// panel aspect and deliberately not a re-derivation of it: rounding the
+    /// width to whole pixels and dividing back would move the projection by a
+    /// fraction of a percent for no reason.
+    pub fn render_aspect(&self, panel_aspect: f32) -> f32 {
+        if self.retro && self.retro_width > 0 {
+            let (w, h) = self.retro_size(panel_aspect);
+            w.max(1) as f32 / h.max(1) as f32
+        } else {
+            panel_aspect
+        }
+    }
+
     /// Resolve this project's named layers + no-collide exceptions into the
     /// runtime table physics and scripts filter with (Default pinned at bit 0).
     pub fn build_layers(&self) -> floptle_core::Layers {
@@ -3739,6 +3771,46 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
 
 #[cfg(test)]
 mod tests {
+
+    /// **Pinning a retro width has to change the FRAMING, not just the target.**
+    ///
+    /// The scene is composited into a fixed `retro_width × retro_height` target
+    /// and then blitted, letterboxed, into the panel. Projecting at the panel's
+    /// aspect while rendering into that target squashes the picture
+    /// horizontally — and it defeats the whole reason for pinning a width, which
+    /// is that the framing stops depending on the window. Reported from a real
+    /// project: with `retro_integer_scale` on, both settings had to be left off.
+    #[test]
+    fn a_pinned_retro_width_decides_the_projection_not_the_window() {
+        let pinned = ProjectConfigDoc {
+            retro: true,
+            retro_width: 320,
+            retro_height: 180,
+            ..Default::default()
+        };
+        // Whatever shape the window is, the camera frames the target.
+        for panel in [4.0 / 3.0, 16.0 / 9.0, 21.0 / 9.0, 1.0] {
+            let a = pinned.render_aspect(panel);
+            assert!(
+                (a - 320.0 / 180.0).abs() < 1e-6,
+                "at a {panel} panel the camera projected at {a}, not the target's aspect"
+            );
+        }
+        // Unpinned, the target is derived FROM the panel, so the panel's own
+        // number is the answer — not a re-derivation of it through a rounded
+        // pixel width.
+        let derived = ProjectConfigDoc { retro: true, retro_height: 180, ..Default::default() };
+        assert_eq!(derived.render_aspect(4.0 / 3.0), 4.0 / 3.0);
+        // And with retro off it is the panel, pinned width or not — nothing is
+        // being composited into a target of another shape.
+        let off = ProjectConfigDoc {
+            retro: false,
+            retro_width: 320,
+            retro_height: 180,
+            ..Default::default()
+        };
+        assert_eq!(off.render_aspect(4.0 / 3.0), 4.0 / 3.0);
+    }
     use super::*;
 
     /// A bare node with a name, for wiring tests — cloned off the demo scene so

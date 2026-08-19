@@ -1,6 +1,17 @@
 ## Just shipped
 
-**v0.69.1 "Fits The Dock"** — **a sprite's own numbers can be keyframed now.**
+**v0.69.1 "One Whole Pixel"** — **spritesheets now reach the sprites wearing
+them.** Slicing a texture in the Assets panel only ever reached the one material
+whose Inspector was open, so every other sprite drew the entire sheet stretched
+across it and came out sized from the whole image; and on a ▫ Sprite the
+Material's cell picker was writing a number the node's draw does not read, so
+clicking a frame changed nothing. Both fixed. A **2D camera can snap to whole
+pixels** (`pixelSnap`, or the Inspector checkbox), which is what stops pixel art
+shimmering when the camera stops between two — and `camera.pixelsPerUnit()`
+finally answers correctly under an orthographic camera, where it had been scaled
+by a distance that has nothing to do with it. Pinning a **retro width** now
+decides the framing rather than leaving the picture squashed inside its
+letterbox. **A sprite's own numbers can be keyframed:**
 ⏱ Animating ▸ ✚ Property ▸ **Sprite ▸ Node** keys `ppu` and `size` for squash and
 stretch, the pivot for a crouch, and the flips for a turn — so a whole
 turn-and-swing is one clip and none of it needs a script. **Add Component ▸ Type**

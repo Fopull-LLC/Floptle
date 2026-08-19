@@ -784,7 +784,11 @@ impl Editor {
         raster.set_retro_defaults(self.project.retro_artefacts());
 
         // ---- gather the scene from the World ----
-        let aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
+        let surface_aspect = gpu.config.width as f32 / gpu.config.height.max(1) as f32;
+        // The camera projects at the aspect of the target the scene composites
+        // into, which is the surface's unless a retro width is pinned — see
+        // `ProjectConfigDoc::render_aspect`.
+        let aspect = self.project.render_aspect(surface_aspect);
         // The Game dock tab being front = render from the active camera node; otherwise
         // (Scene tab) use the editor's free-fly camera. Works whether or not we're
         // playing, so you can frame the active camera's shot without entering play.
@@ -838,6 +842,7 @@ impl Editor {
                 vp_w: gpu.config.width as f32,
                 vp_h: gpu.config.height as f32,
                 fov_y: cam.projection.fov_y(),
+                ortho_height: cam.projection.ortho_height().unwrap_or(0.0),
                 valid: true,
             });
         }
@@ -2469,9 +2474,21 @@ impl Editor {
                         if let Some(&mesh) = self.mesh_ids.get(floptle_core::Shape::Plane as usize)
                         {
                             let model = t.render_matrix(cam.world_position);
+                            // **The same arguments the DRAW gets.** This passed
+                            // no material and no texture size, and
+                            // `sprite_world_size` falls back to the authored
+                            // `size` without them — so the outline of a
+                            // pixels-per-unit sprite was a differently-sized quad
+                            // laid over the sprite, which reads as a stretched
+                            // artefact rather than as a selection.
+                            let mat = self.world.get::<Material>(e);
+                            let px = mat
+                                .and_then(|m| m.texture.as_deref())
+                                .and_then(|p| self.texture_registry.get(p).copied())
+                                .and_then(|id| raster.texture_size(id));
                             let raw = crate::sprite2d::sprite_one_draw(
                                 *ppu, *size, *cell, *flip_x, *flip_y, *pivot,
-                                model, None, None, [0.0, 0.0],
+                                model, mat, px, [0.0, 0.0],
                             );
                             mask_mesh.push((mesh, raw));
                         }

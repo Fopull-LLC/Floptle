@@ -557,6 +557,47 @@ mod tests {
         Sprite { pos: [0.0; 3], rot: 0.0, scale, cell: 0, tint: [1.0; 4] }
     }
 
+    /// **The selection outline is the same quad as the sprite.** It was built
+    /// with no material and no texture size, and without those
+    /// `sprite_world_size` falls back to the authored `size` — so selecting a
+    /// pixels-per-unit sprite laid a differently-shaped quad over it, which
+    /// reads as a stretched artefact rather than as a selection.
+    ///
+    /// The same class as `offscreen_draws_the_same_world`: two gathers of one
+    /// thing, and the one nobody is looking at is the one that drifts.
+    #[test]
+    fn the_selection_outline_is_the_same_quad_as_the_sprite() {
+        // A 16x2 sheet on a 512x64 image: one cell is 32x32, so at 32 px per
+        // unit the sprite is one unit square — and the whole IMAGE would be
+        // sixteen units by two.
+        let mat = floptle_core::Material {
+            texture: Some("art/hero.png".into()),
+            sheet_cols: 16,
+            sheet_rows: 2,
+            ..Default::default()
+        };
+        let px = Some([512.0f32, 64.0]);
+        // `size` is whatever it was last set to — switching to `pixels` does not
+        // erase it — so the two answers are only the same by coincidence.
+        let authored = 4.0;
+        let (w, h) = super::sprite_world_size(32.0, authored, Some(&mat), px);
+        assert!((w - 1.0).abs() < 1e-4 && (h - 1.0).abs() < 1e-4, "one cell is {w}x{h}");
+        let (fw, fh) = super::sprite_world_size(32.0, authored, None, None);
+        assert!((fw - authored).abs() < 1e-4 && (fh - authored).abs() < 1e-4);
+
+        let quad = |mat: Option<&floptle_core::Material>, px| {
+            super::sprite_one_draw(
+                32.0, authored, 1, false, false, [0.5, 0.0], Mat4::IDENTITY, mat, px, [0.0, 0.0],
+            )
+            .model
+        };
+        assert_ne!(
+            quad(Some(&mat), px),
+            quad(None, None),
+            "the fixture cannot tell the two apart, so it proves nothing"
+        );
+    }
+
     /// The width the quad actually occupies, by pushing its own corners through
     /// the instance matrix — rather than reading a scale lane and trusting that
     /// the mesh behind it is a unit square, which is exactly the assumption

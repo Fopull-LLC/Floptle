@@ -2043,7 +2043,7 @@ b:draw(x, y [, z] [, scale] [, rot] [, cell] [, r, g, b, a]) — draw one sprite
 
 ### `node:setCamera2D`
 
-node:setCamera2D{follow="Player", smoothing=0.12, deadZoneX=1.5, deadZoneY=0.75, limits=true, minX=0, minY=0, maxX=200, maxY=40} — how this ORTHOGRAPHIC camera follows. Every key is optional and keeps what the node had, per axis; off=true removes the behaviour. The order is dead zone, then smoothing, then limits: the camera does not move until the target leaves the box, closes the rest exponentially (smoothing is SECONDS to cover about two thirds of the gap, the same at 30fps and 144), then clamps inside the rectangle so it never shows outside the level. Setting `follow` to a DIFFERENT node restarts the follow where the camera is, so handing the camera to a second character does not send it travelling between them; follow="" stops following and keeps the limits, and with no target the camera's position is left to whatever else is moving it. It does nothing on anything that is not an orthographic camera.
+node:setCamera2D{follow="Player", smoothing=0.12, deadZoneX=1.5, deadZoneY=0.75, limits=true, minX=0, minY=0, maxX=200, maxY=40, pixelSnap=32} — how this ORTHOGRAPHIC camera follows. Every key is optional and keeps what the node had, per axis; off=true removes the behaviour. The order is dead zone, then smoothing, then limits: the camera does not move until the target leaves the box, closes the rest exponentially (smoothing is SECONDS to cover about two thirds of the gap, the same at 30fps and 144), then clamps inside the rectangle so it never shows outside the level. Setting `follow` to a DIFFERENT node restarts the follow where the camera is, so handing the camera to a second character does not send it travelling between them; follow="" stops following and keeps the limits, and with no target the camera's position is left to whatever else is moving it. `pixelSnap` is pixels per world unit and lands the DRAWN camera on a whole pixel of that grid — the same number a Sprite's `ppu` uses, and what camera.pixelsPerUnit() answers; 0 turns it off. Without it a camera that stops between two pixels resamples every sprite by a fraction of one and pixel art shimmers along its edges while nothing is moving; the follow keeps its sub-pixel place, so the camera can still creep slower than a pixel a frame. It does nothing on anything that is not an orthographic camera.
 
 ### `node:setParallax`
 
@@ -2215,7 +2215,11 @@ camera.exists() — true once a live game camera is being fed. Guard the other c
 
 ### `camera.pixelsPerUnit`
 
-camera.pixelsPerUnit([distance]) → px — how many screen pixels one world unit covers at that distance (default: the camera's distance from the origin). The number every 2D game used to derive by hand from the FOV and the camera's Z, and then snap the camera to a multiple of for crisp pixels.
+camera.pixelsPerUnit([distance]) → px — how many screen pixels one world unit covers. The number every 2D game used to derive by hand from the FOV and the camera's Z, and then snap the camera to a multiple of for crisp pixels.
+
+Under an ORTHOGRAPHIC camera the answer is the same everywhere and `distance` is ignored — that is what an orthographic projection means, and it is the case a flat game is in. Under a perspective one it is measured at `distance`, defaulting to the camera's distance from the origin.
+
+A 2D camera can do the snapping for you: node:setCamera2D{ pixelSnap = 32 }.
 
 ### `camera.screenRect`
 

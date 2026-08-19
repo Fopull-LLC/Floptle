@@ -1196,6 +1196,8 @@ pub enum RichSet {
         min_y: Option<f32>,
         max_x: Option<f32>,
         max_y: Option<f32>,
+        /// Pixels per world unit to land the drawn camera on; `0` turns it off.
+        pixel_snap: Option<f32>,
         /// `off = true` removes the behaviour entirely.
         off: bool,
     },

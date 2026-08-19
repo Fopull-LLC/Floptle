@@ -94,6 +94,20 @@ impl Projection {
         }
     }
 
+    /// An orthographic view's height in world units, or `None` for a
+    /// perspective one.
+    ///
+    /// The question [`fov_y`](Self::fov_y) cannot answer. Its orthographic
+    /// stand-in is an angle that covers the height ONE unit away, which reads
+    /// correctly right up until somebody multiplies it by a distance — and
+    /// "how many pixels is a metre" is exactly that calculation.
+    pub fn ortho_height(&self) -> Option<f32> {
+        match *self {
+            Projection::Perspective { .. } => None,
+            Projection::Orthographic { height, .. } => Some(height),
+        }
+    }
+
     /// The vertical field of view, radians.
     ///
     /// An orthographic camera has none — its view is the same height at every

@@ -220,6 +220,51 @@ pub(crate) fn asset_rel_path(path: &str, project_root: &Path) -> String {
         .unwrap_or(slashed)
 }
 
+/// Put a texture's sheet grid onto **every material that wears it**.
+///
+/// The grid lives on the TEXTURE — "slice the .png once, every material using it
+/// inherits the same cells" — but the only thing that ever copied it onto a
+/// `Material` was the Inspector's material editor, which runs for the one node
+/// somebody happens to have selected. So slicing a sheet from the Assets panel
+/// left every existing sprite believing its texture was one whole cell: the
+/// sprite drew the ENTIRE SHEET stretched across its quad, and came out sized
+/// from the whole image rather than from one frame. That reads as spritesheets
+/// being broken, which is a long way from one number being stale.
+///
+/// A cell that no longer exists falls back INTO range rather than drawing off
+/// the end of the image — and a `Matter::Sprite` carries its own cell, which is
+/// the one its draw actually reads, so it gets the same clamp.
+pub(crate) fn reslice_materials(
+    world: &mut floptle_core::World,
+    project_root: &Path,
+    rel_path: &str,
+    setting: TexSetting,
+) {
+    let (sc, sr) = setting.sheet();
+    let last = (sc * sr).saturating_sub(1);
+    let mut wearing: Vec<floptle_core::Entity> = Vec::new();
+    for (e, m) in world.query_mut::<floptle_core::Material>() {
+        let wears = m
+            .texture
+            .as_deref()
+            .is_some_and(|t| asset_rel_path(t, project_root) == rel_path);
+        if !wears {
+            continue;
+        }
+        m.sheet_cols = sc;
+        m.sheet_rows = sr;
+        m.cell = m.cell.min(last);
+        wearing.push(e);
+    }
+    for e in wearing {
+        if let Some(floptle_core::Matter::Sprite { cell, .. }) =
+            world.get_mut::<floptle_core::Matter>(e)
+        {
+            *cell = (*cell).min(last);
+        }
+    }
+}
+
 /// A texture's sampling settings, looked up by a path in EITHER form.
 ///
 /// `texture_settings` is keyed the way scenes and materials reference a texture:
@@ -274,6 +319,79 @@ pub(crate) fn collect_script_names(entries: &[AssetEntry], out: &mut Vec<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Slicing a texture into a sheet has to reach the sprites already
+    /// wearing it.** Reported from a real project: a sprite was given a sheet
+    /// texture, the cell was changed, and nothing on screen moved — while the
+    /// node drew a stretched picture of the whole sheet. Both are the same
+    /// stale number: the grid lived on the texture and was only ever copied onto
+    /// a `Material` by the Inspector's material editor, for the one node
+    /// selected at the time.
+    #[test]
+    fn slicing_a_texture_reslices_every_material_wearing_it() {
+        let root = std::path::Path::new("/proj");
+        let mut world = floptle_core::World::new();
+        // Two nodes on the sheet, one on something else — and the sprite's own
+        // cell is out past the end of the new grid.
+        let sprite = world.spawn();
+        world.insert(
+            sprite,
+            floptle_core::Material {
+                texture: Some("art/hero.png".into()),
+                ..Default::default()
+            },
+        );
+        world.insert(
+            sprite,
+            floptle_core::Matter::Sprite {
+                ppu: 32.0,
+                size: 1.0,
+                cell: 99,
+                flip_x: false,
+                flip_y: false,
+                pivot: [0.5, 0.5],
+            },
+        );
+        // Referenced ABSOLUTELY, which is a spelling the Assets side hands out.
+        let other = world.spawn();
+        world.insert(
+            other,
+            floptle_core::Material {
+                texture: Some("/proj/art/hero.png".into()),
+                cell: 7,
+                ..Default::default()
+            },
+        );
+        let elsewhere = world.spawn();
+        world.insert(
+            elsewhere,
+            floptle_core::Material {
+                texture: Some("art/sky.png".into()),
+                ..Default::default()
+            },
+        );
+
+        reslice_materials(
+            &mut world,
+            root,
+            "art/hero.png",
+            TexSetting { sheet_cols: 16, sheet_rows: 2, ..Default::default() },
+        );
+
+        for e in [sprite, other] {
+            let m = world.get::<floptle_core::Material>(e).unwrap();
+            assert_eq!((m.sheet_cols, m.sheet_rows), (16, 2), "a material kept a stale grid");
+            assert!(m.cell < 32, "a cell was left past the end of the new grid");
+        }
+        // The node's OWN cell is what a sprite draws, so it is clamped too.
+        assert!(matches!(
+            world.get::<floptle_core::Matter>(sprite),
+            Some(floptle_core::Matter::Sprite { cell: 31, .. })
+        ));
+        // A material on another texture is untouched.
+        let m = world.get::<floptle_core::Material>(elsewhere).unwrap();
+        assert_eq!((m.sheet_cols, m.sheet_rows), (0, 0));
+    }
 
     /// **An asset ref written on Windows has to resolve everywhere else.** The
     /// settings map, every material and every scene key a texture by its

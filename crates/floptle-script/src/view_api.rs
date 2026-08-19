@@ -29,6 +29,17 @@ pub struct ViewInfo {
     /// pixels tall is the view" into "how many pixels is a metre"
     /// (`floptle/0058`).
     pub fov_y: f32,
+    /// An ORTHOGRAPHIC camera's view height in world units; `0` for a
+    /// perspective one.
+    ///
+    /// Here because "how many pixels is a metre" has a completely different
+    /// answer under the two projections, and `fov_y` alone cannot tell them
+    /// apart. An orthographic camera reports the angle that would cover its
+    /// height one unit away, which is a useful fiction everywhere except in the
+    /// one place it gets multiplied by a distance — and `pixelsPerUnit` was
+    /// doing exactly that, so a 2D camera nine units back answered nine times
+    /// too small.
+    pub ortho_height: f32,
     /// False until the editor has fed a real camera (screen queries no-op).
     pub valid: bool,
 }
@@ -43,6 +54,7 @@ impl Default for ViewInfo {
             vp_w: 0.0,
             vp_h: 0.0,
             fov_y: 60f32.to_radians(),
+            ortho_height: 0.0,
             valid: false,
         }
     }
@@ -90,10 +102,19 @@ pub(crate) fn install_camera_api(lua: &Lua, view: Rc<RefCell<ViewInfo>>) {
                 let c = DVec3::from(v.cam_world);
                 c.length() as f32
             });
-            let half = (v.fov_y * 0.5).tan().max(1e-6);
-            // The world height the view covers at `d`, against its pixel height.
-            let world_h = 2.0 * d.abs().max(1e-6) * half;
-            Ok(v.vp_h / world_h)
+            let _ = d; // unused under an orthographic projection, on purpose
+            // **An orthographic view is the same height at every distance** —
+            // that is the whole reason a flat game uses one — so the distance is
+            // not in the answer at all, and multiplying by it was the bug: a 2D
+            // camera parked nine units back reported nine times too few pixels
+            // per unit, and only `pixelsPerUnit(1)` happened to be right.
+            let world_h = if v.ortho_height > 0.0 {
+                v.ortho_height
+            } else {
+                let half = (v.fov_y * 0.5).tan().max(1e-6);
+                2.0 * d.abs().max(1e-6) * half
+            };
+            Ok(v.vp_h / world_h.max(1e-6))
         }) {
             let _ = t.set("pixelsPerUnit", f);
         }
@@ -189,6 +210,7 @@ mod tests {
             // The same 1.0 rad the projection above was built with, so
             // `pixelsPerUnit` and `worldToScreen` describe one camera.
             fov_y: 1.0,
+            ortho_height: 0.0,
             valid: true,
         }
     }
@@ -223,6 +245,66 @@ mod tests {
         // An explicit distance overrides the default.
         let same: f32 = lua.load("return camera.pixelsPerUnit(20)").eval().unwrap();
         assert!((same - px_far).abs() < 0.5);
+    }
+
+    /// **An orthographic view is the same height at every distance.**
+    ///
+    /// `pixelsPerUnit` divided by `2 · d · tan(fov/2)`, and an orthographic
+    /// camera's stand-in `fov_y` makes `tan(fov/2)` its half-height — so the
+    /// answer came out scaled by the camera's distance from the origin, which
+    /// has nothing to do with it. Reported from a real 2D project: a camera at
+    /// z = 9.33 got an answer 9.33× too small, and only `pixelsPerUnit(1)` was
+    /// usable.
+    ///
+    /// Checked against `worldToScreen`, the same way the perspective case is:
+    /// the two describe one camera or one of them is lying.
+    #[test]
+    fn pixels_per_unit_ignores_distance_under_an_orthographic_camera() {
+        // 800×600, ten world units tall, camera parked well back — the shape a
+        // 2D project actually has.
+        let (w, h, height) = (800.0f32, 600.0f32, 10.0f32);
+        let proj = Mat4::orthographic_rh(
+            -height * 0.5 * (w / h),
+            height * 0.5 * (w / h),
+            -height * 0.5,
+            height * 0.5,
+            -1000.0,
+            1000.0,
+        );
+        let info = |z: f64| ViewInfo {
+            view_proj: (proj * Mat4::from_quat(Quat::IDENTITY)).to_cols_array(),
+            cam_world: [0.0, 0.0, z],
+            vp_x: 0.0,
+            vp_y: 0.0,
+            vp_w: w,
+            vp_h: h,
+            fov_y: 2.0 * (height * 0.5).atan(),
+            ortho_height: height,
+            valid: true,
+        };
+
+        let near = lua_with(info(9.33));
+        let px: f32 = near.load("return camera.pixelsPerUnit()").eval().unwrap();
+        assert!((px - h / height).abs() < 0.01, "{px} px/unit for a {height}-unit view of {h}px");
+
+        // It must agree with what projecting a unit actually measures. Measured
+        // up the Y axis, because `vp_h` is what the answer is in terms of.
+        let (_, ay, _, _): (f32, f32, f32, bool) =
+            near.load("return camera.worldToScreen(0, 0, 0)").eval().unwrap();
+        let (_, by, _, _): (f32, f32, f32, bool) =
+            near.load("return camera.worldToScreen(0, 1, 0)").eval().unwrap();
+        assert!(
+            (px - (by - ay).abs()).abs() < 0.5,
+            "pixelsPerUnit says {px} but projecting a unit measures {}",
+            (by - ay).abs()
+        );
+
+        // Distance is not in the answer — neither the camera's, nor one asked
+        // for explicitly. That is what an orthographic projection MEANS.
+        let far: f32 = lua_with(info(400.0)).load("return camera.pixelsPerUnit()").eval().unwrap();
+        assert!((far - px).abs() < 0.01, "moving the camera back changed {px} to {far}");
+        let asked: f32 = near.load("return camera.pixelsPerUnit(37)").eval().unwrap();
+        assert!((asked - px).abs() < 0.01, "an explicit distance changed {px} to {asked}");
     }
 
     fn lua_with(view: ViewInfo) -> Lua {
