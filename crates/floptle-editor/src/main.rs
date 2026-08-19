@@ -35,6 +35,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 // Animation: editor-side glue (registries, binding, extraction, advance) and the
 // animation UI (Inspector panels, controller graph window, Animating tab). New
 // subsystems live in their own modules — main.rs only wires them in.
+mod agents_guide;
 mod anim;
 mod anim_ui;
 mod aseprite;
@@ -1460,10 +1461,14 @@ fn new_project(path: &Path, stamp: &str, template: &str) -> i32 {
         eprintln!("could not write project.ron: {e}");
         return 1;
     }
+    // A note for whoever — or whatever — opens this folder next. Scaffold-time
+    // only: it belongs to the project from here on.
+    agents_guide::write(path);
     match chosen {
         Some(t) => println!("created the {} project at {}", t.name, path.display()),
         None => println!("created project at {}", path.display()),
     }
+    println!("  {} says how to drive the engine from a terminal", agents_guide::FILE);
     if let Some(id) = chosen.and_then(|t| t.tutorial) {
         println!("  the 🎓 Learn tab builds this one step at a time — tutorial \"{id}\"");
     }
