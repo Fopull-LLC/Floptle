@@ -281,8 +281,12 @@ pub fn step_all(world: &mut crate::ecs::World, dt: f32, t: f64) {
         // world space and converting back is what makes it work rather than
         // drifting by the parent's transform.
         let cam_world = crate::matter::world_transform(world, e);
-        let target = by_name
-            .get(follow.as_str())
+        // An EMPTY follow is "follow nothing", and must not be able to match a
+        // node that happens to have an empty name — which the map would
+        // otherwise hand back quite happily.
+        let target = (!follow.is_empty())
+            .then(|| by_name.get(follow.as_str()))
+            .flatten()
             .map(|te| crate::matter::world_transform(world, *te).translation);
         let parent_world = world
             .get::<crate::matter::Parent>(e)
@@ -469,6 +473,7 @@ mod tests {
         };
         assert_eq!(run(), run());
     }
+
     /// **Two nodes with the same name resolve to the same one every frame.**
     /// Following was a linear scan that took whichever `Name` the world yielded
     /// first, so a scene with a duplicate name — a prefab dropped in twice, a
@@ -515,6 +520,54 @@ mod tests {
             let x = world.get::<crate::transform::Transform>(cam).unwrap().translation.x;
             assert_eq!(x, 100.0, "the camera followed the other Player");
         }
+    }
+
+    /// **An empty `follow` is "follow nothing", not "follow the node with no
+    /// name".** Resolving the whole map up front made that a live possibility —
+    /// an unnamed node is `Name("")` and the map would have handed it back.
+    #[test]
+    fn following_nothing_does_not_match_a_node_with_no_name() {
+        let mut world = crate::ecs::World::default();
+        let unnamed = world.spawn();
+        let mut t = crate::transform::Transform::default();
+        t.translation.x = -500.0;
+        world.insert(unnamed, t);
+        world.insert(unnamed, crate::matter::Name(String::new()));
+        // A second camera that DOES follow something, so the name map is built
+        // at all — the empty-name entry only exists once it is.
+        let target = world.spawn();
+        world.insert(target, crate::transform::Transform::default());
+        world.insert(target, crate::matter::Name("Player".into()));
+
+        let ortho = || crate::matter::Matter::Camera {
+            fov_y: 1.0,
+            active: true,
+            target: String::new(),
+            cull_mask: u32::MAX,
+            target_w: 0,
+            target_h: 0,
+            target_hz: 0.0,
+            ortho: true,
+            ortho_height: 10.0,
+        };
+        let follower = world.spawn();
+        world.insert(follower, crate::transform::Transform::default());
+        world.insert(follower, ortho());
+        world.insert(follower, Camera2D { follow: "Player".into(), ..Default::default() });
+
+        let idle = world.spawn();
+        let mut t = crate::transform::Transform::default();
+        t.translation.x = 9.0;
+        world.insert(idle, t);
+        world.insert(idle, ortho());
+        world.insert(idle, Camera2D::default());
+
+        step_all(&mut world, 0.016, 0.0);
+        assert_eq!(
+            world.get::<crate::transform::Transform>(idle).unwrap().translation.x,
+            9.0,
+            "a camera following nothing was taken to the node with no name"
+        );
     }
 
     /// A camera that follows nothing is not moved by this at all — the position
