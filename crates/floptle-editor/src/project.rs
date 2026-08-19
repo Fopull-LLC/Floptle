@@ -296,7 +296,7 @@ impl Editor {
                     ),
                     None,
                 );
-                println!("  imported {path} (rigged, {} clip(s))", model.clips.len());
+                eprintln!("  imported {path} (rigged, {} clip(s))", model.clips.len());
                 return true;
             }
             Ok(None) => {} // no animations — fall through to the static bake
@@ -335,7 +335,7 @@ impl Editor {
                         rig: None,
                     },
                 );
-                println!("  imported {path}");
+                eprintln!("  imported {path}");
                 true
             }
             Err(e) => {
@@ -404,7 +404,7 @@ impl Editor {
         self.mesh_wire_cache.clear(); // keep the collider-wire cache in lockstep
         self.scene_dirty = false;
         self.asset_tree = build_assets(&self.project_root);
-        println!("  new scene: {}", path.display());
+        eprintln!("  new scene: {}", path.display()); // progress, so: stderr
     }
 
     /// Open an existing scene `.ron` (double-clicked in Assets). Resets the world to
@@ -485,7 +485,7 @@ impl Editor {
             );
         }
         self.check_autosave(); // offer crash recovery if an autosave is newer
-        println!("  opened scene: {}", p.display());
+        eprintln!("  opened scene: {}", p.display()); // progress, so: stderr
     }
 
     /// Register the GPU meshes named by a set of paths, importing each once.
@@ -1269,7 +1269,12 @@ impl Editor {
         for p in mesh_paths {
             self.import_model(&p);
         }
-        println!("  opened project {}", self.project_root.display());
+        // stderr, not stdout. This is progress chatter, and stdout belongs to
+        // whatever the caller asked for — a command-line verb's `--json`
+        // document is on it, and one stray line of prose makes that document
+        // unparseable. Nothing reads this line; the Hub parses `--list-templates`
+        // and nothing else.
+        eprintln!("  opened project {}", self.project_root.display());
     }
 
     /// Create a fresh project at `root` (folders + a starter scene + example

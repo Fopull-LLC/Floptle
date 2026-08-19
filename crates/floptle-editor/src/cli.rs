@@ -331,6 +331,64 @@ pub(crate) const VERBS: &[Verb] = &[
         legacy: &["--bake-gi"],
     },
     Verb {
+        name: "run",
+        summary: "run a project headlessly for a bounded time, and report what happened",
+        detail: "The editor's own play loop with no window and no GPU: the scene-transition \
+                 queue, script hot-reload, the frame pass, the fixed-rate tick pass and \
+                 physics, all of it. Reports every warning, error and `print`, with the file \
+                 and line that raised it, and says whether each happened while opening the \
+                 project or while playing.\n\n\
+                 Time is FIXED, never read off the clock, so two runs of one project agree. \
+                 That does mean a bug which only appears at a particular frame rate will not \
+                 appear here.\n\n\
+                 Nothing draws and nothing is pressed: models are not registered (physics is \
+                 unaffected — a mesh collider reads its triangles from the file), and every \
+                 key reads as up. \"No errors\" means nothing raised, not that the game is \
+                 good.",
+        args: &[
+            Arg {
+                name: "PROJECT",
+                value: Value::Path,
+                required: false,
+                help: "the project directory (default: assets/)",
+            },
+            Arg {
+                name: "--scene",
+                value: Value::Text,
+                required: false,
+                help: "run this scene instead of the project's entry scene",
+            },
+            Arg {
+                name: "--frames",
+                value: Value::Text,
+                required: false,
+                help: "how many steps to run (default: 120)",
+            },
+            Arg {
+                name: "--seconds",
+                value: Value::Text,
+                required: false,
+                help: "how much simulated time to run, instead of --frames",
+            },
+            Arg {
+                name: "--json",
+                value: Value::Flag,
+                required: false,
+                help: "answer as JSON",
+            },
+        ],
+        needs_gpu: false,
+        // It opens the project the way the editor does, and that tops up a
+        // project's seeded files (the input map, the example shaders). Said
+        // here because a caller reads this field to know whether to expect its
+        // working tree to change.
+        writes_project: true,
+        exits: &[(1, "something raised while opening or playing")],
+        output: "one line per log entry, then a summary; with --json an object with \
+                 `ok`, `steps`, `errors`, `warnings` and `log`",
+        legacy: &[],
+    },
+    Verb {
         name: "api",
         summary: "search what a script can call, and exit",
         detail: "Reads the same table the editor's Docs tab, its autocomplete and its hover \
@@ -514,7 +572,7 @@ pub(crate) fn print_help_and_flags() {
 }
 
 /// Is `arg` the name of a verb (or the head of a nested one)?
-fn is_verb_head(arg: &str) -> bool {
+pub(crate) fn is_verb_head(arg: &str) -> bool {
     VERBS.iter().any(|v| v.split().0 == arg)
 }
 
@@ -694,6 +752,49 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             }
             _ => Outcome::Exit(2),
         },
+        Some(("run", a)) => {
+            let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
+            // Parsed here rather than by clap's value parser so a bad number
+            // reads as a usage error with the flag named, which is what the
+            // caller has to fix.
+            let num = |id: &str| -> Result<Option<f32>, String> {
+                match text(a, id) {
+                    None => Ok(None),
+                    Some(v) => v
+                        .parse::<f32>()
+                        .map(Some)
+                        .map_err(|_| format!("--{id} wants a number, not {v:?}")),
+                }
+            };
+            let (frames, seconds) = match (num("frames"), num("seconds")) {
+                (Ok(f), Ok(s)) => (f, s),
+                (Err(e), _) | (_, Err(e)) => {
+                    eprintln!("{e}");
+                    return Outcome::Exit(2);
+                }
+            };
+            if frames.is_some() && seconds.is_some() {
+                eprintln!("--frames and --seconds both say how long to run; pick one");
+                return Outcome::Exit(2);
+            }
+            let span = match (frames, seconds) {
+                (_, Some(s)) if s <= 0.0 => {
+                    eprintln!("--seconds wants a positive number");
+                    return Outcome::Exit(2);
+                }
+                (Some(f), _) if f < 1.0 => {
+                    eprintln!("--frames wants at least one frame");
+                    return Outcome::Exit(2);
+                }
+                (_, Some(s)) => crate::run::Span::Seconds(s),
+                (Some(f), _) => crate::run::Span::Frames(f as u32),
+                // Two seconds of simulated time: long enough for a `start` to
+                // run, a body to fall and a script to raise, short enough to
+                // sit through after every edit.
+                (None, None) => crate::run::Span::Frames(120),
+            };
+            Outcome::Exit(crate::run::run(&project, text(a, "scene").as_deref(), span, a.get_flag("json")))
+        }
         Some(("api", a)) => Outcome::Exit(crate::ide::cli_reference(
             text(a, "QUERY").as_deref(),
             a.get_flag("json"),

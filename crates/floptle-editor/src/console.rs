@@ -33,6 +33,37 @@ pub(crate) struct ConsoleState {
     pub(crate) mirror_to_stderr: bool,
 }
 
+/// A diagnostic's message with the **first** quoted name blanked out, so "the
+/// same problem on a different thing" collapses to one key.
+///
+/// Here rather than in one of the verbs because both of them need it and they
+/// have to group the same way: `check` hit it first (a panel authored hidden
+/// warns once per child, and a real project opened with thirty-four identical
+/// lines) and `run` hit exactly the same wall the first time it opened one.
+///
+/// Only the first: every message these checks produce names the thing that is
+/// wrong first and what it is wrong about after, so blanking the rest would
+/// merge four hidden panels into one line claiming to be one panel. Collapsing
+/// is meant to remove repetition, not information.
+pub(crate) fn repeat_shape(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut quotes = 0;
+    for c in message.chars() {
+        if c == '"' {
+            quotes += 1;
+            if quotes == 1 {
+                out.push_str("\"…\"");
+            }
+            if quotes > 2 {
+                out.push(c);
+            }
+        } else if quotes != 1 {
+            out.push(c);
+        }
+    }
+    out
+}
+
 impl Default for ConsoleState {
     fn default() -> Self {
         Self {

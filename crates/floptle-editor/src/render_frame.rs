@@ -6443,7 +6443,7 @@ impl Editor {
     /// scripts, apply their writes (models, mouse lock, velocities, heights),
     /// advance the animators, then step the sim. Clears stale script errors
     /// when not playing.
-    fn play_step(&mut self, dt: f32, game_focused: bool) {
+    pub(crate) fn play_step(&mut self, dt: f32, game_focused: bool) {
         // Play mode: advance the (pausable) script clock and run the Lua scripts
         // attached to nodes (ADR-0003). Scripts hot-reload as their files change.
         if self.playing {
@@ -7345,12 +7345,24 @@ impl Editor {
         if self.cursor_freed && !self.playing {
             self.cursor_freed = false;
         }
-        // Drain any script logs/errors into the Console (consecutive dups merge).
+        self.drain_script_logs();
+    }
+
+    /// Move whatever the scripts said this frame into the Console.
+    ///
+    /// Its own function because there are two loops that have to do it and only
+    /// one of them is a frame: `finish_input_frame` for the editor, and
+    /// `floptle run` for a headless one. When this lived inline in the frame,
+    /// a headless run collected nothing at all and reported "nothing raised"
+    /// for a project whose script was raising every step — the worst answer
+    /// available, because it is confident and wrong.
+    pub(crate) fn drain_script_logs(&mut self) {
         for l in self.script_host.drain_logs() {
-            // Mirror script logs to stdout too — running from a terminal
-            // (`cargo run`) you shouldn't have to open the Console panel to see
-            // `log(...)` output (crash reports, the FX/DMG diagnostics, etc.).
-            println!("[lua] {}", l.msg);
+            // Mirrored to the terminal as well, so running from one
+            // (`cargo run`) does not mean opening the Console panel to see
+            // `log(...)` output. On **stderr**: stdout belongs to whatever the
+            // caller asked for, and a verb's `--json` document is on it.
+            eprintln!("[lua] {}", l.msg);
             self.console.push(l.level, l.msg, l.source);
         }
     }

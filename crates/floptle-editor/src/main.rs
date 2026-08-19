@@ -100,6 +100,7 @@ mod pkg_thumbs;
 mod play;
 mod prefab;
 mod report;
+mod run;
 mod responsive;
 pub(crate) use report::{open_issue_tracker, DOCS_URL, ISSUES_URL};
 mod shader_graph;
@@ -1186,7 +1187,17 @@ fn json_string_field(json: &str, key: &str) -> Option<String> {
 }
 
 fn main() {
-    env_logger::init();
+    // The editor's internal log channel is for the editor. A command-line verb
+    // reports through its own output — and two of the editor's start-up lines
+    // ("adopt_paint called before gpu/raster exist") are logged at ERROR while
+    // describing exactly the state a headless verb runs in on purpose, so they
+    // read as something having gone wrong when nothing has. Off by default on
+    // the verb path; `RUST_LOG=error floptle run …` turns it back on.
+    if std::env::args().nth(1).is_some_and(|a| cli::is_verb_head(&a)) {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("off")).init();
+    } else {
+        env_logger::init();
+    }
     // Before anything can crash: a panic leaves a note the next launch offers to file.
     report::install_panic_hook();
     // CLI surface the Hub (docs/hub-proposal.md) drives. --version / --new / --migrate run

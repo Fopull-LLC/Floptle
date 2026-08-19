@@ -283,32 +283,6 @@ fn exists(root: &Path, reference: &str) -> bool {
     crate::project::resolve_asset_path(root, reference).exists()
 }
 
-/// One finding's message with the **first** quoted name blanked out, so "the
-/// same problem on a different node" collapses to one key.
-///
-/// Only the first: every message these checks produce names the thing that is
-/// wrong first and what it is wrong about after, so blanking the rest would
-/// merge four hidden panels into one line claiming to be one panel. Collapsing
-/// is meant to remove repetition, not information.
-fn shape(message: &str) -> String {
-    let mut out = String::with_capacity(message.len());
-    let mut quotes = 0;
-    for c in message.chars() {
-        if c == '"' {
-            quotes += 1;
-            if quotes == 1 {
-                out.push_str("\"…\"");
-            }
-            if quotes > 2 {
-                out.push(c);
-            }
-        } else if quotes != 1 {
-            out.push(c);
-        }
-    }
-    out
-}
-
 fn print_text(r: &Report, root: &Path) {
     // **The same problem on forty nodes is one problem.** A real project hits
     // this immediately: a panel authored hidden and shown by a script warns
@@ -320,7 +294,7 @@ fn print_text(r: &Report, root: &Path) {
     // because a program has no trouble reading forty.
     let mut groups: Vec<(Level, Option<&String>, String, &str, usize)> = Vec::new();
     for f in &r.findings {
-        let key = shape(&f.message);
+        let key = crate::console::repeat_shape(&f.message);
         match groups
             .iter_mut()
             .find(|(l, file, k, _, _)| *l == f.level && *file == f.file.as_ref() && *k == key)
@@ -543,6 +517,7 @@ mod tests {
     /// be one panel, which removes information rather than repetition.
     #[test]
     fn repeats_collapse_but_different_problems_do_not() {
+        let shape = crate::console::repeat_shape;
         let same_shape = [
             r#"UI element "A" sits under "Panel", which is not visible"#,
             r#"UI element "B" sits under "Panel", which is not visible"#,
