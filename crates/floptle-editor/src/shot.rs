@@ -101,6 +101,36 @@ pub(crate) fn run(
     // `open_project`'s own model import and paint adoption find a device
     // instead of bailing.
     let gpu = Gpu::headless_hdr(w, h);
+    // **A driver that cannot run the engine's shaders is not a defect in the
+    // engine, and must not be reported as one.**
+    //
+    // Without a handler, wgpu's validation failures reach the default one,
+    // which panics — and this binary writes a crash report on panic, so a
+    // machine whose adapter simply cannot build the renderer told its owner to
+    // open a GitHub issue. That is the same shape as `inspect | head` and
+    // `--size 20000x20000`, and the third time it has come up.
+    //
+    // It **exits** rather than recording and carrying on, which is the opposite
+    // of what the windowed editor's handler does and is deliberate: there, a
+    // person is looking at a window and one bad pass should not take the
+    // session down. Here the only output is a picture, and a picture made after
+    // a pass failed is a picture that lies. See `Gpu::headless_with`, which
+    // installs no handler at all for the same reason in reverse — a probe must
+    // never swallow one.
+    gpu.device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
+        eprintln!("this machine's graphics driver could not build the renderer, so there is no \
+                   picture to write:\n  {e}");
+        // A guess, offered as one. It is the cause on every machine this has
+        // been seen on — the raster pipeline binds one palette texture to a
+        // filtering sampler and a nearest one, which OpenGL forbids — but the
+        // handler cannot know that from here, and a confident wrong cause is
+        // worse than a hint.
+        eprintln!(
+            "if this machine has only an OpenGL adapter, that is the likely cause: floptle's \
+             shaders need Vulkan, Metal or DirectX 12."
+        );
+        std::process::exit(1);
+    }));
     // **The Console has to go somewhere.** `run` and `exec` publish theirs as
     // the report; this verb's answer is a picture, so anything the editor says
     // while making it — a scene that failed to load, a device missing the
