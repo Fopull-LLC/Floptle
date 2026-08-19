@@ -1,18 +1,26 @@
 ## Just shipped
 
-**v0.69.2 "Just That Frame"** — **a lit sprite draws one frame, not the whole
-sheet.** With 2D lighting in the scene, a ▫ Sprite on a spritesheet drew its
-correct frame *and* a squashed copy of the entire sheet on top of it, crowded
-into whichever corner that sheet's filled cells landed in; changing the frame
-moved the sprite underneath and left the ghost where it was. 2D lighting works by
-measuring the difference between what is on screen and what the lights say should
-be, and adding that difference back — and it was measuring against the whole
-sheet rather than the one frame, so what it added back was the rest of the sheet.
-The same reading decided which pixels of a sprite block light, so a sprite's
-shadow was cast by the shape of the sheet rather than by the frame you can see.
-Separate from the sheet fix in v0.69.1: if you upgraded and a stretched sheet was
-still sitting over your sprites, this is the other half of it. Nothing to do on
-upgrade.
+**v0.70.0 "From The Terminal"** — **Floptle has a command line.** You can find
+out whether a project loads, whether it runs, what it looks like and what is
+inside it — and change it correctly — without opening the editor, which means
+your CI can do those things and so can an AI assistant working in your project
+folder. `floptle check` loads every scene, prefab, effect and material and
+reports every reference that does not resolve; `floptle run --frames 120` plays
+the project with no window and reports every warning, error and `print` with its
+file and line; `floptle shot` renders one frame to a PNG through the editor's own
+path, post-processing and all; `floptle inspect` reads a project or one node;
+`floptle exec` runs a Lua file against a project through the editor's own
+scripting API; and `floptle api` searches every name a script can call.
+`floptle help --json` publishes the whole surface — arguments, exit codes, and
+whether a command needs a display or writes to your project — generated from the
+same table the parser is, so it cannot go stale. Every flag that worked before
+still works. New projects are scaffolded with an `AGENTS.md` telling an assistant
+what exists. Also in this one: **a lit sprite draws one frame, not the whole
+sheet** — with 2D lighting in the scene, a ▫ Sprite on a spritesheet drew its
+correct frame *and* a squashed copy of the entire sheet on top of it, and the
+same reading decided which pixels of a sprite block light, so its shadow was cast
+by the sheet rather than by the frame you can see. That is the other half of the
+spritesheet fix in v0.69.1. Nothing to do on upgrade.
 
 **v0.69.1 "One Whole Pixel"** — **spritesheets now reach the sprites wearing
 them.** Slicing a texture in the Assets panel only ever reached the one material
