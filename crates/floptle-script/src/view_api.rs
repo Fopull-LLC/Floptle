@@ -95,22 +95,24 @@ pub(crate) fn install_camera_api(lua: &Lua, view: Rc<RefCell<ViewInfo>>) {
             if !v.valid {
                 return Ok(0.0f32);
             }
-            // Default to the camera's distance from the world origin — a flat
-            // game is built around the origin plane, and asking for the number
-            // at "where my game is" should not require restating where that is.
-            let d = distance.unwrap_or_else(|| {
-                let c = DVec3::from(v.cam_world);
-                c.length() as f32
-            });
-            let _ = d; // unused under an orthographic projection, on purpose
             // **An orthographic view is the same height at every distance** —
             // that is the whole reason a flat game uses one — so the distance is
-            // not in the answer at all, and multiplying by it was the bug: a 2D
-            // camera parked nine units back reported nine times too few pixels
-            // per unit, and only `pixelsPerUnit(1)` happened to be right.
+            // not in the answer at all, and is not even computed. Multiplying by
+            // it was the bug: an orthographic camera's stand-in `fov_y` makes
+            // `tan(fov/2)` its half-height, so a 2D camera parked nine units
+            // back reported nine times too few pixels per unit, and only
+            // `pixelsPerUnit(1)` happened to be right.
             let world_h = if v.ortho_height > 0.0 {
                 v.ortho_height
             } else {
+                // Default to the camera's distance from the world origin — a
+                // flat game is built around the origin plane, and asking for the
+                // number at "where my game is" should not require restating
+                // where that is.
+                let d = distance.unwrap_or_else(|| {
+                    let c = DVec3::from(v.cam_world);
+                    c.length() as f32
+                });
                 let half = (v.fov_y * 0.5).tan().max(1e-6);
                 2.0 * d.abs().max(1e-6) * half
             };
