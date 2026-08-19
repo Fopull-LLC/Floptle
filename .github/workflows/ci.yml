@@ -27,7 +27,20 @@ jobs:
   gate:
     name: test + clippy
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Generous on purpose. A warm run on `main` is ~10 minutes and a cold one is
+    # ~25, but the cache is scoped to the branch that wrote it: `Swatinem/rust-cache`
+    # saves under `refs/heads/main`, so **a tag run always builds cold** — every
+    # cache this repo holds for a tag ref belongs to the bundle jobs, not to this
+    # one. That leaves the release gate's runtime entirely at the mercy of which
+    # runner it lands on, and at 45 minutes a slow one does not fail the build,
+    # it CANCELS it: the run reads `cancelled`, the bundles show `skipped`, and
+    # nothing anywhere says "timeout". v0.69.2 died that way at 45m31s having
+    # passed the identical suite on `main` in 24 minutes.
+    #
+    # So this is not a performance budget and should not be tightened into one.
+    # It is a runaway guard, and the thing it guards against (a hung test, an
+    # infinite loop) will still be running at 90 minutes.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
