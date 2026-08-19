@@ -2577,10 +2577,16 @@ impl EditorTabViewer<'_> {
                                         .changed();
                                 }
                                 let cells = sheet.map(|(c, r)| c.max(1) * r.max(1)).unwrap_or(1);
+                                // Labelled, because it was a bare number box
+                                // under "pixels per unit" — and the Material
+                                // section below has a whole grid of cells that
+                                // looks far more like the control. They are the
+                                // same value; this one is the number.
                                 cmd.inspector_changed |= ui
                                     .add(
                                         egui::DragValue::new(cell)
                                             .speed(1)
+                                            .prefix("cell ")
                                             .range(0..=cells.saturating_sub(1)),
                                     )
                                     .on_hover_text(if cells > 1 {
