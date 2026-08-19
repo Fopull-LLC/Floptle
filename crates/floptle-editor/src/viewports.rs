@@ -37,20 +37,25 @@ use crate::{Editor, Egui, PreviewTarget, PreviewView, scene_hit};
 /// (`srgb_to_linear` applied twice). A linear view makes egui sample the stored bytes
 /// verbatim, so the docked Game view / camera POV / asset preview match the surface. On a
 /// non-sRGB surface `remove_srgb_suffix()` is a no-op, so this stays correct there too.
-fn make_offscreen_target(
+/// The colour + depth textures an offscreen scene render needs.
+///
+/// Shared, because there are two callers and the depth usage flags are
+/// load-bearing in a way that is invisible from the call site: without
+/// `COPY_DST` the opaque depth prepass cannot prime the buffer, and every effect
+/// that reads it — contact shadows, shoreline foam, reflections, lamp shadows —
+/// silently takes its "nothing to report" branch. A second copy of this that
+/// drifted by one flag would render a different world and look almost right.
+///
+/// `extra_color` is what the caller adds on top: egui's targets are sampled
+/// (`TEXTURE_BINDING`, added here), and `floptle shot`'s is read back
+/// (`COPY_SRC`).
+pub(crate) fn offscreen_textures(
     gpu: &Gpu,
-    egui: &mut Egui,
     w: u32,
     h: u32,
     label: &str,
-    filter: wgpu::FilterMode,
-    // Does the SCENE draw into this target? Then it needs its own terminal pass
-    // to get from the floating-point scene format down to the sRGB texture egui
-    // shows. A target that only receives an already-finished picture (the docked
-    // Game view, the UI designer) does not.
-    scene: bool,
-) -> PreviewTarget {
-    let (w, h) = (w.max(1), h.max(1));
+    extra_color: wgpu::TextureUsages,
+) -> (wgpu::Texture, wgpu::Texture) {
     let srgb = gpu.surface_format();
     let linear = srgb.remove_srgb_suffix();
     let view_formats: &[wgpu::TextureFormat] = if linear != srgb { &[linear] } else { &[] };
@@ -61,14 +66,8 @@ fn make_offscreen_target(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: srgb,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | extra_color,
         view_formats,
-    });
-    // sRGB view = render target (pipeline unchanged); linear view = what egui samples.
-    let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
-    let egui_view = color.create_view(&wgpu::TextureViewDescriptor {
-        format: Some(linear),
-        ..Default::default()
     });
     let depth = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
@@ -85,6 +84,32 @@ fn make_offscreen_target(
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
+    });
+    (color, depth)
+}
+
+fn make_offscreen_target(
+    gpu: &Gpu,
+    egui: &mut Egui,
+    w: u32,
+    h: u32,
+    label: &str,
+    filter: wgpu::FilterMode,
+    // Does the SCENE draw into this target? Then it needs its own terminal pass
+    // to get from the floating-point scene format down to the sRGB texture egui
+    // shows. A target that only receives an already-finished picture (the docked
+    // Game view, the UI designer) does not.
+    scene: bool,
+) -> PreviewTarget {
+    let (w, h) = (w.max(1), h.max(1));
+    let linear = gpu.surface_format().remove_srgb_suffix();
+    let (color, depth) =
+        offscreen_textures(gpu, w, h, label, wgpu::TextureUsages::TEXTURE_BINDING);
+    // sRGB view = render target (pipeline unchanged); linear view = what egui samples.
+    let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+    let egui_view = color.create_view(&wgpu::TextureViewDescriptor {
+        format: Some(linear),
+        ..Default::default()
     });
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
     let tex_id = egui.renderer.register_native_texture(&gpu.device, &egui_view, filter);

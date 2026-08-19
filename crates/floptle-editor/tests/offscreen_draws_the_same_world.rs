@@ -158,3 +158,70 @@ fn the_two_gathers_are_actually_two() {
         );
     }
 }
+
+/// **Everything a scene render binds is something start-up sets up.**
+///
+/// `render_world_into` binds six pieces of the device as one `if let` tuple. A
+/// missing one used to mean the whole render silently did nothing: no panic, no
+/// message, a valid and entirely black frame. `floptle shot` shipped its first
+/// picture that way — 960x540 of black, exit 0 — because it built its device
+/// from a copy of start-up that stopped one line too early.
+///
+/// So the rule is that anything the draw binds is created in
+/// `Editor::init_gpu_side`, which is the ONE function both the window and the
+/// headless verb go through. This reads the bind list out of the source rather
+/// than restating it, so adding a seventh thing to the tuple and forgetting the
+/// setup fails here instead of in somebody's black PNG.
+#[test]
+fn every_field_a_scene_render_binds_is_set_up_in_one_place() {
+    let off = offscreen();
+    // The six-way bind, as written: `self.<field>.as_ref()` / `.as_mut()` inside
+    // the tuple that guards the draw.
+    // Anchored on the LAST member of the tuple and walked back to the `) = (`
+    // that opens it: anchoring on the first member instead finds an earlier,
+    // unrelated `self.raster.as_mut()` and reads a window that is not the bind.
+    let last = off.find("self.tri_layer.as_mut(),").expect(
+        "the scene draw no longer binds `self.tri_layer.as_mut()` — if the bind was \
+         reshaped, move this check with it rather than deleting it",
+    );
+    let open = off[..last].rfind(") = (").expect("the bind tuple has no opening");
+    let tuple_end = off[last..].find(") {").expect("the bind tuple is unterminated") + last;
+    let tuple = &off[open..tuple_end];
+
+    let mut bound: Vec<&str> = Vec::new();
+    for line in tuple.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("self.") else { continue };
+        let Some(field) = rest.split(['.', ',']).next() else { continue };
+        if !field.is_empty() && !bound.contains(&field) {
+            bound.push(field);
+        }
+    }
+    assert!(
+        bound.len() >= 6,
+        "only found {bound:?} in the scene draw's bind tuple, which is fewer than the six          it has always taken — this test has stopped reading what it thinks it is reading"
+    );
+
+    let setup = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+    )
+    .expect("read main.rs");
+    let start = setup.find("fn init_gpu_side").expect(
+        "`init_gpu_side` is gone — it is the one place both the window and the headless          verbs set the device up, and without it they can drift again",
+    );
+    let end = setup[start..].find("\n    }\n").map(|i| i + start).unwrap_or(setup.len());
+    let init = &setup[start..end];
+
+    let missing: Vec<&str> = bound
+        .iter()
+        .filter(|f| **f != "gpu" && **f != "raster") // set by `attach_gpu` itself
+        .filter(|f| !init.contains(&format!("self.{f} = Some(")))
+        .copied()
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the scene draw binds {missing:?}, and `init_gpu_side` never creates {}. A device \
+         missing any one of them draws NOTHING — silently, into a valid black frame.",
+        if missing.len() == 1 { "it" } else { "them" }
+    );
+}

@@ -136,8 +136,9 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool) -> i
     report(&opened, &ed.console, steps, json)
 }
 
-/// A scene named by path, by project-relative path, or by name.
-fn resolve_scene(root: &Path, s: &str) -> Option<String> {
+/// A scene named by path, by project-relative path, or by name. Shared with
+/// `shot`, so `--scene arena` means the same thing to both.
+pub(crate) fn resolve_scene(root: &Path, s: &str) -> Option<String> {
     for candidate in [std::path::PathBuf::from(s), root.join(s)] {
         if candidate.is_file() {
             return Some(candidate.to_string_lossy().into_owned());

@@ -9608,6 +9608,8 @@ impl Editor {
             self.line_layer.as_mut(),
             self.tri_layer.as_mut(),
         ) {
+            // Everything below is the draw. If the tuple above does not match,
+            // the `else` at the end of it says so — see there.
             // The opaque depth prepass, HERE as well as on the window path.
             // Contact shadows, `surfaceGap`, screen-space reflections and lamp
             // shadows all read it, and without it every one of them silently
@@ -9740,6 +9742,38 @@ impl Editor {
                     &vfx_instances,
                     &vfx_batches,
                     raster,
+                );
+            }
+        } else {
+            // **A view that cannot draw says so.** This binds six pieces of the
+            // device at once, and until now a missing one meant the whole render
+            // silently did nothing — the caller got a valid, entirely black
+            // frame and no reason for it. That is how `floptle shot` shipped its
+            // first picture: 960x540 of black, exit 0.
+            //
+            // Once, not per view per frame: a device that is missing a piece is
+            // missing it for good, and sixty lines a second would bury it.
+            if !self.warned_incomplete_device {
+                self.warned_incomplete_device = true;
+                let missing = [
+                    ("gpu", self.gpu.is_none()),
+                    ("raster", self.raster.is_none()),
+                    ("raymarch", self.raymarch.is_none()),
+                    ("particles", self.particles.is_none()),
+                    ("lines", self.line_layer.is_none()),
+                    ("tris", self.tri_layer.is_none()),
+                ]
+                .iter()
+                .filter(|(_, missing)| *missing)
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", ");
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!(
+                        "nothing can be drawn: this renderer was never given {missing}.                          Everything a scene render needs is set up in `Editor::init_gpu_side`."
+                    ),
+                    None,
                 );
             }
         }

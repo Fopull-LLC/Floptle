@@ -331,6 +331,60 @@ pub(crate) const VERBS: &[Verb] = &[
         legacy: &["--bake-gi"],
     },
     Verb {
+        name: "shot",
+        summary: "render a scene to a PNG, and exit",
+        detail: "Draws one frame through the editor's own offscreen path — the same one the \
+                 docked Game view, camera previews and render targets come through — so what \
+                 lands in the file is what the editor would show.\n\n\
+                 It looks through the scene's ACTIVE camera, or one named with --camera. A \
+                 scene with no camera has no view and says so rather than inventing an angle.\n\n\
+                 The scene is not played: nothing has moved and no `start` has run. That is \
+                 the right frame for \"what did my edit do\"; use `run` for what happens next.",
+        args: &[
+            Arg {
+                name: "PROJECT",
+                value: Value::Path,
+                required: false,
+                help: "the project directory (default: assets/)",
+            },
+            Arg {
+                name: "--scene",
+                value: Value::Text,
+                required: false,
+                help: "which scene, by path or by name (default: the project's entry scene)",
+            },
+            Arg {
+                name: "--camera",
+                value: Value::Text,
+                required: false,
+                help: "look through this camera node instead of the active one",
+            },
+            Arg {
+                name: "--size",
+                value: Value::Text,
+                required: false,
+                help: "WxH in pixels, or one number for a square (default: 960x540)",
+            },
+            Arg {
+                name: "--out",
+                value: Value::Path,
+                required: false,
+                help: "where to write the PNG (default: <PROJECT>/<scene>.png)",
+            },
+            Arg {
+                name: "--json",
+                value: Value::Flag,
+                required: false,
+                help: "answer as JSON",
+            },
+        ],
+        needs_gpu: true,
+        writes_project: true,
+        exits: &[(1, "the scene has no camera, or the file could not be written")],
+        output: "a PNG at --out; the path on stdout, or an object with --json",
+        legacy: &[],
+    },
+    Verb {
         name: "run",
         summary: "run a project headlessly for a bounded time, and report what happened",
         detail: "The editor's own play loop with no window and no GPU: the scene-transition \
@@ -752,6 +806,30 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             }
             _ => Outcome::Exit(2),
         },
+        Some(("shot", a)) => {
+            let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
+            let scene = text(a, "scene");
+            let size = match text(a, "size").as_deref().map(crate::shot::parse_size) {
+                Some(Err(e)) => {
+                    eprintln!("{e}");
+                    return Outcome::Exit(2);
+                }
+                Some(Ok(s)) => s,
+                // 960x540: a sixteen-by-nine frame big enough to read a label
+                // in and small enough to render and look at in a second.
+                None => (960, 540),
+            };
+            let out = path(a, "out")
+                .unwrap_or_else(|| crate::shot::default_out(&project, scene.as_deref()));
+            Outcome::Exit(crate::shot::run(
+                &project,
+                scene.as_deref(),
+                text(a, "camera").as_deref(),
+                size,
+                &out,
+                a.get_flag("json"),
+            ))
+        }
         Some(("run", a)) => {
             let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
             // Parsed here rather than by clap's value parser so a bad number

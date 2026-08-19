@@ -122,6 +122,7 @@ mod script_meta;
 mod scene_tab;
 mod selection;
 mod shading;
+mod shot;
 mod templates;
 mod terrain_edit;
 mod terrain_ui;
@@ -2284,6 +2285,9 @@ struct Editor {
     /// authored in single frames, and "is this jab 4 frames of startup or 5" cannot be
     /// answered by watching it at full speed.
     tick_steps: u32,
+    /// Said once, if a scene render ever finds its device incomplete. See the
+    /// `else` at the end of `render_world_into`'s six-way bind.
+    warned_incomplete_device: bool,
     /// The in-editor multiplayer session (docs/netcode-design.md §12 2b): the play
     /// world hosts, an optional ghost-client world joins over the in-process hub
     /// with simulated latency/loss, and cyan gizmos show its view. Torn down on Stop.
@@ -3089,6 +3093,77 @@ enum PreviewView {
     Image(egui::TextureHandle, [usize; 2]),
 }
 
+impl Editor {
+    /// Everything the GPU side of start-up sets up, once a device exists.
+    ///
+    /// Shared, because there are two ways in now: the window handler, and
+    /// `floptle shot`, which makes a headless device and never opens one. The
+    /// part that must not be duplicated is the primitive registration — the
+    /// `Shape → MeshId` mapping is POSITIONAL (`Shape as usize`), so a second
+    /// copy that registered them in a different order, or missed one somebody
+    /// added, would draw the wrong primitive rather than fail.
+    fn init_gpu_side(&mut self, gpu: &Gpu, raster: &mut Raster) {
+        use crate::matter_catalog::primitive_mesh;
+        use floptle_core::Shape;
+        let cube_id = raster.register(gpu, &primitive_mesh(Shape::Cube), None);
+        let sphere_id = raster.register(gpu, &primitive_mesh(Shape::Sphere), None);
+        let capsule_id = raster.register(gpu, &primitive_mesh(Shape::Capsule), None);
+        let plane_id = raster.register(gpu, &primitive_mesh(Shape::Plane), None);
+        self.mesh_ids = vec![cube_id, sphere_id, capsule_id, plane_id];
+        self.raymarch = Some(Raymarch::new(gpu));
+        // **Everything `render_world_into` needs, in one place.** That function
+        // binds gpu, raster, raymarch, particles, lines and tris as a single
+        // six-way `if let`, and does nothing at all if one of them is missing —
+        // no panic, no message, just a black frame. `floptle shot` was written
+        // against a copy of this setup that stopped after the raymarch, and it
+        // reported success while writing 960x540 of pure black. Anything a
+        // scene render binds is set up here so a second entry point cannot get
+        // a partial device again.
+        self.line_layer = Some(floptle_render::Lines::new(gpu));
+        self.tri_layer = Some(floptle_render::Tris::new(gpu));
+        self.particles = Some(floptle_render::Particles::new(gpu));
+        self.ui_render = Some(floptle_render::Ui::new(gpu));
+        self.gpu_timer = floptle_render::GpuTimer::new(gpu);
+        // `FLOPTLE_GPU_TIMING=1` opens the ⏱ panel on startup and repeats its
+        // numbers to the terminal — the form a measurement has to take when the
+        // person reading it is not the person at the window.
+        self.gpu_timing_open = std::env::var("FLOPTLE_GPU_TIMING").is_ok();
+
+        // Built-in primitive meshes for particle mesh-render tracks (see vfx.rs). Reserved
+        // `builtin://…` keys in mesh_registry so the VFX picker offers stock shapes and
+        // resolve_mesh_particles finds them by key like any imported model.
+        for (key, _) in crate::vfx::BUILTIN_PARTICLE_MESHES {
+            if let Some(data) = crate::vfx::builtin_particle_mesh_data(key) {
+                let id = raster.register(gpu, &data, None);
+                self.mesh_registry.insert(
+                    (*key).to_string(),
+                    MeshAsset {
+                        parts: vec![id],
+                        part_meta: Vec::new(),
+                        tex_filter: None,
+                        size: 1.0,
+                        rig: None,
+                    },
+                );
+            }
+        }
+
+    }
+
+    /// Give this editor a device and bring up everything that needs one.
+    ///
+    /// The headless entry point. The window handler does the same work inline
+    /// because it has an egui pass to interleave; both go through
+    /// [`init_gpu_side`](Self::init_gpu_side) for the part that would be a bug
+    /// to copy.
+    pub(crate) fn attach_gpu(&mut self, gpu: Gpu) {
+        let mut raster = Raster::new(&gpu);
+        self.init_gpu_side(&gpu, &mut raster);
+        self.gpu = Some(gpu);
+        self.raster = Some(raster);
+    }
+}
+
 impl ApplicationHandler for Editor {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -3161,39 +3236,7 @@ impl ApplicationHandler for Editor {
         // Geometry comes from matter_catalog::primitive_mesh so the paint brush's CPU
         // cache raycasts the EXACT mesh drawn here — paint is indexed by vertex_index,
         // so a divergence would paint the wrong vertices.
-        use crate::matter_catalog::primitive_mesh;
-        use floptle_core::Shape;
-        let cube_id = raster.register(&gpu, &primitive_mesh(Shape::Cube), None);
-        let sphere_id = raster.register(&gpu, &primitive_mesh(Shape::Sphere), None);
-        let capsule_id = raster.register(&gpu, &primitive_mesh(Shape::Capsule), None);
-        let plane_id = raster.register(&gpu, &primitive_mesh(Shape::Plane), None);
-        self.mesh_ids = vec![cube_id, sphere_id, capsule_id, plane_id];
-        self.raymarch = Some(Raymarch::new(&gpu));
-        self.gpu_timer = floptle_render::GpuTimer::new(&gpu);
-        // `FLOPTLE_GPU_TIMING=1` opens the ⏱ panel on startup and repeats its
-        // numbers to the terminal — the form a measurement has to take when the
-        // person reading it is not the person at the window.
-        self.gpu_timing_open = std::env::var("FLOPTLE_GPU_TIMING").is_ok();
-
-        // Built-in primitive meshes for particle mesh-render tracks (see vfx.rs). Reserved
-        // `builtin://…` keys in mesh_registry so the VFX picker offers stock shapes and
-        // resolve_mesh_particles finds them by key like any imported model.
-        for (key, _) in crate::vfx::BUILTIN_PARTICLE_MESHES {
-            if let Some(data) = crate::vfx::builtin_particle_mesh_data(key) {
-                let id = raster.register(&gpu, &data, None);
-                self.mesh_registry.insert(
-                    (*key).to_string(),
-                    MeshAsset {
-                        parts: vec![id],
-                        part_meta: Vec::new(),
-                        tex_filter: None,
-                        size: 1.0,
-                        rig: None,
-                    },
-                );
-            }
-        }
-
+        self.init_gpu_side(&gpu, &mut raster);
         // Seed the project folder structure + default assets, then load the scene,
         // project settings, materials and asset tree from `project_root`.
         self.seed_project_dirs();
@@ -3234,10 +3277,6 @@ impl ApplicationHandler for Editor {
         self.post = Some(floptle_render::PostStack::new(&gpu, gpu.config.width, gpu.config.height));
         self.outline = Some(Outline::new(&gpu));
         self.grid_render = Some(Grid::new(&gpu));
-        self.line_layer = Some(floptle_render::Lines::new(&gpu));
-        self.tri_layer = Some(floptle_render::Tris::new(&gpu));
-        self.particles = Some(floptle_render::Particles::new(&gpu));
-        self.ui_render = Some(floptle_render::Ui::new(&gpu));
 
         let ctx = egui::Context::default();
         // No package has loaded yet, so this is the editor's own stack. Any
