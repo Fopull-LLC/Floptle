@@ -252,16 +252,43 @@ fn readback(gpu: &Gpu, tex: &wgpu::Texture, w: u32, h: u32) -> Vec<u8> {
     out
 }
 
+/// The largest frame this can render.
+///
+/// `Gpu::headless_with` asks for `wgpu::Limits::default()`, and that is exactly
+/// where the ceiling comes from — so this is the real number for the device this
+/// verb creates, not a guess at one.
+fn max_side() -> u32 {
+    wgpu::Limits::default().max_texture_dimension_2d
+}
+
 /// Parse `--size` as `WxH`, or a single number meaning a square.
+///
+/// **The bounds are checked here, not at the texture.** `--size 20000x20000`
+/// used to reach `create_texture`, and wgpu's validation failure is a panic —
+/// so a typed number too large ended in a crash report asking the caller to open
+/// a GitHub issue about having asked for a big picture. That is the same shape
+/// as `inspect | head` panicking on SIGPIPE: a mistake in the command line
+/// reported as a defect in the engine.
 pub(crate) fn parse_size(s: &str) -> Result<(u32, u32), String> {
     let bad = || format!("--size wants WxH (say 960x540), not {s:?}");
-    match s.split_once(['x', 'X']) {
+    let (w, h) = match s.split_once(['x', 'X']) {
         Some((w, h)) => {
             let (Ok(w), Ok(h)) = (w.trim().parse(), h.trim().parse()) else { return Err(bad()) };
-            Ok((w, h))
+            (w, h)
         }
-        None => s.trim().parse().map(|n| (n, n)).map_err(|_| bad()),
+        None => s.trim().parse().map(|n: u32| (n, n)).map_err(|_| bad())?,
+    };
+    if w == 0 || h == 0 {
+        return Err(format!("--size {w}x{h} has no picture in it"));
     }
+    let max = max_side();
+    if w > max || h > max {
+        return Err(format!(
+            "--size {w}x{h} is larger than this machine can render — {max} is the limit on \
+             either side"
+        ));
+    }
+    Ok((w, h))
 }
 
 /// Where a shot lands when the caller did not say.
@@ -284,9 +311,30 @@ mod tests {
         assert_eq!(parse_size(" 512 "), Ok((512, 512)));
         assert!(parse_size("960*540").is_err());
         assert!(parse_size("wide").is_err());
+        // A picture with no pixels in it is a typo, not a request.
+        assert!(parse_size("0x540").is_err());
+        assert!(parse_size("0").is_err());
         // The error names the flag and shows the shape, because the caller that
         // typed this cannot see the source.
         assert!(parse_size("960by540").unwrap_err().contains("960x540"));
+    }
+
+    /// **A number too big is a wrong command line, not a crash.**
+    ///
+    /// It reached `create_texture` before this, and wgpu answers a texture it
+    /// cannot make with a panic — which the editor turns into a crash report
+    /// asking the caller to file a GitHub issue. Somebody who typed a large
+    /// number would have been told the engine was broken.
+    #[test]
+    fn a_frame_bigger_than_the_device_is_refused_by_name() {
+        let max = max_side();
+        assert!(parse_size(&format!("{max}x{max}")).is_ok(), "the limit itself is renderable");
+        let over = format!("{}x{}", max + 1, max + 1);
+        let err = parse_size(&over).unwrap_err();
+        assert!(err.contains(&max.to_string()), "the refusal did not say what the limit is: {err}");
+        // …and one side over is enough.
+        assert!(parse_size(&format!("{}x64", max + 1)).is_err());
+        assert!(parse_size(&format!("64x{}", max + 1)).is_err());
     }
 
     #[test]

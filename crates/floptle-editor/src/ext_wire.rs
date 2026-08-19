@@ -106,17 +106,11 @@ impl Editor {
         }
     }
 
-    /// Step 1 of the frame: mirror the editor into the host and run the hooks.
-    ///
-    /// Deliberately separate from projecting what `handles.*` queued: this needs
-    /// the whole editor, and by the time `view_proj` exists the draw path holds
-    /// pieces of it. Running the hooks first also means a hook's `scene.setPos`
-    /// is queued before anything reads the queue.
     /// Hand the extension host one frame's view of the editor and the scene,
     /// without the rest of a frame.
     ///
-    /// `ext_tick` is the editor's per-frame version and does more than this:
-    /// timers, web pumps, the Update hook, a revision check that avoids
+    /// [`Editor::ext_tick`] is the editor's per-frame version and does more than
+    /// this: timers, web pumps, the Update hook, a revision check that avoids
     /// rebuilding an unchanged mirror. `floptle exec` runs one script once, so
     /// none of that applies — but it needs the same two values, built the same
     /// way, or a script would read a different world from a terminal than it
@@ -126,6 +120,12 @@ impl Editor {
         self.ext.begin_frame(self.ext_snapshot(), mirror);
     }
 
+    /// Step 1 of the frame: mirror the editor into the host and run the hooks.
+    ///
+    /// Deliberately separate from projecting what `handles.*` queued: this needs
+    /// the whole editor, and by the time `view_proj` exists the draw path holds
+    /// pieces of it. Running the hooks first also means a hook's `scene.setPos`
+    /// is queued before anything reads the queue.
     pub(crate) fn ext_tick(&mut self) {
         // **Load this project's packages once, however the project arrived.**
         //

@@ -5460,7 +5460,6 @@ mod tests {
         assert_eq!(api_rank(&e("unrelated", "nothing to do with it"), q), None);
     }
 
-
     /// `docs/lua-api.md` is generated from [`LUA_API`] — this keeps it current.
     ///
     /// The reference exists twice on purpose: in the editor, where you are when
