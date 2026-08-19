@@ -48,20 +48,31 @@ pub struct Light2dInstance {
     pub model: [[f32; 4]; 4],
     /// rgb tint × a opacity, multiplied into the sampled texture.
     pub tint: [f32; 4],
-    /// x = sorting-layer rank, y = 1 when this surface blocks light. z/w are
-    /// spare and are where a normal-map slot goes when step 3 lands.
+    /// x = sorting-layer rank, y = 1 when this surface blocks light,
+    /// z = the raster pass's packed tiling flags (`InstanceRaw::rim.w`:
+    /// `mode + round(rotation_degrees * 10) * 4`). w is spare and is where a
+    /// normal-map slot goes when step 3 lands.
     pub meta: [f32; 4],
+    /// The same tiling lanes the raster pass gets (`InstanceRaw::tile`):
+    /// Uv mode = (count.x, count.y, offset.x, offset.y).
+    ///
+    /// Here because a sprite on a spritesheet *is* a UV window — one cell of
+    /// the sheet across one quad — and a G-buffer that samples the whole sheet
+    /// is not drawing what the raster pass drew, which is the one thing this
+    /// pass promises (see the header).
+    pub tile: [f32; 4],
 }
 
 impl Light2dInstance {
     /// Per-instance attributes, continuing the mesh's own pos/normal/uv at 0..2.
-    const ATTRS: [wgpu::VertexAttribute; 6] = [
+    const ATTRS: [wgpu::VertexAttribute; 7] = [
         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 3 },
         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 4 },
         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 5 },
         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 6 },
         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 64, shader_location: 7 },
         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 80, shader_location: 8 },
+        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 96, shader_location: 9 },
     ];
 
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -79,11 +90,22 @@ impl Light2dInstance {
     /// differently. The only things added are the sorting rank and whether the
     /// surface blocks light, neither of which the raster instance has anywhere
     /// to put.
+    ///
+    /// "Takes them from the very value handed to the colour pass" has to mean
+    /// *everything that pass samples with*, not only the transform and the
+    /// tint. The tiling window was left out of it, and a spritesheet is nothing
+    /// but a tiling window: the raster pass drew cell 3 and the G-buffer drew
+    /// all thirty-two cells squashed across the same quad, so the composite
+    /// laid a stretched copy of the whole sheet over the sprite.
     pub fn from_raster(raw: &crate::raster::InstanceRaw, rank: u32, casts: bool) -> Self {
         Self {
             model: raw.model,
             tint: raw.color,
-            meta: [rank as f32, if casts { 1.0 } else { 0.0 }, 0.0, 0.0],
+            // rim.w is the raster pass's packed tiling flags, carried across
+            // whole rather than unpacked and repacked — the two passes then
+            // cannot disagree about what mode this surface is sampled in.
+            meta: [rank as f32, if casts { 1.0 } else { 0.0 }, raw.rim[3], 0.0],
+            tile: raw.tile,
         }
     }
 
@@ -674,6 +696,39 @@ mod tests {
         // …and every attribute lands where the struct actually put its field.
         assert_eq!(Light2dInstance::ATTRS[4].offset as usize, std::mem::offset_of!(Light2dInstance, tint));
         assert_eq!(Light2dInstance::ATTRS[5].offset as usize, std::mem::offset_of!(Light2dInstance, meta));
-        assert_eq!(Light2dInstance::LAYOUT.array_stride, 96);
+        assert_eq!(Light2dInstance::ATTRS[6].offset as usize, std::mem::offset_of!(Light2dInstance, tile));
+        assert_eq!(Light2dInstance::LAYOUT.array_stride, 112);
+    }
+
+    /// **The G-buffer draws the cell the raster pass drew, not the whole sheet.**
+    ///
+    /// A `Matter::Sprite` on a spritesheet is drawn through a UV window — the
+    /// material's tiling lanes are how one cell of a sheet becomes one quad.
+    /// `from_raster` took the model and the tint and left the window behind, so
+    /// the deferred pass sampled the WHOLE image across the quad and the delta
+    /// composite laid a squashed copy of every frame of the animation over the
+    /// sprite. The raster pass had the cell right the entire time, which is what
+    /// made it read as a glitch rather than as a wrong frame.
+    ///
+    /// The header states the invariant this broke: `C` and `a` in the G-buffer
+    /// must be exactly what the raster pass drew, or the difference the
+    /// composite subtracts is the difference between two different pictures. A
+    /// UV window is part of `C`.
+    #[test]
+    fn the_g_buffer_samples_the_cell_the_raster_pass_drew() {
+        // One cell of a 16x2 sheet: a sixteenth across, a half down, scrolled to
+        // cell 3 — the shape `MaterialParams::from_material_inset` hands over.
+        let mp = crate::MaterialParams {
+            tile_mode: 1,
+            tile: [1.0 / 16.0, 0.5, 3.0 / 16.0, 0.0],
+            ..crate::MaterialParams::flat([1.0, 1.0, 1.0])
+        };
+        let raw = crate::instance_of_mat(glam::Mat4::IDENTITY, &mp);
+        let g = Light2dInstance::from_raster(&raw, 0, true);
+        assert_eq!(g.tile, raw.tile, "the G-buffer sampled the whole sheet instead of the cell");
+        assert_eq!(
+            g.meta[2], raw.rim[3],
+            "…and could not have windowed it anyway: the tiling MODE never arrived"
+        );
     }
 }

@@ -305,6 +305,94 @@ fn main() {
         }
     }
 
+    // ---- one cell of a spritesheet, lit ------------------------------------
+    //
+    // The G-buffer samples the albedo texture itself, so it has to sample it
+    // through the SAME UV window the colour pass used. A sprite on a sheet is
+    // nothing but that window, and when it was missing the deferred pass wrote
+    // every cell of the sheet squashed across the one quad — so the delta
+    // composite laid a stretched copy of the whole sheet over the sprite while
+    // the raster pass had the right frame the entire time. That is why it read
+    // as a glitch and not as a wrong animation frame.
+    //
+    // It has to be checked *lit*, because unlit is the one state where the pass
+    // does not run.
+    {
+        // Four cells, four flat colours, eight pixels each so a linear sampler
+        // always has somewhere to land that is not a cell boundary.
+        let cells: [[u8; 4]; 4] =
+            [[220, 40, 40, 255], [40, 200, 40, 255], [40, 60, 230, 255], [230, 230, 230, 255]];
+        let (tw, th) = (32u32, 8u32);
+        let pixels: Vec<u8> = (0..th)
+            .flat_map(|_| (0..tw).flat_map(|x| cells[(x / 8) as usize]).collect::<Vec<u8>>())
+            .collect();
+        let sheet_tex = raster.register_texture(
+            &gpu,
+            &TextureData { pixels, width: tw, height: th },
+            TexSampling::default(),
+        );
+        // One quad, half the frame across, with plain 0..1 UVs — the window has
+        // to come from the material, exactly as a `Matter::Sprite` gets it.
+        let qd = mesh::tilemap(1, 1, ORTHO_HEIGHT * 0.5, 1, 1, [0.0, 0.0], &[0]);
+        let quad = raster.register(&gpu, &qd, None);
+        // The REAL window, through the same call the editor's sprite draw makes.
+        // Restating the offset convention here would grade the probe's opinion of
+        // it rather than the pass.
+        let sheet_mat = floptle_core::Material {
+            sheet_cols: 4,
+            sheet_rows: 1,
+            cell: 2,
+            unlit: true,
+            ..Default::default()
+        };
+        let mp = MaterialParams::from_material_inset(
+            &sheet_mat,
+            [1.0 / tw as f32, 1.0 / th as f32],
+        );
+        let raw = instance_of_mat(Mat4::IDENTITY, &mp);
+        let flat =
+            [(quad, Some::<TexId>(sheet_tex), Light2dInstance::from_raster(&raw, MAP_RANK, false))];
+        let px = shot(&gpu, &mut raster, S, view_proj, quad, sheet_tex, &raw, &flat, Some(&lit));
+        let out = format!("{dir}/light2d_sheet_lit.png");
+        save_png(&px, S, &out);
+        // Four samples across the quad — one in the middle of each stripe the
+        // whole sheet would have drawn.
+        let row = S / 2;
+        let xs = [S * 5 / 16, S * 7 / 16, S * 9 / 16, S * 11 / 16];
+        let at = |x: u32| px[(row * S + x) as usize];
+        println!("sheet cell 2 lit: {:?} — wrote {out}", xs.map(|x| [at(x)[0], at(x)[1], at(x)[2]]));
+
+        // **The quad is left-right symmetric, and the sheet is not.** One cell
+        // is a flat colour and the light is radial about the centre, so two
+        // samples the same distance either side of it must agree. The sheet's
+        // cells differ from each other, so the moment the deferred pass draws
+        // the sheet instead of the cell the pairs come apart — which is the
+        // measurement, rather than "is it still bluish", because the composite
+        // adds a DIFFERENCE and a wrong cell can still leave blue on top.
+        for (l, r) in [(xs[0], xs[3]), (xs[1], xs[2])] {
+            let (a, b) = (at(l), at(r));
+            for c in 0..3 {
+                assert!(
+                    (a[c] as i32 - b[c] as i32).abs() <= 4,
+                    "the lit pass sampled the whole sheet, not cell 2: channel {c} is {} at \
+                     x={l} and {} at x={r}, and those two pixels are the same distance from a \
+                     radial light on a quad drawing ONE flat colour",
+                    a[c],
+                    b[c]
+                );
+            }
+        }
+        // …and it is the cell that was asked for, not merely a consistent one.
+        for x in xs {
+            let p = at(x);
+            assert!(
+                p[2] > p[0] && p[2] > p[1],
+                "cell 2 is the blue one, and x={x} came out {:?}",
+                &p[..3]
+            );
+        }
+    }
+
     println!("2D lighting OK");
 }
 

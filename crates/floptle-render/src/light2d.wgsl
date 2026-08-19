@@ -63,7 +63,8 @@ struct FillIn {
     @location(5) m2: vec4<f32>,
     @location(6) m3: vec4<f32>,
     @location(7) tint: vec4<f32>,   // rgb tint, a = opacity
-    @location(8) info: vec4<f32>,   // x = sorting rank, y/z/w spare
+    @location(8) info: vec4<f32>,   // x = sorting rank, y = casts, z = tiling flags
+    @location(9) tile: vec4<f32>,   // uv mode: count.xy, offset.xy
 };
 
 struct FillOut {
@@ -90,7 +91,29 @@ fn vs_fill(in: FillIn) -> FillOut {
     let world = model * vec4<f32>(in.pos, 1.0);
     var out: FillOut;
     out.clip = f.view_proj * world;
-    out.uv = in.uv;
+    // **The same UV window the raster pass samples through.** One cell of a
+    // spritesheet IS this transform, so a G-buffer that skipped it wrote the
+    // whole sheet where the colour pass had written one frame — and the delta
+    // composite then subtracted one picture from a different one, which reads
+    // as a squashed copy of the sheet laid over the sprite.
+    //
+    // Done here rather than in the fragment, which is where `raster.wgsl` does
+    // it: the mode-1 window is affine in UV, so transforming the three corners
+    // and interpolating is exact, and the sample keeps its implicit derivatives
+    // (no `textureSampleGrad`) because the result still varies affinely.
+    // Mode 2 (triplanar) needs a local position this pass does not carry and
+    // never applies to a flat 2D surface, so it samples untransformed — the
+    // same thing it did before this window existed.
+    let flags = u32(in.info.z + 0.5);
+    if ((flags & 3u) == 1u) {
+        let rot = f32(flags >> 2u) * 0.1 * 0.017453292519943295;
+        let c = cos(rot);
+        let sn = sin(rot);
+        let m = mat2x2<f32>(vec2<f32>(c, sn), vec2<f32>(-sn, c));
+        out.uv = m * ((in.uv - 0.5) * in.tile.xy) + 0.5 + in.tile.zw;
+    } else {
+        out.uv = in.uv;
+    }
     out.tint = in.tint;
     out.info = in.info;
     return out;
