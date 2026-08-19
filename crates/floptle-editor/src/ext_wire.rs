@@ -398,35 +398,35 @@ impl Editor {
         if let Some(text) = copies.pop()
             && self.last_ext_copy.as_deref() != Some(text.as_str())
         {
-                let n = text.chars().count();
-                self.ensure_os_clipboard();
-                // The editor's own clipboard, so a package's copy button and
-                // Ctrl+C put text in the same place — and so the answer is the
-                // same on all three platforms.
-                let took = match self.os_clipboard.as_mut() {
-                    Some(c) => {
-                        c.set_text(text.clone());
-                        self.window.is_some()
-                    }
-                    None => false,
-                };
-                self.last_ext_copy = Some(text);
-                // A copy button with no visible result is one people press three
-                // times, so the editor confirms it — but only when there was
-                // somewhere to put it. With no window there is no clipboard
-                // backend and `set_text` is a silent no-op; saying "copied"
-                // there would be the editor asserting something it did not do.
-                if took {
-                    let unit = if n == 1 { "character" } else { "characters" };
-                    self.toast = Some((format!("⎘  copied {n} {unit}"), 2.0));
-                } else {
-                    self.console.push(
-                        floptle_script::LogLevel::Warn,
-                        "ed.copy: there is no clipboard to write to here".into(),
-                        None,
-                    );
+            let n = text.chars().count();
+            self.ensure_os_clipboard();
+            // The editor's own clipboard, so a package's copy button and
+            // Ctrl+C put text in the same place — and so the answer is the
+            // same on all three platforms.
+            let took = match self.os_clipboard.as_mut() {
+                Some(c) => {
+                    c.set_text(text.clone());
+                    self.window.is_some()
                 }
+                None => false,
+            };
+            self.last_ext_copy = Some(text);
+            // A copy button with no visible result is one people press three
+            // times, so the editor confirms it — but only when there was
+            // somewhere to put it. With no window there is no clipboard
+            // backend and `set_text` is a silent no-op; saying "copied"
+            // there would be the editor asserting something it did not do.
+            if took {
+                let unit = if n == 1 { "character" } else { "characters" };
+                self.toast = Some((format!("⎘  copied {n} {unit}"), 2.0));
+            } else {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    "ed.copy: there is no clipboard to write to here".into(),
+                    None,
+                );
             }
+        }
         self.drain_ext_log();
         self.serve_mesh_reads();
         self.serve_doc_reads();

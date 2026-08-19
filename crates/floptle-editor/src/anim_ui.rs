@@ -2202,62 +2202,61 @@ impl EditorTabViewer<'_> {
                         && let AnimPropValueDoc::Frame(f) =
                             &mut doc.channels[ci].properties[ti].values[ki]
                     {
-
-                                ui.horizontal_wrapped(|ui| {
-                                    let label = if f.texture.is_empty() {
-                                        "(pick image)".to_string()
-                                    } else {
-                                        f.texture.clone()
-                                    };
-                                    if let Some(pick) = crate::ui_widgets::asset_picker(
-                                        ui,
-                                        egui::Id::new(("prop-frame-tex", ci, ti)),
-                                        self.project_root,
-                                        &label,
-                                        Some("(clear)"),
-                                        tree,
-                                        crate::assets::is_texture,
-                                        190.0,
-                                    ) {
-                                        f.texture = pick.unwrap_or_default();
-                                        st.clip_dirty = true;
-                                    }
-                                    for (name, v, hover) in [
-                                        ("cols", &mut f.cols, "how many columns this image is cut into — 1 is the whole image"),
-                                        ("rows", &mut f.rows, "how many rows this image is cut into — 1 is the whole image"),
-                                    ] {
-                                        ui.label(name);
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(v)
-                                                    .speed(0.2)
-                                                    .range(1..=256),
-                                            )
-                                            .on_hover_text(hover)
-                                            .changed()
-                                        {
-                                            st.clip_dirty = true;
-                                        }
-                                    }
-                                    let last = f.cols.saturating_mul(f.rows).saturating_sub(1);
-                                    ui.label("cell");
-                                    if ui
-                                        .add(egui::DragValue::new(&mut f.cell).speed(0.25).range(0..=last))
-                                        .changed()
-                                    {
-                                        st.clip_dirty = true;
-                                    }
-                                });
-                                if crate::ui_widgets::sheet_cell_picker(
-                                    ui,
-                                    egui::Id::new(("prop-frame-cell", ci, ti)),
-                                    &f.texture,
-                                    f.cols,
-                                    f.rows,
-                                    &mut f.cell,
-                                ) {
+                        ui.horizontal_wrapped(|ui| {
+                            let label = if f.texture.is_empty() {
+                                "(pick image)".to_string()
+                            } else {
+                                f.texture.clone()
+                            };
+                            if let Some(pick) = crate::ui_widgets::asset_picker(
+                                ui,
+                                egui::Id::new(("prop-frame-tex", ci, ti)),
+                                self.project_root,
+                                &label,
+                                Some("(clear)"),
+                                tree,
+                                crate::assets::is_texture,
+                                190.0,
+                            ) {
+                                f.texture = pick.unwrap_or_default();
+                                st.clip_dirty = true;
+                            }
+                            for (name, v, hover) in [
+                                ("cols", &mut f.cols, "how many columns this image is cut into — 1 is the whole image"),
+                                ("rows", &mut f.rows, "how many rows this image is cut into — 1 is the whole image"),
+                            ] {
+                                ui.label(name);
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(v)
+                                            .speed(0.2)
+                                            .range(1..=256),
+                                    )
+                                    .on_hover_text(hover)
+                                    .changed()
+                                {
                                     st.clip_dirty = true;
                                 }
+                            }
+                            let last = f.cols.saturating_mul(f.rows).saturating_sub(1);
+                            ui.label("cell");
+                            if ui
+                                .add(egui::DragValue::new(&mut f.cell).speed(0.25).range(0..=last))
+                                .changed()
+                            {
+                                st.clip_dirty = true;
+                            }
+                        });
+                        if crate::ui_widgets::sheet_cell_picker(
+                            ui,
+                            egui::Id::new(("prop-frame-cell", ci, ti)),
+                            &f.texture,
+                            f.cols,
+                            f.rows,
+                            &mut f.cell,
+                        ) {
+                            st.clip_dirty = true;
+                        }
                     }
                 });
             }
