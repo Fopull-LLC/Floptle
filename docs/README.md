@@ -156,6 +156,8 @@ proposal is **not** documentation of what shipped — for that, use the guides a
 - [rollback-p7-fofighter-checklist.md](rollback-p7-fofighter-checklist.md) — the acceptance
   run over the relay.
 - [hub-proposal.md](hub-proposal.md) — the launcher and version manager.
+- [cli-proposal.md](cli-proposal.md) — the command line the engine already has one flag
+  at a time, and the shape it would take as a designed thing.
 
 ## Releases
 

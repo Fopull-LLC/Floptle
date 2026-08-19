@@ -149,6 +149,7 @@
     "2d-lighting-proposal.md": "a design doc whose later steps are unshipped",
     "animation-system-proposal.md": "a proposal; the shipped guide is animation.md",
     "galaxy-streaming-proposal.md": "a proposal for unshipped work",
+    "cli-proposal.md": "a plan for a command line the engine does not have yet \u2014 the flags it does have are documented in export-builds.md",
     "hub-proposal.md": "a proposal; the shipped guide is updating-the-hub.md",
     "image-editor-proposal.md": "a proposal; the shipped guide is image-editor.md",
     "map-tools-proposal.md": "a proposal; the shipped guide is map-tools.md",
