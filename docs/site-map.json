@@ -124,7 +124,8 @@
         "decisions/0023-audio-system.md",
         "decisions/0024-input-action-map.md",
         "decisions/0025-rollback-netcode.md",
-        "decisions/0026-body-vs-body-contacts-and-the-rollback-contract.md"
+        "decisions/0026-body-vs-body-contacts-and-the-rollback-contract.md",
+        "decisions/0027-a-command-line-an-agent-can-drive.md"
       ]
     }
   ],
@@ -149,7 +150,7 @@
     "2d-lighting-proposal.md": "a design doc whose later steps are unshipped",
     "animation-system-proposal.md": "a proposal; the shipped guide is animation.md",
     "galaxy-streaming-proposal.md": "a proposal for unshipped work",
-    "cli-proposal.md": "a plan for a command line the engine does not have yet \u2014 the flags it does have are documented in export-builds.md",
+    "cli-proposal.md": "the designed command line \u2014 subcommands on the one binary, JSON out, and the verbs that check, run, render and change a project from a terminal; the flags that ship today are documented in export-builds.md",
     "hub-proposal.md": "a proposal; the shipped guide is updating-the-hub.md",
     "image-editor-proposal.md": "a proposal; the shipped guide is image-editor.md",
     "map-tools-proposal.md": "a proposal; the shipped guide is map-tools.md",
