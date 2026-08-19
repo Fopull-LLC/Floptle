@@ -16,6 +16,20 @@
 //! drew a slightly different world would be worse than no `shot` at all,
 //! because its entire value is being believed.
 //!
+//! ## The whole chain, not the tonemap
+//!
+//! Post-processing is the project's look, so a picture without it is a picture
+//! of a different game: the scene's own `PostProcess` node, the depth-of-field
+//! focus resolved against the scene, screen ambient occlusion, any `stage post`
+//! shaders it compiled, and — because a pixel-art project composites at its own
+//! resolution and upscales — the retro presentation. This passed the tonemap
+//! alone for a while and defaulted the rest, which is a quiet way of being
+//! wrong: the picture still looks like a picture.
+//!
+//! Two are left out on purpose. **Motion blur** needs a previous frame and this
+//! is a single one. **The accessibility filters** are one person's display
+//! setting, and a PNG of a project should not carry them.
+//!
 //! ## What it shows
 //!
 //! The scene's **active camera**, because that is the view the game has. A
@@ -61,7 +75,9 @@ fn find_camera(
             }
         }
     }
-    best.filter(|_| named.is_none())
+    // Only the unnamed path ever fills `best` — a named camera either matched
+    // above or is not here — so this is the fallback and nothing else.
+    best
 }
 
 /// Run the verb. Returns the process exit code.
@@ -85,15 +101,25 @@ pub(crate) fn run(
     // `open_project`'s own model import and paint adoption find a device
     // instead of bailing.
     let gpu = Gpu::headless_hdr(w, h);
-    let mut ed = crate::Editor { show_gizmos: false, ..Default::default() };
+    // **The Console has to go somewhere.** `run` and `exec` publish theirs as
+    // the report; this verb's answer is a picture, so anything the editor says
+    // while making it — a scene that failed to load, a device missing the
+    // pieces a scene render binds — would be written into a buffer nobody ever
+    // reads. That last one is the diagnostic added *because* this verb once
+    // wrote a black PNG and exited 0. stderr, so `--json` still owns stdout.
+    let mut ed = crate::Editor {
+        show_gizmos: false,
+        console: crate::console::ConsoleState { mirror_to_stderr: true, ..Default::default() },
+        ..Default::default()
+    };
     ed.attach_gpu(gpu);
     ed.open_project(root.to_path_buf());
     if let Some(s) = scene {
-        let Some(path) = crate::run::resolve_scene(root, s) else {
+        let Some(path) = crate::inspect::resolve_scene(root, s) else {
             eprintln!("no scene called {s} under {}", root.join("scenes").display());
             return 1;
         };
-        ed.open_scene_file(&path);
+        ed.open_scene_file(&path.to_string_lossy());
     }
 
     let Some((e, fov_y, cull_mask, ortho, ortho_height)) = find_camera(&ed, camera) else {
@@ -118,6 +144,20 @@ pub(crate) fn run(
         eprintln!("no GPU: this machine has no adapter floptle can render on");
         return 1;
     };
+    let aspect = w as f32 / h as f32;
+    // **Retro composites at the retro resolution and upscales**, exactly as the
+    // Game view does — post, AO and dither have to land on the same chunky
+    // pixel grid the game uses, or a pixel-art project photographs as a crisp
+    // picture of itself that no player will ever see.
+    let retro_on = ed.project.retro;
+    let (cw, ch) = if retro_on { ed.project.retro_size(aspect) } else { (w, h) };
+    let retro = retro_on.then(|| {
+        let mut r = floptle_render::Retro::new(&gpu, ch);
+        r.resize_to(&gpu, cw, ch);
+        r
+    });
+    // The picture that gets written. In retro mode the scene never draws into
+    // it — the upscale blit does — so only its depth half goes unused.
     let (color, depth) = crate::viewports::offscreen_textures(
         &gpu,
         w,
@@ -126,9 +166,17 @@ pub(crate) fn run(
         wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
     );
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
-    let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-    let post = floptle_render::PostStack::new(&gpu, w, h);
+    let own_depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut post = floptle_render::PostStack::new(&gpu, cw, ch);
+    // Always configured, not only when an effect is on: the chain is the only
+    // route from the scene's floating-point target down to an sRGB texture.
+    post.configure(&gpu, cw, ch, retro_on);
     ed.gpu = Some(gpu);
+
+    let (depth_view, depth_tex) = match &retro {
+        Some(r) => (r.depth_view().clone(), r.depth_texture().clone()),
+        None => (own_depth_view, depth.clone()),
+    };
 
     // The depth TEXTURE is handed over, not just its view: that is what lets the
     // opaque prepass run, and without it contact shadows, shoreline foam,
@@ -139,26 +187,57 @@ pub(crate) fn run(
         post.input_view(),
         &depth_view,
         &cam,
-        w as f32 / h as f32,
+        aspect,
         0.0,
         cull_mask,
         None,
-        (w, h),
+        (cw, ch),
         crate::render_frame::OffscreenOpts {
-            depth_tex: Some(&depth),
+            depth_tex: Some(&depth_tex),
             ..Default::default()
         },
     );
 
-    // Down from the floating-point scene format to sRGB through the same
-    // terminal pass the window uses, tonemap included — so what lands in the
-    // file is what the screen would show, not a raw buffer.
-    let look = floptle_render::PostSettings {
-        tonemap: crate::shading::post_process_uniforms(&ed.world).0.tonemap,
-        ..Default::default()
-    };
+    // **The whole chain, not the tonemap.** This used to pass tonemap alone and
+    // default everything else, so a project with bloom, vignette, AO, posterise
+    // or a custom post shader photographed as a scene that has none of them —
+    // and the one promise this verb makes is that the picture is the editor's.
+    // Built the way the Game view builds it: the PostProcess node's own
+    // settings, the depth-of-field focus resolved against the scene, screen
+    // ambient occlusion, and any `stage post` shaders the project compiled.
+    //
+    // Two are deliberately left out. **Motion blur** needs a previous frame and
+    // this is a single one, so a shutter here would smear against a frame that
+    // does not exist. **The accessibility filters** are one person's display
+    // preference, and a PNG of a project should not carry them.
+    let mut look = crate::shading::post_process_uniforms(&ed.world).0;
+    look.time = ed.fog_time;
+    if let Some(d) = crate::shading::dof_focus_distance(&ed.world, cam.world_position) {
+        look.dof_focus = d;
+    }
     let Some(gpu) = ed.gpu.as_ref() else { return 1 };
-    post.run(gpu, &look, None, &color_view);
+    let proj = cam.proj_matrix(aspect);
+    let ssao = floptle_render::SsaoFrame {
+        depth: &depth_view,
+        proj: proj.to_cols_array_2d(),
+        inv_proj: proj.inverse().to_cols_array_2d(),
+    };
+    // Where the chain lands: the retro target when there is one, the picture
+    // itself otherwise. (`out` is the file; this is the texture.)
+    let composite = match &retro {
+        Some(r) => r.color_view().clone(),
+        None => color_view.clone(),
+    };
+    post.run_with(gpu, &look, Some(&ssao), &composite, ed.post_shaders.as_ref());
+    // …and the chunky upscale, the way the game presents it.
+    if let Some(r) = &retro {
+        let dest = [w as f32, h as f32];
+        if ed.project.retro_integer_scale {
+            r.blit_integer(gpu, &color_view, dest);
+        } else {
+            r.blit_to(gpu, &color_view);
+        }
+    }
 
     let pixels = readback(gpu, &color, w, h);
     if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty())
