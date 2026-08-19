@@ -608,7 +608,10 @@ fn chip_w(ui: &egui::Ui, text: &str) -> f32 {
 /// See `binding_chips` for why measuring is necessary rather than trusting the
 /// wrapped layout to break by itself.
 fn wrap_before(ui: &mut egui::Ui, want: f32) {
-    if crate::responsive::usable_width(ui) < want {
+    // Guarded on `main_wrap` for the reason in `responsive::fit_here_wrapping`:
+    // `end_row` is also how a `Grid` row ends, and breaking one of those would
+    // move every later control into the wrong column.
+    if ui.layout().main_wrap && crate::responsive::usable_width(ui) < want {
         ui.end_row();
     }
 }
@@ -621,10 +624,7 @@ fn wrap_before(ui: &mut egui::Ui, want: f32) {
 /// 200px docked panel is, so there is no line for it to move to and the only
 /// remaining lever is the string. The hover text carries the full name.
 fn wrap_before_chip(ui: &mut egui::Ui, text: &str) -> String {
-    let room = crate::responsive::usable_width(ui);
-    if room < chip_w(ui, text) {
-        ui.end_row();
-    }
+    wrap_before(ui, chip_w(ui, text));
     let line = crate::responsive::usable_width(ui);
     let pad = ui.spacing().button_padding.x * 2.0 + ui.spacing().item_spacing.x;
     crate::responsive::elide_in(

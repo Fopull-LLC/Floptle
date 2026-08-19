@@ -199,6 +199,11 @@ pub(crate) fn fit_here(ui: &Ui, want: f32) -> f32 {
 /// to ask for it. Outside one it does nothing, so this is safe wherever
 /// `fit_here` was.
 pub(crate) fn fit_here_wrapping(ui: &mut Ui, want: f32) -> f32 {
+    // **Only in a WRAPPING layout.** `Ui::end_row` is also the call that ends a
+    // `Grid` row, and these widgets are drawn inside grid cells constantly — an
+    // unguarded break there would not move a control to the next line, it would
+    // move every control after it into the wrong column. `main_wrap` is the one
+    // question that separates "start a new line" from "start a new row".
     if fit_here(ui, f32::INFINITY) < MIN_CONTROL {
         ui.end_row();
     }
@@ -675,6 +680,58 @@ pub(crate) mod tests {
                 bad.join("\n  ")
             );
         }
+    }
+
+    /// **`main_wrap` is what separates "next line" from "next GRID ROW".**
+    ///
+    /// `Ui::end_row` does both jobs, and the responsive widgets are drawn inside
+    /// grid cells constantly: unguarded, a control deciding there was no room
+    /// left would not move itself down, it would move every control after it
+    /// into column one of the next row. `fit_here_wrapping` and `input_ui`'s
+    /// `wrap_before` therefore ask `layout().main_wrap` first, and this asserts
+    /// the fact they lean on — a grid cell says no, a wrapped flow says yes.
+    ///
+    /// Asserted on the layout rather than on the resulting geometry because that
+    /// is the actual dependency. If egui ever makes a grid cell report itself as
+    /// wrapping, the guards stop guarding, silently, and this is the line that
+    /// says so.
+    #[test]
+    fn a_grid_cell_is_not_a_wrapping_layout_and_a_flow_is() {
+        let ctx = crate::icons::test_context();
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(420.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let (mut in_grid, mut in_flow) = (None, None);
+        // Two frames: a grid's columns are sized from the previous one.
+        for _ in 0..2 {
+            let _ = ctx.run_ui(input(), |ui| {
+                grid(ui, "grid_wrap_probe", |ui| {
+                    ui.label("caption");
+                    in_grid = Some(ui.layout().main_wrap);
+                    ui.label("");
+                    ui.end_row();
+                });
+                ui.horizontal_wrapped(|ui| {
+                    in_flow = Some(ui.layout().main_wrap);
+                });
+            });
+        }
+        assert_eq!(
+            in_grid,
+            Some(false),
+            "a grid cell reports itself as a wrapping layout, so every guarded end_row \
+             will now break the ROW instead of the line"
+        );
+        assert_eq!(
+            in_flow,
+            Some(true),
+            "horizontal_wrapped does not report itself as wrapping, so nothing will ever \
+             break a line and the chips are back to drawing over the border"
+        );
     }
 
     #[test]
