@@ -1071,8 +1071,7 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
             }
         }
         // The Sprite node's own numbers — see the matching arm in
-        // `mirror_components`.
-        // "Sprite" is `floptle_scene::SPRITE_COMPONENT` — see `mirror_components`.
+        // `mirror_components`, which is also where the name is explained.
         "Sprite" => {
             if let Some(Matter::Sprite { ppu, size, flip_x, flip_y, pivot, .. }) =
                 world.get_mut::<Matter>(ent)
@@ -1090,8 +1089,12 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                     // does the obvious thing and an eased one flips once.
                     "flipX" => *flip_x = val >= 0.5,
                     "flipY" => *flip_y = val >= 0.5,
-                    "pivotX" => pivot[0] = v,
-                    "pivotY" => pivot[1] = v,
+                    // Not clamped to 0..1 — an origin outside the sprite is a
+                    // legitimate thing to want — but not-a-number is not a
+                    // pivot, and one would take the quad's whole geometry with
+                    // it for the rest of the session.
+                    "pivotX" if v.is_finite() => pivot[0] = v,
+                    "pivotY" if v.is_finite() => pivot[1] = v,
                     _ => {}
                 }
             }
