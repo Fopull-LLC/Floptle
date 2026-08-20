@@ -690,6 +690,29 @@ pub(crate) const VERBS: &[Verb] = &[
         legacy: &["floptle-runtime --server"],
     },
     Verb {
+        name: "doctor",
+        summary: "report what this machine can run, and exit",
+        detail: "`help --json` marks which commands need a display. This says whether the \
+                 machine reading it has one — and it answers by BUILDING the renderer rather \
+                 than by asking the adapter what it supports, because those are different \
+                 questions. An OpenGL adapter exists, reports itself happily, and cannot \
+                 build floptle's shaders.\n\n\
+                 Exits non-zero when the machine cannot render, so a script can branch on it \
+                 before reaching for `shot` or `bake gi`.",
+        args: &[Arg {
+            name: "--json",
+            value: Value::Flag,
+            required: false,
+            help: "answer as JSON",
+        }],
+        needs_gpu: false,
+        writes_project: false,
+        exits: &[(1, "this machine cannot render — the commands marked `needsGpu` will not run")],
+        output: "the engine version, the graphics adapter, and whether the renderer builds; \
+                 with --json an object with `engine`, `adapter`, `canRender` and `whyNot`",
+        legacy: &[],
+    },
+    Verb {
         name: "version",
         summary: "print the engine version and exit",
         detail: "",
@@ -1106,6 +1129,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 }
             }
         }
+        Some(("doctor", a)) => Outcome::Exit(crate::doctor::run(a.get_flag("json"))),
         Some(("api", a)) => Outcome::Exit(crate::ide::cli_reference(
             text(a, "QUERY").as_deref(),
             a.get_flag("json"),

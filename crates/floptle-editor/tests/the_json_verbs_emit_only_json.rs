@@ -651,3 +651,34 @@ fn serve_refuses_what_the_runtime_refuses() {
 
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// **`doctor` answers by building the renderer, not by asking about it.**
+///
+/// `help --json` marks which commands need a display; nothing said whether the
+/// machine reading it had one. And "has an adapter" is not the question — a
+/// release was burned on a machine that had one, reported itself happily, and
+/// could not build the engine's shaders. So this asserts the shape of the
+/// answer and that it agrees with itself.
+#[test]
+fn doctor_says_whether_this_machine_can_render() {
+    let doc = json_of(&["doctor", "--json"]);
+    assert!(doc["engine"].is_string(), "no engine version: {doc}");
+    let can = doc["canRender"].as_bool().expect("canRender");
+
+    // The two halves have to agree: a machine that renders owes no reason, and
+    // one that does not owes exactly one.
+    if can {
+        assert!(doc["whyNot"].is_null(), "it renders and still explained why not: {doc}");
+        assert!(doc["adapter"]["name"].is_string(), "it renders through no adapter: {doc}");
+    } else {
+        assert!(
+            doc["whyNot"].as_str().is_some_and(|w| !w.is_empty()),
+            "it cannot render and did not say why: {doc}"
+        );
+    }
+
+    // …and the exit code carries the same answer, because that is what a script
+    // branches on before reaching for `shot`.
+    let out = Command::new(bin()).args(["doctor"]).output().expect("run doctor");
+    assert_eq!(out.status.code(), Some(i32::from(!can)));
+}

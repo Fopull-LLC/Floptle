@@ -38,6 +38,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 mod agents_guide;
 mod anim;
 mod bake;
+mod doctor;
 mod anim_ui;
 mod aseprite;
 mod assets;
