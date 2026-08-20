@@ -548,3 +548,61 @@ fn a_shot_shows_the_post_processing_the_scene_asks_for() {
 
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// **`bake gi` bakes and exits, with no window anywhere.**
+///
+/// Its help said "and exit" for a long time while it did the opposite: the flag
+/// set a marker, the editor opened a window, and a frame hook ran the bake a
+/// slice at a time. On a build server that is not a slow bake, it is no bake —
+/// there is no display to open. Nothing about the bake needed the window; it
+/// renders offscreen and writes its own file.
+#[test]
+fn baking_light_probes_needs_no_window_and_writes_the_file() {
+    let d = temp("bakegi");
+    scaffold(&d);
+    let p = d.to_string_lossy().into_owned();
+
+    // A scene with nothing to bake says so, rather than baking nothing.
+    let out = Command::new(bin()).args(["bake", "gi", &p]).output().expect("run bake gi");
+    let why = String::from_utf8_lossy(&out.stderr);
+    if why.contains("could not build the renderer") {
+        eprintln!("skipped — this machine cannot render:\n{why}");
+        let _ = std::fs::remove_dir_all(&d);
+        return;
+    }
+    assert_eq!(out.status.code(), Some(1), "a scene with no Light Probes node must exit 1");
+    assert!(why.contains("Light Probes"), "the refusal did not name what is missing: {why}");
+
+    // …and one with a probes volume produces a bake beside the scene.
+    let scene = d.join("scenes/first.ron");
+    let text = std::fs::read_to_string(&scene).expect("read the scene");
+    let at = text.rfind("    ],").expect("the node list ends somewhere");
+    let mut with_probes = text.clone();
+    with_probes.insert_str(
+        at,
+        "        (\n            name: \"Light Probes\",\n\
+         \x20           transform: (translation: (0.0, 2.0, 0.0), \
+         rotation: (0.0, 0.0, 0.0, 1.0), scale: (1.0, 1.0, 1.0)),\n\
+         \x20           matter: LightProbes(half_extents: (6.0, 4.0, 6.0), spacing: 3.0, \
+         quality: 8),\n            scripts: [],\n        ),\n",
+    );
+    std::fs::write(&scene, with_probes).expect("write");
+
+    let doc = json_of(&["bake", "gi", &p, "--json"]);
+    assert_eq!(doc["ok"], true, "the bake reported a problem: {doc}");
+
+    let baked = d.join("scenes/first.fgi");
+    let bytes = std::fs::read(&baked).expect("the bake wrote no file beside the scene");
+    assert!(bytes.len() > 64, "the bake wrote {} bytes, which is not a bake", bytes.len());
+    // **It rendered the scene, rather than emitting a shape full of nothing.**
+    // A grid of zeroed probes is exactly what a bake that never ran would write,
+    // and it would still be the right size.
+    let nonzero = bytes.iter().filter(|b| **b != 0).count();
+    assert!(
+        nonzero * 2 > bytes.len(),
+        "the bake is mostly zeroes ({nonzero} of {}), so it captured no light",
+        bytes.len()
+    );
+
+    let _ = std::fs::remove_dir_all(&d);
+}

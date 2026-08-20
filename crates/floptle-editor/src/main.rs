@@ -37,6 +37,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 // subsystems live in their own modules — main.rs only wires them in.
 mod agents_guide;
 mod anim;
+mod bake;
 mod anim_ui;
 mod aseprite;
 mod assets;
@@ -1210,11 +1211,11 @@ fn main() {
     // command line only when the first argument is a verb; everything else —
     // a bare path, every flag the Hub and CI have always passed — falls through
     // to the loop below, which is the code that has always served them.
-    let mut verb_launch: Option<(Option<PathBuf>, bool, bool)> = None;
+    let mut verb_launch: Option<(Option<PathBuf>, bool)> = None;
     match cli::dispatch(&args) {
         cli::Outcome::Exit(code) => std::process::exit(code),
-        cli::Outcome::Launch { project, player, bake_gi } => {
-            verb_launch = Some((project, player, bake_gi));
+        cli::Outcome::Launch { project, player } => {
+            verb_launch = Some((project, player));
         }
         cli::Outcome::Legacy => {}
     }
@@ -1343,14 +1344,13 @@ fn main() {
         i += 1;
     }
 
-    // Whether to bake GI on load: the `--bake-gi` flag, or the verb that
-    // replaced it. Read here rather than at the Editor literal so a verb and a
-    // flag reach the same field by the same route.
-    let mut bake_gi_on_load = args.iter().any(|a| a == "--bake-gi");
-    if let Some((project, player, bake)) = verb_launch {
+    // Bake GI on load: the `--bake-gi` FLAG only. The verb of that name renders
+    // offscreen and exits (see `bake.rs`) — this is the shipped flag, which
+    // opens the editor and bakes in it, kept behaving exactly as it always has.
+    let bake_gi_on_load = args.iter().any(|a| a == "--bake-gi");
+    if let Some((project, player)) = verb_launch {
         project_path = project;
         player_mode = player;
-        bake_gi_on_load = bake;
     }
 
     // An exported build: a `floptle-game.ron` manifest next to the binary makes

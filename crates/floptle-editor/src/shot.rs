@@ -152,6 +152,14 @@ pub(crate) fn run(
         ed.open_scene_file(&path.to_string_lossy());
     }
 
+    // **Baked global illumination is uploaded by the frame loop, and this has
+    // no frame loop.** `open_project` reads the `.fgi` beside the scene and
+    // marks it dirty; the upload happens on the next frame the editor draws, so
+    // a one-shot render skipped it entirely and photographed a scene with its
+    // bounced light missing. That is the same shape as the post chain: an
+    // effect absent from a picture whose whole promise is being the editor's.
+    ed.refresh_gi();
+
     let Some((e, fov_y, cull_mask, ortho, ortho_height)) = find_camera(&ed, camera) else {
         match camera {
             Some(name) => eprintln!("this scene has no camera called {name}"),

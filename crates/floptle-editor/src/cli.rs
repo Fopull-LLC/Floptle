@@ -317,20 +317,43 @@ pub(crate) const VERBS: &[Verb] = &[
     },
     Verb {
         name: "bake gi",
-        summary: "bake a scene's light probes",
-        detail: "**This opens the editor.** Unlike the other bakes it is not headless yet: it \
-                 asks the editor to bake on load and then runs normally. Said plainly here \
-                 because the flag it replaces claimed otherwise.",
-        args: &[Arg {
-            name: "PROJECT",
-            value: Value::Path,
-            required: false,
-            help: "the project directory (default: assets/)",
-        }],
+        summary: "bake a scene's light probes, and exit",
+        detail: "Renders the scene's Light Probes node into baked global illumination and \
+                 writes it beside the scene. No window: it runs the bake the editor runs, \
+                 back to back instead of a slice per frame, so it belongs in a build \
+                 pipeline.\n\n\
+                 It needs a graphics adapter — the bake photographs the scene from every \
+                 probe. A scene with no enabled Light Probes node has nothing to bake and \
+                 says so.",
+        args: &[
+            Arg {
+                name: "PROJECT",
+                value: Value::Path,
+                required: false,
+                help: "the project directory (default: assets/)",
+            },
+            Arg {
+                name: "--scene",
+                value: Value::Text,
+                required: false,
+                help: "one scene, by path or by name",
+            },
+            Arg {
+                name: "--json",
+                value: Value::Flag,
+                required: false,
+                help: "answer as JSON",
+            },
+        ],
         needs_gpu: true,
         writes_project: true,
-        exits: &[],
-        output: "the bake's progress in the editor's Console",
+        exits: &[(
+            1,
+            "there is no Light Probes node to bake, the named scene is not there, or this \
+             machine cannot render",
+        )],
+        output: "one line saying how many probes, how many bounces, how long and what it \
+                 wrote; with --json an object with `ok`, `errors` and `log`",
         legacy: &["--bake-gi"],
     },
     Verb {
@@ -645,7 +668,7 @@ pub(crate) enum Outcome {
     /// A verb ran to completion. Exit with this code.
     Exit(i32),
     /// A verb that needs a window. The editor starts with these.
-    Launch { project: Option<PathBuf>, player: bool, bake_gi: bool },
+    Launch { project: Option<PathBuf>, player: bool },
 }
 
 /// `floptle --help`, the flag form.
@@ -855,10 +878,10 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             Outcome::Exit(0)
         }
         Some(("open", a)) => {
-            Outcome::Launch { project: path(a, "PROJECT"), player: false, bake_gi: false }
+            Outcome::Launch { project: path(a, "PROJECT"), player: false }
         }
         Some(("play", a)) => {
-            Outcome::Launch { project: path(a, "PROJECT"), player: true, bake_gi: false }
+            Outcome::Launch { project: path(a, "PROJECT"), player: true }
         }
         Some(("export", a)) => {
             let project = path(a, "PROJECT").expect("required");
@@ -878,9 +901,11 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 let model = text(b, "MODEL").expect("required");
                 Outcome::Exit(crate::extract_clips_cmd(&project, &model))
             }
-            Some(("gi", b)) => {
-                Outcome::Launch { project: path(b, "PROJECT"), player: false, bake_gi: true }
-            }
+            Some(("gi", b)) => Outcome::Exit(crate::bake::run(
+                &path(b, "PROJECT").unwrap_or_else(|| PathBuf::from("assets")),
+                text(b, "scene").as_deref(),
+                b.get_flag("json"),
+            )),
             _ => Outcome::Exit(2),
         },
         Some(("exec", a)) => {
@@ -1217,18 +1242,14 @@ mod tests {
     /// a second one.
     #[test]
     fn the_window_verbs_ask_for_a_launch() {
-        assert!(matches!(
-            dispatch(&argv(&["open", "assets"])),
-            Outcome::Launch { player: false, bake_gi: false, .. }
-        ));
+        assert!(matches!(dispatch(&argv(&["open", "assets"])), Outcome::Launch { player: false, .. }));
         assert!(matches!(
             dispatch(&argv(&["play"])),
-            Outcome::Launch { project: None, player: true, bake_gi: false }
+            Outcome::Launch { project: None, player: true }
         ));
-        assert!(matches!(
-            dispatch(&argv(&["bake", "gi"])),
-            Outcome::Launch { player: false, bake_gi: true, .. }
-        ));
+        // …and `bake gi` is NOT one of them any more. It renders offscreen and
+        // exits, which is what its help always claimed.
+        assert!(!matches!(dispatch(&argv(&["bake", "gi", "no-such-project"])), Outcome::Launch { .. }));
     }
 
     /// A usage mistake exits 2, which is the code CI depends on and the one
