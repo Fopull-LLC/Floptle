@@ -234,6 +234,20 @@ pub(crate) fn asset_rel_path(path: &str, project_root: &Path) -> String {
 /// A cell that no longer exists falls back INTO range rather than drawing off
 /// the end of the image — and a `Matter::Sprite` carries its own cell, which is
 /// the one its draw actually reads, so it gets the same clamp.
+/// **What a material wearing this texture should say.** Its sheet grid comes
+/// from the texture's import settings, and its cell has to exist inside that
+/// grid.
+///
+/// One function because there are two callers who must not disagree: the editor
+/// applies it to a live world on load, and `floptle check` asks the same
+/// question of the files on disk without one. A checker that reimplemented the
+/// rule would eventually report a disagreement the editor does not see, or miss
+/// one it does.
+pub(crate) fn sheet_for(setting: TexSetting, cell: u32) -> (u32, u32, u32) {
+    let (sc, sr) = setting.sheet();
+    (sc, sr, cell.min((sc * sr).saturating_sub(1)))
+}
+
 pub(crate) fn reslice_materials(
     world: &mut floptle_core::World,
     project_root: &Path,
@@ -253,9 +267,7 @@ pub(crate) fn reslice_materials(
             continue;
         }
         let was = (m.sheet_cols, m.sheet_rows, m.cell);
-        m.sheet_cols = sc;
-        m.sheet_rows = sr;
-        m.cell = m.cell.min(last);
+        (m.sheet_cols, m.sheet_rows, m.cell) = sheet_for(setting, m.cell);
         changed |= was != (m.sheet_cols, m.sheet_rows, m.cell);
         wearing.push(e);
     }

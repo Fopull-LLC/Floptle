@@ -150,6 +150,15 @@ pub(crate) fn run(root: &Path, json: bool) -> i32 {
     i32::from(report.errors() > 0)
 }
 
+/// The project's per-texture import settings, keyed the way scenes name
+/// textures. Empty when a project has never sliced one.
+fn texture_settings(root: &Path) -> std::collections::HashMap<String, crate::assets::TexSetting> {
+    let path = root.join(".floptle").join("textures.ron");
+    let raw: std::collections::HashMap<String, crate::assets::TexSetting> =
+        std::fs::read_to_string(&path).ok().and_then(|s| ron::from_str(&s).ok()).unwrap_or_default();
+    raw.into_iter().map(|(k, v)| (crate::assets::asset_rel_path(&k, root), v)).collect()
+}
+
 /// Everything the check looks at, in one pass.
 pub(crate) fn examine(root: &Path) -> Report {
     let mut r = Report::default();
@@ -184,6 +193,7 @@ pub(crate) fn examine(root: &Path) -> Report {
         Err(e) => r.error(Some("project.ron".into()), format!("{e}")),
     }
 
+    let settings = texture_settings(root);
     let mut files = Vec::new();
     walk(root, &mut files);
 
@@ -198,13 +208,13 @@ pub(crate) fn examine(root: &Path) -> Report {
             }
         } else if name.ends_with(".prefab.ron") {
             r.prefabs += 1;
-            check_prefab(root, path, &where_, &mut r);
+            check_prefab(root, path, &where_, &settings, &mut r);
         } else if name.ends_with(".ron") && in_dir(root, path, "scenes") {
             r.scenes += 1;
-            check_scene(root, path, &where_, &mut r);
+            check_scene(root, path, &where_, &settings, &mut r);
         } else if name.ends_with(".ron") && in_dir(root, path, "materials") {
             r.materials += 1;
-            check_material_file(root, path, &where_, &mut r);
+            check_material_file(root, path, &where_, &settings, &mut r);
         }
     }
     r
@@ -251,7 +261,7 @@ fn check_effect(root: &Path, doc: &floptle_scene::VfxEffectDoc, where_: &str, r:
 
 /// A prefab is the flat node list the clipboard writes, and it may carry the
 /// clipboard's own tag line.
-fn check_prefab(root: &Path, path: &Path, where_: &str, r: &mut Report) {
+fn check_prefab(root: &Path, path: &Path, where_: &str, settings: &Settings, r: &mut Report) {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => return r.error(Some(where_.into()), format!("{e}")),
@@ -271,7 +281,7 @@ fn check_prefab(root: &Path, path: &Path, where_: &str, r: &mut Report) {
                 );
             }
             for node in &docs {
-                check_node_refs(root, node, where_, r);
+                check_node_refs(root, node, where_, settings, r);
             }
 
         }
@@ -281,7 +291,9 @@ fn check_prefab(root: &Path, path: &Path, where_: &str, r: &mut Report) {
 
 /// One scene: does it parse, is its wiring sound, and is everything it names
 /// actually there.
-fn check_scene(root: &Path, path: &Path, where_: &str, r: &mut Report) {
+type Settings = std::collections::HashMap<String, crate::assets::TexSetting>;
+
+fn check_scene(root: &Path, path: &Path, where_: &str, settings: &Settings, r: &mut Report) {
     let doc = match floptle_scene::load(path) {
         Ok(d) => d,
         Err(e) => return r.error(Some(where_.into()), format!("{e}")),
@@ -294,7 +306,7 @@ fn check_scene(root: &Path, path: &Path, where_: &str, r: &mut Report) {
         r.warn(Some(where_.into()), line);
     }
     for node in &doc.nodes {
-        check_node_refs(root, node, where_, r);
+        check_node_refs(root, node, where_, settings, r);
     }
 }
 
@@ -304,13 +316,28 @@ fn check_scene(root: &Path, path: &Path, where_: &str, r: &mut Report) {
 /// the same clipboard — so a prefab whose material points at a deleted texture
 /// is the same defect as a scene's, and it was going unreported because only
 /// the parent indices were being read.
-fn check_node_refs(root: &Path, node: &floptle_scene::NodeDoc, where_: &str, r: &mut Report) {
+fn check_node_refs(
+    root: &Path,
+    node: &floptle_scene::NodeDoc,
+    where_: &str,
+    settings: &Settings,
+    r: &mut Report,
+) {
     let who = if node.name.is_empty() { "an unnamed node" } else { &node.name };
+    // A Sprite node keeps its own cell and ignores the material's, so ask about
+    // the one that draws — the same rule `floptle_script::effective_cell` reads
+    // by, one layer down where there is no World to ask.
+    let cell = |m: &floptle_scene::MaterialDoc| match node.matter {
+        floptle_scene::MatterDoc::Sprite { cell, .. } => cell,
+        _ => m.cell,
+    };
     if let Some(m) = &node.material {
         check_texture(root, m, who, where_, r);
+        check_sheet_grid(root, m, cell(m), who, where_, settings, r);
     }
     for m in node.object_materials.values() {
         check_texture(root, m, who, where_, r);
+        check_sheet_grid(root, m, cell(m), who, where_, settings, r);
     }
     if let floptle_scene::MatterDoc::Mesh { asset_path } = &node.matter
         && !asset_path.is_empty()
@@ -324,13 +351,22 @@ fn check_node_refs(root: &Path, node: &floptle_scene::NodeDoc, where_: &str, r: 
 }
 
 /// A material file on its own — the ones under `materials/`, which nodes share.
-fn check_material_file(root: &Path, path: &Path, where_: &str, r: &mut Report) {
+fn check_material_file(
+    root: &Path,
+    path: &Path,
+    where_: &str,
+    settings: &Settings,
+    r: &mut Report,
+) {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => return r.error(Some(where_.into()), format!("{e}")),
     };
     match ron::from_str::<floptle_scene::MaterialDoc>(&text) {
-        Ok(m) => check_texture(root, &m, "this material", where_, r),
+        Ok(m) => {
+            check_texture(root, &m, "this material", where_, r);
+            check_sheet_grid(root, &m, m.cell, "this material", where_, settings, r);
+        }
         Err(e) => r.error(Some(where_.into()), format!("not a material: {e}")),
     }
 }
@@ -373,6 +409,47 @@ fn check_texture(
     {
         r.error(Some(where_.into()), format!("{who}: no shader at {sh}"));
     }
+}
+
+/// **Does this material's sheet grid still agree with its texture's?**
+///
+/// The disagreement the design page named and nothing outside the editor could
+/// see. A scene saved before its textures were sliced, or one whose materials
+/// were built by a script, carries a grid the project's own import settings
+/// contradict — and it draws as a sprite showing its whole sheet instead of one
+/// frame, which reads as spritesheets being broken.
+///
+/// The editor corrects this silently when it opens a project, so the fix is to
+/// open and save. That is what the warning says, because it is the whole remedy
+/// and it is one action.
+///
+/// A **warning**, not an error: the project loads, and the editor will put it
+/// right. Reported through the same rule the editor applies
+/// (`assets::sheet_for`), so a checker cannot come to disagree with the fix.
+fn check_sheet_grid(
+    root: &Path,
+    m: &floptle_scene::MaterialDoc,
+    cell: u32,
+    who: &str,
+    where_: &str,
+    settings: &Settings,
+    r: &mut Report,
+) {
+    let Some(tex) = m.texture.as_deref().filter(|t| !t.is_empty()) else { return };
+    let Some(setting) = settings.get(&crate::assets::asset_rel_path(tex, root)) else { return };
+    let want = crate::assets::sheet_for(*setting, cell);
+    let have = (m.sheet_cols.max(1), m.sheet_rows.max(1), cell);
+    if want == have {
+        return;
+    }
+    r.warn(
+        Some(where_.into()),
+        format!(
+            "{who}: this says the sheet is {}x{} showing cell {}, and {tex} is sliced {}x{} \
+             showing cell {} — open the project in the editor and save it to put this right",
+            have.0, have.1, have.2, want.0, want.1, want.2
+        ),
+    );
 }
 
 /// A script's `kind` is its path under `scripts/` without the extension, which
@@ -580,6 +657,56 @@ mod tests {
             .unwrap();
             assert_eq!(examine(&d).errors(), 0, "entry_scene {spelling:?} was rejected");
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **A material whose sheet grid disagrees with its texture's.**
+    ///
+    /// The correction the editor applies silently on open, which meant nothing
+    /// outside the editor could see the problem — and it draws as a sprite
+    /// showing its whole sheet instead of one frame, which reads as
+    /// spritesheets being broken rather than as one number being stale.
+    #[test]
+    fn a_sheet_grid_that_disagrees_with_its_texture_is_reported() {
+        let d = temp("sheet");
+        std::fs::create_dir_all(d.join(".floptle")).unwrap();
+        std::fs::write(
+            d.join(".floptle/textures.ron"),
+            "{\"textures/hero.png\": (sheet_cols: 4, sheet_rows: 2)}",
+        )
+        .unwrap();
+        std::fs::write(d.join("textures/hero.png"), []).unwrap();
+
+        // A ▫ Sprite keeps its OWN cell, so the check has to read that one.
+        std::fs::write(
+            d.join("scenes/first.ron"),
+            scene(
+                "(name: \"Hero\", matter: Sprite(cell: 30), \
+                 material: Some((texture: Some(\"textures/hero.png\"), sheet_cols: 1, \
+                 sheet_rows: 1)))",
+            ),
+        )
+        .unwrap();
+        let r = examine(&d);
+        assert_eq!(r.errors(), 0, "a stale grid still loads — it is a warning");
+        let w: Vec<&str> = r.findings.iter().map(|f| f.message.as_str()).collect();
+        assert_eq!(w.len(), 1, "{w:?}");
+        // Both halves, because the reader has to know which is stale, and the
+        // cell has to be reported clamped into the grid it is moving to.
+        assert!(w[0].contains("1x1 showing cell 30"), "{}", w[0]);
+        assert!(w[0].contains("4x2 showing cell 7"), "{}", w[0]);
+
+        // …and a grid that agrees says nothing at all.
+        std::fs::write(
+            d.join("scenes/first.ron"),
+            scene(
+                "(name: \"Hero\", matter: Sprite(cell: 3), \
+                 material: Some((texture: Some(\"textures/hero.png\"), sheet_cols: 4, \
+                 sheet_rows: 2)))",
+            ),
+        )
+        .unwrap();
+        assert_eq!(examine(&d).findings.len(), 0, "a correct grid was reported anyway");
         let _ = std::fs::remove_dir_all(&d);
     }
 
