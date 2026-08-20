@@ -27,7 +27,7 @@ const H: u32 = 270;
 /// Mean linear luminance of the frame.
 fn mean_luma(px: &[u8]) -> f32 {
     let mut sum = 0.0;
-    for c in px.chunks_exact(4) {
+    for c in px.as_chunks::<4>().0 {
         sum += 0.2126 * c[0] as f32 + 0.7152 * c[1] as f32 + 0.0722 * c[2] as f32;
     }
     sum / (px.len() / 4) as f32
@@ -37,7 +37,7 @@ fn mean_luma(px: &[u8]) -> f32 {
 /// care which hue anything is.
 fn mean_chroma(px: &[u8]) -> f32 {
     let mut sum = 0.0;
-    for c in px.chunks_exact(4) {
+    for c in px.as_chunks::<4>().0 {
         let (r, g, b) = (c[0] as f32, c[1] as f32, c[2] as f32);
         let m = (r + g + b) / 3.0;
         sum += ((r - m).abs() + (g - m).abs() + (b - m).abs()) / 3.0;

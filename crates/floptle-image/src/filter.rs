@@ -65,7 +65,7 @@ pub fn sharpen(buf: &mut [u8], w: u32, h: u32, amount: f32, radius: f32) {
     }
     let mut soft = buf.to_vec();
     blur(&mut soft, w, h, radius.max(0.5), false);
-    for (dst, s) in buf.chunks_exact_mut(4).zip(soft.chunks_exact(4)) {
+    for (dst, s) in buf.chunks_exact_mut(4).zip(soft.as_chunks::<4>().0) {
         for i in 0..3 {
             let v = dst[i] as f32 + (dst[i] as f32 - s[i] as f32) * amount;
             dst[i] = u8c(v);

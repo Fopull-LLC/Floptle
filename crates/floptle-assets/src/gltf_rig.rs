@@ -399,7 +399,7 @@ fn detangent<T: Copy>(values: Vec<T>, cubic: bool) -> Vec<T> {
     if !cubic {
         return values;
     }
-    values.chunks_exact(3).map(|c| c[1]).collect()
+    values.as_chunks::<3>().0.iter().map(|c| c[1]).collect()
 }
 
 /// Just the animation names in a glTF file — a light probe for the Inspector's

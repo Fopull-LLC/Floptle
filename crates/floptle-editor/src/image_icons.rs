@@ -274,7 +274,7 @@ pub(crate) fn render_icon_sheet(path: &std::path::Path, cell: u32, cols: u32) ->
     let mut cov = vec![0f32; (w * h) as usize];
     for prim in prims {
         let egui::epaint::Primitive::Mesh(mesh) = prim.primitive else { continue };
-        for tri in mesh.indices.chunks_exact(3) {
+        for tri in mesh.indices.as_chunks::<3>().0 {
             let v: Vec<_> = tri.iter().map(|&i| mesh.vertices[i as usize]).collect();
             let ring: Vec<(f32, f32)> = v.iter().map(|q| (q.pos.x, q.pos.y)).collect();
             cov.iter_mut().for_each(|c| *c = 0.0);

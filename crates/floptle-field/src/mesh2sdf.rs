@@ -64,7 +64,8 @@ pub fn bake(
 
     // Precompute triangles (positions + the vertex indices, for UV interpolation).
     let tris: Vec<Tri> = indices
-        .chunks_exact(3)
+        .as_chunks::<3>().0
+        .iter()
         .map(|t| Tri {
             a: Vec3::from(positions[t[0] as usize]),
             b: Vec3::from(positions[t[1] as usize]),
@@ -186,7 +187,7 @@ pub fn bake_occluder(positions: &[[f32; 3]], indices: &[u32], res: u32) -> Baked
 
     // Seed: exact point-to-triangle distance, but only for voxels near each
     // triangle (its AABB ± 1 voxel) — O(surface area), not O(volume × tris).
-    for t in indices.chunks_exact(3) {
+    for t in indices.as_chunks::<3>().0 {
         let a = Vec3::from(positions[t[0] as usize]);
         let b = Vec3::from(positions[t[1] as usize]);
         let c = Vec3::from(positions[t[2] as usize]);

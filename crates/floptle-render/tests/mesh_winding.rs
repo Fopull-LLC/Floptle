@@ -22,7 +22,7 @@ use glam::Vec3;
 fn tally(m: &MeshData) -> (usize, usize) {
     let mut agree = 0;
     let mut against = 0;
-    for t in m.indices.chunks_exact(3) {
+    for t in m.indices.as_chunks::<3>().0 {
         let p = |i: u32| Vec3::from(m.vertices[i as usize].pos);
         let n: Vec3 = t.iter().map(|&i| Vec3::from(m.vertices[i as usize].normal)).sum();
         let cross = (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0]));

@@ -476,7 +476,7 @@ mod tests {
         let (mut ok, mut total) = (0u32, 0u32);
         for (_, m) in &meshes {
             let o = Vec3::from(m.origin);
-            for t in m.indices.chunks_exact(3) {
+            for t in m.indices.as_chunks::<3>().0 {
                 let p: Vec<Vec3> = t.iter().map(|&i| Vec3::from(m.positions[i as usize]) + o).collect();
                 let face = (p[1] - p[0]).cross(p[2] - p[0]);
                 if face.length_squared() < 1e-12 {
@@ -525,7 +525,7 @@ mod tests {
                 let n = ids.len() as u32;
                 local.push(*ids.entry(k).or_insert(n));
             }
-            for t in m.indices.chunks_exact(3) {
+            for t in m.indices.as_chunks::<3>().0 {
                 for k in 0..3 {
                     let (a, b) = (local[t[k] as usize], local[t[(k + 1) % 3] as usize]);
                     if a == b {

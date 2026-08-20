@@ -186,7 +186,7 @@ pub(crate) fn mesh_collider_wire_local(model: &floptle_assets::gltf_import::Impo
     for part in &model.parts {
         let vs = &part.mesh.vertices;
         let mut seen = std::collections::HashSet::new();
-        for tri in part.mesh.indices.chunks_exact(3) {
+        for tri in part.mesh.indices.as_chunks::<3>().0 {
             for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
                 if seen.insert((a.min(b), a.max(b))) {
                     edges.push((Vec3::from(vs[a as usize].pos), Vec3::from(vs[b as usize].pos)));

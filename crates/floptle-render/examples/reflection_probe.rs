@@ -207,7 +207,7 @@ fn shot(
     save_png(&px, out);
     let mut sum = [0f64; 3];
     let mut lum: Vec<f32> = Vec::new();
-    for p in px.chunks_exact(4) {
+    for p in px.as_chunks::<4>().0 {
         // The background is (255, 0, 0); anything with green or blue in it, or
         // with red below full, is the sphere.
         if p[0] == 255 && p[1] == 0 && p[2] == 0 {

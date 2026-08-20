@@ -108,8 +108,9 @@ fn main() {
     save_png(&settled, &format!("{prefix}_settled.png"));
 
     let differing = after_move
-        .chunks_exact(4)
-        .zip(settled.chunks_exact(4))
+        .as_chunks::<4>().0
+        .iter()
+        .zip(settled.as_chunks::<4>().0)
         .filter(|(a, b)| a[0].abs_diff(b[0]) > 4 || a[1].abs_diff(b[1]) > 4 || a[2].abs_diff(b[2]) > 4)
         .count();
     // Sanity: the pose is actually on screen, so "identical" means something.
@@ -117,7 +118,8 @@ fn main() {
     // from black, and a brightness threshold happily counts the whole frame.
     // The cube is warm (0.8, 0.35, 0.3), the background cold.
     let body_px = settled
-        .chunks_exact(4)
+        .as_chunks::<4>().0
+        .iter()
         .filter(|p| p[0] as i32 > p[2] as i32 + 30)
         .count();
     println!("{body_px} cube px, {differing} px differ between the moved-into and settled frames");

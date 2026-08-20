@@ -183,8 +183,11 @@ impl GpuTimer {
         {
             let view = self.read.slice(..n * 8).get_mapped_range();
             let ticks: Vec<u64> = view
-                .chunks_exact(8)
-                .map(|c| u64::from_le_bytes(c.try_into().unwrap_or([0; 8])))
+                .as_chunks::<8>().0
+                .iter()
+                // `as_chunks` hands over a real `[u8; 8]`, so the fallible
+                // conversion that used to guard a slice has nothing left to fail.
+                .map(|c| u64::from_le_bytes(*c))
                 .collect();
             self.last.clear();
             let ms = |a: u64, b: u64| (b.saturating_sub(a) as f64 * self.period_ns as f64 / 1e6) as f32;

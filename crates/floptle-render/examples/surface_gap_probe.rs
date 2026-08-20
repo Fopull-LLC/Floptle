@@ -213,7 +213,7 @@ fn render(
     );
     let px = read_back(gpu, &color_tex);
     save_png(&px, out);
-    px.chunks_exact(4).map(|p| p[0] as f32 / 255.0).collect()
+    px.as_chunks::<4>().0.iter().map(|p| p[0] as f32 / 255.0).collect()
 }
 
 fn sample(lum: &[f32], x: u32, y: u32) -> f32 {

@@ -298,7 +298,7 @@ pub fn polygon_mask(w: u32, h: u32, pts: &[(f32, f32)]) -> Mask {
                 }
             }
             xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            for pair in xs.chunks_exact(2) {
+            for pair in xs.as_chunks::<2>().0 {
                 let (a, b) = (pair[0], pair[1]);
                 let x0 = a.floor().max(0.0) as usize;
                 let x1 = (b.ceil() as i64).clamp(0, w as i64) as usize;

@@ -79,13 +79,15 @@ fn to_texture(img: &gltf::image::Data) -> Option<floptle_render::TextureData> {
         Format::R8G8B8A8 => img.pixels.clone(),
         Format::R8G8B8 => img
             .pixels
-            .chunks_exact(3)
+            .as_chunks::<3>().0
+            .iter()
             .flat_map(|c| [c[0], c[1], c[2], 255])
             .collect(),
         Format::R8 => img.pixels.iter().flat_map(|&v| [v, v, v, 255]).collect(),
         Format::R8G8 => img
             .pixels
-            .chunks_exact(2)
+            .as_chunks::<2>().0
+            .iter()
             .flat_map(|c| [c[0], c[0], c[0], c[1]])
             .collect(),
         // 16-bit and float images are legal and rare. Rather than guess at a

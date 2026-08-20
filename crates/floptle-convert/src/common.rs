@@ -43,7 +43,7 @@ impl SubMesh {
             return;
         }
         let mut acc = vec![[0f32; 3]; self.positions.len()];
-        for tri in self.indices.chunks_exact(3) {
+        for tri in self.indices.as_chunks::<3>().0 {
             let (a, b, c) =
                 (tri[0] as usize, tri[1] as usize, tri[2] as usize);
             if a >= acc.len() || b >= acc.len() || c >= acc.len() {
@@ -88,7 +88,7 @@ impl SubMesh {
         let n = self.positions.len() as u32;
         let before = self.indices.len() / 3;
         let mut kept = Vec::with_capacity(self.indices.len());
-        for tri in self.indices.chunks_exact(3) {
+        for tri in self.indices.as_chunks::<3>().0 {
             if tri[0] < n && tri[1] < n && tri[2] < n {
                 kept.extend_from_slice(tri);
             }

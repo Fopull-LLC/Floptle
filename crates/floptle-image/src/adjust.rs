@@ -508,7 +508,7 @@ mod tests {
         // And it still produces only palette colours.
         let mut b: Vec<u8> = (0..64).flat_map(|i| [i * 4, i * 4, i * 4, 255]).collect();
         adj.apply(&mut b, 8, 8, 0, 0);
-        assert!(b.chunks_exact(4).all(|p| p[0] == 0 || p[0] == 255));
+        assert!(b.as_chunks::<4>().0.iter().all(|p| p[0] == 0 || p[0] == 255));
     }
 
     #[test]

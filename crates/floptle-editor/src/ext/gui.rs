@@ -864,7 +864,8 @@ pub(crate) fn bind<'scope, 'env: 'scope>(
                 with(slot, |ui| {
                     let o = ui.min_rect().min;
                     let points: Vec<egui::Pos2> = pts
-                        .chunks_exact(2)
+                        .as_chunks::<2>().0
+                        .iter()
                         .map(|p| egui::pos2(o.x + p[0], o.y + p[1]))
                         .collect();
                     // Two points are a line and one is nothing: egui would draw

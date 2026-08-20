@@ -59,7 +59,7 @@ fn inspect(bytes: &[u8]) -> Shape {
                 }
             }
             tris += ix.len() / 3;
-            for t in ix.chunks_exact(3) {
+            for t in ix.as_chunks::<3>().0 {
                 let (a, b, c) =
                     (ps[t[0] as usize], ps[t[1] as usize], ps[t[2] as usize]);
                 volume += (a[0] as f64 * (b[1] as f64 * c[2] as f64 - b[2] as f64 * c[1] as f64)

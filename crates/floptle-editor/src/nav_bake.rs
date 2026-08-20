@@ -420,7 +420,7 @@ pub(crate) fn gather(
                     };
                     for part in &model.parts {
                         let v = &part.mesh.vertices;
-                        for i in part.mesh.indices.chunks_exact(3) {
+                        for i in part.mesh.indices.as_chunks::<3>().0 {
                             let p = |k: usize| {
                                 m.transform_point3(Vec3::from(v[i[k] as usize].pos)).into()
                             };
@@ -432,7 +432,7 @@ pub(crate) fn gather(
             Some(Matter::MapMesh { id }) => {
                 let Some(mesh) = maps.meshes.get(id) else { continue };
                 for sm in floptle_map::triangulate(mesh) {
-                    for i in sm.indices.chunks_exact(3) {
+                    for i in sm.indices.as_chunks::<3>().0 {
                         let p = |k: usize| {
                             m.transform_point3(Vec3::from(sm.positions[i[k] as usize])).into()
                         };
@@ -449,7 +449,7 @@ pub(crate) fn gather(
                 for (_, cm) in floptle_field::mesher::mesh_field(&terrain.field, 1) {
                     // A chunk mesh's positions are relative to its own origin.
                     let off = Vec3::from(cm.origin);
-                    for i in cm.indices.chunks_exact(3) {
+                    for i in cm.indices.as_chunks::<3>().0 {
                         let p = |k: usize| {
                             m.transform_point3(Vec3::from(cm.positions[i[k] as usize]) + off)
                                 .into()

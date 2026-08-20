@@ -145,7 +145,7 @@ fn main() {
     // compare equal, so "identical" is only evidence if there was something in
     // them — a probe that renders nothing passes a pixel-diff perfectly and
     // proves nothing at all. This repo has shipped exactly that mistake before.
-    let painted = a.chunks_exact(4).filter(|p| !is_background(p)).count();
+    let painted = a.as_chunks::<4>().0.iter().filter(|p| !is_background(*p)).count();
     let coverage = painted as f32 / (W * H) as f32;
     println!("\ngeometry covers {:.1}% of the frame", coverage * 100.0);
     assert!(

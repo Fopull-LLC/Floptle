@@ -413,7 +413,7 @@ impl TriMeshCollider {
         let mut tris = Vec::with_capacity(indices.len() / 3);
         let mut grid: std::collections::HashMap<(i32, i32, i32), Vec<u32>> =
             std::collections::HashMap::new();
-        for tri in indices.chunks_exact(3) {
+        for tri in indices.as_chunks::<3>().0 {
             let (a, b, c) =
                 (verts[tri[0] as usize], verts[tri[1] as usize], verts[tri[2] as usize]);
             // Skip degenerate (zero-area) triangles — common in imported meshes and a

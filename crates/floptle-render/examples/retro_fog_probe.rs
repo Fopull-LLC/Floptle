@@ -361,8 +361,9 @@ fn centre(px: &[u8]) -> [f32; 3] {
 /// How many pixels differ between two frames, past a threshold that ignores
 /// the last-bit wobble of the sRGB round trip.
 fn changed(a: &[u8], b: &[u8]) -> usize {
-    a.chunks_exact(4)
-        .zip(b.chunks_exact(4))
+    a.as_chunks::<4>().0
+        .iter()
+        .zip(b.as_chunks::<4>().0)
         .filter(|(p, q)| (0..3).any(|c| p[c].abs_diff(q[c]) > 8))
         .count()
 }

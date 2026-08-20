@@ -199,7 +199,7 @@ impl TileGrid {
     pub fn prune(&mut self) {
         for t in &mut self.tiles {
             if let Some(data) = t
-                && data.chunks_exact(4).all(|p| p[3] == 0)
+                && data.as_chunks::<4>().0.iter().all(|p| p[3] == 0)
             {
                 *t = None;
             }

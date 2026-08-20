@@ -33,7 +33,8 @@ fn load_layer(path: &str) -> TextureData {
     let pixels = match info.color_type {
         png::ColorType::Rgba => buf[..(256 * 256 * 4)].to_vec(),
         png::ColorType::Rgb => buf[..(256 * 256 * 3)]
-            .chunks_exact(3)
+            .as_chunks::<3>().0
+            .iter()
             .flat_map(|c| [c[0], c[1], c[2], 255])
             .collect(),
         _ => return white(),

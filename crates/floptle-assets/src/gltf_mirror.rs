@@ -232,7 +232,7 @@ fn append_mirror(dst: &mut WriteMesh, src: &WriteMesh) {
         dc.extend_from_slice(sc);
     }
     // Flip winding: reflection reverses orientation, so swap the last two of each tri.
-    for tri in src.indices.chunks_exact(3) {
+    for tri in src.indices.as_chunks::<3>().0 {
         dst.indices.push(base + tri[0]);
         dst.indices.push(base + tri[2]);
         dst.indices.push(base + tri[1]);

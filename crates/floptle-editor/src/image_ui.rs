@@ -2366,10 +2366,10 @@ mod tests {
         let (px, w, h) =
             crate::image_edit::rasterize_text(&ctx, "Ag", 32.0, [255, 0, 0, 255]).expect("raster");
         assert!(w > 4 && h > 4, "{w}×{h}");
-        let opaque = px.chunks_exact(4).filter(|p| p[3] > 40).count();
+        let opaque = px.as_chunks::<4>().0.iter().filter(|p| p[3] > 40).count();
         assert!(opaque > 20, "expected ink, got {opaque} covered texels");
         assert!(
-            px.chunks_exact(4).filter(|p| p[3] > 40).all(|p| p[0] == 255 && p[1] == 0),
+            px.as_chunks::<4>().0.iter().filter(|p| p[3] > 40).all(|p| p[0] == 255 && p[1] == 0),
             "the ink takes the chosen colour"
         );
         // Empty text is nothing, not a panic.

@@ -127,7 +127,7 @@ impl Palette {
     pub fn from_image(px: &[u8], max_colors: usize) -> Palette {
         use std::collections::HashMap;
         let mut hist: HashMap<[u8; 3], (usize, [u32; 3])> = HashMap::new();
-        for c in px.chunks_exact(4) {
+        for c in px.as_chunks::<4>().0 {
             if c[3] < 8 {
                 continue;
             }
