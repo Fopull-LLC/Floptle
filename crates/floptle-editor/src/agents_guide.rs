@@ -54,7 +54,16 @@ floptle run --frames 120           # play it headlessly; reports what raised, an
 floptle shot --out look.png        # one frame through the active camera, as a PNG
 ```
 
-Neither needs you to open the editor. `run` executes the real scripts and
+If a render fails, ask the machine before you conclude the project is wrong:
+
+```sh
+floptle doctor              # can this machine render at all? exits non-zero if not
+```
+
+Neither `run` nor `check` needs a graphics adapter. `shot` does, and on a
+machine without one it says so and stops rather than looking like a crash.
+
+`run` executes the real scripts and
 physics for a fixed number of steps and reports every warning, error and
 `print` with its file and line — a `.ron` that loads is not a game that runs.
 `shot` renders through the same path the editor's Game view uses, so the picture
@@ -111,6 +120,7 @@ quietly re-point at a different node.
 ## Running it
 
 `floptle play` runs the project as a game, and `floptle open` opens the editor.
+`floptle serve` runs it as a dedicated server for a networked scene.
 Both need a display — check `needsGpu` in `floptle help --json` before reaching
 for a command in an environment that has none.
 "#;
