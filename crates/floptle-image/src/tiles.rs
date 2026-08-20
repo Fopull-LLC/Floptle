@@ -189,9 +189,7 @@ impl TileGrid {
 
     /// Drop every tile — free, and the cheapest possible "erase all".
     pub fn clear(&mut self) {
-        for t in &mut self.tiles {
-            *t = None;
-        }
+        self.tiles.fill(None);
     }
 
     /// Release tiles that turned out to be fully transparent (after a big erase),

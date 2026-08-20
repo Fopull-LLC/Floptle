@@ -246,9 +246,7 @@ fn uniform_sh(rgb: [f32; 3]) -> floptle_gi::Sh1 {
 
 fn filled(sh: floptle_gi::Sh1, nearest: f32) -> BakedGi {
     let mut b = grid();
-    for p in &mut b.probes {
-        *p = Probe { sh, nearest, mean: nearest };
-    }
+    b.probes.fill(Probe { sh, nearest, mean: nearest });
     b.bounces = 1;
     b
 }
