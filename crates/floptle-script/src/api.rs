@@ -305,6 +305,15 @@ fn light_shape_from_id(id: f64, size: f32) -> floptle_core::LightShape {
 /// The numeric component fields exposed to scripts via `node:getcomponent(name)`, mirrored
 /// from the live ECS each frame. Extend here (and in [`apply_component_field`]) to reach
 /// more components / fields.
+/// The spritesheet cell this entity draws — the node's own on a `Matter::Sprite`,
+/// the Material's otherwise. The read half of [`set_sprite_cell`].
+pub fn effective_cell(world: &World, e: Entity) -> u32 {
+    match world.get::<Matter>(e) {
+        Some(Matter::Sprite { cell, .. }) => *cell,
+        _ => world.get::<floptle_core::Material>(e).map(|m| m.cell).unwrap_or(0),
+    }
+}
+
 pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<String, f64>> {
     let mut out: HashMap<String, HashMap<String, f64>> = HashMap::new();
     if let Some(Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness }) =
@@ -451,7 +460,11 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
         out.insert(
             "Material".to_string(),
             HashMap::from([
-                ("cell".to_string(), m.cell as f64),
+                // The cell as the node actually draws it. On a Sprite node the
+                // node owns it (see `set_sprite_cell`), and a mirror reporting
+                // the Material's stale copy would make record diff a value
+                // playback never writes — keying the same frame every pass.
+                ("cell".to_string(), effective_cell(world, e) as f64),
                 ("sheetCols".to_string(), m.sheet_cols as f64),
                 ("sheetRows".to_string(), m.sheet_rows as f64),
                 // The look.
@@ -1130,10 +1143,15 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
         // step it every tick (`face:getcomponent("Material").cell = f`) and an
         // animation clip can key it on a stepped track.
         "Material" => {
+            // **The cell first, and not through the Material borrow.** On a
+            // Sprite node it belongs to the node; see `set_sprite_cell`.
+            if field == "cell" {
+                set_sprite_cell(world, ent, val.max(0.0) as u32);
+                return;
+            }
             if let Some(m) = world.get_mut::<floptle_core::Material>(ent) {
                 let n = val.max(0.0) as u32;
                 match field {
-                    "cell" => m.cell = n,
                     // At least one, like every reader of these. Stored as 0 they
                     // read back as 1 through `Material::sheet()`, which leaves a
                     // permanent difference between what was written and what is
@@ -2895,9 +2913,7 @@ pub fn mirror_component_strings(
 /// frames give you a cell index read against the wrong grid, which draws a
 /// slice of the wrong picture and never reports anything.
 ///
-/// The cell lands on whichever thing owns it. A [`Matter::Sprite`] carries its
-/// own `cell` and its Material's is unused, so writing the Material's for a
-/// Sprite node would set a number the Inspector shows and nothing draws.
+/// The cell lands on whichever thing owns it — see [`set_sprite_cell`].
 pub fn apply_sprite_frame(
     world: &mut World,
     ent: Entity,
@@ -2906,19 +2922,38 @@ pub fn apply_sprite_frame(
     rows: u32,
     cell: u32,
 ) {
-    let is_sprite = matches!(world.get::<floptle_core::Matter>(ent), Some(Matter::Sprite { .. }));
     if let Some(m) = world.get_mut::<floptle_core::Material>(ent) {
         m.texture = (!texture.is_empty()).then(|| texture.to_string());
         m.sheet_cols = cols.max(1);
         m.sheet_rows = rows.max(1);
-        if !is_sprite {
-            m.cell = cell;
-        }
     }
-    if is_sprite
-        && let Some(Matter::Sprite { cell: c, .. }) = world.get_mut::<floptle_core::Matter>(ent)
-    {
+    set_sprite_cell(world, ent, cell);
+}
+
+/// **Put a spritesheet cell where the thing that draws it will read it.**
+///
+/// A [`Matter::Sprite`] carries its own `cell` and ignores its Material's, so a
+/// cell written to the Material of a Sprite node sets a number the Inspector
+/// shows and nothing draws. Every other surface reads the Material's.
+///
+/// This is one function because the rule was written twice and only one copy
+/// knew it: `apply_sprite_frame` got it right, and the `Material ▸ cell`
+/// property lane did not — so recording a sprite's cell in the timeline keyed
+/// the change correctly and played it back into a field with no reader. The
+/// keys were there, the values were right, and the sprite never moved.
+pub fn set_sprite_cell(world: &mut World, ent: Entity, cell: u32) {
+    if let Some(Matter::Sprite { cell: c, .. }) = world.get_mut::<floptle_core::Matter>(ent) {
         *c = cell;
+        // **And the Material's copy is deliberately NOT written.** It is unused
+        // here, the Inspector re-seeds its frame grid from the node every time
+        // it draws, and writing it would mutate the material on every frame of
+        // every playback — a scene that marks itself edited because somebody
+        // pressed play. An existing guard says so, and it caught this being
+        // added.
+        return;
+    }
+    if let Some(m) = world.get_mut::<floptle_core::Material>(ent) {
+        m.cell = cell;
     }
 }
 
@@ -2927,11 +2962,8 @@ pub fn apply_sprite_frame(
 /// Used to key "what it looks like now", so recording a sprite lane takes the
 /// same four values back out that playing one puts in.
 pub fn read_sprite_frame(world: &World, ent: Entity) -> Option<(String, u32, u32, u32)> {
+    let cell = effective_cell(world, ent);
     let m = world.get::<floptle_core::Material>(ent)?;
-    let cell = match world.get::<floptle_core::Matter>(ent) {
-        Some(Matter::Sprite { cell, .. }) => *cell,
-        _ => m.cell,
-    };
     Some((m.texture.clone().unwrap_or_default(), m.sheet_cols.max(1), m.sheet_rows.max(1), cell))
 }
 

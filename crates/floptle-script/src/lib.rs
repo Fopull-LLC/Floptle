@@ -281,7 +281,7 @@ pub(crate) use api::install_handle_api;
 /// it to auto-key changed properties.
 pub use api::{
     apply_component_color, apply_component_field, apply_component_field_str, apply_sprite_frame,
-    mirror_component_strings, read_sprite_frame,
+    effective_cell, mirror_component_strings, read_sprite_frame, set_sprite_cell,
     mirror_component_colors, mirror_components, HANDLE_KEYS,
 };
 pub use input_api::{SharedDomain, SharedInput};

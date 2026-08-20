@@ -4803,6 +4803,53 @@ mod tests {
         ));
     }
 
+    /// **A keyed cell has to move the sprite on playback.**
+    ///
+    /// The one the ▫ Sprite Inspector's frame grid produces: picking a frame
+    /// writes the node's own `cell` AND the Material's copy of it, so record
+    /// diffs the Material and writes a `Material ▸ cell` lane. Playing that lane
+    /// back wrote the Material's cell and stopped — which a Sprite node's draw
+    /// does not read, so every key was correct and nothing on screen ever
+    /// changed. The whole feature looked broken from the only door people use.
+    #[test]
+    fn a_recorded_cell_change_plays_back_onto_the_sprite() {
+        let (mut w, e) = sprite_world();
+        let mut st = recording_state(&w, e);
+
+        // Pick a frame the way the Inspector does: the node, and its Material's
+        // copy kept in step.
+        floptle_script::set_sprite_cell(&mut w, e, 5);
+        st.playhead = 0.25;
+        assert!(record_scan(&w, &mut st, e), "changing the cell wrote no key");
+        let doc = &st.clip_doc.as_ref().unwrap().1;
+        let lane = lane(doc, "Material", "cell").expect("no Material.cell lane");
+        assert_eq!(lane.values, vec![AnimPropValueDoc::Float(5.0)]);
+
+        // …and playing it back moves the cell the SPRITE draws, not just the
+        // number the Inspector shows.
+        floptle_script::set_sprite_cell(&mut w, e, 0);
+        floptle_script::apply_component_field(&mut w, e, "Material", "cell", 5.0);
+        assert!(
+            matches!(w.get::<Matter>(e), Some(Matter::Sprite { cell: 5, .. })),
+            "the keyed cell never reached the node that draws it: {:?}",
+            w.get::<Matter>(e).map(|m| matches!(m, Matter::Sprite { .. }))
+        );
+        // The Material's own copy is left alone: it is unused on a Sprite, and
+        // writing it every playback frame would mark the scene edited for
+        // having pressed play. The Inspector re-seeds its grid from the node.
+        assert_eq!(w.get::<floptle_core::Material>(e).map(|m| m.cell), Some(0));
+    }
+
+    /// A surface that is NOT a sprite still keeps its cell on the material —
+    /// the rule is "wherever it is read", not "always the node".
+    #[test]
+    fn a_mesh_keeps_its_cell_on_the_material() {
+        let (mut w, e) = sprite_world();
+        w.insert(e, Matter::Empty);
+        floptle_script::apply_component_field(&mut w, e, "Material", "cell", 4.0);
+        assert_eq!(w.get::<floptle_core::Material>(e).map(|m| m.cell), Some(4));
+    }
+
     /// Recording authors the clip, never the scene.
     ///
     /// The restore snapshot covered numbers only, so recording a texture swap
