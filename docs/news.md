@@ -1,5 +1,27 @@
 ## Just shipped
 
+**v0.72.0 "Wear It Well"** — **materials on models, sorted out.** A Material you
+put on a model now **replaces** what the model came with — every part, textures
+included — instead of leaving it wearing its old picture while the colour and
+the emissive quietly took effect. That is what the component is for: *this whole
+thing is made of THIS*, and a model that already looks right needs no Material
+at all. To change one part, there is now a script route:
+`node:materials()` says what a model's parts are called and
+`node:material("Clothing").texture = "art/shirt.png"` dresses them — the whole
+basis of a clothing system, and a material's fields read back now instead of
+answering nil. **A model's own textures can be taken out of it**: ⬇ Extract
+textures writes each material's image beside the model as a PNG you can paint
+over, point anything at, or draw a costume on top of — a `.glb` keeps its images
+inside itself, where nothing else could reach them. **A tint** is the other half:
+`node:setTint(color(1, 0.3, 0.3))` multiplies over everything a node draws and
+keeps its textures, which is what a hit flash, a team colour or a ghosted
+placement preview actually wants. Also: **flipping a sprite is one line**
+(`node:sprite().flipX = mx > 0`), an options table written as a list is refused
+instead of doing nothing at all, `floptle shot` stopped photographing models in
+the textures they were imported with and planets before their ground arrived,
+and `floptle run` reports the time it actually simulated. On upgrade, check any
+model with a Material on the node — it now wears it.
+
 **v0.71.0 "Nothing Left Open"** — **the command line's loose ends, closed.**
 `floptle bake gi` no longer opens a window: it said "and exit" and did the
 opposite, so on a build machine with no display it did not bake at all; it now
