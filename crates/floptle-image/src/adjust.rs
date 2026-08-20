@@ -237,7 +237,7 @@ impl Adjustment {
 }
 
 fn per_pixel(buf: &mut [u8], mut f: impl FnMut(&mut [f32; 4])) {
-    for px in buf.chunks_exact_mut(4) {
+    for px in buf.as_chunks_mut::<4>().0 {
         // Fully transparent texels carry no colour worth adjusting, and touching
         // them turns invisible black into visible fringing when they're later
         // resampled. Leave them alone.

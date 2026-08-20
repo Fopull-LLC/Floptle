@@ -213,7 +213,7 @@ fn oriented(vertices: Vec<Vertex>, indices: Vec<u32>) -> MeshData {
 }
 
 fn orient_faces(m: &mut MeshData) {
-    for t in m.indices.chunks_exact_mut(3) {
+    for t in m.indices.as_chunks_mut::<3>().0 {
         let p = |i: u32| glam::Vec3::from(m.vertices[i as usize].pos);
         let n: glam::Vec3 =
             t.iter().map(|&i| glam::Vec3::from(m.vertices[i as usize].normal)).sum();

@@ -2096,7 +2096,8 @@ impl Raster {
     /// `self` for something else.
     fn transmissive_extras(&self) -> Vec<bool> {
         self.mat_ext_cpu
-            .chunks_exact(EXT_LANES)
+            .as_chunks::<EXT_LANES>().0
+            .iter()
             // lane 1 `.w` is transmission; lane 1 `.x` bit 0 is the physical
             // flag, and only the metal-rough model has a refraction term.
             .map(|c| c[1][3] > 0.0 && (c[1][0] as u32) & EXT_PHYSICAL != 0)
@@ -3157,7 +3158,8 @@ impl Raster {
         // `self` because the bucketing closures below borrow `raws` mutably.
         let dithers: Vec<bool> = self
             .mat_ext_cpu
-            .chunks_exact(EXT_LANES)
+            .as_chunks::<EXT_LANES>().0
+            .iter()
             .map(|c| (c[1][0] as u32) & EXT_DITHER_ALPHA != 0)
             .collect();
         let is_opaque = |raw: &InstanceRaw| {

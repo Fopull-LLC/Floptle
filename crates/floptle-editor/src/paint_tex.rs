@@ -143,7 +143,7 @@ impl Editor {
         for atlas in atlases {
             let edge = atlas.edge;
             let mut pixels = vec![0u8; (edge * edge * 4) as usize];
-            for px in pixels.chunks_exact_mut(4) {
+            for px in pixels.as_chunks_mut::<4>().0 {
                 px.copy_from_slice(&CLEAR_TEXEL);
             }
             let tex = raster.register_texture(
@@ -419,7 +419,7 @@ impl Editor {
                 };
                 let Some(pt) = self.paint_tex.get_mut(&id) else { continue };
                 for pp in pt.parts.iter_mut() {
-                    for px in pp.pixels.chunks_exact_mut(4) {
+                    for px in pp.pixels.as_chunks_mut::<4>().0 {
                         let cur_a = px[3] as f32;
                         if erase {
                             px[3] = (cur_a * (1.0 - w)).round().clamp(0.0, 255.0) as u8;
@@ -690,7 +690,7 @@ mod tests {
         // The paint layer: transparent canvas + a painted disc + an erased disc inside it —
         // the same math texture_paint_dab runs.
         let mut paint = vec![0u8; (edge * edge * 4) as usize];
-        for px in paint.chunks_exact_mut(4) {
+        for px in paint.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&[255, 255, 255, 0]);
         }
         let dab = |paint: &mut [u8], center: Vec3, radius: f32, color: [f32; 3], erase: bool| {

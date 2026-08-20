@@ -268,7 +268,7 @@ pub(crate) fn render_icon_sheet(path: &std::path::Path, cell: u32, cols: u32) ->
     // transparent background every viewer shows them against white paper, i.e.
     // shows nothing at all, and the sheet looks empty when it isn't.
     let mut px = vec![0u8; (w * h) as usize * 4];
-    for p in px.chunks_exact_mut(4) {
+    for p in px.as_chunks_mut::<4>().0 {
         p.copy_from_slice(&[28, 30, 34, 255]);
     }
     let mut cov = vec![0f32; (w * h) as usize];

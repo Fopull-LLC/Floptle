@@ -328,7 +328,7 @@ impl Editor {
         for (p, atlas) in atlases.into_iter().enumerate() {
             let edge = atlas.edge;
             let mut pixels = vec![0u8; (edge * edge * 4) as usize];
-            for px in pixels.chunks_exact_mut(4) {
+            for px in pixels.as_chunks_mut::<4>().0 {
                 px.copy_from_slice(&crate::paint_tex::CLEAR_TEXEL);
             }
             // Copy each surviving triangle's patch across. A triangle whose face

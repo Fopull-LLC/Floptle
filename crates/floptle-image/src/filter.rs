@@ -65,7 +65,7 @@ pub fn sharpen(buf: &mut [u8], w: u32, h: u32, amount: f32, radius: f32) {
     }
     let mut soft = buf.to_vec();
     blur(&mut soft, w, h, radius.max(0.5), false);
-    for (dst, s) in buf.chunks_exact_mut(4).zip(soft.as_chunks::<4>().0) {
+    for (dst, s) in buf.as_chunks_mut::<4>().0.iter_mut().zip(soft.as_chunks::<4>().0) {
         for i in 0..3 {
             let v = dst[i] as f32 + (dst[i] as f32 - s[i] as f32) * amount;
             dst[i] = u8c(v);
@@ -88,7 +88,7 @@ pub fn noise(buf: &mut [u8], w: u32, _h: u32, amount: f32, mono: bool, seed: u32
     if amount <= 0.0 {
         return;
     }
-    for (i, px) in buf.chunks_exact_mut(4).enumerate() {
+    for (i, px) in buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let base = hash(i as u32 ^ seed.wrapping_mul(0x9e37_79b9) ^ w);
         if mono {
             let n = (base % 512) as f32 / 511.0 - 0.5;

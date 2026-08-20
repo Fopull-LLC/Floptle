@@ -403,7 +403,7 @@ fn read_back(gpu: &Gpu, tex: &wgpu::Texture) -> Vec<u8> {
     // are talking about the channels they name.
     if matches!(gpu.config.format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb)
     {
-        for px in out.chunks_exact_mut(4) {
+        for px in out.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
         }
     }

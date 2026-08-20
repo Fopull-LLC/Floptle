@@ -235,7 +235,7 @@ fn walk(
                 None => sm.indices = (0..sm.positions.len() as u32).collect(),
             }
             if flipped {
-                for t in sm.indices.chunks_exact_mut(3) {
+                for t in sm.indices.as_chunks_mut::<3>().0 {
                     t.swap(1, 2);
                 }
             }
