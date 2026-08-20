@@ -1,5 +1,24 @@
 ## Just shipped
 
+**v0.71.0 "Nothing Left Open"** — **the command line's loose ends, closed.**
+`floptle bake gi` no longer opens a window: it said "and exit" and did the
+opposite, so on a build machine with no display it did not bake at all; it now
+runs the same bake the editor runs, back to back, and writes the result beside
+the scene (`--bake-gi` is unchanged and still opens the editor). **`floptle
+serve`** runs the dedicated server, the same one `floptle-runtime --server`
+runs, refusing a scene with no Networked nodes rather than serving it empty.
+**`floptle doctor`** says whether a machine will run the commands that need a
+screen — and it answers by *building* the renderer rather than by asking the
+adapter what it supports, because those are different questions. Also:
+**animating a sprite's frame works** — recording keyed the material's frame
+number while a ▫ Sprite draws its own, so every key was right and the picture
+never changed; clips you already recorded start working. **The renderer builds
+on OpenGL now**, where two shaders sampled one texture with two samplers and the
+renderer could not be created at all — worth another try if Floptle would not
+start on your hardware. **`floptle check`** notices a spritesheet grid that
+disagrees with its texture's import settings, and **`floptle shot`** stopped
+leaving baked global illumination out of the picture. Nothing to do on upgrade.
+
 **v0.70.1 "From The Terminal"** — **Floptle has a command line.** You can find
 out whether a project loads, whether it runs, what it looks like and what is
 inside it — and change it correctly — without opening the editor, which means
