@@ -8,6 +8,10 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "floptle_runtime"
+path = "src/lib.rs"
+
 [[bin]]
 name = "floptle-runtime"
 path = "src/main.rs"

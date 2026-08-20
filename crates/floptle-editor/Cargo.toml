@@ -73,6 +73,10 @@ arboard = { version = "3.6", default-features = false, features = ["image-data"]
 ron = { workspace = true }
 serde = { workspace = true }
 floptle-net = { path = "../floptle-net" }
+# The dedicated server, for `floptle serve`. The runtime's LIBRARY half, so the
+# verb runs the same server the runtime binary does rather than a second copy of
+# it — the rule the whole command line follows (ADR-0027).
+floptle-runtime = { path = "../floptle-runtime" }
 # Native file picker for asset import — the XDG desktop portal backend works on
 # Wayland (where winit delivers no file drops) as well as X11/Windows/macOS.
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }

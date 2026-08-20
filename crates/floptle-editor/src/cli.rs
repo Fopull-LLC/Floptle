@@ -618,6 +618,78 @@ pub(crate) const VERBS: &[Verb] = &[
         legacy: &[],
     },
     Verb {
+        name: "serve",
+        summary: "run a project as an authoritative dedicated server, until interrupted",
+        detail: "The same server `floptle-runtime --server` runs — this is where to type it, \
+                 so one command line covers the engine. No window, no GPU, and it does not \
+                 return: it ticks the scene and replicates it until something stops it.\n\n\
+                 Give it a PORT to listen directly, or a RELAY address to be reachable from \
+                 behind a router — the relay prints a lobby code for players to join with. \
+                 With neither it listens on the default port.\n\n\
+                 The scene needs Networked nodes, or a session would replicate nothing, and \
+                 it must not be a rollback scene: a rollback match is simulated by every \
+                 peer and hosted by one of the players, so there is nothing here to drive \
+                 it. Both are refused by name rather than served empty.",
+        args: &[
+            Arg {
+                name: "PROJECT",
+                value: Value::Path,
+                required: false,
+                help: "the project directory (default: assets/)",
+            },
+            Arg {
+                name: "--scene",
+                value: Value::Text,
+                required: false,
+                help: "which scene to serve (default: the project's entry scene)",
+            },
+            Arg {
+                name: "--port",
+                value: Value::Text,
+                required: false,
+                help: "listen on this port",
+            },
+            Arg {
+                name: "--relay",
+                value: Value::Text,
+                required: false,
+                help: "reach players through this relay instead, and print a lobby code",
+            },
+            Arg {
+                name: "--tick",
+                value: Value::Text,
+                required: false,
+                help: "simulation rate in Hz (default: 60)",
+            },
+            Arg {
+                name: "--interest",
+                value: Value::Text,
+                required: false,
+                help: "only replicate what is within this many units of a player",
+            },
+            Arg {
+                name: "--budget",
+                value: Value::Text,
+                required: false,
+                help: "cap on entities replicated per tick",
+            },
+        ],
+        needs_gpu: false,
+        writes_project: false,
+        exits: &[
+            (
+                1,
+                "the scene could not be loaded, has no Networked nodes, or is a rollback \
+                 scene no dedicated server can drive",
+            ),
+            (3, "there was nothing wrong with the request, but it could not listen — the \
+                 port is taken, or the relay refused"),
+        ],
+        output: "a line naming what it is listening on (and the lobby code, with --relay), \
+                 then a heartbeat while it runs",
+        legacy: &["floptle-runtime --server"],
+    },
+    Verb {
         name: "version",
         summary: "print the engine version and exit",
         detail: "",
@@ -990,6 +1062,49 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 (None, None) => crate::run::Span::Frames(120),
             };
             Outcome::Exit(crate::run::run(&project, text(a, "scene").as_deref(), span, a.get_flag("json")))
+        }
+        Some(("serve", a)) => {
+            // **Built for the runtime's own parser, not parsed again here.**
+            // `ServerArgs::parse` is the one hand-written parser in this repo
+            // with tests, it validates every value (a tick rate of zero, a port
+            // that is not a number) and it reports unknown flags rather than
+            // ignoring them. Handing it the shape it expects means `serve` and
+            // `--server` cannot disagree about what a flag means.
+            let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
+            let mut argv: Vec<String> =
+                vec!["--server".into(), project.to_string_lossy().into_owned()];
+            for flag in ["scene", "port", "relay", "tick", "interest", "budget"] {
+                if let Some(v) = text(a, flag) {
+                    argv.push(format!("--{flag}"));
+                    argv.push(v);
+                }
+            }
+            // **Somewhere to listen is a command-line question, so it is asked
+            // here.** The server answers it with the same code it uses for "this
+            // scene cannot be served", and those are 2 and 1 in this command
+            // line — a caller has to be able to tell "you typed it wrong" from
+            // "your project is wrong". Asking first is what makes every 2 the
+            // server returns afterwards unambiguous.
+            if text(a, "port").is_none() && text(a, "relay").is_none() {
+                eprintln!(
+                    "a dedicated server needs somewhere to listen: --port <n> or --relay <addr>"
+                );
+                return Outcome::Exit(2);
+            }
+            match floptle_runtime::server::ServerArgs::parse(&argv) {
+                Ok(args) => Outcome::Exit(match floptle_runtime::server::run(args) {
+                    // The server's "cannot serve this scene" is this command
+                    // line's 1: the project is wrong, not the invocation. Its 3
+                    // (could not bind, relay refused) passes through as its own
+                    // thing, because neither of those is either.
+                    2 => 1,
+                    other => other,
+                }),
+                Err(e) => {
+                    eprintln!("{e}");
+                    Outcome::Exit(2)
+                }
+            }
         }
         Some(("api", a)) => Outcome::Exit(crate::ide::cli_reference(
             text(a, "QUERY").as_deref(),

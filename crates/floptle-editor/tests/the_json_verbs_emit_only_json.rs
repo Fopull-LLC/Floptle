@@ -606,3 +606,48 @@ fn baking_light_probes_needs_no_window_and_writes_the_file() {
 
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// **`serve` is the runtime's server, not a second one.**
+///
+/// The dedicated server had its own command line on another binary, which meant
+/// two places to look and two sets of flags to keep in step. The verb hands the
+/// runtime's own parser — the one hand-written parser in this repo with tests —
+/// the shape it expects, so `serve` and `--server` cannot come to disagree about
+/// what a flag means. These assertions are the evidence: every refusal below is
+/// the runtime's own wording, reached through the verb.
+#[test]
+fn serve_refuses_what_the_runtime_refuses() {
+    let d = temp("serve");
+    scaffold(&d);
+    let p = d.to_string_lossy().into_owned();
+
+    // **Nowhere to listen is the command line being wrong: 2.**
+    let out = Command::new(bin()).args(["serve", &p]).output().expect("run serve");
+    assert_eq!(out.status.code(), Some(2));
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert!(why.contains("--port"), "the refusal did not say what to give it: {why}");
+
+    // **A scene that cannot be served is the PROJECT being wrong: 1.** The
+    // server answers both with its own 2, and a caller has to be able to tell
+    // "you typed it wrong" from "your project is wrong" — which is the whole
+    // reason the check above happens here rather than in the server.
+    let out = Command::new(bin())
+        .args(["serve", &p, "--port", "45911"])
+        .output()
+        .expect("run serve");
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "serving a scene with no Networked nodes: {why}");
+    assert!(why.contains("Networked"), "the refusal did not say what is missing: {why}");
+
+    // …and a value the server would not accept is caught before anything binds
+    // a socket, with the runtime's own message.
+    let out = Command::new(bin())
+        .args(["serve", &p, "--port", "45911", "--tick", "0"])
+        .output()
+        .expect("run serve");
+    assert_eq!(out.status.code(), Some(2));
+    let why = String::from_utf8_lossy(&out.stderr);
+    assert!(why.contains("--tick"), "a bad tick rate was not named: {why}");
+
+    let _ = std::fs::remove_dir_all(&d);
+}
