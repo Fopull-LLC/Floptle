@@ -1,6 +1,6 @@
 ## Just shipped
 
-**v0.72.0 "Wear It Well"** — **materials on models, sorted out.** A Material you
+**v0.72.1 "Wear It Well"** — **materials on models, sorted out.** A Material you
 put on a model now **replaces** what the model came with — every part, textures
 included — instead of leaving it wearing its old picture while the colour and
 the emissive quietly took effect. That is what the component is for: *this whole
