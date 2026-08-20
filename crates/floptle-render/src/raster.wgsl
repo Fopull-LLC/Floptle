@@ -42,8 +42,17 @@ struct RasterGlobals {
 @group(0) @binding(2) var<storage, read> tpaint: array<u32>;
 // The terrain texture palette (a layer array) + its REPEAT samplers (linear + nearest),
 // for meshed-terrain triplanar splatting — the raster mirror of the raymarch's palette.
+//
+// **The SAME texture is bound twice**, once per sampler, and that is not
+// redundancy — it is what makes this shader expressible on OpenGL. GLSL has no
+// separate image and sampler: `sampler2DArray` is the pair, so one image used
+// with two samplers cannot be written at all, and naga refuses the whole module
+// rather than the one function. Binding 11 is the same view as binding 3; the
+// cost is one descriptor and the alternative was a pipeline that could not be
+// created on that backend.
 @group(0) @binding(3) var terrain_pal: texture_2d_array<f32>;
 @group(0) @binding(4) var terrain_pal_samp: sampler;
+@group(0) @binding(11) var terrain_pal_nearest: texture_2d_array<f32>;
 @group(0) @binding(5) var terrain_pal_samp_nearest: sampler;
 // GPU skinning (`floptle/0080`). Three stores, all read in `vs_skin` and nowhere
 // else, all following the `vpaint` pattern: ONE buffer per scene, indexed by a
@@ -1200,9 +1209,9 @@ fn terrain_triplanar(slot: i32, p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy:
     let w = an / (an.x + an.y + an.z);
     let nearest = (g.terrain_bits.x & (1u << u32(slot))) != 0u;
     if (nearest) {
-        let nx = textureSampleGrad(terrain_pal, terrain_pal_samp_nearest, p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale).rgb;
-        let ny = textureSampleGrad(terrain_pal, terrain_pal_samp_nearest, p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale).rgb;
-        let nz = textureSampleGrad(terrain_pal, terrain_pal_samp_nearest, p.xy * scale, slot, dpx.xy * scale, dpy.xy * scale).rgb;
+        let nx = textureSampleGrad(terrain_pal_nearest, terrain_pal_samp_nearest, p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale).rgb;
+        let ny = textureSampleGrad(terrain_pal_nearest, terrain_pal_samp_nearest, p.xz * scale, slot, dpx.xz * scale, dpy.xz * scale).rgb;
+        let nz = textureSampleGrad(terrain_pal_nearest, terrain_pal_samp_nearest, p.xy * scale, slot, dpx.xy * scale, dpy.xy * scale).rgb;
         return nx * w.x + ny * w.y + nz * w.z;
     }
     let lx = textureSampleGrad(terrain_pal, terrain_pal_samp, p.zy * scale, slot, dpx.zy * scale, dpy.zy * scale).rgb;

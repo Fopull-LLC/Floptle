@@ -29,6 +29,11 @@
 // every terrain texture was hardcoded Linear (blurry) while the identical image on a
 // mesh honoured its Pixelated setting.
 @group(0) @binding(8) var terrain_samp_nearest: sampler;
+// …and the palette bound a SECOND time, for that nearest sampler. GLSL has no
+// separate image and sampler — `sampler2DArray` is the pair — so one image used
+// with two samplers cannot be written at all, and naga refuses the whole module.
+// Same view as binding 4; one descriptor buys a shader OpenGL can compile.
+@group(0) @binding(10) var terrain_tex_nearest: texture_2d_array<f32>;
 @group(0) @binding(6) var sky_tex: texture_2d<f32>;
 // The opaque-mesh depth prepass (screen-sized when primed, a 1×1 "off" fallback
 // otherwise): caps the march per pixel so rays stop at the nearest mesh instead
@@ -446,9 +451,9 @@ fn triplanar(slot: i32, rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let lx = textureSampleLevel(terrain_tex, terrain_samp, rel.zy * scale, slot, 0.0).rgb;
     let ly = textureSampleLevel(terrain_tex, terrain_samp, rel.xz * scale, slot, 0.0).rgb;
     let lz = textureSampleLevel(terrain_tex, terrain_samp, rel.xy * scale, slot, 0.0).rgb;
-    let nx = textureSampleLevel(terrain_tex, terrain_samp_nearest, rel.zy * scale, slot, 0.0).rgb;
-    let ny = textureSampleLevel(terrain_tex, terrain_samp_nearest, rel.xz * scale, slot, 0.0).rgb;
-    let nz = textureSampleLevel(terrain_tex, terrain_samp_nearest, rel.xy * scale, slot, 0.0).rgb;
+    let nx = textureSampleLevel(terrain_tex_nearest, terrain_samp_nearest, rel.zy * scale, slot, 0.0).rgb;
+    let ny = textureSampleLevel(terrain_tex_nearest, terrain_samp_nearest, rel.xz * scale, slot, 0.0).rgb;
+    let nz = textureSampleLevel(terrain_tex_nearest, terrain_samp_nearest, rel.xy * scale, slot, 0.0).rgb;
     let cx = select(lx, nx, nearest);
     let cy = select(ly, ny, nearest);
     let cz = select(lz, nz, nearest);

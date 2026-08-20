@@ -575,6 +575,19 @@ impl Raymarch {
                 },
                 // Baked GI probes — the same entry the shared field group uses.
                 crate::gi::probe_tex_entry(9),
+                // Binding 10: the terrain palette AGAIN, so binding 8's nearest
+                // sampler has an image of its own. OpenGL's combined sampler
+                // type is the reason; see `raymarch.wgsl`.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -694,7 +707,7 @@ impl Raymarch {
         sky_fn: Option<&str>,
         support: &str,
     ) -> String {
-        let base = concat!(include_str!("raymarch.wgsl"), "\n", include_str!("field.wgsl"));
+        let base = prelude();
         let mut s = base.to_string();
         if let Some((field, color)) = field_code {
             s = crate::raster::splice_block(
@@ -1606,6 +1619,7 @@ fn make_bind(
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&color_view) },
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(sampler) },
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&terrain_view) },
+            wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&terrain_view) },
             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(tile_sampler) },
             wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(tile_sampler_nearest) },
             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&sky_view) },
@@ -1805,4 +1819,12 @@ fn f32_to_f16(v: f32) -> u16 {
     } else {
         sign | ((exp as u16) << 10) | mant
     }
+}
+
+/// The WGSL every raymarch module starts from: the pass shader + the shared
+/// distance-field module. The mirror of [`crate::raster::pass_prelude`], and
+/// public for the same reason — something outside this file needs to validate
+/// the REAL seam rather than a reconstruction of it.
+pub fn prelude() -> &'static str {
+    concat!(include_str!("raymarch.wgsl"), "\n", include_str!("field.wgsl"))
 }

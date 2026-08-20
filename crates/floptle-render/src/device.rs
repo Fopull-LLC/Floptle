@@ -37,6 +37,32 @@ fn describe(e: &wgpu::Error) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Which graphics backends to consider, honouring `WGPU_BACKEND`.
+///
+/// **This exists so a backend-specific bug can be reproduced on a machine that
+/// would never pick that backend.** Everything here runs on Vulkan in practice;
+/// GitHub's runners have no Vulkan driver and fall back to OpenGL, where naga's
+/// GLSL output has restrictions the other backends do not — and a failure only
+/// CI can see is a failure nobody can fix. `WGPU_BACKEND=gl cargo run …`
+/// reproduces it in one command.
+///
+/// Unset means all of them, which is what shipped and what a player gets.
+/// Accepts wgpu's own spellings: `vulkan`, `gl`, `metal`, `dx12`, `primary`.
+pub fn backends_from_env() -> wgpu::Backends {
+    match std::env::var("WGPU_BACKEND") {
+        Ok(v) if !v.trim().is_empty() => {
+            let want = wgpu::Backends::from_comma_list(&v);
+            if want.is_empty() {
+                eprintln!("WGPU_BACKEND={v:?} names no backend floptle knows — using all of them");
+                wgpu::Backends::all()
+            } else {
+                want
+            }
+        }
+        _ => wgpu::Backends::all(),
+    }
+}
+
 fn gpu_error(e: &wgpu::Error) {
     let message = describe(e);
     if let Ok(mut g) = GPU_ERRORS.lock() {
@@ -160,7 +186,7 @@ impl Gpu {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: backends_from_env(),
             flags: wgpu::InstanceFlags::default(),
             memory_budget_thresholds: Default::default(),
             backend_options: Default::default(),
@@ -290,7 +316,7 @@ impl Gpu {
 
     fn headless_with(width: u32, height: u32, scene: Option<wgpu::TextureFormat>) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: backends_from_env(),
             flags: wgpu::InstanceFlags::default(),
             memory_budget_thresholds: Default::default(),
             backend_options: Default::default(),

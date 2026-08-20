@@ -25,6 +25,12 @@ log = { workspace = true }
 fontdue = "0.9"
 
 [dev-dependencies]
+# The GLSL backend, for the test that holds every shader against OpenGL's rules.
+# A dev-dependency on purpose: nothing shipped needs to WRITE GLSL, and the check
+# it powers needs no GPU, so it runs everywhere including a machine that could
+# never select that backend.
+naga = { version = "29", features = ["wgsl-in", "glsl-out"] }
+
 # Offscreen render tests (examples/blob_probe.rs) write PNGs to inspect the look.
 png = "0.18"
 # examples/shader_probe.rs compiles .flsl through the production path.

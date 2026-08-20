@@ -350,6 +350,13 @@ fn make_globals_bind(
             wgpu::BindGroupEntry { binding: 8, resource: skin_palette.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 9, resource: skin_meta.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 10, resource: mat_ext.as_entire_binding() },
+            // The palette again, for the nearest sampler. See `raster.wgsl`:
+            // GLSL cannot express one image with two samplers, so the image is
+            // what gets duplicated. Same view, so there is one texture.
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: wgpu::BindingResource::TextureView(pal_view),
+            },
         ],
     })
 }
@@ -1028,6 +1035,19 @@ impl Raster {
                     binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Binding 11: the palette texture a SECOND time, so binding 5's
+                // nearest sampler has an image of its own. OpenGL's combined
+                // sampler type is the reason; see `raster.wgsl`.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
                     count: None,
                 },
                 // Bindings 6/7/8: GPU skinning (`floptle/0080`) — per-vertex joint

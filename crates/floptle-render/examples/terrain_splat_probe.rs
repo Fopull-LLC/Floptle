@@ -126,7 +126,13 @@ fn main() {
     // The checker's dark cells are near-black; its light cells are red-dominant. Count both
     // over the terrain surface: a flat (broken) terrain has neither. This is direction-
     // independent (the checker lands wherever the painted slope faces the camera).
-    let sky = |p: [u8; 4]| p[2] > p[1] + 12 && p[2] > p[0] + 20;
+    // Widened before comparing: `p[1] + 12` on a `u8` overflows on any bright
+    // pixel, which panicked this probe outright in a debug build and silently
+    // wrapped in a release one — counting a bright sky pixel as terrain.
+    let sky = |p: [u8; 4]| {
+        let (r, g, b) = (u16::from(p[0]), u16::from(p[1]), u16::from(p[2]));
+        b > g + 12 && b > r + 20
+    };
     let (mut reddish, mut dark, mut surface) = (0u32, 0u32, 0u32);
     for p in &px {
         if sky(*p) {
