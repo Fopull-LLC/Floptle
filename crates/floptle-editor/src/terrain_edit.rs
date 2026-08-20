@@ -1903,6 +1903,120 @@ impl Editor {
 
     // ---- G1 residency (docs/galaxy-streaming-proposal.md) ---------------------
 
+    /// The world-streaming work a frame does, with none of the drawing: hand
+    /// queued `terrain.generatePlanet` fills to the generator, drive residency,
+    /// and step the background checkpoint.
+    ///
+    /// It exists because a frame is not the only thing that steps this world.
+    /// `floptle run` has no frame at all, and without this it never released the
+    /// Play-start streaming hold ([`begin_play_terrain_hold`] auto-PAUSES until
+    /// the ground exists). A paused session runs no fixed tick, so no rails, no
+    /// physics and `dt == 0` — the run stepped its full span, reported the full
+    /// span of simulated time, and had simulated **none** of it. Every script's
+    /// `time` sat at zero and `space.bodies()` was empty, which reads as a game
+    /// whose world was never built rather than as a runner that never started.
+    ///
+    /// The ORDER is the frame's order and matters: generates before residency,
+    /// or residency adopts a freshly created body as cold and streams a stale
+    /// same-id field into it. Keep the two in step.
+    ///
+    /// No GPU: this is field/RAM bookkeeping. Meshing and upload are the frame's
+    /// half and stay there.
+    pub(crate) fn pump_world_streaming(&mut self) {
+        let anchor = if self.playing {
+            floptle_core::active_camera(&self.world)
+                .map(|e| floptle_core::world_transform(&self.world, e).translation)
+                .unwrap_or(self.camera.position)
+        } else {
+            self.camera.position
+        };
+        self.drain_terrain_generates();
+        self.poll_terrain_generates();
+        self.update_terrain_residency(anchor);
+        self.step_terrain_checkpoint();
+        self.publish_terrain_busy();
+    }
+
+    /// Answer `terrain.busy()` for the coming tick: true while the background
+    /// terrain worker has a whole-body fill running or a field streaming in.
+    ///
+    /// A game that generates its world as the player travels needs this to
+    /// pace itself. Both kinds of work share one background budget, so a game
+    /// that queues the next star system whenever it likes queues it behind the
+    /// ground somebody is currently standing on.
+    pub(crate) fn publish_terrain_busy(&mut self) {
+        let busy = self.terrain_worker_busy();
+        self.script_host.set_terrain_busy(busy);
+    }
+
+    /// Does the background terrain worker have anything to do — a whole-body
+    /// fill running or queued, or a field streaming in?
+    ///
+    /// ONE predicate, because two callers must not disagree about it:
+    /// `terrain.busy()` answers a game with it, and `settle_world_streaming`
+    /// waits on it. They did disagree — the wait watched only the streaming
+    /// half, so `shot` would photograph a planet that was still GENERATING as
+    /// its impostor sphere and report that everything had settled. That is the
+    /// exact failure `settle_world_streaming` exists to prevent, arriving
+    /// through the door it left open.
+    pub(crate) fn terrain_worker_busy(&self) -> bool {
+        self.planet_gen_job.is_some()
+            || !self.planet_gen_pending.is_empty()
+            || !self.terrain_load_jobs.is_empty()
+    }
+
+    /// Stream the world in and WAIT for it, for the one-shot verbs that have no
+    /// frame loop to do it over time. Returns whether it settled inside `budget`.
+    ///
+    /// A celestial terrain arrives on a background thread, so a renderer that
+    /// opens a scene and draws it immediately draws every planet as its impostor
+    /// sphere — a smooth ball where the ground, the rocks and the buildings
+    /// should be. That picture is not a slightly worse picture: `shot` exists to
+    /// be believed, and a photograph of a world that had not loaded yet is a
+    /// confident answer to a question nobody asked.
+    ///
+    /// Settled = the terrain worker had nothing to do across a full pass —
+    /// nothing generating, nothing queued to generate, nothing streaming in.
+    /// The extra pass matters because the pass that lands the last load is also
+    /// the pass that may kick the next one.
+    pub(crate) fn settle_world_streaming(
+        &mut self,
+        anchor: DVec3,
+        budget: std::time::Duration,
+    ) -> bool {
+        // Residency anchors on the editor camera outside Play, and for a shot
+        // the view being photographed IS the presence in the world.
+        self.camera.position = anchor;
+        let deadline = std::time::Instant::now() + budget;
+        let mut quiet = false;
+        loop {
+            self.pump_world_streaming();
+            if !self.terrain_worker_busy() {
+                if quiet {
+                    return true;
+                }
+                // The confirming pass, taken IMMEDIATELY and without spending
+                // any of the budget: nothing is in flight, so there is nothing
+                // to wait for — this pass only asks whether the last one kicked
+                // anything off. Deadline-checking here instead would report a
+                // world with no terrain at all as "still streaming" whenever the
+                // budget was tight, and `shot` would print a warning about
+                // impostors that are not in the picture.
+                quiet = true;
+                continue;
+            }
+            quiet = false;
+            // Out of budget with work still in flight is the honest false: the
+            // caller is about to photograph something unfinished and has to be
+            // told so.
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            // The work is on other threads; this one only has to let them finish.
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+    }
+
     /// Per-frame residency driver: land finished background loads, kick loads
     /// for cold bodies something is approaching, evict residents left behind.
     ///
@@ -2679,6 +2793,53 @@ mod tests {
     use super::{CHUNK_FADE_SECS, chunk_fade, chunk_priority, lod_for, raw_lod, rings_for_body, LOD_RINGS};
     use floptle_core::math::{DVec3, Quat};
     use floptle_field::BakedSdf;
+
+    /// The wait and the flag are the same question (`floptle/0157` + `0158`).
+    ///
+    /// `terrain.busy()` answers a game; `settle_world_streaming` waits before a
+    /// shot. When the wait watched only the streaming half, a planet that was
+    /// still GENERATING settled instantly and was photographed as its impostor
+    /// sphere — the exact failure the wait exists to prevent.
+    #[test]
+    fn the_wait_and_the_busy_flag_ask_the_same_question() {
+        let mut ed = crate::Editor::default();
+        assert!(!ed.terrain_worker_busy(), "an empty editor has no terrain work");
+        // A queued whole-body fill counts, even though nothing is streaming.
+        ed.planet_gen_pending.insert(3);
+        assert!(ed.terrain_worker_busy(), "a queued fill is work");
+        assert!(
+            !ed.settle_world_streaming(DVec3::ZERO, std::time::Duration::ZERO),
+            "…so the wait must not report a still-generating world as settled"
+        );
+        ed.planet_gen_pending.clear();
+        assert!(ed.settle_world_streaming(DVec3::ZERO, std::time::Duration::from_secs(1)));
+    }
+
+    /// A world with nothing to stream settles, and says so, without spending
+    /// the budget it was offered (`floptle/0157`).
+    ///
+    /// `shot` calls this before it takes the picture and prints a warning about
+    /// photographing impostors when it comes back false. A scene with no terrain
+    /// in it must therefore come back TRUE, promptly — a warning that fires on
+    /// every shot of every 2D project is a warning nobody reads by the time a
+    /// planet really is unfinished.
+    #[test]
+    fn a_world_with_nothing_to_stream_settles_at_once() {
+        let mut ed = crate::Editor::default();
+        let t0 = std::time::Instant::now();
+        assert!(
+            ed.settle_world_streaming(DVec3::ZERO, std::time::Duration::from_secs(45)),
+            "an empty world is a settled world"
+        );
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(1),
+            "settling nothing must not wait: took {:?}",
+            t0.elapsed()
+        );
+        // …and the same answer when it is handed no budget at all, because the
+        // question "is anything in flight" does not need one.
+        assert!(ed.settle_world_streaming(DVec3::ZERO, std::time::Duration::ZERO));
+    }
 
     /// A chunk that just arrived dissolves in over its first moments, monotonically
     /// (`floptle/0067`) — and a chunk with no arrival stamp is simply opaque, which

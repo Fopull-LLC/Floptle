@@ -16,8 +16,8 @@ each group, and meant to be searched.
 
 - [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 47
 - [node — transform & body fields](#node--transform--body-fields) — 36
-- [node — methods & handles](#node--methods--handles) — 23
-- [vectors, directions & easing](#vectors-directions--easing) — 47
+- [node — methods & handles](#node--methods--handles) — 26
+- [vectors, directions & easing](#vectors-directions--easing) — 49
 - [scene lookups & raycast](#scene-lookups--raycast) — 16
 - [references — wire nodes in the Inspector](#references--wire-nodes-in-the-inspector) — 3
 - [input — keyboard & mouse](#input--keyboard--mouse) — 42
@@ -27,11 +27,11 @@ each group, and meant to be searched.
 - [game UI — text, buttons & hooks](#game-ui--text-buttons--hooks) — 71
 - [networking — net.*, synced](#networking--net-synced) — 31
 - [scenes — load, unload & persist](#scenes--load-unload--persist) — 6
-- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 14
+- [terrain — runtime sculpt & queries](#terrain--runtime-sculpt--queries) — 15
 - [pathfinding — nav.*](#pathfinding--nav) — 25
 - [water — depth, buoyancy & ice](#water--depth-buoyancy--ice) — 6
 - [scatter — instanced props](#scatter--instanced-props) — 8
-- [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 28
+- [2D — sprites, sorting & the flat camera](#2d--sprites-sorting--the-flat-camera) — 36
 - [vessels — assembly.*](#vessels--assembly) — 14
 - [the camera & the screen](#the-camera--the-screen) — 7
 - [physics controls — pause & step](#physics-controls--pause--step) — 4
@@ -40,7 +40,7 @@ each group, and meant to be searched.
 - [persistence — save.*](#persistence--save) — 7
 - [timers — after, every, tween](#timers--after-every-tween) — 4
 - [space — orbits & time-warp](#space--orbits--time-warp) — 19
-- [components — getcomponent](#components--getcomponent) — 82
+- [components — getcomponent](#components--getcomponent) — 97
 - [animation — node:animator](#animation--nodeanimator) — 16
 - [particles — effects from script](#particles--effects-from-script) — 10
 - [audio — sounds & the mixer](#audio--sounds--the-mixer) — 27
@@ -500,6 +500,14 @@ node:getscript("health") — a script handle for that script on this node, or ni
 
 node:hasTag("enemy") — whether the node carries that exact tag. The classic hit-filter: local hit = raycast(...) if hit and hit.node and hit.node:hasTag("enemy") then ... end
 
+### `node:material`
+
+node:material() / node:material("Clothing") — a material you can read AND assign, in code. With no name it is this node's OWN Material, which on a model covers every part of it. With a name — an object like "Torso#2" or a material like "Clothing", both from node:materials() — it is that part of the model alone, and the override is created the first time you write to it. Fields: texture (and normalMap/roughnessMap/metallicMap/occlusionMap) by path, color/emissive/specular/rim as colours, plus alpha, roughness, metallic, emissiveStrength, unlit, fog, cell. This is how a clothing system works: node:material("Clothing").texture = "art/shirt.png". A part's override starts as the engine's default material, not as the part's imported look — state what you want it to be.
+
+### `node:materials`
+
+node:materials() — what this model's parts are CALLED, which is what you need before you can address one: a list of { object =, material =, textured =, overridden = }. `object` names one sub-object exactly (import renames repeats, so a model with two Torso nodes has a "Torso#2" — which is why guessing does not work); `material` is the glTF material name and reaches every part wearing it, usually the grouping you mean. Empty on a node that is not an imported model.
+
 ### `node:removeTag`
 
 node:removeTag("burning") — remove a tag (no-op when absent).
@@ -519,6 +527,8 @@ node:setLighting2D{mode="2d", layers={"Terrain","Characters"}, blocks="on", inne
 ### `node:setMaterial`
 
 node:setMaterial{color={r,g,b}, emissive={r,g,b}, emissiveStrength=…, unlit=true, texture="…", alpha=…, …} — set (creating if absent) the node's Material. texture also takes a live render target: "rt:<name>".
+
+On a MODEL this material SUPERSEDES the ones the model was imported with — every part draws with it, textures included, so a material naming no texture draws untextured. That is what a node Material is for: "this whole thing is made of THIS". To change one part instead, use node:material("<name>") — node:materials() lists what the parts are called.
 
 Surface maps: normalMap / roughnessMap / metallicMap / occlusionMap (paths, "" clears) with normalStrength / roughness / metallic / occlusionStrength. shading="physical" switches from the hand-set Blinn-Phong highlight to metal-rough; roughness and metallic only mean anything there, while a normal or occlusion map works under either.
 
@@ -578,6 +588,12 @@ node:setTerrain(id) — make the node a Terrain volume with that id; fill it wit
 ### `node:setTerrainGen`
 
 node:setTerrainGen(opts) — attach an ON-DEMAND generation spec (the same opts table terrain.generatePlanet takes): the body's field generates in the background when something first approaches, so no field file is needed at all — a rolled galaxy is playable instantly and unvisited worlds cost one scene node. Player edits saved under terrain.saveDir take priority over regeneration. nil clears.
+
+### `node:setTint`
+
+node:setTint(color [, alpha]) — a colour MULTIPLIED over everything this node draws, keeping its own textures and each part's own colour. The easy "same model, but red": a hit flash, a team colour, a highlighted selection, a building ghosted while it is placed, a body fading out (that is what the alpha is for). node:setTint() with no argument clears it.
+
+Not a Material. A Material says what a thing is MADE OF and supersedes the materials a model was imported with; a tint leaves all of that alone. Reachable as a component too — node:getcomponent("Tint").color = color(1, 0.3, 0.3) — so an animation clip can key a flash.
 
 ### `node:sound`
 
@@ -769,13 +785,17 @@ vec2:lengthSquared() — length without the square root, for comparisons.
 
 vec2:lerp(other, t) — a straight-line blend from this (t = 0) to other (t = 1).
 
+### `vec2:magnitude`
+
+vec2:magnitude() — how long the 2-D vector is. The same call as vec2:length(), under the name most engines use for it.
+
 ### `vec2:normalized`
 
 vec2:normalized() — a unit-length copy, pointing the same way. Zero stays zero rather than becoming a NaN.
 
 ### `vec3`
 
-vec3(x, y, z) — a 3-vector VALUE with real operators: a + b, a - b, v * 2, -v, a == b. Methods: :length(), :lengthSquared(), :normalized(), :dot(o), :cross(o), :lerp(o, t), :distance(o), :flatten(up), :withX/:withY/:withZ(n), :rotatedY(rad), :rotatedAround(axis, rad), :towards(o, maxDelta), :angleTo(o). vec3() = zero, vec3(s) = splat, vec3(other) = copy. Anything that takes a vector also takes a {x=,y=,z=} table or a node handle.
+vec3(x, y, z) — a 3-vector VALUE with real operators: a + b, a - b, v * 2, -v, a == b. Methods: :length() (:magnitude()), :lengthSquared(), :normalized(), :dot(o), :cross(o), :lerp(o, t), :distance(o), :flatten(up), :withX/:withY/:withZ(n), :rotatedY(rad), :rotatedAround(axis, rad), :towards(o, maxDelta), :angleTo(o). vec3() = zero, vec3(s) = splat, vec3(other) = copy. Anything that takes a vector also takes a {x=,y=,z=} table or a node handle.
 
 ```lua
 local v = vec3(1, 0, 0) * 5 + vec3(0, 2, 0)   -- real operators
@@ -832,6 +852,10 @@ vec3:lengthSquared() — length without the square root. Compare distances with 
 ### `vec3:lerp`
 
 vec3:lerp(other, t) — a straight-line blend, t from 0 (this) to 1 (other). The one-liner behind smooth camera and marker movement.
+
+### `vec3:magnitude`
+
+vec3:magnitude() — how long the vector is. The same call as vec3:length(), under the name most engines use for it — both are here so neither spelling is a dead end.
 
 ### `vec3:normalized`
 
@@ -1810,6 +1834,10 @@ scene.unload("Shop") — remove a scene that was loaded additively, and everythi
 
 Runtime sculpting and queries against the SDF terrain: dig, sculpt, paint, ask what is under a point, and persist edits per save slot.
 
+### `terrain.busy`
+
+terrain.busy() — is the background terrain worker already occupied? True while any field is generating or streaming in. Whole-body fills and residency streaming share one background budget, so a game that BUILDS ITS WORLD AS THE PLAYER TRAVELS should ask before queueing the next one — otherwise the new world goes in behind the ground somebody is standing on. The pattern: build one thing, wait for this to go quiet, build the next.
+
 ### `terrain.deleteSaveDir`
 
 terrain.deleteSaveDir("saves/slot2/terrain") — delete a save slot's persisted terrain from disk (pair with save.deleteSlot in a "delete this save" UI). Narrow by design: relative path, no "..", must not be the ACTIVE saveDir, and only .cfield/.tfield/.meta files in that one directory are removed (emptied dirs are tidied). Returns the number of files removed.
@@ -2073,6 +2101,10 @@ node:shake(amount, seconds) — shake a 2D camera. `amount` is a distance in wor
 
 node:sorting() -> { layer =, order =, mode = } — where this node sits in the 2D stack. A node that has never said anything about sorting answers with the DEFAULT ("Default", 0, "order") rather than nil, because that IS the true answer for it and nil would make every caller write the same three lines of fallback before it could add one to a number.
 
+### `node:sprite`
+
+node:sprite() — this node's Sprite component as a handle you can read AND assign: local sp = node:sprite(); sp.flipX = mx > 0. Fields: flipX, flipY, cell, ppu, size, pivotX, pivotY. Writes land on the component the renderer reads (and the Inspector shows) after the frame, and read back straight away, so the flag a script sets is the flag it can ask about on the next line. Singular: this is the ONE sprite this node draws. node:sprites() (plural) is the batch handle, for a node that draws many. On a node that is not a Sprite this is an error naming what to do about it, not a handle whose writes go nowhere.
+
 ### `node:sprites`
 
 node:sprites() — a handle to this node's SpriteBatch (make it one with node:setSpriteBatch{} first; on any other node this is an error rather than a handle that silently draws nothing): b:draw(...) queues one sprite for this frame. N sprites from one node, each with its own position, rotation, scale, cell AND tint — no scene node per sprite and no pool to grow.
@@ -2080,6 +2112,34 @@ node:sprites() — a handle to this node's SpriteBatch (make it one with node:se
 ### `node:tilemap`
 
 node:tilemap() — a handle to this node's tilemap grid. Squares: tm:set / tm:get / tm:at / tm:fill / tm:fillRect / tm:size / tm:resize. World space: tm:cellAt (which tile is the player standing on) / tm:worldAt / tm:tileSize. What a tile IS, from the node's tileset: tm:solid / tm:tags / tm:hasTag / tm:autotile.
+
+### `sp.cell`
+
+sp.cell — which cell of the Material's spritesheet draws, 0-based. An animation clip's Sprite ▸ frame lane writes this too, so a script that also sets it every frame is the one that wins.
+
+### `sp.flipX`
+
+sp.flipX — mirrored left-to-right. The one line behind a character facing the way it walks: sp.flipX = mx > 0. Reads back as a BOOLEAN.
+
+### `sp.flipY`
+
+sp.flipY — mirrored top-to-bottom.
+
+### `sp.pivotX`
+
+sp.pivotX — where the node's origin sits across the sprite, 0..1 (0.5 = centred). Outside 0..1 is allowed: an origin off the sprite is a legitimate thing to want.
+
+### `sp.pivotY`
+
+sp.pivotY — the origin up the sprite. 0 puts it at the sprite's feet, which is what a Y-sorted character wants; setting one axis leaves the other alone.
+
+### `sp.ppu`
+
+sp.ppu — pixels per world unit, measured against ONE CELL of the sheet: it is what makes a 16-pixel tile exactly one unit wide. 0 means "size me by `size` instead".
+
+### `sp.size`
+
+sp.size — the sprite's world edge length, used when ppu is 0. For art that is not pixel art.
 
 ### `tm.EMPTY`
 
@@ -2734,9 +2794,57 @@ Rect / disk only (1/0): lights out of the back as well as the front. Off is a wi
 
 Rect only: its width in world units. Reads 0 on a shape that has no width.
 
+### `mat.alpha`
+
+mat.alpha — opacity, 0..1. Also readable as mat.opacity.
+
 ### `mat.cell`
 
 Which cell of the sheet draws (row-major from the top-left; clamped into the grid).
+
+### `mat.color`
+
+mat.color — the tint, MULTIPLIED into the texture: white leaves the picture alone, and a colour tints it. Takes a color(r, g, b) or any {r,g,b} table; reads back as a colour. The per-channel spellings mat.r / mat.g / mat.b are the same value, for animation lanes that key one number.
+
+### `mat.emissive`
+
+mat.emissive — light this surface gives off, scaled by emissiveStrength. A colour; the channels are also mat.emissiveR/G/B.
+
+### `mat.emissiveStrength`
+
+mat.emissiveStrength — how much light emissive gives off. 0 turns it off however bright the colour is.
+
+### `mat.fog`
+
+mat.fog — does the scene's fog reach this surface? false keeps a UI panel or a skybox plane out of the weather. Reads back as a BOOLEAN.
+
+### `mat.metallic`
+
+mat.metallic — 0 is a dielectric, 1 is bare metal. For a metal the ALBEDO is the reflection tint, so a black metal reflects nothing.
+
+### `mat.metallicMap`
+
+mat.metallicMap — per-pixel metalness. "" clears it.
+
+### `mat.normalMap`
+
+mat.normalMap — the surface's bump directions. "" clears it.
+
+### `mat.occlusionMap`
+
+mat.occlusionMap — baked ambient occlusion. "" clears it.
+
+### `mat.rim`
+
+mat.rim — the colour of the rim light around its silhouette (channels: mat.rimR/G/B).
+
+### `mat.roughness`
+
+mat.roughness — 0 is a mirror, 1 is chalk.
+
+### `mat.roughnessMap`
+
+mat.roughnessMap — per-pixel roughness. "" clears it.
 
 ### `mat.sheetCols`
 
@@ -2745,6 +2853,18 @@ Sheet columns (0 = not a sheet — the whole texture).
 ### `mat.sheetRows`
 
 Sheet rows.
+
+### `mat.specular`
+
+mat.specular — the colour of its highlight (channels: mat.specularR/G/B).
+
+### `mat.texture`
+
+mat.texture — the base-colour image, project-relative ("art/shirt.png"). Assigning swaps what the surface wears; "" clears it back to a flat colour. Reads back what you last set.
+
+### `mat.unlit`
+
+mat.unlit — draw at full brightness, ignoring every light. Reads back as a BOOLEAN.
 
 ### `node:getcomponent`
 

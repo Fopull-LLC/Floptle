@@ -289,6 +289,7 @@ mod tests {
             scripts: Vec::new(),
             material: None,
             object_materials: Default::default(),
+            tint: None,
             rigidbody: None,
             celestial: None,
             mesh_collider: false,

@@ -769,6 +769,11 @@ pub struct Raster {
     /// pick theirs by filter/wrap; samplers are cheap to share).
     samplers: HashMap<TexSampling, wgpu::Sampler>,
     default_tex: wgpu::Texture,
+    /// [`Self::white_texture`]'s handle, registered on first ask. One per
+    /// renderer: every "draw this untextured" in the frame is the same 1×1
+    /// image, and re-registering it per draw would grow `textures` without
+    /// bound.
+    white_tex: Option<TexId>,
     /// The neutral surface-map defaults: a 1×1 `(0.5, 0.5, 1)` flat normal, and
     /// one plain sampler for it and for `default_tex` when they stand in for a
     /// map nobody set. See [`SURFACE_SLOTS`].
@@ -1372,6 +1377,7 @@ impl Raster {
             empty_field_bind,
             samplers: HashMap::new(),
             default_tex,
+            white_tex: None,
             flat_normal_view,
             _flat_normal_tex: flat_normal_tex,
             neutral_samp,
@@ -2205,6 +2211,29 @@ impl Raster {
             let s = t._texture.size();
             [s.width as f32, s.height as f32]
         })
+    }
+
+    /// A 1×1 **white** texture as an ordinary [`TexId`], registered once and
+    /// reused.
+    ///
+    /// The difference between two things a draw needs to be able to say. `None`
+    /// means "no override — the mesh's OWN texture draws", which is right for a
+    /// model wearing its imported look. There was no way to say the other one:
+    /// *deliberately untextured*. A node-level Material that supersedes a
+    /// model's own materials needs exactly that — without it, a material with no
+    /// texture fell back to the very texture it was replacing, so a model kept
+    /// the picture of the material that was no longer in effect.
+    pub fn white_texture(&mut self, gpu: &Gpu) -> TexId {
+        if let Some(id) = self.white_tex {
+            return id;
+        }
+        let id = self.register_texture(
+            gpu,
+            &TextureData { pixels: vec![255, 255, 255, 255], width: 1, height: 1 },
+            TexSampling::default(),
+        );
+        self.white_tex = Some(id);
+        id
     }
 
     /// Register a standalone material texture (RGBA8) with the given sampling, returning

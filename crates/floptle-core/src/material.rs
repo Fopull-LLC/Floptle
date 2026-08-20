@@ -143,6 +143,54 @@ impl Retro {
     }
 }
 
+/// **A multiplier over whatever this node already draws.**
+///
+/// The counterpart of a [`Material`], which REPLACES: "this model is made of
+/// gold" and "this model, but red" are different things to say, and a component
+/// that does one cannot do the other. A Material on a model supersedes the
+/// materials it was imported with — every part draws with that one. A Tint
+/// leaves all of that exactly as it is and multiplies over the result, so a
+/// model keeps its own textures, its parts keep their own colours, and the
+/// whole thing goes red.
+///
+/// What it is for is the ordinary run of things a game does to a model it did
+/// not otherwise change: a hit flash, a team colour, a highlighted selection, a
+/// building ghosted while it is being placed, a body fading out.
+///
+/// White at full alpha is the identity, so a fresh one changes nothing — and a
+/// Tint that has been put back to the identity is dropped rather than stored,
+/// which keeps it out of scenes that do not use it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tint {
+    /// Multiplied into the surface's colour, after everything else has decided
+    /// what that colour is.
+    pub color: [f32; 3],
+    /// …and into its opacity, so fading a whole model out is one number rather
+    /// than one per material.
+    pub alpha: f32,
+}
+
+impl Default for Tint {
+    fn default() -> Self {
+        Self { color: [1.0, 1.0, 1.0], alpha: 1.0 }
+    }
+}
+
+impl Tint {
+    /// Does this tint do nothing? White at full opacity multiplies to itself.
+    pub fn is_identity(&self) -> bool {
+        self.color == [1.0, 1.0, 1.0] && self.alpha >= 1.0
+    }
+
+    /// Apply it to a colour + alpha, in place.
+    pub fn apply(&self, rgba: &mut [f32; 4]) {
+        rgba[0] *= self.color[0];
+        rgba[1] *= self.color[1];
+        rgba[2] *= self.color[2];
+        rgba[3] *= self.alpha;
+    }
+}
+
 /// The surface look attached to a node (a component). Default is a plain white
 /// matte — applying it changes nothing until the artist dials in properties.
 #[derive(Clone, Debug, PartialEq)]

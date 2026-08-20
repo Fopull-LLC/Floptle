@@ -1004,6 +1004,105 @@ node.material = "Gold"                              -- a preset by name
 node.material = assets.getFile("materials/Rusty.ron")
 ```
 
+### `node:material(...)` — a model's materials, one at a time
+
+A model arrives with its own materials — a character has a `Head`, a `Clothing`,
+a `Pants` — and each of them draws on one or more of its parts. Two calls reach
+them:
+
+```lua
+for _, slot in ipairs(node:materials()) do
+  print(slot.material, slot.object, slot.textured, slot.overridden)
+end
+-- Clothing  Torso#2    true  false
+-- Head      Head#2     true  false
+-- Pants     RightLeg#2 true  false
+
+node:material("Clothing").texture = assets.getFile("textures/shirt.png")
+node:material("Pants").texture    = assets.getFile("textures/jeans.png")
+```
+
+**Ask before you address.** `node:materials()` is not decoration: import renames
+repeated object names, so a model whose torso is called `Torso` in Blender is
+`Torso#2` here, and a guessed name matches nothing. Every slot answers to two
+names — the **object** (exactly one part) and the **material** (every part
+wearing it, which is usually the group you mean: one `Clothing` covers a torso
+and both arms).
+
+A handle is the material, whole: `texture`, `normalMap`, `roughnessMap`,
+`metallicMap`, `occlusionMap` by path (`""` clears one), `color` / `emissive` /
+`specular` / `rim` as colours, and `alpha`, `roughness`, `metallic`,
+`emissiveStrength`, `unlit`, `fog`, `cell` as values. Reads answer with what you
+last wrote:
+
+```lua
+local shirt = node:material("Clothing")
+if shirt.texture ~= wanted then shirt.texture = wanted end
+```
+
+`node:material()` with no name is the node's **own** Material — see the rule
+below before reaching for it.
+
+### One material over a whole model
+
+**A Material on a model supersedes the model's own materials.** Every part draws
+with that one material — its colour, its texture, its maps. That is what the
+component is *for*: "this whole thing is made of THIS". A model that already
+looks right needs no Material at all.
+
+So:
+
+| What you want | What to use |
+|---|---|
+| this whole model is one material (all ice, all gold) | a **Material** on the node |
+| this one part looks different | `node:material("<name>")`, or **◑ Model materials** in the Inspector |
+| the model as the artist made it | no Material and no overrides |
+
+An untextured material means untextured — a Material with no `texture` draws its
+parts with no picture, rather than keeping the one it is replacing. Half-applying
+a material is what made this confusing before: a new material would take effect
+in its emissive and its numbers while the model kept the old picture on it.
+
+### A tint — the same model, but red
+
+A Material replaces. A **tint** multiplies over whatever a node already draws,
+so the model keeps its textures and its parts keep their colours:
+
+```lua
+node:setTint(color(1, 0.3, 0.3))          -- hit flash
+node:setTint(teamColor)                    -- team colours on one prefab
+node:setTint(color(1, 1, 1), 0.4)          -- ghosted while being placed
+node:setTint()                             -- back to normal
+```
+
+It needs no Material and does not create one. In the Inspector it is the **◐
+tint** swatch; white at full opacity is "no tint" and removes it.
+
+Because it is a component, an animation clip can key it — a flash is a tint
+faded back to white over a fifth of a second — and a script can read it back:
+
+```lua
+local t = node:getcomponent("Tint")        -- nil when the node has none
+if t then t.alpha = t.alpha - dt end       -- fade the whole model out
+```
+
+| What you want | What to use |
+|---|---|
+| this whole model is one material | a **Material** on the node |
+| this model, but tinted | `node:setTint(color)` |
+| this one part looks different | `node:material("<name>")` |
+
+### Getting a model's own textures out
+
+A `.glb` keeps its images inside itself, so nothing outside it can point at one.
+Select the model (or its node) and press **⬇ Extract textures**: each material's
+image is written beside the model as `<model>_textures/<material>.png`, and from
+then on it is an ordinary project texture — paintable in the 🖼 Image tab,
+assignable to any material, usable as the base layer a clothing system draws
+over. Overriding one part of a textured model extracts that part's texture on
+the spot and starts the override wearing it, so "override" never means "go
+blank".
+
 ### `node.visible` — show / hide geometry
 
 Toggle whether a node's mesh/shape is drawn (it keeps its transform, physics, and

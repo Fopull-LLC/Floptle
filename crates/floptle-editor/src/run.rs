@@ -110,7 +110,23 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool) -> i
     // number. A field a caller reads to know how far the run got has to have
     // been measured by the thing that got there.
     let mut steps = 0u32;
+    // **The clock, not the step count.** A step is not a promise that anything
+    // moved: a paused session — which is what the Play-start terrain hold makes
+    // one until the ground exists — steps happily with `dt = 0`. Reporting
+    // `steps × DT` therefore published a span the run had NOT simulated, and it
+    // was the confident kind of wrong: 3600 steps, "60.00s of simulated time",
+    // and a world where `time` never left zero (`floptle/0157`). `play_t` is the
+    // clock the scripts themselves read, so it cannot disagree with them.
+    let t0 = ed.play_t;
     for _ in 0..asked {
+        // The streaming half of a frame, which this loop is otherwise missing.
+        // Without it the Play-start terrain hold never lifts, and a held session
+        // is a PAUSED one: no fixed tick, so no rails, no physics, and a `dt` of
+        // zero handed to every script. The run still counted its steps and still
+        // reported its full span of simulated time — it had simply simulated
+        // none of it, which is the one failure a verb built to be believed must
+        // not have. See `pump_world_streaming`.
+        ed.pump_world_streaming();
         ed.play_step(DT, true);
         steps += 1;
         // The same drain the editor's frame does, for the same reason it does it
@@ -140,7 +156,41 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool) -> i
     // …and once more, for anything the teardown itself said.
     ed.drain_script_logs();
 
-    report(&opened, &ed.console, steps, asked, json)
+    let simulated = (ed.play_t - t0).max(0.0);
+    report(&opened, &ed.console, steps, asked, simulated, json)
+}
+
+/// The one line a run ends with.
+///
+/// Its own function because it is the sentence a caller believes without
+/// checking anything else, and it has to be readable by a test that asserts
+/// what it says. `simulated` is MEASURED off the session clock; `steps × DT` is
+/// only what the loop was asked to step.
+fn summary_line(steps: u32, asked: u32, simulated: f32, errors: usize, warnings: usize) -> String {
+    let stepped = steps as f32 * DT;
+    let mut ran = format!("ran {steps} step(s), {simulated:.2}s of simulated time");
+    if steps < asked {
+        // The session ended before the span did. Said out loud, because a run
+        // that stopped early and a run that finished report the same way
+        // otherwise, and only one of them answered the question that was asked.
+        ran.push_str(&format!(" — the session ended after {steps} of {asked}"));
+    }
+    // Stepped but not simulated: the session was paused for some of it. Named
+    // rather than smoothed over, because a run that advanced nothing looks
+    // exactly like a game whose world was never built, and whoever is reading
+    // this is about to go looking for the wrong thing.
+    if stepped - simulated > 1e-3 {
+        ran.push_str(&format!(
+            " — PAUSED for {:.2}s of that, which was stepped but not simulated",
+            stepped - simulated
+        ));
+    }
+    match (errors, warnings) {
+        (0, 0) => format!("{ran} — nothing raised"),
+        (0, w) => format!("{ran} — {w} warning(s)"),
+        (e, 0) => format!("{ran} — {e} error(s)"),
+        (e, w) => format!("{ran} — {e} error(s), {w} warning(s)"),
+    }
 }
 
 fn level_str(l: floptle_script::LogLevel) -> &'static str {
@@ -159,6 +209,7 @@ fn report(
     console: &ConsoleState,
     steps: u32,
     asked: u32,
+    simulated: f32,
     json: bool,
 ) -> i32 {
     use floptle_script::LogLevel;
@@ -193,7 +244,14 @@ fn report(
             // would think it got the run it requested.
             "steps": steps,
             "requested": asked,
-            "seconds": steps as f32 * DT,
+            // MEASURED off the session clock, not `steps × DT`: a paused
+            // session steps without advancing, and this field is what a caller
+            // reads to know whether anything happened (`floptle/0157`).
+            "seconds": simulated,
+            // What the loop stepped. The two differ exactly when the session
+            // was paused for some of the run, and a caller comparing them can
+            // see that without parsing a sentence.
+            "stepped": steps as f32 * DT,
             "errors": errors,
             "warnings": warnings,
             "log": lines,
@@ -224,19 +282,7 @@ fn report(
             None => println!("{}: {phase}: {}{repeat}", level_str(e.level), e.msg),
         }
     }
-    let mut ran = format!("ran {steps} step(s), {:.2}s of simulated time", steps as f32 * DT);
-    if steps < asked {
-        // The session ended before the span did. Said out loud, because a run
-        // that stopped early and a run that finished report the same way
-        // otherwise, and only one of them answered the question that was asked.
-        ran.push_str(&format!(" — the session ended after {steps} of {asked}"));
-    }
-    match (errors, warnings) {
-        (0, 0) => println!("{ran} — nothing raised"),
-        (0, w) => println!("{ran} — {w} warning(s)"),
-        (e, 0) => println!("{ran} — {e} error(s)"),
-        (e, w) => println!("{ran} — {e} error(s), {w} warning(s)"),
-    }
+    println!("{}", summary_line(steps, asked, simulated, errors, warnings));
     i32::from(errors > 0)
 }
 
@@ -249,6 +295,42 @@ mod tests {
         assert_eq!(Span::Frames(90).steps(), 90);
         assert_eq!(Span::Seconds(1.5).steps(), 90, "1.5s at 60 Hz is 90 steps");
         assert_eq!(Span::Seconds(0.0).steps(), 1, "a span nobody can measure is still a step");
+    }
+
+    /// **The summary reports time that was SIMULATED** (`floptle/0157`).
+    ///
+    /// A run whose session is paused — which is what the Play-start terrain hold
+    /// makes it until the ground exists — steps its whole span with `dt = 0`.
+    /// The verb used to publish `steps × DT` regardless, so the report of a run
+    /// that simulated nothing at all was "3600 step(s), 60.00s of simulated
+    /// time — nothing raised": a confident answer, at exit 0, that sends the
+    /// reader looking for a bug in their game rather than at the runner.
+    #[test]
+    fn a_run_that_advanced_nothing_does_not_report_the_span_it_was_asked_for() {
+        // 3600 steps at 60 Hz is a minute — and the clock did not move.
+        let stuck = summary_line(3600, 3600, 0.0, 0, 0);
+        assert!(stuck.contains("0.00s of simulated time"), "{stuck}");
+        assert!(
+            !stuck.contains("60.00s of simulated time"),
+            "it must not publish the span it was asked for as though it ran it: {stuck}"
+        );
+        assert!(stuck.contains("PAUSED"), "and it has to SAY the session was paused: {stuck}");
+        assert!(stuck.contains("60.00s"), "…naming how much was stepped without advancing: {stuck}");
+
+        // A run that really did advance reads exactly as it did before.
+        let good = summary_line(3600, 3600, 60.0, 0, 0);
+        assert_eq!(good, "ran 3600 step(s), 60.00s of simulated time — nothing raised");
+
+        // Half paused, half not: both facts, one line.
+        let half = summary_line(120, 120, 1.0, 1, 2);
+        assert!(half.contains("1.00s of simulated time"), "{half}");
+        assert!(half.contains("PAUSED for 1.00s"), "{half}");
+        assert!(half.contains("1 error(s), 2 warning(s)"), "{half}");
+
+        // Ending early and pausing are different things and both get said.
+        let early = summary_line(40, 120, 0.0, 0, 0);
+        assert!(early.contains("the session ended after 40 of 120"), "{early}");
+        assert!(early.contains("PAUSED"), "{early}");
     }
 
     /// **A run is the same length twice.** The whole value of this verb is being

@@ -87,6 +87,10 @@ pub(crate) struct TerrainStreamShared {
     pub save_dir: Rc<RefCell<Option<String>>>,
     pub warm: Rc<RefCell<Vec<String>>>,
     pub flush: Rc<RefCell<bool>>,
+    /// Mirror of "the background terrain worker has something to do" — a field
+    /// being generated, or one streaming in. Published so a game that creates
+    /// worlds ON DEMAND can wait its turn.
+    pub busy: Rc<std::cell::Cell<bool>>,
     /// Project root — `terrain.deleteSaveDir` resolves its (validated,
     /// relative) path against this.
     pub root: Rc<RefCell<std::path::PathBuf>>,
@@ -101,7 +105,7 @@ pub(crate) fn install_terrain_api(
     stream: TerrainStreamShared,
     receipts: TerrainReceipts,
 ) {
-    let TerrainStreamShared { save_dir, warm, flush, root } = stream;
+    let TerrainStreamShared { save_dir, warm, flush, busy, root } = stream;
     let TerrainReceipts { yields, next_op_id } = receipts;
     let Ok(t) = lua.create_table() else { return };
 
@@ -184,6 +188,22 @@ pub(crate) fn install_terrain_api(
             Ok(())
         }) {
             let _ = t.set("warm", f);
+        }
+    }
+
+    // terrain.busy() — is the background terrain worker already occupied?
+    //
+    // For a game that GENERATES its world as the player travels. Terrain fills
+    // and streams share one background budget, so a game that queues more of
+    // them whenever it feels like it queues them behind the ground somebody is
+    // standing on. Asking first is how on-demand generation stays smooth: build
+    // one thing, wait until this goes quiet, build the next.
+    //
+    // True while any field is generating OR streaming in.
+    {
+        let b = busy.clone();
+        if let Ok(f) = lua.create_function(move |_, ()| Ok(b.get())) {
+            let _ = t.set("busy", f);
         }
     }
 
@@ -343,6 +363,7 @@ pub(crate) fn install_terrain_api(
     {
         let q = generates.clone();
         let logs2 = logs.clone();
+        let busy2 = busy.clone();
         if let Ok(f) = lua.create_function(move |_, (id, opts): (u32, Option<Table>)| {
             let fill = planet_fill_from_table(opts.as_ref())?;
             let mut q = q.borrow_mut();
@@ -356,6 +377,19 @@ pub(crate) fn install_terrain_api(
                 return Ok(());
             }
             q.push((id, fill));
+            // **Busy from this instant**, not from the next publish
+            // (`floptle/0158`). The consumer is a game that queues a world and
+            // then asks whether it may queue the next one — a caller told "idle"
+            // about work it just asked for queues it twice, and the second one
+            // goes in behind the ground a player is standing on. The editor's
+            // per-frame publish owns the flag from the real job state after
+            // this, and is what lowers it again.
+            //
+            // Only the QUEUEING calls raise it. `terrain.warm` deliberately does
+            // not: it is immediate-mode, called every frame for as long as a
+            // caller cares about a body, so raising it there would pin the flag
+            // true for the whole time the map has a planet focused.
+            busy2.set(true);
             Ok(())
         }) {
             let _ = t.set("generatePlanet", f);

@@ -62,13 +62,38 @@ pub const TABLES: &[OptTable] = &[
 /// Names the key, and suggests the nearest real one — a rejected typo that
 /// doesn't say what you meant is only half an error message.
 pub fn check_keys(opts: &Table, known: &[&str], call: &str) -> mlua::Result<()> {
+    let mut positional = 0usize;
+    let mut unknown: Option<String> = None;
     for pair in opts.clone().pairs::<Value, Value>() {
         let (k, _) = pair?;
-        let Value::String(k) = k else { continue };
-        let key = k.to_str()?.to_string();
-        if known.contains(&key.as_str()) {
+        // A LIST where a keyed table belongs — `node:setSprite{ 8, 1, true }`,
+        // which is what anybody who reads the call as taking arguments in order
+        // writes. Every option is looked up BY NAME, so such a table sets
+        // nothing whatsoever: the call returns, the value is unchanged, and the
+        // script's own `print` still says the thing it meant to write. That cost
+        // a real project a debugging session on a sprite that would not flip.
+        if matches!(k, Value::Integer(_)) {
+            positional += 1;
             continue;
         }
+        let Value::String(k) = k else { continue };
+        let key = k.to_str()?.to_string();
+        if known.contains(&key.as_str()) || unknown.is_some() {
+            continue;
+        }
+        unknown = Some(key);
+    }
+    // The shape first: a table that is a list is wrong in a way that makes the
+    // spelling of its other keys beside the point.
+    if positional > 0 {
+        let example = known.first().copied().unwrap_or("key");
+        return Err(mlua::Error::RuntimeError(format!(
+            "{call}: {positional} value(s) passed by position, and nothing reads those — every \
+             option is named, as in {call}{{ {example} = ... }}. It reads: {}",
+            known.join(", ")
+        )));
+    }
+    if let Some(key) = unknown {
         return Err(mlua::Error::RuntimeError(format!(
             "{call}: no option called `{key}`{}",
             near_miss_hint(&key, known)

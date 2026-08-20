@@ -469,6 +469,11 @@ pub struct ScriptHost {
     /// gameplay anchor's distance — the map warms its focused planet while
     /// open. A warmed body loads if cold and never evicts.
     terrain_warm: Rc<RefCell<Vec<String>>>,
+    /// The editor's answer to `terrain.busy()`: true while the background
+    /// terrain worker has a field generating or streaming in. Published each
+    /// frame so a game that builds its world ON DEMAND can wait its turn
+    /// instead of queueing new worlds behind the ground someone stands on.
+    terrain_busy: Rc<std::cell::Cell<bool>>,
     /// `terrain.flush()` — write every dirty resident field to the save slot
     /// NOW (checkpoints, exit-to-menu). One-shot flag drained per frame.
     terrain_flush: Rc<RefCell<bool>>,
@@ -969,6 +974,18 @@ pub(crate) struct SceneMirror {
     /// that is not one instead of handing back a handle whose every draw is
     /// silently dropped.
     sprite_batches: std::collections::HashSet<u32>,
+    /// Sprite nodes' own numbers, so `node:sprite()` can READ them.
+    ///
+    /// `setSprite` shipped write-only, the same gap `sorting` above had: a
+    /// character that flips on a turn has to ask which way it is facing, and a
+    /// value you cannot read is one every caller ends up shadowing in a local —
+    /// which is then the second copy that goes stale.
+    ///
+    /// Written by the per-frame sync AND by every script-side write, so a read
+    /// straight after an assignment answers with what was just assigned rather
+    /// than with what the frame started as (the queue itself does not apply
+    /// until after the pass).
+    pub(crate) sprites: HashMap<u32, SpriteMirror>,
     /// What each node said about sorting, so `node:sorting()` can READ it.
     ///
     /// `setSorting` shipped without a getter, which makes the obvious pattern —
@@ -1010,6 +1027,21 @@ pub(crate) struct SceneMirror {
     repeat_index: HashMap<u32, u32>,
     /// The colour-valued half of the same mirror (`e.fill`, `e.textColor`, …).
     component_colors: HashMap<u32, HashMap<String, HashMap<String, [f32; 4]>>>,
+    /// …and the STRING-valued half (`mat.texture`, `el.text`, `el.style`).
+    ///
+    /// Writable since strings landed, and readable by nothing: `mat.texture`
+    /// answered nil however many times it had been set, so a script could not
+    /// ask what a material was wearing — only tell it. Which makes the obvious
+    /// swap ("put the shirt on unless it is already on") impossible to write.
+    component_strings: HashMap<u32, HashMap<String, HashMap<String, String>>>,
+    /// Model asset path → the material slots it was imported with, LENT by the
+    /// editor (`ScriptHost::set_model_slots`) the way the tilesets are: the host
+    /// does no file I/O, and a `.glb`'s parts are the importer's knowledge.
+    ///
+    /// This is what `node:materials()` answers from, and without it a script
+    /// cannot even find out that a character's torso is called `Torso#2` —
+    /// which is the one thing standing between a dev and a clothing system.
+    pub(crate) model_slots: HashMap<String, Vec<ModelSlot>>,
     /// Entity index → its `Entity` (with generation), so handle-written transforms flush
     /// back to the right ECS entity.
     ents: HashMap<u32, Entity>,
@@ -1217,6 +1249,14 @@ pub enum RichSet {
         pivot_x: Option<f32>,
         pivot_y: Option<f32>,
     },
+    /// `node:setTint(color [, alpha])` — a multiplier over everything this node
+    /// draws, or `node:setTint()` to clear it.
+    ///
+    /// Separate from `Material` because it is a different act: a Material says
+    /// what a thing is MADE OF and replaces the model's own materials, while a
+    /// tint leaves all of that alone and multiplies over the result. Flashing a
+    /// character red must not cost it its textures.
+    NodeTint { color: [f32; 3], alpha: f32, clear: bool },
     /// `node:setLighting2D{ mode =, layers =, blocks = }` — the 2D lighting flag,
     /// the layers a light reaches, and whether this node blocks light
     /// (`floptle/0113`).
@@ -1301,6 +1341,123 @@ pub(crate) struct TilemapMirror {
     pub(crate) data: Vec<u32>,
     /// Project-relative `.tileset.ron`, or empty.
     pub(crate) tileset: String,
+}
+
+/// One material slot of an imported model: which sub-object, which material,
+/// and whether the model brought a texture for it.
+///
+/// Both names are here because a part answers to both, and neither is
+/// sufficient on its own: the OBJECT name addresses exactly one part but is
+/// rewritten by import when a model repeats a name (`Torso` becomes `Torso#2`),
+/// while the MATERIAL name is the one on the model's own materials list and
+/// usually covers the group somebody means — a character's `Clothing` is its
+/// torso and both arms, which is exactly what a clothing system wants to change
+/// at once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelSlot {
+    /// The sub-object this part belongs to — the override key that addresses
+    /// this part and no other.
+    pub object: String,
+    /// The glTF material name — the key that addresses every part wearing it.
+    pub material: String,
+    /// Did the model arrive with a texture on this material? A script that is
+    /// about to override it can tell whether it is replacing a picture or a
+    /// flat colour.
+    pub textured: bool,
+}
+
+/// One sprite node's drawing numbers, as `node:sprite()` reads them.
+///
+/// A copy rather than a borrow for the reason every mirror entry is one: a Lua
+/// closure answers reads while the host holds no `&World`. Six numbers per
+/// sprite node — nothing worth a change-detection dance.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SpriteMirror {
+    pub(crate) ppu: f32,
+    pub(crate) size: f32,
+    pub(crate) cell: u32,
+    pub(crate) flip_x: bool,
+    pub(crate) flip_y: bool,
+    pub(crate) pivot: [f32; 2],
+}
+
+impl Default for SpriteMirror {
+    /// The same defaults the queued write falls back to when a node is only
+    /// becoming a sprite now, so the two cannot disagree about what an
+    /// unmentioned field starts as.
+    fn default() -> Self {
+        Self { ppu: 32.0, size: 1.0, cell: 0, flip_x: false, flip_y: false, pivot: [0.5, 0.5] }
+    }
+}
+
+impl SpriteMirror {
+    /// These numbers, read off a component.
+    pub(crate) fn of(m: &floptle_core::Matter) -> Option<Self> {
+        match m {
+            floptle_core::Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot } => Some(Self {
+                ppu: *ppu,
+                size: *size,
+                cell: *cell,
+                flip_x: *flip_x,
+                flip_y: *flip_y,
+                pivot: *pivot,
+            }),
+            _ => None,
+        }
+    }
+
+    /// …and the component they describe.
+    pub(crate) fn matter(&self) -> floptle_core::Matter {
+        floptle_core::Matter::Sprite {
+            ppu: self.ppu,
+            size: self.size,
+            cell: self.cell,
+            flip_x: self.flip_x,
+            flip_y: self.flip_y,
+            pivot: self.pivot,
+        }
+    }
+
+    /// Fold one `setSprite`-shaped write in, clamping the way the component does.
+    ///
+    /// The ONE place both the clamps and the keep-what-you-had rule live: the
+    /// ECS write and the mirror a script reads straight back both go through
+    /// here, so what a script sets and what the renderer draws cannot drift.
+    /// Anything that is not a sprite write is ignored rather than refused —
+    /// callers hand this whatever they queued.
+    pub(crate) fn apply(&mut self, set: &RichSet) {
+        let RichSet::MatterSprite { ppu, size, cell, flip_x, flip_y, pivot_x, pivot_y } = set
+        else {
+            return;
+        };
+        // `ppu = 0` is meaningful — "size me by `size` instead" — so the floor
+        // is zero, not one pixel. `size` cannot be zero: a quad with no edge is
+        // nothing on screen and the scale divides by it.
+        if let Some(v) = *ppu {
+            self.ppu = v.max(0.0);
+        }
+        if let Some(v) = *size {
+            self.size = v.max(1e-4);
+        }
+        if let Some(v) = *cell {
+            self.cell = v;
+        }
+        if let Some(v) = *flip_x {
+            self.flip_x = v;
+        }
+        if let Some(v) = *flip_y {
+            self.flip_y = v;
+        }
+        // One axis at a time, and the other keeps what it had: `pivotY = 0` is
+        // the documented way to stand a character on its feet, and defaulting
+        // the axis it did not name would silently recentre it.
+        if let Some(v) = *pivot_x {
+            self.pivot[0] = v;
+        }
+        if let Some(v) = *pivot_y {
+            self.pivot[1] = v;
+        }
+    }
 }
 
 /// The interior-mutable state the Lua handle closures share with the host: the scene
@@ -1662,6 +1819,396 @@ mod tests {
     use floptle_core::transform::Transform;
     use floptle_core::{Scripts, World};
     use std::io::Write;
+
+    /// The read list and the write list of a Material are one list
+    /// (`floptle/0082`'s rule, applied here): a field the mirror publishes and
+    /// the applier ignores is a value a script can read, assign, and watch do
+    /// nothing.
+    ///
+    /// It matters more since a per-object override is CREATED by a write: the
+    /// write list is what decides whether a name is real enough to bring one
+    /// into being, so a name in one list and not the other either blanks a part
+    /// of a model on a typo or refuses a field that works everywhere else.
+    #[test]
+    fn every_material_field_can_be_both_read_and_written() {
+        let m = floptle_core::Material::default();
+        let readable = crate::api::material_fields_for_test(&m, 0);
+        let writable: std::collections::HashSet<&str> =
+            crate::api::MATERIAL_NUM_FIELDS.iter().copied().collect();
+        let missing: Vec<&String> =
+            readable.keys().filter(|k| !writable.contains(k.as_str())).collect();
+        assert!(
+            missing.is_empty(),
+            "the mirror publishes {missing:?}, which no write can reach — a script can read \
+             them, assign them and watch nothing happen"
+        );
+        // The other direction, minus the write-only spellings that are
+        // deliberately aliases of a published field.
+        let aliases = ["opacity"];
+        let unreadable: Vec<&&str> = crate::api::MATERIAL_NUM_FIELDS
+            .iter()
+            .filter(|k| !readable.contains_key(**k) && !aliases.contains(k))
+            .collect();
+        assert!(unreadable.is_empty(), "writable but never readable: {unreadable:?}");
+    }
+
+    /// A TINT is a multiplier over whatever a node already draws — the "same
+    /// model, but red" a Material cannot express, because a Material replaces.
+    ///
+    /// Asked for as: *"there still needs to be an easy way to apply a tint to an
+    /// entire mesh without having to manually set everything."* One call, no
+    /// Material required, and the model keeps its own textures.
+    #[test]
+    fn a_script_tints_a_whole_model_without_replacing_anything() {
+        use floptle_core::{Material, Matter, Tint};
+
+        let dir = std::env::temp_dir().join(format!("floptle-tint-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_script(
+            &dir,
+            "flash",
+            concat!(
+                "function start(node)\n",
+                "  node:setTint(color(1, 0.3, 0.3))\n",
+                "end\n",
+                "function update(node, dt)\n",
+                // …and the same value through the component route, which is
+                // what an animation lane keys.
+                "  local t = node:getcomponent('Tint')\n",
+                "  log('alpha=' .. tostring(t and t.alpha or 'none'))\n",
+                "  if clear then node:setTint() end\n",
+                "end\n",
+            ),
+        );
+
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Mesh { asset_path: "models/avatar.glb".into() });
+        // A material with a texture, to prove the tint leaves it alone.
+        world.insert(
+            e,
+            Material { texture: Some("art/skin.png".into()), ..Material::default() },
+        );
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "flash".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let t = world.get::<Tint>(e).copied().expect("the tint landed");
+        assert!((t.color[0] - 1.0).abs() < 1e-5 && (t.color[1] - 0.3).abs() < 1e-5);
+        assert_eq!(t.alpha, 1.0, "no alpha given means opaque, not invisible");
+        // The material it was wearing is untouched — that is the whole point.
+        let m = world.get::<Material>(e).expect("still has its material");
+        assert_eq!(m.texture.as_deref(), Some("art/skin.png"));
+        assert_eq!(m.color, [1.0, 1.0, 1.0], "a tint is not a material write");
+
+        // The component route sees it…
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert!(logs.iter().any(|l| l == "alpha=1.0" || l == "alpha=1"), "{logs:?}");
+
+        // …and clearing puts the node back to carrying no tint at all, rather
+        // than to carrying a white one nobody asked for.
+        let e2 = world.spawn();
+        world.insert(e2, Transform::IDENTITY);
+        world.insert(e2, Tint { color: [1.0, 0.0, 0.0], alpha: 0.5 });
+        world.insert(
+            e2,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "clearer".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        write_script(&dir, "clearer", "function start(node)\n  node:setTint()\nend\n");
+        host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
+        assert!(world.get::<Tint>(e2).is_none(), "setTint() with nothing clears it");
+    }
+
+    /// **A clothing system, in script.** `node:materials()` says what the parts
+    /// are called; `node:material(name)` is one of them, read and assigned.
+    ///
+    /// The ask, verbatim: *"for my clothing system I could swap the texture for
+    /// the arms and torso for the shirt and swap the texture for the legs for
+    /// the pants, and I could do that with a script."* None of it was reachable:
+    /// a script could set the NODE's material (which covers the whole model) and
+    /// there was no way to name one part, no way to find out what the parts were
+    /// called, and `mat.texture` read back nil however many times it had been
+    /// written.
+    #[test]
+    fn a_script_dresses_one_part_of_a_model() {
+        use floptle_core::{Material, Matter, ObjectMaterials};
+
+        let dir = std::env::temp_dir().join(format!("floptle-clothing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_script(
+            &dir,
+            "wardrobe",
+            concat!(
+                "function start(node)\n",
+                // Discovery first — the part names are the model's, not the
+                // script author's guess.
+                "  for _, slot in ipairs(node:materials()) do\n",
+                "    log(slot.material .. ' on ' .. slot.object .. ' textured=' .. \n",
+                "        tostring(slot.textured) .. ' overridden=' .. tostring(slot.overridden))\n",
+                "  end\n",
+                // The shirt goes on every part wearing the Clothing material…
+                "  local shirt = node:material('Clothing')\n",
+                // Reading BEFORE writing: a part with no override yet reads as
+                // the default material, so the ordinary first line anybody
+                // writes — halve what is there — is arithmetic and not a raise.
+                "  log('fresh alpha=' .. tostring(shirt.alpha))\n",
+                "  shirt.alpha = shirt.alpha * 0.5\n",
+                "  shirt.texture = 'art/shirt.png'\n",
+                "  shirt.color = color(1, 0.9, 0.9)\n",
+                // …the trousers on one named object…
+                "  node:material('RightLeg#2').texture = 'art/pants.png'\n",
+                // …and the whole-model Material stays what it was.
+                "  node:material().roughness = 0.25\n",
+                // Read-your-writes, on a string, which used to answer nil.
+                "  log('wearing ' .. tostring(shirt.texture))\n",
+                "end\n",
+            ),
+        );
+
+        let mut world = World::default();
+        let hero = world.spawn();
+        world.insert(hero, Transform::IDENTITY);
+        world.insert(hero, Matter::Mesh { asset_path: "models/avatar.glb".into() });
+        world.insert(hero, Material::default());
+        world.insert(
+            hero,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "wardrobe".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+
+        let mut host = ScriptHost::new();
+        // What the editor lends: the parts this model was imported with.
+        host.set_model_slots(std::collections::HashMap::from([(
+            "models/avatar.glb".to_string(),
+            vec![
+                crate::ModelSlot {
+                    object: "Torso#2".into(),
+                    material: "Clothing".into(),
+                    textured: true,
+                },
+                crate::ModelSlot {
+                    object: "RightLeg#2".into(),
+                    material: "Pants".into(),
+                    textured: true,
+                },
+            ],
+        )]));
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+
+        let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert!(
+            logs.iter().any(|l| l == "Clothing on Torso#2 textured=true overridden=false"),
+            "a script must be able to ASK what the parts are called: {logs:?}"
+        );
+        assert!(
+            logs.iter().any(|l| l == "fresh alpha=1.0" || l == "fresh alpha=1"),
+            "a part with no override yet reads as the material it is about to become: {logs:?}"
+        );
+        assert!(
+            logs.iter().any(|l| l == "wearing art/shirt.png"),
+            "a material's texture has to read back — a field you can only write is half a \
+             field: {logs:?}"
+        );
+
+        // …and the writes landed on the component the renderer reads.
+        let om = world.get::<ObjectMaterials>(hero).expect("the overrides were created");
+        let shirt = om.0.get("Clothing").expect("the material-name slot");
+        assert_eq!(shirt.texture.as_deref(), Some("art/shirt.png"));
+        assert!((shirt.color[1] - 0.9).abs() < 1e-5, "the colour went on as a colour: {:?}", shirt.color);
+        assert!((shirt.alpha - 0.5).abs() < 1e-5, "read-then-write landed: {}", shirt.alpha);
+        assert_eq!(
+            om.0.get("RightLeg#2").and_then(|m| m.texture.as_deref()),
+            Some("art/pants.png"),
+            "an object name addresses one part"
+        );
+        // The node's own Material is still the node's own.
+        let node_mat = world.get::<Material>(hero).expect("still there");
+        assert!((node_mat.roughness - 0.25).abs() < 1e-5);
+        assert_eq!(node_mat.texture, None, "dressing a part must not touch the whole model");
+    }
+
+    /// A LIBRARY script — no `start`, no `update`, just functions other scripts
+    /// call — must have its `params` before anybody calls into it
+    /// (`floptle/0156`).
+    ///
+    /// `params` used to be seeded by the tick, so a script that never ticks
+    /// never got one and the first caller into any of its functions got
+    /// `attempt to index global 'params' (a nil value)`. Worse than a plain nil:
+    /// whether a hookless script had been seeded depended on whether something
+    /// else had ticked it first, which depends on SCENE ORDER — so the same
+    /// project worked on one machine and raised on another, and adding an
+    /// unrelated node could fix it. In the solar game this one error read as
+    /// four broken features (no inventory, no selling, no HUD count).
+    #[test]
+    fn a_hookless_library_script_has_its_params_before_anybody_calls_in() {
+        let dir = std::env::temp_dir().join(format!("floptle-libparams-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // No start, no update: this script exists to be CALLED.
+        write_script(
+            &dir,
+            "inventory",
+            concat!(
+                // `@node` is a REFERENCE param: the Inspector wires it to a node
+                // and the script reads it as a handle.
+                "defaults = { cap = 40, owner = noderef() }\n",
+                "function cap()\n",
+                "  return params.cap\n",
+                "end\n",
+                "function ownerName()\n",
+                "  return params.owner and params.owner.name or 'nobody'\n",
+                "end\n",
+            ),
+        );
+        // …and the caller asks on the very first frame, from `start`.
+        write_script(
+            &dir,
+            "hud",
+            concat!(
+                "function start(node)\n",
+                "  local inv = findScript('inventory')\n",
+                "  log('cap=' .. tostring(inv:cap()))\n",
+                "  log('owner=' .. tostring(inv:ownerName()))\n",
+                "end\n",
+            ),
+        );
+
+        let mut world = World::default();
+        // The library node comes SECOND in scene order on purpose: it is the
+        // order that used to decide whether this worked.
+        let hud = world.spawn();
+        world.insert(hud, Transform::IDENTITY);
+        world.insert(hud, floptle_core::Name("Hud".into()));
+        world.insert(
+            hud,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "hud".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let bag = world.spawn();
+        world.insert(bag, Transform::IDENTITY);
+        world.insert(bag, floptle_core::Name("Inventory".into()));
+        world.insert(
+            bag,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "inventory".into(),
+                enabled: true,
+                // The Inspector's own value, which is what the caller must read
+                // — not the `defaults` line and not nil.
+                params: vec![("cap".into(), 55.0)],
+                // …wired to the HUD node, by name, as the Inspector wires one.
+                refs: vec![("owner".into(), "Hud".into())],
+                strs: Vec::new(),
+            }]),
+        );
+
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert!(
+            logs.iter().any(|l| l == "cap=55.0" || l == "cap=55"),
+            "the library answered from its Inspector params: {logs:?}"
+        );
+        // A hookless script NEVER ticks, so the seed is the only chance its
+        // reference params ever get to be resolved.
+        assert!(
+            logs.iter().any(|l| l == "owner=Hud"),
+            "a wired reference param has to be there too, or it is nil forever: {logs:?}"
+        );
+    }
+
+    /// `terrain.busy()` (floptle/0158) has to be true the MOMENT work is
+    /// queued, not on the frame after.
+    ///
+    /// The consumer is a game that builds its world as the player travels: it
+    /// queues one system, then asks whether it may queue the next. Answering
+    /// with last frame's state means the answer to "did what I just asked for
+    /// start?" is "no" — so the game queues it again, and the second request is
+    /// the one that lands behind the ground somebody is standing on. The flag is
+    /// therefore raised by the QUEUEING call itself; the editor's per-frame
+    /// publish then owns it from the real job state and is what lowers it again.
+    #[test]
+    fn terrain_busy_is_true_the_moment_a_fill_is_queued() {
+        let dir = std::env::temp_dir().join(format!("floptle-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_script(
+            &dir,
+            "galaxy",
+            concat!(
+                "function update(node, dt)\n",
+                "  if not asked then\n",
+                "    log('before=' .. tostring(terrain.busy()))\n",
+                "    terrain.generatePlanet(1, { radius = 20 })\n",
+                "    log('after=' .. tostring(terrain.busy()))\n",
+                "    asked = true\n",
+                "  else\n",
+                "    log('later=' .. tostring(terrain.busy()))\n",
+                "  end\n",
+                "end\n",
+            ),
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "galaxy".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert!(logs.iter().any(|l| l == "before=false"), "idle to start with: {logs:?}");
+        assert!(
+            logs.iter().any(|l| l == "after=true"),
+            "the queueing call itself must raise it — a game that queues and then asks in the \
+             same breath is the whole consumer: {logs:?}"
+        );
+
+        // What the editor does with the queue, and then its per-frame publish
+        // finding nothing left to do. The flag is the WORKER's state, so the
+        // host is what lowers it — and the script sees that on the next tick.
+        let queued = host.take_terrain_generates();
+        assert_eq!(queued.len(), 1, "the fill was queued for the editor to drain");
+        host.set_terrain_busy(false);
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        assert!(logs.iter().any(|l| l == "later=false"), "quiet again once nothing is running: {logs:?}");
+    }
 
     /// The editor-action path end-to-end at the script layer: `call_action`
     /// runs EXACTLY the named function (never `start`), the construction API
@@ -5330,6 +5877,100 @@ end
             torch_lit.mode,
             floptle_core::Lit2D::Yes,
             "the refused write must not have changed anything"
+        );
+    }
+
+    /// The sprite component as a HANDLE — `node:sprite()` — plus the call that
+    /// used to fail in total silence.
+    ///
+    /// A 2D character flips on a turn, which is one boolean written every frame.
+    /// The only route was `node:setSprite{ flipX = }`, and written positionally
+    /// — `setSprite{ 8, 1, flipX }`, which is what somebody reaching for a
+    /// six-argument call writes — every key read back as absent, so the call
+    /// re-set the sprite to exactly what it already was: the print said `true`,
+    /// the Inspector said nothing, and there was no error anywhere.
+    #[test]
+    fn a_script_reads_and_writes_the_sprite_component() {
+        use floptle_core::Matter;
+
+        let dir = std::env::temp_dir().join("floptle_script_test_sprite_handle");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "hero",
+            concat!(
+                "function start(node)\n",
+                "  local sp = node:sprite()\n",
+                "  sp.flipX = true\n",
+                "  sp.cell = 4\n",
+                "  sp.pivotY = 0\n",
+                // Read-your-writes: the queue applies after the pass, so a
+                // handle that could only see the mirror would answer with the
+                // value from before the line above it.
+                "  log('flipX reads ' .. tostring(sp.flipX))\n",
+                "  log('cell reads ' .. tostring(sp.cell))\n",
+                // The generic component route has to answer with a BOOLEAN:
+                // 0 is truthy in Lua, so a number makes `if sp.flipY then`
+                // always taken.
+                "  local c = node:getcomponent('Sprite')\n",
+                "  log('component flipY is a ' .. type(c.flipY))\n",
+                // And the positional call raises instead of doing nothing.
+                "  local ok, err = pcall(function() node:setSprite{ 8, 1, true } end)\n",
+                "  log('positional: ' .. tostring(ok) .. ' ' .. tostring(err))\n",
+                "end\n",
+            ),
+        );
+
+        let mut world = World::default();
+        let hero = world.spawn();
+        world.insert(hero, Transform::IDENTITY);
+        world.insert(
+            hero,
+            Matter::Sprite {
+                ppu: 32.0,
+                size: 1.0,
+                cell: 0,
+                flip_x: false,
+                flip_y: false,
+                pivot: [0.5, 0.5],
+            },
+        );
+        world.insert(
+            hero,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "hero".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![],
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+
+        let Some(Matter::Sprite { cell, flip_x, pivot, ppu, .. }) = world.get::<Matter>(hero)
+        else {
+            panic!("the node stopped being a sprite")
+        };
+        assert!(*flip_x, "sp.flipX = true must reach the component the renderer reads");
+        assert_eq!(*cell, 4, "sp.cell = 4 must reach the component");
+        assert_eq!(pivot[1], 0.0, "sp.pivotY = 0 puts the origin at the feet");
+        assert_eq!(pivot[0], 0.5, "…and leaves the axis it did not name alone");
+        assert_eq!(*ppu, 32.0, "an untouched field keeps what the node had");
+
+        let logs: Vec<String> = host.drain_logs().into_iter().map(|l| l.msg).collect();
+        let said = |what: &str| {
+            assert!(logs.iter().any(|l| l.contains(what)), "no log said {what:?}: {logs:?}");
+        };
+        said("flipX reads true");
+        said("cell reads 4");
+        said("component flipY is a boolean");
+        said("positional: false");
+        said("setSprite");
+        assert!(
+            logs.iter().any(|l| l.contains("positional") && l.contains("pivotX")),
+            "the refusal must name the keys it does read: {logs:?}"
         );
     }
 

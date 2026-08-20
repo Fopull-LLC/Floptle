@@ -128,6 +128,13 @@ impl Editor {
         // original.
         let paint = self.world.get::<floptle_core::VertexPaint>(e).map(|p| p.id);
         let tex_paint = self.world.get::<floptle_core::TexturePaint>(e).map(|p| p.id);
+        // The tint travels with the node — duplicating a ghosted preview or a
+        // team-coloured prop copies what makes it look that way.
+        let tint = self
+            .world
+            .get::<floptle_core::Tint>(e)
+            .filter(|t| !t.is_identity())
+            .map(|t| [t.color[0], t.color[1], t.color[2], t.alpha]);
         let collidable = self.world.get::<floptle_core::Collidable>(e).is_some();
         let trigger = self.world.get::<floptle_core::Trigger>(e).is_some();
         let nav_exclude = self.world.get::<floptle_core::NavMeshExclude>(e).is_some();
@@ -202,6 +209,7 @@ impl Editor {
             scripts,
             material,
             object_materials,
+            tint,
             rigidbody,
             celestial,
             disabled,
@@ -299,6 +307,10 @@ impl Editor {
                         .collect(),
                 ),
             );
+        }
+        if let Some(t) = node.tint {
+            self.world
+                .insert(e, floptle_core::Tint { color: [t[0], t[1], t[2]], alpha: t[3] });
         }
         if let Some(rb) = &node.rigidbody {
             self.world.insert(e, rb.to_rigidbody());
@@ -410,6 +422,7 @@ impl Editor {
             scripts,
             material,
             object_materials,
+            tint,
             rigidbody,
             celestial,
             mesh_collider,
@@ -451,6 +464,7 @@ impl Editor {
         self.world.remove::<Scripts>(e);
         self.world.remove::<Material>(e);
         self.world.remove::<floptle_core::ObjectMaterials>(e);
+        self.world.remove::<floptle_core::Tint>(e);
         self.world.remove::<floptle_core::RigidBody>(e);
         self.world.remove::<floptle_core::CelestialBody>(e);
         self.world.remove::<floptle_core::MeshCollider>(e);
@@ -555,6 +569,7 @@ impl Editor {
             scripts: Vec::new(),
             material: None,
             object_materials: Default::default(),
+            tint: None,
             rigidbody: None,
             celestial: None,
             disabled: false,
@@ -664,6 +679,7 @@ impl Editor {
                 scripts: Vec::new(),
                 material: None,
                 object_materials: Default::default(),
+                tint: None,
                 rigidbody: None,
                 celestial: None,
                 disabled: false,

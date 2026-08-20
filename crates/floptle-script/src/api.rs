@@ -171,6 +171,35 @@ pub fn mirror_component_colors(
             HashMap::from([("color".to_string(), [color[0], color[1], color[2], 1.0])]),
         );
     }
+    // The node's TINT — a multiplier over everything it draws. Mirrored as a
+    // component so `node:getcomponent("Tint").color = …` reads and writes it and
+    // an animation lane can key it: a hit flash IS a tint keyed over 0.2s.
+    if let Some(t) = world.get::<floptle_core::Tint>(e) {
+        out.insert(
+            "Tint".to_string(),
+            HashMap::from([("color".to_string(), [t.color[0], t.color[1], t.color[2], t.alpha])]),
+        );
+    }
+    // A material's four colours, readable as colours — the other half of the
+    // write path above. Alpha rides `color` because a material HAS one and a
+    // script reading a colour to put it back would otherwise lose it.
+    let mat_colors = |m: &floptle_core::Material| {
+        let rgb = |c: [f32; 3], a: f32| [c[0], c[1], c[2], a];
+        HashMap::from([
+            ("color".to_string(), rgb(m.color, m.alpha)),
+            ("emissive".to_string(), rgb(m.emissive, 1.0)),
+            ("specular".to_string(), rgb(m.specular, 1.0)),
+            ("rim".to_string(), rgb(m.rim, 1.0)),
+        ])
+    };
+    if let Some(m) = world.get::<floptle_core::Material>(e) {
+        out.insert("Material".to_string(), mat_colors(m));
+    }
+    if let Some(om) = world.get::<floptle_core::ObjectMaterials>(e) {
+        for (key, m) in &om.0 {
+            out.insert(format!("{OBJECT_MATERIAL_PREFIX}{key}"), mat_colors(m));
+        }
+    }
     out
 }
 
@@ -182,7 +211,44 @@ pub fn apply_component_color(
     field: &str,
     v: [f32; 4],
 ) {
-    match comp {
+    // `Material:<object>` addresses ONE PART of a model's materials. Matching on
+    // the head lets the same arm serve a whole node and one of its parts, which
+    // is the point of the namespace: everything that can already do this to a
+    // Material can do it to a part without knowing that is what it is doing.
+    let comp_head =
+        if comp.starts_with(OBJECT_MATERIAL_PREFIX) { OBJECT_MATERIAL_PREFIX } else { comp };
+    match comp_head {
+        // **A material's colours, as colours.** The mirror publishes them per
+        // channel (`m.r`, `m.emissiveG`) because a keyframe holds one number,
+        // and every one of those works — but `m.color = color(1, 0.8, 0.6)` is
+        // what anybody writes first, and it used to land in the colour map and
+        // be dropped on the floor here. Silently: the write "succeeded", the
+        // material did not change.
+        "Material" | OBJECT_MATERIAL_PREFIX => {
+            let known = matches!(field, "color" | "tint" | "emissive" | "specular" | "rim");
+            let Some(m) = material_target(world, ent, comp, known) else { return };
+            let rgb = [v[0], v[1], v[2]];
+            match field {
+                "color" | "tint" => m.color = rgb,
+                "emissive" => m.emissive = rgb,
+                "specular" => m.specular = rgb,
+                "rim" => m.rim = rgb,
+                _ => {}
+            }
+        }
+        // `node:getcomponent("Tint").color = color(1, 0.3, 0.3)` — the whole
+        // tint in one write, which is how anybody says "flash red".
+        "Tint" => {
+            if field != "color" && field != "tint" {
+                return;
+            }
+            let t = floptle_core::Tint { color: [v[0], v[1], v[2]], alpha: v[3] };
+            if t.is_identity() {
+                world.remove::<floptle_core::Tint>(ent);
+            } else {
+                world.insert(ent, t);
+            }
+        }
         "UiElement" => {
             let Some(spec) = world.get_mut::<floptle_ui::ElementSpec>(ent) else { return };
             match field {
@@ -232,6 +298,9 @@ pub fn apply_component_color(
 /// `0` is **truthy**, so `if el.visible then` was always taken. Returning a
 /// real boolean is the only way `if` means what it looks like.
 pub fn is_bool_field(comp: &str, field: &str) -> bool {
+    // One part of a model's materials answers exactly as the whole node's does.
+    let comp =
+        if comp.starts_with(OBJECT_MATERIAL_PREFIX) { "Material" } else { comp };
     matches!(
         (comp, field),
         ("UiElement", "visible" | "disabled" | "selected" | "toggle" | "focusable")
@@ -244,6 +313,13 @@ pub fn is_bool_field(comp: &str, field: &str) -> bool {
             | ("LightProbes", "enabled")
             | ("ReflectionProbe", "enabled")
             | ("PointLight", "twoSided" | "shadows")
+            // A material's two flags. `if mat.unlit then` was always taken:
+            // the field came back as the number 0, and 0 is truthy in Lua.
+            | ("Material", "unlit" | "fog")
+            // A flip is a flag, and 0 is TRUTHY in Lua: without this arm
+            // `if node:getcomponent("Sprite").flipX then` is a branch that is
+            // always taken, whichever way the sprite is facing.
+            | ("Sprite", "flipX" | "flipY")
             | (
                 "Light",
                 "stars"
@@ -302,9 +378,121 @@ fn light_shape_from_id(id: f64, size: f32) -> floptle_core::LightShape {
     }
 }
 
-/// The numeric component fields exposed to scripts via `node:getcomponent(name)`, mirrored
-/// from the live ECS each frame. Extend here (and in [`apply_component_field`]) to reach
-/// more components / fields.
+/// The component-name prefix that addresses ONE PART of a model's materials:
+/// `Material:Clothing`, `Material:Torso#2`.
+///
+/// A namespace rather than a new kind of handle, so a per-object material is
+/// read, written, recorded and played back by everything that already knows how
+/// to do those things to a Material.
+pub const OBJECT_MATERIAL_PREFIX: &str = "Material:";
+
+/// Every numeric field of a Material a script (or an animation lane) can write.
+///
+/// It exists to answer one question before anything is created: *is this write
+/// real?* Naming a field that does not exist must not be able to bring a
+/// per-object material override into being — an override is a whole material,
+/// so a typo would replace a part of a model with flat white and report
+/// nothing. `material_fields` is the read half and the two are checked against
+/// each other by a test.
+pub(crate) const MATERIAL_NUM_FIELDS: &[&str] = &[
+    "cell", "sheetCols", "sheetRows", "roughness", "metallic", "normalStrength",
+    "occlusionStrength", "reflectivity", "transmission", "ior", "thickness", "jitter",
+    "alpha", "opacity", "ambient", "r", "g", "b", "emissiveR", "emissiveG", "emissiveB",
+    "emissiveStrength", "specularR", "specularG", "specularB", "specularStrength",
+    "shininess", "rimR", "rimG", "rimB", "rimStrength", "unlit", "fog",
+];
+
+/// …and every string-valued one: the texture and the surface maps, plus the
+/// shading model's name.
+pub(crate) const MATERIAL_STR_FIELDS: &[&str] =
+    &["texture", "normalMap", "roughnessMap", "metallicMap", "occlusionMap", "shading"];
+
+/// The Material a component name addresses: the node's own for `Material`, or
+/// one sub-object's override for `Material:<key>` — created on demand, because
+/// a script that says what a part should look like has said that the part has
+/// its own material.
+///
+/// `None` for any other component name, and for a `Material` write to a node
+/// that has none: writing a look onto a node that was never given one would
+/// invent a component out of a typo.
+pub(crate) fn material_target<'a>(
+    world: &'a mut World,
+    ent: Entity,
+    comp: &str,
+    // Does this write actually name a field of a material? Checked BEFORE the
+    // override is created, because creating one is a visible act: an override
+    // is a whole material, so a part that had a texture and gets a default
+    // white one has changed its look. A typo'd field name must not be able to
+    // do that — it would blank a part of a model and report nothing.
+    known_field: bool,
+) -> Option<&'a mut floptle_core::Material> {
+    let Some(key) = comp.strip_prefix(OBJECT_MATERIAL_PREFIX) else {
+        return (comp == "Material").then(|| world.get_mut::<floptle_core::Material>(ent))?;
+    };
+    if key.is_empty() || !known_field {
+        return None;
+    }
+    if world.get::<floptle_core::ObjectMaterials>(ent).is_none() {
+        world.insert(ent, floptle_core::ObjectMaterials::default());
+    }
+    let om = world.get_mut::<floptle_core::ObjectMaterials>(ent)?;
+    Some(om.0.entry(key.to_string()).or_default())
+}
+
+/// Every numeric field of a Material, in the spellings the API uses.
+///
+/// One function because there are two callers who must agree: the node's own
+/// Material and each per-object override under `Material:<key>`. A field
+/// published for one and not the other is a field that works on a whole model
+/// and silently does nothing on one part of it.
+///
+/// `cell` is passed in rather than read off `m`: on a Sprite node the NODE owns
+/// the cell, and the mirror has to report the one that actually draws.
+#[cfg(test)]
+pub(crate) fn material_fields_for_test(m: &floptle_core::Material, cell: u32) -> HashMap<String, f64> {
+    material_fields(m, cell)
+}
+
+fn material_fields(m: &floptle_core::Material, cell: u32) -> HashMap<String, f64> {
+    HashMap::from([
+        ("cell".to_string(), cell as f64),
+        ("sheetCols".to_string(), m.sheet_cols as f64),
+        ("sheetRows".to_string(), m.sheet_rows as f64),
+        // The look.
+        ("alpha".to_string(), m.alpha as f64),
+        ("opacity".to_string(), m.alpha as f64),
+        ("r".to_string(), m.color[0] as f64),
+        ("g".to_string(), m.color[1] as f64),
+        ("b".to_string(), m.color[2] as f64),
+        ("ambient".to_string(), m.ambient as f64),
+        ("emissiveR".to_string(), m.emissive[0] as f64),
+        ("emissiveG".to_string(), m.emissive[1] as f64),
+        ("emissiveB".to_string(), m.emissive[2] as f64),
+        ("emissiveStrength".to_string(), m.emissive_strength as f64),
+        ("specularR".to_string(), m.specular[0] as f64),
+        ("specularG".to_string(), m.specular[1] as f64),
+        ("specularB".to_string(), m.specular[2] as f64),
+        ("specularStrength".to_string(), m.specular_strength as f64),
+        ("shininess".to_string(), m.shininess as f64),
+        ("rimR".to_string(), m.rim[0] as f64),
+        ("rimG".to_string(), m.rim[1] as f64),
+        ("rimB".to_string(), m.rim[2] as f64),
+        ("rimStrength".to_string(), m.rim_strength as f64),
+        ("unlit".to_string(), f64::from(m.unlit)),
+        ("fog".to_string(), f64::from(m.fog)),
+        // The surface.
+        ("normalStrength".to_string(), m.normal_strength as f64),
+        ("roughness".to_string(), m.roughness as f64),
+        ("metallic".to_string(), m.metallic as f64),
+        ("occlusionStrength".to_string(), m.occlusion_strength as f64),
+        ("reflectivity".to_string(), m.reflectivity as f64),
+        ("transmission".to_string(), m.transmission as f64),
+        ("ior".to_string(), m.ior as f64),
+        ("thickness".to_string(), m.thickness as f64),
+        ("jitter".to_string(), m.retro.jitter as f64),
+    ])
+}
+
 /// The spritesheet cell this entity draws — the node's own on a `Matter::Sprite`,
 /// the Material's otherwise. The read half of [`set_sprite_cell`].
 pub fn effective_cell(world: &World, e: Entity) -> u32 {
@@ -314,6 +502,9 @@ pub fn effective_cell(world: &World, e: Entity) -> u32 {
     }
 }
 
+/// The numeric component fields exposed to scripts via `node:getcomponent(name)`, mirrored
+/// from the live ECS each frame. Extend here (and in [`apply_component_field`]) to reach
+/// more components / fields.
 pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<String, f64>> {
     let mut out: HashMap<String, HashMap<String, f64>> = HashMap::new();
     if let Some(Matter::PointLight { color, intensity, range, shape, shadows, spot_angle, spot_softness }) =
@@ -456,51 +647,35 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
     //
     // Colours come out per channel, the spelling `PointLight` and `UiElement`
     // already use, because a keyframe holds one number.
-    if let Some(m) = world.get::<floptle_core::Material>(e) {
+    if let Some(t) = world.get::<floptle_core::Tint>(e) {
         out.insert(
-            "Material".to_string(),
+            "Tint".to_string(),
             HashMap::from([
-                // The cell as the node actually draws it. On a Sprite node the
-                // node owns it (see `set_sprite_cell`), and a mirror reporting
-                // the Material's stale copy would make record diff a value
-                // playback never writes — keying the same frame every pass.
-                ("cell".to_string(), effective_cell(world, e) as f64),
-                ("sheetCols".to_string(), m.sheet_cols as f64),
-                ("sheetRows".to_string(), m.sheet_rows as f64),
-                // The look.
-                ("alpha".to_string(), m.alpha as f64),
-                ("opacity".to_string(), m.alpha as f64),
-                ("r".to_string(), m.color[0] as f64),
-                ("g".to_string(), m.color[1] as f64),
-                ("b".to_string(), m.color[2] as f64),
-                ("ambient".to_string(), m.ambient as f64),
-                ("emissiveR".to_string(), m.emissive[0] as f64),
-                ("emissiveG".to_string(), m.emissive[1] as f64),
-                ("emissiveB".to_string(), m.emissive[2] as f64),
-                ("emissiveStrength".to_string(), m.emissive_strength as f64),
-                ("specularR".to_string(), m.specular[0] as f64),
-                ("specularG".to_string(), m.specular[1] as f64),
-                ("specularB".to_string(), m.specular[2] as f64),
-                ("specularStrength".to_string(), m.specular_strength as f64),
-                ("shininess".to_string(), m.shininess as f64),
-                ("rimR".to_string(), m.rim[0] as f64),
-                ("rimG".to_string(), m.rim[1] as f64),
-                ("rimB".to_string(), m.rim[2] as f64),
-                ("rimStrength".to_string(), m.rim_strength as f64),
-                ("unlit".to_string(), f64::from(m.unlit)),
-                ("fog".to_string(), f64::from(m.fog)),
-                // The surface.
-                ("normalStrength".to_string(), m.normal_strength as f64),
-                ("roughness".to_string(), m.roughness as f64),
-                ("metallic".to_string(), m.metallic as f64),
-                ("occlusionStrength".to_string(), m.occlusion_strength as f64),
-                ("reflectivity".to_string(), m.reflectivity as f64),
-                ("transmission".to_string(), m.transmission as f64),
-                ("ior".to_string(), m.ior as f64),
-                ("thickness".to_string(), m.thickness as f64),
-                ("jitter".to_string(), m.retro.jitter as f64),
+                ("r".to_string(), t.color[0] as f64),
+                ("g".to_string(), t.color[1] as f64),
+                ("b".to_string(), t.color[2] as f64),
+                ("alpha".to_string(), t.alpha as f64),
             ]),
         );
+    }
+    if let Some(m) = world.get::<floptle_core::Material>(e) {
+        // The cell as the node actually draws it. On a Sprite node the node owns
+        // it (see `set_sprite_cell`), and a mirror reporting the Material's
+        // stale copy would make record diff a value playback never writes —
+        // keying the same frame every pass.
+        out.insert("Material".to_string(), material_fields(m, effective_cell(world, e)));
+    }
+    // **Each per-object override, under `Material:<key>`.**
+    //
+    // Same fields, same spellings, one namespace: `node:material("Clothing")`
+    // hands back a handle over `Material:Clothing`, so everything that already
+    // knows how to read and write a Material — the handle, the appliers, record
+    // and playback — works on one part of a model without knowing that is what
+    // it is doing.
+    if let Some(om) = world.get::<floptle_core::ObjectMaterials>(e) {
+        for (key, m) in &om.0 {
+            out.insert(format!("{OBJECT_MATERIAL_PREFIX}{key}"), material_fields(m, m.cell));
+        }
     }
     // The post chain (`floptle/0118`). A mandatory scene node, so a script that
     // wants to dim the bloom for a cutscene finds it with `find` and writes
@@ -926,7 +1101,13 @@ fn rgba_index(field: &str) -> usize {
 /// Apply a `node:getcomponent(name).field = value` write back to the ECS (mirror of
 /// [`mirror_components`]). Unknown component/field names are ignored.
 pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: &str, val: f64) {
-    match comp {
+    // `Material:<object>` addresses ONE PART of a model's materials. Matching on
+    // the head lets the same arm serve a whole node and one of its parts, which
+    // is the point of the namespace: everything that can already do this to a
+    // Material can do it to a part without knowing that is what it is doing.
+    let comp_head =
+        if comp.starts_with(OBJECT_MATERIAL_PREFIX) { OBJECT_MATERIAL_PREFIX } else { comp };
+    match comp_head {
         "UiElement" => {
             if let Some(spec) = world.get_mut::<floptle_ui::ElementSpec>(ent) {
                 let v = val as f32;
@@ -1083,6 +1264,27 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
                 }
             }
         }
+        // The node's tint, per channel — what an animation lane keys.
+        "Tint" => {
+            let t = world.get::<floptle_core::Tint>(ent).copied().unwrap_or_default();
+            let mut t = t;
+            let v = val as f32;
+            match field {
+                "r" => t.color[0] = v,
+                "g" => t.color[1] = v,
+                "b" => t.color[2] = v,
+                "alpha" | "opacity" => t.alpha = v,
+                _ => return,
+            }
+            // Back to white at full opacity IS no tint. Dropping the component
+            // rather than storing an identity keeps it out of scenes that
+            // finished with it — the same rule `Sorting` and `Parallax` follow.
+            if t.is_identity() {
+                world.remove::<floptle_core::Tint>(ent);
+            } else {
+                world.insert(ent, t);
+            }
+        }
         // The Sprite node's own numbers — see the matching arm in
         // `mirror_components`, which is also where the name is explained.
         "Sprite" => {
@@ -1142,16 +1344,26 @@ pub fn apply_component_field(world: &mut World, ent: Entity, comp: &str, field: 
         // The spritesheet frame — a plain uniform-cheap write, so a script can
         // step it every tick (`face:getcomponent("Material").cell = f`) and an
         // animation clip can key it on a stepped track.
-        "Material" => {
+        //
+        // `Material:<object>` lands here too and writes ONE PART of a model's
+        // materials; `material_target` is what turns the name into the material.
+        "Material" | OBJECT_MATERIAL_PREFIX => {
             // **The cell first, and not through the Material borrow.** On a
             // Sprite node it belongs to the node; see `set_sprite_cell`.
-            if field == "cell" {
+            //
+            // Only for the node's OWN material: a per-object override has its
+            // own `cell` (it is a whole material, and the mirror publishes it),
+            // and routing that through the node would put one part's frame on
+            // the whole node.
+            if field == "cell" && comp == "Material" {
                 set_sprite_cell(world, ent, val.max(0.0) as u32);
                 return;
             }
-            if let Some(m) = world.get_mut::<floptle_core::Material>(ent) {
+            if let Some(m) = material_target(world, ent, comp, MATERIAL_NUM_FIELDS.contains(&field))
+            {
                 let n = val.max(0.0) as u32;
                 match field {
+                    "cell" => m.cell = n,
                     // At least one, like every reader of these. Stored as 0 they
                     // read back as 1 through `Material::sheet()`, which leaves a
                     // permanent difference between what was written and what is
@@ -1887,27 +2099,28 @@ pub(crate) fn apply_rich_sets(
                     world.insert(e, next);
                 }
             }
-            RichSet::MatterSprite { ppu, size, cell, flip_x, flip_y, pivot_x, pivot_y } => {
+            RichSet::MatterSprite { .. } => {
                 // Keep whatever the node already had, so retuning one field
                 // never resets the rest — the same rule `setTilemap` follows
-                // for its tileset.
-                let cur = match world.get::<Matter>(e) {
-                    Some(Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot }) => {
-                        (*ppu, *size, *cell, *flip_x, *flip_y, *pivot)
-                    }
-                    _ => (32.0, 1.0, 0, false, false, [0.5, 0.5]),
-                };
-                world.insert(
-                    e,
-                    Matter::Sprite {
-                        ppu: ppu.unwrap_or(cur.0).max(0.0),
-                        size: size.unwrap_or(cur.1).max(1e-4),
-                        cell: cell.unwrap_or(cur.2),
-                        flip_x: flip_x.unwrap_or(cur.3),
-                        flip_y: flip_y.unwrap_or(cur.4),
-                        pivot: [pivot_x.unwrap_or(cur.5[0]), pivot_y.unwrap_or(cur.5[1])],
-                    },
-                );
+                // for its tileset. The fold itself is `SpriteMirror::apply`,
+                // which is also what the script-side handle writes through, so
+                // a value read back mid-frame is the value that lands here.
+                let mut m = world
+                    .get::<Matter>(e)
+                    .and_then(crate::SpriteMirror::of)
+                    .unwrap_or_default();
+                m.apply(&set);
+                world.insert(e, m.matter());
+            }
+            RichSet::NodeTint { color, alpha, clear } => {
+                let t = floptle_core::Tint { color, alpha };
+                // Clearing and setting the identity are the same act, and both
+                // mean "no tint" — so neither leaves a component behind.
+                if clear || t.is_identity() {
+                    world.remove::<floptle_core::Tint>(e);
+                } else {
+                    world.insert(e, t);
+                }
             }
             RichSet::MatterParallax { x, y } => {
                 let cur = world.get::<floptle_core::Parallax>(e).copied().unwrap_or_default();
@@ -2805,7 +3018,13 @@ fn new_sprite_batch_handle(
 /// also covers a Material's texture and a text element's string. Used by the
 /// animation system's property tracks (and available for future Lua setters).
 pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, field: &str, val: &str) {
-    match comp {
+    // `Material:<object>` addresses ONE PART of a model's materials. Matching on
+    // the head lets the same arm serve a whole node and one of its parts, which
+    // is the point of the namespace: everything that can already do this to a
+    // Material can do it to a part without knowing that is what it is doing.
+    let comp_head =
+        if comp.starts_with(OBJECT_MATERIAL_PREFIX) { OBJECT_MATERIAL_PREFIX } else { comp };
+    match comp_head {
         "UiElement" => {
             if let Some(spec) = world.get_mut::<floptle_ui::ElementSpec>(ent) {
                 match field {
@@ -2832,8 +3051,10 @@ pub fn apply_component_field_str(world: &mut World, ent: Entity, comp: &str, fie
                 }
             }
         }
-        "Material" => {
-            if let Some(m) = world.get_mut::<floptle_core::Material>(ent) {
+        "Material" | OBJECT_MATERIAL_PREFIX => {
+            if let Some(m) =
+                material_target(world, ent, comp, MATERIAL_STR_FIELDS.contains(&field))
+            {
                 // `""` clears a slot — the spelling `texture` already used, kept
                 // for the surface maps so there is one rule, not five.
                 let path = (!val.is_empty()).then(|| val.to_string());
@@ -2875,22 +3096,29 @@ pub fn mirror_component_strings(
     e: Entity,
 ) -> HashMap<String, HashMap<String, String>> {
     let mut out: HashMap<String, HashMap<String, String>> = HashMap::new();
-    if let Some(m) = world.get::<floptle_core::Material>(e) {
-        // A cleared slot reads as `""`, which is the same spelling that clears
-        // one — so a lane can key "no texture here" rather than only ever being
-        // able to key a path.
+    // A cleared slot reads as `""`, which is the same spelling that clears one —
+    // so a lane can key "no texture here" rather than only ever being able to
+    // key a path.
+    let paths = |m: &floptle_core::Material| {
         let p = |o: &Option<String>| o.clone().unwrap_or_default();
-        out.insert(
-            "Material".to_string(),
-            HashMap::from([
-                ("texture".to_string(), p(&m.texture)),
-                ("normalMap".to_string(), p(&m.normal_map)),
-                ("roughnessMap".to_string(), p(&m.roughness_map)),
-                ("metallicMap".to_string(), p(&m.metallic_map)),
-                ("occlusionMap".to_string(), p(&m.ao_map)),
-                ("shading".to_string(), m.shading.as_str().to_string()),
-            ]),
-        );
+        HashMap::from([
+            ("texture".to_string(), p(&m.texture)),
+            ("normalMap".to_string(), p(&m.normal_map)),
+            ("roughnessMap".to_string(), p(&m.roughness_map)),
+            ("metallicMap".to_string(), p(&m.metallic_map)),
+            ("occlusionMap".to_string(), p(&m.ao_map)),
+            ("shading".to_string(), m.shading.as_str().to_string()),
+        ])
+    };
+    if let Some(m) = world.get::<floptle_core::Material>(e) {
+        out.insert("Material".to_string(), paths(m));
+    }
+    // …and every per-object override, so `node:material("Clothing").texture`
+    // reads back what the part is wearing.
+    if let Some(om) = world.get::<floptle_core::ObjectMaterials>(e) {
+        for (key, m) in &om.0 {
+            out.insert(format!("{OBJECT_MATERIAL_PREFIX}{key}"), paths(m));
+        }
     }
     if let Some(spec) = world.get::<floptle_ui::ElementSpec>(e) {
         let mut fields = HashMap::from([("style".to_string(), spec.style.clone())]);
@@ -3714,6 +3942,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             let scene = shared.scene.clone();
             let changes = shared.component_changes.clone();
             let colors = shared.component_colors.clone();
+            let strs_r = shared.component_strs.clone();
             let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
                 let e: u32 = this.raw_get("__id")?;
                 let comp: String = this.raw_get("__comp")?;
@@ -3744,6 +3973,19 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 {
                     return Ok(wrap(*v));
                 }
+                // **Strings, which used to be write-only.** `mat.texture = p`
+                // worked and `mat.texture` answered nil, however many times it
+                // had been set — so a script could tell a material what to wear
+                // and never ask. This frame's pending write first, then the
+                // mirror, exactly as the numbers above do it.
+                if let Some(v) = strs_r.borrow().get(&(e, comp.clone(), key.clone())) {
+                    return Ok(Value::String(lua.create_string(v)?));
+                }
+                if let Some(v) =
+                    s.component_strings.get(&e).and_then(|c| c.get(&comp)).and_then(|m| m.get(&key))
+                {
+                    return Ok(Value::String(lua.create_string(v)?));
+                }
                 // `rb.lockRotX` → the mirror's `lock_rot_x`: the camelCase
                 // spelling the docs teach, over the snake_case names a few
                 // components still store.
@@ -3755,6 +3997,36 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         s.components.get(&e).and_then(|c| c.get(&comp)).and_then(|m| m.get(&alt))
                     {
                         return Ok(wrap(*v));
+                    }
+                }
+                // **A per-object material answers before it exists.**
+                //
+                // `node:material("Clothing")` hands back a handle whether or not
+                // that part has an override yet — writing one is how it comes to
+                // exist. But nothing is mirrored until it does, so every field
+                // read back nil and the ordinary first line anybody writes,
+                // `m.alpha = m.alpha * 0.5`, raised on arithmetic against nil.
+                //
+                // A fresh override IS the engine's default material, so that is
+                // what it reads as. The value is true before the write and after
+                // it, which is the only thing a reader can rely on.
+                if comp.starts_with(OBJECT_MATERIAL_PREFIX) {
+                    let d = floptle_core::Material::default();
+                    if let Some(v) = material_fields(&d, d.cell).get(&key) {
+                        return Ok(wrap(*v));
+                    }
+                    if MATERIAL_STR_FIELDS.contains(&key.as_str()) {
+                        let s = if key == "shading" { d.shading.as_str() } else { "" };
+                        return Ok(Value::String(lua.create_string(s)?));
+                    }
+                    if matches!(key.as_str(), "color" | "emissive" | "specular" | "rim") {
+                        let c = match key.as_str() {
+                            "color" => [d.color[0], d.color[1], d.color[2], d.alpha],
+                            "emissive" => [d.emissive[0], d.emissive[1], d.emissive[2], 1.0],
+                            "specular" => [d.specular[0], d.specular[1], d.specular[2], 1.0],
+                            _ => [d.rim[0], d.rim[1], d.rim[2], 1.0],
+                        };
+                        return Ok(Value::Table(new_color(lua, c)?));
                     }
                 }
                 Ok(Value::Nil)
@@ -3809,6 +4081,132 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             comp_mt.set("__newindex", newidx)?;
         }
         lua.set_named_registry_value("floptle_component_mt", comp_mt)?;
+    }
+
+    // ---- sprite handle metatable (node:sprite) -------------------------------------
+    // The Sprite component as something you hold: `local sp = node:sprite()`,
+    // then `sp.flipX = mx > 0`. `node:setSprite{...}` shipped as the only route,
+    // which makes the commonest 2D line in any game — face the way you are
+    // walking — a table literal rebuilt every frame, and gives no way at all to
+    // ASK which way the sprite is facing.
+    //
+    // Reads answer from the mirror and every write updates it as it queues, so a
+    // read straight after an assignment is the value just assigned rather than
+    // the one the frame started with. An unknown field RAISES on both sides: a
+    // handle is where somebody guesses a name, and `sp.flipx = true` doing
+    // nothing at all is the failure this whole feature exists to end.
+    {
+        let sprite_mt = lua.create_table()?;
+        {
+            let scene = shared.scene.clone();
+            let idx = lua.create_function(move |_, (this, key): (Table, String)| {
+                let e: u32 = this.raw_get("__id")?;
+                let Some(m) = scene.borrow().sprites.get(&e).copied() else {
+                    return Err(mlua::Error::runtime(
+                        "node:sprite(): this node is not a sprite any more — something \
+                         changed its Matter after the handle was taken.",
+                    ));
+                };
+                Ok(match key.as_str() {
+                    "ppu" => Value::Number(f64::from(m.ppu)),
+                    "size" => Value::Number(f64::from(m.size)),
+                    "cell" => Value::Integer(i64::from(m.cell)),
+                    // Booleans as BOOLEANS: 0 is truthy in Lua, so a number here
+                    // would make `if sp.flipX then` a branch that is always taken.
+                    "flipX" => Value::Boolean(m.flip_x),
+                    "flipY" => Value::Boolean(m.flip_y),
+                    "pivotX" => Value::Number(f64::from(m.pivot[0])),
+                    "pivotY" => Value::Number(f64::from(m.pivot[1])),
+                    other => {
+                        return Err(mlua::Error::runtime(format!(
+                            "node:sprite() has no field `{other}`{}",
+                            crate::opts::near_miss_hint(other, SPRITE_KEYS)
+                        )));
+                    }
+                })
+            })?;
+            sprite_mt.set("__index", idx)?;
+        }
+        {
+            let scene = shared.scene.clone();
+            let q = shared.rich_sets.clone();
+            let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
+                let e: u32 = this.raw_get("__id")?;
+                // A number is a number; a flip is a boolean, but a number is
+                // taken too (past the halfway point is flipped) because that is
+                // what an animation lane writes and what a value restored from a
+                // save file arrives as.
+                let num = |field: &str| -> mlua::Result<f64> {
+                    match &val {
+                        Value::Number(n) => Ok(*n),
+                        Value::Integer(n) => Ok(*n as f64),
+                        Value::Boolean(b) => Ok(f64::from(u8::from(*b))),
+                        other => Err(mlua::Error::runtime(format!(
+                            "sprite field `{field}` takes a number, got {}",
+                            other.type_name()
+                        ))),
+                    }
+                };
+                let flag = |field: &str| -> mlua::Result<bool> { Ok(num(field)? >= 0.5) };
+                let mut set = crate::RichSet::MatterSprite {
+                    ppu: None,
+                    size: None,
+                    cell: None,
+                    flip_x: None,
+                    flip_y: None,
+                    pivot_x: None,
+                    pivot_y: None,
+                };
+                let crate::RichSet::MatterSprite {
+                    ppu,
+                    size,
+                    cell,
+                    flip_x,
+                    flip_y,
+                    pivot_x,
+                    pivot_y,
+                } = &mut set
+                else {
+                    unreachable!("built one line above")
+                };
+                match key.as_str() {
+                    "ppu" => *ppu = Some(num("ppu")? as f32),
+                    "size" => *size = Some(num("size")? as f32),
+                    "cell" => {
+                        let n = num("cell")?;
+                        // A cell is an index into the sheet. `as u32` on a
+                        // negative would wrap to four billion and draw whatever
+                        // that lands on, which is the kind of wrong that reads
+                        // as a corrupt spritesheet.
+                        if n < 0.0 || n.is_nan() {
+                            return Err(mlua::Error::runtime(format!(
+                                "sprite field `cell` is an index into the sheet, so it cannot \
+                                 be {n}"
+                            )));
+                        }
+                        *cell = Some(n as u32);
+                    }
+                    "flipX" => *flip_x = Some(flag("flipX")?),
+                    "flipY" => *flip_y = Some(flag("flipY")?),
+                    "pivotX" => *pivot_x = Some(num("pivotX")? as f32),
+                    "pivotY" => *pivot_y = Some(num("pivotY")? as f32),
+                    other => {
+                        return Err(mlua::Error::runtime(format!(
+                            "node:sprite() has no field `{other}`{}",
+                            crate::opts::near_miss_hint(other, SPRITE_KEYS)
+                        )));
+                    }
+                }
+                // The mirror first, so a read on the next line answers with what
+                // was just written; the queue is what reaches the component
+                // after the pass.
+                scene.borrow_mut().sprites.entry(e).or_default().apply(&set);
+                q.borrow_mut().push((e, set));
+                Ok(())
+            })?;
+            sprite_mt.set("__newindex", newidx)?;
+        }
+        lua.set_named_registry_value("floptle_sprite_mt", sprite_mt)?;
     }
 
     // ---- node methods (children / getchild / getparent / getscript / find) ----------
@@ -3899,6 +4297,130 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         })?;
         methods.set("component", f.clone())?;
         methods.set("getcomponent", f)?;
+    }
+    // node:setTint(color [, alpha]) / node:setTint() — a colour multiplied over
+    // everything this node draws, its own textures and its parts' own colours
+    // included. The easy "same model, but red".
+    {
+        let q = shared.rich_sets.clone();
+        methods.set(
+            "setTint",
+            lua.create_function(move |_, (this, c, a): (Table, Value, Option<f32>)| {
+                let e: u32 = this.raw_get("__id")?;
+                // No argument clears it. `node:setTint()` reads as "no tint",
+                // and a caller turning a highlight off should not have to know
+                // that white is the identity.
+                let (color, clear) = match &c {
+                    Value::Nil => ([1.0; 3], true),
+                    // Any spelling of a colour the rest of the API takes: a
+                    // `color(...)`, `{r=,g=,b=}`, `{1,0.5,0.2}`, or a vec3.
+                    Value::Table(t) => {
+                        let c = read_color(t)?;
+                        ([c[0], c[1], c[2]], false)
+                    }
+                    other => {
+                        let v = crate::math_api::vec3_of(other).ok_or_else(|| {
+                            mlua::Error::runtime(
+                                "node:setTint(color [, alpha]): a colour takes color(r,g,b), \
+                                 {r,g,b}, {1,0.5,0.2} or vec3 — and node:setTint() with \
+                                 nothing clears it",
+                            )
+                        })?;
+                        ([v.x as f32, v.y as f32, v.z as f32], false)
+                    }
+                };
+                q.borrow_mut().push((
+                    e,
+                    crate::RichSet::NodeTint { color, alpha: a.unwrap_or(1.0), clear },
+                ));
+                Ok(())
+            })?,
+        )?;
+    }
+    // node:material() / node:material("Clothing") — the node's own Material, or
+    // ONE PART of a model's materials, as a handle you can read and assign.
+    {
+        let scene = shared.scene.clone();
+        let q = shared.rich_sets.clone();
+        methods.set(
+            "material",
+            lua.create_function(move |lua, (this, key): (Table, Option<String>)| {
+                let e: u32 = this.raw_get("__id")?;
+                let Some(key) = key else {
+                    // No name: the node's own Material — the one that covers the
+                    // whole model. Refused rather than invented when the node has
+                    // none, because a handle whose writes create a component
+                    // nobody asked for is how a typo becomes a look change.
+                    let has = scene
+                        .borrow()
+                        .components
+                        .get(&e)
+                        .is_some_and(|c| c.contains_key("Material"))
+                        // …or it is ABOUT to have one: `setMaterial` is queued
+                        // and applied after the pass, so the two lines anybody
+                        // writes — give it a material, then take its handle —
+                        // have to work in that order. The batch handle makes the
+                        // same allowance for `setSpriteBatch`.
+                        || q.borrow().iter().any(|(qe, set)| {
+                            *qe == e && matches!(set, crate::RichSet::Material(_))
+                        });
+                    if !has {
+                        return Err(mlua::Error::runtime(
+                            "node:material(): this node has no Material. Add one in the \
+                             Inspector, or call node:setMaterial{ ... } first — on a MODEL a \
+                             Material covers every part, and node:material(\"<name>\") is how \
+                             you reach one part instead.",
+                        ));
+                    }
+                    return crate::env::new_component_handle(lua, e, "Material");
+                };
+                if key.trim().is_empty() {
+                    return Err(mlua::Error::runtime(
+                        "node:material(name): the name is one of node:materials() — an \
+                         object like \"Torso#2\" or a material like \"Clothing\".",
+                    ));
+                }
+                // A part's material handle is NOT refused when the part has no
+                // override yet: writing one is how an override comes to exist,
+                // and that is the whole point of the call. It starts as the
+                // engine's default material (white, untextured) rather than as
+                // the part's imported look, because the imported look lives in
+                // the model file and this side of the engine has never read it —
+                // so state what you want, don't tweak what you assume.
+                crate::env::new_component_handle(lua, e, &format!("{}{key}", crate::api::OBJECT_MATERIAL_PREFIX))
+            })?,
+        )?;
+    }
+    // node:materials() -> the model's material slots, so a script can find out
+    // what the parts are CALLED before trying to address one.
+    {
+        let scene = shared.scene.clone();
+        methods.set(
+            "materials",
+            lua.create_function(move |lua, this: Table| {
+                let e: u32 = this.raw_get("__id")?;
+                let s = scene.borrow();
+                let arr = lua.create_table()?;
+                let Some(model) = s.models.get(&e) else { return Ok(arr) };
+                let Some(slots) = s.model_slots.get(model) else { return Ok(arr) };
+                let overridden = |k: &str| {
+                    s.components
+                        .get(&e)
+                        .is_some_and(|c| c.contains_key(&format!("{}{k}", crate::api::OBJECT_MATERIAL_PREFIX)))
+                };
+                for (i, slot) in slots.iter().enumerate() {
+                    let t = lua.create_table()?;
+                    t.set("object", slot.object.as_str())?;
+                    t.set("material", slot.material.as_str())?;
+                    t.set("textured", slot.textured)?;
+                    // Whether THIS node has already said something about it —
+                    // either by its object name or by its material name.
+                    t.set("overridden", overridden(&slot.object) || overridden(&slot.material))?;
+                    arr.set(i + 1, t)?;
+                }
+                Ok(arr)
+            })?,
+        )?;
     }
     // node:uiRect() -> x, y, w, h — this UI element's SOLVED screen rect in
     // WINDOW physical pixels: the same space input.mouse() reports and
@@ -4174,6 +4696,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         }
         {
             let q = q.clone();
+            let scene = shared.scene.clone();
             // node:setSprite{ ppu = 32, cell = 3, pivotY = 0 } — make this node
             // one sprite, or retune one. Every key optional and every key keeps
             // what the node had.
@@ -4184,27 +4707,26 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     crate::opts::check_keys(&t, SPRITE_KEYS, "node:setSprite")?;
                     let px = t.get::<Option<f32>>("pivotX")?;
                     let py = t.get::<Option<f32>>("pivotY")?;
-                    q.borrow_mut().push((
-                        e,
-                        crate::RichSet::MatterSprite {
-                            ppu: t.get::<Option<f32>>("ppu")?,
-                            size: t.get::<Option<f32>>("size")?,
-                            cell: t.get::<Option<u32>>("cell")?,
-                            flip_x: t.get::<Option<bool>>("flipX")?,
-                            flip_y: t.get::<Option<bool>>("flipY")?,
-                            // One axis at a time is allowed: a game flips a
-                            // sprite far more often than it moves a pivot, and
-                            // requiring both would make the common call carry a
-                            // number it does not care about.
-                            // One axis at a time, and the other KEEPS what the
-                            // node had. Defaulting the unmentioned axis to 0.5
-                            // here made `setSprite{ pivotY = 0 }` — the
-                            // documented way to put a character's origin at its
-                            // feet — silently recentre it horizontally.
-                            pivot_x: px,
-                            pivot_y: py,
-                        },
-                    ));
+                    let set = crate::RichSet::MatterSprite {
+                        ppu: t.get::<Option<f32>>("ppu")?,
+                        size: t.get::<Option<f32>>("size")?,
+                        cell: t.get::<Option<u32>>("cell")?,
+                        flip_x: t.get::<Option<bool>>("flipX")?,
+                        flip_y: t.get::<Option<bool>>("flipY")?,
+                        // One axis at a time, and the other KEEPS what the node
+                        // had. Defaulting the unmentioned axis to 0.5 here made
+                        // `setSprite{ pivotY = 0 }` — the documented way to put
+                        // a character's origin at its feet — silently recentre
+                        // it horizontally.
+                        pivot_x: px,
+                        pivot_y: py,
+                    };
+                    // The mirror moves with the queue, so `node:sprite()` on the
+                    // next line reads what this call just set — and so a node
+                    // BECOMING a sprite here can be read at all, since the
+                    // component itself does not exist until after the pass.
+                    scene.borrow_mut().sprites.entry(e).or_default().apply(&set);
+                    q.borrow_mut().push((e, set));
                     Ok(())
                 })?,
             )?;
@@ -4510,6 +5032,37 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             )?;
         }
         {
+            let scene = shared.scene.clone();
+            // node:sprite() -> the Sprite component as a handle: read and assign
+            // `flipX`, `flipY`, `cell`, `ppu`, `size`, `pivotX`, `pivotY`.
+            methods.set(
+                "sprite",
+                lua.create_function(move |lua, this: Table| {
+                    let e: u32 = this.raw_get("__id")?;
+                    let (is_sprite, is_batch) = {
+                        let s = scene.borrow();
+                        (s.sprites.contains_key(&e), s.sprite_batches.contains(&e))
+                    };
+                    // Refuse rather than hand back a handle whose every write is
+                    // queued and then dropped — the same call the batch handle
+                    // makes, for the same reason. The two names are one letter
+                    // apart, so each error names the other.
+                    if !is_sprite {
+                        return Err(mlua::Error::runtime(if is_batch {
+                            "node:sprite(): this node is a sprite BATCH. Its sprites are the \
+                             ones you draw into it — take node:sprites() (plural) and call \
+                             b:draw(...) per sprite."
+                        } else {
+                            "node:sprite(): this node is not a sprite. Set Matter to Sprite in \
+                             the Inspector, or call node:setSprite{ ppu = 32 } first — a handle \
+                             to a component that is not there could only throw its writes away."
+                        }));
+                    }
+                    crate::env::new_sprite_handle(lua, e)
+                })?,
+            )?;
+        }
+        {
             let draws = shared.sprite_draws.clone();
             let scene = shared.scene.clone();
             let q = q.clone();
@@ -4532,11 +5085,21 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                             *qe == e && matches!(set, crate::RichSet::MatterSpriteBatch { .. })
                         });
                     if !is_batch {
+                        // A plain Sprite is the near miss worth naming: the two
+                        // calls differ by one letter and do different jobs.
                         return Err(mlua::Error::runtime(
-                            "node:sprites(): this node is not a sprite batch. Call \
-                             node:setSpriteBatch{ size = 1.0 } first (or set Matter to \
-                             Sprite Batch in the Inspector) — without it every draw is \
-                             thrown away.",
+                            if scene.borrow().sprites.contains_key(&e) {
+                                "node:sprites(): this node is one SPRITE, not a batch. To \
+                                 change how it draws — flipX, cell, pivot — take \
+                                 node:sprite() (singular). node:sprites() is for a node that \
+                                 draws many sprites a frame, which needs \
+                                 node:setSpriteBatch{ size = 1.0 } first."
+                            } else {
+                                "node:sprites(): this node is not a sprite batch. Call \
+                                 node:setSpriteBatch{ size = 1.0 } first (or set Matter to \
+                                 Sprite Batch in the Inspector) — without it every draw is \
+                                 thrown away."
+                            },
                         ));
                     }
                     new_sprite_batch_handle(lua, e, draws.clone())

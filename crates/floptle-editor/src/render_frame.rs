@@ -419,6 +419,7 @@ impl Editor {
         // under a rolled galaxy's spawn world — Ty fell straight through it).
         self.drain_terrain_generates();
         self.update_terrain_residency(lod_cam);
+        self.publish_terrain_busy();
         // Background checkpoints (terrain.flush): a few chunks of encoding per
         // frame + threaded writes — autosaves must never stutter the game.
         self.step_terrain_checkpoint();
@@ -506,7 +507,12 @@ impl Editor {
         // Register every texture + import every mesh the particle system needs
         // BEFORE the gather that resolves them (full &mut self here — no borrow
         // race, no frame lag on the open effect).
+        self.frame_no = self.frame_no.wrapping_add(1);
         self.ensure_vfx_assets();
+        // Every texture this scene's materials name, before any gather looks one
+        // up — see `ensure_scene_textures` for what an unregistered one looks
+        // like (it looks like the material was never applied).
+        self.ensure_scene_textures();
         // Compile/hot-reload `.flsl` shader materials + refresh their group(3)
         // bindings — the gathers below (main, Game viewport, camera preview)
         // all read `flsl_binds`, so this must run before any of them. Field
@@ -1926,7 +1932,7 @@ impl Editor {
             // eight arms and the helpers they call — those build their own
             // `MaterialParams` and would each need the renderer passed down to
             // ask for an index. One stamp at the end cannot miss an arm.
-            let ext_from = (instances.len(), flsl_draws.len(), skin_draws.len());
+            let ext_from = (instances.len(), flsl_draws.len(), skin_draws.len(), flat2d.len());
             let flsl = self.flsl_binds.get(e).map(|b| b.binding);
             match matter {
                 Matter::Primitive { shape, color } => {
@@ -2097,6 +2103,19 @@ impl Editor {
             // pushed. `0` is the neutral entry, so a node with no material (or a
             // material that sets none of this) writes the value that is already
             // there and the whole block is a no-op.
+            // **The node's tint, over everything it just pushed.** A
+            // multiplier, not a replacement: the model keeps its own textures
+            // and its parts keep their own colours, and the whole thing goes
+            // red. One stamp after the match rather than a branch in each arm,
+            // for the reason the extras stamp below gives.
+            apply_node_tint(
+                self.world.get::<floptle_core::Tint>(*e),
+                ext_from,
+                &mut instances,
+                &mut flsl_draws,
+                &mut skin_draws,
+                &mut flat2d,
+            );
             if node_ext != 0 {
                 use floptle_render::{ext_index_of, set_ext_index};
                 // Only where nothing is set yet. A model part with its own
@@ -2674,7 +2693,25 @@ impl Editor {
                 vis.window_fill = tint(vis.window_fill);
                 vis.extreme_bg_color = tint(vis.extreme_bg_color);
             }
-            ctx.all_styles_mut(|s| s.visuals = vis.clone());
+            ctx.all_styles_mut(|s| {
+                s.visuals = vis.clone();
+                // **Leave the scrollbar its own gutter.**
+                //
+                // egui's scroll bars FLOAT by default: they are drawn over the
+                // contents and allocate no width. So the last few pixels of
+                // every scrolling panel are behind a bar — a slider's label
+                // ellipsised down to its first letter, a `…` menu half over the
+                // edge — and the panel looks a little bit cut off everywhere,
+                // which is exactly what it is. The controls are laid out to the
+                // panel's edge correctly; the edge is simply not where the
+                // visible area ends.
+                //
+                // Allocating the bar's width moves that edge in to where things
+                // can actually be seen, and every widget follows it — egui's own
+                // truncation as much as `responsive::fit_here`. The bar still
+                // floats and still looks the same.
+                s.spacing.scroll.floating_allocated_width = s.spacing.scroll.bar_width;
+            });
         }
         // Every named entity, Matter nodes and the Lighting node alike.
         let entity_names: Vec<(Entity, String)> =
@@ -6083,7 +6120,7 @@ impl Editor {
     /// Per-frame GPU sync for SDF matter: upload structurally-changed terrain
     /// volumes + shadow-occluder bakes into the shared 3D atlas (or just the
     /// dabbed region on the fast sculpt path), and refresh the texture palette.
-    fn sync_terrain_gpu(&mut self) {
+    pub(crate) fn sync_terrain_gpu(&mut self) {
         // Terrain volumes render PER-VOLUME, each at native resolution: moving a
         // terrain needs NO GPU work at all — its f64 anchor is read fresh every frame
         // when the globals are built. Only structural changes (add/edit/delete/resize)
@@ -7891,6 +7928,99 @@ impl Editor {
                 self.world.insert(e, Material::tinted(base));
             }
         }
+        if let Some(e) = cmd.reset_transform {
+            self.record();
+            // The whole selection, like every other component action here: a
+            // reset that only reached the node you happened to click would be a
+            // surprise the first time it matters.
+            for e in self.selected_group(e) {
+                if let Some(t) = self.world.get_mut::<Transform>(e) {
+                    *t = Transform::IDENTITY;
+                }
+            }
+        }
+        // **Get a model's own pictures out of it.** See `model_textures` —
+        // everything a dev wants to do next with a model's art (layer over it,
+        // recolour it, point one part at a different copy) starts with the file
+        // existing.
+        if let Some(path) = cmd.extract_model_textures {
+            let abs = self.resolve_asset_path(&path);
+            match crate::model_textures::extract_model_textures(&abs, &path, &self.project_root) {
+                Ok(written) => {
+                    self.console.push(
+                        floptle_script::LogLevel::Debug,
+                        format!(
+                            "extracted {} texture(s) from {path}: {}",
+                            written.len(),
+                            written.iter().map(|e| e.path.as_str()).collect::<Vec<_>>().join(", ")
+                        ),
+                        None,
+                    );
+                    // They are real project assets now — the Assets panel and
+                    // every texture picker have to see them without a restart.
+                    self.asset_tree = build_assets(&self.project_root);
+                }
+                Err(e) => self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!("could not extract {path}'s textures: {e}"),
+                    None,
+                ),
+            }
+        }
+        // Override ONE sub-object's material, seeded with what that part already
+        // looks like — its imported colour AND, if the model brought one, its
+        // texture (extracted on the spot, because an override that names no
+        // texture draws untextured and "override" must not mean "go blank").
+        if let Some((e, key, model)) = cmd.override_object_material {
+            self.record();
+            let (base, textured, material) = self
+                .mesh_registry
+                .get(&model)
+                .and_then(|a| {
+                    a.part_meta.iter().enumerate().find(|(i, pm)| {
+                        a.override_key(*i) == Some(key.as_str()) || pm.material == key
+                    })
+                })
+                .map(|(_, pm)| (pm.base_color, pm.textured, pm.material.clone()))
+                .unwrap_or(([1.0; 3], false, key.clone()));
+            let mut mat = Material::tinted(base);
+            if textured {
+                let abs = self.resolve_asset_path(&model);
+                let existing =
+                    crate::model_textures::extracted_file(&self.project_root, &model, &material);
+                mat.texture = match existing {
+                    Some(p) => Some(p),
+                    None => match crate::model_textures::extract_model_textures(
+                        &abs,
+                        &model,
+                        &self.project_root,
+                    ) {
+                        Ok(written) => {
+                            self.asset_tree = build_assets(&self.project_root);
+                            written
+                                .iter()
+                                .find(|x| x.material == material)
+                                .map(|x| x.path.clone())
+                        }
+                        Err(err) => {
+                            self.console.push(
+                                floptle_script::LogLevel::Warn,
+                                format!(
+                                    "{key}: could not extract this part's texture ({err}) — the \
+                                     override starts untextured"
+                                ),
+                                None,
+                            );
+                            None
+                        }
+                    },
+                };
+            }
+            let mut om =
+                self.world.get::<floptle_core::ObjectMaterials>(e).cloned().unwrap_or_default();
+            om.0.insert(key, mat);
+            self.world.insert(e, om);
+        }
         if let Some(e) = cmd.remove_material {
             self.record();
             for e in self.selected_group(e) {
@@ -8848,8 +8978,42 @@ impl Editor {
                 let path = p.path.clone();
                 self.import_model(&path);
             }
-        // Pre-warm material textures so the gather can resolve them next frame —
-        // node Materials AND per-object override materials.
+    }
+
+    /// **Register every texture this scene's materials name, before the gather
+    /// asks for them.**
+    ///
+    /// A gather cannot do it itself — `gpu`/`raster` are borrowed there — so it
+    /// resolves a material's texture by looking the path up in the registry, and
+    /// a path that never got here comes back `None`. `None` does not draw
+    /// nothing: it means "no override", so the mesh's OWN imported texture draws
+    /// instead. A material whose texture was never registered therefore looks
+    /// exactly like a material that was never applied — except that its colour,
+    /// its emissive and its maps all work, which is the most confusing possible
+    /// failure. Reported as "I override the material, my new material has a
+    /// texture, but it is still showing the texture of the model — though if I
+    /// change the emission I can see it get brighter."
+    ///
+    /// This used to live at the end of `apply_frame_commands`, which is the
+    /// editor's UI pass. So it ran for the editor's own window and for nothing
+    /// else: `floptle shot` and every other path that goes straight to
+    /// `render_world_into` photographed a scene wearing the wrong textures, and
+    /// said nothing about it. It belongs to the FRAME, and both paths call it.
+    ///
+    /// Idempotent and cheap: every entry is skipped once registered, so the
+    /// steady-state cost is one hash lookup per material per frame.
+    pub(crate) fn ensure_scene_textures(&mut self) {
+        // Once per frame, however many views ask. `render_world_into` is called
+        // six times for six cube faces during a GI bake or a reflection
+        // capture, and this walks the whole world four times — with the same
+        // answer on every face, plus a fresh disk-load attempt for every path
+        // that does not resolve.
+        if self.textures_warmed_frame == self.frame_no && self.frame_no != 0 {
+            return;
+        }
+        self.textures_warmed_frame = self.frame_no;
+        // Node Materials AND per-object override materials — an override's
+        // texture is as much a texture as the node's.
         let mut tex_paths: Vec<String> = self
             .world
             .query::<Material>()
@@ -8862,6 +9026,24 @@ impl Editor {
                 .flat_map(|(_, om)| om.0.values().filter_map(|m| m.texture.clone()))
                 .filter(|p| !self.texture_registry.contains_key(p)),
         );
+        // The SURFACE MAPS too — normal, roughness, metallic, occlusion. They go
+        // through the same registry lookup as the base texture and had the same
+        // silence on a miss: a material with a normal map it could not resolve
+        // drew flat, and the only sign was that it looked like every other flat
+        // surface.
+        let maps = |m: &Material| m.maps().into_iter().flatten().cloned().collect::<Vec<_>>();
+        let map_paths: Vec<String> = self
+            .world
+            .query::<Material>()
+            .flat_map(|(_, m)| maps(m))
+            .chain(
+                self.world
+                    .query::<floptle_core::ObjectMaterials>()
+                    .flat_map(|(_, om)| om.0.values().flat_map(maps).collect::<Vec<_>>()),
+            )
+            .filter(|p| !self.texture_registry.contains_key(p))
+            .collect();
+        tex_paths.extend(map_paths);
         // …and every sheet of every tileset a tilemap in this scene uses.
         //
         // Nothing else warms these. A tileset sheet reached the GPU only if some
@@ -8997,6 +9179,12 @@ impl Editor {
         size: (u32, u32),
         opts: OffscreenOpts<'_>,
     ) {
+        // The same pre-warm the window frame does. This path is reached without
+        // one by `floptle shot` and by any embedder driving the editor headless,
+        // and a gather here resolves textures through exactly the same registry:
+        // without this, a shot of a scene draws every model in the texture it
+        // was IMPORTED with, whatever its materials say.
+        self.ensure_scene_textures();
         let view_proj = cam.view_proj(aspect);
         // Layer names resolve to bits only when a mask actually culls.
         let layer_table = (cull_mask != u32::MAX).then(|| self.project.build_layers());
@@ -9192,6 +9380,8 @@ impl Editor {
                 .and_then(|p| self.texture_registry.get(p).copied())
                 .filter(|id| Some(*id) != skip_tex);
             let flsl = self.flsl_binds.get(ent).map(|b| b.binding);
+            // Where this node's draws begin, for the tint stamp after the match.
+            let tint_from = (instances.len(), flsl_draws.len(), skin_draws.len(), flat2d.len());
             match matter {
                 // Same helper as the main gather, vertex paint and all — this
                 // arm used to build its own instance and forgot the paint, so a
@@ -9411,6 +9601,17 @@ impl Editor {
                 Matter::GravityVolume { .. } => {} // physics only; no visual
                 Matter::Empty => {}              // a transform with nothing on it
             }
+            // …and the same tint the window path applies, through the same
+            // function: a model tinted in the Scene view and plain in the Game
+            // view is the drift this file's test exists to catch.
+            apply_node_tint(
+                self.world.get::<floptle_core::Tint>(*ent),
+                tint_from,
+                &mut instances,
+                &mut flsl_draws,
+                &mut skin_draws,
+                &mut flat2d,
+            );
         }
 
         let (sky_params, sky_tint, sky_rot, sky_solid) = skybox_uniforms(&self.world);
@@ -9840,6 +10041,101 @@ fn prepass_and_bind(
 
 }
 
+/// Multiply a node's [`Tint`](floptle_core::Tint) into everything it pushed
+/// into this frame.
+///
+/// A function rather than a loop written twice because the Scene view and
+/// `render_world_into` both have to do it: a kind of drawing tinted on one path
+/// and not the other is a model that is red while you edit it and plain in the
+/// game, which is the drift `offscreen_draws_the_same_world` exists to catch.
+///
+/// `from` is where this node's instances START — everything after it belongs to
+/// this node and nothing before it does.
+pub(crate) fn apply_node_tint(
+    tint: Option<&floptle_core::Tint>,
+    from: (usize, usize, usize, usize),
+    instances: &mut [(MeshId, Option<TexId>, InstanceRaw)],
+    flsl_draws: &mut [floptle_render::FlslDraw],
+    skin_draws: &mut [floptle_render::SkinDraw],
+    // The 2D lighting G-buffer. A flat node on the lit path draws UNLIT in the
+    // raster pass and is corrected by the light composite, which reads THIS
+    // copy of the colour — so a tint applied only to the raster instance is
+    // corrected back out again by a pass that never heard about it.
+    flat2d: &mut [(MeshId, Option<TexId>, floptle_render::Light2dInstance)],
+) {
+    let Some(t) = tint.filter(|t| !t.is_identity()) else { return };
+    for (_, _, raw) in &mut instances[from.0..] {
+        t.apply(&mut raw.color);
+    }
+    for (_, _, _, raw) in &mut flsl_draws[from.1..] {
+        t.apply(&mut raw.color);
+    }
+    for d in &mut skin_draws[from.2..] {
+        t.apply(&mut d.instance.color);
+    }
+    for (_, _, lit) in &mut flat2d[from.3..] {
+        t.apply(&mut lit.tint);
+    }
+}
+
+/// **Which material one part of a model draws with.**
+///
+///   this object's override  ▸  the node's Material  ▸  the part as imported
+///
+/// The most specific one wins, WHOLE — its colour, its texture, its maps, its
+/// retro flags. Its own function because that sentence is the contract, and it
+/// used to be three-quarters true: a node Material multiplied its colour into
+/// each part's imported colour while its texture replaced outright, so a model
+/// given a new material kept the old picture on it and only the emissive
+/// appeared to work. A rule that applies half a material is not a rule anybody
+/// can predict, and this is the place it is stated once.
+pub(crate) enum PartLook<'a> {
+    /// This sub-object's own override material.
+    Override(&'a floptle_core::Material),
+    /// The node-level Material, over every part of the model.
+    Node(&'a MaterialParams),
+    /// Nothing supersedes: the part's imported base colour (and, at the draw,
+    /// its imported texture).
+    Imported([f32; 3]),
+}
+
+pub(crate) fn part_look_rule<'a>(
+    obj_mats: Option<&'a floptle_core::ObjectMaterials>,
+    override_key: Option<&str>,
+    // The glTF MATERIAL this part was imported with — the other name the same
+    // part answers to. See below for why both.
+    material_name: Option<&str>,
+    node_material: Option<&'a MaterialParams>,
+    imported_base: [f32; 3],
+) -> PartLook<'a> {
+    // **A part answers to its object name AND to its material name.**
+    //
+    // The object name is the precise one — it addresses ONE sub-object — but it
+    // is not the name anybody has. Import de-duplicates repeated node names, so
+    // an avatar whose torso node is called `Torso` in Blender is keyed `Torso#2`
+    // here, and an override written as `Torso` matched nothing at all and said
+    // nothing about it.
+    //
+    // The material name is the one on the model's own materials list, the one a
+    // glTF author chose, and usually the one that means something across the
+    // parts: a character's `Clothing` covers the torso and both arms, which is
+    // exactly the grouping a clothing system wants to address at once.
+    //
+    // Object first, so the precise name still wins where both exist.
+    if let Some(om) = obj_mats {
+        if let Some(m) = override_key.and_then(|k| om.0.get(k)) {
+            return PartLook::Override(m);
+        }
+        if let Some(m) = material_name.and_then(|k| om.0.get(k)) {
+            return PartLook::Override(m);
+        }
+    }
+    match node_material {
+        Some(m) => PartLook::Node(m),
+        None => PartLook::Imported(imported_base),
+    }
+}
+
 /// Shared by the main surface gather AND the offscreen `render_world_into` so the
 /// fullscreen, docked, split, and camera-preview views all animate identically —
 /// previously the offscreen path drew every mesh rigidly at its root, so a character
@@ -9884,49 +10180,44 @@ fn push_mesh_instances(
         Some(b) => flsl_out.push((mid, ptex, b, raw)),
         None => instances.push((mid, ptex, raw)),
     };
-    // A part's look: an ObjectMaterials override for its object wins, else the
-    // node Material covers the whole model, else the part's imported base color.
+    // **A part's look, by one rule: the most specific material wins, whole.**
+    //
+    //   this object's override  ▸  the node's Material  ▸  the part as imported
+    //
+    // Whichever of those applies is the material, entire — its colour, its
+    // texture, its maps, its retro flags. A material is a statement of what a
+    // surface looks like, and half-applying one is what made this confusing:
+    // the node Material used to MULTIPLY its colour into each part's imported
+    // colour while its texture replaced outright, so "I gave it a new material
+    // and it still has the old picture on it, but the emissive works" was the
+    // exact and correct description of what the engine did.
+    //
+    // A model that looks right therefore carries no node Material at all. One is
+    // how you say "this whole model is made of THIS" — and per-object overrides
+    // are how you say it about one part.
     let part_look = |raster: &mut floptle_render::Raster,
                          asset: &MeshAsset,
                          part: usize|
      -> (Option<TexId>, MaterialParams) {
         // The part's own imported base-colour factor — its share of the model's
-        // built-in look, and the thing a node-level Material used to throw away.
+        // built-in look, which is what draws when nothing supersedes it.
         let base = asset.part_meta.get(part).map(|pm| pm.base_color).unwrap_or([1.0; 3]);
-        if let Some(m) = obj_mats.and_then(|om| asset.override_key(part).and_then(|k| om.0.get(k)))
-        {
+        let mat_name = asset.part_meta.get(part).map(|pm| pm.material.as_str());
+        match part_look_rule(obj_mats, asset.override_key(part), mat_name, mp, base) {
             // An override is a whole material, surface maps and retro flags
             // included — resolved the same way a node's own Material is, so
             // "give this one object a normal map" works.
-            //
-            // It REPLACES the part's imported colour rather than tinting it,
-            // unlike the node-level Material below. The two are different acts:
-            // a node Material is a layer over the whole model, an override is
-            // this one part's look, stated. (The Inspector seeds a new override
-            // with the part's own colour, so it still starts as what it was.)
-            return crate::shading::material_draw(raster, gpu, m, texture_registry, tex);
-        }
-        match mp {
-            // A node-level Material TINTS each part rather than replacing it.
-            //
-            // It used to replace: put a Material on a model and every part
-            // collapsed to one flat colour, losing the per-part base colours the
-            // model was imported with. Which made the Material component
-            // unusable for exactly the thing people reach for it for — "make
-            // this whole model jitter", "give the whole model a normal map" —
-            // because paying for that cost the model's own colours.
-            //
-            // Multiplying is both non-destructive and what the default already
-            // promises: a fresh Material is white, so applying one changes
-            // nothing until you dial something in. It is also the rule `color`
-            // already follows against a texture.
-            Some(m) => {
-                let mut mpar = *m;
-                mpar.color =
-                    [mpar.color[0] * base[0], mpar.color[1] * base[1], mpar.color[2] * base[2]];
-                (tex, mpar)
+            PartLook::Override(m) => {
+                let (t, p) = crate::shading::material_draw(raster, gpu, m, texture_registry, None);
+                (Some(t.unwrap_or_else(|| raster.white_texture(gpu))), p)
             }
-            None => (tex, MaterialParams::flat(base)),
+            // `tex` is this node Material's own texture. `None` there does NOT
+            // mean "keep what the part had" — a bind of `None` is what makes the
+            // MESH's texture draw, which is the imported look this material is
+            // superseding. An untextured material means untextured, so it says
+            // so with white.
+            PartLook::Node(m) => (Some(tex.unwrap_or_else(|| raster.white_texture(gpu))), *m),
+            PartLook::Imported(base) => (tex, MaterialParams::flat(base)),
         }
     };
     // Vertex paint is per-PART: import splits a model per-material into parts with
@@ -10131,6 +10422,89 @@ fn perf_readout(ui: &mut egui::Ui, s: &PerfSnapshot) {
 mod lit_2d_tests {
     use super::*;
     use floptle_core::{Lighting2D, Lit2D, Sorting, World};
+
+    /// **A material applies whole, or it is not the material.**
+    ///
+    /// Reported as: "I override a model's material, my new material has a
+    /// texture, but it is still showing the texture of the normal model — and
+    /// if I change the emission I can see the object get brighter." That is one
+    /// rule applied to three quarters of a material: the node Material's params
+    /// were taken (hence the emission), its colour was MULTIPLIED into the
+    /// part's imported colour, and its texture replaced only if it had one.
+    ///
+    /// The rule is now: the most specific material wins, entire.
+    #[test]
+    fn the_most_specific_material_wins_whole() {
+        use crate::render_frame::{PartLook, part_look_rule};
+
+        let imported = [0.2, 0.4, 0.6];
+        // A node Material that says nothing but its colour. It still supersedes.
+        let node = MaterialParams::flat([1.0, 0.0, 0.0]);
+
+        match part_look_rule(None, Some("Torso#2"), Some("Clothing"), Some(&node), imported) {
+            PartLook::Node(m) => assert_eq!(
+                m.color,
+                [1.0, 0.0, 0.0],
+                "a node Material is the model's look, not a tint over it — multiplying it \
+                 into {imported:?} is what made a new material keep the old look"
+            ),
+            _ => panic!("a node Material must supersede the imported look"),
+        }
+
+        // Nothing on the node: the part keeps exactly what it was imported with.
+        match part_look_rule(None, Some("Torso#2"), Some("Clothing"), None, imported) {
+            PartLook::Imported(c) => assert_eq!(c, imported),
+            _ => panic!("with no Material anywhere the model wears its own"),
+        }
+
+        // An override beats the node Material, for its object only.
+        let mut om = floptle_core::ObjectMaterials::default();
+        om.0.insert("Torso#2".into(), floptle_core::Material::tinted([0.0, 1.0, 0.0]));
+        match part_look_rule(Some(&om), Some("Torso#2"), Some("Clothing"), Some(&node), imported) {
+            PartLook::Override(m) => assert_eq!(m.color, [0.0, 1.0, 0.0]),
+            _ => panic!("the object's own material is the most specific one"),
+        }
+        // …and the parts it does not name still take the node Material.
+        match part_look_rule(Some(&om), Some("LeftLeg#2"), Some("Pants"), Some(&node), imported) {
+            PartLook::Node(m) => assert_eq!(m.color, [1.0, 0.0, 0.0]),
+            _ => panic!("an override is for ITS object, not the model"),
+        }
+
+        // **The material name addresses its parts too**, which is the whole
+        // clothing case: `Clothing` is one material across a torso and two arms,
+        // and import renamed every one of those objects (`Torso` → `Torso#2`),
+        // so the object name is not a name anybody has.
+        let mut by_mat = floptle_core::ObjectMaterials::default();
+        by_mat.0.insert("Clothing".into(), floptle_core::Material::tinted([0.0, 0.0, 1.0]));
+        for object in ["Torso#2", "RightArm#2", "LeftArm#2"] {
+            match part_look_rule(Some(&by_mat), Some(object), Some("Clothing"), Some(&node), imported)
+            {
+                PartLook::Override(m) => assert_eq!(m.color, [0.0, 0.0, 1.0], "{object}"),
+                _ => panic!("a material name must reach every part wearing it ({object})"),
+            }
+        }
+        // …and reach no further than that.
+        match part_look_rule(Some(&by_mat), Some("RightLeg#2"), Some("Pants"), Some(&node), imported)
+        {
+            PartLook::Node(_) => {}
+            _ => panic!("`Pants` is a different material and keeps the node's"),
+        }
+        // The precise name still wins where both are present.
+        let mut both = floptle_core::ObjectMaterials::default();
+        both.0.insert("Clothing".into(), floptle_core::Material::tinted([0.0, 0.0, 1.0]));
+        both.0.insert("Torso#2".into(), floptle_core::Material::tinted([1.0, 1.0, 0.0]));
+        match part_look_rule(Some(&both), Some("Torso#2"), Some("Clothing"), None, imported) {
+            PartLook::Override(m) => assert_eq!(m.color, [1.0, 1.0, 0.0], "object beats material"),
+            _ => panic!("the object's own override is the most specific"),
+        }
+
+        // A model whose parts have neither name cannot be addressed per object,
+        // and must not accidentally match somebody else's override.
+        match part_look_rule(Some(&om), None, None, None, imported) {
+            PartLook::Imported(c) => assert_eq!(c, imported),
+            _ => panic!("no key, no override"),
+        }
+    }
 
     /// The project's sorting layers, so a rank means something.
     fn project() -> floptle_scene::ProjectConfigDoc {

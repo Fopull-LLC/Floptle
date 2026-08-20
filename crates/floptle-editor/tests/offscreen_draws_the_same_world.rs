@@ -44,8 +44,13 @@ const SRC: &str = include_str!("../src/render_frame.rs");
 /// The calls that put world geometry into a frame. Each must appear on both
 /// paths; a call that exists on only one is a kind of object some views cannot
 /// see.
-const GATHERS: [(&str, &str); 10] = [
+const GATHERS: [(&str, &str); 11] = [
     ("push_mesh_instances", "imported models, map meshes, skinned characters"),
+    // Not geometry either, but the same failure with a different face: a node's
+    // Tint multiplies over everything it drew. Applied on one path only, a
+    // ghosted building or a flashing enemy is tinted while you edit it and
+    // plain in the game.
+    ("apply_node_tint", "the node's tint, over everything it drew"),
     ("tilemap_draws", "tilemaps — the 2D level itself"),
     ("sprite_draws", "sprite batches"),
     ("primitive_draw", "primitives, with their vertex paint"),

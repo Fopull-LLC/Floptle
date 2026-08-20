@@ -37,6 +37,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 // subsystems live in their own modules — main.rs only wires them in.
 mod agents_guide;
 mod anim;
+mod model_textures;
 mod bake;
 mod doctor;
 mod anim_ui;
@@ -260,6 +261,18 @@ struct EditorCmd {
     save_material: Option<(String, MaterialDoc)>,
     /// Give an entity a default Material component (start customizing its look).
     add_material: Option<Entity>,
+    /// Put a node's Transform back to the identity (⊕ Transform ▸ … ▸ Reset).
+    reset_transform: Option<Entity>,
+    /// Write a model's embedded textures out as files (the model's asset path).
+    /// The Inspector spells it "⬇ Extract textures", beside "⬇ Extract
+    /// animations" — the same act on the other half of what a `.glb` carries.
+    /// A `.glb` keeps its images inside itself, and until they are on disk
+    /// nothing else can point at them — no override, no shader slot, no editor.
+    extract_model_textures: Option<String>,
+    /// Give ONE sub-object of a model its own material: (node, override key,
+    /// the model's asset path). Seeded from what the part already looks like,
+    /// which needs the model — hence the path.
+    override_object_material: Option<(Entity, String, String)>,
     /// Add / remove a physics RigidBody on this entity.
     add_rigidbody: Option<Entity>,
     remove_rigidbody: Option<Entity>,
@@ -1680,6 +1693,11 @@ struct Editor {
     /// FAILURE, so a prototype that cannot be drawn is reported once rather
     /// than every frame it is looked at.
     scatter_protos: HashMap<String, Vec<crate::scatter_draw::Part>>,
+    /// Prototypes that baked to nothing only because there was no GPU to
+    /// register meshes on (`floptle run`, `check`). Cached so a long headless
+    /// run asks once instead of per step, and thrown away the moment a GPU
+    /// exists — the empty answer was about the process, not the asset.
+    scatter_protos_gpuless: std::collections::HashSet<String>,
     /// A scatter prototype's bounding radius at scale 1, by the same asset
     /// string — measured while baking, from the same import bounds the mesh path
     /// uses. Needed so a field can be frustum-culled per prop and not just by
@@ -2732,6 +2750,14 @@ struct Editor {
     /// must not contain its own reflections, or each one folds the last one in
     /// and the room's reflections compound frame after frame.
     capturing_probes: bool,
+    /// Bumped once per window frame. `ensure_scene_textures` uses it to run at
+    /// most once per frame however many views ask: a GI bake or a reflection
+    /// capture calls `render_world_into` six times for six cube faces, and the
+    /// pre-warm's four full-world queries have exactly the same answer all six
+    /// times.
+    frame_no: u64,
+    /// The frame `ensure_scene_textures` last ran on.
+    textures_warmed_frame: u64,
     /// The tuning view: show ONLY the baked bounce, with every direct light
     /// switched off. A view flag rather than a scene setting — like the ortho
     /// grid or the gizmo filter, it is about what you are looking at, not about

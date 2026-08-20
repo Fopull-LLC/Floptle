@@ -415,6 +415,19 @@ pub(crate) fn new_component_handle(lua: &Lua, e: u32, comp: &str) -> mlua::Resul
     Ok(t)
 }
 
+/// Create a Lua **sprite handle** for entity index `e`: a table `{__id}` with the
+/// shared sprite metatable, so `sp.flipX`, `sp.cell` and the rest read and
+/// assign like fields. Just the id — the numbers live in the scene mirror, so
+/// two handles to one node can never disagree.
+pub(crate) fn new_sprite_handle(lua: &Lua, e: u32) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.raw_set("__id", e)?;
+    if let Ok(mt) = lua.named_registry_value::<Table>("floptle_sprite_mt") {
+        t.set_metatable(Some(mt));
+    }
+    Ok(t)
+}
+
 /// Create a Lua **script handle** for script `name` on entity index `e`: a table
 /// `{__id, __script}` with the shared script metatable, so you can read/write its state,
 /// call its methods, and reach `.node` / `.params`.

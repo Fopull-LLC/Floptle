@@ -178,6 +178,21 @@ pub(crate) fn run(
         Projection::of_camera(fov_y, ortho, ortho_height, 0.05, 300_000.0),
     );
 
+    // **Stream the world in before photographing it.** Celestial terrain loads
+    // on a background thread and meshes on the frame that follows, and this verb
+    // has neither — so every planet drew as its impostor sphere: a smooth ball
+    // where the ground, the scattered rock and the base were meant to be. It is
+    // the failure this verb can least afford, because the picture still looks
+    // like a picture. Anchored on the camera being photographed, since that is
+    // the presence in the world here.
+    if !ed.settle_world_streaming(wt.translation, std::time::Duration::from_secs(45)) {
+        eprintln!(
+            "warning: the world was still streaming after 45s — some terrain in this \
+             shot is drawn as its impostor sphere rather than its surface"
+        );
+    }
+    ed.sync_terrain_gpu();
+
     let Some(gpu) = ed.gpu.take() else {
         eprintln!("no GPU: this machine has no adapter floptle can render on");
         return 1;

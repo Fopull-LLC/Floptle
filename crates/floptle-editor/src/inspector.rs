@@ -90,6 +90,59 @@ pub(crate) fn component_header(
     });
     (copy, paste, remove)
 }
+/// [`component_header`] for the **Transform**, which has one more thing to
+/// offer and one fewer: it can be put back to the identity, and it cannot be
+/// removed (every node has one).
+///
+/// Reset is here rather than as a button beside the fields because it belongs
+/// with copy and paste — the three things you do to a whole transform rather
+/// than to one of its nine numbers.
+pub(crate) fn transform_header(ui: &mut egui::Ui, can_paste: bool) -> (bool, bool, bool) {
+    let mut copy = false;
+    let mut paste = false;
+    let mut reset = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.menu_button("…", |ui| {
+                if ui
+                    .button("⎘  Copy values")
+                    .on_hover_text("the whole transform — position, rotation and scale")
+                    .clicked()
+                {
+                    copy = true;
+                    ui.close();
+                }
+                if can_paste
+                    && ui
+                        .button("📋  Paste values")
+                        .on_hover_text("put the copied transform onto this node")
+                        .clicked()
+                {
+                    paste = true;
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .button("⟲  Reset transform")
+                    .on_hover_text(
+                        "back to the identity: position 0,0,0 — no rotation — scale 1,1,1",
+                    )
+                    .clicked()
+                {
+                    reset = true;
+                    ui.close();
+                }
+            })
+            .response
+            .on_hover_text("transform options");
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(egui::RichText::new("⊕ Transform").strong()).truncate());
+            });
+        });
+    });
+    (copy, paste, reset)
+}
+
 /// [`component_header`] for components with no copyable values (Collider,
 /// Networked, Animation Controller): the `…` menu offers only Remove, so no
 /// dead "Copy values" item sits there doing nothing. Returns `remove`.
@@ -1449,17 +1502,20 @@ impl EditorTabViewer<'_> {
                 .button("◑ Override material for this object")
                 .on_hover_text(
                     "give JUST this sub-object its own material (color/texture/shader) \
-                     while the rest of the model keeps its imported look",
+                     while the rest of the model keeps its imported look.\n\nIt starts as \
+                     what this part already looks like — including its texture, which is \
+                     extracted out of the model into a file so you can point at it.",
                 )
                 .clicked()
             {
-                let mut om = self
-                    .world
-                    .get::<floptle_core::ObjectMaterials>(mesh)
-                    .cloned()
-                    .unwrap_or_default();
-                om.0.insert(bone_name.clone(), floptle_core::Material::default());
-                self.world.insert(mesh, om);
+                // Through the command rather than written here: seeding it with
+                // the part's own look means reading the model and possibly
+                // writing a PNG, and the Inspector holds `&mut self.world`.
+                let model = match self.world.get::<Matter>(mesh) {
+                    Some(Matter::Mesh { asset_path }) => asset_path.clone(),
+                    _ => String::new(),
+                };
+                self.cmd.override_object_material = Some((mesh, bone_name.clone(), model));
                 self.cmd.inspector_changed = true;
             }
         }
@@ -1534,6 +1590,31 @@ impl EditorTabViewer<'_> {
             if objs.len() > 1 || objs.first().is_some_and(|o| *o != *mat) {
                 ui.small(format!("   on: {}", objs.join(", ")));
             }
+        }
+        if asset.part_meta.iter().any(|m| m.textured) {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button("⬇ Extract textures")
+                    .on_hover_text(
+                        "write this model's own images out as PNG files beside it \
+                         (<model>_textures/<material>.png).\n\nA .glb keeps its images \
+                         inside itself, so until they are files nothing else can point at \
+                         one — not a material, not a shader slot, not an image editor. \
+                         This is where a base skin layer to draw clothing over comes from.",
+                    )
+                    .clicked()
+                {
+                    self.cmd.extract_model_textures = Some(path.to_string());
+                }
+                // Say whether they are already there, and where.
+                let done = by_mat.keys().filter(|m| {
+                    crate::model_textures::extracted_file(self.project_root, path, m).is_some()
+                });
+                let n = done.count();
+                if n > 0 {
+                    ui.small(format!("{n} in {}/", crate::model_textures::extract_dir(path)));
+                }
+            });
         }
         ui.small(
             "to change one of these: place the model, select the node, and use \
@@ -4725,11 +4806,9 @@ impl EditorTabViewer<'_> {
                     );
                 }
                 {
-                    let (copy, paste, _) = component_header(
+                    let (copy, paste, reset) = transform_header(
                         ui,
-                        "⊕ Transform",
                         matches!(clip, Some(ComponentClip::Transform(_))),
-                        false,
                     );
                     if copy
                         && let Some(t) = world.get::<Transform>(e) {
@@ -4737,6 +4816,9 @@ impl EditorTabViewer<'_> {
                         }
                     if paste {
                         cmd.paste_component = Some(e);
+                    }
+                    if reset {
+                        cmd.reset_transform = Some(e);
                     }
                 }
                 ui.indent("xform_props", |ui| {
@@ -4869,21 +4951,93 @@ impl EditorTabViewer<'_> {
                     && !parts.is_empty()
                 {
                     ui.separator();
-                    ui.strong("◑ Model materials");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong("◑ Model materials");
+                        if parts.iter().any(|(_, _, _, textured)| *textured)
+                            && ui
+                                .small_button("⬇ extract textures")
+                                .on_hover_text(
+                                    "write this model's own images out as PNG files beside \
+                                     it, so you can point a material at one, paint over it, \
+                                     or use it as a base layer.\n\nA .glb keeps its images \
+                                     inside itself; until they are files, nothing else can \
+                                     reach them.",
+                                )
+                                .clicked()
+                        {
+                            cmd.extract_model_textures = Some(asset_path.clone());
+                        }
+                    });
                     ui.small(
                         "what this model was imported with. Overriding one changes it for \
-                         this node only — the model file is never touched.",
+                         this node only — the model file is never touched. A Material on \
+                         the node replaces ALL of these at once; a Tint multiplies over \
+                         them and keeps them.",
                     );
+                    // **◐ Tint** — the easy "same model, but red". Right here,
+                    // beside the list it multiplies over, because this is where
+                    // somebody is standing when they want it.
+                    {
+                        let cur = world
+                            .get::<floptle_core::Tint>(e)
+                            .copied()
+                            .unwrap_or_default();
+                        let mut rgba =
+                            [cur.color[0], cur.color[1], cur.color[2], cur.alpha];
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("◐ tint")
+                                .on_hover_text(
+                                    "multiplied over everything this node draws — its own \
+                                     textures and each part's own colour are kept. White \
+                                     is no tint.\n\nFor a hit flash, a team colour, a \
+                                     ghosted preview, a body fading out.",
+                                );
+                            // Written straight into the world and marked
+                            // `inspector_changed`, like every other property row
+                            // here — that is what coalesces a drag into ONE undo
+                            // step. Going through a command would call `record()`
+                            // per changed frame, so dragging the swatch for a
+                            // second would push sixty snapshots of the scene and
+                            // need sixty undos to get back.
+                            let mut set = None;
+                            if ui.color_edit_button_rgba_unmultiplied(&mut rgba).changed() {
+                                set = Some(rgba);
+                            }
+                            if !cur.is_identity()
+                                && ui
+                                    .small_button("🗑")
+                                    .on_hover_text("no tint")
+                                    .clicked()
+                            {
+                                set = Some([1.0, 1.0, 1.0, 1.0]);
+                            }
+                            if let Some(v) = set {
+                                let t = floptle_core::Tint {
+                                    color: [v[0], v[1], v[2]],
+                                    alpha: v[3],
+                                };
+                                // White at full opacity is no tint: the node goes
+                                // back to carrying none rather than carrying one
+                                // that does nothing.
+                                if t.is_identity() {
+                                    world.remove::<floptle_core::Tint>(e);
+                                } else {
+                                    world.insert(e, t);
+                                }
+                                cmd.inspector_changed = true;
+                            }
+                        });
+                    }
                     if world.get::<Material>(e).is_none() {
                         ui.horizontal_wrapped(|ui| {
                             if ui
                                 .button("◑ Add Material (whole model)")
                                 .on_hover_text(
-                                    "one material over every part at once — the fast way to \
-                                     give a whole model a normal map, a roughness, or the \
-                                     retro artefacts.\n\nIts colour MULTIPLIES each part's \
-                                     own, so a fresh one changes nothing until you dial \
-                                     something in.",
+                                    "make the WHOLE model one material — \"this thing is \
+                                     made of ice\", \"…of gold\".\n\nIt REPLACES what the \
+                                     model was imported with, every part of it, textures \
+                                     included: a material with no texture draws untextured. \
+                                     To change one part instead, use the list below.",
                                 )
                                 .clicked()
                             {
@@ -4936,15 +5090,15 @@ impl EditorTabViewer<'_> {
                             }
                         });
                         if make {
-                            let mut om = world
-                                .get::<floptle_core::ObjectMaterials>(e)
-                                .cloned()
-                                .unwrap_or_default();
-                            // Seeded with the part's imported colour, so
-                            // overriding is visibly a starting point and not a
-                            // reset to white.
-                            om.0.insert(key.clone(), floptle_core::Material::tinted(base_color));
-                            world.insert(e, om);
+                            // Seeded with what the part already looks like — its
+                            // imported colour AND its texture, extracted from
+                            // the model on the spot if it has one. An override
+                            // is a whole material, so without the texture
+                            // "override this part" would mean "make this part
+                            // blank", and the picture it was wearing lives
+                            // inside the `.glb` where nothing can point at it.
+                            cmd.override_object_material =
+                                Some((e, key.clone(), asset_path.clone()));
                             cmd.inspector_changed = true;
                         }
                         if overridden {

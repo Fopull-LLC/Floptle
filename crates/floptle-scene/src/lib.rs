@@ -83,6 +83,11 @@ pub struct NodeDoc {
     /// [`floptle_core::ObjectMaterials`]. Empty = none (old scenes untouched).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub object_materials: std::collections::BTreeMap<String, MaterialDoc>,
+    /// A colour multiplied over everything this node draws — see
+    /// [`floptle_core::Tint`]. `None` = no tint, which is what every scene
+    /// written before this said, so their bytes are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tint: Option<[f32; 4]>,
     /// A physics rigidbody on this node (`None` = not a physics body).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rigidbody: Option<RigidBodyDoc>,
@@ -3367,6 +3372,12 @@ pub fn spawn_node(node: &NodeDoc, world: &mut World) -> floptle_core::Entity {
             ),
         );
     }
+    if let Some(t) = node.tint {
+        world.insert(
+            e,
+            floptle_core::Tint { color: [t[0], t[1], t[2]], alpha: t[3] },
+        );
+    }
     if let Some(rb) = &node.rigidbody {
         world.insert(e, rb.to_rigidbody());
     }
@@ -3643,6 +3654,13 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
                 om.0.iter().map(|(k, m)| (k.clone(), MaterialDoc::from_material(m))).collect()
             })
             .unwrap_or_default();
+        // Written only when it does something: the identity is "no tint", the
+        // same value as its absence, and storing it would put a line into every
+        // scene that never used one.
+        let tint = world
+            .get::<floptle_core::Tint>(e)
+            .filter(|t| !t.is_identity())
+            .map(|t| [t.color[0], t.color[1], t.color[2], t.alpha]);
         let rigidbody = world.get::<RigidBody>(e).map(RigidBodyDoc::from_rigidbody);
         let celestial =
             world.get::<floptle_core::CelestialBody>(e).map(CelestialBodyDoc::from_body);
@@ -3733,6 +3751,7 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
             scripts,
             material,
             object_materials,
+            tint,
             rigidbody,
             celestial,
             mesh_collider,
@@ -4147,6 +4166,7 @@ mod tests {
                     transform: TransformDoc { translation: [1.0, 2.0, 3.0], ..Default::default() },
                     matter: MatterDoc::Primitive { shape: ShapeDoc::Cube, color: [0.9, 0.4, 0.3] },
                     object_materials: Default::default(),
+                    tint: None,
                     scripts: vec![ScriptDoc {
                         kind: "pulsate".into(),
                         enabled: true,
@@ -4291,6 +4311,7 @@ mod tests {
                     transform: TransformDoc::default(),
                     matter: MatterDoc::Blob { scale: 1.3 },
                     object_materials: Default::default(),
+                    tint: None,
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,
@@ -4336,6 +4357,7 @@ mod tests {
                     transform: TransformDoc::default(),
                     matter: MatterDoc::PointLight { color: [0.1, 0.2, 0.9], intensity: 3.5, range: 7.5, shape: Default::default(), shadows: false, spot: None },
                     object_materials: Default::default(),
+                    tint: None,
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,
@@ -4378,6 +4400,7 @@ mod tests {
                     transform: TransformDoc::default(),
                     matter: MatterDoc::Camera { fov_y: 1.0, active: true, target: String::new(), cull_mask: u32::MAX, target_w: Matter::TARGET_W, target_h: Matter::TARGET_H, target_hz: 0.0, ortho: false, ortho_height: Matter::ORTHO_HEIGHT },
                     object_materials: Default::default(),
+                    tint: None,
                     scripts: Vec::new(),
                     material: None,
                     rigidbody: None,

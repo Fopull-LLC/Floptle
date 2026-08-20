@@ -20,6 +20,7 @@
 ---@field up_y number Physics: body up (−gravity) Y.
 ---@field up_z number Physics: body up (−gravity) Z.
 ---@field visible boolean Show / hide this node's geometry (Inspector eye toggle).
+---@field persistent boolean Carry this node — and everything under it — across a `scene.load` swap. Its scripts keep RUNNING (`start` does not re-fire), because the node never stopped existing.
 ---@field pos Vec3 The node's position as a vec3 (read/write: `node.pos = node.pos + dir * dt`). Accepts any {x=,y=,z=} value.
 ---@field vel Vec3 The body's velocity as a vec3 (read/write) — one write instead of vx/vy/vz: `node.vel = node.vel + node.up * jump`.
 ---@field up Vec3 The body's up as a vec3 (−gravity): Y on flat ground, RADIAL on a planet. The direction to jump in wherever you're standing.
@@ -40,20 +41,63 @@
 ---@field removeTag fun(self: Node, tag: string) Remove a tag (no-op when absent).
 ---@field height number Physics (capsule bodies): standing height - write a smaller value to crouch.
 ---@field text string|nil UI elements: the label's text (write to change it — numbers coerce, so `hp.text = 42` works).
----@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Live component handle (RigidBody / PointLight / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer / Material), nil if the node lacks it.
+---@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|LightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Live component handle (RigidBody / PointLight / Light / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer / Material), nil if the node lacks it.
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
 ---@field setShaderParam fun(self: Node, name: string, x: number, y?: number, z?: number, w?: number) Drive a `.flsl` uniform on this node every tick (a GPU uniform write, never a recompile): the node's Material shader, or its UI element's `stage ui` shader (instruments like the navball). Unset lanes are 0.
 ---@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, luminosity, starColor, occluderRadius (occlusion culling: radius of the solid core geometry never pierces — chunks fully behind it skip their draws; keep it BELOW the deepest cave/dig; 0 = off).
+---@field setShaderTexture fun(self: Node, slot: string, ref: string) Point one of this node's `.flsl` shader texture SLOTS somewhere else, at runtime. `slot` is the name the shader declares (`texture ramp` gives "ramp"); `ref` is a project-relative image path, an `rt:<name>` render target (what another camera sees, live), or "" to clear the slot. A shader can declare up to 8 slots.
 ---@field setMaterial fun(self: Node, t: table) Construction API — SETUP-TIME, not per-frame: set (and create if absent) the node's Material. It inserts the component and queues a deferred write, so call it on transitions and use `setShaderParam` for values that change every tick. Fields: color/emissive/specular/rim (a colour takes {r,g,b}, {x,y,z}, {1,0.5,0.2} or vec3), emissiveStrength, shininess, specularStrength, rimStrength, unlit (bool), ambient, alpha, texture (path or "rt:<name>"), sheetCols/sheetRows/cell (spritesheet grid + which cell draws — `cell` is also a live mirror field, see MaterialHandle).
 ---@field setTerrain fun(self: Node, id: number) Construction API: make this node a Terrain volume with the given id (generate its field with `terrain.generatePlanet`).
 ---@field setTerrainGen fun(self: Node, opts: table|nil) Construction API: attach an ON-DEMAND generation spec (same opts table as `terrain.generatePlanet`) — the body's field generates in the background when first approached, so no field file is needed at all (galaxy streaming). Player edits saved under `terrain.saveDir` take priority over regeneration. nil clears the spec.
 ---@field setPrimitive fun(self: Node, shape: string, color?: table) Construction API: make this node a primitive ("Cube"/"Sphere"/"Capsule"/"Plane") with an optional {r,g,b} color.
+---@field setCamera fun(self: Node, t: table) Construction API: aim a camera and point it at a RENDER TARGET. Fields: fovY (RADIANS, 0.05–3), active (bool — true clears every other camera's authority), target (a bare name; the picture is the texture "rt:<name>", usable on any material or UI image), width/height (the target's pixels, 8–4096), hz (redraws per second, 0 = every frame), cullMask (layer bitmask). A node that is not a camera becomes one. Minimaps, mirrors, security monitors, scopes, split-screen.
 ---@field sound fun(self: Node): AudioSourceHandle The sound handle for this node's Audio Source: play / stop / pause / swap clips and read playback state.
+---@field parent Node|nil The parent node handle, or nil at the root.
+---@field getparent fun(self: Node): Node|nil The parent node handle, or nil (same as node.parent).
+---@field children fun(self: Node): Node[] An array of this node's child handles.
+---@field getchild fun(self: Node, name: string): Node|nil The first CHILD with that name, or nil.
+---@field child fun(self: Node, name: string): Node|nil Short alias of getchild.
+---@field find fun(self: Node, name: string): Node|nil The first DESCENDANT at any depth with that name, or nil. getchild only looks one level down.
+---@field getscript fun(self: Node, name: string): table|nil A script handle for that script on this node, or nil: read/write its state, call its methods, reach .node / .params.
+---@field script fun(self: Node, name: string): table|nil Short alias of getscript.
+---@field component fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|LightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Short alias of getcomponent.
+---@field animator fun(self: Node): table The animation handle for this node's Animation Controller (or a rigged model's embedded clips): :play / :restart / :crossfade / :stop / :setSpeed / :setLayerWeight / :seek, and :state / :time / :finished / :isPlaying.
+---@field toWorld fun(self: Node, v: Vec3): Vec3 A point in this node's own frame converted to world space — position, rotation AND scale, composed up the whole parent chain. "Where is the muzzle?" is gun:toWorld(vec3(0, 0, -1.2)).
+---@field toLocal fun(self: Node, v: Vec3): Vec3 The inverse of toWorld: a world point expressed in this node's frame.
+---@field setWorldPos fun(self: Node, v: Vec3) Put this node at a WORLD point, whatever it is parented to, without deriving the parent inverse by hand.
+---@field worldForward fun(self: Node): Vec3 The node's forward AFTER the parent chain. node.forward is the LOCAL one, so a barrel parented to a swinging arm points where the ARM says.
+---@field worldRight fun(self: Node): Vec3 The node's +X axis after the parent chain.
+---@field worldUp fun(self: Node): Vec3 The node's +Y axis after the parent chain (not node.up, which is the body's -gravity up).
+---@field distanceTo fun(self: Node, other: Node|Vec3): number Distance to a node or a world point, measured in WORLD space. distance(a, b) compares LOCAL positions, which stops being the same answer the moment one of the two is parented.
+---@field distanceFlat fun(self: Node, other: Node|Vec3, up?: Vec3): number Distance ignoring the up axis (default +Y): the "have I arrived?" test for anything walking on ground it does not control the height of. Pass an up for a planet.
+---@field lookAt fun(self: Node, target: Node|Vec3, up?: Vec3) Point this node at another node or a world point. Sets yaw + pitch and leaves roll alone; pass an up and it sets roll too.
+---@field turnTowards fun(self: Node, target: Node|Vec3, maxRadians: number) Turn toward something by at most that much, the SHORT way round. Pass rate * dt for a frame-rate-independent turn.
+---@field moveTowards fun(self: Node, target: Node|Vec3, maxDelta: number) The method spelling of moveTowards(node, ...). World-space and placed through the parent inverse, so a node under a container arrives where you pointed.
+---@field setTint fun(self: Node, color?: Color, alpha?: number) A colour MULTIPLIED over everything this node draws — its own textures and each part's own colour are kept. The easy "same model, but red": a hit flash, a team colour, a ghosted preview. `node:setTint()` with nothing clears it. Different from a Material, which REPLACES the model's own materials.
+---@field material fun(self: Node, name?: string): MaterialHandle Read and change a material with code. With no name: this node's own Material, which on a MODEL covers every part of it. With a name from `node:materials()` — an object like `Torso#2` or a material like `Clothing` — just that part of the model, creating the override on first write.
+---@field materials fun(self: Node): ModelSlot[] What this model's parts are CALLED, so a script can address one: `{object=, material=, textured=, overridden=}` per slot. Empty on a node that is not an imported model.
+---@field sprite fun(self: Node): SpriteHandle Read and change how this ONE sprite draws: `node:sprite().flipX = true`. Fields: flipX, flipY, cell, ppu, size, pivotX, pivotY — each readable and assignable. Raises on a node that is not a Sprite (a batch node wants node:sprites(), plural).
+---@field setSprite fun(self: Node, t: table) Construction API: make this node one SPRITE, or retune one. Keys (all optional, each keeping what the node had): ppu, size, cell, flipX, flipY, pivotX, pivotY. ppu is pixels per unit measured against ONE CELL of the Material's sheet; ppu=0 falls back to size, a world edge length. pivotY=0 puts the origin at the sprite's feet, which is what a Y-sorted character wants.
+---@field setSpriteBatch fun(self: Node, t?: table) Construction API: make this node a SPRITE BATCH, so node:sprites() can draw into it. Key: size (the world edge length one sprite gets before its own scale).
+---@field sprites fun(self: Node): table A handle to this node's SpriteBatch (make it one with setSpriteBatch first): b:draw(...) queues one sprite for this frame, each with its own position, rotation, scale, cell and tint.
+---@field setTilemap fun(self: Node, t: table) Construction API: make this node a TILEMAP — a grid of spritesheet cells drawn as one mesh. Keys: cols, rows, tile, data, tileset.
+---@field tilemap fun(self: Node): TilemapHandle A handle to this node's tilemap grid: tm:set / tm:get / tm:at / tm:fill / tm:fillRect / tm:size / tm:resize, and tm:cellAt / tm:worldAt / tm:tileSize in world space.
+---@field setSorting fun(self: Node, t: table) Where this 2D node draws in the stack. Keys (both optional): layer, one of the project's sorting layers by NAME, and order, higher being nearer the camera.
+---@field sorting fun(self: Node): table Where this node sits in the 2D stack: { layer =, order =, mode = }. A node that has never said anything about sorting answers with the DEFAULT rather than nil, because that IS where it draws.
+---@field getsorting fun(self: Node): table Short alias of sorting.
+---@field setParallax fun(self: Node, t: table) How much of the camera's movement this layer KEEPS, per axis: x and y. 1 moves with the world (the default), 0 pins it to the camera as if infinitely far away.
+---@field setCamera2D fun(self: Node, t: table) How this ORTHOGRAPHIC camera follows. Keys (all optional, each per axis): follow, smoothing, deadZoneX, deadZoneY, limits, minX, minY, maxX, maxY, pixelSnap, off. pixelSnap is pixels per world unit and lands the DRAWN camera on a whole pixel of that grid (0 = off), which is what stops pixel art shimmering when the camera stops between two. Dead zone, then smoothing, then limits. Does nothing on anything that is not an orthographic camera.
+---@field shake fun(self: Node, amount: number, seconds?: number) Shake a 2D camera: amount is a distance in world units, seconds defaults to 0.3, and it fades out. Added to what is DRAWN and never fed back into the follow. Calling it again takes the LOUDER amplitude and the LONGER time, each independently.
+---@field setLighting2D fun(self: Node, t: table) 2D lighting, from a script. Keys: mode (auto/2d/3d), layers (the sorting layers a light reaches), blocks (auto/on/off, whether a receiver occludes), inner, falloff, shadows.
+---@field setPointLight fun(self: Node, t: table) Construction API: make this node a light, or retune one. Keys (all optional, each keeping what the node had, INCLUDING its emitter shape): color, intensity, range.
+---@field setScreenShader fun(self: Node, name: string, on: boolean) Switch one of the Post Processing node's screen shaders on or off. The name is the file without its extension, the one the Inspector lists.
+---@field uiRect fun(self: Node): number, number, number, number Where this UI element was actually laid out on screen this frame — x, y, w, h in pixels — or nil if it is not a UI element or has not been drawn yet.
 
 ---A Rigidbody's live tunables (every Inspector field). Assign to change while playing;
 ---booleans may be written true/false and read back as 1/0.
 ---@class RigidBodyHandle
----@field friction number Surface friction 0..1 (0 = frictionless).
+---@field friction number Grip, as a coefficient: a ramp holds while tan(its angle) <= friction. 0 is ice, 1 holds exactly 45 degrees, above 1 is grippier still.
+---@field slopeLimit number Steepest standable surface, in degrees (default 60). Past it nothing grounds the body and no grip holds it.
 ---@field restitution number Bounciness 0..1 (0 = no bounce).
 ---@field gravity number Gravity pull on this body (1/0; assign true/false).
 ---@field kinematic number Transform-driven mode (1/0; assign true/false, live): never falls or gets pushed, but PUSHES dynamic bodies — platforms, elevators, grabbed objects. (Static mode is the Inspector dropdown — a baked collider, nothing to toggle here.)
@@ -69,6 +113,7 @@
 ---@field lock_rot_x number Freeze rotation about X (1/0).
 ---@field lock_rot_y number Freeze rotation about Y (1/0).
 ---@field lock_rot_z number Freeze rotation about Z (1/0).
+---@field two_d number 2D: keep the body in the XY plane (1/0).
 
 ---A Point Light's live tunables.
 ---@class PointLightHandle
@@ -77,6 +122,64 @@
 ---@field r number Color red 0..1.
 ---@field g number Color green 0..1.
 ---@field b number Color blue 0..1.
+---@field shape number The surface it emits from: 0 point, 1 sphere, 2 rect, 3 disk, 4 tube. Assigning keeps the size it had.
+---@field width number Rect only: its width in world units (0 on other shapes).
+---@field height number Rect only: its height in world units.
+---@field radius number Sphere / disk only: its radius in world units.
+---@field length number Tube only: how long the bar is.
+---@field thickness number Tube only: how thick the bar is.
+---@field twoSided number Rect / disk only (1/0): lights out of the back as well as the front.
+
+---The scene's LIGHTING NODE (`find("Lighting"):getcomponent("Light")`) — the one
+---environment a world has: the key light, the ambients, the shadows and the fog.
+---Conventionally bound to `env`, because `light` is the Point Light handle.
+---`ambient2dR/G/B` is where a 2D scene's brightness lives.
+---@class LightHandle
+---@field ambient2dR number The 2D BASE LIGHT, red 0..1 — the whole light a flat scene has before any 2D light is placed. White by default; turn it down for a dark room a torch can carve a circle out of, and read it back first so you can put it where it was.
+---@field ambient2dG number The 2D base light, green 0..1. See ambient2dR.
+---@field ambient2dB number The 2D base light, blue 0..1. See ambient2dR.
+---@field intensity number Brightness multiplier on the key (directional) light.
+---@field colorR number Key light colour red.
+---@field colorG number Key light colour green.
+---@field colorB number Key light colour blue.
+---@field directionX number Key light direction X — lerp the three for a day cycle.
+---@field directionY number Key light direction Y.
+---@field directionZ number Key light direction Z.
+---@field stars number Stars mode (1/0; assign true/false): luminous celestial bodies ARE the key lights.
+---@field ambientR number 3D ambient fill red 0..1 — the fill under the key light, deliberately a different value from ambient2dR.
+---@field ambientG number 3D ambient fill green 0..1.
+---@field ambientB number 3D ambient fill blue 0..1.
+---@field shadows number Sun shadows on (1/0; assign true/false). Every shadow field below only applies when this is on.
+---@field shadowSoftness number 0 = razor-hard edge … 1 = dreamy-soft penumbra.
+---@field shadowStrength number How dark full shadow gets, 0..1 (ambient still fills, so never pitch black).
+---@field shadowTintR number Shadows darken toward this colour instead of black — red.
+---@field shadowTintG number Shadow tint green.
+---@field shadowTintB number Shadow tint blue.
+---@field shadowQuantize number 0 = smooth penumbra; 2..8 = posterize it into that many bands (toon/retro).
+---@field shadowDither number Bayer-dither the penumbra (1/0) — the classic PS1 dithered shadow edge.
+---@field shadowDistance number Max world distance a shadow ray marches before giving up; far geometry stops casting past it.
+---@field fog number Depth fog on (1/0; assign true/false).
+---@field contactShadows number Contact shadows (1/0): the small dark line where things touch, traced from the depth buffer so a mesh casts its real silhouette. Only what is ON SCREEN casts one.
+---@field contactLength number How far a contact shadow traces, in world units.
+---@field contactSteps number Samples along the contact trace (2..32).
+---@field contactStrength number How dark a contact shadow gets, 0..1.
+---@field fogColorR number Fog colour red — match it to the horizon or a seam shows.
+---@field fogColorG number Fog colour green.
+---@field fogColorB number Fog colour blue.
+---@field fogStart number World distance where fog begins (fully clear nearer than this).
+---@field fogEnd number World distance where fog is full.
+---@field fogDither number Dither the fog gradient to hide 8-bit banding on long ramps (1/0).
+---@field fogDitherStrength number Dither amplitude 0..1.
+---@field fogVolumetric number Volumetric mode (1/0): march real fog media instead of a distance ramp, so hills poke out of ground mist. fogStart/fogEnd do not apply.
+---@field fogDensity number Volumetric: media density per world unit.
+---@field fogHeight number Volumetric: world height (y) of the fog layer's top.
+---@field fogFalloff number Volumetric: softness of the layer's top edge, world units.
+---@field fogNoise number Volumetric: how much drifting noise breaks up the media, 0..1.
+---@field fogNoiseScale number Volumetric: noise feature size, world units per repeat.
+---@field fogLight number Volumetric: how much of the scene's light scatters in the fog (0 = a flat colour, 1 = lit by the sun/points/bounce, past 1 exaggerates).
+---@field fogAnisotropy number Volumetric: which way the media throws light (-0.9..0.9, positive blooms toward the sun).
+---@field fogSteps number Volumetric: samples along each pixel's fog ray (2..64).
+---@field fogShafts number Volumetric (1/0): march the sun shadow per fog step — the beams, and the cost.
 
 ---A Camera's live properties (`node:getcomponent("Camera")`).
 ---@class CameraHandle
@@ -124,6 +227,7 @@
 ---@field z number Draw order: lowest z first.
 ---@field designHeight number Design units that span the window height.
 ---@field worldSpace number 1 = a panel inside the 3D world at this node's transform; 0 = a screen overlay.
+---@field textSnap number Round every rasterized text size to a whole multiple of this many SCREEN PIXELS; 0 = off. For a pixel font whose art is a grid — a cell only looks like a pixel when it lands on a whole one.
 
 ---A Material's live SPRITESHEET frame (`node:getcomponent("Material")`) — the
 ---mesh-side twin of a UI image's cell. Slice the texture into a grid in its
@@ -134,6 +238,30 @@
 ---@field cell number Which cell of the sheet draws (row-major from the top-left; clamped into the grid).
 ---@field sheetCols number Sheet columns (0 = not a sheet — the whole texture).
 ---@field sheetRows number Sheet rows.
+
+---A node's tilemap grid, from `node:tilemap()`. Read and write single squares
+---to re-dress a room without rebuilding the node.
+---
+---`cell` is an index into the node's Material spritesheet. To clear a square,
+---pass `-1` (any negative works, as in Tiled, Godot and LDtk), `nil`, or the
+---`EMPTY_TILE` global — the three are the same value (`floptle/0083`).
+---@class TilemapHandle
+---@field EMPTY number The cell value meaning "no tile here". Same as the EMPTY_TILE global; -1 and nil mean it too.
+---@field set fun(self: TilemapHandle, x: number, y: number, cell: number|nil, xform: table|nil) Set one square, 0-based from the TOP-LEFT. Outside the grid is a no-op, not a wrap. A negative or nil cell empties the square. The optional 4th argument turns it: { rot = 0|90|180|270, flipX = bool, flipY = bool }.
+---@field get fun(self: TilemapHandle, x: number, y: number): number|nil The cell at (x, y), orientation stripped — nil outside the grid and on an empty square.
+---@field at fun(self: TilemapHandle, x: number, y: number): number|nil, number|nil, boolean|nil cell, rot (degrees clockwise), flipX. The whole answer, for art that faces a direction.
+---@field fill fun(self: TilemapHandle, cell: number|nil, xform: table|nil) Set every square, including the empty ones. No argument (or -1) clears the whole grid.
+---@field fillRect fun(self: TilemapHandle, x0: number, y0: number, x1: number, y1: number, cell: number|nil, xform: table|nil) Fill a rectangle; corners in either order, clipped to the grid.
+---@field size fun(self: TilemapHandle): number, number cols, rows.
+---@field tileSize fun(self: TilemapHandle): number The world edge length of one square.
+---@field resize fun(self: TilemapHandle, opts: table) tm:resize{ cols =, rows =, offsetX =, offsetY = } — keeps whatever overlaps. offsetX/Y is where the old top-left lands, so offsetY = 1 grows a row on top.
+---@field cellAt fun(self: TilemapHandle, p: any): number|nil, number|nil Which square a WORLD position (vec3, {x=,y=,z=} or a node) falls in — through the map's own transform, so a moved, turned or scaled map still answers. nil off the map.
+---@field worldAt fun(self: TilemapHandle, x: number, y: number): any|nil The world position of that square's CENTRE, or nil off the grid.
+---@field tileset fun(self: TilemapHandle): string|nil The project-relative .tileset.ron this map is cut from, or nil.
+---@field solid fun(self: TilemapHandle, x: number, y: number): boolean Whether the tileset says that square collides. False with no tileset.
+---@field tags fun(self: TilemapHandle, x: number, y: number): table The tileset's tags for that square, as a list. Empty with no tileset.
+---@field hasTag fun(self: TilemapHandle, x: number, y: number, tag: string): boolean The common case of tags(), without allocating a table per square.
+---@field autotile fun(self: TilemapHandle, x0: number, y0: number, x1: number, y1: number) Recompute the region's autotiled squares (and the one-square ring around it, which is where the stale edges are). Does nothing without a tileset.
 
 ---A node's Particle System, controlled from a script via `node:particles()`.
 ---Start/stop the effect at runtime and read whether it's playing.
@@ -156,6 +284,40 @@
 ---@field seek fun(self: AudioSourceHandle, secs: number) Jump the playhead to a time in seconds.
 ---@field isPlaying fun(self: AudioSourceHandle): boolean Is the source audible right now?
 ---@field position fun(self: AudioSourceHandle): number Playhead in seconds.
+
+---Something that walks the navmesh, returned by `nav.agent(node)`. Order it with
+---`moveTo` and read `state` as it goes — the engine steps the whole crowd once a
+---frame, so there is no update to call.
+---@class NavAgentHandle
+---@field state string 'idle' | 'moving' | 'arrived' | 'blocked' | 'crossing', and 'gone' once destroyed.
+---@field arrived boolean True once it got there — the flag to hang "and then attack" off.
+---@field moving boolean True while it still has somewhere to be.
+---@field blocked boolean True when it cannot get there right now: unreachable, or no progress for giveUpAfter seconds. A crowd pin clears itself; a cut-off goal does not.
+---@field offMesh boolean True when the order named a place the navmesh does not cover, rather than one it cannot reach.
+---@field complete boolean Whether the route it is walking actually reaches the order.
+---@field remaining number How far there is left to walk, ALONG THE ROUTE rather than through the walls.
+---@field velocity Vec3 How fast it is going. With drive = 'none' this is the whole output.
+---@field speed number Ground speed in units per second — what a walk/run blend reads.
+---@field pos Vec3 Where it is, in world space.
+---@field target Vec3|nil Where it was told to go, or nil with no order.
+---@field link string|nil The Nav Link being crossed right now, by name. The hook for a climb animation.
+---@field linkProgress number|nil How far across that link, 0 to 1.
+---@field alive boolean False once the agent (or its node) has gone.
+---@field moveTo fun(self: NavAgentHandle, point: any) Send it to a world point. Idempotent, so calling it every frame to chase a moving target is fine.
+---@field stop fun(self: NavAgentHandle) Cancel the order. Anything mid-crossing finishes crossing first.
+---@field teleport fun(self: NavAgentHandle, point: any) Put it somewhere without walking there.
+---@field set fun(self: NavAgentHandle, opts: table) Change how it walks mid-game; anything left out is left alone.
+---@field corners fun(self: NavAgentHandle): table The corners still to walk, as a list of vec3.
+---@field destroy fun(self: NavAgentHandle) Take it out of the crowd.
+
+---A hole cut in the navmesh at runtime by `nav.obstacle(centre, size)` — the
+---crate in the corridor. Keep the handle; `remove()` gives the ground back.
+---@class NavObstacleHandle
+---@field id number Its id in the mesh. Opaque; compare it, do not compute with it.
+---@field active boolean Still cut out? False once removed, or after the scene reloaded.
+---@field position Vec3|nil The middle of the hole ACTUALLY cut, in world space, or nil once removed.
+---@field size Vec3|nil How big the hole actually is — the box you asked for, grown outward to whole navmesh cells. Draw this rather than what you passed in.
+---@field remove fun(self: NavObstacleHandle): boolean Give the ground back. False if it was already gone — calling it twice is not an error.
 
 ---A playing sound returned by `audio.play(...)`. Handles stay valid until the
 ---sound finishes; calls on a finished sound are ignored.
@@ -846,6 +1008,24 @@ function camera.exists() end
 ---The game viewport size in pixels: `local w, h = camera.screenSize()`.
 ---@return number, number
 function camera.screenSize() end
+---The game viewport rect in the SAME space as `input.mouse()`: `x, y, w, h`.
+---`screenSize` alone cannot answer "is the cursor over the game view?" — in the
+---editor the view is a dock panel, so the cursor's x carries whatever is to its
+---left.
+---@return number, number, number, number
+function camera.screenRect() end
+---How many screen pixels one world unit covers.
+---
+---Under an ORTHOGRAPHIC camera the answer is the same everywhere and `distance`
+---is ignored — that is what an orthographic projection means, and it is the case
+---a flat game is in. Under a perspective one it is measured at `distance`,
+---defaulting to the camera's distance from the origin.
+---
+---The number to size a pixel-art world by. A 2D camera can do the snapping for
+---you: `node:setCamera2D{ pixelSnap = camera.pixelsPerUnit() }`.
+---@param distance? number
+---@return number
+function camera.pixelsPerUnit(distance) end
 ---Project a world point to the game view: `sx, sy, depth, onscreen`. `onscreen`
 ---is false for points behind the camera or outside the frustum — skip those.
 ---@param x number
@@ -888,6 +1068,30 @@ function raycast(ox, oy, oz, dx, dy, dz, max, ignore) end
 ---@return table[]
 function findScripts(kind) end
 
+---The player's accessibility settings (`floptle/0079`). A game's options menu
+---drives these; the engine honours the parts it owns (UI text sizes reflow, the
+---colour filter is a post stage, UI transitions snap). Persist them with `save.*`.
+---@class Access
+---@field textScale fun(): number The UI text multiplier (1.0 = normal).
+---@field setTextScale fun(scale: number) Set the UI text multiplier, 0.5–3.0. Applied BEFORE layout, so text scaling reflows rather than clipping. Out of range raises.
+---@field colorFilter fun(): string The active colour-vision filter: "none" / "protanopia" / "deuteranopia" / "tritanopia".
+---@field setColorFilter fun(name: string, strength?: number) Correct the picture for a colour vision deficiency (a post-chain stage, so it applies to everything the player sees). An unrecognised name raises.
+---@field colorFilterStrength fun(): number How strongly the filter applies, 0–1.
+---@field filters fun(): { name: string, label: string }[] Every filter in menu order, for a settings dropdown.
+---@field reducedMotion fun(): boolean The player asked for less movement — read this for YOUR camera shake and screen effects.
+---@field setReducedMotion fun(on: boolean) Ask for less movement. The engine snaps its own UI transitions.
+---@field captions fun(): boolean Is the player showing captions?
+---@field setCaptions fun(on: boolean) Turn captions on.
+access = {}
+
+---Say a caption line, if the player asked for captions — drawn by the engine
+---bottom-centre at the player's text scale. A no-op returning false while
+---`access.captions()` is off, so you write this beside the sound with no `if`.
+---@param text string
+---@param seconds? number How long it stays up; without one, the length of the line decides.
+---@return boolean shown
+function caption(text, seconds) end
+
 ---EVERY node carrying tag `tag` (Inspector "tags" chips / node:addTag), as
 ---node handles in scene order — an empty table when none.
 ---`findTagged("enemy")[1]` grabs the first.
@@ -903,6 +1107,7 @@ function findTagged(tag) end
 ---@field y number
 ---@field z number
 ---@field length fun(self: Vec3): number
+---@field magnitude fun(self: Vec3): number The same call as length, under the name most engines use.
 ---@field lengthSquared fun(self: Vec3): number
 ---@field normalized fun(self: Vec3): Vec3 Unit-length copy (zero stays zero).
 ---@field dot fun(self: Vec3, other: Vec3): number
@@ -910,11 +1115,57 @@ function findTagged(tag) end
 ---@field lerp fun(self: Vec3, other: Vec3, t: number): Vec3
 ---@field distance fun(self: Vec3, other: Vec3): number
 
+---One material slot of a model, as `node:materials()` reports it.
+---@class ModelSlot
+---@field object string The sub-object this part belongs to — the key that addresses this part and no other. Import renames repeats, so a model with two `Torso` nodes has a `Torso#2`.
+---@field material string The glTF material name — the key that addresses every part wearing it (a character's `Clothing` is usually its torso and both arms).
+---@field textured boolean Did the model arrive with a texture on this material?
+---@field overridden boolean Has this node already given the part its own material?
+
+---A material you can read and assign, from `node:material(...)`.
+---
+---Every field of the Material component: `texture` and the surface maps by path
+---(`""` clears one), `color`/`emissive`/`specular`/`rim` as colours, and the
+---numbers — `alpha`, `roughness`, `metallic`, `emissiveStrength`, `unlit`,
+---`fog`, `cell`, and the rest. Writes land after the frame; reads answer with
+---what you last wrote.
+---@class MaterialHandle
+---@field texture string The base-colour image, project-relative. `""` clears it.
+---@field normalMap string
+---@field roughnessMap string
+---@field metallicMap string
+---@field occlusionMap string
+---@field color Color The tint, multiplied into the texture.
+---@field emissive Color Light this surface gives off (scaled by emissiveStrength).
+---@field specular Color
+---@field rim Color
+---@field alpha number Opacity, 0..1.
+---@field roughness number
+---@field metallic number
+---@field emissiveStrength number
+---@field unlit boolean Draw at full brightness, ignoring the scene's lights.
+---@field fog boolean Does the scene's fog reach this surface?
+---@field cell number Which cell of the spritesheet draws.
+
+---One sprite node's drawing numbers, as `node:sprite()` hands them over.
+---
+---Assigning a field takes effect this frame and reads back straight away, so
+---`sp.flipX = mx > 0` and `if sp.flipX then` in the same update agree.
+---@class SpriteHandle
+---@field flipX boolean Mirrored left-to-right — the face-the-way-you-are-walking flag.
+---@field flipY boolean Mirrored top-to-bottom.
+---@field cell integer Which cell of the Material's spritesheet draws, 0-based.
+---@field ppu number Pixels per unit, measured against ONE CELL of the sheet. 0 falls back to `size`, a world edge length.
+---@field size number World edge length, used when ppu is 0.
+---@field pivotX number The origin across the sprite, 0..1 (0.5 = centred).
+---@field pivotY number The origin up the sprite. 0 puts it at the feet, which is what a Y-sorted character wants.
+
 ---A 2-component vector (UI/screen math) — same operators as Vec3.
 ---@class Vec2
 ---@field x number
 ---@field y number
 ---@field length fun(self: Vec2): number
+---@field magnitude fun(self: Vec2): number The same call as length, under the name most engines use.
 ---@field lengthSquared fun(self: Vec2): number
 ---@field normalized fun(self: Vec2): Vec2
 ---@field dot fun(self: Vec2, other: Vec2): number
@@ -1049,8 +1300,26 @@ scene = {}
 ---against it, and every script's `start` re-fires — exactly like the scene
 ---booting fresh. Accepts a name ("arena"), a scenes-relative path
 ---("arenas/desert"), or a project-relative path ("scenes/arena.ron").
+---
+---With `{ additive = true }` the scene is LAYERED on top of the running one
+---instead of replacing it: nothing is torn down, no script restarts, and the
+---new nodes join the live physics sim. An additive scene brings nodes only —
+---no second lighting, skybox or post-processing node.
 ---@param name string
-function scene.load(name) end
+---@param opts? { additive?: boolean }
+function scene.load(name, opts) end
+---Remove an additively-loaded scene (and anything parented under it). The
+---base scene — the one you opened — is never a candidate.
+---@param name string
+function scene.unload(name) end
+---Be told when a scene has finished loading — AFTER the world is whole, which
+---is when a loading screen's job is done. The callback receives the scene's
+---name and whether it arrived additively.
+---
+---The subscription dies with the script that made it, so a node covering a
+---full swap must set `node.persistent = true` to be around for the answer.
+---@param fn fun(name: string, additive: boolean)
+function scene.onLoaded(fn) end
 ---The running scene's name (its file stem, e.g. "first").
 ---@return string
 function scene.current() end
@@ -1058,6 +1327,96 @@ function scene.current() end
 ---subfolders kept, e.g. "arenas/desert").
 ---@return string[]
 function scene.list() end
+
+---Thousands of props from a seed, GPU-instanced and never scene nodes. Your
+---generator keeps deciding WHAT grows where; the engine places and draws it.
+---@class Scatter
+scatter = {}
+---Declare a scatter source; returns its id. `asset` (a mesh path) or a `lod`
+---list is required; everything else defaults. An option this doesn't list is an
+---ERROR, not a shrug — scattered props have no collision, and the `collide`
+---option that suggested otherwise was never read by anything.
+---
+---Give `center` + `radius` for a planet's surface, or `center` + `halfX`/`halfZ`
+---for a flat region.
+---
+---`asset` is a mesh file **or** a `.prefab.ron`. A prefab is baked ONCE into one
+---instanced draw per Mesh node it contains, each at its authored place within
+---the prop — so a plant your own generator assembled (a trunk and three fronds)
+---can be scattered without a scene node per frond. Nodes that are not Meshes are
+---skipped; a prototype that yields nothing says so in the Console.
+---
+---`density` gives a world biomes: a function(x, y, z) returning 0..1, sampled
+---ONCE when the source is declared into a `densityRows` grid. It is not called
+---per instance and never while chunks build — placement has to stay a pure
+---function of the seed, or walking away and back would regrow a different
+---world. Density 0 generates no instance at all.
+---@param opts { asset?: string, lod?: { asset: string, distance: number }[], seed?: number, center?: Vec3, radius?: number, halfX?: number, halfZ?: number, perChunk?: number, chunk?: number, align?: string, scaleMin?: number, scaleMax?: number, range?: number, fade?: number, density?: fun(x: number, y: number, z: number): number | number[], densityRows?: number }
+---@return integer
+function scatter.create(opts) end
+---Instances within `radius` of a point, nearest first. What a harvest verb aims
+---with — a proximity query, not a ray.
+---@param id integer
+---@param point Vec3
+---@param radius? number
+---@return { id: integer, distance: number, pos: Vec3, scale: number, param: number }[]
+function scatter.near(id, point, radius) end
+---Remove one instance, permanently. By ID, so it survives the chunk streaming
+---out and back in.
+---@param id integer
+---@param instanceId integer
+---@return boolean
+function scatter.remove(id, instanceId) end
+---Put one instance back, or all of them — what regrowth is made of.
+---@param id integer
+---@param instanceId? integer
+---@return integer restored
+function scatter.restore(id, instanceId) end
+---The instance ids this source has lost. Save THIS (a handful of numbers), not
+---every prop you ever saw.
+---@param id integer
+---@return integer[]
+function scatter.removed(id) end
+---Drop a whole source.
+---@param id integer
+---@return boolean
+function scatter.destroy(id) end
+
+---The scene's bodies of water. The engine floats things and drags them; what
+---being WET means — swimming, drowning, a flooded engine, a gauge going red —
+---is the game's, and all of it comes from one number: the depth.
+---@class Water
+water = {}
+---Metres below the nearest water surface; 0 in air. Takes (x, y, z), a vec3,
+---or a node. The same rule the solver uses, so a swim state can never disagree
+---with the physics floating you.
+---@param x number|Vec3|Node
+---@param y? number
+---@param z? number
+---@return number
+function water.depthAt(x, y, z) end
+---nil in air, else `{depth, density, frozen, node, up}` — `up` being the
+---direction OUT of the water (radial on a sea; NOT −gravity in a tilted tank).
+---@param x number|Vec3|Node
+---@param y? number
+---@param z? number
+---@return { depth: number, density: number, frozen: boolean, node: Node, up: Vec3 }|nil
+function water.at(x, y, z) end
+---The yes/no, when that is all you wanted.
+---@param x number|Vec3|Node
+---@param y? number
+---@param z? number
+---@return boolean
+function water.isUnderwater(x, y, z) end
+---Freeze or thaw a water volume. Frozen water applies no buoyancy, no drag and
+---no underwater look — pair it with a Collidable surface and a sea becomes
+---walkable ground.
+---@param node Node
+---@param frozen boolean
+function water.setFrozen(node, frozen) end
+---Every water volume in the scene, as nodes.
+---@return Node[]
+function water.volumes() end
 
 ---Runtime terrain editing + queries (Terrain 2.0). Edits queue and land the
 ---same tick (collision updates with the surface). World coordinates.
@@ -1074,6 +1433,7 @@ terrain = {}
 ---@param radius number
 ---@param strength? number
 ---@param mode? string
+---@return number id an id for the yield report this edit will produce
 function terrain.sculpt(x, y, z, radius, strength, mode) end
 ---Dig a hole — sugar for `terrain.sculpt(x, y, z, radius, strength, "lower")`.
 ---@param x number
@@ -1081,6 +1441,7 @@ function terrain.sculpt(x, y, z, radius, strength, mode) end
 ---@param z number
 ---@param radius number
 ---@param strength? number
+---@return number id an id for the yield report this edit will produce
 function terrain.dig(x, y, z, radius, strength) end
 ---Recolor the terrain surface inside the brush ball (r/g/b are 0..1).
 ---@param x number
@@ -1131,6 +1492,16 @@ function terrain.saveDir(path) end
 ---positions of dynamic bodies, never the camera.
 ---@param bodyName string The body's node name (as in `space.bodies()`).
 function terrain.warm(bodyName) end
+---Is the background terrain worker already occupied? True while any field is
+---generating or streaming in.
+---
+---Whole-body fills and residency streaming share ONE background budget, so a
+---game that builds its world as the player travels should ask before queueing
+---the next one — otherwise the new world goes in behind the ground somebody is
+---standing on. The pattern: build one thing, wait for this to go quiet, build
+---the next.
+---@return boolean
+function terrain.busy() end
 ---Checkpoint every EDITED resident terrain field to the save slot
 ---(`terrain.saveDir` must be set). Runs IN THE BACKGROUND — a few chunks of
 ---encoding per frame plus a threaded write, deferred while a field is being
@@ -1154,6 +1525,47 @@ function terrain.deleteSaveDir(path) end
 ---@param z number
 ---@return number|nil
 function terrain.query(x, y, z) end
+---The texture-palette slot at a world point — what the rock there is made of —
+---or nil where the field carries no slot.
+---@param x number
+---@param y number
+---@param z number
+---@return number|nil
+function terrain.slotAt(x, y, z) end
+---Everything inside a sphere: a list of hits, deepest overlap first. Hits carry
+---the same fields a raycast hit does; `distance` is the PENETRATION DEPTH.
+---Sees sensors (a hitbox wants to know it swept a trigger) and, inside
+---`net.rewind`, sees the rewound world.
+---@param center Vec3
+---@param radius number
+---@param opts? table { ignore = node, layers = "Ground" or a list of names }
+---@return table[]
+function overlapSphere(center, radius, opts) end
+---Sweep a sphere along a ray; the first thing it touches, or nil. Catches what a
+---bare ray squeaks past.
+---@param origin Vec3
+---@param dir Vec3
+---@param radius number
+---@param max number
+---@param opts? table
+---@return table|nil
+function spherecast(origin, dir, radius, max, opts) end
+---Sweep an upright capsule — the shape a character actually is — along a ray.
+---@param origin Vec3
+---@param dir Vec3
+---@param radius number
+---@param halfHeight number
+---@param max number
+---@param opts? table
+---@return table|nil
+function capsulecast(origin, dir, radius, halfHeight, max, opts) end
+---Reports for terrain edits that have LANDED since the last call (drained).
+---Each entry is { id, removed, added, untextured, slots = { [slot] = volume } }
+---in world cubic units; `removed` equals `untextured` plus the slot volumes.
+---An edit is queued and applied after the script pass, so a report arrives on a
+---later frame than the `terrain.dig` that asked for it — match them by `id`.
+---@return table[]
+function terrain.yields() end
 ---World Y of the highest terrain surface under (x,z), or nil when no terrain
 ---is hit there.
 ---@param x number

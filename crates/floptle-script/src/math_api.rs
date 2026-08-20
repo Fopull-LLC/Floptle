@@ -2,11 +2,11 @@
 //!
 //! Vectors are small userdata values with real operators — `a + b`, `a - b`,
 //! `v * 2`, `-v`, `a == b` — plus the methods games actually reach for
-//! (`length`, `normalized`, `dot`, `cross`, `lerp`, `distance`). Everything
-//! that ACCEPTS a vector also accepts a plain `{x=, y=, z=}` table or a node
-//! handle (anything with numeric x/y/z fields), so `distance(node, target)`
-//! just works. LuaJIT-friendly: components are plain doubles, ops allocate
-//! one small userdata — fine at gameplay call rates.
+//! (`length` — also spelled `magnitude` — `normalized`, `dot`, `cross`, `lerp`,
+//! `distance`). Everything that ACCEPTS a vector also accepts a plain
+//! `{x=, y=, z=}` table or a node handle (anything with numeric x/y/z fields),
+//! so `distance(node, target)` just works. LuaJIT-friendly: components are
+//! plain doubles, ops allocate one small userdata — fine at gameplay call rates.
 
 use mlua::{Lua, MetaMethod, Table, UserData, UserDataFields, UserDataMethods, Value};
 
@@ -71,6 +71,11 @@ impl UserData for LuaVec3 {
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("length", |_, v, ()| Ok(v.0.length()));
+        // `magnitude` is `length` spelled the way most engines spell it. A
+        // developer arriving from one of them types the name they already know,
+        // and a name that isn't there reads as a missing feature rather than a
+        // different word for the same thing — so both are the same call.
+        methods.add_method("magnitude", |_, v, ()| Ok(v.0.length()));
         methods.add_method("lengthSquared", |_, v, ()| Ok(v.0.length_squared()));
         methods.add_method("normalized", |_, v, ()| {
             Ok(LuaVec3(v.0.try_normalize().unwrap_or(glam::DVec3::ZERO)))
@@ -205,6 +210,8 @@ impl UserData for LuaVec2 {
             vec3_of(v).map(|v| glam::DVec2::new(v.x, v.y))
         }
         methods.add_method("length", |_, v, ()| Ok(v.0.length()));
+        // The same alias vec3 carries, for the same reason.
+        methods.add_method("magnitude", |_, v, ()| Ok(v.0.length()));
         methods.add_method("lengthSquared", |_, v, ()| Ok(v.0.length_squared()));
         methods.add_method("normalized", |_, v, ()| {
             Ok(LuaVec2(v.0.try_normalize().unwrap_or(glam::DVec2::ZERO)))
@@ -1234,6 +1241,25 @@ mod helper_tests {
         let a = n("return vec3(1,0,0):angleTo(vec3(0,1,0))");
         assert!((a - std::f64::consts::FRAC_PI_2).abs() < 1e-12, "perpendicular: {a}");
         assert_eq!(n("return vec3(0,0,0):angleTo(vec3(0,1,0))"), 0.0);
+    }
+
+    /// `magnitude` is `length` under the name most other engines use for it.
+    /// The guard is that the two are the SAME number on BOTH vector types — an
+    /// alias that has drifted from the call it aliases is worse than no alias.
+    #[test]
+    fn magnitude_is_length_on_both_vector_types() {
+        let lua = lua();
+        let n = |src: &str| -> f64 { lua.load(src).call::<f64>(()).expect(src) };
+
+        assert_eq!(n("return vec3(3, 4, 12):magnitude()"), 13.0);
+        assert_eq!(n("return vec3(3, 4, 12):magnitude()"), n("return vec3(3, 4, 12):length()"));
+        assert_eq!(n("return vec2(3, 4):magnitude()"), 5.0);
+        assert_eq!(n("return vec2(3, 4):magnitude()"), n("return vec2(3, 4):length()"));
+        // A zero vector is zero long, not a NaN.
+        assert_eq!(n("return vec3(0, 0, 0):magnitude()"), 0.0);
+        assert_eq!(n("return vec2(0, 0):magnitude()"), 0.0);
+        // It reads the same off a difference, which is what most calls are.
+        assert_eq!(n("return (vec3(1, 0, 0) - vec3(4, 4, 0)):magnitude()"), 5.0);
     }
 
     /// The list helpers, and the two behaviours worth pinning: `find` takes a

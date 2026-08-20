@@ -1828,6 +1828,7 @@ impl ScriptHost {
         let terrain_save_dir: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let terrain_warm: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         let terrain_flush: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
+        let terrain_busy: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
         let terrain_yields: Rc<RefCell<Vec<crate::terrain_api::TerrainYield>>> =
             Rc::new(RefCell::new(Vec::new()));
         let terrain_op_id: Rc<std::cell::Cell<u64>> = Rc::new(std::cell::Cell::new(0));
@@ -1841,6 +1842,7 @@ impl ScriptHost {
                 save_dir: terrain_save_dir.clone(),
                 warm: terrain_warm.clone(),
                 flush: terrain_flush.clone(),
+                busy: terrain_busy.clone(),
                 root: project_root.clone(),
             },
             crate::terrain_api::TerrainReceipts {
@@ -1968,6 +1970,7 @@ impl ScriptHost {
             terrain_save_dir,
             terrain_warm,
             terrain_flush,
+            terrain_busy,
             create_requests,
             rich_sets: shared.rich_sets.clone(),
             scene: shared.scene.clone(),
@@ -2731,6 +2734,11 @@ impl ScriptHost {
         self.frame_step_request.replace(0)
     }
 
+    /// Mirror the background terrain worker's state into `terrain.busy()`.
+    pub fn set_terrain_busy(&self, on: bool) {
+        self.terrain_busy.set(on);
+    }
+
     /// Mirror the editor's physics-paused state into `physics.isPaused()`.
     pub fn set_physics_paused(&self, on: bool) {
         self.physics_paused.set(on);
@@ -3197,27 +3205,7 @@ impl ScriptHost {
                 .and_then(|s| s.0.iter().find(|i| i.kind == kind))
                 .map(|i| (i.params.clone(), i.refs.clone(), i.strs.clone()))
                 .unwrap_or_default();
-            let resolved: Vec<(String, crate::env::ResolvedRef)> = {
-                use crate::env::{parse_ref_sentinel, ResolvedRef};
-                let s = self.scene.borrow();
-                let defaults = env.get::<Table>("defaults").ok();
-                refs.iter()
-                    .map(|(k, target)| {
-                        let id = (!target.is_empty())
-                            .then(|| s.by_name.get(target).copied())
-                            .flatten();
-                        let rk = defaults
-                            .as_ref()
-                            .and_then(|d| d.get::<String>(k.as_str()).ok())
-                            .and_then(|v| parse_ref_sentinel(&v));
-                        let r = match (rk, id) {
-                            (Some(crate::RefKind::Node), Some(id)) => ResolvedRef::Node(id),
-                            _ => ResolvedRef::None,
-                        };
-                        (k.clone(), r)
-                    })
-                    .collect()
-            };
+            let resolved = self.resolve_refs(&env, &refs);
             if let Ok(t) = crate::env::params_table(&self.lua, &env, &params, &resolved, &strs) {
                 let _ = env.set("params", t);
             }
@@ -3666,6 +3654,17 @@ impl ScriptHost {
         self.scene.borrow_mut().tilesets = sets;
     }
 
+    /// Lend the material slots of every model the editor has imported, keyed by
+    /// asset path — what `node:materials()` answers from.
+    ///
+    /// Lent rather than read: a `.glb`'s parts are the importer's knowledge and
+    /// this host does no file I/O, the same deal `set_tilesets` makes. Cheap to
+    /// re-publish (one `Vec` per model), so the editor does it whenever the mesh
+    /// registry changes rather than trying to keep a diff.
+    pub fn set_model_slots(&self, slots: std::collections::HashMap<String, Vec<crate::ModelSlot>>) {
+        self.scene.borrow_mut().model_slots = slots;
+    }
+
     /// A live `(entity, script)` environment table, if built — for tests and
     /// tooling that read a script's state from Rust.
     pub fn instance_env(&self, eid: u32, kind: &str) -> Option<Table> {
@@ -4037,6 +4036,7 @@ impl ScriptHost {
             for inst in &scripts.0 {
                 if inst.enabled {
                     self.ensure_instance(*e, &inst.kind, scripts_dir);
+                    self.seed_params(*e, &inst.kind, &inst.params, &inst.refs, &inst.strs);
                 }
             }
         }
@@ -4731,12 +4731,14 @@ impl ScriptHost {
         s.ui_texts.clear();
         s.ui_styles.clear();
         s.ui_textures.clear();
+        s.component_strings.clear();
         // NOT cleared: the grids are reused when a map has not changed
         // (`floptle/0117`). Entities that are gone, or that stopped being a
         // tilemap, are dropped by the retain after the loop.
         let mut live_tilemaps: std::collections::HashSet<u32> =
             std::collections::HashSet::new();
         s.sprite_batches.clear();
+        s.sprites.clear();
         s.sorting.clear();
         s.by_kind.clear();
         s.by_tag.clear();
@@ -4829,6 +4831,19 @@ impl ScriptHost {
                         }
                     }
                 }
+                Some(Matter::Sprite { ppu, size, cell, flip_x, flip_y, pivot }) => {
+                    s.sprites.insert(
+                        id,
+                        crate::SpriteMirror {
+                            ppu: *ppu,
+                            size: *size,
+                            cell: *cell,
+                            flip_x: *flip_x,
+                            flip_y: *flip_y,
+                            pivot: *pivot,
+                        },
+                    );
+                }
                 Some(Matter::SpriteBatch { .. }) => {
                     s.sprite_batches.insert(id);
                 }
@@ -4865,6 +4880,13 @@ impl ScriptHost {
             let cols = crate::mirror_component_colors(world, e);
             if !cols.is_empty() {
                 s.component_colors.insert(id, cols);
+            }
+            // The string half — what a material is WEARING, what an element
+            // says. Mirrored for the same reason the numbers are: a field a
+            // script can write and cannot read is half a field.
+            let strs = crate::mirror_component_strings(world, e);
+            if !strs.is_empty() {
+                s.component_strings.insert(id, strs);
             }
             if let Some(v) = world.get::<Visible>(e) {
                 s.visible.insert(id, v.0);
@@ -5066,6 +5088,81 @@ impl ScriptHost {
         let Ok(key) = self.lua.create_registry_value(&env) else { return false };
         self.envs.borrow_mut().insert((e.index(), name.to_string()), key);
         true
+    }
+
+    /// A script instance's REFERENCE params, resolved against the scene by name.
+    ///
+    /// Its own function because two callers need the same answer and used to
+    /// have one and a half: the editor-action path resolved them, and the
+    /// pass-1 seed passed an empty list — so a library script's wired node
+    /// reference read nil, and for a HOOKLESS script (which never ticks) it
+    /// stayed nil for the whole session.
+    fn resolve_refs(
+        &self,
+        env: &Table,
+        refs: &[(String, String)],
+    ) -> Vec<(String, crate::env::ResolvedRef)> {
+        use crate::env::{parse_ref_sentinel, ResolvedRef};
+        let s = self.scene.borrow();
+        let defaults = env.get::<Table>("defaults").ok();
+        refs.iter()
+            .map(|(k, target)| {
+                let id =
+                    (!target.is_empty()).then(|| s.by_name.get(target).copied()).flatten();
+                let rk = defaults
+                    .as_ref()
+                    .and_then(|d| d.get::<String>(k.as_str()).ok())
+                    .and_then(|v| parse_ref_sentinel(&v));
+                let r = match (rk, id) {
+                    (Some(crate::RefKind::Node), Some(id)) => ResolvedRef::Node(id),
+                    _ => ResolvedRef::None,
+                };
+                (k.clone(), r)
+            })
+            .collect()
+    }
+
+    /// Give a freshly built environment its `params` before ANY script runs.
+    ///
+    /// `tick` seeds `params` too, but only for the instance it is ticking — so
+    /// until an instance has had its first tick, its `params` is **nil**, not
+    /// the defaults-seeded table `params_table` promises. That is invisible for
+    /// a script that only reads its own tunables, and fatal for the pair that
+    /// pass 1 exists to support: a script whose `update` runs early calls a
+    /// LIBRARY script through `findScript`, the callee reads `params.foo`, and
+    /// it raises on `params` being nil. Whether it raises depends on the two
+    /// nodes' order in the scene file, which is why it reads as random.
+    ///
+    /// A hookless library script never ticks at all, so for it this is the only
+    /// seed it ever gets.
+    ///
+    /// Only when unset: once an instance has ticked, `tick`'s table is the live
+    /// one — it carries the resolved reference params, which need the world and
+    /// so cannot be built here. Two-way param writes live in that table too, and
+    /// re-seeding would discard them.
+    fn seed_params(
+        &self,
+        e: Entity,
+        name: &str,
+        params: &[(String, f32)],
+        refs: &[(String, String)],
+        strs: &[(String, String)],
+    ) {
+        let Some(inst) = self.instances.get(&(e.index(), name.to_string())) else { return };
+        let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return };
+        // `raw_get`, so an env whose metatable reaches the globals cannot answer
+        // this with somebody else's `params`.
+        if env.raw_get::<Value>("params").is_ok_and(|v| !v.is_nil()) {
+            return;
+        }
+        // REFERENCE params too, resolved the same way every other caller
+        // resolves them. Seeding without them looked harmless — the tick would
+        // fill them in — but a hookless library script never ticks, so its
+        // wired-up node reference would have been nil for the entire session.
+        let resolved = self.resolve_refs(&env, refs);
+        if let Ok(t) = crate::env::params_table(&self.lua, &env, params, &resolved, strs) {
+            let _ = env.set("params", t);
+        }
     }
 
     /// Run one already-ensured `(entity, script)` instance's lifecycle for

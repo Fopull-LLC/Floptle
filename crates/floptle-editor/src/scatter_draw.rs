@@ -314,22 +314,73 @@ impl crate::Editor {
     }
 
     pub(crate) fn scatter_prototype(&mut self, asset: &str) -> Option<Vec<Part>> {
+        // A "nothing baked" answer taken without a GPU is not about the asset,
+        // so it stops being the answer the moment there is one to bake on.
+        if self.gpu.is_some() && !self.scatter_protos_gpuless.is_empty() {
+            for a in std::mem::take(&mut self.scatter_protos_gpuless) {
+                self.scatter_protos.remove(&a);
+            }
+        }
         if let Some(cached) = self.scatter_protos.get(asset) {
             return (!cached.is_empty()).then(|| cached.clone());
         }
         let parts = self.bake_scatter_prototype(asset);
         if parts.is_empty() {
-            self.console.push(
-                floptle_script::LogLevel::Warn,
-                format!(
-                    "scatter: `{asset}` has nothing to draw — a mesh file, or a prefab \
-                     containing at least one Mesh node, is what a scatter prototype is"
-                ),
-                None,
-            );
+            // **"Nothing to draw" has to be a fact about the ASSET.**
+            //
+            // A bake registers meshes on the GPU, so with no GPU it comes back
+            // empty whatever the asset is — and `floptle run` has no GPU and
+            // draws nothing at all. Printing this there said a project's props
+            // were broken when they were fine, several times, in every single
+            // headless run: exactly the kind of warning that teaches a reader to
+            // skip the warning block (`floptle/0157`).
+            //
+            // A missing file is still worth saying and is knowable either way,
+            // so that half is unconditional and the rest waits for a process
+            // that could actually have drawn it.
+            if !self.scatter_asset_exists(asset) {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!(
+                        "scatter: `{asset}` has nothing to draw — no prefab and no model \
+                         file of that name. A scatter prototype is a mesh file, or a prefab \
+                         containing at least one Mesh node."
+                    ),
+                    None,
+                );
+            } else if self.gpu.is_some() {
+                self.console.push(
+                    floptle_script::LogLevel::Warn,
+                    format!(
+                        "scatter: `{asset}` has nothing to draw — a mesh file, or a prefab \
+                         containing at least one Mesh node, is what a scatter prototype is"
+                    ),
+                    None,
+                );
+            } else {
+                // Cached, but remembered as a NON-answer: an editor that later
+                // gets a GPU re-bakes it (see `scatter_protos_gpuless`). Not
+                // caching at all was the obvious move and the wrong one — a
+                // headless `floptle run` bakes inside every one of its thousands
+                // of steps, so an un-cached miss re-reads and re-parses the
+                // prefab thousands of times over.
+                self.scatter_protos_gpuless.insert(asset.to_string());
+                self.scatter_protos.insert(asset.to_string(), parts);
+                return None;
+            }
         }
         self.scatter_protos.insert(asset.to_string(), parts.clone());
         (!parts.is_empty()).then_some(parts)
+    }
+
+    /// Is there anything on disk this scatter asset could name — a prefab, or a
+    /// model file? The half of "nothing to draw" that is true with or without a
+    /// GPU.
+    fn scatter_asset_exists(&mut self, asset: &str) -> bool {
+        if self.resolve_prefab_request(asset).is_some() {
+            return true;
+        }
+        crate::project::resolve_asset_path(&self.project_root, asset).exists()
     }
 
     fn bake_scatter_prototype(&mut self, asset: &str) -> Vec<Part> {
@@ -400,6 +451,51 @@ fn prefab_local(docs: &[floptle_scene::NodeDoc], i: usize) -> Mat4 {
 mod tests {
     use super::*;
     use floptle_core::scatter::{Band, Region};
+
+    /// A headless process must not report a project's props as broken
+    /// (`floptle/0157`).
+    ///
+    /// The bake registers meshes on the GPU, so with no GPU it comes back empty
+    /// for every asset alike — and `floptle run` has no GPU. It printed
+    /// "`grass.glb` has nothing to draw" for each prototype, in every run, about
+    /// models that were perfectly fine. A warning that is always there and never
+    /// true is worse than no warning: it teaches whoever is reading to skip the
+    /// block that also holds the real ones.
+    #[test]
+    fn a_gpuless_bake_does_not_call_a_perfectly_good_model_undrawable() {
+        let dir = std::env::temp_dir().join(format!("floptle-scatter-warn-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("models"));
+        // A file that exists — the bake still cannot register it without a GPU.
+        std::fs::write(dir.join("models/rock.glb"), b"not really a glb, but it is HERE").unwrap();
+
+        let mut ed = crate::Editor { project_root: dir.clone(), ..Default::default() };
+        assert!(ed.gpu.is_none(), "this test is about the no-GPU path");
+
+        assert!(ed.scatter_prototype("models/rock.glb").is_none(), "nothing bakes without a GPU");
+        assert!(
+            ed.console.entries.is_empty(),
+            "a model that is right there must not be called undrawable by a process that \
+             could not have drawn anything: {:?}",
+            ed.console.entries.iter().map(|e| &e.msg).collect::<Vec<_>>()
+        );
+        // …and it is not cached as an answer, so the same editor with a GPU
+        // would still bake it.
+        // Cached so a thousand-step headless run does not re-parse it a
+        // thousand times — but remembered as a non-answer, so an editor WITH a
+        // GPU bakes it properly.
+        assert!(ed.scatter_protos.contains_key("models/rock.glb"), "cached, so it is asked once");
+        assert!(ed.scatter_protos_gpuless.contains("models/rock.glb"), "…and known to be provisional");
+
+        // An asset that names nothing on disk is a real mistake, and saying so
+        // needs no GPU at all.
+        assert!(ed.scatter_prototype("models/nope.glb").is_none());
+        assert_eq!(ed.console.entries.len(), 1, "the missing one is still reported");
+        assert!(
+            ed.console.entries[0].msg.contains("no prefab and no model file"),
+            "{}",
+            ed.console.entries[0].msg
+        );
+    }
 
     fn src() -> ScatterSource {
         ScatterSource {

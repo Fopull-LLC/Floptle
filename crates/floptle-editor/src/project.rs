@@ -227,6 +227,34 @@ impl Editor {
     }
 
     /// Import + register a glTF model (cached by path). Returns true on success.
+    /// Every imported model's material slots, keyed by asset path — what the
+    /// script host is lent so `node:materials()` can answer.
+    ///
+    /// Both names per slot, because a part answers to both and neither is
+    /// enough on its own: the OBJECT name is precise but is rewritten by import
+    /// when a model repeats a name (`Torso` → `Torso#2`), and the MATERIAL name
+    /// is the one on the model's own list and usually the group somebody means.
+    pub(crate) fn model_slots(
+        &self,
+    ) -> std::collections::HashMap<String, Vec<floptle_script::ModelSlot>> {
+        self.mesh_registry
+            .iter()
+            .map(|(path, asset)| {
+                let slots = asset
+                    .part_meta
+                    .iter()
+                    .enumerate()
+                    .map(|(i, pm)| floptle_script::ModelSlot {
+                        object: asset.override_key(i).unwrap_or(&pm.material).to_string(),
+                        material: pm.material.clone(),
+                        textured: pm.textured,
+                    })
+                    .collect();
+                (path.clone(), slots)
+            })
+            .collect()
+    }
+
     pub(crate) fn import_model(&mut self, path: &str) -> bool {
         if self.mesh_registry.contains_key(path) {
             return true;
@@ -336,6 +364,11 @@ impl Editor {
                     },
                 );
                 eprintln!("  imported {path}");
+                // A model imported after Play started — a script spawning a
+                // prefab, a scatter prototype baking — has to reach
+                // `node:materials()` too, or a runtime-spawned character has no
+                // parts a script can name.
+                self.script_host.set_model_slots(self.model_slots());
                 true
             }
             Err(e) => {
@@ -1910,6 +1943,7 @@ fn default_camera_node() -> floptle_scene::NodeDoc {
         }],
         material: None,
         object_materials: Default::default(),
+        tint: None,
         rigidbody: None,
         celestial: None,
         mesh_collider: false,

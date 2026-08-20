@@ -119,6 +119,10 @@ pub(crate) const LUA_ANNOTATIONS: &str = "\
 ---@field lookAt fun(self: Node, target: Node|Vec3, up?: Vec3) Point this node at another node or a world point. Sets yaw + pitch and leaves roll alone; pass an up and it sets roll too.
 ---@field turnTowards fun(self: Node, target: Node|Vec3, maxRadians: number) Turn toward something by at most that much, the SHORT way round. Pass rate * dt for a frame-rate-independent turn.
 ---@field moveTowards fun(self: Node, target: Node|Vec3, maxDelta: number) The method spelling of moveTowards(node, ...). World-space and placed through the parent inverse, so a node under a container arrives where you pointed.
+---@field setTint fun(self: Node, color?: Color, alpha?: number) A colour MULTIPLIED over everything this node draws — its own textures and each part's own colour are kept. The easy \"same model, but red\": a hit flash, a team colour, a ghosted preview. `node:setTint()` with nothing clears it. Different from a Material, which REPLACES the model's own materials.
+---@field material fun(self: Node, name?: string): MaterialHandle Read and change a material with code. With no name: this node's own Material, which on a MODEL covers every part of it. With a name from `node:materials()` — an object like `Torso#2` or a material like `Clothing` — just that part of the model, creating the override on first write.
+---@field materials fun(self: Node): ModelSlot[] What this model's parts are CALLED, so a script can address one: `{object=, material=, textured=, overridden=}` per slot. Empty on a node that is not an imported model.
+---@field sprite fun(self: Node): SpriteHandle Read and change how this ONE sprite draws: `node:sprite().flipX = true`. Fields: flipX, flipY, cell, ppu, size, pivotX, pivotY — each readable and assignable. Raises on a node that is not a Sprite (a batch node wants node:sprites(), plural).
 ---@field setSprite fun(self: Node, t: table) Construction API: make this node one SPRITE, or retune one. Keys (all optional, each keeping what the node had): ppu, size, cell, flipX, flipY, pivotX, pivotY. ppu is pixels per unit measured against ONE CELL of the Material's sheet; ppu=0 falls back to size, a world edge length. pivotY=0 puts the origin at the sprite's feet, which is what a Y-sorted character wants.
 ---@field setSpriteBatch fun(self: Node, t?: table) Construction API: make this node a SPRITE BATCH, so node:sprites() can draw into it. Key: size (the world edge length one sprite gets before its own scale).
 ---@field sprites fun(self: Node): table A handle to this node's SpriteBatch (make it one with setSpriteBatch first): b:draw(...) queues one sprite for this frame, each with its own position, rotation, scale, cell and tint.
@@ -1149,6 +1153,7 @@ function findTagged(tag) end
 ---@field y number
 ---@field z number
 ---@field length fun(self: Vec3): number
+---@field magnitude fun(self: Vec3): number The same call as length, under the name most engines use.
 ---@field lengthSquared fun(self: Vec3): number
 ---@field normalized fun(self: Vec3): Vec3 Unit-length copy (zero stays zero).
 ---@field dot fun(self: Vec3, other: Vec3): number
@@ -1156,11 +1161,57 @@ function findTagged(tag) end
 ---@field lerp fun(self: Vec3, other: Vec3, t: number): Vec3
 ---@field distance fun(self: Vec3, other: Vec3): number
 
+---One material slot of a model, as `node:materials()` reports it.
+---@class ModelSlot
+---@field object string The sub-object this part belongs to — the key that addresses this part and no other. Import renames repeats, so a model with two `Torso` nodes has a `Torso#2`.
+---@field material string The glTF material name — the key that addresses every part wearing it (a character's `Clothing` is usually its torso and both arms).
+---@field textured boolean Did the model arrive with a texture on this material?
+---@field overridden boolean Has this node already given the part its own material?
+
+---A material you can read and assign, from `node:material(...)`.
+---
+---Every field of the Material component: `texture` and the surface maps by path
+---(`\"\"` clears one), `color`/`emissive`/`specular`/`rim` as colours, and the
+---numbers — `alpha`, `roughness`, `metallic`, `emissiveStrength`, `unlit`,
+---`fog`, `cell`, and the rest. Writes land after the frame; reads answer with
+---what you last wrote.
+---@class MaterialHandle
+---@field texture string The base-colour image, project-relative. `\"\"` clears it.
+---@field normalMap string
+---@field roughnessMap string
+---@field metallicMap string
+---@field occlusionMap string
+---@field color Color The tint, multiplied into the texture.
+---@field emissive Color Light this surface gives off (scaled by emissiveStrength).
+---@field specular Color
+---@field rim Color
+---@field alpha number Opacity, 0..1.
+---@field roughness number
+---@field metallic number
+---@field emissiveStrength number
+---@field unlit boolean Draw at full brightness, ignoring the scene's lights.
+---@field fog boolean Does the scene's fog reach this surface?
+---@field cell number Which cell of the spritesheet draws.
+
+---One sprite node's drawing numbers, as `node:sprite()` hands them over.
+---
+---Assigning a field takes effect this frame and reads back straight away, so
+---`sp.flipX = mx > 0` and `if sp.flipX then` in the same update agree.
+---@class SpriteHandle
+---@field flipX boolean Mirrored left-to-right — the face-the-way-you-are-walking flag.
+---@field flipY boolean Mirrored top-to-bottom.
+---@field cell integer Which cell of the Material's spritesheet draws, 0-based.
+---@field ppu number Pixels per unit, measured against ONE CELL of the sheet. 0 falls back to `size`, a world edge length.
+---@field size number World edge length, used when ppu is 0.
+---@field pivotX number The origin across the sprite, 0..1 (0.5 = centred).
+---@field pivotY number The origin up the sprite. 0 puts it at the feet, which is what a Y-sorted character wants.
+
 ---A 2-component vector (UI/screen math) — same operators as Vec3.
 ---@class Vec2
 ---@field x number
 ---@field y number
 ---@field length fun(self: Vec2): number
+---@field magnitude fun(self: Vec2): number The same call as length, under the name most engines use.
 ---@field lengthSquared fun(self: Vec2): number
 ---@field normalized fun(self: Vec2): Vec2
 ---@field dot fun(self: Vec2, other: Vec2): number
@@ -1487,6 +1538,16 @@ function terrain.saveDir(path) end
 ---positions of dynamic bodies, never the camera.
 ---@param bodyName string The body's node name (as in `space.bodies()`).
 function terrain.warm(bodyName) end
+---Is the background terrain worker already occupied? True while any field is
+---generating or streaming in.
+---
+---Whole-body fills and residency streaming share ONE background budget, so a
+---game that builds its world as the player travels should ask before queueing
+---the next one — otherwise the new world goes in behind the ground somebody is
+---standing on. The pattern: build one thing, wait for this to go quiet, build
+---the next.
+---@return boolean
+function terrain.busy() end
 ---Checkpoint every EDITED resident terrain field to the save slot
 ---(`terrain.saveDir` must be set). Runs IN THE BACKGROUND — a few chunks of
 ---encoding per frame plus a threaded write, deferred while a field is being
@@ -1810,5 +1871,51 @@ pub(crate) fn seed_default_scripts(scripts_dir: &Path) {
         if !p.exists() {
             let _ = std::fs::write(&p, body);
         }
+    }
+}
+
+#[cfg(test)]
+mod stub_tests {
+    /// **The projects in this repo carry the annotations the engine ships.**
+    ///
+    /// `.floptle/library/floptle.lua` is generated — the editor rewrites it when
+    /// it opens a project — but the two in this repository are also COMMITTED,
+    /// and a generated file that is committed goes stale the moment the thing it
+    /// is generated from moves. Both had drifted, differently from each other:
+    /// neither knew about `node:material`, and the demo project's copy was
+    /// missing `node:sprite`, `vec3:magnitude` and `terrain.busy` as well.
+    ///
+    /// A stale stub is quietly expensive. It is what an external editor reads,
+    /// so every call to a binding it has not heard of is underlined as an error
+    /// in a file that runs perfectly — which teaches people to stop believing
+    /// the underlines.
+    ///
+    /// `UPDATE_STUBS=1 cargo test -p floptle-editor stubs_are_current` rewrites
+    /// them, the same convention the docs use.
+    #[test]
+    fn the_committed_stubs_are_current() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let update = std::env::var("UPDATE_STUBS").is_ok();
+        let mut stale = Vec::new();
+        for project in ["assets", "solar"] {
+            let p = repo.join(project).join(".floptle/library/floptle.lua");
+            if !p.exists() {
+                continue;
+            }
+            if std::fs::read_to_string(&p).unwrap_or_default() == super::LUA_ANNOTATIONS {
+                continue;
+            }
+            if update {
+                std::fs::write(&p, super::LUA_ANNOTATIONS).expect("write stub");
+            } else {
+                stale.push(project);
+            }
+        }
+        assert!(
+            stale.is_empty(),
+            "{stale:?}: .floptle/library/floptle.lua no longer matches the engine's own \
+             annotations, so an external editor flags real calls as errors. Run \
+             `UPDATE_STUBS=1 cargo test -p floptle-editor stubs_are_current`."
+        );
     }
 }

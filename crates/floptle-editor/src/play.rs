@@ -408,6 +408,10 @@ impl Editor {
         // `tm:tags` / `tm:autotile` can answer. Lent rather than loaded by the
         // host: the host does no file I/O, so who owns the parse is unambiguous.
         self.script_host.set_tilesets(self.scene_tilesets());
+        // …and every imported model's material slots, so `node:materials()` can
+        // answer what a character's parts are CALLED. Same deal as the tilesets:
+        // the parts are the importer's knowledge and the host does no file I/O.
+        self.script_host.set_model_slots(self.model_slots());
         sim
     }
 

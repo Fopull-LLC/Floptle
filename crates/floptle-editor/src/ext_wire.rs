@@ -835,6 +835,7 @@ fn known_doc_fields() -> &'static [&'static str] {
             scripts,
             material,
             object_materials,
+            tint,
             rigidbody,
             celestial,
             mesh_collider,
@@ -871,7 +872,7 @@ fn known_doc_fields() -> &'static [&'static str] {
             camera_2d,
         } = d;
         let _ = (
-            name, transform, matter, scripts, material, object_materials, rigidbody, celestial,
+            name, transform, matter, scripts, material, object_materials, tint, rigidbody, celestial,
             mesh_collider, disabled, paint, tex_paint, terrain_gen, collidable, trigger,
             nav_exclude, visible, cast_shadow, anim_controller, particles, id, parent_id, parent,
             attachment, net, ui_layer, ui, audio, layer, tags, sorting, sort_mode, parallax, lit_2d,
@@ -886,6 +887,7 @@ fn known_doc_fields() -> &'static [&'static str] {
         "scripts",
         "material",
         "object_materials",
+        "tint",
         "rigidbody",
         "celestial",
         "mesh_collider",
