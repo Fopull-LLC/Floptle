@@ -1341,6 +1341,80 @@ fn every_name_in_the_environment_is_in_the_reference() {
     let _ = std::fs::remove_dir_all(&proj);
 }
 
+/// `floptle/0154`: the walk above reaches every top-level TABLE, and cannot
+/// see the fields of a table a binding *returns* — `scene.info(id).ui` is
+/// real (a downstream project's auto-wiring is built on it), was undocumented for exactly
+/// that reason, and would still pass the test above today. This extends the
+/// same walk-and-diff to the return shapes that actually needed it: a UI node
+/// answers `scene.info(id).ui`, and a tiny baked navmesh answers
+/// `nav.settings()`. Both are absent by default (no scene, no bake), which is
+/// exactly why the gap this pins went unnoticed for as long as it did.
+#[test]
+fn returned_table_fields_are_documented_too() {
+    let proj = temp("apidocs-returns");
+    install(
+        &proj,
+        "com.t.b",
+        "",
+        r#"
+        local names = {}
+        local function walk(prefix, t)
+            for k, v in pairs(t) do
+                if type(k) == "string" then names[#names + 1] = prefix .. k end
+            end
+        end
+        local id = scene.find("Button")
+        local n = id and scene.info(id)
+        if n and n.ui then walk("scene.info().ui.", n.ui) end
+        local s = nav.settings()
+        if s then walk("nav.settings().", s) end
+        table.sort(names)
+        ed.log(table.concat(names, " "))
+        "#,
+    );
+
+    let mut world = floptle_core::World::default();
+    let e = world.spawn();
+    world.insert(e, floptle_core::Name("Button".into()));
+    world.insert(e, floptle_core::transform::Transform::IDENTITY);
+    world.insert(e, floptle_ui::ElementSpec::default());
+    let mirror = SceneMirror::build(&world, &|_, _| None, &|_, _| None);
+
+    let tris = vec![
+        floptle_nav::Tri::new([0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 0.0, 4.0]),
+        floptle_nav::Tri::new([4.0, 0.0, 0.0], [4.0, 0.0, 4.0], [0.0, 0.0, 4.0]),
+    ];
+    let mesh = floptle_nav::bake(&tris, &floptle_nav::NavSettings::default())
+        .expect("this floor bakes");
+
+    let mut host = ExtHost::new();
+    host.begin_frame(Snapshot { project_root: proj.clone(), ..Snapshot::default() }, mirror);
+    host.set_nav_mesh(Some(mesh));
+    host.reload(&proj, &engine());
+
+    let log = host.take_log();
+    assert!(!log.is_empty(), "the package did not run");
+    let doc = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/editor-scripting.md"),
+    )
+    .expect("docs/editor-scripting.md");
+    let doc = documented_code(&doc);
+    let mut missing: Vec<String> = Vec::new();
+    for full in log[0].msg.split_whitespace() {
+        let short = full.rsplit('.').next().unwrap_or(full);
+        if !doc.contains(full) && !doc.contains(short) {
+            missing.push(full.to_string());
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "{} returned-table field(s) missing from docs/editor-scripting.md: {}",
+        missing.len(),
+        missing.join(", ")
+    );
+    let _ = std::fs::remove_dir_all(&proj);
+}
+
 /// The reference's **code** — everything inside backticks, fenced blocks
 /// included — and nothing else.
 ///

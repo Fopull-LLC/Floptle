@@ -310,10 +310,19 @@ one.
 | `scene.raycast(origin, dir [, maxDist])` | `{ node, point, normal, distance }`, or `nil` |
 
 `scene.info(id)` returns `{ id, name, kind, parent, children, pos, worldPos, rot,
-scale, radius, extents, tags, layer, visible, scripts, asset }`. `pos` is local; `worldPos`
+scale, radius, extents, ui, tags, layer, visible, scripts, asset }`. `pos` is local; `worldPos`
 has the parents applied. `kind` is a stable name — `"mesh"`, `"camera"`,
 `"pointLight"`, `"terrain"`, `"tilemap"`, `"empty"`… — that will not change
 because a node type gained a field.
+
+`ui` is `{ element, text, interactive, disabled }` **only on a node that is a UI
+element** — `if n.ui then` is the test, the same shape `extents` uses. A UI
+element is an ordinary node carrying a spec, so its `kind` reads `"empty"`,
+which leaves nothing else able to tell a button from a folder. `element` is one
+word — `"button"`, `"slider"`, `"text"`, `"image"`, `"scroll"` or `"panel"` —
+rather than the raw flags it is derived from; `text` is the label it draws,
+where it draws one; `interactive` is whether it takes a click at all (a panel
+does not, a button does); `disabled` is the greyed-out state.
 
 `extents` is the node's **oriented** half-extents in world units — read it with
 `rot` when which way a thing faces matters, which is most of the time for a
@@ -499,7 +508,7 @@ origin needs no arithmetic at your end.
 | | |
 | --- | --- |
 | `nav.ready()` | is there a bake to ask |
-| `nav.settings()` | the character it was baked for: `radius`, `height`, `maxSlope`, `stepHeight`, `cellSize`, plus `area` in square metres |
+| `nav.settings()` | the character it was baked for: `radius`, `height`, `maxSlope`, `stepHeight`, `cellSize`, plus `area` in square metres and `areaCount`, the number of polygons |
 | `nav.areas()` | the walkable surface — see below |
 | `nav.links()` | the portals between those rectangles |
 | `nav.ground()` | `{ {name, cost}… }`, the kinds of ground the level named |
