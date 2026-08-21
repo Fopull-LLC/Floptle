@@ -397,6 +397,34 @@ impl NavMesh {
         self
     }
 
+    /// A mesh with no geometry at all, made from `settings` alone — for a
+    /// level whose first bake never happened (`floptle/0142`).
+    ///
+    /// A fully streamed level has no edit-time geometry to hand-bake, so the
+    /// only route to ever having a mesh is splicing regions in as they
+    /// stream — and splicing needs a host to splice INTO. [`Self::empty_like`]
+    /// makes the same shape but needs an existing mesh to copy `origin` /
+    /// `cell_size` / `areas` from; this is the one for when there isn't one
+    /// yet.
+    pub fn empty(settings: NavSettings, anchor: [f64; 3]) -> Self {
+        Self {
+            polys: Vec::new(),
+            links: Vec::new(),
+            origin: [0.0; 3],
+            cell_size: settings.cell_size,
+            anchor,
+            settings,
+            areas: default_areas(),
+            off_links: Vec::new(),
+            index: std::sync::OnceLock::new(),
+            link_index: std::sync::OnceLock::new(),
+            obstacles: Vec::new(),
+            next_obstacle: 0,
+            baked: None,
+            obstacle_rev: 0,
+        }
+    }
+
     /// A world point in this mesh's own frame.
     pub fn to_local(&self, world: [f64; 3]) -> [f32; 3] {
         [

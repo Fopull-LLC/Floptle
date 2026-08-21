@@ -2745,10 +2745,8 @@ struct Editor {
     nav_loaded_from: Option<std::path::PathBuf>,
     /// A navmesh bake running on another thread.
     nav_job: Option<nav_bake::NavJob>,
-    /// The level's shape as of the last time it was looked at, and how long it
-    /// has held still — the two halves of "changed, and stopped changing".
+    /// The level's shape as of the last sample.
     nav_watch_stamp: u64,
-    nav_watch_settled: f32,
     /// What the bake in hand was made from, so an automatic rebake asks for a
     /// bake that would be different rather than one it already has.
     nav_baked_stamp: u64,
@@ -2756,6 +2754,18 @@ struct Editor {
     /// has not been written to, re-hashing the level cannot change the answer —
     /// see `tick_nav_autobake`.
     nav_watch_rev: u64,
+    /// Seconds since the last time `tick_nav_autobake` actually sampled the
+    /// level (`floptle/0142`). The hash is throttled to this, not to
+    /// `World::revision()` deltas — a streamed level moves the revision on
+    /// nearly every frame, which left the old revision-only gate barely
+    /// throttling anything during exactly the period it most needed to.
+    nav_watch_elapsed: f32,
+    /// The stamp of the level shape that most recently gathered NO geometry
+    /// to bake (`floptle/0142`). An empty gather is a real, storable result —
+    /// without recording it, `tick_nav_autobake` retried the (main-thread,
+    /// O(scene)) gather forever on any level whose ground genuinely has not
+    /// arrived yet, logging "nothing to bake" every settle cycle.
+    nav_empty_stamp: Option<u64>,
     /// The `.fnav` beside this scene could not be read, so it wants making
     /// again. Set when the scene loads and acted on a frame later, once the
     /// scene has finished arriving.

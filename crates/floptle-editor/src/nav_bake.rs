@@ -32,6 +32,12 @@ use floptle_core::math::{DVec3, Mat4, Vec3};
 use floptle_core::{Entity, Matter, World};
 use floptle_nav::{NavMesh, NavSettings, OffLink, Tri};
 
+/// How often `tick_nav_autobake` samples the level, in seconds — both the
+/// throttle on the O(scene) hash and (by construction, see the function's own
+/// doc) the settle time it waits for two samples to agree. Long enough that a
+/// drag is one bake, short enough that it feels like the editor noticed.
+const NAV_WATCH_INTERVAL: f32 = 0.4;
+
 /// The scene's navmesh node, if it has one.
 ///
 /// Like the light-probe volume, one per scene is the shape that makes sense —
@@ -1056,40 +1062,49 @@ impl crate::Editor {
         if !auto || self.nav_job.is_some() {
             return;
         }
-        // **Hashing the level is O(scene); asking whether it is worth hashing is
-        // O(1).** The stamp is a pure function of the world, so while the world's
-        // revision has not moved the answer provably has not either — and on a
-        // level being streamed in, that is nearly every frame (`floptle/0138`:
-        // thousands of nodes walked and hashed sixty times a second to conclude
-        // that nothing had happened).
+        // **The hash is throttled to `NAV_WATCH_INTERVAL` of real time, not to
+        // `World::revision()` deltas (`floptle/0142`).** The revision-gated
+        // version looked right and was measured wrong: a streamed level moves
+        // the revision on nearly every frame — a streamer spawning ~40 pieces a
+        // frame is 40 bumps a frame — so "skip the O(scene) hash while the
+        // revision hasn't moved" barely skipped anything during exactly the
+        // period a streaming game spends most of its time in. `0138`'s own
+        // fix (a whole-scene hash sixty times a second to conclude nothing had
+        // happened) came back in a different shape.
         //
-        // The hash itself is untouched and stays the authority. The revision is
-        // conservative in the safe direction: it can say "maybe" when the answer
-        // is no, which costs one hash, and it cannot say "no" when the answer is
-        // yes. Undo, a reload and a nudge that ends where it started all move the
-        // revision and still hash to the same number, which is the property this
-        // is a hash for in the first place.
+        // Real time is what a drag, or a stream, actually respects: a wall
+        // dragged for two seconds is still ONE bake, however many revisions it
+        // passed through, because this only samples the world once per
+        // interval. Two consecutive samples agreeing IS 0.4s of the level
+        // holding still, which is what "settled" always meant — it no longer
+        // needs its own accumulator to say so.
+        self.nav_watch_elapsed += dt;
+        if self.nav_watch_elapsed < NAV_WATCH_INTERVAL {
+            return;
+        }
+        self.nav_watch_elapsed = 0.0;
+        // Cheap early-out for the idle editor: if NOTHING has been written to
+        // the world since the last sample, the hash cannot have changed either
+        // and there is no reason to pay for it.
         let rev = self.world.revision();
-        let now = if rev == self.nav_watch_rev {
-            self.nav_watch_stamp
-        } else {
-            self.nav_watch_rev = rev;
-            self.nav_inputs_stamp()
-        };
+        if rev == self.nav_watch_rev {
+            return;
+        }
+        self.nav_watch_rev = rev;
+        let now = self.nav_inputs_stamp();
         if now != self.nav_watch_stamp {
+            // Still changing — this sample does not agree with the last one,
+            // so the next interval is the earliest it could be "settled".
             self.nav_watch_stamp = now;
-            self.nav_watch_settled = 0.0;
             return;
         }
         if now == self.nav_baked_stamp {
             return; // the bake in hand already describes this level
         }
-        self.nav_watch_settled += dt;
-        // Long enough that a drag is one bake, short enough that it feels like
-        // the editor noticed.
-        if self.nav_watch_settled >= 0.4 {
-            self.start_nav_bake(BakeReason::Watched);
+        if Some(now) == self.nav_empty_stamp {
+            return; // already know a gather over this exact shape finds nothing
         }
+        self.start_nav_bake(BakeReason::Watched);
     }
 
     /// Take a finished background bake and put it in.
@@ -1125,6 +1140,30 @@ impl crate::Editor {
         centre: DVec3,
         size: Vec3,
     ) -> Result<usize, String> {
+        // A fully streamed level has nothing to hand-bake — there is no
+        // edit-time geometry to press the Bake button on — so a first splice
+        // with nothing to splice INTO used to refuse outright, which locked
+        // such a level out of ever getting a navmesh at all (`floptle/0142`).
+        // Bootstrap an empty host from the Nav Mesh node's own settings,
+        // anchored at the node, and let the ordinary splice path below fill
+        // it in exactly as it would fill in any other region.
+        if self.nav_baked.is_none() {
+            let Some((e, matter)) = nav_node(&self.world) else {
+                return Err(
+                    "there is no baked navmesh to splice into — bake the level once first"
+                        .into(),
+                );
+            };
+            let Some(settings) = settings_of(&matter) else {
+                return Err(
+                    "there is no baked navmesh to splice into — bake the level once first"
+                        .into(),
+                );
+            };
+            let anchor = floptle_core::world_transform(&self.world, e).translation;
+            self.nav_baked =
+                Some(NavMesh::empty(settings, [anchor.x, anchor.y, anchor.z]));
+        }
         let Some(host) = self.nav_baked.as_ref() else {
             return Err("there is no baked navmesh to splice into — bake the level once first"
                 .into());
@@ -1234,21 +1273,35 @@ impl crate::Editor {
         let origin = floptle_core::world_transform(&self.world, e).translation;
         let g = gather(&self.world, origin, &layers, &self.maps, &self.terrains, None);
         if g.tris.is_empty() {
-            self.console.push(
-                LogLevel::Warn,
-                if g.sources == 0 {
-                    "navmesh: nothing to bake. A navmesh bakes what a character would collide \
-                     with — level geometry needs the collidable switch on it, and the layer \
-                     filter has to include it."
-                        .into()
-                } else {
-                    format!(
-                        "navmesh: {} object(s) matched but produced no geometry to bake",
-                        g.sources
-                    )
-                },
-                None,
-            );
+            // A stamp that has already been reported empty stays quiet on a
+            // background retry (`floptle/0142`) — a level whose ground has
+            // not streamed in yet would otherwise log this every settle
+            // cycle forever, at "nothing to bake … (x1624)" in one observed
+            // session. An explicit `Asked` bake (the user pressed the
+            // button) always answers: they asked *this time* and deserve to
+            // know, whatever the last automatic attempt already said.
+            if !(quiet && self.nav_empty_stamp == Some(stamp)) {
+                self.console.push(
+                    LogLevel::Warn,
+                    if g.sources == 0 {
+                        "navmesh: nothing to bake. A navmesh bakes what a character would \
+                         collide with — level geometry needs the collidable switch on it, and \
+                         the layer filter has to include it."
+                            .into()
+                    } else {
+                        format!(
+                            "navmesh: {} object(s) matched but produced no geometry to bake",
+                            g.sources
+                        )
+                    },
+                    None,
+                );
+            }
+            // Recorded regardless of `quiet`: an empty gather IS a result for
+            // this exact level shape, not a non-answer — `tick_nav_autobake`
+            // reads this to stop retrying a gather that can only fail again
+            // until the level itself changes.
+            self.nav_empty_stamp = Some(stamp);
             return;
         }
         let triangles = g.tris.len();
@@ -2089,6 +2142,136 @@ mod tests {
             mesh.path(question.0, question.1),
             back.path(question.0, question.1),
             "the reloaded mesh must answer the same question the same way"
+        );
+    }
+
+    // ---- streamed-level autobake (`floptle/0142`) ---------------------------
+
+    fn nav_mesh_matter(auto_rebake: bool) -> Matter {
+        let mut m = Matter::default_nav_mesh(1);
+        if let Matter::NavMesh { auto_rebake: ar, .. } = &mut m {
+            *ar = auto_rebake;
+        }
+        m
+    }
+
+    fn ground_node(w: &mut World, at: [f64; 3]) -> Entity {
+        let e = w.spawn();
+        w.insert(e, Matter::Primitive { shape: floptle_core::Shape::Cube, color: [1.0; 3] });
+        w.insert(e, floptle_core::Collidable);
+        w.insert(e, floptle_core::transform::Transform { translation: at.into(), ..Default::default() });
+        e
+    }
+
+    /// Defect 3: a level with nothing ever baked has no host to splice into,
+    /// which used to refuse outright — the only route a fully streamed level
+    /// (no edit-time geometry to hand-bake) has to a navmesh at all.
+    #[test]
+    fn a_first_splice_bootstraps_an_empty_host_rather_than_refusing() {
+        let mut ed = crate::Editor::default();
+        let n = ed.world.spawn();
+        ed.world.insert(n, nav_mesh_matter(true));
+        ed.world.insert(n, floptle_core::transform::Transform::IDENTITY);
+        assert!(ed.nav_baked.is_none(), "nothing has ever been baked");
+
+        // A wide, thin floor under the splice region.
+        ground_node(&mut ed.world, [0.0, 0.0, 0.0]);
+
+        let n = ed
+            .rebake_region(DVec3::ZERO, Vec3::new(20.0, 10.0, 20.0))
+            .expect("the first-ever splice must bootstrap a host, not refuse");
+        assert!(n > 0, "the floor should have produced walkable polygons, got {n}");
+        assert!(ed.nav_baked.is_some());
+    }
+
+    /// Defect 2: an automatic (quiet) bake that gathers nothing must say so
+    /// once and then go quiet for the SAME level shape, not retry the gather
+    /// and re-log every settle cycle forever.
+    #[test]
+    fn an_empty_gather_says_so_once_and_then_stays_quiet_until_the_level_changes() {
+        let mut ed = crate::Editor::default();
+        let n = ed.world.spawn();
+        ed.world.insert(n, nav_mesh_matter(true));
+        ed.world.insert(n, floptle_core::transform::Transform::IDENTITY);
+        // No collidable geometry anywhere — every gather comes up empty.
+
+        ed.start_nav_bake(BakeReason::Watched);
+        assert_eq!(ed.console.entries.len(), 1, "the first empty gather warns once");
+        assert_eq!(ed.console.entries[0].count, 1);
+        assert!(ed.nav_empty_stamp.is_some(), "the empty result must be recorded");
+
+        ed.start_nav_bake(BakeReason::Watched);
+        assert_eq!(
+            ed.console.entries.len(),
+            1,
+            "a repeat Watched attempt over the SAME empty stamp must not add a new line"
+        );
+        assert_eq!(ed.console.entries[0].count, 1, "...or bump the existing one's count either");
+
+        // An explicit ask always answers, regardless of what a background
+        // attempt already logged — merged into the same Console line (the
+        // Console merges consecutive identical messages by count) rather
+        // than staying silent because a Watched attempt already spoke.
+        ed.start_nav_bake(BakeReason::Asked);
+        assert_eq!(ed.console.entries.len(), 1, "still one merged line, not a new one");
+        assert_eq!(
+            ed.console.entries[0].count, 2,
+            "a user who pressed Bake must be told, even if a Watched attempt already knows"
+        );
+    }
+
+    /// Defect 1, as a scaling guard in the `spawn_scaling.rs` style: the hash
+    /// is throttled to `NAV_WATCH_INTERVAL` of real time, not to
+    /// `World::revision()` deltas, so `auto_rebake: true` must not cost
+    /// meaningfully more than `false` over a level that streams in — before
+    /// this fix it did, because a streamer bumps the revision on nearly every
+    /// tick and the old guard re-hashed the whole scene on every one of them.
+    #[test]
+    fn autobake_does_not_rehash_the_whole_scene_every_streaming_frame() {
+        const DT: f32 = 1.0 / 60.0;
+        const BASE_NODES: usize = 3000;
+        const TICKS: usize = 240; // 4 simulated seconds
+
+        fn run(auto_rebake: bool, ticks: usize) -> std::time::Duration {
+            let mut ed = crate::Editor::default();
+            let n = ed.world.spawn();
+            ed.world.insert(n, nav_mesh_matter(auto_rebake));
+            ed.world.insert(n, floptle_core::transform::Transform::IDENTITY);
+            for i in 0..BASE_NODES {
+                ground_node(&mut ed.world, [i as f64, 0.0, 0.0]);
+            }
+            let t0 = std::time::Instant::now();
+            for _ in 0..ticks {
+                // ~40 pieces a frame, the card's own streaming figure.
+                for i in 0..40 {
+                    ground_node(&mut ed.world, [1000.0 + i as f64, 0.0, 0.0]);
+                }
+                ed.tick_nav_autobake(DT);
+                // A real background bake would confound the timing with
+                // actual mesh work; never let one start mid-measurement.
+                ed.nav_job = None;
+            }
+            t0.elapsed()
+        }
+
+        let _ = run(true, 10); // warm the allocator/page cache first
+        let on = run(true, TICKS);
+        let off = run(false, TICKS);
+        let ratio = on.as_secs_f64() / off.as_secs_f64().max(1e-9);
+        // Measured before this fix: 146x (240 hashes over 240 ticks — every
+        // single one, because a streamer bumps `World::revision()` on nearly
+        // every tick). After: ~7x (10 hashes — one per `NAV_WATCH_INTERVAL`
+        // of simulated time, matching `TICKS × DT / NAV_WATCH_INTERVAL`). The
+        // bound sits well below the old number and with headroom above the
+        // new one for a shared runner, per this repo's ratio-guard
+        // convention (`docs/HANDOFF.md` § The gates) — it is the SHAPE
+        // (bounded vs unbounded in stream length) that this pins, not a
+        // specific multiple.
+        assert!(
+            ratio < 25.0,
+            "auto_rebake: true cost {ratio:.1}x what false did over a {TICKS}-tick streamed \
+             run ({on:?} vs {off:?}) — the hash is being paid on every revision bump instead \
+             of throttled to real time"
         );
     }
 }
