@@ -11183,7 +11183,36 @@ mod water_draw_tests {
     #[test]
     fn retro_exempt_water_does_not_share_the_projects_dithered_neutral_entry() {
         let gpu = floptle_render::Gpu::headless(4, 4);
+        // **A driver that cannot build the renderer is not a defect this test is
+        // about.** `Raster::new` allocates a placeholder texture with a
+        // reinterpretation view format (`upload_texture_mips`'s `view_formats`,
+        // so a material's own picture can also be read raw for its surface
+        // maps) — a capability CI's adapter does not have (the same class of
+        // gap as "the raster pipeline cannot be built on OpenGL", already
+        // documented in HANDOFF; wgpu's default uncaptured-error handler
+        // panics, so without this the FIRST test to build a full `Raster` on a
+        // headless device anywhere finds that out by crashing the test binary).
+        // Same idiom `doctor.rs` uses to answer "can this machine render" at
+        // all: install a sink instead of the default panic, and if the
+        // pipeline could not be built, this test has nothing to say about a
+        // machine that cannot ask it the question.
+        let failed = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = failed.clone();
+        gpu.device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
+            if let Ok(mut s) = sink.lock()
+                && s.is_empty()
+            {
+                *s = e.to_string();
+            }
+        }));
         let mut raster = floptle_render::Raster::new(&gpu);
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        if let Ok(why) = failed.lock()
+            && !why.is_empty()
+        {
+            eprintln!("skipped — this machine cannot build the raster pipeline:\n{why}");
+            return;
+        }
         raster.set_retro_defaults(floptle_core::Retro {
             dither_alpha: true,
             ..floptle_core::Retro::default()
