@@ -162,12 +162,32 @@ fn primitive_draw(
 /// whether something exists, and the reason this is a function.
 ///
 /// `None` for any other matter, and for a shape that is not registered.
+///
+/// `material` is the node's own `Material` component, if any (`floptle/0144`).
+/// **Absent → drawn exactly as before this card**: the hand-tuned defaults
+/// below, untouched. Present → those defaults are the FALLBACK and the
+/// material's own `specular`/`specular_strength`/`shininess` win outright, the
+/// same "the node's Material wins whole" rule the rest of this file uses
+/// (`part_look_rule`). `alpha` is the one field that does NOT follow that rule:
+/// every unauthored `Material` defaults to `alpha = 1.0`, and a water volume
+/// that carries one for some other reason (today, that is almost always
+/// `retro: (exempt: true)` and nothing else) must not go opaque just because
+/// nobody touched the number. A frozen volume stays opaque ice regardless of
+/// what the material says.
+///
+/// `raster` doubles as "is a Raster available at all" (a thumbnail render may
+/// have none) and, when a material is present, is what turns its `retro`
+/// flags, `reflectivity` and the rest of the PBR surface extras into an
+/// `ext_index` — the same store `material_draw` interns into, so a water
+/// volume marked `retro: (exempt: true)` reads as exempt through the exact
+/// path everything else does, in both gathers that call this function.
 fn water_draw(
     matter: &Matter,
+    material: Option<&Material>,
     t: &Transform,
     cam_world: DVec3,
     mesh_ids: &[MeshId],
-    raster: Option<&floptle_render::Raster>,
+    raster: Option<&mut floptle_render::Raster>,
 ) -> Option<(MeshId, InstanceRaw)> {
     use floptle_core::WaterKind;
     let Matter::WaterVolume { kind, radius, half_extents, frozen, tint, .. } = matter else {
@@ -201,7 +221,21 @@ fn water_draw(
         mp.shininess = 96.0;
         mp.specular = [1.0, 1.0, 1.0];
     }
-    mp.paint_base = raster.map_or(0, |r| r.mesh_paint_base(mesh));
+    if let Some(m) = material {
+        mp.specular = m.specular;
+        mp.specular_strength = m.specular_strength;
+        mp.shininess = m.shininess;
+        if !*frozen && m.alpha != 1.0 {
+            mp.alpha = m.alpha;
+        }
+    }
+    if let Some(raster) = raster {
+        mp.paint_base = raster.mesh_paint_base(mesh);
+        if let Some(m) = material {
+            let ext = floptle_render::SurfaceExtras::from_material(m);
+            mp.ext_index = raster.push_surface_extras(ext);
+        }
+    }
     Some((mesh, instance_of_mat(model, &mp)))
 }
 
@@ -1953,10 +1987,18 @@ impl Editor {
                     }
                 }
                 Matter::WaterVolume { .. } => {
-                    if let Some((mesh, raw)) =
-                        water_draw(matter, &t, cam.world_position, &self.mesh_ids, Some(raster))
-                    {
-                        instances.push((mesh, tex, raw));
+                    if let Some((mesh, raw)) = water_draw(
+                        matter,
+                        mat.as_ref(),
+                        &t,
+                        cam.world_position,
+                        &self.mesh_ids,
+                        Some(raster),
+                    ) {
+                        match flsl {
+                            Some(b) => flsl_draws.push((mesh, tex, b, raw)),
+                            None => instances.push((mesh, tex, raw)),
+                        }
                     }
                 }
                 // The 2D layer (`floptle/0058`). A tilemap is one uploaded
@@ -9610,12 +9652,16 @@ impl Editor {
                 Matter::WaterVolume { .. } => {
                     if let Some((mesh, raw)) = water_draw(
                         matter,
+                        mat.as_ref(),
                         &t,
                         cam.world_position,
                         &self.mesh_ids,
-                        self.raster.as_ref(),
+                        self.raster.as_mut(),
                     ) {
-                        instances.push((mesh, tex, raw));
+                        match flsl {
+                            Some(b) => flsl_draws.push((mesh, tex, b, raw)),
+                            None => instances.push((mesh, tex, raw)),
+                        }
                     }
                 }
                 Matter::Blob { scale } => {
@@ -10993,5 +11039,201 @@ mod lit_2d_tests {
         let mut world = World::default();
         batch_on(&mut world, "Ground", Lit2D::No);
         assert!(lit_2d_ranks(&world, &project(), true, u64::MAX).is_empty());
+    }
+}
+
+/// `floptle/0144`: `water_draw` used to build its `MaterialParams` from
+/// scratch and never look at the node's own `Material` — no shader, no
+/// `retro: (exempt: true)`, no way to style it at all. These pin the overlay
+/// rule: absent Material → today's exact numbers; present → its surface
+/// params win, EXCEPT `alpha`, which only overrides when the material set one
+/// (every unauthored `Material` defaults to `alpha = 1.0`, and a water volume
+/// wearing one for its `retro` flag alone must not go opaque).
+#[cfg(test)]
+mod water_draw_tests {
+    use super::*;
+
+    /// A `Pool` water volume with the project's default numbers — same shape
+    /// as `Matter::default_water()`, but with `frozen` controllable so the ice
+    /// path can be pinned too.
+    fn pool(frozen: bool) -> Matter {
+        Matter::WaterVolume {
+            kind: floptle_core::WaterKind::Pool,
+            radius: 10.0,
+            half_extents: [5.0, 2.0, 5.0],
+            density: 1000.0,
+            drag: 1.0,
+            angular_drag: 1.0,
+            frozen,
+            tint: [0.10, 0.32, 0.38],
+            visibility: 28.0,
+        }
+    }
+
+    fn mesh_ids() -> Vec<MeshId> {
+        // `water_draw` only ever indexes Cube/Sphere; the exact MeshId value
+        // doesn't matter to these tests, only that a slot exists.
+        vec![MeshId(0), MeshId(1), MeshId(2), MeshId(3)]
+    }
+
+    /// **The property the card asks to be pinned above all others**: with no
+    /// Material component, water draws exactly as it always has.
+    #[test]
+    fn no_material_draws_unchanged() {
+        let ids = mesh_ids();
+        let (_, unfrozen) =
+            water_draw(&pool(false), None, &Transform::IDENTITY, DVec3::ZERO, &ids, None).unwrap();
+        assert_eq!(unfrozen.color[3], 0.55, "unfrozen water's alpha is untouched");
+        assert_eq!(unfrozen.specular[3], 0.9, "unfrozen water's specular strength is untouched");
+        assert_eq!(unfrozen.specular[0..3], [1.0, 1.0, 1.0], "unfrozen water's specular colour");
+        assert_eq!(unfrozen.params[0], 96.0, "unfrozen water's shininess is untouched");
+
+        let (_, frozen) =
+            water_draw(&pool(true), None, &Transform::IDENTITY, DVec3::ZERO, &ids, None).unwrap();
+        assert_eq!(frozen.color[3], 1.0, "frozen water (ice) is opaque, untouched");
+        assert_eq!(frozen.specular[3], 0.15, "frozen water's specular strength is untouched");
+        assert_eq!(frozen.params[0], 8.0, "frozen water's shininess is untouched");
+    }
+
+    /// A Material's specular/shininess win outright once it exists — the same
+    /// "most specific wins, whole" rule `part_look_rule` states for meshes —
+    /// but its default `alpha = 1.0` must NOT silently make the water opaque:
+    /// a water volume wearing a Material purely for `retro: (exempt: true)`
+    /// keeps its translucency.
+    #[test]
+    fn material_overlays_specular_but_alpha_needs_an_actual_value() {
+        let ids = mesh_ids();
+        // alpha left at Material::default()'s 1.0 — the untouched case.
+        let m = Material {
+            specular: [0.2, 0.4, 0.9],
+            specular_strength: 0.5,
+            shininess: 40.0,
+            ..Material::default()
+        };
+        let (_, raw) = water_draw(
+            &pool(false),
+            Some(&m),
+            &Transform::IDENTITY,
+            DVec3::ZERO,
+            &ids,
+            None,
+        )
+        .unwrap();
+        assert_eq!(raw.specular[0..3], [0.2, 0.4, 0.9], "material specular colour wins");
+        assert_eq!(raw.specular[3], 0.5, "material specular strength wins");
+        assert_eq!(raw.params[0], 40.0, "material shininess wins");
+        assert_eq!(
+            raw.color[3], 0.55,
+            "an untouched Material.alpha (1.0) must not override the water's own translucency"
+        );
+    }
+
+    /// An author who DOES dial in a specific alpha gets it.
+    #[test]
+    fn material_alpha_is_honoured_once_actually_set() {
+        let ids = mesh_ids();
+        let m = Material { alpha: 0.2, ..Material::default() };
+        let (_, raw) = water_draw(
+            &pool(false),
+            Some(&m),
+            &Transform::IDENTITY,
+            DVec3::ZERO,
+            &ids,
+            None,
+        )
+        .unwrap();
+        assert_eq!(raw.color[3], 0.2, "an explicit material alpha is honoured");
+    }
+
+    /// Criterion 3: frozen ice stays opaque whatever the material says.
+    #[test]
+    fn frozen_ignores_material_alpha() {
+        let ids = mesh_ids();
+        let m = Material { alpha: 0.2, ..Material::default() };
+        let (_, raw) = water_draw(
+            &pool(true),
+            Some(&m),
+            &Transform::IDENTITY,
+            DVec3::ZERO,
+            &ids,
+            None,
+        )
+        .unwrap();
+        assert_eq!(raw.color[3], 1.0, "frozen water is opaque ice regardless of the material");
+    }
+
+    /// Criterion 5, watched against the real surface-extras store: under a
+    /// project with `retro_dither_alpha: true`, a WaterVolume with NO Material
+    /// stays on the project's (dithered) neutral entry — matching every other
+    /// undecorated surface — while one carrying `retro: (exempt: true)` lands
+    /// on its own, distinct entry. `push_surface_extras` is the only thing
+    /// that can answer this, so it needs a real (headless) `Raster`.
+    #[test]
+    fn retro_exempt_water_does_not_share_the_projects_dithered_neutral_entry() {
+        let gpu = floptle_render::Gpu::headless(4, 4);
+        let mut raster = floptle_render::Raster::new(&gpu);
+        raster.set_retro_defaults(floptle_core::Retro {
+            dither_alpha: true,
+            ..floptle_core::Retro::default()
+        });
+        let ids = mesh_ids();
+
+        // No Material at all → index 0, same as every plain surface.
+        let (_, plain) = water_draw(
+            &pool(false),
+            None,
+            &Transform::IDENTITY,
+            DVec3::ZERO,
+            &ids,
+            Some(&mut raster),
+        )
+        .unwrap();
+        assert_eq!(
+            floptle_render::ext_index_of(&plain),
+            0,
+            "a materialless water volume stays on the project's own (dithered) neutral entry"
+        );
+
+        // A Material attached but touching nothing (not even `retro`) still
+        // follows the project's dither, same as the materialless case above —
+        // it just lands on its OWN entry to get there, because an attached
+        // Material's other neutral values (e.g. `roughness = 0.5`) genuinely
+        // differ from the GPU-wide neutral (`roughness = 1.0`) index 0 holds.
+        // That is an existing, general property of `push_surface_extras` and
+        // not specific to water; the comparison below is against THIS index,
+        // not against 0, so the test isolates what `retro.exempt` changes.
+        let plain_material = Material::default();
+        let (_, plain_mat) = water_draw(
+            &pool(false),
+            Some(&plain_material),
+            &Transform::IDENTITY,
+            DVec3::ZERO,
+            &ids,
+            Some(&mut raster),
+        )
+        .unwrap();
+        let dithered_index = floptle_render::ext_index_of(&plain_mat);
+
+        // `retro: (exempt: true)`, otherwise identical — must land on a
+        // DIFFERENT entry than the (still dithered) plain material above.
+        let exempt = Material {
+            retro: floptle_core::Retro { exempt: true, ..floptle_core::Retro::default() },
+            ..Material::default()
+        };
+        let (_, raw) = water_draw(
+            &pool(false),
+            Some(&exempt),
+            &Transform::IDENTITY,
+            DVec3::ZERO,
+            &ids,
+            Some(&mut raster),
+        )
+        .unwrap();
+        assert_ne!(
+            floptle_render::ext_index_of(&raw),
+            dithered_index,
+            "retro: (exempt: true) must NOT receive the project's EXT_DITHER_ALPHA — it needs \
+             a surface-extras entry distinct from an otherwise-identical dithered material"
+        );
     }
 }
