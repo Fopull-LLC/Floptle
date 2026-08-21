@@ -173,6 +173,11 @@ pub struct PhysicsWorld {
     /// SLEEPING bodies are checked, and only every
     /// [`SLEEP_REVALIDATE_INTERVAL`].
     resting_check_elapsed: f32,
+    /// `self.colliders.len()` as of the last call to [`Self::set_colliders`]
+    /// that actually triggered a revalidation, rather than `usize::MAX`
+    /// meaning "never checked, so don't skip." See [`Self::set_colliders`]
+    /// for why this exists — only that call site consults it.
+    last_revalidated_collider_count: usize,
 }
 
 impl Default for PhysicsWorld {
@@ -194,6 +199,7 @@ impl Default for PhysicsWorld {
             index_fresh: false,
             resting: Vec::new(),
             resting_check_elapsed: 0.0,
+            last_revalidated_collider_count: usize::MAX,
         }
     }
 }
@@ -652,14 +658,27 @@ impl PhysicsWorld {
     /// wake costs one ordinary step; a missed one costs a floating prop
     /// nobody notices until they walk past it.
     pub fn set_colliders(&mut self, colliders: Vec<AnchoredCollider>) {
+        // Called once per REAL frame regardless of whether anything actually
+        // streamed — the caller reclaims whatever the script host held for
+        // raycasts, which is the same list it was lent unless a chunk
+        // actually (un)loaded this frame. Without this length check, every
+        // sleeping body paid a full reindex + broadphase query every single
+        // frame the game ran, not only when the list was actually replaced —
+        // defeating the cost this card exists to remove (`floptle/0143`,
+        // found by an adversarial review re-reading this card before it
+        // shipped). A length mismatch is a cheap, conservative signal for "the
+        // list was replaced" — it can miss a same-length swap, but
+        // `Self::step`'s periodic safety net (an UNRELATED call to
+        // `revalidate_sleeping_bodies`, deliberately not gated by this check)
+        // exists precisely to catch what a replacement-shaped check cannot
+        // see, on a bounded delay.
+        let replaced = colliders.len() != self.last_revalidated_collider_count;
         self.colliders = colliders;
         self.index_fresh = false;
-        // The collider indices every sleeping body's `resting` cache names
-        // are about to stop meaning anything — this is the common point they
-        // go stale (a streamed chunk unloading), so it is the point that
-        // re-derives them, once per replacement rather than once per asleep
-        // tick.
-        self.revalidate_sleeping_bodies();
+        if replaced {
+            self.last_revalidated_collider_count = self.colliders.len();
+            self.revalidate_sleeping_bodies();
+        }
     }
 
     /// Re-derive every sleeping body's `resting` cache against the CURRENT
@@ -676,13 +695,25 @@ impl PhysicsWorld {
     /// streamed chunk) and `Self::step`'s periodic safety net (geometry
     /// changed IN PLACE — terrain sculpting, a map edit — which nothing
     /// "replaced" for this to see any other way).
+    ///
+    /// **Non-driven bodies only.** A driven (rollback-owned) body is stepped
+    /// exclusively through `PhysicsWorld::step_body`, reached directly by
+    /// `Sim::step_body_tick` — which is the ONLY per-tick point a live tick
+    /// and its later resimulation are both guaranteed to call, since this
+    /// function is only ever reached from the once-per-REAL-frame code (this
+    /// struct's own doc comment on `Self::set_colliders`) or `Self::step`'s
+    /// periodic timer, neither of which a resimulation ever runs. `step_body`
+    /// re-derives a driven body's resting cache itself, every asleep tick,
+    /// for exactly that reason — touching it here too would be redundant at
+    /// best and, if a caller ever grew a reason not to reindex-then-query
+    /// identically in both, a reintroduced desync at worst (`floptle/0143`).
     fn revalidate_sleeping_bodies(&mut self) {
-        if !self.bodies.iter().any(|b| b.asleep) {
-            return; // the common case: nobody is asleep, nothing to check
+        if !self.bodies.iter().any(|b| b.asleep && !b.driven) {
+            return; // the common case: nobody (non-driven) is asleep
         }
         self.reindex_colliders();
         for bi in 0..self.bodies.len() {
-            if !self.bodies[bi].asleep {
+            if !self.bodies[bi].asleep || self.bodies[bi].driven {
                 continue;
             }
             let fresh = self.find_resting_contacts(bi);
@@ -1119,15 +1150,48 @@ impl PhysicsWorld {
             let has_velocity = self.bodies[bi].vel.length_squared()
                 > SLEEP_LINEAR_SPEED * SLEEP_LINEAR_SPEED;
             if !has_velocity && !self.touches_a_kinematic_hull(bi) {
-                // Still asleep. Re-report what it is resting on — a
-                // candidate-bounded query, same cost shape as the kinematic
-                // check above, not the O(scene) the ordinary step would pay
-                // — so `PhysicsWorld::contacts` and, downstream, touch/stay
-                // events keep seeing a resting body as touching exactly what
-                // it was touching, the way they would if it had run the full
-                // step and landed on the same floor again.
-                self.report_resting_contacts(bi);
-                return;
+                if self.bodies[bi].driven {
+                    // A DRIVEN body is never reached by `set_colliders`'s
+                    // wake check or `step`'s periodic safety net in a way a
+                    // rollback resimulation can also reach — a resimulated
+                    // tick calls only `Sim::step_body_tick` → this function
+                    // (`rollback.rs::simulate_tick`), never the frame-pass
+                    // code those two live only inside. So instead of trusting
+                    // the cached `resting[bi]` (which those two are what keep
+                    // fresh for everyone else), re-derive it here, every
+                    // asleep tick — the one call both a live tick and its
+                    // later resimulation are guaranteed to make identically.
+                    // Not the O(scene) cost that sounds like: the reindex
+                    // just above already runs unconditionally for a directly-
+                    // reached `step_body` call (a driven body was never
+                    // covered by `step`'s once-per-real-frame index reuse),
+                    // so this adds one bounded broadphase query on top of a
+                    // cost already being paid — cheap because driven bodies
+                    // are few, not because this query is free (`floptle/0143`,
+                    // the desync an adversarial review found).
+                    let fresh = self.find_resting_contacts(bi);
+                    if fresh.is_empty() {
+                        self.bodies[bi].asleep = false;
+                        self.bodies[bi].sleep_time = 0.0;
+                        // Falls through to the ordinary step below, same as
+                        // the has_velocity/kin_hull wake path just below.
+                    } else {
+                        self.resting[bi] = fresh;
+                        self.report_resting_contacts(bi);
+                        return;
+                    }
+                } else {
+                    // Still asleep. Re-report what it is resting on — a
+                    // candidate-bounded query, same cost shape as the
+                    // kinematic check above, not the O(scene) the ordinary
+                    // step would pay — so `PhysicsWorld::contacts` and,
+                    // downstream, touch/stay events keep seeing a resting
+                    // body as touching exactly what it was touching, the way
+                    // they would if it had run the full step and landed on
+                    // the same floor again.
+                    self.report_resting_contacts(bi);
+                    return;
+                }
             }
             self.bodies[bi].asleep = false;
             self.bodies[bi].sleep_time = 0.0;

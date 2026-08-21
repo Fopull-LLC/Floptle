@@ -2005,4 +2005,43 @@ end\n";
             d.faults
         );
     }
+
+    /// The desync an adversarial review found before this batch shipped
+    /// (`floptle/0143`): a driven body's ground vanishing must wake it
+    /// through the SAME sequence a resimulated tick actually runs —
+    /// `reclaim_world`'s per-tick collider swap, then that tick's
+    /// `step_body_tick` — not only through `render_frame.rs`'s
+    /// once-per-REAL-frame `set_colliders` call, which `simulate_tick` never
+    /// reaches during a pure resimulation. If the wake only happened through
+    /// the frame-pass call, a live tick would wake the body and a later
+    /// resimulation of that exact tick would not, computing a stationary body
+    /// where the live run computed a falling one.
+    #[test]
+    fn a_driven_body_wakes_on_the_exact_tick_its_ground_vanishes_via_reclaim_world() {
+        let mut world = World::default();
+        let mut sim =
+            Sim::build(&world, &[], GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)), DVec3::ZERO);
+        sim.world.add_collider(Box::new(floptle_physics::Plane::ground(0.0)));
+        let bi = sim.world.add_body(floptle_physics::Body::sphere(Vec3::new(0.0, 0.5, 0.0), 0.5));
+        sim.world.bodies[bi].driven = true;
+        for _ in 0..90 {
+            sim.world.step_body(bi, STEP);
+        }
+        assert!(sim.world.bodies[bi].asleep, "fixture: the body should have settled by now");
+
+        // What `simulate_tick` does every tick, live and replayed alike: the
+        // ground is gone from what comes back this tick, `reclaim_world`
+        // reclaims it, then this same tick's `step_body_tick` runs.
+        let mut host = ScriptHost::new();
+        host.set_colliders(Vec::new(), DVec3::ZERO);
+        let mut ctx = Ctx { world: &mut world, sim: &mut sim, host: &mut host, step: STEP };
+        RollbackDriver::reclaim_world(&mut ctx);
+        sim.world.step_body(bi, STEP);
+
+        assert!(
+            !sim.world.bodies[bi].asleep,
+            "a driven body must wake, THIS tick, when reclaim_world's per-tick collider swap \
+             removes its ground — this is the only collider-set path a resimulated tick ever takes"
+        );
+    }
 }
