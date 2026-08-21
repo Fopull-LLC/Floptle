@@ -462,18 +462,36 @@ fn lenient_facets<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Facet>, D::Erro
 /// reads the same as absent, an array keeps whatever entries this build
 /// recognises (unlike `lenient_list`, one bad entry does not need to be able
 /// to sink the array — there simply are so few permission kinds that a
-/// single genuinely-malformed one is likely the whole list), and anything
-/// else present-but-wrong-shaped is treated the same as not having said.
+/// single genuinely-malformed one is likely the whole list).
+///
+/// **Present-but-unreadable is not the same fact as "declares nothing", and
+/// must not read as one** — this field's only reason to exist is warning
+/// someone before they install a package, and collapsing "we could not tell
+/// what this asked for" into the safest possible answer defeats that
+/// (`floptle/0137`, found by an adversarial review re-reading this card
+/// before it shipped). So a value that is present but not an array at all,
+/// or an array where EVERY entry failed to parse (a genuinely empty array is
+/// still a clean, explicit "declares none" and is left alone), reads as
+/// [`Permission::ALL`] instead of `None` — assume the maximum until this
+/// catalogue entry is fixed, the same "err toward the alarming answer, not
+/// the quiet one" call this session already made for a body's sleep state.
 fn lenient_permissions<'de, D: Deserializer<'de>>(
     d: D,
 ) -> Result<Option<Vec<Permission>>, D::Error> {
     let raw = Option::<serde_json::Value>::deserialize(d)?;
     match raw {
         None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::Array(items)) => Ok(Some(
-            items.into_iter().filter_map(|v| serde_json::from_value::<Permission>(v).ok()).collect(),
-        )),
-        Some(_) => Ok(None),
+        Some(serde_json::Value::Array(items)) => {
+            let declared_something = !items.is_empty();
+            let parsed: Vec<Permission> =
+                items.into_iter().filter_map(|v| serde_json::from_value::<Permission>(v).ok()).collect();
+            if parsed.is_empty() && declared_something {
+                Ok(Some(Permission::ALL.to_vec()))
+            } else {
+                Ok(Some(parsed))
+            }
+        }
+        Some(_) => Ok(Some(Permission::ALL.to_vec())),
     }
 }
 
@@ -1019,5 +1037,30 @@ mod tests {
             // …and the package beside it keeps its own perfectly good list.
             assert_eq!(idx.find("c.d").unwrap().permissions, Some(vec![Permission::Files]), "{bad}");
         }
+    }
+
+    /// The chip this field exists to drive (`permission_chip`,
+    /// `floptle-editor/src/packages_ui.rs`) shows nothing when `permissions`
+    /// is `None`. A value that is PRESENT but unreadable must not resolve to
+    /// `None` too, or the one field whose entire job is warning someone before
+    /// they install something reads as "nothing to see here" on exactly the
+    /// listings it could least afford to (`floptle/0137`).
+    #[test]
+    fn a_permissions_field_this_reader_cannot_understand_reads_as_declaring_everything() {
+        for bad in [r#""permissions":"Network""#, r#""permissions":{}"#, r#""permissions":[1,2,3]"#] {
+            let json = format!(r#"{{"packages":[{{"id":"a.b","name":"A","versions":[],{bad}}}]}}"#);
+            let idx = Index::parse(&json).expect("a bad permissions field must not fail the catalogue");
+            assert_eq!(
+                idx.find("a.b").unwrap().permissions,
+                Some(Permission::ALL.to_vec()),
+                "{bad}: unreadable must warn about everything, not nothing"
+            );
+        }
+
+        // An explicit, genuinely empty list is a clean answer and must stay
+        // exactly that — "declares none" is not the same fact as "unreadable".
+        let idx = Index::parse(r#"{"packages":[{"id":"a.b","name":"A","versions":[],"permissions":[]}]}"#)
+            .unwrap();
+        assert_eq!(idx.find("a.b").unwrap().permissions, Some(vec![]));
     }
 }

@@ -1776,6 +1776,23 @@ mod tests {
             Some("Network, Browser")
         );
     }
+
+    /// The end-to-end case `floptle/0137`'s adversarial-review follow-up
+    /// exists for: a catalogue entry whose permissions field is present but
+    /// unreadable must still show a chip, not read as though nothing were
+    /// declared — this is the one field whose whole job is warning someone
+    /// before they install something.
+    #[test]
+    fn a_listing_with_an_unreadable_permissions_field_still_shows_a_chip() {
+        let idx = floptle_package::Index::parse(
+            r#"{"packages":[{"id":"g.h","name":"G","versions":[],"permissions":"Network"}]}"#,
+        )
+        .unwrap();
+        assert!(
+            permission_chip(idx.find("g.h").unwrap()).is_some(),
+            "unreadable permissions must still warn, not read as a clean install"
+        );
+    }
 }
 
 #[cfg(test)]
