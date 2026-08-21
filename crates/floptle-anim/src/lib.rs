@@ -60,13 +60,39 @@ impl TransformTRS {
     /// T(-pivot)`. With `pivot = 0` this is exactly `matrix()`. This is what lets an
     /// object whose mesh sits far from its origin (an N64-style forearm baked in
     /// model space) rotate about a chosen joint — the pivot point stays put as the
-    /// rotation changes, and the rest pose is unaffected.
+    /// rotation changes.
+    ///
+    /// This form assumes the node's REST rotation/scale are identity (the baked
+    /// object-model case it was written for). A node with a rotated rest — a mesh
+    /// bone-parented in Blender carries the bone's axis flip — must use
+    /// [`Self::matrix_about_rest`], or the pivot displaces it at rest.
     pub fn matrix_about(&self, pivot: Vec3) -> Mat4 {
+        self.matrix_about_rest(pivot, &Self::IDENTITY)
+    }
+
+    /// Rotation/scale about `pivot`, anchored against the node's `rest` pose.
+    ///
+    /// The pivot is a point in the node's own local (mesh) space, so where it sits
+    /// in PARENT space depends on the rest rotation/scale that map local → parent:
+    /// `anchor = rest.r · (rest.s * pivot)`. Pivoting there gives
+    /// `T(t + anchor)·R·S·T(-pivot)`, which has the two properties the feature
+    /// promises:
+    ///
+    /// * **Rest is exact.** Feed the rest pose back in and the result is bit-for-bit
+    ///   `rest.matrix()` — the pivot never moves a node that isn't being posed.
+    /// * **The pivot point holds still.** Re-key the rotation and the pivot stays
+    ///   where rest put it, so the object orbits its joint.
+    ///
+    /// [`Self::matrix_about`] is this with an identity rest: for the baked
+    /// object models that case was written for, `anchor == pivot` and the two
+    /// agree exactly.
+    pub fn matrix_about_rest(&self, pivot: Vec3, rest: &Self) -> Mat4 {
         if pivot == Vec3::ZERO {
             return self.matrix();
         }
+        let anchor = rest.r * (rest.s * pivot);
         let rs = Mat4::from_scale_rotation_translation(self.s, self.r, Vec3::ZERO);
-        Mat4::from_translation(self.t + pivot) * rs * Mat4::from_translation(-pivot)
+        Mat4::from_translation(self.t + anchor) * rs * Mat4::from_translation(-pivot)
     }
 }
 
@@ -84,6 +110,18 @@ pub struct SkelNode {
     /// (see the `.rig.ron` pivot overrides); ignored by clips (it only reshapes how
     /// a pose composes, never what's keyed).
     pub pivot: Vec3,
+}
+
+impl SkelNode {
+    /// The pivot expressed in PARENT space, relative to the node's translation:
+    /// `rest.r · (rest.s * pivot)`. This is the offset [`TransformTRS::matrix_about_rest`]
+    /// adds to the pose translation, so anything that reverses that composition —
+    /// the gizmo turning a dragged world transform back into a local pose — must
+    /// subtract THIS, not the raw pivot. Identity rest rotation/scale → the two
+    /// are the same vector.
+    pub fn pivot_anchor(&self) -> Vec3 {
+        self.rest.r * (self.rest.s * self.pivot)
+    }
 }
 
 /// A model's animated node hierarchy, shared by every instance of the model.
@@ -127,7 +165,7 @@ impl Skeleton {
         out.clear();
         out.reserve(self.nodes.len());
         for (i, n) in self.nodes.iter().enumerate() {
-            let local = pose.get(i).unwrap_or(&n.rest).matrix_about(n.pivot);
+            let local = pose.get(i).unwrap_or(&n.rest).matrix_about_rest(n.pivot, &n.rest);
             let m = match n.parent {
                 Some(p) => out[p] * local,
                 None => local,
@@ -1151,6 +1189,39 @@ mod tests {
         // pivot = ZERO must be identical to plain matrix().
         let plain = TransformTRS { t: Vec3::new(1.0, 2.0, 3.0), ..trs };
         assert_eq!(plain.matrix_about(Vec3::ZERO), plain.matrix());
+    }
+
+    #[test]
+    fn a_pivot_never_moves_a_node_with_a_rotated_rest() {
+        // A mesh bone-parented in Blender exports with the bone's axis flip baked
+        // into its rest rotation (180° about X is the usual one). Give such a node
+        // the centroid pivot the editor auto-assigns to every object node: the REST
+        // pose must come out bit-identical to `rest.matrix()`. The old
+        // `T(t + pivot)·R·S·T(-pivot)` form displaced it by `pivot - R·pivot`, which
+        // flung an R6 character's limbs off the body on import.
+        let rest = TransformTRS {
+            t: Vec3::new(0.08, -0.05, -0.01),
+            r: Quat::from_rotation_x(std::f32::consts::PI),
+            s: Vec3::ONE,
+        };
+        let pivot = Vec3::new(0.0, -0.88, 0.0); // a limb's centroid, well off its origin
+        let posed = rest.matrix_about_rest(pivot, &rest);
+        let plain = rest.matrix();
+        for p in [Vec3::ZERO, Vec3::new(0.5, -1.8, 0.5), pivot] {
+            let (a, b) = (posed.transform_point3(p), plain.transform_point3(p));
+            assert!((a - b).length() < 1e-6, "rest displaced by the pivot: {a} vs {b}");
+        }
+
+        // ...and posing it still orbits the pivot: the pivot POINT stays where rest
+        // put it, no matter what rotation is keyed on top.
+        let at_rest = plain.transform_point3(pivot);
+        let keyed = TransformTRS { r: Quat::from_rotation_z(0.7) * rest.r, ..rest };
+        let moved = keyed.matrix_about_rest(pivot, &rest).transform_point3(pivot);
+        assert!((moved - at_rest).length() < 1e-6, "pivot moved when posed: {moved} vs {at_rest}");
+
+        // An identity rest is the case `matrix_about` was written for — unchanged.
+        let flat = TransformTRS { t: rest.t, r: Quat::from_rotation_z(0.7), s: Vec3::ONE };
+        assert_eq!(flat.matrix_about_rest(pivot, &TransformTRS::IDENTITY), flat.matrix_about(pivot));
     }
 
     fn skel2() -> Skeleton {

@@ -703,7 +703,7 @@ impl Editor {
             return;
         };
         // Pull everything off the rig, then drop the borrow before touching anim_ui.
-        let (parent, parent_local, offset, bone_name, pivot) = {
+        let (parent, parent_local, offset, bone_name, anchor) = {
             let Some(rig) = self.mesh_registry.get(&asset_path).and_then(|m| m.rig.as_ref())
             else {
                 return;
@@ -725,7 +725,7 @@ impl Editor {
                 pw,
                 rig.offset,
                 rig.skeleton.nodes.get(idx).map(|n| n.name.clone()),
-                rig.skeleton.nodes.get(idx).map(|n| n.pivot).unwrap_or(Vec3::ZERO),
+                rig.skeleton.nodes.get(idx).map(|n| n.pivot_anchor()).unwrap_or(Vec3::ZERO),
             )
         };
         let Some(bone_name) = bone_name else { return };
@@ -737,16 +737,19 @@ impl Editor {
             Some(_) => mesh_world * parent_local.as_dmat4(),
             None => mesh_world * offset.as_dmat4(),
         };
-        // The gizmo sits at the pivot, so `parent_scene⁻¹ · world` = T(t)·T(pivot)·R·S
-        // (see `TransformTRS::matrix_about`); its translation is `t + pivot`, so the
-        // node's pose translation is that minus the pivot. (pivot = 0 → unchanged.)
+        // The gizmo sits at the pivot, so `parent_scene⁻¹ · world` = T(t + anchor)·R·S
+        // (see `TransformTRS::matrix_about_rest`); its translation is `t + anchor`, so
+        // the node's pose translation is that minus the pivot ANCHOR — the pivot mapped
+        // into parent space by the rest rotation/scale, which is the offset the forward
+        // composition actually added. Subtracting the raw pivot instead would drift any
+        // node whose rest is rotated. (pivot = 0 → anchor = 0 → unchanged.)
         let local_m = parent_scene.inverse() * world_xf.world_matrix();
         if !local_m.is_finite() {
             return;
         }
         let (s, r, t) = local_m.to_scale_rotation_translation();
         let trs = floptle_anim::TransformTRS {
-            t: t.as_vec3() - pivot,
+            t: t.as_vec3() - anchor,
             r: r.as_quat(),
             s: s.as_vec3(),
         };
