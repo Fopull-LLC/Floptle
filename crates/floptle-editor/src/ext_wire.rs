@@ -248,7 +248,13 @@ impl Editor {
                 continue;
             };
             live.insert(e);
-            let reuse = self.ext_tilemap_cache.get(&e).filter(|g| g.data == *data);
+            let reuse = self.ext_tilemap_cache.get(&e).filter(|g| {
+                g.data == *data
+                    && g.cols == *cols
+                    && g.rows == *rows
+                    && g.tile == *tile
+                    && g.tileset == *tileset
+            });
             let grid = match reuse {
                 Some(g) => g.clone(),
                 None => std::rc::Rc::new(ext::scene_mirror::TilemapGrid {
@@ -1420,5 +1426,27 @@ mod tests {
         let rc2 = m2.tilemaps.get(&id).unwrap().clone();
         assert!(!std::rc::Rc::ptr_eq(&rc1, &rc2), "an actual edit must not reuse the old buffer");
         assert_eq!(rc2.data[0], 7);
+    }
+
+    /// …and an edit to `tile` (the tile's world-unit size) with `data`
+    /// untouched must ALSO get a fresh grid — the reuse check compared only
+    /// `data`, so a size or tileset edit that left the cell contents alone
+    /// handed packages back the old `tile`/`cols`/`rows`/`tileset` forever.
+    #[test]
+    fn an_edit_that_leaves_data_untouched_still_gets_a_fresh_grid() {
+        let (mut ed, id) = with_a_tilemap(2, 1);
+        let m1 = ed.ext_mirror();
+        let rc1 = m1.tilemaps.get(&id).unwrap().clone();
+        let e = ed.entity_of(id).unwrap();
+        if let Some(Matter::Tilemap { tile, .. }) = ed.world.get_mut::<Matter>(e) {
+            *tile = 2.0;
+        }
+        let m2 = ed.ext_mirror();
+        let rc2 = m2.tilemaps.get(&id).unwrap().clone();
+        assert!(
+            !std::rc::Rc::ptr_eq(&rc1, &rc2),
+            "a tile-size edit must not reuse a grid built for the old size"
+        );
+        assert_eq!(rc2.tile, 2.0, "a package reading tileSize() after this edit must see the new value");
     }
 }
