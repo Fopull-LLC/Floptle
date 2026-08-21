@@ -1083,11 +1083,18 @@ impl crate::Editor {
             return;
         }
         self.nav_watch_elapsed = 0.0;
-        // Cheap early-out for the idle editor: if NOTHING has been written to
-        // the world since the last sample, the hash cannot have changed either
-        // and there is no reason to pay for it.
+        // Cheap early-out for the idle editor — but ONLY once we already know
+        // this shape is settled (baked, or a confirmed-empty gather). While
+        // still waiting to confirm settlement, a real edit bumps the revision
+        // exactly once and then never again for as long as the level stays
+        // idle afterwards — which is the ordinary case, not a rare one. Gating
+        // on the revision unconditionally skipped every sample after that
+        // first one, so the two-consecutive-samples-agree check below never
+        // got its second sample and an idle level after one edit never baked.
         let rev = self.world.revision();
-        if rev == self.nav_watch_rev {
+        let already_settled =
+            self.nav_watch_stamp == self.nav_baked_stamp || Some(self.nav_watch_stamp) == self.nav_empty_stamp;
+        if rev == self.nav_watch_rev && already_settled {
             return;
         }
         self.nav_watch_rev = rev;
@@ -2272,6 +2279,36 @@ mod tests {
             "auto_rebake: true cost {ratio:.1}x what false did over a {TICKS}-tick streamed \
              run ({on:?} vs {off:?}) — the hash is being paid on every revision bump instead \
              of throttled to real time"
+        );
+    }
+
+    /// The revision early-out is only a fast-path for the ALREADY-settled
+    /// editor — it must never be the reason settlement is never confirmed in
+    /// the first place. A single edit followed by a truly idle level moves
+    /// `World::revision()` once and then never again, so the second (and
+    /// every later) sample lands on `rev == self.nav_watch_rev` — if that
+    /// alone skips the function, the two-consecutive-samples-agree check
+    /// that decides "settled" never runs a second time, and the drag-a-wall
+    /// workflow this feature exists for never bakes.
+    #[test]
+    fn an_edit_followed_by_idle_still_confirms_settled_and_bakes() {
+        let mut ed = crate::Editor::default();
+        let n = ed.world.spawn();
+        ed.world.insert(n, nav_mesh_matter(true));
+        ed.world.insert(n, floptle_core::transform::Transform::IDENTITY);
+        ground_node(&mut ed.world, [0.0, 0.0, 0.0]);
+
+        // One edit, one sample: never bakes alone — it has nothing yet to agree with.
+        ed.tick_nav_autobake(NAV_WATCH_INTERVAL);
+        assert!(ed.nav_job.is_none(), "a single sample must not bake on its own");
+
+        // The level goes idle: no further edits, several more intervals pass.
+        for _ in 0..5 {
+            ed.tick_nav_autobake(NAV_WATCH_INTERVAL);
+        }
+        assert!(
+            ed.nav_job.is_some(),
+            "an idle level after one edit must eventually confirm settlement and start a bake"
         );
     }
 }
