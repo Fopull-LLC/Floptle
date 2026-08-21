@@ -123,6 +123,25 @@ pub struct Body {
     /// that genuinely need it: buoyancy compares the body's density against the
     /// water's, which is the difference between a cork and a cannonball.
     pub mass: f32,
+    /// SLEEPING (`floptle/0143`): grounded and below rest speed for long
+    /// enough that the step skips it entirely — no gravity, no depenetration,
+    /// no ground detection — the same near-zero cost `kinematic` already
+    /// gets. Woken by a kinematic hull touching it, a Lua velocity/impulse
+    /// write, a teleport, a Kinematic→Dynamic switch, or its supporting
+    /// collider disappearing (a chunk unload).
+    ///
+    /// Part of the body's own state, not a cache: a rollback resimulation
+    /// that replays this body alone (`PhysicsWorld::step_body`'s "a single
+    /// body's step is EXACTLY the trajectory in a full step" contract) must
+    /// reach this exact value on the exact same tick the live run did, or a
+    /// resimulated peer could integrate ticks the other one skipped over
+    /// something that was supposed to be standing still. See
+    /// [`crate::sim::BodySnapshot`].
+    pub asleep: bool,
+    /// Seconds this body has been grounded and below the sleep speed,
+    /// consecutively — reset the instant either condition breaks. Reaching
+    /// [`crate::world::SLEEP_SETTLE_TIME`] is what sets `asleep`.
+    pub sleep_time: f32,
 }
 
 impl Body {
@@ -151,6 +170,8 @@ impl Body {
             driven: false,
             pushbox_only: false,
             mass: 1.0,
+            asleep: false,
+            sleep_time: 0.0,
         }
     }
 

@@ -1565,6 +1565,15 @@ impl Editor {
                         pos: floptle_core::math::DVec3::from_array(state.pos),
                         vel: floptle_core::math::Vec3::from_array(state.vel),
                         grounded: state.grounded,
+                        // The wire state carries no sleep info (`floptle/0143`)
+                        // — a corrected body starts awake and re-settles on
+                        // its own through the replay below, exactly as a
+                        // genuinely-at-rest body would within a few ticks.
+                        // Unlike the solo-body rollback replay
+                        // (`rollback.rs`), a client reconciliation is not a
+                        // bit-exact contract with the server to begin with.
+                        asleep: false,
+                        sleep_time: 0.0,
                     },
                 );
             }

@@ -8,6 +8,28 @@ use crate::compound::{Compound, CompoundContact};
 use crate::gravity::{GravityField, GravitySource};
 use crate::shapes::CollisionShape;
 
+/// Sleeping (`floptle/0143`). Below this speed AND grounded, consecutively,
+/// for [`SLEEP_SETTLE_TIME`] and a body stops integrating.
+///
+/// 0.05 m/s: slow enough that nothing that reads as "moving" ever crosses it
+/// (a walking character clears 1 m/s; this is a fifth of a slow drift), fast
+/// enough that genuine settling — the last wobble of a dropped mug — clears
+/// it well before the settle timer would anyway.
+pub const SLEEP_LINEAR_SPEED: f32 = 0.05;
+/// How long a body must stay below [`SLEEP_LINEAR_SPEED`] and grounded before
+/// it sleeps. Long enough that a body bouncing to a stop (several taps, each
+/// separated by a near-zero crossing) does not sleep mid-bounce; short enough
+/// that a room of settling debris goes quiet almost as soon as it looks like
+/// it has.
+pub const SLEEP_SETTLE_TIME: f32 = 0.5;
+/// How often `PhysicsWorld::step` re-validates every sleeping body's cached
+/// support against the current colliders — the safety net for geometry that
+/// changes IN PLACE (terrain sculpting, a map edit) rather than through
+/// `set_colliders`'s wholesale replacement. Not gameplay-latency-sensitive
+/// (nothing is waiting on this to feel instant, unlike waking on contact),
+/// so it can be coarser than [`SLEEP_SETTLE_TIME`].
+pub const SLEEP_REVALIDATE_INTERVAL: f32 = 1.0;
+
 /// A collider plus the world-space frame its geometry is expressed in (ADR-0015).
 ///
 /// The sim runs **origin-relative**: bodies and queries use small coordinates near
@@ -134,6 +156,23 @@ pub struct PhysicsWorld {
     /// Contacts compounds resolved on the most recent step, attributed to the
     /// shape that took them (cleared each step, sim frame).
     pub compound_contacts: Vec<CompoundContact>,
+    /// What each SLEEPING body (by index, parallel to `bodies`) is resting
+    /// on: `(collider index, contact point, normal)` per touching collider,
+    /// cached the moment it fell asleep — see `Self::report_resting_contacts`
+    /// (`floptle/0143`). A separate parallel Vec rather than a field on
+    /// `Body` because `Body` is `Copy` throughout this crate and a `Vec`
+    /// field would end that. Empty for every awake body.
+    resting: Vec<Vec<(usize, Vec3, Vec3)>>,
+    /// Seconds since the last periodic re-check of every sleeping body's
+    /// support (`floptle/0143`). `Self::set_colliders` already catches a
+    /// collider LIST replacement (a streamed chunk unloading); this is the
+    /// safety net for geometry that changes in place instead — terrain
+    /// sculpting mutates a `ChunkField` a collider already points at, a map
+    /// edit rewrites mesh data the same way, and neither is a call this
+    /// struct has a hook for in general. Cheap and infrequent: only
+    /// SLEEPING bodies are checked, and only every
+    /// [`SLEEP_REVALIDATE_INTERVAL`].
+    resting_check_elapsed: f32,
 }
 
 impl Default for PhysicsWorld {
@@ -153,6 +192,8 @@ impl Default for PhysicsWorld {
             collider_index: Default::default(),
             cand: Vec::new(),
             index_fresh: false,
+            resting: Vec::new(),
+            resting_check_elapsed: 0.0,
         }
     }
 }
@@ -578,6 +619,7 @@ impl PhysicsWorld {
 
     pub fn add_body(&mut self, body: Body) -> usize {
         self.bodies.push(body);
+        self.resting.push(Vec::new());
         self.bodies.len() - 1
     }
 
@@ -599,6 +641,60 @@ impl PhysicsWorld {
         self.index_fresh = true;
     }
 
+    /// Replace the static collider set — a scene reload, or a chunk streaming
+    /// in or out — and wake any sleeping body whose ground this MAY have
+    /// pulled out from under it (`floptle/0143`).
+    ///
+    /// A chunk unloading its colliders out from under a sleeping mug must not
+    /// leave the mug floating in stale-rest state forever, so this errs
+    /// toward waking: a body with nothing at all nearby afterwards wakes,
+    /// however far off it was resting versus merely near something — a false
+    /// wake costs one ordinary step; a missed one costs a floating prop
+    /// nobody notices until they walk past it.
+    pub fn set_colliders(&mut self, colliders: Vec<AnchoredCollider>) {
+        self.colliders = colliders;
+        self.index_fresh = false;
+        // The collider indices every sleeping body's `resting` cache names
+        // are about to stop meaning anything — this is the common point they
+        // go stale (a streamed chunk unloading), so it is the point that
+        // re-derives them, once per replacement rather than once per asleep
+        // tick.
+        self.revalidate_sleeping_bodies();
+    }
+
+    /// Re-derive every sleeping body's `resting` cache against the CURRENT
+    /// collider set, waking any body that finds nothing there any more
+    /// (`floptle/0143`).
+    ///
+    /// Errs toward waking: a body with nothing at all nearby wakes, however
+    /// far off it was resting versus merely near something — a false wake
+    /// costs one ordinary step; a missed one costs a floating prop nobody
+    /// notices until they walk past it. A no-op when nobody is asleep.
+    ///
+    /// Called from two places for two different reasons a body's ground can
+    /// change: `Self::set_colliders` (the collider LIST was replaced — a
+    /// streamed chunk) and `Self::step`'s periodic safety net (geometry
+    /// changed IN PLACE — terrain sculpting, a map edit — which nothing
+    /// "replaced" for this to see any other way).
+    fn revalidate_sleeping_bodies(&mut self) {
+        if !self.bodies.iter().any(|b| b.asleep) {
+            return; // the common case: nobody is asleep, nothing to check
+        }
+        self.reindex_colliders();
+        for bi in 0..self.bodies.len() {
+            if !self.bodies[bi].asleep {
+                continue;
+            }
+            let fresh = self.find_resting_contacts(bi);
+            if fresh.is_empty() {
+                self.bodies[bi].asleep = false;
+                self.bodies[bi].sleep_time = 0.0;
+            } else {
+                self.resting[bi] = fresh;
+            }
+        }
+    }
+
     pub fn step(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, 0.1); // guard against a huge stalled frame
         self.reindex_colliders();
@@ -614,6 +710,16 @@ impl PhysicsWorld {
         }
         for ci in 0..self.compounds.len() {
             self.step_compound(ci, dt);
+        }
+        // Safety net for geometry that changed IN PLACE under a sleeping
+        // body — terrain sculpting, a map edit — which `set_colliders`
+        // cannot see because nothing replaced the collider LIST
+        // (`floptle/0143`). Only sleeping bodies are checked, at most once
+        // per `SLEEP_REVALIDATE_INTERVAL`.
+        self.resting_check_elapsed += dt;
+        if self.resting_check_elapsed >= SLEEP_REVALIDATE_INTERVAL {
+            self.resting_check_elapsed = 0.0;
+            self.revalidate_sleeping_bodies();
         }
         self.index_fresh = false;
     }
@@ -986,6 +1092,49 @@ impl PhysicsWorld {
             self.bodies[bi].prev_pos = self.bodies[bi].pos;
             return;
         }
+        if self.bodies[bi].asleep {
+            // SLEEPING (`floptle/0143`): skip gravity, depenetration and
+            // ground detection against however many static colliders the
+            // level has — the expensive part, and the part that cannot
+            // change under a body whose ground has not itself changed.
+            //
+            // Still tested against `kin_hulls` (moving platforms, a grabbed
+            // prop, a player capsule): those are the one thing that CAN
+            // touch a sleeping body without anything about the body itself
+            // changing first, and — same as every other body-to-body
+            // relationship this solver has — they are externally driven
+            // inputs, not another dynamic body's own simulated state, so
+            // testing them here does not touch the "a single body's step is
+            // EXACTLY the trajectory in a full step" contract this function's
+            // own doc comment states.
+            //
+            // Also self-wakes on velocity: `Body::vel` is a public field on
+            // a public `Vec<Body>`, so a caller can (and does — direct
+            // Inspector/test writes, and any future code that has not gone
+            // through `Sim::set_body_velocity`'s explicit wake) hand a
+            // sleeping body a real velocity without going through the
+            // wake-aware setters. A body that is not actually slow is not
+            // actually asleep, whatever the flag says.
+            self.bodies[bi].prev_pos = self.bodies[bi].pos;
+            let has_velocity = self.bodies[bi].vel.length_squared()
+                > SLEEP_LINEAR_SPEED * SLEEP_LINEAR_SPEED;
+            if !has_velocity && !self.touches_a_kinematic_hull(bi) {
+                // Still asleep. Re-report what it is resting on — a
+                // candidate-bounded query, same cost shape as the kinematic
+                // check above, not the O(scene) the ordinary step would pay
+                // — so `PhysicsWorld::contacts` and, downstream, touch/stay
+                // events keep seeing a resting body as touching exactly what
+                // it was touching, the way they would if it had run the full
+                // step and landed on the same floor again.
+                self.report_resting_contacts(bi);
+                return;
+            }
+            self.bodies[bi].asleep = false;
+            self.bodies[bi].sleep_time = 0.0;
+            // Falls through to the ordinary step below, which resolves the
+            // contact that woke it this same tick — a platform sliding under
+            // a sleeping mug does not wait a frame to start carrying it.
+        }
         if self.bodies[bi].pushbox_only {
             // Integrate the velocity, and stop. Everything below this line —
             // gravity, the depenetration relaxation, ground detection, the
@@ -1202,7 +1351,125 @@ impl PhysicsWorld {
                     set_axis(&mut self.bodies[bi].vel, i, 0.0);
                 }
             }
+
+            // SLEEPING, part two: settle detection (`floptle/0143`). Grounded
+            // and below `SLEEP_LINEAR_SPEED`, consecutively, for
+            // `SLEEP_SETTLE_TIME` — a pure function of this body's own state
+            // this step, nothing else's, so a resimulation that replays only
+            // this body reaches the identical decision on the identical tick.
+            if self.bodies[bi].grounded
+                && self.bodies[bi].vel.length_squared()
+                    < SLEEP_LINEAR_SPEED * SLEEP_LINEAR_SPEED
+            {
+                self.bodies[bi].sleep_time += dt;
+                if self.bodies[bi].sleep_time >= SLEEP_SETTLE_TIME {
+                    self.bodies[bi].asleep = true;
+                    // Stop exactly here rather than let a whisper of
+                    // sub-threshold creep survive into a woken body's first
+                    // moment awake.
+                    self.bodies[bi].vel = Vec3::ZERO;
+                    // Cache what it is resting on NOW, while a real query is
+                    // still cheap to justify (this tick already paid for the
+                    // full step) — every subsequent asleep tick re-pushes
+                    // this instead of asking the broadphase again.
+                    self.resting[bi] = self.find_resting_contacts(bi);
+                }
+            } else {
+                self.bodies[bi].sleep_time = 0.0;
+            }
         }
+    }
+
+    /// Does a kinematic hull (a moving platform, a grabbed prop, a player
+    /// capsule) touch body `bi` right now? Read-only — no push, no state
+    /// change — for [`Self::step_body`]'s sleeping branch to decide whether
+    /// to wake it. Same distance test the real kinematic pass below uses,
+    /// against the SAME `kin_hulls`, so "would the ordinary step have found
+    /// a contact" and "does this say so" cannot disagree.
+    fn touches_a_kinematic_hull(&self, bi: usize) -> bool {
+        let row = self.matrix[self.bodies[bi].layer as usize];
+        let (centers, n_c, radius) = self.bodies[bi].sample_centers();
+        self.kin_hulls.iter().any(|hull| {
+            (row >> hull.layer) & 1 != 0
+                && centers[..n_c].iter().any(|&c| hull.distance(c) < radius)
+        })
+    }
+
+    /// What [`Self::step_body`]'s sleeping branch calls instead of the real
+    /// depenetration passes: the SAME candidate-bounded broadphase query and
+    /// the SAME per-candidate distance test the ordinary step uses, so it
+    /// finds exactly the contacts a full step would — but no position push,
+    /// no velocity reflection, no friction, because a body that is genuinely
+    /// asleep has nothing to correct. `note_body_contact` does the same
+    /// grounded/wall classification the ordinary path uses, so a sleeping
+    /// body's `grounded`/`ground_normal`/`wall_normal` and
+    /// `PhysicsWorld::contacts` read exactly as they would the moment before
+    /// it fell asleep, every step, until something wakes it (`floptle/0143`).
+    ///
+    /// **No query.** Just replays `Body::resting`, cached the moment this
+    /// body fell asleep (or last refreshed by `Self::set_colliders`) — the
+    /// broadphase cost this whole feature exists to avoid would otherwise be
+    /// paid every asleep TICK instead of once per nap.
+    fn report_resting_contacts(&mut self, bi: usize) {
+        self.bodies[bi].contact = None;
+        self.bodies[bi].ground_normal = None;
+        self.bodies[bi].wall_normal = None;
+        self.bodies[bi].grounded = false;
+        for i in 0..self.resting[bi].len() {
+            let (ci, point, n) = self.resting[bi][i];
+            // The cache only claims to be valid against the collider set it
+            // was taken from; `set_colliders` is what keeps it that way for
+            // a body that stays asleep across a replacement. A stale index
+            // is simply dropped here rather than trusted.
+            if ci >= self.colliders.len() {
+                continue;
+            }
+            self.note_body_contact(bi, n);
+            self.contacts.push(Contact { body: bi, collider: ci, point, normal: n });
+        }
+    }
+
+    /// The query-based version: what a sleeping body is ACTUALLY resting on
+    /// right now, freshly asked of the broadphase. Read-only. Used exactly
+    /// twice — caching `Body::resting` the moment a body falls asleep (this
+    /// tick already paid for the real step, so one more query is free by
+    /// comparison), and refreshing it in `Self::set_colliders` for a body
+    /// that stays asleep across a collider-set replacement, which is the
+    /// only way the cache can go stale. Never called once per asleep tick —
+    /// that cost is exactly what `Self::report_resting_contacts` exists to
+    /// avoid.
+    fn find_resting_contacts(&self, bi: usize) -> Vec<(usize, Vec3, Vec3)> {
+        let row = self.matrix[self.bodies[bi].layer as usize];
+        let (centers, n_c, radius) = self.bodies[bi].sample_centers();
+        let pos = self.bodies[bi].pos;
+        let reach = centers[..n_c].iter().map(|c| c.distance(pos)).fold(0.0f32, f32::max);
+        let mut cand = Vec::new();
+        self.collider_index.sphere(pos, reach + radius + 0.01, &mut cand);
+        let mut out = Vec::new();
+        for &ci in &cand {
+            let ci = ci as usize;
+            if (row >> self.colliders[ci].layer) & 1 == 0 || self.colliders[ci].sensor {
+                continue;
+            }
+            for &c in &centers[..n_c] {
+                // A small tolerance, not the strict `pen > 0.0` the real
+                // depenetration pass uses: this runs right after that pass
+                // already resolved the body to the surface (pen ≈ 0 by
+                // construction), so a hair of floating-point slack on the
+                // "clear" side of zero must still read as resting, or a body
+                // that settled exactly onto a surface finds nothing here and
+                // wakes up floorless the instant `report_resting_contacts`
+                // asks (`floptle/0143`).
+                let pen = radius - self.colliders[ci].distance(c);
+                #[allow(clippy::neg_cmp_op_on_partial_ord)]
+                if !(pen > -0.01) {
+                    continue;
+                }
+                let n = self.colliders[ci].normal(c);
+                out.push((ci, c - n * radius, n));
+            }
+        }
+        out
     }
 }
 
@@ -1234,6 +1501,179 @@ mod step_body_tests {
         assert_eq!(full.bodies[0].grounded, solo.bodies[0].grounded);
         // ...and body 1 was genuinely untouched in the solo world.
         assert_eq!(solo.bodies[1].pos, Vec3::new(5.0, 3.0, 0.0));
+    }
+
+    /// `floptle/0143`, the rollback-safety half: a body that falls asleep
+    /// during a full-`step()` run must fall asleep on the EXACT SAME TICK
+    /// when replayed solo (`step_body`, the path a rollback resimulation
+    /// uses) — the same contract `single_body_step_matches_full_step` pins
+    /// for position/velocity/grounded, now for sleep state too. If this ever
+    /// drifts, two rollback peers could integrate a different number of
+    /// ticks over something that was supposed to be standing still and
+    /// desync without either side raising an error.
+    #[test]
+    fn falling_asleep_replays_bit_identically_solo() {
+        let build = || {
+            let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+            w.add_collider(Box::new(Plane::ground(0.0)));
+            // Resting on the floor from tick 0 — no fall to wait out.
+            w.add_body(Body::sphere(Vec3::new(0.0, 0.5, 0.0), 0.5));
+            w
+        };
+        let (mut full, mut solo) = (build(), build());
+        let dt = 1.0 / 120.0;
+        let mut slept_full = None;
+        let mut slept_solo = None;
+        for tick in 0..300 {
+            full.step(dt);
+            solo.step_body(0, dt);
+            if slept_full.is_none() && full.bodies[0].asleep {
+                slept_full = Some(tick);
+            }
+            if slept_solo.is_none() && solo.bodies[0].asleep {
+                slept_solo = Some(tick);
+            }
+            assert_eq!(
+                full.bodies[0].sleep_time, solo.bodies[0].sleep_time,
+                "sleep timer diverged at tick {tick}"
+            );
+            assert_eq!(full.bodies[0].pos, solo.bodies[0].pos, "position diverged at tick {tick}");
+        }
+        let (Some(sf), Some(ss)) = (slept_full, slept_solo) else {
+            panic!("the body never fell asleep in {} ticks — fixture is wrong, not the property", 300);
+        };
+        assert_eq!(sf, ss, "the two paths must fall asleep on the exact same tick");
+    }
+
+    /// Criterion 4, as a `spawn_scaling.rs`-style ratio guard: a room of
+    /// resting Dynamic props costs approximately what the SAME props cost
+    /// once they have settled and gone to sleep — the property this whole
+    /// card is about, measured rather than assumed. `SLEEP_SETTLE_TIME` at
+    /// 120 Hz is 60 ticks, so ticks 0..59 are the "still deciding" window
+    /// (every body pays the full step) and ticks well past it are the
+    /// "asleep" steady state (skipped almost entirely).
+    #[test]
+    fn resting_bodies_cost_falls_once_they_settle() {
+        const BODIES: usize = 200;
+        const GRID: i32 = 20; // (2*20+1)^2 = 1681 static colliders — the card's own count
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        for x in -GRID..=GRID {
+            for z in -GRID..=GRID {
+                w.add_collider(Box::new(crate::shapes::BoxShape::new(
+                    Vec3::new(x as f32 * 1.0, 0.0, z as f32 * 1.0),
+                    Vec3::new(0.5, 0.5, 0.5),
+                    Quat::IDENTITY,
+                )));
+            }
+        }
+        for i in 0..BODIES {
+            let a = i as f32 * 0.618_034; // spread them across the floor (golden-ratio scatter)
+            let x = (a.fract() - 0.5) * (GRID as f32 * 1.6);
+            let z = ((a * 1.37).fract() - 0.5) * (GRID as f32 * 1.6);
+            // Resting exactly on a box top from tick 0 — settling starts
+            // immediately, the same as furniture that was placed at rest.
+            w.add_body(Body::sphere(Vec3::new(x, 1.0, z), 0.5));
+        }
+        let dt = 1.0 / 120.0;
+        let time_n = |w: &mut PhysicsWorld, n: usize| {
+            let t0 = std::time::Instant::now();
+            for _ in 0..n {
+                w.step(dt);
+            }
+            t0.elapsed()
+        };
+        // Ticks 0..59: still inside SLEEP_SETTLE_TIME (0.5s @ 120Hz), every
+        // body pays the full step.
+        let settling = time_n(&mut w, 59);
+        // A few more ticks to cross the threshold.
+        let _ = time_n(&mut w, 5);
+        assert!(
+            w.bodies.iter().all(|b| b.asleep),
+            "the fixture is wrong, not the property: not every resting body is asleep yet"
+        );
+        // Steady state: everyone asleep, nothing moving.
+        let asleep = time_n(&mut w, 64);
+        let ratio = settling.as_secs_f64() / asleep.as_secs_f64().max(1e-12);
+        // Measured on this machine: ~0.9x before the fix (bodies never
+        // sleep, so "settling" and "asleep" cost the same, within noise) —
+        // ~4-9x after, release or debug. The bound is set well under either
+        // measured "after" figure and far above the "before" one, so it
+        // stays a real guard rather than a coin flip on a shared runner.
+        assert!(
+            ratio > 4.0,
+            "{BODIES} resting bodies over {} static colliders: settling window {settling:?}, \
+             asleep steady state {asleep:?} — only {ratio:.1}x apart. Sleeping should make the \
+             asleep window cost close to nothing by comparison.",
+            (2 * GRID + 1) * (2 * GRID + 1)
+        );
+    }
+
+    /// Criterion 2: a moving KINEMATIC hull (a walked-into player, a pushed
+    /// platform) wakes a sleeping body — the one physical way in this engine
+    /// a "moving body" can actually touch a Dynamic one at all (there is no
+    /// body-vs-body pass; see this file's `step_body` doc comment).
+    #[test]
+    fn a_moving_kinematic_hull_wakes_a_sleeping_body() {
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(Plane::ground(0.0)));
+        let bi = w.add_body(Body::sphere(Vec3::new(0.0, 0.5, 0.0), 0.5));
+        let dt = 1.0 / 120.0;
+        for _ in 0..90 {
+            w.step(dt);
+        }
+        assert!(w.bodies[bi].asleep, "fixture: the body should have settled by now");
+
+        // A kinematic hull sweeps in from the side, on a collision course.
+        w.kin_hulls.push(BodyHull {
+            eid: 999,
+            pos: Vec3::new(-0.3, 0.5, 0.0),
+            radius: 0.5,
+            shape: BodyShape::Sphere,
+            up: Vec3::Y,
+            layer: 0,
+        });
+        w.step(dt);
+        assert!(!w.bodies[bi].asleep, "a touching kinematic hull must wake the sleeping body");
+    }
+
+    /// Criterion 2: a Lua-style velocity write must actually take effect
+    /// next step, not be silently discarded because the body was still
+    /// marked asleep.
+    #[test]
+    fn a_velocity_write_wakes_a_sleeping_body() {
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(Plane::ground(0.0)));
+        let bi = w.add_body(Body::sphere(Vec3::new(0.0, 0.5, 0.0), 0.5));
+        let dt = 1.0 / 120.0;
+        for _ in 0..90 {
+            w.step(dt);
+        }
+        assert!(w.bodies[bi].asleep, "fixture: the body should have settled by now");
+
+        w.bodies[bi].vel = Vec3::new(3.0, 0.0, 0.0);
+        w.bodies[bi].asleep = false; // what Sim::set_body_velocity now also does
+        w.bodies[bi].sleep_time = 0.0;
+        let before = w.bodies[bi].pos;
+        w.step(dt);
+        assert_ne!(w.bodies[bi].pos, before, "a woken body with a real velocity must actually move");
+    }
+
+    /// Criterion 2: a chunk's colliders unloading out from under a sleeping
+    /// body must not leave it floating in stale-rest state.
+    #[test]
+    fn losing_its_ground_wakes_a_sleeping_body() {
+        let mut w = PhysicsWorld::new(GravityField::uniform(Vec3::new(0.0, -9.81, 0.0)));
+        w.add_collider(Box::new(Plane::ground(0.0)));
+        let bi = w.add_body(Body::sphere(Vec3::new(0.0, 0.5, 0.0), 0.5));
+        let dt = 1.0 / 120.0;
+        for _ in 0..90 {
+            w.step(dt);
+        }
+        assert!(w.bodies[bi].asleep, "fixture: the body should have settled by now");
+
+        // The chunk holding the floor unloads.
+        w.set_colliders(Vec::new());
+        assert!(!w.bodies[bi].asleep, "losing its ground must wake the body, not leave it floating");
     }
 }
 

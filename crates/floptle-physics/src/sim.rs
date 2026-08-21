@@ -166,6 +166,15 @@ pub struct BodySnapshot {
     pub pos: DVec3,
     pub vel: Vec3,
     pub grounded: bool,
+    /// SLEEPING (`floptle/0143`), and how long it has been settling. Part of
+    /// the snapshot for the same reason `pos`/`vel` are: a rollback
+    /// resimulation restores a body to exactly this state and then replays
+    /// it forward, and if the sleep timer were left out, a replay would
+    /// restart its settle count from zero instead of picking up where the
+    /// live run's did — reaching `asleep` on a different tick than the peer
+    /// it is supposed to agree with.
+    pub asleep: bool,
+    pub sleep_time: f32,
 }
 
 /// What one dynamic body reports to the game each frame — see
@@ -1487,6 +1496,8 @@ impl Sim {
                     + DVec3::new(b.pos.x as f64, b.pos.y as f64, b.pos.z as f64),
                 vel: b.vel,
                 grounded: b.grounded,
+                asleep: b.asleep,
+                sleep_time: b.sleep_time,
             }
         })
     }
@@ -1503,6 +1514,8 @@ impl Sim {
                 b.prev_pos = p;
                 b.vel = s.vel;
                 b.grounded = s.grounded;
+                b.asleep = s.asleep;
+                b.sleep_time = s.sleep_time;
                 if let Some(tp) = self.tick_prev.get_mut(l.body) {
                     *tp = p;
                 }
@@ -1633,6 +1646,11 @@ impl Sim {
                 if let Some(p) = self.tick_prev.get_mut(l.body) {
                     *p = local;
                 }
+                // A teleport moves the body out from under whatever it was
+                // resting on — asleep or not, the ground underneath it is
+                // now a question the solver has not asked yet (`floptle/0143`).
+                self.world.bodies[l.body].asleep = false;
+                self.world.bodies[l.body].sleep_time = 0.0;
                 return;
             }
         }
@@ -1661,6 +1679,12 @@ impl Sim {
         for l in &self.map {
             if l.entity.index() == eid {
                 self.world.bodies[l.body].vel = vel;
+                // A script that just handed a sleeping body a velocity means
+                // it, and the next step must actually integrate it rather
+                // than silently discard the write until something else wakes
+                // the body (`floptle/0143`).
+                self.world.bodies[l.body].asleep = false;
+                self.world.bodies[l.body].sleep_time = 0.0;
                 return;
             }
         }
@@ -1709,8 +1733,15 @@ impl Sim {
                 // Live toggles from the Inspector / `rig.pushboxOnly`.
                 b.pushbox_only = rb.pushbox_only;
                 if b.kinematic && !kinematic {
-                    // Waking up into Dynamic: start from rest at the tracked pose.
+                    // Waking up into Dynamic: start from rest at the tracked
+                    // pose, and genuinely awake — `rig.kinematic = 0` (the
+                    // documented live switch a grabbed prop uses on release)
+                    // must not hand back a body the solver still thinks is
+                    // asleep from before it was ever picked up
+                    // (`floptle/0143`).
                     b.vel = Vec3::ZERO;
+                    b.asleep = false;
+                    b.sleep_time = 0.0;
                 }
                 b.kinematic = kinematic;
                 if let Some(p) = kin_pos {
@@ -2090,6 +2121,8 @@ mod runtime_body_tests {
             pos: DVec3::new(0.0, 5.0, 0.0),
             vel: Vec3::new(30.0, 0.0, 0.0),
             grounded: false,
+            asleep: false,
+            sleep_time: 0.0,
         };
         sim.restore_body(e.index(), &server);
         for _ in 0..6 {
@@ -2110,6 +2143,37 @@ mod runtime_body_tests {
             (rendered - server.pos).length() > 1.0,
             "render anchor must have LEFT the restored server pose"
         );
+    }
+
+    /// `floptle/0143`: the rollback checkpoint (`rollback.rs`'s `SavedTick`)
+    /// is built entirely out of `body_snapshot`/`restore_body` — this is the
+    /// one place that has to carry sleep state through, or every rollback
+    /// node in the game silently loses it on the first correction.
+    #[test]
+    fn a_bodys_sleep_state_round_trips_through_a_snapshot() {
+        let (ecs, ents) = world_with_bodies(1);
+        let e = ents[0];
+        let mut sim =
+            Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -10.0, 0.0)), DVec3::ZERO);
+        let Some(bi) = sim.map.iter().find(|l| l.entity == e).map(|l| l.body) else {
+            panic!("body not mapped");
+        };
+        sim.world.bodies[bi].asleep = true;
+        sim.world.bodies[bi].sleep_time = 0.37;
+        let snap = sim.body_snapshot(e.index()).expect("mapped body");
+        assert!(snap.asleep, "the snapshot must carry the sleeping flag");
+        assert_eq!(snap.sleep_time, 0.37);
+
+        // A fresh sim (a resimulation restoring from a saved tick) starts
+        // awake — restoring must actually SET the sleep state, not merely
+        // agree with it by coincidence.
+        let mut fresh =
+            Sim::build(&ecs, &[], GravityField::uniform(Vec3::new(0.0, -10.0, 0.0)), DVec3::ZERO);
+        let fbi = fresh.map.iter().find(|l| l.entity == e).map(|l| l.body).unwrap();
+        assert!(!fresh.world.bodies[fbi].asleep, "fixture: a fresh body starts awake");
+        fresh.restore_body(e.index(), &snap);
+        assert!(fresh.world.bodies[fbi].asleep, "restore_body must set the sleeping flag");
+        assert_eq!(fresh.world.bodies[fbi].sleep_time, 0.37);
     }
 
     /// The collision matrix end-to-end: a "Ghosts"-layer body falls straight

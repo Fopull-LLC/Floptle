@@ -7039,7 +7039,7 @@ impl Editor {
                 // claim about determinism within one tick, not about being
                 // built once per session.
                 sim.world.water = Self::build_water_field(&self.world, sim.world.origin);
-                sim.world.colliders = self.script_host.take_colliders(); // reclaim before stepping
+                sim.world.set_colliders(self.script_host.take_colliders()); // reclaim before stepping
                 // Live Inspector edits: re-read RigidBody tunables (shape/size, friction,
                 // restitution, gravity, pos/rot locks) into the running bodies each frame —
                 // no teleport.
@@ -7222,7 +7222,7 @@ impl Editor {
                     self.feed_assembly_info();
                     self.script_host.run_fixed(&mut self.world, self.game_tick.step, tick_time);
                     if let Some(sim) = self.sim.as_mut() {
-                        sim.world.colliders = self.script_host.take_colliders(); // reclaim
+                        sim.world.set_colliders(self.script_host.take_colliders()); // reclaim
                         // Apply the tick's writes, then step physics exactly one tick.
                         sim.sync_dynamic_params(&self.world);
                         for (eid, v) in self.script_host.take_body_changes() {
@@ -7367,7 +7367,7 @@ impl Editor {
             }
             self.script_host.run_late(&mut self.world, sdt, self.play_t);
             if let Some(sim) = self.sim.as_mut() {
-                sim.world.colliders = self.script_host.take_colliders(); // reclaim
+                sim.world.set_colliders(self.script_host.take_colliders()); // reclaim
                 // A velocity write from lateUpdate still lands (applied next
                 // step) — but the camera pass shouldn't steer bodies; drain so
                 // nothing double-applies with next frame's `update` writes.
