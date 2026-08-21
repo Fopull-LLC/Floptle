@@ -926,6 +926,36 @@ impl Editor {
 
     // ---- scene-graph (parenting) -------------------------------------------
     /// True if `e` is `ancestor` or one of its descendants (cycle guard).
+    /// Everything under `roots`, deduped, excluding the roots themselves.
+    ///
+    /// Breadth-first off a single parent→children index, so this costs one pass
+    /// over the scene rather than one per root — a level root with a few
+    /// thousand nodes under it is the case that matters, and it is also the case
+    /// where anybody actually asks the question.
+    pub(crate) fn descendants_of(&self, roots: &[Entity]) -> Vec<Entity> {
+        let mut kids: std::collections::HashMap<Entity, Vec<Entity>> =
+            std::collections::HashMap::new();
+        for (e, p) in self.world.query::<floptle_core::Parent>() {
+            kids.entry(p.0).or_default().push(e);
+        }
+        let mut seen: std::collections::HashSet<Entity> = roots.iter().copied().collect();
+        let mut out = Vec::new();
+        let mut queue: std::collections::VecDeque<Entity> = roots.iter().copied().collect();
+        while let Some(e) = queue.pop_front() {
+            for &c in kids.get(&e).map(Vec::as_slice).unwrap_or(&[]) {
+                // `seen` starts as the roots, so a child that is ALSO selected
+                // is never reported as its own parent's extra — otherwise
+                // selecting a parent and its child would offer to change the
+                // child twice and count it as an unselected extra.
+                if seen.insert(c) {
+                    out.push(c);
+                    queue.push_back(c);
+                }
+            }
+        }
+        out
+    }
+
     pub(crate) fn is_descendant(&self, e: Entity, ancestor: Entity) -> bool {
         let mut cur = e;
         for _ in 0..64 {
@@ -1000,6 +1030,171 @@ mod subtree_tests {
             ed.world.insert(e, floptle_core::Parent(p));
         }
         e
+    }
+
+    /// The whole route the user actually takes: the Inspector's pick becomes a
+    /// command, a node with children raises the prompt instead of applying, and
+    /// the answer applies the set the answer chose.
+    ///
+    /// Driven through `apply_frame_commands`, not by calling `apply_layer`
+    /// directly — the wiring between the picker and the edit is where this
+    /// feature can be broken while every piece of it still works.
+    #[test]
+    fn a_layer_pick_asks_about_children_and_then_applies_what_was_answered() {
+        use floptle_core::{Layer, Matter, Parent, Shape, Transform};
+        let mut ed = crate::Editor::default();
+        let node = |ed: &mut crate::Editor| {
+            let e = ed.world.spawn();
+            ed.world.insert(e, Transform::IDENTITY);
+            ed.world.insert(e, Matter::Primitive { shape: Shape::Cube, color: [1.0; 3] });
+            e
+        };
+        let root = node(&mut ed);
+        let child = node(&mut ed);
+        ed.world.insert(child, Parent(root));
+        let lone = node(&mut ed);
+
+        let pick = |ed: &mut crate::Editor, targets: Vec<floptle_core::Entity>| {
+            let cmd = crate::EditorCmd {
+                set_layer: Some(crate::SetLayer { targets, layer: "Enemy".into() }),
+                ..Default::default()
+            };
+            ed.apply_frame_commands(cmd, false);
+        };
+        let layer = |ed: &crate::Editor, e| {
+            ed.world.get::<Layer>(e).map(|l| l.0.clone())
+        };
+
+        // A node with no children applies straight away — nothing to ask.
+        pick(&mut ed, vec![lone]);
+        assert!(ed.layer_children_confirm.is_none(), "nothing to ask about");
+        assert_eq!(layer(&ed, lone).as_deref(), Some("Enemy"));
+
+        // A node WITH children asks, and changes nothing until it is answered.
+        pick(&mut ed, vec![root]);
+        let prompt = ed.layer_children_confirm.clone().expect("it has a child, so it asks");
+        assert_eq!(prompt.children, vec![child]);
+        assert_eq!(layer(&ed, root), None, "asking is not doing");
+        assert_eq!(layer(&ed, child), None);
+
+        // "Just this node".
+        let cmd = crate::EditorCmd {
+            do_set_layer: Some(crate::SetLayer {
+                targets: prompt.targets.clone(),
+                layer: prompt.layer.clone(),
+            }),
+            ..Default::default()
+        };
+        ed.apply_frame_commands(cmd, false);
+        assert_eq!(layer(&ed, root).as_deref(), Some("Enemy"));
+        assert_eq!(layer(&ed, child), None, "the child was explicitly left alone");
+
+        // "Include the children".
+        let mut all = prompt.targets.clone();
+        all.extend_from_slice(&prompt.children);
+        let cmd = crate::EditorCmd {
+            do_set_layer: Some(crate::SetLayer { targets: all, layer: "Prop".into() }),
+            ..Default::default()
+        };
+        ed.apply_frame_commands(cmd, false);
+        assert_eq!(layer(&ed, root).as_deref(), Some("Prop"));
+        assert_eq!(layer(&ed, child).as_deref(), Some("Prop"), "and now it comes along");
+    }
+
+    /// Setting a collision layer has to reach every SELECTED node.
+    ///
+    /// The Inspector says "an edit here applies to all of them" in the panel
+    /// itself; the layer picker addressed one entity, so twenty crates and one
+    /// pick moved exactly one crate and the banner said otherwise.
+    #[test]
+    fn a_layer_change_reaches_the_whole_selection() {
+        use floptle_core::Layer;
+        let mut ed = crate::Editor::default();
+        let nodes: Vec<_> = (0..5).map(|_| ed.world.spawn()).collect();
+
+        ed.apply_layer(&nodes, "Enemy");
+        for &e in &nodes {
+            assert_eq!(
+                ed.world.get::<Layer>(e).map(|l| l.0.as_str()),
+                Some("Enemy"),
+                "every selected node moves, not just the last one picked"
+            );
+        }
+
+        // …and back to Default REMOVES the component, rather than storing a
+        // layer name that means "no layer".
+        ed.apply_layer(&nodes, floptle_core::layers::DEFAULT_LAYER);
+        for &e in &nodes {
+            assert!(ed.world.get::<Layer>(e).is_none(), "Default is the absence of it");
+        }
+    }
+
+    /// The whole set is ONE undo step, not one per node.
+    ///
+    /// Counted across the world rather than by entity handle: undo restores the
+    /// scene by respawning it, so the handles afterwards are not the handles
+    /// before, and asserting on them would be asserting about the snapshot
+    /// mechanism instead of about the edit.
+    #[test]
+    fn re_layering_a_selection_undoes_in_one_step() {
+        use floptle_core::{Layer, Transform};
+        let mut ed = crate::Editor::default();
+        let nodes: Vec<_> = (0..4)
+            .map(|_| {
+                let e = ed.world.spawn();
+                ed.world.insert(e, Transform::IDENTITY);
+                ed.world.insert(
+                    e,
+                    floptle_core::Matter::Primitive {
+                        shape: floptle_core::Shape::Cube,
+                        color: [1.0; 3],
+                    },
+                );
+                ed.world.insert(e, Layer("Prop".into()));
+                e
+            })
+            .collect();
+        let on = |ed: &crate::Editor, name: &str| {
+            ed.world.query::<Layer>().filter(|(_, l)| l.0 == name).count()
+        };
+        assert_eq!(on(&ed, "Prop"), 4);
+
+        ed.apply_layer(&nodes, "Enemy");
+        assert_eq!(on(&ed, "Enemy"), 4, "all four moved");
+        assert_eq!(on(&ed, "Prop"), 0);
+
+        ed.undo();
+        assert_eq!(on(&ed, "Prop"), 4, "one Ctrl+Z puts the whole change back");
+        assert_eq!(on(&ed, "Enemy"), 0, "and leaves none of it behind");
+    }
+
+    /// The children the prompt offers are the real subtree — every level of it,
+    /// not just the direct children, and never a node that is already selected.
+    #[test]
+    fn the_children_offered_are_the_whole_subtree_and_never_the_selection_itself() {
+        use floptle_core::Parent;
+        let mut ed = crate::Editor::default();
+        let root = ed.world.spawn();
+        let child = ed.world.spawn();
+        let grandchild = ed.world.spawn();
+        let stranger = ed.world.spawn();
+        ed.world.insert(child, Parent(root));
+        ed.world.insert(grandchild, Parent(child));
+
+        let kids = ed.descendants_of(&[root]);
+        assert_eq!(kids.len(), 2, "child AND grandchild: {kids:?}");
+        assert!(kids.contains(&child) && kids.contains(&grandchild));
+        assert!(!kids.contains(&root), "a root is not its own child");
+        assert!(!kids.contains(&stranger));
+
+        // Selecting a parent AND its child must not report the child as an
+        // extra the user has not already chosen — otherwise the prompt offers
+        // to change nodes that are in the selection anyway, and the count lies.
+        let kids = ed.descendants_of(&[root, child]);
+        assert_eq!(kids, vec![grandchild], "only the genuinely unselected: {kids:?}");
+
+        // A childless node asks nothing at all.
+        assert!(ed.descendants_of(&[stranger]).is_empty());
     }
 
     /// The clipboard/duplicate/prefab capture format: a parent → child →

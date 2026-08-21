@@ -306,6 +306,22 @@ fn own_pad(source: crate::source::Source, player: Option<u8>, slot: u8) -> crate
     }
 }
 
+/// The shortest frame the mouse-rate conversion will divide by.
+///
+/// A divide-by-zero guard and nothing else. Deliberately absurd (10 000 fps) so
+/// that every frame a real machine produces divides by its own true `dt` and a
+/// script's `* dt` cancels exactly — `floptle/0161` is what a floor inside the
+/// real range does instead.
+const MIN_RATE_DT: f32 = 1.0 / 10_000.0;
+
+/// The most pixels-per-second a mouse axis will report.
+///
+/// The hitch guard, as a ceiling on the answer rather than a floor under the
+/// divisor — so it bounds the pathological case without altering the ordinary
+/// one. A fast human flick is a few thousand pixels a second; this is two
+/// orders of magnitude above that.
+const MAX_MOUSE_RATE: f32 = 500_000.0;
+
 fn resolve_axis2(
     b: &Axis2Binding,
     raw: &RawInput,
@@ -367,10 +383,38 @@ fn resolve_axis2(
             let (dx, dy) = raw.mouse_delta;
             // Pixels-this-frame → pixels-per-second, so the value composes with
             // a stick's rate and a script's `* dt` cancels back out exactly.
-            // Clamped rather than divided by a near-zero dt: a hitching frame
-            // must not fling the camera.
-            let s = if *rate { *sensitivity / dt.max(1.0 / 240.0) } else { *sensitivity };
-            (dx * s, if *invert_y { -dy * s } else { dy * s })
+            //
+            // **The cancellation is only exact if the divisor is the real
+            // `dt`.** This floored it at `1/240 s`, so every frame faster than
+            // 240 fps divided by 1/240 instead — and `yaw_delta = dx * sens *
+            // dt * 240` is proportional to `dt` again, which is the one thing
+            // the conversion exists to remove. Two consecutive 2 ms and 4 ms
+            // frames turned identical mouse movement into 2x different
+            // rotation, so frame-time variance fed straight into the camera at
+            // exactly the frame rates where it should have been smoothest
+            // (`floptle/0161`). "Hundreds of fps" is ordinary hardware now.
+            //
+            // The floor was doing two jobs. They are separated here, because
+            // only one of them needs to touch the transfer function — and that
+            // one never fires in practice.
+            let (mut vx, mut vy) = (dx, dy);
+            if *rate {
+                // Job one: never divide by zero. A frame of no duration is the
+                // only thing this has to survive, so the floor sits orders of
+                // magnitude below any real frame rather than inside the band
+                // real machines run in.
+                vx /= dt.max(MIN_RATE_DT);
+                vy /= dt.max(MIN_RATE_DT);
+                // Job two: the hitch guard. A cap on the RATE, which is what
+                // "must not fling the camera" actually means, set far above any
+                // hand — a violent flick is a few thousand pixels a second. Real
+                // input at a real frame time cannot reach it; only a
+                // pathological `dt` gets near.
+                vx = vx.clamp(-MAX_MOUSE_RATE, MAX_MOUSE_RATE);
+                vy = vy.clamp(-MAX_MOUSE_RATE, MAX_MOUSE_RATE);
+            }
+            let (vx, vy) = (vx * *sensitivity, vy * *sensitivity);
+            (vx, if *invert_y { -vy } else { vy })
         }
     }
 }
@@ -871,6 +915,70 @@ mod tests {
         }
     }
 
+    /// **The same hand movement has to turn the camera the same amount, at any
+    /// frame rate.** That is the entire promise of `rate: true` — the axis
+    /// reports pixels per second so a script's `* dt` cancels the frame time
+    /// back out. A floor under the divisor broke the cancellation above 240 fps
+    /// and put frame-time variance straight into the camera (`floptle/0161`).
+    ///
+    /// So: drive one physical 600-pixel sweep three ways and integrate the
+    /// rotation a documented `yaw -= lookX * dt` script would apply.
+    #[test]
+    fn a_sweep_turns_the_same_amount_at_60_fps_and_at_600_fps() {
+        let map = look_map();
+
+        /// One sweep, `frames` long, `total_px` of movement spread over the
+        /// given frame times — integrated the way a camera script does it.
+        fn sweep(map: &InputMap, total_px: f32, dts: &[f32]) -> f32 {
+            let mut rt = ActionRuntime::new();
+            let mut yaw = 0.0;
+            let span: f32 = dts.iter().sum();
+            for &dt in dts {
+                // The mouse moves at a constant physical speed, so the pixels
+                // a frame sees are proportional to how long it lasted — which
+                // is what makes `dx` itself scale with frame time.
+                let px = total_px * (dt / span);
+                let raw = RawInput {
+                    mouse_delta: (px, 0.0),
+                    mouse_buttons: {
+                        let mut b = [false; 5];
+                        b[crate::source::MouseButton::Right.index()] = true;
+                        b
+                    },
+                    ..Default::default()
+                };
+                let (lx, _) = rt.resolve(map, &raw, 0, dt, AllowMask::ALL).axis2(0);
+                yaw += lx * dt;
+            }
+            yaw
+        }
+
+        let slow = sweep(&map, 600.0, &[1.0 / 60.0; 60]);
+        let fast = sweep(&map, 600.0, &[1.0 / 600.0; 600]);
+        // 600 fps with 3x jitter — alternating 0.83 ms and 2.5 ms frames, the
+        // uneven pacing a compositor actually produces.
+        let jitter: Vec<f32> = (0..600)
+            .map(|i| if i % 2 == 0 { 1.0 / 1200.0 } else { 3.0 / 1200.0 })
+            .collect();
+        let rough = sweep(&map, 600.0, &jitter);
+
+        // 600 px x 0.006 sensitivity = 3.6 radians, whatever the frame rate.
+        assert!(
+            (slow - 3.6).abs() < 1e-3,
+            "60 fps is the baseline and was never broken: {slow}"
+        );
+        assert!(
+            (fast - slow).abs() < 1e-3,
+            "600 fps turned {fast} where 60 fps turned {slow} — the rate \
+             conversion stopped cancelling the frame time"
+        );
+        assert!(
+            (rough - slow).abs() < 1e-3,
+            "jittered 600 fps turned {rough} where 60 fps turned {slow} — \
+             frame-time variance is reaching the camera"
+        );
+    }
+
     #[test]
     fn a_gated_mouse_binding_needs_its_button() {
         // The bug this prevents: a free cursor drifting across the window spins
@@ -928,12 +1036,28 @@ mod tests {
     #[test]
     fn a_hitching_frame_does_not_fling_the_camera() {
         // dt near zero would otherwise divide the delta into a huge rate.
+        //
+        // Stated against [`MAX_MOUSE_RATE`], which is where the bound now comes
+        // from. It used to be a bare `< 100.0` — a number that was really
+        // `40 px x 0.006 x 240`, i.e. a restatement of the `1/240 s` floor
+        // rather than of the property. The floor had to move to fix
+        // `floptle/0161`, and the assertion moved with it, which is exactly the
+        // situation where a guard written around an implementation stops
+        // guarding anything. The property is: finite, and bounded by a stated
+        // ceiling.
         let map = look_map();
         let mut rt = ActionRuntime::new();
         let mut raw = RawInput { mouse_delta: (40.0, 0.0), ..Default::default() };
         raw.mouse_buttons[crate::source::MouseButton::Right.index()] = true;
         let v = rt.resolve(&map, &raw, 0, 0.0, AllowMask::ALL).axis2(0);
-        assert!(v.0.is_finite() && v.0 < 100.0, "clamped, got {v:?}");
+        assert!(v.0.is_finite(), "a zero-length frame must not divide to infinity: {v:?}");
+        assert!(
+            v.0.abs() <= MAX_MOUSE_RATE * 0.006 + 1e-3,
+            "bounded by the rate ceiling, got {v:?}"
+        );
+        // And the reason it does not matter in practice: a script's `* dt` is
+        // multiplying by the same zero.
+        assert_eq!(v.0 * 0.0, 0.0);
     }
 
     #[test]

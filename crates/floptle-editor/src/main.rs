@@ -354,9 +354,16 @@ struct EditorCmd {
     /// A STRUCTURAL physics edit happened (e.g. the Rigidbody mode dropdown) —
     /// rebuild the live sim so bodies/colliders re-register.
     rebuild_physics: bool,
-    /// Put a node on a named collision/query layer ("Default" removes the
+    /// Put nodes on a named collision/query layer ("Default" removes the
     /// component). Rebuilds the sim mid-play so static colliders re-layer.
-    set_layer: Option<(Entity, String)>,
+    ///
+    /// **A list, not one entity.** The Inspector edits the primary selection and
+    /// hands the change to the rest — that is the promise the panel makes in so
+    /// many words ("an edit here applies to all of them"). The layer picker was
+    /// addressing a single `Entity`, so selecting twenty crates and picking a
+    /// layer moved exactly one of them, with the banner overhead still saying
+    /// otherwise.
+    set_layer: Option<SetLayer>,
     /// A node's sorting layer + order: what draws in front of what, for a flat
     /// scene. `(entity, layer name, order)`.
     set_sorting: Option<(Entity, String, i32)>,
@@ -592,6 +599,8 @@ struct EditorCmd {
     focus_anim_graph: bool,
     /// CONFIRMED asset deletion (from the delete modal) — actually deletes.
     do_delete_asset: Option<Vec<String>>,
+    /// The layer-children modal was answered — apply this set, no more asking.
+    do_set_layer: Option<SetLayer>,
     /// Folder the new controller should be created in (absolute; None = default).
     new_anim_controller_dir: Option<String>,
     /// Select a model's object/bone by (rigged-mesh entity, skeleton node index) — set
@@ -709,6 +718,33 @@ enum ProjectAction {
     Close,
 }
 
+
+/// A layer change waiting to be applied, and to whom.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SetLayer {
+    /// The nodes the change was made on — the whole selection.
+    pub(crate) targets: Vec<Entity>,
+    /// The layer name ("Default" removes the component).
+    pub(crate) layer: String,
+}
+
+/// A layer change that has children in its way, waiting on an answer.
+///
+/// **A collision layer is the one setting whose scope is genuinely ambiguous.**
+/// A node is usually a body with its collider, its visual and its attachments
+/// hanging under it, and moving only the parent leaves the pieces that actually
+/// carry the colliders on the old layer — a "changed" node that still collides
+/// exactly as it did, which reads as the setting not working. Assuming the other
+/// way is just as wrong: a level root's children are the whole level. So the
+/// editor asks, rather than guessing on the node's behalf.
+#[derive(Clone, Debug)]
+pub(crate) struct LayerChildrenPrompt {
+    /// The nodes whose dropdown was used.
+    pub(crate) targets: Vec<Entity>,
+    /// Everything under them, deduped, excluding the targets themselves.
+    pub(crate) children: Vec<Entity>,
+    pub(crate) layer: String,
+}
 
 /// Renders each dockable tab against borrowed slices of the editor's state, and
 /// records UI intents on `cmd` to be applied after the frame.
@@ -2861,8 +2897,45 @@ struct Editor {
     code_theme: usize,
     /// Smoothed frames-per-second + a throttle so the window title isn't rewritten
     /// every frame.
+    ///
+    /// **Derived from [`Editor::frame_ms`], never smoothed itself.** The mean of
+    /// a reciprocal is not the reciprocal of a mean: an EMA over instantaneous
+    /// fps is dragged toward the fast frames, and the more bimodal the frame
+    /// times the harder it is flattered. On a real capture of frames arriving in
+    /// bursts of 0.08 ms separated by 16 ms blocks — 144 fps of true throughput —
+    /// that formula read **4312 fps** (`floptle/0160`). It is the number that
+    /// told somebody their choppy scene was fine.
     fps: f32,
     fps_timer: f32,
+    /// Smoothed frame TIME in milliseconds — the quantity that is actually
+    /// linear in what it measures, and so the one that can be averaged.
+    frame_ms: f32,
+    /// The last couple of seconds of raw frame times, milliseconds, as a ring.
+    ///
+    /// A mean cannot show a hitch, which is the whole reason the ⏱ panel reports
+    /// a worst column beside its average. The title bar was the one readout with
+    /// no such column, and it is the one everybody looks at — so it carries a
+    /// 1% low off this buffer.
+    frame_log: Vec<f32>,
+    /// Where the next frame time goes in `frame_log`.
+    frame_log_at: usize,
+    /// How much of `frame_log` has been written (it starts empty).
+    frame_log_len: usize,
+    /// The last computed 1% low, milliseconds.
+    ///
+    /// Refreshed on the title-bar throttle rather than per frame: it costs a
+    /// sort of the log, and nobody can read a number that changes 144 times a
+    /// second anyway.
+    frame_low_ms: f32,
+    /// How often the dt snap is actually applying, 0..1, smoothed.
+    ///
+    /// Snapping goes inert whenever the measured frame time stops landing near a
+    /// whole multiple of the reported refresh period — a window on a different
+    /// output than the one `current_monitor()` names, or a present mode that
+    /// isn't pacing to vblank. It used to do that in total silence, so a
+    /// load-bearing anti-jitter path could be switched off for a whole session
+    /// with nothing to notice (`floptle/0160`). The ⏱ panel reads this.
+    dt_snap_rate: f32,
     /// Smoothed milliseconds spent BLOCKED waiting for a display image, kept
     /// apart from the frame's own cost so the title can report the two
     /// separately. A frame that costs 8 ms and presents at 20 fps is a display
@@ -2916,6 +2989,9 @@ struct Editor {
     save_flash: f32,
     /// An asset delete awaiting confirmation (absolute path).
     delete_confirm: Option<Vec<String>>,
+    /// A layer change whose targets have children — the modal is up asking
+    /// whether the children come along. See [`LayerChildrenPrompt`].
+    layer_children_confirm: Option<LayerChildrenPrompt>,
     last: Option<Instant>,
     started: Option<Instant>,
     gpu: Option<Gpu>,

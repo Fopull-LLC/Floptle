@@ -33,7 +33,24 @@ impl Default for Tally {
 fn main() {
     let path = std::env::args().nth(1).expect("usage: nav_dump <file.fnav>");
     let bytes = std::fs::read(&path).expect("read");
-    let mesh: floptle_nav::NavMesh = postcard::from_bytes(&bytes).expect("parse");
+    // A `.fnav` is `FNAV` + a u32 version + the postcard body. Reading the whole
+    // file as a body parses the magic as data and fails with a varint error —
+    // which is what this probe did to every real bake it was ever pointed at.
+    let body = match bytes.strip_prefix(b"FNAV".as_slice()) {
+        Some(rest) if rest.len() >= 4 => {
+            let (v, body) = rest.split_at(4);
+            let v = u32::from_le_bytes(v.try_into().expect("4 bytes"));
+            println!("{}  format v{v}", path);
+            body
+        }
+        // No header: a bake from before the format carried one. Say which,
+        // rather than reporting it as a parse failure.
+        _ => {
+            eprintln!("{path}: not a versioned .fnav (no FNAV header) — rebake it");
+            std::process::exit(1);
+        }
+    };
+    let mesh: floptle_nav::NavMesh = postcard::from_bytes(body).expect("parse");
 
     println!("anchor {:?}  cell {}  settings {:?}", mesh.anchor, mesh.cell_size, mesh.settings);
     println!("{} polygons, {:.1} m² total", mesh.polys.len(), mesh.area());

@@ -257,6 +257,32 @@ origin (a regression test now proves a rebase renders zero discontinuity:
    back ≤0.25 ms/frame so long-term time stays wall-clock exact. Hitches and
    uncapped frames pass through unsnapped.
 
+   **It can only do that if it knows the refresh period, and for a long time it
+   often did not** (`floptle/0160`). The period came from `current_monitor()`,
+   and a `None` from that call was mapped onto `0.0` — which is the value that
+   switches snapping off. On Wayland `current_monitor()` returns `None` from
+   window creation until the surface is mapped, and `None` again on an output
+   hotplug, a monitor change or a window drag; since the period was only
+   re-read every 240 frames, one transient `None` disabled this whole layer for
+   seconds at a time and startup never had it at all. A `None` now means "ask
+   again": the last known good period is retained, any monitor is used only when
+   nothing is known yet, and the poll interval is 60 frames. When snapping is
+   nonetheless inert — the frame times are not landing near whole refreshes,
+   usually because the window is on a different output than the one being
+   reported, or nothing is pacing to vblank — **the ⏱ panel says so**, with both
+   numbers. A load-bearing path being switched off used to be silent, which is
+   the worst way for it to be.
+
+**Reading the result.** The window title reports fps from a smoothed frame
+*time*, inverted at the end, plus a **1% low** beside the mean. Smoothing
+`1.0 / dt` instead — which it did until `floptle/0160` — averages a reciprocal,
+which is biased toward the fast frames: on a real capture of frames arriving in
+bursts of 0.08 ms between 16 ms blocks, a true 144 fps read as **4312**. A
+readout that flatters exactly the frame-time distribution that feels worst is
+worse than no readout, because it actively argues that nothing is wrong. The
+1% low is there for the same reason the ⏱ panel has always had a worst column:
+a hitch is invisible in an average.
+
 3. **`lateUpdate` — the camera pass** (floptle-script `Pass::Late`). Frame
    order is scripts → animation → physics ticks → interpolated writeback →
    `lateUpdate`. A camera positioned in `update` read its target's pose from

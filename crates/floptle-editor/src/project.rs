@@ -1249,6 +1249,17 @@ impl Editor {
         self.adopt_maps();
         self.adopt_paint();
         self.adopt_tex_paint();
+        // **The bakes, exactly as opening a scene loads them.** Opening a
+        // project restores its active scene, which makes this a scene load in
+        // every way that matters — and it was the one scene load that skipped
+        // these two. So the navmesh and the baked GI came back empty every time
+        // the editor started or a project was switched to, and the only symptom
+        // was a level with no bake in it: no navmesh overlay, no bounce light,
+        // nothing said. Both files were sitting right there beside the scene.
+        // The reasonable conclusion is that baking does not stick, and the
+        // reasonable response is to bake again, every single session.
+        self.load_gi();
+        self.load_nav();
         self.project = floptle_scene::load_project(&self.project_cfg_path());
         // The action map belongs to the project, so it reloads with it —
         // otherwise the new project's scripts would resolve against the old

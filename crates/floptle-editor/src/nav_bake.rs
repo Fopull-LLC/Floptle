@@ -1791,6 +1791,168 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **Bake, save, reopen — the bake has to still be there.**
+    ///
+    /// The whole promise of a `.fnav` beside the scene is that baking is
+    /// something you do once. A reload that comes back unbaked is
+    /// indistinguishable from a bake that never worked, and the only thing
+    /// anybody can do about it is press Bake again — every single time they open
+    /// the level.
+    #[test]
+    fn a_bake_survives_saving_the_scene_and_opening_it_again() {
+        use floptle_core::{Collidable, Matter, Shape, Transform};
+        let dir = std::env::temp_dir().join(format!("floptle-nav-reopen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+
+        // A level with a floor and a navmesh over it, saved the way ⌘S saves it.
+        let mut ed = crate::Editor {
+            project_root: dir.clone(),
+            scene_rel: "scenes/level.ron".into(),
+            scene_name: "level".into(),
+            ..Default::default()
+        };
+        let nav = ed.world.spawn();
+        ed.world.insert(nav, Transform::IDENTITY);
+        ed.world.insert(
+            nav,
+            Matter::NavMesh {
+                id: 1,
+                half_extents: [24.0, 8.0, 24.0],
+                auto_bounds: true,
+                layers: Vec::new(),
+                agent_radius: 0.4,
+                agent_height: 2.0,
+                max_slope: 45.0,
+                step_height: 0.4,
+                cell_size: 0.5,
+                enabled: true,
+                auto_rebake: false,
+            },
+        );
+        let floor = ed.world.spawn();
+        ed.world.insert(
+            floor,
+            Transform {
+                scale: floptle_core::math::Vec3::new(40.0 / 0.7, 1.0, 40.0 / 0.7),
+                ..Transform::IDENTITY
+            },
+        );
+        ed.world.insert(floor, Matter::Primitive { shape: Shape::Plane, color: [0.5; 3] });
+        ed.world.insert(floor, Collidable);
+
+        ed.bake_nav();
+        while ed.nav_baked.is_none() {
+            ed.poll_nav_bake();
+            std::thread::yield_now();
+        }
+        let baked_polys = ed.nav_baked.as_ref().expect("just baked").polys.len();
+        assert!(baked_polys > 0, "the floor is walkable");
+        assert!(ed.save_scene(), "the scene saves");
+
+        // Reopening is a fresh world spawned from the file, then `load_nav`.
+        // (Not `open_scene_file`: that registers GPU meshes, and this test has
+        // no device. Everything between the file and the bake is the same.)
+        let mut back = crate::Editor {
+            project_root: dir.clone(),
+            scene_rel: "scenes/level.ron".into(),
+            scene_name: "level".into(),
+            ..Default::default()
+        };
+        let doc = floptle_scene::load(&dir.join("scenes/level.ron")).expect("the scene reopens");
+        floptle_scene::spawn_into(&doc, &mut back.world);
+        back.load_nav();
+
+        assert!(
+            back.nav_baked.is_some(),
+            "the bake made a moment ago is gone on reopen — this is the rebake-every-time bug"
+        );
+        assert_eq!(
+            back.nav_baked.as_ref().expect("checked above").polys.len(),
+            baked_polys,
+            "and it has to be the SAME bake, not a different one"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Opening the project has to restore the bake too.**
+    ///
+    /// Opening a project restores its active scene, so it is a scene load in
+    /// every way that matters — but it was the one scene load that never asked
+    /// for the sidecars. Every editor start and every project switch therefore
+    /// came up with no navmesh and no baked light, with both files sitting
+    /// beside the scene, and nothing saying so. That reads as "baking does not
+    /// stick", and the only available response is to bake again every session.
+    #[test]
+    fn opening_the_project_restores_the_bake_not_just_opening_the_scene() {
+        use floptle_core::{Collidable, Matter, Shape, Transform};
+        let dir = std::env::temp_dir().join(format!("floptle-nav-openproj-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+        std::fs::write(dir.join("project.ron"), "(name: \"t\")").unwrap();
+
+        // Bake a level and save it, the way somebody would before closing up.
+        let mut ed = crate::Editor {
+            project_root: dir.clone(),
+            scene_rel: "scenes/first.ron".into(),
+            scene_name: "first".into(),
+            ..Default::default()
+        };
+        let nav = ed.world.spawn();
+        ed.world.insert(nav, Transform::IDENTITY);
+        ed.world.insert(
+            nav,
+            Matter::NavMesh {
+                id: 1,
+                half_extents: [24.0, 8.0, 24.0],
+                auto_bounds: true,
+                layers: Vec::new(),
+                agent_radius: 0.4,
+                agent_height: 2.0,
+                max_slope: 45.0,
+                step_height: 0.4,
+                cell_size: 0.5,
+                enabled: true,
+                auto_rebake: false,
+            },
+        );
+        let floor = ed.world.spawn();
+        ed.world.insert(
+            floor,
+            Transform {
+                scale: floptle_core::math::Vec3::new(40.0 / 0.7, 1.0, 40.0 / 0.7),
+                ..Transform::IDENTITY
+            },
+        );
+        ed.world.insert(floor, Matter::Primitive { shape: Shape::Plane, color: [0.5; 3] });
+        ed.world.insert(floor, Collidable);
+        ed.bake_nav();
+        while ed.nav_baked.is_none() {
+            ed.poll_nav_bake();
+            std::thread::yield_now();
+        }
+        let polys = ed.nav_baked.as_ref().expect("just baked").polys.len();
+        assert!(polys > 0);
+        assert!(ed.save_scene());
+
+        // Now start the editor on that project — no `open_scene_file` anywhere,
+        // which is exactly what happens when the editor boots.
+        let mut fresh = crate::Editor::default();
+        fresh.open_project(dir.clone());
+        assert_eq!(
+            fresh.scene_rel, "scenes/first.ron",
+            "the active scene is the one that was baked"
+        );
+        assert_eq!(
+            fresh.nav_baked.as_ref().map(|m| m.polys.len()),
+            Some(polys),
+            "opening the project came up unbaked — the .fnav is right beside the scene"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A navmesh of one corner of the map looks exactly like a navmesh of the
     /// map: it bakes, it counts polygons, it draws. The only place the
     /// difference exists is between the box and the geometry, and this is the
@@ -1930,3 +2092,4 @@ mod tests {
         );
     }
 }
+

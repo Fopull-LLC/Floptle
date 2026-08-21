@@ -1718,6 +1718,12 @@ impl EditorTabViewer<'_> {
         // "before" here so the change can be found by comparison afterwards —
         // an immediate-mode panel leaves no other record of what it touched.
         let multi = multi_edit::Snapshot::take(self.world, self.selection);
+        // The whole selection, copied out before `self` is split below, for the
+        // few controls that route their change through `cmd` instead of writing
+        // a component the multi-edit diff could find afterwards. The layer
+        // picker is one: it has to rebuild the live sim, so it cannot just poke
+        // the component and let the diff carry it.
+        let sel_all: Vec<floptle_core::Entity> = self.selection.to_vec();
         let cmd = &mut *self.cmd;
         let world = &mut *self.world;
         // Read before `self` is split up below (`floptle/0110`).
@@ -2218,22 +2224,47 @@ impl EditorTabViewer<'_> {
                              sorting layer below — that one is about drawing, and the two \
                              are set independently on purpose.",
                         );
-                    let cur = world
-                        .get::<floptle_core::Layer>(e)
-                        .map(|l| l.0.clone())
-                        .unwrap_or_else(|| floptle_core::layers::DEFAULT_LAYER.to_string());
+                    let layer_of = |w: &floptle_core::World, e| {
+                        w.get::<floptle_core::Layer>(e)
+                            .map(|l| l.0.clone())
+                            .unwrap_or_else(|| floptle_core::layers::DEFAULT_LAYER.to_string())
+                    };
+                    let cur = layer_of(world, e);
+                    // Every selected node, not just the one whose dropdown this
+                    // is (the panel's stated promise, which this control was not
+                    // keeping).
+                    let targets: Vec<floptle_core::Entity> =
+                        if sel_all.contains(&e) { sel_all.clone() } else { vec![e] };
+                    // Do the selected nodes AGREE about their layer? If they do
+                    // not, the combo must not claim they do — showing the
+                    // primary's layer over a mixed selection is a readout that
+                    // is wrong about four nodes out of five.
+                    let mixed = targets.iter().any(|&t| layer_of(world, t) != cur);
                     let known = self.layer_names.contains(&cur);
-                    let shown = if known { cur.clone() } else { format!("⚠ {cur}") };
+                    let shown = if mixed {
+                        format!("— mixed ({}) —", targets.len())
+                    } else if known {
+                        cur.clone()
+                    } else {
+                        format!("⚠ {cur}")
+                    };
                     egui::ComboBox::from_id_salt("node_layer")
                         .width(crate::responsive::fit_here(ui, 220.0))
                 .wrap_mode(egui::TextWrapMode::Truncate)
                         .selected_text(shown)
                         .show_ui(ui, |ui| {
                             for name in self.layer_names {
-                                if ui.selectable_label(*name == cur, name).clicked()
-                                    && *name != cur
-                                {
-                                    cmd.set_layer = Some((e, name.clone()));
+                                // Ticked only when the whole selection is on it.
+                                let ticked = !mixed && *name == cur;
+                                // A mixed selection may be UNIFIED onto the
+                                // layer the primary already has — that is a real
+                                // edit and the obvious way to ask for it. Only a
+                                // selection that already agrees can be a no-op.
+                                if ui.selectable_label(ticked, name).clicked() && !ticked {
+                                    cmd.set_layer = Some(crate::SetLayer {
+                                        targets: targets.clone(),
+                                        layer: name.clone(),
+                                    });
                                 }
                             }
                         })

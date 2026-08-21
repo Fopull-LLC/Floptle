@@ -2865,6 +2865,7 @@ impl Editor {
         let show_quit_confirm = &mut self.show_quit_confirm;
         let image_close_confirm = &mut self.image_close_confirm;
         let delete_confirm = &mut self.delete_confirm;
+        let layer_children_confirm = &mut self.layer_children_confirm;
         let toast = &mut self.toast;
         // Dirty tilesets ride the scene's flag here. They are not scene state —
         // they are their own files — but every gate that asks "is there unsaved
@@ -3099,7 +3100,14 @@ impl Editor {
         let net_lobby_code = self.net_lobby_code.clone();
         // A snapshot of the profile, taken before the UI closure so the readout
         // never holds the `RefCell` across a frame that also writes it.
-        let perf_snapshot = PerfSnapshot::take(&profile.borrow());
+        let mut perf_snapshot = PerfSnapshot::take(&profile.borrow());
+        perf_snapshot.pacing = Pacing {
+            mean_ms: self.frame_ms,
+            p99_ms: self.frame_low_ms,
+            // `refresh_period` is in SECONDS (it is compared against `dt`).
+            refresh_ms: self.refresh_period * 1000.0,
+            snap_rate: self.dt_snap_rate,
+        };
         let show_net_panel = &mut self.show_net_panel;
         let show_perf_panel = &mut self.show_perf_panel;
         // Applied after the UI closure, because turning collection on or off
@@ -5206,6 +5214,79 @@ impl Editor {
                 }
             }
 
+            // ---- collision layer: do the children come too? ----
+            //
+            // See `LayerChildrenPrompt` for why this is a question and not a
+            // default. Both answers are offered as buttons that say what they
+            // will do, with the counts in them — "Yes/No" on a dialog nobody
+            // reads carefully is how the wrong one gets clicked every time.
+            if let Some(pending) = layer_children_confirm.clone() {
+                let mut open = true;
+                let mut close = false;
+                let n_targets = pending.targets.len();
+                let n_kids = pending.children.len();
+                egui::Window::new("Collision layer")
+                    .open(&mut open)
+                    .resizable(false)
+                    .collapsible(false)
+                    .default_width(380.0)
+                    .show(ui.ctx(), |ui| {
+                        ui.label(format!(
+                            "{} has {} child node{} under it.",
+                            if n_targets == 1 {
+                                "This node".to_string()
+                            } else {
+                                format!("These {n_targets} nodes have")
+                            },
+                            n_kids,
+                            if n_kids == 1 { "" } else { "s" },
+                        ));
+                        ui.small(format!(
+                            "Put them on \"{}\" as well? A collider usually hangs under the \
+                             node you just changed, so leaving the children behind is often \
+                             why a layer change looks like it did nothing.",
+                            pending.layer
+                        ));
+                        ui.add_space(6.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .button(format!("⬇  Include the {n_kids} children"))
+                                .clicked()
+                            {
+                                let mut all = pending.targets.clone();
+                                all.extend_from_slice(&pending.children);
+                                cmd.do_set_layer = Some(crate::SetLayer {
+                                    targets: all,
+                                    layer: pending.layer.clone(),
+                                });
+                                close = true;
+                            }
+                            if ui
+                                .button(if n_targets == 1 {
+                                    "Just this node".to_string()
+                                } else {
+                                    format!("Just these {n_targets}")
+                                })
+                                .clicked()
+                            {
+                                cmd.do_set_layer = Some(crate::SetLayer {
+                                    targets: pending.targets.clone(),
+                                    layer: pending.layer.clone(),
+                                });
+                                close = true;
+                            }
+                            // Closing the window IS Cancel, and cancel changes
+                            // nothing — the layer has not been written yet.
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                if !open || close {
+                    *layer_children_confirm = None;
+                }
+            }
+
             // ---- new terrain dialog ----
             // Lets a fresh terrain arrive already the size/look you want (a tiny
             // rock-grey patch or a massive grass field) instead of always starting as
@@ -6341,6 +6422,96 @@ impl Editor {
         arr
     }
 
+    /// How many frame times the 1% low is taken over — about two seconds at
+    /// 144 Hz, which is long enough for a periodic hitch to land in it and short
+    /// enough that the number still tracks what the scene is doing now.
+    const FRAME_LOG: usize = 512;
+
+    /// Bank one frame time (milliseconds) for the 1% low.
+    fn record_frame_time(&mut self, ms: f32) {
+        if self.frame_log.len() != Self::FRAME_LOG {
+            self.frame_log = vec![0.0; Self::FRAME_LOG];
+            self.frame_log_at = 0;
+            self.frame_log_len = 0;
+        }
+        self.frame_log[self.frame_log_at] = ms;
+        self.frame_log_at = (self.frame_log_at + 1) % Self::FRAME_LOG;
+        self.frame_log_len = (self.frame_log_len + 1).min(Self::FRAME_LOG);
+    }
+
+    /// The 1% low: the MEAN of the worst 1% of frame times in the log, ms.
+    ///
+    /// **The worst frames, reported as a time rather than as a rate.** "1% low
+    /// fps" is the usual name, but the honest quantity is the frame time — it is
+    /// what is being measured, it averages correctly, and inverting it invites
+    /// exactly the reciprocal-of-a-mean error this readout was fixed for.
+    ///
+    /// The mean of the worst 1%, not the 99th percentile, and the difference is
+    /// not pedantic: a hitch that happens on almost exactly 1% of frames puts
+    /// the p99 index right at the boundary, so the single sample it lands on is
+    /// as likely to be a good frame as a bad one and the readout blinks between
+    /// 6.9 and 40. Averaging the tail reports the tail.
+    fn frame_time_low(&self) -> f32 {
+        if self.frame_log_len == 0 {
+            return self.frame_ms;
+        }
+        let mut v: Vec<f32> = self.frame_log[..self.frame_log_len].to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // At least one sample, so a short log answers with its worst frame
+        // rather than with nothing.
+        let n = (((v.len() as f32) * 0.01).ceil() as usize).clamp(1, v.len());
+        v[v.len() - n..].iter().sum::<f32>() / n as f32
+    }
+
+    /// Re-read the display's refresh period, without throwing away a good one.
+    ///
+    /// **A `None` from `current_monitor()` means "ask again", not "there is no
+    /// display."** On Wayland it returns `None` from `create_window` until the
+    /// surface is mapped, and `None` again on an output hotplug, a monitor
+    /// change or a window drag. The old read mapped that straight onto `0.0`,
+    /// and `period <= 0.0` is how dt snapping switches itself off — so the
+    /// anti-jitter path `docs/subsystems/time.md` §10 calls load-bearing was
+    /// inert for the whole of startup, and for the whole poll interval after
+    /// every later hiccup, on a machine where `available_monitors()` was
+    /// answering correctly the entire time (`floptle/0160`).
+    fn reread_refresh_period(&mut self) {
+        let Some(w) = self.window.as_ref() else { return };
+        let hz = |m: &winit::monitor::MonitorHandle| m.refresh_rate_millihertz();
+        let current = w.current_monitor().as_ref().and_then(hz);
+        // Only asked for when there is nothing else to go on, so it is computed
+        // lazily — enumerating monitors is not free and the common case never
+        // needs it.
+        let any = || w.primary_monitor().or_else(|| w.available_monitors().next()).as_ref().and_then(hz);
+        self.refresh_period = chosen_refresh_period(self.refresh_period, current, any);
+    }
+
+    /// Put every node in `targets` on `layer`, as ONE undo step.
+    ///
+    /// One `record()` and one `rebuild_sim()` for the whole set, not per node:
+    /// twenty crates re-layered is one thing somebody did and one Ctrl+Z, and
+    /// rebuilding the sim twenty times to reach the same state is twenty times
+    /// the cost of reaching it once.
+    pub(crate) fn apply_layer(&mut self, targets: &[Entity], layer: &str) {
+        if targets.is_empty() {
+            return;
+        }
+        self.record();
+        for &e in targets {
+            // "Default" is the ABSENCE of the component, not a value of it —
+            // so putting a node back on Default has to remove it, or the scene
+            // file grows a layer entry that means nothing.
+            if layer == floptle_core::layers::DEFAULT_LAYER {
+                self.world.remove::<floptle_core::Layer>(e);
+            } else {
+                self.world.insert(e, floptle_core::Layer(layer.to_string()));
+            }
+        }
+        self.scene_dirty = true;
+        // Re-layer the live sim: bodies re-resolve via sync_dynamic_params,
+        // but static colliders bake their bit at build — so rebuild.
+        self.rebuild_sim();
+    }
+
     /// Frame-time smoothing: SNAP the measured dt to the nearest whole multiple
     /// of the display's refresh period when it's close. Under vsync (Fifo) a
     /// frame's true screen time IS a whole number of refresh periods — the
@@ -6354,18 +6525,16 @@ impl Editor {
         // (Re)read the monitor's refresh rate occasionally — cheap, and the
         // window can move between monitors.
         if self.refresh_poll == 0 {
-            self.refresh_period = self
-                .window
-                .as_ref()
-                .and_then(|w| w.current_monitor())
-                .and_then(|m| m.refresh_rate_millihertz())
-                .map(|mhz| 1000.0 / mhz as f32)
-                .unwrap_or(0.0);
-            self.refresh_poll = 240;
+            // 60 frames rather than 240. The poll interval is also the length of
+            // every outage below, so a long one turned a momentary hiccup into
+            // seconds of unsnapped dt.
+            self.refresh_poll = 60;
+            self.reread_refresh_period();
         }
         self.refresh_poll -= 1;
         let period = self.refresh_period;
         if period <= 0.0 || raw <= 0.0 {
+            self.dt_snap_rate *= 0.99;
             return raw;
         }
         let n = (raw / period).round();
@@ -6373,8 +6542,13 @@ impl Editor {
         // at least one) — a giant hitch or an uncapped frame passes through.
         if n < 1.0 || (raw - n * period).abs() > period * 0.12 {
             self.dt_snap_error = self.dt_snap_error.clamp(-period, period);
+            // A miss is not a fault — an uncapped frame legitimately misses. A
+            // long RUN of them means the snap is inert, which is a different
+            // thing and worth being able to see (`floptle/0160`).
+            self.dt_snap_rate *= 0.99;
             return raw;
         }
+        self.dt_snap_rate = self.dt_snap_rate * 0.99 + 0.01;
         self.dt_snap_error += raw - n * period;
         // Fold the banked truth back in slowly (≤0.25 ms/frame): time stays
         // exact without re-introducing per-frame noise.
@@ -6420,8 +6594,15 @@ impl Editor {
 
         // FPS in the window title (smoothed, refreshed a few times a second).
         if dt > 0.0 {
-            let inst = 1.0 / dt;
-            self.fps = if self.fps > 0.0 { self.fps * 0.9 + inst * 0.1 } else { inst };
+            // **Smooth the frame TIME and invert at display time.** Smoothing
+            // `1.0 / dt` averages a reciprocal, which is biased toward the fast
+            // frames — and the more bimodal the distribution, the more wildly it
+            // flatters. See `Editor::fps` for the capture where it read 4312 fps
+            // against a true 144 (`floptle/0160`).
+            let ms = dt * 1000.0;
+            self.frame_ms = if self.frame_ms > 0.0 { self.frame_ms * 0.9 + ms * 0.1 } else { ms };
+            self.fps = 1000.0 / self.frame_ms.max(1e-4);
+            self.record_frame_time(ms);
             self.fps_timer += dt;
             if self.fps_timer >= 0.4 {
                 self.fps_timer = 0.0;
@@ -6431,12 +6612,21 @@ impl Editor {
                     // "this scene is expensive" from "this display is pacing
                     // us". A scene costing 8 ms and presenting at 20 fps is the
                     // second, and used to be indistinguishable from the first.
-                    let cost = (1000.0 / self.fps.max(1e-3) - self.present_wait_ms).max(0.0);
+                    let cost = (self.frame_ms - self.present_wait_ms).max(0.0);
+                    // The 1% low beside the mean, because a bimodal frame time
+                    // is exactly the distribution that feels worst and the only
+                    // one a mean cannot show. The ⏱ panel has always reported a
+                    // worst column for this reason; the title bar is what people
+                    // actually read, and it used to disagree with it.
+                    self.frame_low_ms = self.frame_time_low();
+                    let low = self.frame_low_ms;
                     window.set_title(&format!(
-                        "Floptle Editor — {}{} — {:.0} fps ({:.1} ms/frame) — {} nodes ({} off screen), {} instances",
+                        "Floptle Editor — {}{} — {:.0} fps ({:.1} ms/frame, 1% low {:.1}, cost {:.1}) — {} nodes ({} off screen), {} instances",
                         self.scene_name,
                         if self.scene_dirty { " •" } else { "" },
                         self.fps,
+                        self.frame_ms,
+                        low,
                         cost,
                         self.render_counts.nodes,
                         self.render_counts.culled,
@@ -7406,7 +7596,7 @@ impl Editor {
 
     /// Apply the frame's deferred [`EditorCmd`] intents — runs after every
     /// gpu/egui borrow has ended, so `self` is fully free again.
-    fn apply_frame_commands(&mut self, mut cmd: EditorCmd, frame_pointer_down: bool) {
+    pub(crate) fn apply_frame_commands(&mut self, mut cmd: EditorCmd, frame_pointer_down: bool) {
         // ---- apply UI commands (gpu/egui borrows have ended; `self` is free) ----
         if let Some(action) = cmd.project_action {
             match action {
@@ -8282,16 +8472,24 @@ impl Editor {
                 }
             }
         }
-        if let Some((e, layer)) = cmd.set_layer {
-            self.record();
-            if layer == floptle_core::layers::DEFAULT_LAYER {
-                self.world.remove::<floptle_core::Layer>(e);
+        if let Some(req) = cmd.do_set_layer.clone() {
+            // Already answered — the modal put the final target list here.
+            self.apply_layer(&req.targets, &req.layer);
+        }
+        if let Some(req) = cmd.set_layer.clone() {
+            // Children make the scope of this edit a real question rather than a
+            // detail — see `LayerChildrenPrompt`. Ask once, covering the whole
+            // selection, and only when there is actually something to ask about.
+            let kids = self.descendants_of(&req.targets);
+            if kids.is_empty() {
+                self.apply_layer(&req.targets, &req.layer);
             } else {
-                self.world.insert(e, floptle_core::Layer(layer));
+                self.layer_children_confirm = Some(crate::LayerChildrenPrompt {
+                    targets: req.targets,
+                    children: kids,
+                    layer: req.layer,
+                });
             }
-            // Re-layer the live sim: bodies re-resolve via sync_dynamic_params,
-            // but static colliders bake their bit at build — so rebuild.
-            self.rebuild_sim();
         }
         if let Some(a) = cmd.access {
             // One set of values, two ways in: this pane and a game's own options
@@ -10315,11 +10513,32 @@ struct PerfSnapshot {
     scripts: Vec<(String, floptle_core::profile::Cost)>,
     accounted_ms: f32,
     counts: floptle_core::profile::Counts,
+    /// How the frames are actually arriving, and whether dt snapping is
+    /// managing to do anything about it (`floptle/0160`).
+    pacing: Pacing,
+}
+
+/// What the display path is doing, as opposed to what the scene costs.
+///
+/// The two get confused constantly — "my game runs at 300 fps and stutters" is
+/// almost never a scene that is slow — so they are reported side by side and
+/// named differently.
+#[derive(Clone, Copy, Default)]
+struct Pacing {
+    /// Smoothed frame time, ms.
+    mean_ms: f32,
+    /// 99th-percentile frame time over the last couple of seconds, ms.
+    p99_ms: f32,
+    /// The display's refresh period in ms, or 0 if nothing could be read.
+    refresh_ms: f32,
+    /// Share of recent frames the dt snap actually applied to, 0..1.
+    snap_rate: f32,
 }
 
 impl PerfSnapshot {
     fn take(p: &floptle_core::profile::FrameProfile) -> Self {
         Self {
+            pacing: Pacing::default(),
             on: p.enabled(),
             frames: p.frames(),
             buckets: floptle_core::profile::Bucket::ALL
@@ -10330,6 +10549,206 @@ impl PerfSnapshot {
             accounted_ms: p.accounted_ms().unwrap_or(0.0),
             counts: p.counts(),
         }
+    }
+}
+
+#[cfg(test)]
+mod readout_tests {
+    /// **The readout has to smooth frame time, not its reciprocal.**
+    ///
+    /// The acceptance case from `floptle/0160`: a frame sequence alternating
+    /// 2 ms and 30 ms. Sixty-two frames a second are genuinely arriving (16 ms
+    /// mean), and an EMA over `1.0 / dt` reports something near 265 — it spends
+    /// half its samples at 500 fps and a reciprocal does not average.
+    ///
+    /// The real capture was worse: bursts of 0.08 ms frames between 16 ms blocks
+    /// read as 4312 fps against a true 144.
+    #[test]
+    fn the_fps_readout_averages_frame_time_not_its_reciprocal() {
+        let seq: Vec<f32> = (0..400)
+            .map(|i| if i % 2 == 0 { 0.002 } else { 0.030 })
+            .collect();
+        let true_fps = seq.len() as f32 / seq.iter().sum::<f32>();
+        assert!((true_fps - 62.5).abs() < 0.1, "the sequence really is ~62 fps: {true_fps}");
+
+        // What the readout does now: smooth the time, invert at the end.
+        let mut frame_ms = 0.0f32;
+        for &dt in &seq {
+            let ms = dt * 1000.0;
+            frame_ms = if frame_ms > 0.0 { frame_ms * 0.9 + ms * 0.1 } else { ms };
+        }
+        let reported = 1000.0 / frame_ms;
+
+        // What it used to do: smooth the reciprocal.
+        let mut old = 0.0f32;
+        for &dt in &seq {
+            let inst = 1.0 / dt;
+            old = if old > 0.0 { old * 0.9 + inst * 0.1 } else { inst };
+        }
+
+        assert!(
+            (reported - true_fps).abs() < 6.0,
+            "reported {reported} against a true {true_fps}"
+        );
+        assert!(
+            old > 200.0,
+            "the old formula really did overstate this badly — if it doesn't, this \
+             test is no longer measuring the bug it was written for (got {old})"
+        );
+    }
+
+    /// The 1% low has to SEE the slow frames. A mean cannot, which is the whole
+    /// reason it is reported beside one.
+    #[test]
+    fn the_one_percent_low_reports_the_worst_frames_not_the_average() {
+        let mut ed = crate::Editor::default();
+        // 99 good frames and one 40 ms hitch, repeated — the shape that adds
+        // well under a millisecond to an average and is the only thing anybody
+        // is ever chasing.
+        for i in 0..500 {
+            ed.record_frame_time(if i % 100 == 99 { 40.0 } else { 6.9 });
+        }
+        let low = ed.frame_time_low();
+        assert!(low > 30.0, "the hitch has to be visible in the 1% low, got {low}");
+
+        // And a steady stream reports a steady low — it must not manufacture a
+        // spike out of an even distribution.
+        let mut steady = crate::Editor::default();
+        for _ in 0..500 {
+            steady.record_frame_time(6.9);
+        }
+        assert!((steady.frame_time_low() - 6.9).abs() < 0.01);
+    }
+}
+
+/// Which refresh period to hold, given what the platform just said.
+///
+/// Pulled out of [`Editor::reread_refresh_period`] because it is the whole of
+/// `floptle/0160`'s second half and it cannot be tested through a real window.
+///
+/// * `held` — what we already believe (0 = nothing yet).
+/// * `current` — `current_monitor()`'s refresh in mHz, if it answered.
+/// * `any` — a monitor, any monitor, in mHz. Only consulted when nothing is
+///   known at all, because on a mixed-refresh desktop it is a guess.
+fn chosen_refresh_period(held: f32, current: Option<u32>, any: impl FnOnce() -> Option<u32>) -> f32 {
+    if let Some(mhz) = current.filter(|&m| m > 0) {
+        return 1000.0 / mhz as f32;
+    }
+    // A `None` means "ask again", not "there is no display" — mapping it onto
+    // 0.0 is what switched dt snapping off for a whole session.
+    if held > 0.0 {
+        return held;
+    }
+    any().filter(|&m| m > 0).map(|mhz| 1000.0 / mhz as f32).unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::chosen_refresh_period;
+
+    /// Measured on Ty's machine with `present_stats`: `current_monitor()` is
+    /// **NONE** at window creation and becomes `Some(DP-2, 144001)` once the
+    /// surface is mapped, while `available_monitors()` reports
+    /// `[HDMI-A-1 59951, DP-2 144001]` correctly the entire time.
+    #[test]
+    fn a_none_from_current_monitor_never_zeroes_a_good_period() {
+        let dp2 = Some(144_001);
+        let hdmi = || Some(59_951);
+
+        // Startup: nothing known and nothing current. Snapping used to be dead
+        // here for 240 frames; a monitor — any monitor — beats no snapping.
+        let boot = chosen_refresh_period(0.0, None, hdmi);
+        assert!(boot > 0.0, "startup must not come up with snapping switched off");
+
+        // The surface maps and the real output answers.
+        let live = chosen_refresh_period(boot, dp2, hdmi);
+        // In SECONDS: `refresh_period` is compared against `dt`, not against a
+        // millisecond readout. 144.001 Hz -> 6.944 ms.
+        assert!((live - 1.0 / 144.001).abs() < 1e-6, "{live}");
+
+        // A later transient None — an output hotplug, a window drag — must KEEP
+        // the good value rather than replace it with a guess about the other
+        // monitor or with zero.
+        let after = chosen_refresh_period(live, None, hdmi);
+        assert_eq!(after, live, "a transient None is 'ask again', not 'no display'");
+
+        // And a display that reports nonsense is treated as no answer at all.
+        assert_eq!(chosen_refresh_period(live, Some(0), hdmi), live);
+        assert_eq!(chosen_refresh_period(0.0, None, || None), 0.0, "genuinely nothing to go on");
+    }
+}
+
+/// Draw how the frames are ARRIVING, beside what they cost.
+///
+/// **Two different questions, and an fps number answers neither on its own.** A
+/// scene costing 8 ms that presents at 20 fps is a display path pacing the
+/// engine; the same 8 ms at 120 fps is the same scene doing fine. And when dt
+/// snapping goes inert — the measured frame time stops landing near a whole
+/// multiple of the reported refresh, because the window is on a different output
+/// than `current_monitor()` names, or nothing is pacing to vblank — the raw
+/// scheduler jitter goes straight into the fixed-step accumulator and the render
+/// judders by `velocity x noise`. That used to happen in total silence
+/// (`floptle/0160`), which is the worst possible way for a load-bearing path to
+/// be switched off.
+fn pacing_readout(ui: &mut egui::Ui, p: &Pacing) {
+    if p.mean_ms <= 0.0 {
+        return;
+    }
+    let warn = egui::Color32::from_rgb(230, 150, 90);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new("frames arriving").strong());
+        ui.label(
+            egui::RichText::new(format!(
+                "{:.2} ms mean   {:.2} ms 1% low   ({:.0} fps)",
+                p.mean_ms,
+                p.p99_ms,
+                1000.0 / p.mean_ms.max(1e-4)
+            ))
+            .monospace(),
+        );
+    });
+    // A 1% low several times the mean IS the stutter, whatever the fps says.
+    if p.p99_ms > p.mean_ms * 2.0 {
+        ui.small(
+            egui::RichText::new(format!(
+                "⚠ the worst 1% of frames take {:.1}x the average. That is what a \
+                 stutter is, and an fps number cannot show it.",
+                p.p99_ms / p.mean_ms.max(1e-4)
+            ))
+            .color(warn),
+        );
+    }
+    if p.refresh_ms <= 0.0 {
+        ui.small(
+            egui::RichText::new(
+                "⚠ no display refresh rate available, so dt snapping is off — frame-time \
+                 jitter is reaching the simulation clock unfiltered.",
+            )
+            .color(warn),
+        );
+        return;
+    }
+    let hz = 1000.0 / p.refresh_ms;
+    if p.snap_rate >= 0.5 {
+        ui.small(format!(
+            "dt snapping: on — {:.2} ms refresh ({hz:.4} Hz), applied to {:.0}% of frames.",
+            p.refresh_ms,
+            p.snap_rate * 100.0
+        ));
+    } else {
+        ui.small(
+            egui::RichText::new(format!(
+                "⚠ dt snapping is inert — the display reports {:.2} ms ({hz:.4} Hz) but frames \
+                 are arriving every {:.2} ms, so they aren't landing on whole refreshes and the \
+                 snap can't apply (it caught {:.0}% of them). Usually the window is on a \
+                 different output than the one being reported, or the present mode isn't pacing \
+                 to vblank. Frame-time jitter is reaching the simulation clock.",
+                p.refresh_ms,
+                p.mean_ms,
+                p.snap_rate * 100.0
+            ))
+            .color(warn),
+        );
     }
 }
 
@@ -10355,6 +10774,8 @@ fn perf_readout(ui: &mut egui::Ui, s: &PerfSnapshot) {
         "worst = the worst single frame in the last second. That is the column to \
          read; a hitch is invisible in an average.",
     );
+    ui.add_space(4.0);
+    pacing_readout(ui, &s.pacing);
     ui.add_space(4.0);
     egui::Grid::new("perf-buckets").num_columns(3).striped(true).show(ui, |ui| {
         ui.label(egui::RichText::new("").strong());
