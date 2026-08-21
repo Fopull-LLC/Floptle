@@ -3591,6 +3591,7 @@ pub fn spawn_into(doc: &SceneDoc, world: &mut World) {
     spawn_nodes(&doc.nodes, world);
     let light = world.spawn();
     world.insert(light, Name("Lighting".into()));
+    world.insert(light, Transform::IDENTITY);
     world.insert(light, doc.lighting.to_light());
 
     // Every scene carries a Skybox node (the environment background). If the doc didn't

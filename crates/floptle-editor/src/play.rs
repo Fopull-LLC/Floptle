@@ -1524,6 +1524,7 @@ impl Editor {
 #[cfg(test)]
 mod scene_request_tests {
     use crate::Editor;
+    use super::{Transform, Scripts, ScriptInst};
 
     /// `scene.load` strings resolve inside the project only: names,
     /// scenes-relative paths, and project-relative paths all work; escapes
@@ -1553,5 +1554,50 @@ mod scene_request_tests {
         assert!(ed.resolve_scene_request("").is_none());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `floptle/0159`: the docs promise `find("Lighting")` always resolves —
+    /// "every scene has exactly one Lighting node and the loader makes it". It
+    /// didn't, because `spawn_into` never gave the Lighting entity a
+    /// `Transform`, and the script mirror (`sync_scene`) only mirrors entities
+    /// it can find one on. A real scene, a real script, a real `find()` call.
+    #[test]
+    fn find_lighting_is_reachable_from_a_game_script() {
+        let dir = std::env::temp_dir()
+            .join(format!("floptle-find-lighting-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("scripts/probe.lua"),
+            "function update(node, dt)\n\
+             \x20 local l = find(\"Lighting\")\n\
+             \x20 if l then log(\"FOUND \" .. tostring(l:getcomponent(\"Light\") ~= nil)) else log(\"NIL\") end\n\
+             end\n",
+        )
+        .unwrap();
+
+        let doc = floptle_scene::SceneDoc {
+            name: "test".into(),
+            lighting: floptle_scene::LightDoc::default(),
+            nodes: vec![],
+        };
+        let mut world = floptle_core::World::default();
+        floptle_scene::spawn_into(&doc, &mut world);
+
+        let probe = world.spawn();
+        world.insert(probe, Transform::IDENTITY);
+        world.insert(probe, Scripts(vec![ScriptInst::new("probe")]));
+
+        let mut host = floptle_script::ScriptHost::new();
+        host.run(&mut world, &dir.join("scripts"), 1.0 / 60.0, 0.0);
+
+        let logs = host.drain_logs();
+        let msgs: Vec<&str> = logs.iter().map(|l| l.msg.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.starts_with("FOUND true")),
+            "find(\"Lighting\") should resolve a handle with a Light component; got {msgs:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
