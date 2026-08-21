@@ -80,9 +80,13 @@ impl AnchoredCollider {
 /// a `f64` world point. Near the origin (the default), the two frames coincide.
 pub struct PhysicsWorld {
     pub gravity: GravityField,
-    /// The scene's bodies of water (`floptle/0038`). Built from the scene's
-    /// WaterVolume nodes each Play, exactly like `gravity` — and just as static
-    /// per step, which is what keeps `Sim::step_body_tick` bit-for-bit exact.
+    /// The scene's bodies of water (`floptle/0038`). Rebuilt from the scene's
+    /// WaterVolume nodes every frame, exactly like `gravity` (`floptle/0141`) —
+    /// **static only *within* one step**, which is what keeps
+    /// `Sim::step_body_tick` bit-for-bit exact. That is a claim about the field
+    /// not moving *while a tick is running*, not about being built once per
+    /// session: a pool spawned, moved, resized or destroyed while the game is
+    /// running is in this field the same frame it is in the renderer's gather.
     pub water: crate::water::WaterField,
     pub colliders: Vec<AnchoredCollider>,
     pub bodies: Vec<Body>,

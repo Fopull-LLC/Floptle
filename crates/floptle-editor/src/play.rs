@@ -1601,3 +1601,114 @@ mod scene_request_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+mod water_streaming_tests {
+    use crate::Editor;
+    use floptle_core::{GravityMode, Matter, Name, RigidBody, WaterKind};
+    use super::{Transform};
+
+    /// `floptle/0141`: `build_water_field` used to run once, at Play start —
+    /// exactly like `build_gravity_field`, except gravity is rebuilt every
+    /// frame and water was not. A pool spawned while the game is already
+    /// running (a streamed level's ordinary case) was drawn — `water_draw`
+    /// gathers from the live world every frame — but never entered the
+    /// solver's field, so it floated nothing.
+    ///
+    /// Falling body, no water yet, no water for the first several ticks —
+    /// then a `WaterVolume` node is spawned into the live world exactly the
+    /// way a script's `scene.add`/streamer would, and the body must be
+    /// caught by it the same tick class water always has been.
+    #[test]
+    fn a_pool_spawned_mid_session_is_in_the_sim_the_frame_it_exists() {
+        let mut ed = Editor::default();
+
+        // Down gravity, or nothing falls at all.
+        let g = ed.world.spawn();
+        ed.world.insert(g, Name("Gravity".into()));
+        ed.world.insert(g, Transform::IDENTITY);
+        ed.world.insert(g, Matter::GravityVolume { mode: GravityMode::Down, strength: 15.0, radius: 0.0 });
+
+        // A dynamic sphere, falling from height with nothing below it — no
+        // floor, no water, so left alone it falls forever.
+        let ball = ed.world.spawn();
+        ed.world.insert(ball, Name("Ball".into()));
+        ed.world.insert(ball, Transform { translation: [0.0, 10.0, 0.0].into(), ..Transform::IDENTITY });
+        ed.world.insert(ball, RigidBody::default());
+
+        ed.toggle_play();
+        assert!(ed.playing, "the session must actually start");
+
+        const DT: f32 = 1.0 / 60.0;
+        let pos_of = |ed: &Editor| -> f64 {
+            ed.sim.as_ref().unwrap().body_states().find(|r| r.entity == ball).unwrap().pos.y
+        };
+        let vel_of = |ed: &Editor| -> f32 {
+            ed.sim.as_ref().unwrap().body_states().find(|r| r.entity == ball).unwrap().vel.y
+        };
+
+        // A few ticks of ordinary free fall — no water exists yet.
+        for _ in 0..15 {
+            ed.play_step(DT, true);
+        }
+        let falling_at = pos_of(&ed);
+        assert!(vel_of(&ed) < -1.0, "the ball should be falling under gravity before any water exists");
+        assert!(falling_at < 10.0, "it should have actually fallen");
+
+        // Spawn the pool now, mid-session — the way a streamer or a script's
+        // scene.add would, not through Play start. Centred where the ball
+        // already is, tall enough to still be under it.
+        let pool = ed.world.spawn();
+        ed.world.insert(pool, Name("Pool".into()));
+        ed.world.insert(
+            pool,
+            Transform { translation: [0.0, falling_at - 1.0, 0.0].into(), ..Transform::IDENTITY },
+        );
+        ed.world.insert(
+            pool,
+            Matter::WaterVolume {
+                kind: WaterKind::Pool,
+                radius: 0.0,
+                half_extents: [5.0, 5.0, 5.0],
+                density: 1000.0,
+                drag: 1.0,
+                angular_drag: 1.0,
+                frozen: false,
+                tint: [0.1, 0.3, 0.4],
+                visibility: 20.0,
+            },
+        );
+
+        // ONE tick is the actual claim: the pool must be in the solver's
+        // field the same frame it exists in the world, not next Play. Water
+        // this dense (1000, real-water-like, against a 1 kg 0.5 m sphere)
+        // flips the ball's velocity from falling to sharply buoyant
+        // immediately — the clean, unambiguous signal that the field is
+        // being read at all, before anything has had time to rise out the
+        // top of the pool and start free-falling again.
+        ed.play_step(DT, true);
+        assert_eq!(
+            ed.sim.as_ref().unwrap().world.water.volumes.len(),
+            1,
+            "the pool must be in the solver's water field the very next tick"
+        );
+        assert!(
+            vel_of(&ed) > 0.0,
+            "a body inside a pool this dense must be pushed UP by buoyancy on the very next \
+             tick — instead it kept falling at {} — the pool never reached the solver",
+            vel_of(&ed)
+        );
+
+        // …and it keeps floating rather than sinking through to wherever it
+        // would have landed in empty space — the property that matters to a
+        // player, not just to the solver's bookkeeping.
+        for _ in 0..10 {
+            ed.play_step(DT, true);
+        }
+        assert!(
+            pos_of(&ed) > falling_at - 2.0,
+            "the ball should be held up near the pool, not have fallen through it: {}",
+            pos_of(&ed)
+        );
+    }
+}

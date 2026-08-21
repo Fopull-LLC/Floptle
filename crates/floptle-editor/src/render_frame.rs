@@ -7027,6 +7027,18 @@ impl Editor {
                 .map(|e| floptle_core::world_transform(&self.world, e).translation);
             if let Some(sim) = self.sim.as_mut() {
                 sim.world.gravity = Self::build_gravity_field(&self.world, sim.world.origin);
+                // Water is rebuilt every frame for the same reason gravity is
+                // (`floptle/0141`): a WaterVolume spawned, moved, resized,
+                // disabled or destroyed while the game is running must be in
+                // the solver's field the same frame it is in the renderer's —
+                // `water_draw` already gathers from the live world every
+                // frame, so the two were disagreeing about *when* a pool
+                // exists, not about what it is. Same cost shape as gravity's
+                // scan (cheap on a level of a few thousand nodes); "static
+                // per step" (the doc comment on `PhysicsWorld::water`) is a
+                // claim about determinism within one tick, not about being
+                // built once per session.
+                sim.world.water = Self::build_water_field(&self.world, sim.world.origin);
                 sim.world.colliders = self.script_host.take_colliders(); // reclaim before stepping
                 // Live Inspector edits: re-read RigidBody tunables (shape/size, friction,
                 // restitution, gravity, pos/rot locks) into the running bodies each frame —
