@@ -80,6 +80,17 @@ pub(crate) const PAINT: &str = "◨";
 /// texture icon.
 pub(crate) const IMAGE: &str = "🖼";
 
+// --- disclosure -----------------------------------------------------------
+/// A collapsed row — click to expand. The conventional file-manager/tree-view
+/// triangle, not a standalone marker (see `dock.rs`'s "File ▸ Export…"
+/// breadcrumbs, which are prose and out of this module's scope). Pairs with
+/// `EXPANDED`.
+pub(crate) const COLLAPSED: &str = "▸";
+/// An expanded row — click to collapse. Pairs with `COLLAPSED`. Same glyph as
+/// `MENU` (a dropdown's own chevron) — different meaning, same mark, which is
+/// why it gets its own name here rather than reusing that one.
+pub(crate) const EXPANDED: &str = "▾";
+
 /// Every icon, for the coverage test.
 pub(crate) const ALL: &[(&str, &str)] = &[
     ("KEYBOARD", KEYBOARD),
@@ -105,6 +116,8 @@ pub(crate) const ALL: &[(&str, &str)] = &[
     ("SHADERS", SHADERS),
     ("PAINT", PAINT),
     ("IMAGE", IMAGE),
+    ("COLLAPSED", COLLAPSED),
+    ("EXPANDED", EXPANDED),
 ];
 
 /// Build the editor's exact font stack — the same builder `main.rs` calls, so

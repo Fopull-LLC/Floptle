@@ -425,7 +425,12 @@ fn step_row(
 ) -> egui::Response {
     let (mark, color) = match (done, current) {
         (true, _) => ("✔", DONE),
-        (false, true) => ("▸", HERE),
+        // `▸` read as a stray arrow rather than a status marker next to `✔`
+        // and `○` — `crate::icons::ON` is the registered "present and
+        // active" glyph and already pairs with `OFF` (`○`, used for
+        // "pending" here), so the same convention this file's own "here"
+        // step is describing now looks like one.
+        (false, true) => (crate::icons::ON, HERE),
         (false, false) => ("○", ui.visuals().weak_text_color()),
     };
     ui.horizontal(|ui| {
@@ -968,7 +973,11 @@ mod tests {
                 );
             }
             assert!(got.contains('✔'), "{}: a finished step draws no tick", t.id);
-            assert!(got.contains('▸'), "{}: the current step is unmarked", t.id);
+            assert!(
+                got.contains(crate::icons::ON),
+                "{}: the current step is unmarked",
+                t.id
+            );
             assert!(got.contains('○'), "{}: a pending step is unmarked", t.id);
         }
     }

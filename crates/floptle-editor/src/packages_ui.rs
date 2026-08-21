@@ -388,7 +388,9 @@ fn installed_tab(ui: &mut egui::Ui, ctx: &PkgCtx<'_>, state: &mut PackagesState,
                                 .on_hover_text("read in place — edits show up on Reload");
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button(if expanded { "▾" } else { "▸" }).clicked() {
+                            let mark =
+                                if expanded { crate::icons::EXPANDED } else { crate::icons::COLLAPSED };
+                            if ui.small_button(mark).clicked() {
                                 state.expanded =
                                     if expanded { None } else { Some(entry.id.clone()) };
                             }
@@ -1004,7 +1006,12 @@ fn grid_cell(
                     }
                 });
                 ui.horizontal(|ui| {
-                    if ui.small_button(if open { "▾ close" } else { "▸ details" }).clicked() {
+                    let label = if open {
+                        format!("{} close", crate::icons::EXPANDED)
+                    } else {
+                        format!("{} details", crate::icons::COLLAPSED)
+                    };
+                    if ui.small_button(label).clicked() {
                         state.expanded = if open { None } else { Some(listing.id.clone()) };
                         state.reviews_for = None;
                     }
