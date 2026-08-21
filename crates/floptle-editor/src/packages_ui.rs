@@ -928,6 +928,28 @@ fn toggle<T: PartialEq + Copy>(list: &mut Vec<T>, v: T) {
     }
 }
 
+/// The Browse-tile permissions warning, or `None` when there is nothing to
+/// warn about (`floptle/0137`).
+///
+/// A pure function on purpose, separate from the `ui.label` call that paints
+/// it: the catalogue's own claim vs fact split means `None` covers TWO
+/// different states that must not be conflated — "the registry did not say"
+/// (`Listing::permissions` is `None`) and "declares none" (`Some(vec![])`) —
+/// and neither one is a chip worth drawing. Only an author who actually
+/// declared something earns the warning colour.
+///
+/// This is the chip's own content — a package that touches the network reads
+/// the same, in the same words, wherever this is called from — never the
+/// grant itself: the consent gate reads the manifest off disk at install
+/// time and is the only thing that decides what a package can actually do.
+fn permission_chip(listing: &Listing) -> Option<String> {
+    let perms = listing.permissions.as_ref()?;
+    if perms.is_empty() {
+        return None;
+    }
+    Some(perms.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>().join(", "))
+}
+
 /// One package, as a picture with a name under it.
 #[allow(clippy::too_many_arguments)]
 fn grid_cell(
@@ -950,6 +972,13 @@ fn grid_cell(
             .show(ui, |ui| {
                 ui.set_width(CELL);
                 thumbnail(ui, state, listing);
+                if let Some(label) = permission_chip(listing) {
+                    ui.label(look::fine(ui, format!("⚠ {label}")).color(crate::theme::signal::WARN))
+                        .on_hover_text(format!(
+                            "declared by the author — asks to: {label}. The install \
+                             screen shows the full list before anything runs."
+                        ));
+                }
                 ui.horizontal(|ui| {
                     ui.label(look::section(ui, crate::assets::truncate_label(&listing.name, 20)));
                     if have.is_some() {
@@ -1708,6 +1737,37 @@ mod tests {
     fn blank_boxes_read_as_absent_rather_than_as_empty_strings() {
         assert_eq!(non_empty("  "), None);
         assert_eq!(non_empty(" v1.0 "), Some("v1.0".to_string()));
+    }
+
+    /// `floptle/0137`: asserted against the chip's own content, not against
+    /// substring text anywhere in the panel — "Network" and "Browser" also
+    /// appear in this file's explanatory prose, so a text-scan assertion
+    /// would pass for the wrong reason (the card's own account of why its
+    /// first attempt at this test was worthless).
+    #[test]
+    fn the_permission_chip_only_shows_what_was_actually_declared() {
+        let idx = floptle_package::Index::parse(
+            r#"{"packages":[
+                 {"id":"a.b","name":"A","versions":[]},
+                 {"id":"c.d","name":"C","versions":[],"permissions":[]},
+                 {"id":"e.f","name":"E","versions":[],"permissions":["Network","Browser"]}
+               ]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            permission_chip(idx.find("a.b").unwrap()),
+            None,
+            "the registry not saying must not read as a warning"
+        );
+        assert_eq!(
+            permission_chip(idx.find("c.d").unwrap()),
+            None,
+            "declaring none is not a warning either — only an actual ask earns the colour"
+        );
+        assert_eq!(
+            permission_chip(idx.find("e.f").unwrap()).as_deref(),
+            Some("Network, Browser")
+        );
     }
 }
 

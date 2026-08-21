@@ -26,7 +26,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::contents::Facet;
-use crate::manifest::{Category, Media};
+use crate::manifest::{Category, Media, Permission};
 use crate::version::{Version, VersionReq};
 
 /// Where the catalogue lives. Overridable per install for a private registry.
@@ -140,6 +140,24 @@ pub struct Listing {
     /// same rule as [`Rating`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downloads: Option<u64>,
+    /// The author's declared permissions, from the manifest of the newest
+    /// listed version — a *claim*, advisory only. The consent gate that
+    /// actually grants anything still reads the manifest off disk at install
+    /// time; this is what lets the editor say "this will ask for network"
+    /// before that moment (`floptle/0137`).
+    ///
+    /// **Absent is not "none"**, the same rule as [`Listing::downloads`]: it
+    /// means the registry did not say, not that the package asks for nothing.
+    /// A readable manifest always yields the key — `Some(vec![])` is the
+    /// positive "declares none". Render nothing for `None`; only render "no
+    /// permissions" for `Some(vec![])`, if that is ever worth saying.
+    ///
+    /// Read leniently, like [`Listing::categories`]: a permission kind this
+    /// build has never heard of is dropped from the list rather than failing
+    /// the whole field, or a newer engine adding a kind would strand every
+    /// older one on an unparseable catalogue.
+    #[serde(default, deserialize_with = "lenient_permissions", skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<Permission>>,
     #[serde(default)]
     pub versions: Vec<Release>,
     /// Absent until somebody reviews it. Added after the reader shipped, which
@@ -435,6 +453,30 @@ fn lenient_facets<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Facet>, D::Erro
     lenient_list(d)
 }
 
+/// Unlike `categories`/`contains` — plain `Vec`s, where absent and empty read
+/// the same — this has to keep `None` (the registry did not say) apart from
+/// `Some(vec![])` (declares none), so it cannot just be `lenient_list` behind
+/// `#[serde(default)]`: that would collapse both onto an empty `Vec`. `#[serde(default)]`
+/// on the field already gives `None` for an ABSENT key without this function
+/// running at all; this only has to cover a key that IS present — `null`
+/// reads the same as absent, an array keeps whatever entries this build
+/// recognises (unlike `lenient_list`, one bad entry does not need to be able
+/// to sink the array — there simply are so few permission kinds that a
+/// single genuinely-malformed one is likely the whole list), and anything
+/// else present-but-wrong-shaped is treated the same as not having said.
+fn lenient_permissions<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Vec<Permission>>, D::Error> {
+    let raw = Option::<serde_json::Value>::deserialize(d)?;
+    match raw {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Array(items)) => Ok(Some(
+            items.into_iter().filter_map(|v| serde_json::from_value::<Permission>(v).ok()).collect(),
+        )),
+        Some(_) => Ok(None),
+    }
+}
+
 /// One person's word on a package they ran.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Review {
@@ -717,6 +759,7 @@ mod tests {
                   {"video":"https://youtu.be/z","poster":"https://x/p.png"}],
          "updated":"2026-08-14","downloads":1284,
          "rating":{"score":4.8,"count":90},
+         "permissions":["Network","Browser"],
          "versions":[{"version":"1.0.0","git":"https://x/b.git","rev":"v1.0.0"}]},
         {"id":"com.other.sfx","name":"Field SFX","author":"Other",
          "categories":["Audio"],"contains":["audio"],"updated":"2026-08-01",
@@ -897,8 +940,84 @@ mod tests {
         // Absent stays absent — a registry that does not count installs must not
         // publish "0 downloads" for every package on it.
         assert!(!text.contains(r#""downloads":null"#));
+        // Same for permissions: a package that declared some round-trips them...
+        assert_eq!(
+            idx.find("com.fopull.brutalist").unwrap().permissions,
+            Some(vec![Permission::Network, Permission::Browser])
+        );
+        assert!(!text.contains(r#""permissions":null"#));
+        // …and one that never named the field stays silent about it, not "[]".
+        assert!(idx.find("com.other.sfx").unwrap().permissions.is_none());
         let bare = serde_json::to_string(&Index::parse(SAMPLE).unwrap()).unwrap();
         assert!(!bare.contains("categories"), "{bare}");
         assert!(!bare.contains("thumbnail"), "{bare}");
+        assert!(!bare.contains("permissions"), "{bare}");
+    }
+
+    // ---- permissions (0137) -------------------------------------------------
+
+    /// The same "absent is not zero" rule `rating`/`downloads` follow, with one
+    /// more state: an author who ran the publisher and asks for nothing gets to
+    /// SAY so (`Some(vec![])`), which reads differently from a registry that
+    /// simply never mentioned the field (`None`).
+    #[test]
+    fn permissions_absent_is_none_and_declaring_none_is_some_empty() {
+        let idx = Index::parse(SAMPLE).unwrap();
+        assert!(
+            idx.find("com.other.audio").unwrap().permissions.is_none(),
+            "a listing that never named permissions must not read as \"asks for nothing\""
+        );
+
+        let declared = Index::parse(
+            r#"{"packages":[
+                 {"id":"a.b","name":"A","versions":[],"permissions":[]},
+                 {"id":"c.d","name":"C","versions":[],"permissions":["Files"]}
+               ]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            declared.find("a.b").unwrap().permissions,
+            Some(vec![]),
+            "an explicit empty array is the positive \"declares none\""
+        );
+        assert_eq!(declared.find("c.d").unwrap().permissions, Some(vec![Permission::Files]));
+    }
+
+    /// Verbatim pass-through with unknown kinds dropped, not fatal — the same
+    /// contract `categories`/`contains` already keep, so a newer engine's
+    /// permission kind cannot strand an older one on an unparseable catalogue.
+    #[test]
+    fn a_permission_this_build_has_never_heard_of_is_dropped_not_fatal() {
+        let idx = Index::parse(
+            r#"{"packages":[{"id":"a.b","name":"A","versions":[],
+                 "permissions":["Network","MindControl","Browser"]}]}"#,
+        )
+        .expect("an unknown permission must not fail the catalogue");
+        assert_eq!(
+            idx.find("a.b").unwrap().permissions,
+            Some(vec![Permission::Network, Permission::Browser])
+        );
+
+        // Shapes that are not a list of strings at all must not sink the
+        // catalogue either — the same class of defect `rating`'s
+        // `"score":null` guard exists for.
+        for bad in [
+            r#""permissions":"Network""#,
+            r#""permissions":null"#,
+            r#""permissions":{}"#,
+            r#""permissions":[1,2,3]"#,
+        ] {
+            let json = format!(
+                r#"{{"packages":[
+                     {{"id":"a.b","name":"A","versions":[],{bad}}},
+                     {{"id":"c.d","name":"C","versions":[],"permissions":["Files"]}}
+                   ]}}"#
+            );
+            let idx = Index::parse(&json)
+                .unwrap_or_else(|e| panic!("a bad permissions field must not fail the catalogue ({bad}): {e}"));
+            assert_eq!(idx.packages.len(), 2, "{bad}");
+            // …and the package beside it keeps its own perfectly good list.
+            assert_eq!(idx.find("c.d").unwrap().permissions, Some(vec![Permission::Files]), "{bad}");
+        }
     }
 }
