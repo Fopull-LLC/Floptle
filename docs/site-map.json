@@ -135,6 +135,7 @@
 
     "README.md": "the docs index — becomes the site's navigation, not a page in it",
     "HANDOFF.md": "cold-start orientation for whoever picks the engine up next; it is about the work, not the engine",
+    "perf-brief.md": "the performance view of the engine for whoever picks that work up — measurement tooling, what is already optimised, and open leads; about the work, not about what the engine does",
     "ROADMAP.md": "unshipped intentions — a docs site that lists them reads as a list of things the engine does not do",
     "engine-roadmap.md": "same, and sequenced by task id",
     "game-roadmap.md": "the roadmap for a game built IN the engine, not for the engine",

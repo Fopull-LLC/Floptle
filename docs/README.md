@@ -118,6 +118,9 @@ Where a system was argued out before it was built. Useful when you want the reas
 behind a design, or when you are picking up work that was scoped but not finished. A
 proposal is **not** documentation of what shipped — for that, use the guides above.
 
+- [perf-brief.md](perf-brief.md) — the **performance view of the engine**: what is
+  measured and with which tool, what has already been optimised, and what is still
+  outstanding. The cold start for a performance pass.
 - [engine-roadmap.md](engine-roadmap.md) — the four workstreams from "great editor" to
   "ship a whole game".
 - [2d-release-proposal.md](2d-release-proposal.md) — where the 2D layer stands against
