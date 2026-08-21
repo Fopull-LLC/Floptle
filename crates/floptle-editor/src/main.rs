@@ -1704,6 +1704,14 @@ struct Editor {
     /// carries the selection's documents, so a pick that changes nothing else
     /// still makes it stale.
     ext_mirror_selection: usize,
+    /// The last grid built for each tilemap node, so a scene revision bump
+    /// from something ELSE in the level does not cost a copy of a map that
+    /// has not itself changed (`floptle/0155`; the same fix `floptle/0117`
+    /// made for the game-script mirror). Survives a mirror rebuild — the
+    /// mirror itself is rebuilt fresh every time; this is what it reuses
+    /// from. Pruned in `Editor::fill_mirror_tilemaps` so a despawned map's
+    /// buffer is not held forever.
+    ext_tilemap_cache: HashMap<Entity, std::rc::Rc<ext::scene_mirror::TilemapGrid>>,
     /// A package panel asking to be brought to the front next frame.
     ext_focus_window: Option<usize>,
     /// `ed.message(title, body)`, shown as a modal until dismissed.

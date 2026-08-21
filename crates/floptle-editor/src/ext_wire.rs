@@ -199,7 +199,7 @@ impl Editor {
     /// The scene, as extensions see it. The radius comes from the same
     /// measurement the draw loop culls with, so a package and the renderer
     /// agree about how big a node is.
-    fn ext_mirror(&self) -> SceneMirror {
+    fn ext_mirror(&mut self) -> SceneMirror {
         let registry = &self.mesh_registry;
         let model_size = |m: &Matter| match m {
             Matter::Mesh { asset_path } => registry.get(asset_path).map(|a| a.size),
@@ -220,7 +220,57 @@ impl Editor {
             &|_e: Entity, m: &Matter| local_half_extents(m, model_size(m)),
         );
         self.fill_mirror_docs(&mut mirror);
+        self.fill_mirror_tilemaps(&mut mirror);
         mirror
+    }
+
+    /// Every tilemap node's grid, for `tilemap.of` (`floptle/0155`).
+    ///
+    /// **Reuses last frame's buffer when the grid has not changed.** This
+    /// runs whenever `ext_mirror` does, which is gated on `World::revision`
+    /// — but that revision moves on ANY mutable access anywhere in the
+    /// scene, so "the mirror is rebuilding" does not mean "this particular
+    /// map changed". Comparing against `ext_tilemap_cache` (survives the
+    /// mirror being replaced) is what tells the two apart: the comparison
+    /// itself is an O(grid) scan, same as `floptle/0117`'s fix for the
+    /// game-script mirror, but it allocates nothing, and an `Rc::clone` is
+    /// all a call that finds no change costs.
+    fn fill_mirror_tilemaps(&mut self, mirror: &mut SceneMirror) {
+        let mut live = std::collections::HashSet::new();
+        for node in &mirror.nodes {
+            if node.kind != "tilemap" {
+                continue;
+            }
+            let Some(e) = self.entity_of(node.id) else { continue };
+            let Some(Matter::Tilemap { cols, rows, tile, data, tileset }) =
+                self.world.get::<Matter>(e)
+            else {
+                continue;
+            };
+            live.insert(e);
+            let reuse = self.ext_tilemap_cache.get(&e).filter(|g| g.data == *data);
+            let grid = match reuse {
+                Some(g) => g.clone(),
+                None => std::rc::Rc::new(ext::scene_mirror::TilemapGrid {
+                    cols: *cols,
+                    rows: *rows,
+                    tile: *tile,
+                    data: data.clone(),
+                    tileset: tileset.clone(),
+                }),
+            };
+            if !tileset.is_empty() && !mirror.tilesets.contains_key(tileset) {
+                // A tileset describes tile TYPES, not per-instance cells —
+                // cheap to clone fresh regardless of how big the grid is, so
+                // this does not need the same reuse trick.
+                if let Some(set) = self.tiles.get(tileset) {
+                    mirror.tilesets.insert(tileset.clone(), set.clone());
+                }
+            }
+            self.ext_tilemap_cache.insert(e, grid.clone());
+            mirror.tilemaps.insert(node.id, grid);
+        }
+        self.ext_tilemap_cache.retain(|e, _| live.contains(e));
     }
 
     /// The selected nodes' full documents, for `scene.doc`.
@@ -1308,5 +1358,67 @@ mod tests {
         let mut ed = Editor::default();
         let err = ed.ext_set_node_doc(4242, &json(r#"{"name": "x"}"#)).unwrap_err();
         assert!(err.contains("4242"), "{err}");
+    }
+
+    // ---- the tilemap mirror (`floptle/0155`) --------------------------------
+
+    fn with_a_tilemap(cols: u32, rows: u32) -> (Editor, u32) {
+        let mut ed = Editor::default();
+        let e = ed.world.spawn();
+        ed.world.insert(e, floptle_core::Name("Floor".into()));
+        ed.world.insert(e, floptle_core::Transform::IDENTITY);
+        ed.world.insert(
+            e,
+            Matter::Tilemap {
+                cols,
+                rows,
+                tile: 1.0,
+                data: vec![0u32; (cols * rows) as usize],
+                tileset: String::new(),
+            },
+        );
+        (ed, e.index())
+    }
+
+    /// **The property `floptle/0117` exists to protect, on the editor's own
+    /// mirror this time.** A grid that has not changed must come back as the
+    /// SAME allocation across a rebuild, not a fresh copy — an `Rc::clone`,
+    /// not a `Vec` realloc, however big the map.
+    #[test]
+    fn an_unchanged_tilemap_reuses_last_frames_grid() {
+        let (mut ed, id) = with_a_tilemap(4, 4);
+        let m1 = ed.ext_mirror();
+        let g1 = m1.tilemap(id).expect("the grid was built").clone();
+        // Bump the world revision without touching the tilemap at all — a
+        // mutable access to an UNRELATED node, exactly what a streamed level
+        // or an animated neighbour does every frame.
+        let other = ed.world.spawn();
+        ed.world.insert(other, floptle_core::Name("Unrelated".into()));
+        let m2 = ed.ext_mirror();
+        let g2 = m2.tilemap(id).expect("the grid still exists").clone();
+        assert!(
+            std::rc::Rc::ptr_eq(
+                m1.tilemaps.get(&id).unwrap(),
+                m2.tilemaps.get(&id).unwrap()
+            ),
+            "an unrelated scene edit must not reallocate a tilemap that did not change"
+        );
+        assert_eq!(g1, g2);
+    }
+
+    /// …and a real edit DOES get a fresh grid, with the new data in it.
+    #[test]
+    fn an_edited_tilemap_gets_a_fresh_grid() {
+        let (mut ed, id) = with_a_tilemap(2, 1);
+        let m1 = ed.ext_mirror();
+        let rc1 = m1.tilemaps.get(&id).unwrap().clone();
+        let e = ed.entity_of(id).unwrap();
+        if let Some(Matter::Tilemap { data, .. }) = ed.world.get_mut::<Matter>(e) {
+            data[0] = 7;
+        }
+        let m2 = ed.ext_mirror();
+        let rc2 = m2.tilemaps.get(&id).unwrap().clone();
+        assert!(!std::rc::Rc::ptr_eq(&rc1, &rc2), "an actual edit must not reuse the old buffer");
+        assert_eq!(rc2.data[0], 7);
     }
 }

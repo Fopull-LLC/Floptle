@@ -30,6 +30,13 @@ pub(crate) struct MirrorNode {
     pub(crate) scale: [f32; 3],
     /// Absolute world position, parents applied.
     pub(crate) world_pos: [f64; 3],
+    /// Absolute world rotation, parents applied. Read fresh from here rather
+    /// than cached anywhere per-tilemap: unlike a grid's cells, a node's
+    /// transform can change on a frame that touches nothing else about it, and
+    /// `MirrorNode` is rebuilt every time the mirror is (`floptle/0155`).
+    pub(crate) world_rot: [f32; 4],
+    /// Absolute world scale, parents applied — see `world_rot`.
+    pub(crate) world_scale: [f32; 3],
     /// A bounding sphere in world units, or `None` for a node with no
     /// measurable geometry (a folder, a light, a camera).
     pub(crate) radius: Option<f32>,
@@ -54,6 +61,24 @@ pub(crate) struct MirrorNode {
     pub(crate) asset: Option<String>,
 }
 
+/// One tilemap's grid, as a package sees it (`floptle/0155`) — a read-only
+/// snapshot of `Matter::Tilemap`, kept in `Rc` so a scene revision bump for
+/// something ELSE in the level does not cost a copy of a map that has not
+/// itself changed. `Editor::fill_mirror_tilemaps` is what decides whether a
+/// fresh one is needed; this struct is just the shape.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TilemapGrid {
+    pub(crate) cols: u32,
+    pub(crate) rows: u32,
+    /// World-unit edge length of one square.
+    pub(crate) tile: f32,
+    /// Row-major, packed exactly as `Matter::Tilemap::data` — index via
+    /// `floptle_core::tile_index`/`tile_xform`, empty via `floptle_core::EMPTY_TILE`.
+    pub(crate) data: Vec<u32>,
+    /// Project-relative `.tileset.ron` path, or empty for none.
+    pub(crate) tileset: String,
+}
+
 /// Every node in the open scene, plus the index that makes lookups cheap.
 #[derive(Default)]
 pub(crate) struct SceneMirror {
@@ -70,6 +95,14 @@ pub(crate) struct SceneMirror {
     /// read a document pays nothing, and one that does pays only when the scene
     /// has actually changed (see `Editor::ext_mirror`).
     pub(crate) docs: HashMap<u32, serde_json::Value>,
+    /// id → that tilemap's grid, for `tilemap.of`. Filled by
+    /// `Editor::fill_mirror_tilemaps`, which is what does the buffer-reuse —
+    /// this module has no world access of its own to compare against.
+    pub(crate) tilemaps: HashMap<u32, std::rc::Rc<TilemapGrid>>,
+    /// Every tileset a tilemap in `tilemaps` names, by its project-relative
+    /// path. A tileset describes tile TYPES, not per-instance cells, so
+    /// unlike the grids it costs nothing worth avoiding to clone fresh.
+    pub(crate) tilesets: HashMap<String, floptle_tiles::TileSet>,
 }
 
 impl SceneMirror {
@@ -85,6 +118,17 @@ impl SceneMirror {
     /// pretending they are is how a tool edits the wrong door.
     pub(crate) fn find_all(&self, name: &str) -> Vec<u32> {
         self.nodes.iter().filter(|n| n.name == name).map(|n| n.id).collect()
+    }
+
+    /// This tilemap's grid, or `None` for a node that is not one (or whose
+    /// grid has not been built — see `Editor::fill_mirror_tilemaps`).
+    pub(crate) fn tilemap(&self, id: u32) -> Option<&TilemapGrid> {
+        self.tilemaps.get(&id).map(std::rc::Rc::as_ref)
+    }
+
+    /// The tileset a tilemap references, if it names one and it loaded.
+    pub(crate) fn tileset_of(&self, grid: &TilemapGrid) -> Option<&floptle_tiles::TileSet> {
+        (!grid.tileset.is_empty()).then(|| self.tilesets.get(&grid.tileset))?
     }
 
     /// Build the mirror from the world.
@@ -125,6 +169,13 @@ impl SceneMirror {
                     world_t.translation.y,
                     world_t.translation.z,
                 ],
+                world_rot: [
+                    world_t.rotation.x,
+                    world_t.rotation.y,
+                    world_t.rotation.z,
+                    world_t.rotation.w,
+                ],
+                world_scale: [world_t.scale.x, world_t.scale.y, world_t.scale.z],
                 radius: matter.and_then(|m| radius_of(e, m)).map(|r| {
                     // Local radii are pre-scale; the caller's number is not.
                     let s = world_t.scale;

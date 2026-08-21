@@ -59,6 +59,7 @@ pub(crate) fn build_env(
     env.set("handles", super::handles::bind(lua, shared)?)?;
     env.set("nav", nav_table(lua, shared)?)?;
     env.set("mesh", mesh_table_api(lua, shared)?)?;
+    env.set("tilemap", tilemap_table(lua, shared)?)?;
 
     if state.permissions.contains(&Permission::Network) {
         env.set("http", http_table(lua, shared)?)?;
@@ -86,6 +87,288 @@ fn nav_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     floptle_script::nav_api::install_mesh_reads(lua, &t, shared.nav.clone());
     Ok(t)
+}
+
+/// `tilemap` — a 2D level's grid, read-only (`floptle/0155`).
+///
+/// The reading half of the tilemap surface a game script already has
+/// (`node:tilemap()`), for the same reason `nav` is "the reading half of the
+/// scripting `nav` API and nothing that moves": no `set`, no `resize`, no
+/// `fill`. An edit to somebody's level made by a panel is a different
+/// conversation, and `scene.set` already exists for a package that genuinely
+/// means to write.
+///
+/// No permission gates it, for the same reason `nav` needs none: it answers
+/// questions about a grid the same package can already see the bounding box
+/// of via `scene.bounds`.
+fn tilemap_table(lua: &Lua, shared: &Rc<Shared>) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    let s = shared.clone();
+    t.set(
+        "of",
+        lua.create_function(move |lua, id: u32| {
+            if s.scene.borrow().tilemap(id).is_none() {
+                return Ok(Value::Nil);
+            }
+            Ok(Value::Table(new_tilemap_handle(lua, id, s.clone())?))
+        })?,
+    )?;
+    Ok(t)
+}
+
+fn new_tilemap_handle(lua: &Lua, id: u32, shared: Rc<Shared>) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.raw_set("__id", id)?;
+
+    // tm:size() -> cols, rows
+    {
+        let shared = shared.clone();
+        t.set(
+            "size",
+            lua.create_function(move |_, this: Table| {
+                let id: u32 = this.raw_get("__id")?;
+                let s = shared.scene.borrow();
+                Ok(s.tilemap(id).map(|g| (g.cols, g.rows)).unwrap_or((0, 0)))
+            })?,
+        )?;
+    }
+    // tm:tileSize() -> the world edge length of one square.
+    {
+        let shared = shared.clone();
+        t.set(
+            "tileSize",
+            lua.create_function(move |_, this: Table| {
+                let id: u32 = this.raw_get("__id")?;
+                let s = shared.scene.borrow();
+                Ok(s.tilemap(id).map(|g| g.tile).unwrap_or(0.0))
+            })?,
+        )?;
+    }
+    // tm:tileset() -> the project-relative .tileset.ron, or nil.
+    {
+        let shared = shared.clone();
+        t.set(
+            "tileset",
+            lua.create_function(move |_, this: Table| {
+                let id: u32 = this.raw_get("__id")?;
+                let s = shared.scene.borrow();
+                Ok(s.tilemap(id)
+                    .map(|g| g.tileset.clone())
+                    .filter(|p| !p.is_empty()))
+            })?,
+        )?;
+    }
+    // tm:get(x, y) -> cell index, or nil outside the grid / on an empty
+    // square. The orientation is stripped, same as the game API's `tm:get`.
+    {
+        let shared = shared.clone();
+        t.set(
+            "get",
+            lua.create_function(move |_, (this, x, y): (Table, u32, u32)| {
+                let id: u32 = this.raw_get("__id")?;
+                let s = shared.scene.borrow();
+                match tile_packed_at(&s, id, x, y) {
+                    Some(p) if p != floptle_core::EMPTY_TILE => {
+                        Ok(Value::Integer(floptle_core::tile_index(p) as i64))
+                    }
+                    _ => Ok(Value::Nil),
+                }
+            })?,
+        )?;
+    }
+    // tm:at(x, y) -> cell, rotDeg, flipX — the full answer, same shape as the
+    // game API's `tm:at`.
+    {
+        let shared = shared.clone();
+        t.set(
+            "at",
+            lua.create_function(move |_, (this, x, y): (Table, u32, u32)| {
+                let id: u32 = this.raw_get("__id")?;
+                let s = shared.scene.borrow();
+                match tile_packed_at(&s, id, x, y) {
+                    Some(p) if p != floptle_core::EMPTY_TILE => {
+                        let xf = floptle_core::tile_xform(p);
+                        Ok((
+                            Value::Integer(floptle_core::tile_index(p) as i64),
+                            Value::Integer(xf.rot as i64 * 90),
+                            Value::Boolean(xf.flip_x),
+                        ))
+                    }
+                    _ => Ok((Value::Nil, Value::Nil, Value::Nil)),
+                }
+            })?,
+        )?;
+    }
+    // tm:solid(x, y) -> whether the tileset says that square collides.
+    // **The one that matters** — without it the rest is decoration, because
+    // solidity is what makes the grid a level rather than a picture.
+    {
+        let shared = shared.clone();
+        t.set(
+            "solid",
+            lua.create_function(move |_, (this, x, y): (Table, u32, u32)| {
+                let id: u32 = this.raw_get("__id")?;
+                let s = shared.scene.borrow();
+                let Some(grid) = s.tilemap(id) else { return Ok(false) };
+                let Some(p) = tile_packed_at(&s, id, x, y) else { return Ok(false) };
+                let Some(set) = s.tileset_of(grid) else { return Ok(false) };
+                if set.is_empty_square(p) {
+                    return Ok(false);
+                }
+                Ok(set.collision(floptle_core::tile_index(p)).is_solid())
+            })?,
+        )?;
+    }
+    // tm:tags(x, y) -> the tileset's tags for that square, as a list.
+    {
+        let shared = shared.clone();
+        t.set(
+            "tags",
+            lua.create_function(move |lua, (this, x, y): (Table, u32, u32)| {
+                let id: u32 = this.raw_get("__id")?;
+                let s = shared.scene.borrow();
+                let out = lua.create_table()?;
+                let Some(grid) = s.tilemap(id) else { return Ok(out) };
+                let (Some(p), Some(set)) = (tile_packed_at(&s, id, x, y), s.tileset_of(grid))
+                else {
+                    return Ok(out);
+                };
+                if set.is_empty_square(p) {
+                    return Ok(out);
+                }
+                for (i, tag) in set.tags(floptle_core::tile_index(p)).iter().enumerate() {
+                    out.raw_set(i + 1, tag.clone())?;
+                }
+                Ok(out)
+            })?,
+        )?;
+    }
+    // tm:hasTag(x, y, tag) -> the common case of the above without a table
+    // allocation per square.
+    {
+        let shared = shared.clone();
+        t.set(
+            "hasTag",
+            lua.create_function(move |_, (this, x, y, tag): (Table, u32, u32, String)| {
+                let id: u32 = this.raw_get("__id")?;
+                let s = shared.scene.borrow();
+                let Some(grid) = s.tilemap(id) else { return Ok(false) };
+                let (Some(p), Some(set)) = (tile_packed_at(&s, id, x, y), s.tileset_of(grid))
+                else {
+                    return Ok(false);
+                };
+                if set.is_empty_square(p) {
+                    return Ok(false);
+                }
+                Ok(set.tags(floptle_core::tile_index(p)).contains(&tag))
+            })?,
+        )?;
+    }
+    // tm:cellAt(worldPoint) -> x, y — or nil off the map. Through the node's
+    // own world transform, so a moved, turned or scaled tilemap needs no
+    // arithmetic at the caller's end.
+    {
+        let shared = shared.clone();
+        t.set(
+            "cellAt",
+            lua.create_function(move |_, (this, p): (Table, Value)| {
+                let id: u32 = this.raw_get("__id")?;
+                let p = super::handles::vec3_of(&p)?;
+                let s = shared.scene.borrow();
+                match tile_cell_of_world(&s, id, floptle_core::math::DVec3::from(p)) {
+                    Some((x, y)) => Ok((Value::Integer(x as i64), Value::Integer(y as i64))),
+                    None => Ok((Value::Nil, Value::Nil)),
+                }
+            })?,
+        )?;
+    }
+    // tm:worldAt(x, y) -> the world position of that square's centre.
+    {
+        let shared = shared.clone();
+        t.set(
+            "worldAt",
+            lua.create_function(move |lua, (this, x, y): (Table, i64, i64)| {
+                let id: u32 = this.raw_get("__id")?;
+                let s = shared.scene.borrow();
+                match tile_world_of_cell(&s, id, x, y) {
+                    Some(p) => xyz(lua, [p.x, p.y, p.z]).map(Value::Table),
+                    None => Ok(Value::Nil),
+                }
+            })?,
+        )?;
+    }
+    Ok(t)
+}
+
+/// One square as the mirror holds it, or `None` outside the grid.
+///
+/// Outside reads as absent rather than wrapping, same rule the game API's
+/// `packed_at` follows: a loop that runs one past the edge is a bug in the
+/// caller's bounds, and wrapping would hide it.
+fn tile_packed_at(s: &super::scene_mirror::SceneMirror, id: u32, x: u32, y: u32) -> Option<u32> {
+    let m = s.tilemap(id)?;
+    (x < m.cols && y < m.rows).then(|| m.data.get((y * m.cols + x) as usize).copied())?
+}
+
+/// Which square of a tilemap a world point falls in — the package-API twin of
+/// `floptle_script::api`'s `cell_of_world`, reading the mirror's own
+/// (per-frame, non-cached) world transform instead of walking the game
+/// mirror's parent chain.
+fn tile_cell_of_world(
+    s: &super::scene_mirror::SceneMirror,
+    id: u32,
+    p: floptle_core::math::DVec3,
+) -> Option<(u32, u32)> {
+    let m = s.tilemap(id)?;
+    let node = s.get(id)?;
+    if m.tile <= 0.0 || m.cols == 0 || m.rows == 0 {
+        return None;
+    }
+    let rot = floptle_core::math::Quat::from_array(node.world_rot);
+    let rot = if rot.is_normalized() { rot } else { floptle_core::math::Quat::IDENTITY };
+    let origin = floptle_core::math::DVec3::from(node.world_pos);
+    let rel = rot.inverse() * (p - origin).as_vec3();
+    let s3 = floptle_core::math::Vec3::from(node.world_scale);
+    if s3.x.abs() < 1e-9 || s3.y.abs() < 1e-9 {
+        return None;
+    }
+    let local = floptle_core::math::Vec2::new(rel.x / s3.x, rel.y / s3.y);
+    let (w, h) = (m.cols as f32 * m.tile * 0.5, m.rows as f32 * m.tile * 0.5);
+    let fx = (local.x + w) / m.tile;
+    // Row 0 is the top, so the row index counts DOWN from +h — matches the
+    // mesh builder and the game API exactly.
+    let fy = (h - local.y) / m.tile;
+    if fx < 0.0 || fy < 0.0 {
+        return None;
+    }
+    let (x, y) = (fx.floor() as i64, fy.floor() as i64);
+    (x >= 0 && y >= 0 && x < m.cols as i64 && y < m.rows as i64).then_some((x as u32, y as u32))
+}
+
+/// The world position of a square's centre — the inverse of
+/// [`tile_cell_of_world`].
+fn tile_world_of_cell(
+    s: &super::scene_mirror::SceneMirror,
+    id: u32,
+    x: i64,
+    y: i64,
+) -> Option<floptle_core::math::DVec3> {
+    let m = s.tilemap(id)?;
+    let node = s.get(id)?;
+    if x < 0 || y < 0 || x >= m.cols as i64 || y >= m.rows as i64 {
+        return None;
+    }
+    let (w, h) = (m.cols as f32 * m.tile * 0.5, m.rows as f32 * m.tile * 0.5);
+    let local = floptle_core::math::Vec3::new(
+        x as f32 * m.tile - w + m.tile * 0.5,
+        h - (y as f32 * m.tile + m.tile * 0.5),
+        0.0,
+    );
+    let rot = floptle_core::math::Quat::from_array(node.world_rot);
+    let rot = if rot.is_normalized() { rot } else { floptle_core::math::Quat::IDENTITY };
+    let s3 = floptle_core::math::Vec3::from(node.world_scale);
+    let origin = floptle_core::math::DVec3::from(node.world_pos);
+    Some(origin + (rot * (s3 * local)).as_dvec3())
 }
 
 /// `mesh` — the triangles behind a node or a model file.

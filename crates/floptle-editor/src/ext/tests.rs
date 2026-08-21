@@ -1262,7 +1262,12 @@ fn every_name_in_the_environment_is_in_the_reference() {
         local names = {}
         local function walk(prefix, t)
             for k, v in pairs(t) do
-                if type(k) == "string" then names[#names + 1] = prefix .. k end
+                -- `__id` and friends are a handle's own bookkeeping (see
+                -- `pretty_value`'s treatment of them) -- never part of the
+                -- surface a package reads or is asked to know about.
+                if type(k) == "string" and k:sub(1, 2) ~= "__" then
+                    names[#names + 1] = prefix .. k
+                end
             end
         end
         walk("ed.", ed)
@@ -1272,15 +1277,52 @@ fn every_name_in_the_environment_is_in_the_reference() {
         walk("handles.", handles)
         walk("nav.", nav)
         walk("mesh.", mesh)
+        walk("tilemap.", tilemap)
         walk("http.", http)
         walk("sys.", sys)
         walk("ed.prefs.", ed.prefs)
         walk("json.", json)
+        -- `tilemap.of` returns a HANDLE, not a data table -- its methods are
+        -- reachable only through an actual instance, the same shape 0154's
+        -- return-value walk exists for. A tilemap node is seeded below so
+        -- this has one to ask for.
+        local tm = tilemap.of(scene.find("__CoverageTilemap"))
+        if tm then walk("tilemap.of().", tm) end
         table.sort(names)
         ed.log(table.concat(names, " "))
         "#,
     );
-    let host = host_for(&proj);
+
+    // A tilemap node, purely so `tilemap.of()` above has something to walk —
+    // the coverage sweep needs the HANDLE to exist, not a real level.
+    let mut world = floptle_core::World::default();
+    let tm = world.spawn();
+    world.insert(tm, floptle_core::Name("__CoverageTilemap".into()));
+    world.insert(tm, floptle_core::transform::Transform::IDENTITY);
+    world.insert(
+        tm,
+        floptle_core::Matter::Tilemap {
+            cols: 1,
+            rows: 1,
+            tile: 1.0,
+            data: vec![floptle_core::EMPTY_TILE],
+            tileset: String::new(),
+        },
+    );
+    let mut mirror = SceneMirror::build(&world, &|_, _| None, &|_, _| None);
+    mirror.tilemaps.insert(
+        tm.index(),
+        std::rc::Rc::new(scene_mirror::TilemapGrid {
+            cols: 1,
+            rows: 1,
+            tile: 1.0,
+            data: vec![floptle_core::EMPTY_TILE],
+            tileset: String::new(),
+        }),
+    );
+    let mut host = ExtHost::new();
+    host.begin_frame(Snapshot { project_root: proj.clone(), ..Snapshot::default() }, mirror);
+    host.reload(&proj, &engine());
     // The walk above is written by hand, so it can quietly fall behind the
     // environment it is meant to cover — a whole new table would simply not be
     // visited and every name in it would pass undocumented. This builds the
@@ -1311,7 +1353,7 @@ fn every_name_in_the_environment_is_in_the_reference() {
         tables.sort();
         assert_eq!(
             tables,
-            ["ed", "handles", "http", "json", "mesh", "nav", "scene", "selection", "sys"],
+            ["ed", "handles", "http", "json", "mesh", "nav", "scene", "selection", "sys", "tilemap"],
             "the environment has a table the coverage walk above does not visit"
         );
     }
@@ -1360,7 +1402,12 @@ fn returned_table_fields_are_documented_too() {
         local names = {}
         local function walk(prefix, t)
             for k, v in pairs(t) do
-                if type(k) == "string" then names[#names + 1] = prefix .. k end
+                -- `__id` and friends are a handle's own bookkeeping (see
+                -- `pretty_value`'s treatment of them) -- never part of the
+                -- surface a package reads or is asked to know about.
+                if type(k) == "string" and k:sub(1, 2) ~= "__" then
+                    names[#names + 1] = prefix .. k
+                end
             end
         end
         local id = scene.find("Button")
@@ -1642,6 +1689,97 @@ fn a_baked_floor() -> floptle_nav::NavMesh {
     tris.extend(quad(0.0, 4.0, 4.0, 8.0));
     tris.extend(quad(8.0, 12.0, 4.0, 8.0));
     floptle_nav::bake(&tris, &floptle_nav::NavSettings::default()).expect("this floor bakes")
+}
+
+/// `floptle/0155`: a package can read a 2D level's floor — size, a square's
+/// cell, its solidity and tags, and the world transform both ways — and gets
+/// `nil` for a node that is not a tilemap. Read-only: there is no `set` on
+/// the handle to try.
+#[test]
+fn a_package_reads_a_tilemaps_grid_and_solidity() {
+    let proj = temp("tilemap-read");
+    install(
+        &proj,
+        "com.t.tm",
+        "",
+        r#"
+        local id = scene.find("Floor")
+        local tm = tilemap.of(id)
+        local cols, rows = tm:size()
+        local wp = tm:worldAt(0, 0)
+        local cx, cy = tm:cellAt(wp)
+        ed.log(string.format(
+            "cols=%d rows=%d tile=%.1f solid00=%s solid10=%s cell00=%d cell10=%s tag=%s cellOut=%s roundtrip=%d,%d",
+            cols, rows, tm:tileSize(), tostring(tm:solid(0, 0)), tostring(tm:solid(1, 0)),
+            tm:get(0, 0), tostring(tm:get(1, 0)), tm:tags(0, 0)[1] or "none",
+            tostring(tm:get(cols, 0)), cx, cy
+        ))
+        ed.log("nonTilemap " .. tostring(tilemap.of(scene.find("Empty"))))
+        ed.log("hasSet " .. tostring(tm.set == nil))
+        "#,
+    );
+
+    let mut world = floptle_core::World::default();
+    let floor = world.spawn();
+    world.insert(floor, floptle_core::Name("Floor".into()));
+    world.insert(floor, floptle_core::transform::Transform::IDENTITY);
+    world.insert(
+        floor,
+        floptle_core::Matter::Tilemap {
+            cols: 2,
+            rows: 1,
+            tile: 2.0,
+            data: vec![
+                floptle_core::tile_pack(3, floptle_core::TileXform::default()),
+                floptle_core::EMPTY_TILE,
+            ],
+            tileset: "t.tileset.ron".into(),
+        },
+    );
+    let plain = world.spawn();
+    world.insert(plain, floptle_core::Name("Empty".into()));
+    world.insert(plain, floptle_core::transform::Transform::IDENTITY);
+
+    let mut mirror = SceneMirror::build(&world, &|_, _| None, &|_, _| None);
+    let mut tileset = floptle_tiles::TileSet { sheet_cols: 4, sheet_rows: 1, ..Default::default() };
+    tileset.tiles.insert(
+        3,
+        floptle_tiles::TileInfo {
+            collision: floptle_tiles::TileCollision::Full,
+            tags: vec!["ground".into()],
+            ..Default::default()
+        },
+    );
+    mirror.tilemaps.insert(
+        floor.index(),
+        std::rc::Rc::new(scene_mirror::TilemapGrid {
+            cols: 2,
+            rows: 1,
+            tile: 2.0,
+            data: vec![
+                floptle_core::tile_pack(3, floptle_core::TileXform::default()),
+                floptle_core::EMPTY_TILE,
+            ],
+            tileset: "t.tileset.ron".into(),
+        }),
+    );
+    mirror.tilesets.insert("t.tileset.ron".into(), tileset);
+
+    let mut host = ExtHost::new();
+    host.begin_frame(Snapshot { project_root: proj.clone(), ..Snapshot::default() }, mirror);
+    host.reload(&proj, &engine());
+
+    let log: Vec<String> = host.take_log().into_iter().map(|l| l.msg).collect();
+    assert!(!log.is_empty(), "the package did not run: {log:?}");
+    assert!(
+        log[0]
+            == "cols=2 rows=1 tile=2.0 solid00=true solid10=false cell00=3 cell10=nil tag=ground \
+                 cellOut=nil roundtrip=0,0",
+        "{log:?}"
+    );
+    assert_eq!(log[1], "nonTilemap nil", "a node that is not a tilemap must answer nil, not raise");
+    assert_eq!(log[2], "hasSet true", "the handle must carry no write method at all");
+    let _ = std::fs::remove_dir_all(&proj);
 }
 
 fn host_with_a_navmesh(proj: &Path) -> ExtHost {

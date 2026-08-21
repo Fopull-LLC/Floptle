@@ -564,6 +564,47 @@ end)
 
 ---
 
+## `tilemap` — a 2D level's floor
+
+The reading half of the [scripting `tilemap`](scripting.md) handle
+(`node:tilemap()`), the way `nav` is the reading half of the scripting `nav`
+API: no `set`, no `resize`, no `fill`. An edit to somebody's level made by a
+panel is a different conversation, and `scene.set` already exists for a
+package that genuinely means to write.
+
+```lua
+local tm = tilemap.of(id)   -- nil for a node whose kind is not "tilemap"
+if tm then
+    local cols, rows = tm:size()
+end
+```
+
+| | |
+| --- | --- |
+| `tilemap.of(id)` | a handle for that node, or `nil` if it is not a tilemap |
+| `tm:size()` | `cols, rows` |
+| `tm:tileSize()` | the world edge length of one square |
+| `tm:tileset()` | the project-relative `.tileset.ron` path, or `nil` |
+| `tm:get(x, y)` | the cell index at that square, or `nil` (outside the grid, or empty) |
+| `tm:at(x, y)` | `cell, rotDeg, flipX` — the full answer, orientation included |
+| `tm:solid(x, y)` | whether the tileset says that square collides — **the one that matters**; the rest is decoration without it |
+| `tm:tags(x, y)` | the tileset's tags for that square, as a list |
+| `tm:hasTag(x, y, tag)` | the common case of the above without a table per call |
+| `tm:cellAt(worldPoint)` | `x, y`, or `nil` off the map — through the node's own transform, so a moved, turned or scaled tilemap needs no arithmetic at your end |
+| `tm:worldAt(x, y)` | the world position of that square's centre — the inverse of `cellAt` |
+
+Grid coordinates are 0-based from the top-left, the same convention the
+scripting API uses. `x`/`y` outside the grid answer `false`/`nil`/empty rather
+than wrapping — a loop that runs one past the edge is a bug in the caller's
+bounds, and wrapping would hide it by answering about the far side of the map.
+
+A tileset describes tile *types* — collision, tags, autotile groups — not the
+grid itself, so `tm:solid`/`tm:tags` answer `false`/empty for a square whose
+tilemap names no tileset, or names one that has not loaded, rather than
+raising: a level mid-import is not an error state.
+
+---
+
 ## `gui` — widgets
 
 Only inside a draw callback. Widgets **return their new value**:
