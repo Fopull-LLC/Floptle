@@ -1,5 +1,29 @@
 ## Just shipped
 
+**v0.73.0 "Straight Answer"** — **the editor stops under-reporting and
+under-doing.** **Your bakes are still baked when you come back**: a navmesh you
+baked was gone next time you opened the project, so baking a level felt like
+something you had to redo every session. The file was on disk beside the scene
+the whole time — opening a *scene* loaded it, opening a *project* did not ask
+for it, and the same was true of baked lighting. Both load with the project now;
+open your project and the bakes you already made come back. **The frame counter
+tells the truth**: a scene that plays like a slideshow could report hundreds of
+frames a second — a real capture of 21 fps read as 481 — because the counter
+averaged the *rate* instead of how long frames take, which drags the number
+toward the fast frames and flatters exactly the stuttering it should expose. The
+title bar now carries a **1% low** beside the average, which is the number that
+matches what a stutter feels like. The **⏱ Frame cost** panel gained a *frames
+arriving* line that says what your display is really doing, and says so when the
+engine's frame-timing smoothing cannot apply — it used to switch itself off for
+a whole session in silence. **Mouse look is smooth above 240 fps**: the camera
+was jittery at exactly the frame rates where it should have been smoothest,
+because a mouse axis stopped cancelling frame time exactly past 240 fps and the
+unevenness went straight into your view. Also: **setting a collision layer
+applies to everything you selected** rather than to one node, as one undo step,
+with a **— mixed —** reading when the selection disagrees — and changing the
+layer on a node with children now asks whether the children come too, because a
+collider usually hangs under the node you just changed.
+
 **v0.72.1 "Wear It Well"** — **materials on models, sorted out.** A Material you
 put on a model now **replaces** what the model came with — every part, textures
 included — instead of leaving it wearing its old picture while the colour and
