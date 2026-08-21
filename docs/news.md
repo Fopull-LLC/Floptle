@@ -1,5 +1,25 @@
 ## Just shipped
 
+**v0.74.0 "Rest Easy"** — **a settled room stops costing what a falling one
+does.** Two hundred ordinary props sitting completely still could cost the
+whole frame budget several times over, because nothing ever stopped paying
+for them — a prop that hadn't moved since the level loaded cost exactly what
+one mid-flight did. A body that's been slow enough for long enough now goes
+to sleep and stays cheap until something actually touches it: a moving
+platform, a script writing its velocity, or its ground vanishing out from
+under it. **A streamed level finishes its first navmesh bake**: automatic
+rebaking used to wait for the level to hold still and then sometimes never
+notice that it had, so dragging a wall and waiting didn't reliably produce a
+fresh navmesh — it does now. **Water reacts the moment it's there** — a pool
+spawned, moved, or resized mid-session used to take a frame or more to reach
+the physics solver; it's rebuilt every frame now, and a `WaterVolume` can
+carry its own Material for a specular look of its own, exempt from retro
+dithering if you want. For package authors: **`tilemap.of(id)`** hands back a
+read-only look at a level's tilemap — grid size, tile size, tileset, and
+per-cell lookups — and the **Browse tab now shows a package's declared
+permissions** before you install it, not only after. Also: `find("Lighting")`
+used to always come back empty; it doesn't any more.
+
 **v0.73.0 "Straight Answer"** — **the editor stops under-reporting and
 under-doing.** **Your bakes are still baked when you come back**: a navmesh you
 baked was gone next time you opened the project, so baking a level felt like
