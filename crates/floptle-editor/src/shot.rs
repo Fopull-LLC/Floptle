@@ -192,6 +192,16 @@ pub(crate) fn run(
         );
     }
     ed.sync_terrain_gpu();
+    // **Map geometry is authored, not generated — but it still has to reach the
+    // GPU somehow.** `sync_map_meshes` (self-heal + triangulate + upload) and
+    // `sync_map_paint` (re-attach paint to whatever survived the last edit) are
+    // both per-frame housekeeping the windowed editor's `render()` runs before
+    // every draw. This verb has no such frame, so without them a level's every
+    // `MapMesh` node points at a mesh registry entry that was never built: the
+    // walls, floor and ceiling are silently absent and the shot is the props and
+    // the character floating over flat grey (`floptle/0166`).
+    ed.sync_map_meshes();
+    ed.sync_map_paint();
 
     let Some(gpu) = ed.gpu.take() else {
         eprintln!("no GPU: this machine has no adapter floptle can render on");
@@ -467,6 +477,198 @@ mod tests {
         // …and one side over is enough.
         assert!(parse_size(&format!("{}x64", max + 1)).is_err());
         assert!(parse_size(&format!("64x{}", max + 1)).is_err());
+    }
+
+    /// **The failure `floptle/0166` was about.** A scene holding nothing but a
+    /// `MapMesh` box and a camera renders, unfixed, as a perfectly flat clear
+    /// color: nothing else in the frame varies it, so "not one uniform color"
+    /// is exactly the pixel-coverage floor the card asked for — any pixel that
+    /// differs from the corner is the box, and their total absence is the bug.
+    /// Built by hand (no project on disk) the way `map_edit`'s own tests build
+    /// a `MapMesh` node, so this exercises the same `sync_map_meshes` +
+    /// `render_world_into` path `shot::run` does without needing a fixture
+    /// project.
+    #[test]
+    fn a_shot_draws_map_mesh_geometry() {
+        let gpu = Gpu::headless_hdr(64, 64);
+        // Same skip-gracefully idiom `retro_exempt_water_does_not_share_the_
+        // projects_dithered_neutral_entry` uses: a device that cannot build the
+        // raster pipeline has nothing to say about whether THIS test's box drew.
+        let failed = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let sink = failed.clone();
+        gpu.device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
+            if let Ok(mut s) = sink.lock()
+                && s.is_empty()
+            {
+                *s = e.to_string();
+            }
+        }));
+
+        let mut ed = crate::Editor::default();
+        ed.attach_gpu(gpu);
+        if let Some(g) = ed.gpu.as_ref() {
+            let _ = g.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+
+        fn blank_node() -> floptle_scene::NodeDoc {
+            floptle_scene::NodeDoc {
+                name: String::new(),
+                transform: Default::default(),
+                matter: floptle_scene::MatterDoc::Empty,
+                scripts: Vec::new(),
+                material: None,
+                object_materials: Default::default(),
+                tint: None,
+                rigidbody: None,
+                celestial: None,
+                mesh_collider: false,
+                disabled: false,
+                paint: None,
+                tex_paint: None,
+                terrain_gen: None,
+                collidable: false,
+                trigger: false,
+                nav_exclude: false,
+                visible: true,
+                cast_shadow: true,
+                anim_controller: None,
+                particles: None,
+                id: None,
+                parent_id: None,
+                parent: None,
+                attachment: None,
+                net: None,
+                ui_layer: None,
+                ui: None,
+                audio: None,
+                layer: None,
+                tags: Vec::new(),
+                sorting: None,
+                sort_mode: None,
+                parallax: None,
+                camera_2d: None,
+                lit_2d: None,
+                light_layers: Vec::new(),
+                shadow_2d: None,
+                light_inner: None,
+                light_falloff: None,
+                light_shadows: None,
+            }
+        }
+
+        // The box, dead centre.
+        let geo = crate::map_edit::MapShape::Box.mesh(crate::map_edit::MapOpts::default());
+        ed.spawn_node(&floptle_scene::NodeDoc {
+            matter: floptle_scene::MatterDoc::MapMesh { id: 0, geo: Some(geo) },
+            ..blank_node()
+        });
+        // A camera looking straight down -Z at it.
+        ed.spawn_node(&floptle_scene::NodeDoc {
+            transform: floptle_scene::TransformDoc {
+                translation: [0.0, 0.0, 8.0],
+                ..Default::default()
+            },
+            matter: floptle_scene::MatterDoc::Camera {
+                fov_y: 1.0,
+                active: true,
+                target: String::new(),
+                cull_mask: u32::MAX,
+                target_w: floptle_core::Matter::TARGET_W,
+                target_h: floptle_core::Matter::TARGET_H,
+                target_hz: 0.0,
+                ortho: false,
+                ortho_height: floptle_core::Matter::ORTHO_HEIGHT,
+            },
+            ..blank_node()
+        });
+        // Light it — no ambient/intensity means every surface shades to the
+        // same black the empty background would already be, which would make
+        // this test pass even on the bug it exists to catch.
+        let light_e = ed.world.spawn();
+        ed.world.insert(
+            light_e,
+            floptle_core::Light {
+                color: [1.0, 1.0, 1.0],
+                ambient: [0.6, 0.6, 0.6],
+                intensity: 1.5,
+                direction: [0.3, -0.7, 0.2],
+                ..Default::default()
+            },
+        );
+
+        // The fix under test: without these, the box's node exists but its
+        // geometry was never uploaded to the registry `render_world_into` reads
+        // from — see `sync_map_meshes`'s own doc comment.
+        ed.sync_map_meshes();
+        ed.sync_map_paint();
+
+        if let Ok(why) = failed.lock()
+            && !why.is_empty()
+        {
+            eprintln!("skipped — this machine cannot build the raster pipeline:\n{why}");
+            return;
+        }
+        let Some(gpu_ref) = ed.gpu.as_ref() else { return };
+        let (w, h) = (64u32, 64u32);
+        // `render_world_into` draws into an HDR target — the raster pipeline is
+        // built for one — so this mirrors `shot::run` exactly: an HDR input
+        // through `PostStack`, tonemapped down into the SRGB texture that gets
+        // read back, rather than drawing straight into an SRGB target the
+        // pipeline was never built to hit (a format mismatch, not the bug this
+        // test is about).
+        let (color, depth) = crate::viewports::offscreen_textures(
+            gpu_ref,
+            w,
+            h,
+            "shot-test",
+            wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut post = floptle_render::PostStack::new(gpu_ref, w, h);
+        post.configure(gpu_ref, w, h, false);
+        let cam = RenderCamera::new(
+            floptle_core::math::DVec3::new(0.0, 0.0, 8.0),
+            floptle_core::math::Quat::IDENTITY,
+            Projection::of_camera(1.0, false, floptle_core::Matter::ORTHO_HEIGHT, 0.05, 300_000.0),
+        );
+        ed.render_world_into(
+            post.input_view(),
+            &depth_view,
+            &cam,
+            1.0,
+            0.0,
+            u32::MAX,
+            None,
+            (w, h),
+            crate::render_frame::OffscreenOpts::default(),
+        );
+        let look = crate::shading::post_process_uniforms(&ed.world).0;
+
+        let Some(gpu_ref) = ed.gpu.as_ref() else { return };
+        if let Ok(why) = failed.lock()
+            && !why.is_empty()
+        {
+            eprintln!("skipped — this machine cannot build the raster pipeline:\n{why}");
+            return;
+        }
+        post.run_with(gpu_ref, &look, None, &color_view, None);
+        let pixels = readback(gpu_ref, &color, w, h);
+        let (chunks, _) = pixels.as_chunks::<4>();
+        let corner = chunks[0];
+        let differs = chunks
+            .iter()
+            .filter(|p| {
+                p[0].abs_diff(corner[0]) > 6 || p[1].abs_diff(corner[1]) > 6 || p[2].abs_diff(corner[2]) > 6
+            })
+            .count();
+        assert!(
+            differs > 16,
+            "the frame is {differs} pixels different from its own corner out of {} — a scene \
+             with nothing in it but a MapMesh box and a camera photographed as an empty room \
+             (floptle/0166)",
+            pixels.len() / 4
+        );
     }
 
     #[test]
