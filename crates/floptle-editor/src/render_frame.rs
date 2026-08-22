@@ -2170,7 +2170,7 @@ impl Editor {
                         let obj_mats = self.world.get::<floptle_core::ObjectMaterials>(*e);
                         let pose = self.anim.poses.get(e).map(|v| v.as_slice());
                         let node_paint = paint_bases.get(e).map(|v| v.as_slice());
-                        push_mesh_instances(gpu, raster, asset, pose, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, &mut skin_draws, flsl, &mut flsl_draws);
+                        push_mesh_instances(gpu, raster, asset, pose, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, &mut skin_draws, flsl, &mut flsl_draws, &self.obj_flsl_binds);
                     }
                 }
                 Matter::MapMesh { id } => {
@@ -2184,7 +2184,7 @@ impl Editor {
                         let mp = mat.as_ref().map(material_params);
                         let obj_mats = self.world.get::<floptle_core::ObjectMaterials>(*e);
                         let node_paint = paint_bases.get(e).map(|v| v.as_slice());
-                        push_mesh_instances(gpu, raster, asset, None, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, &mut skin_draws, flsl, &mut flsl_draws);
+                        push_mesh_instances(gpu, raster, asset, None, model, tex, mp.as_ref(), obj_mats, &self.texture_registry, node_paint, *e, skin_variants, &mut skin_scratch, &mut instances, &mut skin_draws, flsl, &mut flsl_draws, &self.obj_flsl_binds);
                     }
                 }
                 // group / terrain / camera / light / gravity / skybox / post render
@@ -9806,7 +9806,7 @@ impl Editor {
                             &self.texture_registry, node_paint,
                             *ent, &mut self.skin_variants,
                             &mut skin_scratch, &mut instances, &mut skin_draws, flsl,
-                            &mut flsl_draws,
+                            &mut flsl_draws, &self.obj_flsl_binds,
                         );
                     }
                 }
@@ -9830,7 +9830,7 @@ impl Editor {
                             &self.texture_registry, node_paint,
                             *ent, &mut self.skin_variants,
                             &mut skin_scratch, &mut instances, &mut skin_draws, flsl,
-                            &mut flsl_draws,
+                            &mut flsl_draws, &self.obj_flsl_binds,
                         );
                     }
                 }
@@ -10528,8 +10528,12 @@ fn count_draw_batches(
 /// appeared to work. A rule that applies half a material is not a rule anybody
 /// can predict, and this is the place it is stated once.
 pub(crate) enum PartLook<'a> {
-    /// This sub-object's own override material.
-    Override(&'a floptle_core::Material),
+    /// This sub-object's own override material, plus the exact key it is
+    /// stored under in `ObjectMaterials` — the object name or the material
+    /// name, whichever matched. A per-part `.flsl` shader binding is keyed the
+    /// same way, so callers that need to find THIS override's shader (rather
+    /// than the node's own) need this back, not just the `Material`.
+    Override(&'a str, &'a floptle_core::Material),
     /// The node-level Material, over every part of the model.
     Node(&'a MaterialParams),
     /// Nothing supersedes: the part's imported base colour (and, at the draw,
@@ -10561,11 +10565,19 @@ pub(crate) fn part_look_rule<'a>(
     //
     // Object first, so the precise name still wins where both exist.
     if let Some(om) = obj_mats {
-        if let Some(m) = override_key.and_then(|k| om.0.get(k)) {
-            return PartLook::Override(m);
+        // `get_key_value` rather than `get`: the returned key has to outlive
+        // this call (a per-part `.flsl` binding is looked up by it later), and
+        // the map's OWN key — not the caller's `override_key`/`material_name`
+        // argument — is the only one guaranteed to live that long.
+        if let Some(k) = override_key
+            && let Some((k, m)) = om.0.get_key_value(k)
+        {
+            return PartLook::Override(k, m);
         }
-        if let Some(m) = material_name.and_then(|k| om.0.get(k)) {
-            return PartLook::Override(m);
+        if let Some(k) = material_name
+            && let Some((k, m)) = om.0.get_key_value(k)
+        {
+            return PartLook::Override(k, m);
         }
     }
     match node_material {
@@ -10611,24 +10623,41 @@ fn push_mesh_instances(
     skins: &mut Vec<floptle_render::SkinDraw>,
     flsl: Option<floptle_render::FlslBindingId>,
     flsl_out: &mut Vec<floptle_render::FlslDraw>,
+    // Per-PART `.flsl` bindings — an `ObjectMaterials` override that names its
+    // own shader, keyed by (this entity, the override's key). Looked up fresh
+    // per part rather than threaded in like `flsl`, because unlike the node's
+    // shader this can differ PART TO PART.
+    obj_flsl: &crate::shaders::ObjFlslBinds,
 ) {
     // A node's custom `.flsl` material routes every part through the shader's
     // pipeline instead of the built-in one — same instance data either way.
-    let mut push = |mid: MeshId, ptex: Option<TexId>, raw: InstanceRaw| match flsl {
-        Some(b) => flsl_out.push((mid, ptex, b, raw)),
-        None => instances.push((mid, ptex, raw)),
+    // `part_flsl` overrides that per part: `None` inherits the node's `flsl`,
+    // `Some(x)` is the override's OWN answer (its own binding, or `None` for
+    // "built-in, and not the node's shader either" — seeing the override at
+    // all already means the node's shader does not apply here).
+    let mut push_for = |mid: MeshId,
+                         ptex: Option<TexId>,
+                         raw: InstanceRaw,
+                         part_flsl: Option<Option<floptle_render::FlslBindingId>>| {
+        match part_flsl.unwrap_or(flsl) {
+            Some(b) => flsl_out.push((mid, ptex, b, raw)),
+            None => instances.push((mid, ptex, raw)),
+        }
     };
     // **A part's look, by one rule: the most specific material wins, whole.**
     //
     //   this object's override  ▸  the node's Material  ▸  the part as imported
     //
     // Whichever of those applies is the material, entire — its colour, its
-    // texture, its maps, its retro flags. A material is a statement of what a
-    // surface looks like, and half-applying one is what made this confusing:
-    // the node Material used to MULTIPLY its colour into each part's imported
-    // colour while its texture replaced outright, so "I gave it a new material
-    // and it still has the old picture on it, but the emissive works" was the
-    // exact and correct description of what the engine did.
+    // texture, its maps, its retro flags, and (see `part_flsl` above) its
+    // shader. A material is a statement of what a surface looks like, and
+    // half-applying one is what made this confusing: the node Material used
+    // to MULTIPLY its colour into each part's imported colour while its
+    // texture replaced outright, so "I gave it a new material and it still
+    // has the old picture on it, but the emissive works" was the exact and
+    // correct description of what the engine did — and a shader that named
+    // itself on an override but never took effect was the same bug in the
+    // one property this rule didn't reach yet.
     //
     // A model that looks right therefore carries no node Material at all. One is
     // how you say "this whole model is made of THIS" — and per-object overrides
@@ -10636,7 +10665,7 @@ fn push_mesh_instances(
     let part_look = |raster: &mut floptle_render::Raster,
                          asset: &MeshAsset,
                          part: usize|
-     -> (Option<TexId>, MaterialParams) {
+     -> (Option<TexId>, MaterialParams, Option<Option<floptle_render::FlslBindingId>>) {
         // The part's own imported base-colour factor — its share of the model's
         // built-in look, which is what draws when nothing supersedes it.
         let base = asset.part_meta.get(part).map(|pm| pm.base_color).unwrap_or([1.0; 3]);
@@ -10645,17 +10674,26 @@ fn push_mesh_instances(
             // An override is a whole material, surface maps and retro flags
             // included — resolved the same way a node's own Material is, so
             // "give this one object a normal map" works.
-            PartLook::Override(m) => {
+            PartLook::Override(key, m) => {
                 let (t, p) = crate::shading::material_draw(raster, gpu, m, texture_registry, None);
-                (Some(t.unwrap_or_else(|| raster.white_texture(gpu))), p)
+                // No shader named: built-in look, same as ever. A shader
+                // named: this part's OWN binding if it has compiled yet, or
+                // (for the frame or two before it has) the built-in look
+                // rather than the node's shader — an override that hasn't
+                // finished compiling is not the same as no override.
+                let part_flsl = m
+                    .shader
+                    .is_some()
+                    .then(|| obj_flsl.get(&(entity, key.to_string())).map(|b| b.binding));
+                (Some(t.unwrap_or_else(|| raster.white_texture(gpu))), p, part_flsl)
             }
             // `tex` is this node Material's own texture. `None` there does NOT
             // mean "keep what the part had" — a bind of `None` is what makes the
             // MESH's texture draw, which is the imported look this material is
             // superseding. An untextured material means untextured, so it says
             // so with white.
-            PartLook::Node(m) => (Some(tex.unwrap_or_else(|| raster.white_texture(gpu))), *m),
-            PartLook::Imported(base) => (tex, MaterialParams::flat(base)),
+            PartLook::Node(m) => (Some(tex.unwrap_or_else(|| raster.white_texture(gpu))), *m, None),
+            PartLook::Imported(base) => (tex, MaterialParams::flat(base), None),
         }
     };
     // Vertex paint is per-PART: import splits a model per-material into parts with
@@ -10672,21 +10710,22 @@ fn push_mesh_instances(
     };
     let Some(rig) = asset.rig.as_ref() else {
         for (i, &mid) in asset.parts.iter().enumerate() {
-            let (ptex, pmp) = part_look(raster, asset, i);
-            push(mid, ptex, instance_of_mat(model, &painted(raster, mid, i, pmp)));
+            let (ptex, pmp, part_flsl) = part_look(raster, asset, i);
+            push_for(mid, ptex, instance_of_mat(model, &painted(raster, mid, i, pmp)), part_flsl);
         }
         return;
     };
     let node_world = pose.unwrap_or(rig.rest_world.as_slice());
     for (i, &mid) in asset.parts.iter().enumerate() {
         let part_node = rig.part_nodes.get(i).copied().unwrap_or(0);
-        let (ptex, pmp) = part_look(raster, asset, i);
+        let (ptex, pmp, part_flsl) = part_look(raster, asset, i);
+        let this_flsl = part_flsl.unwrap_or(flsl);
         if let Some(Some(skin)) = rig.skins.get(i) {
             let raw = instance_of_mat(model, &painted(raster, mid, i, pmp));
             let skin_base = rig.skin_bases.get(i).copied().unwrap_or(0);
             // A custom `.flsl` material routes the part through its own pipeline,
             // which has no skinned variant — those parts keep the CPU deform.
-            if skin_base != 0 && flsl.is_none() {
+            if skin_base != 0 && this_flsl.is_none() {
                 // GPU skinning: hand the pose over and draw the SHARED bind-pose
                 // buffer. `push_skin_pose` is the same arithmetic `cpu_skin_part`
                 // applies per vertex, done once per draw instead of once per vertex.
@@ -10708,11 +10747,11 @@ fn push_mesh_instances(
                 let draw_mid = variants.variant_for(gpu, raster, entity, i, mid);
                 anim::cpu_skin_part(skin, part_node, node_world, skin_scratch);
                 raster.update_mesh_vertices(gpu, draw_mid, skin_scratch);
-                push(draw_mid, ptex, raw);
+                push_for(draw_mid, ptex, raw, part_flsl);
             }
         } else {
             let local = node_world.get(part_node).copied().unwrap_or(Mat4::IDENTITY);
-            push(mid, ptex, instance_of_mat(model * local, &painted(raster, mid, i, pmp)));
+            push_for(mid, ptex, instance_of_mat(model * local, &painted(raster, mid, i, pmp)), part_flsl);
         }
     }
 }
@@ -11256,7 +11295,13 @@ mod lit_2d_tests {
         let mut om = floptle_core::ObjectMaterials::default();
         om.0.insert("Torso#2".into(), floptle_core::Material::tinted([0.0, 1.0, 0.0]));
         match part_look_rule(Some(&om), Some("Torso#2"), Some("Clothing"), Some(&node), imported) {
-            PartLook::Override(m) => assert_eq!(m.color, [0.0, 1.0, 0.0]),
+            PartLook::Override(k, m) => {
+                assert_eq!(m.color, [0.0, 1.0, 0.0]);
+                // The key matters as much as the material: it is how a
+                // per-part `.flsl` binding for this override gets found again
+                // at draw time — the WRONG key silently loses the shader.
+                assert_eq!(k, "Torso#2");
+            }
             _ => panic!("the object's own material is the most specific one"),
         }
         // …and the parts it does not name still take the node Material.
@@ -11274,7 +11319,14 @@ mod lit_2d_tests {
         for object in ["Torso#2", "RightArm#2", "LeftArm#2"] {
             match part_look_rule(Some(&by_mat), Some(object), Some("Clothing"), Some(&node), imported)
             {
-                PartLook::Override(m) => assert_eq!(m.color, [0.0, 0.0, 1.0], "{object}"),
+                PartLook::Override(k, m) => {
+                    assert_eq!(m.color, [0.0, 0.0, 1.0], "{object}");
+                    // Matched by MATERIAL name here (no per-object entry
+                    // exists), so the key handed back is "Clothing", not
+                    // the object's own name — that is the string a
+                    // per-part shader binding for it is stored under.
+                    assert_eq!(k, "Clothing", "{object}");
+                }
                 _ => panic!("a material name must reach every part wearing it ({object})"),
             }
         }
@@ -11289,7 +11341,10 @@ mod lit_2d_tests {
         both.0.insert("Clothing".into(), floptle_core::Material::tinted([0.0, 0.0, 1.0]));
         both.0.insert("Torso#2".into(), floptle_core::Material::tinted([1.0, 1.0, 0.0]));
         match part_look_rule(Some(&both), Some("Torso#2"), Some("Clothing"), None, imported) {
-            PartLook::Override(m) => assert_eq!(m.color, [1.0, 1.0, 0.0], "object beats material"),
+            PartLook::Override(k, m) => {
+                assert_eq!(m.color, [1.0, 1.0, 0.0], "object beats material");
+                assert_eq!(k, "Torso#2", "the returned key must be the one that actually matched");
+            }
             _ => panic!("the object's own override is the most specific"),
         }
 

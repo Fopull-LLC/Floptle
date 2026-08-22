@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 
-use floptle_core::{Entity, Material};
+use floptle_core::{Entity, Material, ObjectMaterials};
 use floptle_render::{FlslBindingId, FlslBlend, FlslShaderId, TexId};
 use floptle_shader::CompiledFragment;
 
@@ -37,10 +37,66 @@ pub(crate) struct FlslMatBind {
     textures: Vec<Option<TexId>>,
 }
 
+/// A plan for one live `.flsl` material binding — shared by whole-node
+/// Materials and per-part `ObjectMaterials` overrides, which are compiled and
+/// bound through the same machinery under different keys (`K = Entity` for a
+/// node, `K = (Entity, String)` for one named part of it).
+struct FlslPlan<K> {
+    key: K,
+    shader: FlslShaderId,
+    params: Vec<u8>,
+    slot_paths: Vec<Option<String>>,
+}
+
+/// Apply one resolved [`FlslPlan`] (textures already looked up) to a binding
+/// map: reuse the live binding if the shader and textures didn't change
+/// (params-only writes are the common case — a knob dragged every frame),
+/// rebuild it in place if they did, or create a fresh one. `K` is generic so
+/// this serves both `FlslBinds` (whole-node) and `ObjFlslBinds` (per-part).
+fn apply_flsl_bind<K: Eq + std::hash::Hash>(
+    binds: &mut HashMap<K, FlslMatBind>,
+    free: &mut Vec<FlslBindingId>,
+    gpu: &floptle_render::Gpu,
+    raster: &mut floptle_render::Raster,
+    // (key, shader, params, resolved textures) — bundled to stay under the
+    // house arg-count limit rather than because they're conceptually one thing.
+    resolved: (K, FlslShaderId, Vec<u8>, Vec<Option<TexId>>),
+) {
+    let (key, shader, params, textures) = resolved;
+    match binds.get_mut(&key) {
+        Some(b) if b.shader == shader && b.textures == textures => {
+            if b.params != params {
+                raster.write_flsl_params(gpu, b.binding, &params);
+                b.params = params;
+            }
+        }
+        Some(b) => {
+            // Shader or texture set changed: rebuild the bind group in place.
+            b.binding = raster.set_flsl_binding(gpu, Some(b.binding), shader, &params, &textures);
+            b.shader = shader;
+            b.params = params;
+            b.textures = textures;
+        }
+        None => {
+            let reuse = free.pop();
+            let binding = raster.set_flsl_binding(gpu, reuse, shader, &params, &textures);
+            binds.insert(key, FlslMatBind { binding, shader, params, textures });
+        }
+    }
+}
+
 impl Editor {
     /// Per-frame driver, called before any gather: hot-reload every `.flsl`
     /// the scene references, then create/refresh each shader-material
     /// entity's group(3) binding. Unchanged frames cost a few file stats.
+    ///
+    /// Two sources feed this, compiled and bound through the same machinery:
+    /// a node's own whole-model `Material` (`flsl_binds`, keyed by entity) and
+    /// each part of an `ObjectMaterials` override that names a shader of its
+    /// own (`obj_flsl_binds`, keyed by entity + the part's override key). A
+    /// part's override is a WHOLE material superseding the node's — its
+    /// shader-or-not is part of that whole — so it gets its own binding
+    /// rather than inheriting whatever the node happens to have.
     pub(crate) fn ensure_flsl_materials(&mut self) {
         if self.gpu.is_none() || self.raster.is_none() {
             return;
@@ -59,34 +115,42 @@ impl Editor {
             .filter(|(e, m)| m.shader.is_some() && !field_shape.contains(e))
             .map(|(e, m)| (e, m.clone()))
             .collect();
+        let obj_mats: Vec<(Entity, String, Material)> = self
+            .world
+            .query::<ObjectMaterials>()
+            .filter(|(e, _)| !field_shape.contains(e))
+            .flat_map(|(e, om)| {
+                om.0.iter()
+                    .filter(|(_, m)| m.shader.is_some())
+                    .map(|(k, m)| (e, k.clone(), m.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
 
-        let mut paths: Vec<String> =
-            mats.iter().filter_map(|(_, m)| m.shader.clone()).collect();
+        let mut paths: Vec<String> = mats
+            .iter()
+            .map(|(_, m)| m)
+            .chain(obj_mats.iter().map(|(_, _, m)| m))
+            .filter_map(|m| m.shader.clone())
+            .collect();
         paths.sort();
         paths.dedup();
         for p in &paths {
             self.ensure_flsl_shader(p);
         }
 
-        // Plan each entity's binding from the compile cache (immutable pass),
-        // then resolve textures + touch the GPU (mutable pass).
-        struct Plan {
-            e: Entity,
-            shader: FlslShaderId,
-            params: Vec<u8>,
-            slot_paths: Vec<Option<String>>,
-        }
-        let mut plans: Vec<Plan> = Vec::new();
-        for (e, mat) in &mats {
-            let rel = mat.shader.as_deref().unwrap_or_default();
-            let Some((compiled, shader)) =
-                self.flsl_cache.get(rel).and_then(|en| en.compiled.as_ref())
-            else {
-                continue; // never compiled — the node keeps its built-in look
-            };
+        // Plan each binding from the compile cache (immutable pass), then
+        // resolve textures + touch the GPU (mutable pass) — one round for the
+        // node-level materials, one for the per-part overrides.
+        let plan_of = |cache: &FlslCache,
+                        shader_path: Option<&str>,
+                        m: &Material|
+         -> Option<(FlslShaderId, Vec<u8>, Vec<Option<String>>)> {
+            let rel = shader_path.unwrap_or_default();
+            let (compiled, shader) = cache.get(rel).and_then(|en| en.compiled.as_ref())?;
             let params = compiled.pack_params(
-                &|name| mat.shader_params.get(name).copied(),
-                &|slot| mat.shader_tiling.get(slot).map(tiling_pack),
+                &|name| m.shader_params.get(name).copied(),
+                &|slot| m.shader_tiling.get(slot).map(tiling_pack),
             );
             // The material's override wins; a slot it leaves empty falls back to
             // the image the shader itself declares, so a texture shader looks
@@ -95,14 +159,28 @@ impl Editor {
                 .textures
                 .iter()
                 .zip(&compiled.texture_defaults)
-                .map(|(slot, dflt)| mat.shader_textures.get(slot).cloned().or_else(|| dflt.clone()))
+                .map(|(slot, dflt)| m.shader_textures.get(slot).cloned().or_else(|| dflt.clone()))
                 .collect();
-            plans.push(Plan { e: *e, shader: *shader, params, slot_paths });
-        }
+            Some((*shader, params, slot_paths))
+        };
+        let plans: Vec<FlslPlan<Entity>> = mats
+            .iter()
+            .filter_map(|(e, m)| {
+                let (shader, params, slot_paths) = plan_of(&self.flsl_cache, m.shader.as_deref(), m)?;
+                Some(FlslPlan { key: *e, shader, params, slot_paths })
+            })
+            .collect();
+        let obj_plans: Vec<FlslPlan<(Entity, String)>> = obj_mats
+            .iter()
+            .filter_map(|(e, key, m)| {
+                let (shader, params, slot_paths) = plan_of(&self.flsl_cache, m.shader.as_deref(), m)?;
+                Some(FlslPlan { key: (*e, key.clone()), shader, params, slot_paths })
+            })
+            .collect();
 
         let mut seen: HashSet<Entity> = HashSet::new();
         for plan in plans {
-            seen.insert(plan.e);
+            seen.insert(plan.key);
             let textures: Vec<Option<TexId>> = plan
                 .slot_paths
                 .iter()
@@ -111,49 +189,45 @@ impl Editor {
             let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
                 return;
             };
-            match self.flsl_binds.get_mut(&plan.e) {
-                Some(b) if b.shader == plan.shader && b.textures == textures => {
-                    if b.params != plan.params {
-                        raster.write_flsl_params(gpu, b.binding, &plan.params);
-                        b.params = plan.params;
-                    }
-                }
-                Some(b) => {
-                    // Shader or texture set changed: rebuild the bind group in place.
-                    b.binding = raster.set_flsl_binding(
-                        gpu,
-                        Some(b.binding),
-                        plan.shader,
-                        &plan.params,
-                        &textures,
-                    );
-                    b.shader = plan.shader;
-                    b.params = plan.params;
-                    b.textures = textures;
-                }
-                None => {
-                    let reuse = self.flsl_free.pop();
-                    let binding =
-                        raster.set_flsl_binding(gpu, reuse, plan.shader, &plan.params, &textures);
-                    self.flsl_binds.insert(
-                        plan.e,
-                        FlslMatBind {
-                            binding,
-                            shader: plan.shader,
-                            params: plan.params,
-                            textures,
-                        },
-                    );
-                }
-            }
+            apply_flsl_bind(
+                &mut self.flsl_binds, &mut self.flsl_free, gpu, raster,
+                (plan.key, plan.shader, plan.params, textures),
+            );
         }
-
         // Entities that lost their shader material free their binding slot.
         let stale: Vec<Entity> =
             self.flsl_binds.keys().copied().filter(|e| !seen.contains(e)).collect();
         for e in stale {
             if let Some(b) = self.flsl_binds.remove(&e) {
                 self.flsl_free.push(b.binding);
+            }
+        }
+
+        let mut obj_seen: HashSet<(Entity, String)> = HashSet::new();
+        for plan in obj_plans {
+            obj_seen.insert(plan.key.clone());
+            let textures: Vec<Option<TexId>> = plan
+                .slot_paths
+                .iter()
+                .map(|p| p.as_deref().and_then(|p| self.ensure_texture(p)))
+                .collect();
+            let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
+                return;
+            };
+            apply_flsl_bind(
+                &mut self.obj_flsl_binds, &mut self.obj_flsl_free, gpu, raster,
+                (plan.key, plan.shader, plan.params, textures),
+            );
+        }
+        let obj_stale: Vec<(Entity, String)> = self
+            .obj_flsl_binds
+            .keys()
+            .filter(|k| !obj_seen.contains(*k))
+            .cloned()
+            .collect();
+        for k in obj_stale {
+            if let Some(b) = self.obj_flsl_binds.remove(&k) {
+                self.obj_flsl_free.push(b.binding);
             }
         }
     }
@@ -275,6 +349,8 @@ impl Editor {
         self.flsl_cache.clear();
         self.flsl_binds.clear();
         self.flsl_free.clear();
+        self.obj_flsl_binds.clear();
+        self.obj_flsl_free.clear();
         self.ui_flsl_cache.clear();
         self.ui_flsl_binds.clear();
         self.ui_flsl_free.clear();
@@ -620,6 +696,9 @@ fn tiling_pack(t: &floptle_core::Tiling) -> floptle_shader::TilingPack {
 /// Editor-side registry fields, bundled for `Editor` (see main.rs).
 pub(crate) type FlslCache = HashMap<String, FlslEntry>;
 pub(crate) type FlslBinds = HashMap<Entity, FlslMatBind>;
+/// One binding per named part of an `ObjectMaterials` override that names its
+/// own shader — see [`Editor::ensure_flsl_materials`].
+pub(crate) type ObjFlslBinds = HashMap<(Entity, String), FlslMatBind>;
 
 /// One `stage ui` `.flsl` file's compile state, keyed by element shader path.
 pub(crate) struct UiFlslEntry {

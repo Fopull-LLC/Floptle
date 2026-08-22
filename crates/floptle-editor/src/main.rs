@@ -2705,6 +2705,13 @@ struct Editor {
     flsl_binds: shaders::FlslBinds,
     /// Retired binding slots, reused before growing the raster's registry.
     flsl_free: Vec<floptle_render::FlslBindingId>,
+    /// Live group(3) material bindings per (entity, part) — an `ObjectMaterials`
+    /// override that names its own shader, distinct from the node's `flsl_binds`
+    /// entry because a part's override is a whole material that can pick a
+    /// DIFFERENT shader than the rest of the model, or none at all.
+    obj_flsl_binds: shaders::ObjFlslBinds,
+    /// Retired per-part binding slots, reused before growing the raster's registry.
+    obj_flsl_free: Vec<floptle_render::FlslBindingId>,
     /// Compiled `stage ui` `.flsl` shaders by path (mtime hot reload).
     ui_flsl_cache: shaders::UiFlslCache,
     /// Live UI-shader param bindings per element (keyed by entity index —
