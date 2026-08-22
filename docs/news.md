@@ -1,5 +1,18 @@
 ## Just shipped
 
+**v0.75.0 "Own Look"** — **a part of a model can finally wear its own
+shader.** Giving one part its own material and picking a custom shader for
+it never actually took effect — the part kept its plain look regardless, and
+the shader panel got stuck reading "compiling…" forever; it now compiles and
+draws correctly, independent of whatever the rest of the model wears. **Two
+Inspector panels stay fully on screen**: a slider's caption — bounce,
+friction, radius, and dozens more, most visible in the Rigidbody component's
+stack of sliders — could run past the edge of a narrow panel instead of
+shrinking to fit; it now elides the same way every other label already did.
+**New shader math**: `lerp`, `inverseLerp` and `remap` for turning one range
+of values into another, `rotate2D` for spinning a UV without hand-building a
+matrix, and `refract` alongside the existing `reflect`.
+
 **v0.74.1 "Second Look"** — **four tools that check what's actually happening
 told the truth a little less often than they should have.** `floptle shot`,
 the command-line screenshot tool, skipped a level's map-tool geometry
