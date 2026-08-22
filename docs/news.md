@@ -1,5 +1,23 @@
 ## Just shipped
 
+**v0.74.1 "Second Look"** — **four tools that check what's actually happening
+told the truth a little less often than they should have.** `floptle shot`,
+the command-line screenshot tool, skipped a level's map-tool geometry
+entirely — walls, floors and ceilings vanished, leaving props and characters
+floating over an empty room; screenshots now match what you'd see playing
+the level. **The editor tells you when a scene has too many lights**: only
+sixteen point lights can shade at once, always true and now said out loud,
+with a warning naming the count instead of quietly picking sixteen and
+staying silent about the rest. **`perf` counts you can trust** — the
+scripting API for checking your own frame cost could answer `0` for draw
+calls and lights even while the game ran normally, because part of the count
+wasn't kept for every view; those numbers reflect what's on screen now, in
+the editor and from the command line alike. **The editor knows when your
+display is the slow part**: on some machines a scene costing almost nothing
+can still show a low, flat frame rate because of how frames are being
+presented, not because anything in your project is slow — the performance
+panel and the console can now tell the two apart and name the setting to try.
+
 **v0.74.0 "Rest Easy"** — **a settled room stops costing what a falling one
 does.** Two hundred ordinary props sitting completely still could cost the
 whole frame budget several times over, because nothing ever stopped paying
