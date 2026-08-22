@@ -1385,8 +1385,9 @@ fn every_name_in_the_environment_is_in_the_reference() {
 
 /// `floptle/0154`: the walk above reaches every top-level TABLE, and cannot
 /// see the fields of a table a binding *returns* — `scene.info(id).ui` is
-/// real (a downstream project's auto-wiring is built on it), was undocumented for exactly
-/// that reason, and would still pass the test above today. This extends the
+/// real, was undocumented for exactly that reason (invisible from inside the
+/// engine, only found once a substantial package was built against it), and
+/// would still pass the test above today. This extends the
 /// same walk-and-diff to the return shapes that actually needed it: a UI node
 /// answers `scene.info(id).ui`, and a tiny baked navmesh answers
 /// `nav.settings()`. Both are absent by default (no scene, no bake), which is
