@@ -379,6 +379,7 @@ impl<'a> SettingsCtx<'a> {
                 )
                 .fixed_decimals(2)
                 .suffix("×"),
+                "",
             )
             .changed()
             {
@@ -410,7 +411,7 @@ impl<'a> SettingsCtx<'a> {
         if a.color_filter != ColorFilter::None {
             row(ui, "Strength", Some("how far the correction goes"), |ui| {
                 let mut v = a.color_filter_strength;
-                if slider(ui, egui::Slider::new(&mut v, 0.0..=1.0).fixed_decimals(2)).changed() {
+                if slider(ui, egui::Slider::new(&mut v, 0.0..=1.0).fixed_decimals(2), "").changed() {
                     a.color_filter_strength = v;
                     changed = true;
                 }
@@ -614,7 +615,7 @@ impl<'a> SettingsCtx<'a> {
         ui.add_enabled_ui(project.retro, |ui| {
             row(ui, "Pixel rows", Some("vertical resolution before the upscale"), |ui| {
                 out.save_project |=
-                    slider(ui, egui::Slider::new(&mut project.retro_height, 80u32..=1080))
+                    slider(ui, egui::Slider::new(&mut project.retro_height, 80u32..=1080), "")
                         .changed();
             });
             row(

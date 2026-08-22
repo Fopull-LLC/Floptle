@@ -236,9 +236,25 @@ pub(crate) fn check(ui: &mut Ui, on: &mut bool, text: &str) -> egui::Response {
 /// it was allocated, so `add_sized` does not bound it — a slider given 119 px
 /// draws 119 px of track and then puts a 40 px number past the edge. What
 /// bounds it is `spacing.slider_width`, which measures the track alone.
-pub(crate) fn slider(ui: &mut Ui, s: egui::Slider<'_>) -> egui::Response {
+///
+/// `text` is the SAME caption passed to the `Slider`'s own `.text(...)` (pass
+/// `""` for a slider with none, e.g. one that already has its caption drawn as
+/// a separate `ui.label` before it). It has to be handed in separately because
+/// `egui::Slider` draws that caption as a THIRD thing after the track and the
+/// number box, inside whatever `Ui` it is given, and does not stop at that
+/// `Ui`'s edge any more than the number box does — reserving room for the box
+/// alone (the original bug here) left the caption to draw straight past the
+/// panel. `egui::Slider` keeps its caption private, so there is no way to
+/// measure — or shrink — it on the built `Slider` itself; this re-sets it
+/// (`.text()` on an already-built `Slider` simply replaces the field) to
+/// whatever fits, the same way `check`'s tick label does.
+pub(crate) fn slider(ui: &mut Ui, s: egui::Slider<'_>, text: &str) -> egui::Response {
     /// Room for the number box egui appends, plus the gap before it.
     const VALUE_BOX: f32 = 62.0;
+    /// The gap egui leaves between the number box and the caption text.
+    const LABEL_GAP: f32 = 8.0;
+    /// The narrowest a track can go — below this it is a sliver, not a slider.
+    const TRACK_FLOOR: f32 = 24.0;
 
     // A slider CLAMPS to the width available rather than wrapping, which is the
     // detail that decides this. Squeezed onto the tail of a line it does not
@@ -269,6 +285,25 @@ pub(crate) fn slider(ui: &mut Ui, s: egui::Slider<'_>) -> egui::Response {
     } else {
         fit(ui, f32::INFINITY)
     };
+
+    // The caption is the one part of a slider that CAN shrink without going
+    // unusable — the track already has its own floor above, and the number
+    // box is egui's own fixed width. So it gets whatever's left of `w` after
+    // both of those, elided rather than truncated by the renderer's clip rect:
+    // an ellipsis inside the panel beats "bou" with no sign anything's missing.
+    let avail_for_text = (w - TRACK_FLOOR - VALUE_BOX - LABEL_GAP).max(0.0);
+    let label = if text.is_empty() || avail_for_text < 8.0 {
+        String::new()
+    } else {
+        elide_in(ui, egui::TextStyle::Body, text, avail_for_text)
+    };
+    let label_w = if label.is_empty() {
+        0.0
+    } else {
+        text_w_in(ui, egui::TextStyle::Body, &label) + LABEL_GAP
+    };
+    let reserved = VALUE_BOX + label_w;
+
     // `allocate_ui` and not `scope`: a scope reserves nothing up front, so the
     // wrapped parent never learns how much room this wanted and never wraps it.
     // Reserving `w` is what makes the request visible — and a request larger
@@ -276,8 +311,8 @@ pub(crate) fn slider(ui: &mut Ui, s: egui::Slider<'_>) -> egui::Response {
     // moving to the next one.
     let h = ui.spacing().interact_size.y;
     ui.allocate_ui(egui::vec2(w, h), |ui| {
-        ui.spacing_mut().slider_width = (w - VALUE_BOX).max(24.0);
-        ui.add(s)
+        ui.spacing_mut().slider_width = (w - reserved).max(TRACK_FLOOR);
+        ui.add(s.text(label))
     })
     .inner
 }
@@ -796,6 +831,43 @@ pub(crate) mod tests {
                 ui.add(egui::DragValue::new(&mut a).prefix("segments "));
                 ui.add(egui::DragValue::new(&mut b).prefix("opening w "));
                 ui.add(egui::DragValue::new(&mut c).prefix("h "));
+            });
+        });
+    }
+
+    #[test]
+    fn a_bare_slider_stays_inside_every_width() {
+        assert_fits("a bare vertical slider", |ui| {
+            let mut v = 0.5f32;
+            ui.vertical(|ui| {
+                slider(ui, egui::Slider::new(&mut v, 0.0..=1.0).text("bounce"), "bounce");
+            });
+        });
+    }
+
+    /// The exact shape the Rigidbody panel drew: a run of captioned sliders,
+    /// each on its own line inside an `add_enabled_ui` (a plain vertical, not
+    /// a wrapped flow), reported as "the value box hangs off the edge of the
+    /// panel". Every one of these overhung before the fix — the caption text
+    /// `egui::Slider::text()` draws past the number box, which the wrapper
+    /// budgeted room for but the caption never was.
+    #[test]
+    fn a_stack_of_captioned_sliders_stays_inside_every_width() {
+        assert_fits("a rigidbody-shaped stack of sliders", |ui| {
+            let (mut radius, mut height, mut bounce, mut friction, mut slope) =
+                (0.5f32, 2.4f32, 0.0f32, 0.3f32, 60.0f32);
+            ui.vertical(|ui| {
+                ui.add_enabled_ui(true, |ui| {
+                    slider(ui, egui::Slider::new(&mut radius, 0.05..=10.0).text("radius"), "radius");
+                    slider(ui, egui::Slider::new(&mut height, 0.2..=20.0).text("height"), "height");
+                    slider(ui, egui::Slider::new(&mut bounce, 0.0..=1.0).text("bounce"), "bounce");
+                    slider(ui, egui::Slider::new(&mut friction, 0.0..=2.0).text("friction"), "friction");
+                    slider(
+                        ui,
+                        egui::Slider::new(&mut slope, 0.0..=90.0).text("slope limit °"),
+                        "slope limit °",
+                    );
+                });
             });
         });
     }

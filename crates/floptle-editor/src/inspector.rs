@@ -235,7 +235,7 @@ fn tiling_ui(ui: &mut egui::Ui, t: &mut Option<floptle_core::Tiling>) -> bool {
                     .on_hover_text("one tile spans this many object units")
                     .changed();
                 ui.label("blend");
-                changed |= crate::responsive::slider(ui, egui::Slider::new(blend, 0.5..=8.0))
+                changed |= crate::responsive::slider(ui, egui::Slider::new(blend, 0.5..=8.0), "")
                     .on_hover_text("axis-edge sharpness")
                     .changed();
             });
@@ -264,7 +264,7 @@ pub(crate) fn shader_uniform_rows(
                 floptle_shader::Ty::Float => {
                     ch |= match u.range {
                         Some((lo, hi)) => {
-                            crate::responsive::slider(ui, egui::Slider::new(&mut v[0], lo..=hi)).changed()
+                            crate::responsive::slider(ui, egui::Slider::new(&mut v[0], lo..=hi), "").changed()
                         }
                         None => ui.add(egui::DragValue::new(&mut v[0]).speed(0.02)).changed(),
                     };
@@ -1050,7 +1050,7 @@ pub(crate) fn material_props_ui(
                     ui.end_row();
                     if m.normal_map.is_some() {
                         ui.label("  strength");
-                        r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.normal_strength, -2.0..=2.0))
+                        r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.normal_strength, -2.0..=2.0), "")
                             .on_hover_text(
                                 "1 = as authored, 0 = flat. NEGATIVE flips the green channel — \
                                  the one-click fix when every bump reads as a dent (a map \
@@ -1071,7 +1071,7 @@ pub(crate) fn material_props_ui(
                     ui.end_row();
                     if m.ao_map.is_some() {
                         ui.label("  strength");
-                        r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.occlusion_strength, 0.0..=1.0))
+                        r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.occlusion_strength, 0.0..=1.0), "")
                             .changed();
                         ui.end_row();
                     }
@@ -1107,7 +1107,7 @@ pub(crate) fn material_props_ui(
         ui.add_enabled_ui(!m.unlit, |ui| {
             crate::responsive::grid(ui, "mat_pbr", |ui| {
                 ui.label("roughness");
-                r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.roughness, 0.0..=1.0))
+                r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.roughness, 0.0..=1.0), "")
                     .on_hover_text("0 = mirror, 1 = chalk. Multiplied by the roughness map.")
                     .changed();
                 ui.end_row();
@@ -1125,7 +1125,7 @@ pub(crate) fn material_props_ui(
                 );
                 ui.end_row();
                 ui.label("metallic");
-                r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.metallic, 0.0..=1.0))
+                r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.metallic, 0.0..=1.0), "")
                     .on_hover_text(
                         "0 = dielectric (plastic, wood, stone: a white highlight over a \
                          coloured surface). 1 = metal (no diffuse at all; the highlight \
@@ -1156,7 +1156,7 @@ pub(crate) fn material_props_ui(
                      deliberate cheat that flatters a hero prop.",
                 );
                 r.changed |=
-                    crate::responsive::slider(ui, egui::Slider::new(&mut m.reflectivity, 0.0..=2.0)).changed();
+                    crate::responsive::slider(ui, egui::Slider::new(&mut m.reflectivity, 0.0..=2.0), "").changed();
                 ui.end_row();
 
                 // ---- glass -------------------------------------------------
@@ -1174,7 +1174,7 @@ pub(crate) fn material_props_ui(
                      through, so green glass makes what is behind it green.",
                 );
                 r.changed |=
-                    crate::responsive::slider(ui, egui::Slider::new(&mut m.transmission, 0.0..=1.0)).changed();
+                    crate::responsive::slider(ui, egui::Slider::new(&mut m.transmission, 0.0..=1.0), "").changed();
                 ui.end_row();
                 ui.label("  bend").on_hover_text(
                     "Index of refraction — how sharply light bends on the way in.\n\n                     1.0 does not bend at all (the scene shows through undistorted), \
@@ -1235,7 +1235,7 @@ pub(crate) fn material_props_ui(
                          the project\" — see Project Settings ⏵ Rendering ⏵ Era \
                          artefacts.",
                     );
-                    r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.retro.jitter, 0.0..=512.0).step_by(1.0))
+                    r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.retro.jitter, 0.0..=512.0).step_by(1.0), "")
                         .changed();
                     ui.end_row();
                     ui.label("affine UVs");
@@ -1294,7 +1294,7 @@ pub(crate) fn material_props_ui(
             });
             ui.end_row();
             ui.label("shininess");
-            r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.shininess, 1.0..=256.0).logarithmic(true)).changed();
+            r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.shininess, 1.0..=256.0).logarithmic(true), "").changed();
             ui.end_row();
         });
     });
@@ -1314,10 +1314,10 @@ pub(crate) fn material_props_ui(
             });
             ui.end_row();
             ui.label("ambient");
-            r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.ambient, 0.0..=4.0)).changed();
+            r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.ambient, 0.0..=4.0), "").changed();
             ui.end_row();
             ui.label("opacity");
-            r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.alpha, 0.0..=1.0))
+            r.changed |= crate::responsive::slider(ui, egui::Slider::new(&mut m.alpha, 0.0..=1.0), "")
                 .on_hover_text("1 = opaque; below 1 alpha-blends over the scene (drawn after opaque objects)")
                 .changed();
             ui.end_row();
@@ -1805,7 +1805,7 @@ impl EditorTabViewer<'_> {
                          the key light.",
                     );
                     cmd.inspector_changed |=
-                        crate::responsive::slider(ui, egui::Slider::new(&mut l.intensity, 0.0..=8.0).text("intensity"))
+                        crate::responsive::slider(ui, egui::Slider::new(&mut l.intensity, 0.0..=8.0), "intensity")
                             .on_hover_text(
                                 "brightness of the KEY (directional) light only. It is not a \
                                  master dimmer — ambient, 2D base light, point lights, emissive \
@@ -1875,10 +1875,10 @@ impl EditorTabViewer<'_> {
                         )
                         .changed();
                     ui.add_enabled_ui(l.shadows, |ui| {
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.shadow_softness, 0.0..=1.0).text("softness"))
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.shadow_softness, 0.0..=1.0), "softness")
                             .on_hover_text("0 = razor-hard edge (retro), 1 = dreamy-soft penumbra")
                             .changed();
-                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.shadow_strength, 0.0..=1.0).text("strength"))
+                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.shadow_strength, 0.0..=1.0), "strength")
                             .on_hover_text("how dark full shadow gets — ambient light still fills, so 1.0 isn't pitch black")
                             .changed();
                         ui.horizontal_wrapped(|ui| {
@@ -1912,9 +1912,8 @@ impl EditorTabViewer<'_> {
                                 .changed();
                         });
                         cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.shadow_distance, 10.0..=1000.0)
-                                    .logarithmic(true)
-                                    .text("distance"),
-                            )
+                                    .logarithmic(true),
+                                    "distance")
                             .on_hover_text("max distance a shadow ray marches (a perf fence — farther geometry stops casting)")
                             .changed();
                         // Contact shadows: the short-range half, from the depth
@@ -1929,13 +1928,13 @@ impl EditorTabViewer<'_> {
                             )
                             .changed();
                         ui.add_enabled_ui(l.contact_shadows, |ui| {
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.contact_length, 0.02..=3.0).text("reach").suffix("m"))
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.contact_length, 0.02..=3.0).suffix("m"), "reach")
                                 .on_hover_text("how far it traces. Too far and distant geometry starts smearing shadows over things in front of it")
                                 .changed();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.contact_strength, 0.0..=1.0).text("strength"))
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.contact_strength, 0.0..=1.0), "strength")
                                 .changed();
                             let mut steps = l.contact_steps as i32;
-                            if crate::responsive::slider(ui, egui::Slider::new(&mut steps, 4..=32).text("steps"))
+                            if crate::responsive::slider(ui, egui::Slider::new(&mut steps, 4..=32), "steps")
                                 .on_hover_text("samples along the trace — raise it if the shadow looks striped")
                                 .changed()
                             {
@@ -1961,13 +1960,12 @@ impl EditorTabViewer<'_> {
                         ui.add_enabled_ui(l.reflections, |ui| {
                             cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.reflection_distance, 1.0..=200.0)
                                         .logarithmic(true)
-                                        .text("reach")
-                                        .suffix("m"),
-                                )
+                                        
+                                        .suffix("m"), "reach")
                                 .on_hover_text("how far a reflected ray travels before giving up. A puddle showing a building across the street needs more of this than a floor showing the table on it")
                                 .changed();
                             let mut steps = l.reflection_steps as i32;
-                            if crate::responsive::slider(ui, egui::Slider::new(&mut steps, 8..=64).text("steps"))
+                            if crate::responsive::slider(ui, egui::Slider::new(&mut steps, 8..=64), "steps")
                                 .on_hover_text("samples along that ray — raise it with the reach, or reflections start missing thin things")
                                 .changed()
                             {
@@ -1976,14 +1974,12 @@ impl EditorTabViewer<'_> {
                             }
                             cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.reflection_thickness, 0.02..=5.0)
                                         .logarithmic(true)
-                                        .text("thickness")
-                                        .suffix("m"),
-                                )
+                                        
+                                        .suffix("m"), "thickness")
                                 .on_hover_text("how solid things are assumed to be. Too little and reflections come out speckled with holes; too much and railings and leaves smear over what is really behind them")
                                 .changed();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.reflection_clamp, 0.0..=64.0)
-                                        .text("brightness cap"),
-                                )
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.reflection_clamp, 0.0..=64.0),
+                                        "brightness cap")
                                 .on_hover_text(
                                     "the most one reflected bounce may carry. Two mirrors facing \
                                      each other re-reflect each other every frame and a polished \
@@ -2004,9 +2000,8 @@ impl EditorTabViewer<'_> {
                         if crate::responsive::slider(ui, egui::Slider::new(
                                     &mut layers,
                                     1..=floptle_core::Light::MAX_REFRACTION_LAYERS as i32,
-                                )
-                                .text("glass layers"),
-                            )
+                                ),
+                                "glass layers")
                             .on_hover_text(
                                 "how many depths of see-through surface can be looked through at \
                                  once. At 1 only the nearest pane shows what is behind it, so a \
@@ -2077,7 +2072,7 @@ impl EditorTabViewer<'_> {
                             });
                             ui.horizontal_wrapped(|ui| {
                                 ui.label("noise");
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_noise, 0.0..=1.0))
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_noise, 0.0..=1.0), "")
                                     .on_hover_text("break the media into drifting patches (0 = uniform)")
                                     .changed();
                                 ui.label("scale");
@@ -2096,14 +2091,14 @@ impl EditorTabViewer<'_> {
                             // Light injection: the media lit by the scene rather
                             // than painted a flat colour.
                             ui.separator();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_light, 0.0..=3.0).text("lit by the scene"))
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_light, 0.0..=3.0), "lit by the scene")
                                 .on_hover_text(
                                     "0 = the flat fog colour; 1 = the media lit by the sun, the point lights and the baked bounce; \
                                      past 1 exaggerates. The fog colour becomes what the media is MADE of rather than what it looks like.",
                                 )
                                 .changed();
                             ui.add_enabled_ui(l.fog_light > 0.0, |ui| {
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_anisotropy, -0.9..=0.9).text("forward scatter"))
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_anisotropy, -0.9..=0.9), "forward scatter")
                                     .on_hover_text(
                                         "which way the media throws light. Positive blooms toward the sun (look into it and the air glows); \
                                          0 is an even haze; negative bounces it back at you. A mote of fog has no facing — this is what \
@@ -2121,7 +2116,7 @@ impl EditorTabViewer<'_> {
                             ui.horizontal_wrapped(|ui| {
                                 ui.label("quality");
                                 let mut steps = l.fog_steps as i32;
-                                if crate::responsive::slider(ui, egui::Slider::new(&mut steps, 4..=64).text("steps"))
+                                if crate::responsive::slider(ui, egui::Slider::new(&mut steps, 4..=64), "steps")
                                     .on_hover_text("samples along each pixel's ray — raise it until the fog stops looking stepped, then stop")
                                     .changed()
                                 {
@@ -2153,7 +2148,7 @@ impl EditorTabViewer<'_> {
                                 .on_hover_text("break up color banding across the fog gradient (matches the retro pixel grid)")
                                 .changed();
                             ui.add_enabled_ui(l.fog_dither, |ui| {
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_dither_strength, 0.0..=1.0).text("amount"))
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut l.fog_dither_strength, 0.0..=1.0), "amount")
                                     .changed();
                             });
                         });
@@ -2892,7 +2887,7 @@ impl EditorTabViewer<'_> {
                                     ui.horizontal_wrapped(|ui| {
                                         ui.label("field of view");
                                         let mut deg = fov_y.to_degrees();
-                                        if crate::responsive::slider(ui, egui::Slider::new(&mut deg, 20.0..=120.0).suffix("°")).changed() {
+                                        if crate::responsive::slider(ui, egui::Slider::new(&mut deg, 20.0..=120.0).suffix("°"), "").changed() {
                                             *fov_y = deg.to_radians();
                                             cmd.inspector_changed = true;
                                         }
@@ -3007,9 +3002,9 @@ impl EditorTabViewer<'_> {
                                     cmd.inspector_changed |= ui.color_edit_button_rgb(color).changed();
                                 });
                                 cmd.inspector_changed |=
-                                    crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=20.0).text("intensity")).changed();
+                                    crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=20.0), "intensity").changed();
                                 cmd.inspector_changed |=
-                                    crate::responsive::slider(ui, egui::Slider::new(range, 0.1..=200.0).text("range")).changed();
+                                    crate::responsive::slider(ui, egui::Slider::new(range, 0.1..=200.0), "range").changed();
                                 cmd.inspector_changed |= crate::responsive::check(ui, shadows, "casts shadows")
                                     .on_hover_text(
                                         "stop this lamp at the walls between it and what it lights, instead \
@@ -3048,15 +3043,14 @@ impl EditorTabViewer<'_> {
                                                 floptle_core::MIN_SPOT_ANGLE
                                                     ..=floptle_core::OMNI_ANGLE - 0.5,
                                             )
-                                            .text("cone")
-                                            .suffix("°"),
-                                        )
+                                            
+                                            .suffix("°"), "cone")
                                         .on_hover_text(
                                             "the FULL angle, the number on a real fixture — 45° is a \
                                              45° cone, not a 90° one",
                                         )
                                         .changed();
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(spot_softness, 0.0..=1.0).text("edge"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(spot_softness, 0.0..=1.0), "edge")
                                         .on_hover_text(
                                             "how much of the cone is falloff. 0 is a hard circle; 1 \
                                              fades from the middle out. A fraction of the cone, so \
@@ -3150,9 +3144,9 @@ impl EditorTabViewer<'_> {
                                     }
                                 });
                                 cmd.inspector_changed |=
-                                    crate::responsive::slider(ui, egui::Slider::new(strength, 0.0..=60.0).text("strength")).changed();
+                                    crate::responsive::slider(ui, egui::Slider::new(strength, 0.0..=60.0), "strength").changed();
                                 if *mode == GravityMode::Radial {
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(radius, 0.5..=500.0).text("well radius"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(radius, 0.5..=500.0), "well radius")
                                         .changed();
                                 }
                             }
@@ -3187,9 +3181,8 @@ impl EditorTabViewer<'_> {
                                 match kind {
                                     WaterKind::Sea => {
                                         cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(radius, 1.0..=100_000.0)
-                                                    .logarithmic(true)
-                                                    .text("sea radius"),
-                                            )
+                                                    .logarithmic(true),
+                                                    "sea radius")
                                             .changed();
                                     }
                                     WaterKind::Pool => {
@@ -3201,16 +3194,14 @@ impl EditorTabViewer<'_> {
                                                         &mut half_extents[i],
                                                         0.1..=1000.0,
                                                     )
-                                                    .logarithmic(true)
-                                                    .text(*label),
-                                                )
+                                                    .logarithmic(true),
+                                                    label)
                                                 .changed();
                                         }
                                     }
                                 }
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(density, 1.0..=5000.0)
-                                            .text("density kg/m³"),
-                                    )
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(density, 1.0..=5000.0),
+                                            "density kg/m³")
                                     .on_hover_text(
                                         "1000 = fresh water. What decides whether a given hull \
                                          floats is this against the hull's own density, so a \
@@ -3218,8 +3209,8 @@ impl EditorTabViewer<'_> {
                                     )
                                     .changed();
                                 cmd.inspector_changed |=
-                                    crate::responsive::slider(ui, egui::Slider::new(drag, 0.0..=10.0).text("drag")).changed();
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(angular_drag, 0.0..=10.0).text("spin drag"))
+                                    crate::responsive::slider(ui, egui::Slider::new(drag, 0.0..=10.0), "drag").changed();
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(angular_drag, 0.0..=10.0), "spin drag")
                                     .changed();
                                 ui.separator();
                                 ui.horizontal_wrapped(|ui| {
@@ -3228,9 +3219,8 @@ impl EditorTabViewer<'_> {
                                         ui.color_edit_button_rgb(tint).changed();
                                 });
                                 cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(visibility, 1.0..=500.0)
-                                            .logarithmic(true)
-                                            .text("visibility m"),
-                                    )
+                                            .logarithmic(true),
+                                            "visibility m")
                                     .on_hover_text(
                                         "How far you can see from inside. Replaces the scene's \
                                          own fog while the camera is under, so meshes, terrain \
@@ -3363,7 +3353,7 @@ impl EditorTabViewer<'_> {
                                         cmd.inspector_changed |= ui.color_edit_button_rgb(tint).changed();
                                     });
                                 }
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(size, 10.0..=5000.0).logarithmic(true).text("size (radius)"))
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(size, 10.0..=5000.0).logarithmic(true), "size (radius)")
                                     .changed();
                             }
                             Matter::NavMesh {
@@ -3471,32 +3461,28 @@ impl EditorTabViewer<'_> {
                                 ui.separator();
                                 ui.small("the character this is for");
                                 let mut touched = false;
-                                touched |= crate::responsive::slider(ui, egui::Slider::new(agent_radius, 0.0..=5.0)
-                                            .text("radius"),
-                                    )
+                                touched |= crate::responsive::slider(ui, egui::Slider::new(agent_radius, 0.0..=5.0),
+                                            "radius")
                                     .on_hover_text(
                                         "How wide it is. Ground closer than this to a wall or a \
                                          drop is not walkable, so a path can be walked by \
                                          something with a body rather than by a point.",
                                     )
                                     .changed();
-                                touched |= crate::responsive::slider(ui, egui::Slider::new(agent_height, 0.1..=10.0)
-                                            .text("height"),
-                                    )
+                                touched |= crate::responsive::slider(ui, egui::Slider::new(agent_height, 0.1..=10.0),
+                                            "height")
                                     .on_hover_text(
                                         "How tall it is. Ground with less headroom than this is \
                                          not walkable.",
                                     )
                                     .changed();
                                 touched |= crate::responsive::slider(ui, egui::Slider::new(max_slope, 0.0..=89.0)
-                                            .suffix("°")
-                                            .text("max slope"),
-                                    )
+                                            .suffix("°"),
+                                            "max slope")
                                     .on_hover_text("The steepest floor it will walk up.")
                                     .changed();
-                                touched |= crate::responsive::slider(ui, egui::Slider::new(step_height, 0.0..=5.0)
-                                            .text("step height"),
-                                    )
+                                touched |= crate::responsive::slider(ui, egui::Slider::new(step_height, 0.0..=5.0),
+                                            "step height")
                                     .on_hover_text(
                                         "The tallest lip it steps over rather than walks around. \
                                          This is what makes a staircase one place and a ledge \
@@ -3504,9 +3490,8 @@ impl EditorTabViewer<'_> {
                                     )
                                     .changed();
                                 touched |= crate::responsive::slider(ui, egui::Slider::new(cell_size, 0.02..=2.0)
-                                            .logarithmic(true)
-                                            .text("cell size"),
-                                    )
+                                            .logarithmic(true),
+                                            "cell size")
                                     .on_hover_text(
                                         "How finely the level is sampled. The one performance \
                                          knob: halving it quadruples the bake.",
@@ -3672,9 +3657,8 @@ impl EditorTabViewer<'_> {
                                     cmd.inspector_changed = true;
                                 }
                                 cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(cost, 0.0..=100.0)
-                                            .logarithmic(true)
-                                            .text("cost"),
-                                    )
+                                            .logarithmic(true),
+                                            "cost")
                                     .on_hover_text(
                                         "What crossing costs the router, in metres of ordinary \
                                          walking. Raise it to make this a last resort; lower it \
@@ -3682,9 +3666,8 @@ impl EditorTabViewer<'_> {
                                     )
                                     .changed();
                                 cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(duration, 0.0..=10.0)
-                                            .suffix(" s")
-                                            .text("crossing takes"),
-                                    )
+                                            .suffix(" s"),
+                                            "crossing takes")
                                     .on_hover_text(
                                         "How long an agent spends on it. 0 means at walking \
                                          speed, which is right for a vault and wrong for a lift.",
@@ -3759,9 +3742,8 @@ impl EditorTabViewer<'_> {
                                          the same name are the same kind of ground.",
                                     );
                                     cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(cost, 0.0..=50.0)
-                                                .logarithmic(true)
-                                                .text("costs"),
-                                        )
+                                                .logarithmic(true),
+                                                "costs")
                                         .on_hover_text(
                                             "How expensive a metre of it is next to ordinary \
                                              ground. Above 1 is walked round when there is a way \
@@ -3826,9 +3808,8 @@ impl EditorTabViewer<'_> {
                                      scale. Move the node to move the box.",
                                 );
                                 if crate::responsive::slider(ui, egui::Slider::new(spacing, 0.25..=16.0)
-                                            .logarithmic(true)
-                                            .text("probe spacing"),
-                                    )
+                                            .logarithmic(true),
+                                            "probe spacing")
                                     .on_hover_text(
                                         "World units between probes. This is the resolution of \
                                          the bounce: it cannot represent a shadow sharper than \
@@ -3906,7 +3887,7 @@ impl EditorTabViewer<'_> {
                                 // ---- how it is baked ----------------------------
                                 ui.separator();
                                 let mut b = *bounces;
-                                if crate::responsive::slider(ui, egui::Slider::new(&mut b, 1..=4).text("bounces"))
+                                if crate::responsive::slider(ui, egui::Slider::new(&mut b, 1..=4), "bounces")
                                     .on_hover_text(
                                         "1 is light coming off surfaces once — the difference \
                                          between a black corner and a lit one. Each extra bounce \
@@ -3919,9 +3900,8 @@ impl EditorTabViewer<'_> {
                                 }
                                 let mut q = *quality;
                                 if crate::responsive::slider(ui, egui::Slider::new(&mut q, 8..=64)
-                                            .step_by(8.0)
-                                            .text("bake detail"),
-                                    )
+                                            .step_by(8.0),
+                                            "bake detail")
                                     .on_hover_text(
                                         "Pixels per cube face. Higher resolves small bright \
                                          things — a lamp, a window — and does not change how \
@@ -3965,7 +3945,7 @@ impl EditorTabViewer<'_> {
 
                                 // ---- how it is applied --------------------------
                                 ui.separator();
-                                if crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=4.0).text("intensity"))
+                                if crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=4.0), "intensity")
                                     .on_hover_text(
                                         "1 is the light as measured. Past that is a look, not a \
                                          mistake. Changing this does not need a re-bake.",
@@ -3975,7 +3955,7 @@ impl EditorTabViewer<'_> {
                                     cmd.inspector_changed = true;
                                     cmd.gi_changed = true;
                                 }
-                                if crate::responsive::slider(ui, egui::Slider::new(leak, 0.0..=3.0).text("leak rejection"))
+                                if crate::responsive::slider(ui, egui::Slider::new(leak, 0.0..=3.0), "leak rejection")
                                     .on_hover_text(
                                         "Throws away probes buried in geometry, so the lit room \
                                          next door stops glowing through the wall. Costs some \
@@ -3986,9 +3966,8 @@ impl EditorTabViewer<'_> {
                                     cmd.inspector_changed = true;
                                     cmd.gi_changed = true;
                                 }
-                                if crate::responsive::slider(ui, egui::Slider::new(normal_bias, 0.0..=2.0)
-                                            .text("surface offset"),
-                                    )
+                                if crate::responsive::slider(ui, egui::Slider::new(normal_bias, 0.0..=2.0),
+                                            "surface offset")
                                     .on_hover_text(
                                         "How far a surface steps along its own normal before \
                                          looking the light up, in cells. Too little leaks at \
@@ -4060,7 +4039,7 @@ impl EditorTabViewer<'_> {
                                      walls, a reflected wall sits on the wall instead of \
                                      sliding as the camera moves.",
                                 );
-                                if crate::responsive::slider(ui, egui::Slider::new(fade, 0.0..=20.0).text("edge fade"))
+                                if crate::responsive::slider(ui, egui::Slider::new(fade, 0.0..=20.0), "edge fade")
                                     .on_hover_text(
                                         "How far outside the box the room's reflection gives way \
                                          to the sky, in world units. A doorway wants a metre or \
@@ -4070,7 +4049,7 @@ impl EditorTabViewer<'_> {
                                 {
                                     cmd.inspector_changed = true;
                                 }
-                                if crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=4.0).text("strength"))
+                                if crate::responsive::slider(ui, egui::Slider::new(intensity, 0.0..=4.0), "strength")
                                     .on_hover_text(
                                         "How much of the capture to apply. 1 is what was \
                                          measured; this is the artistic knob for a room that \
@@ -4176,24 +4155,24 @@ impl EditorTabViewer<'_> {
                                         }
                                     });
                                     if *ao != AoMode::Off {
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_strength, 0.0..=1.0).text("strength"))
+                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_strength, 0.0..=1.0), "strength")
                                             .changed();
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_radius, 0.05..=5.0).logarithmic(true).text("radius (m)"))
+                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(ao_radius, 0.05..=5.0).logarithmic(true), "radius (m)")
                                             .changed();
                                     }
                                     ui.separator();
                                     cmd.inspector_changed |= crate::responsive::check(ui, bloom, "Bloom").changed();
                                     if *bloom {
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_threshold, 0.0..=2.0).text("threshold"))
+                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_threshold, 0.0..=2.0), "threshold")
                                             .changed();
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_intensity, 0.0..=2.0).text("intensity"))
+                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(bloom_intensity, 0.0..=2.0), "intensity")
                                             .changed();
                                     }
                                     cmd.inspector_changed |= crate::responsive::check(ui, vignette, "Vignette").changed();
                                     if *vignette {
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_strength, 0.0..=1.0).text("strength"))
+                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_strength, 0.0..=1.0), "strength")
                                             .changed();
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_radius, 0.3..=1.0).text("radius"))
+                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(vignette_radius, 0.3..=1.0), "radius")
                                             .changed();
                                     }
                                     // Posterize — crush the ART to a limited palette. It runs
@@ -4505,49 +4484,49 @@ impl EditorTabViewer<'_> {
                                             cmd.inspector_changed = true;
                                         }
                                     });
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(exposure, -4.0..=4.0).text("exposure"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(exposure, -4.0..=4.0), "exposure")
                                         .on_hover_text(
                                             "in STOPS: +1 is twice the light. The unit a camera and a \
                                              renderer already share — it keeps meaning the same thing \
                                              when the scene's brightness changes.",
                                         )
                                         .changed();
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(contrast, 0.0..=3.0).text("contrast"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(contrast, 0.0..=3.0), "contrast")
                                         .on_hover_text("pivots on 18% grey, so adding contrast doesn't also darken everything")
                                         .changed();
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(saturation, 0.0..=3.0).text("saturation"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(saturation, 0.0..=3.0), "saturation")
                                         .on_hover_text("0 = greyscale, 1 = untouched. Brightness is preserved.")
                                         .changed();
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(temperature, -1.0..=1.0).text("temperature"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(temperature, -1.0..=1.0), "temperature")
                                         .on_hover_text("cool (−) ↔ warm (+)")
                                         .changed();
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(tint, -1.0..=1.0).text("tint"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(tint, -1.0..=1.0), "tint")
                                         .on_hover_text(
                                             "green (−) ↔ magenta (+) — the axis temperature can't reach, \
                                              and the one that fixes a scene that has gone subtly sickly",
                                         )
                                         .changed();
                                     ui.small("shadows / midtones / highlights");
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(lift, -0.5..=0.5).text("lift"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(lift, -0.5..=0.5), "lift")
                                         .on_hover_text("raise or crush the black floor — a lifted black is the film look")
                                         .changed();
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grade_gamma, 0.2..=3.0).text("gamma"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grade_gamma, 0.2..=3.0), "gamma")
                                         .on_hover_text("bend the midtones without moving black or white")
                                         .changed();
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(gain, 0.0..=3.0).text("gain"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(gain, 0.0..=3.0), "gain")
                                         .on_hover_text("scale the highlights")
                                         .changed();
                                 }
 
                                 ui.separator();
                                 ui.label("lens");
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(aberration, 0.0..=2.0).text("chromatic aberration"))
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(aberration, 0.0..=2.0), "chromatic aberration")
                                     .on_hover_text(
                                         "red and blue drift apart toward the edges, the way real glass \
                                          disperses. 0 = off.",
                                     )
                                     .changed();
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(distortion, -0.5..=0.5).text("distortion"))
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(distortion, -0.5..=0.5), "distortion")
                                     .on_hover_text(
                                         "positive barrels (fisheye), negative pincushions. The corners go \
                                          BLACK rather than smearing the edge pixel outward — a bent frame \
@@ -4560,13 +4539,13 @@ impl EditorTabViewer<'_> {
 
                                 ui.separator();
                                 ui.label("detail");
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(sharpen, 0.0..=2.0).text("sharpen"))
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(sharpen, 0.0..=2.0), "sharpen")
                                     .on_hover_text(
                                         "unsharp mask, clamped to the local neighbourhood so edges get \
                                          crisper without growing a bright halo. 0 = off.",
                                     )
                                     .changed();
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(denoise, 0.0..=1.0).text("denoise"))
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(denoise, 0.0..=1.0), "denoise")
                                     .on_hover_text(
                                         "bilateral: averages within a flat region and refuses to average \
                                          across an edge, which is the difference between removing noise \
@@ -4580,7 +4559,7 @@ impl EditorTabViewer<'_> {
 
                                 ui.separator();
                                 ui.label("film grain");
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain, 0.0..=1.0).text("amount"))
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain, 0.0..=1.0), "amount")
                                     .on_hover_text(
                                         "multiplicative and strongest in the MIDTONES, the way emulsion \
                                          responds — additive grain lifts every shadow into grey mud, \
@@ -4589,7 +4568,7 @@ impl EditorTabViewer<'_> {
                                     )
                                     .changed();
                                 ui.add_enabled_ui(*grain > 0.0, |ui| {
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain_size, 1.0..=8.0).text("size"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(grain_size, 1.0..=8.0), "size")
                                         .on_hover_text(
                                             "grain cell in pixels. 1 is per-pixel — which under a retro \
                                              upscale is invisible, then suddenly a flat shimmer. 2–4 is \
@@ -4601,9 +4580,8 @@ impl EditorTabViewer<'_> {
                                 ui.separator();
                                 ui.label("depth of field");
                                 cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_focus, 0.0..=200.0)
-                                            .logarithmic(true)
-                                            .text("focus distance"),
-                                    )
+                                            .logarithmic(true),
+                                            "focus distance")
                                     .on_hover_text("world units from the camera that are sharp. 0 = off.")
                                     .changed();
                                 // Focus on a NODE instead of a number: the focus
@@ -4663,7 +4641,7 @@ impl EditorTabViewer<'_> {
                                     );
                                 }
                                 ui.add_enabled_ui(*dof_focus > 0.0 || !dof_focus_node.is_empty(), |ui| {
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_range, 0.1..=100.0).logarithmic(true).text("far range"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_range, 0.1..=100.0).logarithmic(true), "far range")
                                         .on_hover_text("how far BEYOND the focus distance stays sharp")
                                         .changed();
                                     let mut near = *dof_near_range;
@@ -4671,7 +4649,7 @@ impl EditorTabViewer<'_> {
                                     if auto {
                                         near = *dof_range * 0.5;
                                     }
-                                    let r = crate::responsive::slider(ui, egui::Slider::new(&mut near, 0.05..=100.0).logarithmic(true).text("near range"))
+                                    let r = crate::responsive::slider(ui, egui::Slider::new(&mut near, 0.05..=100.0).logarithmic(true), "near range")
                                         .on_hover_text(
                                             "how far IN FRONT of it stays sharp. A lens goes soft \
                                              on the near side much sooner than on the far side, \
@@ -4695,7 +4673,7 @@ impl EditorTabViewer<'_> {
                                         *dof_near_range = 0.0;
                                         cmd.inspector_changed = true;
                                     }
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_max_blur, 0.0..=16.0).text("max blur"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_max_blur, 0.0..=16.0), "max blur")
                                         .on_hover_text("the widest the out-of-focus blur gets, in pixels. 0 = off.")
                                         .changed();
 
@@ -4703,9 +4681,8 @@ impl EditorTabViewer<'_> {
                                     ui.small("the iris");
                                     let mut blades = *dof_blades as f32;
                                     let r = crate::responsive::slider(ui, egui::Slider::new(&mut blades, 0.0..=10.0)
-                                                .step_by(1.0)
-                                                .text("blades"),
-                                        )
+                                                .step_by(1.0),
+                                                "blades")
                                         .on_hover_text(
                                             "0 is a round iris. 3 and up gives the polygonal bokeh \
                                              of a real lens — six is the classic hexagon.",
@@ -4715,13 +4692,12 @@ impl EditorTabViewer<'_> {
                                         cmd.inspector_changed = true;
                                     }
                                     if *dof_blades >= 3 {
-                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_blade_rotation, 0.0..=180.0)
-                                                    .text("blade angle°"),
-                                            )
+                                        cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_blade_rotation, 0.0..=180.0),
+                                                    "blade angle°")
                                             .on_hover_text("turn the polygon")
                                             .changed();
                                     }
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_highlight, 0.0..=8.0).text("highlight bokeh"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(dof_highlight, 0.0..=8.0), "highlight bokeh")
                                         .on_hover_text(
                                             "how much brighter-than-white pixels dominate the \
                                              blur. 0 averages them away into grey; turn it up and \
@@ -4731,7 +4707,7 @@ impl EditorTabViewer<'_> {
                                         )
                                         .changed();
                                     let mut q = if *dof_quality == 0 { 16.0 } else { *dof_quality as f32 };
-                                    let r = crate::responsive::slider(ui, egui::Slider::new(&mut q, 4.0..=64.0).step_by(1.0).text("samples"))
+                                    let r = crate::responsive::slider(ui, egui::Slider::new(&mut q, 4.0..=64.0).step_by(1.0), "samples")
                                         .on_hover_text(
                                             "taps in the blur. More is smoother bokeh and costs \
                                              linearly more; fewer is the chunky look, on purpose.",
@@ -4763,7 +4739,7 @@ impl EditorTabViewer<'_> {
                                 ui.separator();
                                 ui.strong("≈ Motion blur");
                                 ui.small("shows in the Game view");
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(motion_blur, 0.0..=1.0).text("shutter"))
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(motion_blur, 0.0..=1.0), "shutter")
                                     .on_hover_text(
                                         "How much of the frame's camera motion is smeared. 0 is off. \
                                          0.5 is the 180° shutter a film camera has and is the one \
@@ -4778,7 +4754,7 @@ impl EditorTabViewer<'_> {
                                 if *motion_blur > 0.0 {
                                     let mut taps =
                                         if *motion_samples == 0 { 12.0 } else { *motion_samples as f32 };
-                                    if crate::responsive::slider(ui, egui::Slider::new(&mut taps, 4.0..=32.0).text("samples"))
+                                    if crate::responsive::slider(ui, egui::Slider::new(&mut taps, 4.0..=32.0), "samples")
                                         .on_hover_text(
                                             "Taps along the streak. Too few and a fast pan bands \
                                              into separate copies of the picture.",
@@ -5298,10 +5274,9 @@ impl EditorTabViewer<'_> {
                                 }
                             });
                             let p = &mut src.params;
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut p.volume, 0.0..=2.0).text("Volume"),
-                                )
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut p.volume, 0.0..=2.0), "Volume")
                                 .changed();
-                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut p.pitch, 0.25..=4.0).text("Pitch").logarithmic(true))
+                            cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut p.pitch, 0.25..=4.0).logarithmic(true), "Pitch")
                                 .changed();
                             egui::ComboBox::from_label("Spatial")
                                 .selected_text(p.mode.name())
@@ -5319,7 +5294,7 @@ impl EditorTabViewer<'_> {
                                 });
                             match p.mode {
                                 floptle_audio::SpatialMode::Flat => {
-                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut p.pan, -1.0..=1.0).text("Pan"))
+                                    cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut p.pan, -1.0..=1.0), "Pan")
                                         .changed();
                                 }
                                 _ => {
@@ -5510,10 +5485,10 @@ impl EditorTabViewer<'_> {
                                 });
                             } else {
                                 cmd.inspector_changed |=
-                                    crate::responsive::slider(ui, egui::Slider::new(&mut rb.radius, 0.05..=10.0).text("radius")).changed();
+                                    crate::responsive::slider(ui, egui::Slider::new(&mut rb.radius, 0.05..=10.0), "radius").changed();
                                 if rb.kind == BodyKind::Capsule {
                                     cmd.inspector_changed |=
-                                        crate::responsive::slider(ui, egui::Slider::new(&mut rb.height, 0.2..=20.0).text("height")).changed();
+                                        crate::responsive::slider(ui, egui::Slider::new(&mut rb.height, 0.2..=20.0), "height").changed();
                                 }
                             }
                             // Bounce/friction/gravity/locks only matter on a
@@ -5550,8 +5525,8 @@ impl EditorTabViewer<'_> {
                                     )
                                     .changed();
                                 cmd.inspector_changed |=
-                                    crate::responsive::slider(ui, egui::Slider::new(&mut rb.restitution, 0.0..=1.0).text("bounce")).changed();
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut rb.friction, 0.0..=2.0).text("friction"))
+                                    crate::responsive::slider(ui, egui::Slider::new(&mut rb.restitution, 0.0..=1.0), "bounce").changed();
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut rb.friction, 0.0..=2.0), "friction")
                                     .on_hover_text(
                                         "Grip, as a coefficient. A ramp holds this body while \
                                          tan(its angle) ≤ friction — so 0 is ice, 0.3 lets go \
@@ -5561,9 +5536,8 @@ impl EditorTabViewer<'_> {
                                          capping it: a shoved crate slides and then stops.",
                                     )
                                     .changed();
-                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut rb.slope_limit, 0.0..=90.0)
-                                            .text("slope limit °"),
-                                    )
+                                cmd.inspector_changed |= crate::responsive::slider(ui, egui::Slider::new(&mut rb.slope_limit, 0.0..=90.0),
+                                            "slope limit °")
                                     .on_hover_text(
                                         "The steepest surface this body can stand on. Past it \
                                          the body is not grounded, the surface reads as \
@@ -5735,13 +5709,13 @@ impl EditorTabViewer<'_> {
                             ch |= drag(ui, "atmo height", &mut cb.atmo_height, 1.0, "shell height above the surface; the sky fades to space across it");
                             ui.horizontal_wrapped(|ui| {
                                 ui.label("density");
-                                ch |= crate::responsive::slider(ui, egui::Slider::new(&mut cb.atmo_density, 0.0..=1.0))
+                                ch |= crate::responsive::slider(ui, egui::Slider::new(&mut cb.atmo_density, 0.0..=1.0), "")
                                     .on_hover_text("how opaque the sky gets at full depth")
                                     .changed();
                             });
                             ui.horizontal_wrapped(|ui| {
                                 ui.label("clouds");
-                                ch |= crate::responsive::slider(ui, egui::Slider::new(&mut cb.clouds, 0.0..=1.0))
+                                ch |= crate::responsive::slider(ui, egui::Slider::new(&mut cb.clouds, 0.0..=1.0), "")
                                     .on_hover_text("cloud coverage in the atmosphere (0 = clear)")
                                     .changed();
                             });
@@ -5842,7 +5816,7 @@ impl EditorTabViewer<'_> {
                                 .changed();
                             if rep.interp {
                                 let mut d = rep.interp_delay as i32;
-                                if crate::responsive::slider(ui, egui::Slider::new(&mut d, 0..=30).text("interp delay (ticks)"))
+                                if crate::responsive::slider(ui, egui::Slider::new(&mut d, 0..=30), "interp delay (ticks)")
                                     .on_hover_text("how far behind the server remote copies render — 6 ticks ≈ 100 ms. Lower = tighter tracking (stutters under jitter/loss); higher = smoother on bad links")
                                     .changed()
                                 {
@@ -6804,7 +6778,7 @@ fn lighting_2d_row(
             let mut inner = cur.inner;
             // Capped by the light's own range, because past it the whole disc
             // is flat and the range slider stops meaning anything.
-            if crate::responsive::slider(ui, egui::Slider::new(&mut inner, 0.0..=range.max(0.01)).suffix(" m"))
+            if crate::responsive::slider(ui, egui::Slider::new(&mut inner, 0.0..=range.max(0.01)).suffix(" m"), "")
                 .on_hover_text(
                     "full brightness out to here, and only then falling away to nothing at \
                      the light's range. 0 starts the ramp at the light, which is what every \
@@ -6820,7 +6794,7 @@ fn lighting_2d_row(
         ui.horizontal_wrapped(|ui| {
             ui.label("falloff");
             let mut f = cur.falloff;
-            if crate::responsive::slider(ui, egui::Slider::new(&mut f, 0.25..=6.0).logarithmic(true))
+            if crate::responsive::slider(ui, egui::Slider::new(&mut f, 0.25..=6.0).logarithmic(true), "")
                 .on_hover_text(
                     "the exponent of that ramp. 2 is the curve every light has always had; \
                      below 1 holds the brightness out and drops it late, above 2 dives away \
