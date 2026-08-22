@@ -2888,6 +2888,27 @@ struct Editor {
     /// order-dependence `floptle/0116` just finished taking out of the light
     /// list. Nothing is guessed on the game's behalf; it is told.
     lighting_nodes_warned: usize,
+    /// How many point lights the last warning was about, so a scene past the
+    /// sixteen-light cap says so ONCE per count rather than every frame — the
+    /// same latch as `lighting_nodes_warned` just above, for the cap
+    /// `floptle/0116`/`floptle/0168` are both about. Reset to `0` once the
+    /// scene drops back under the cap, so going over it again re-warns.
+    lights_dropped_warned: usize,
+    /// The `frame_no` the light-cap check last ran for. `render_world_into`
+    /// runs several times in one `render()` — the docked Game view, camera
+    /// previews, a GI bake — and each is a DIFFERENT camera, which can see a
+    /// different `dropped` count (an orthographic minimap camera routes its
+    /// lights through the 2D split; a perspective one doesn't). Without this,
+    /// two cameras disagreeing every frame would look like the count
+    /// "changing" and re-warn every frame — the exact spam the latch above
+    /// exists to prevent. Only the first gather to run in a frame checks;
+    /// every later one this same frame is a no-op.
+    lights_dropped_checked_frame: u64,
+    /// Which multiple `fifo_pacing_multiple` last warned about in the Console,
+    /// so a session pinned at "every 3rd refresh" says so once rather than
+    /// every 0.4s the title bar refreshes (`floptle/0169`). `0` = not warned;
+    /// resets when the condition clears, so it re-warns if it comes back.
+    fifo_pacing_warned: u32,
     /// Mixer tab UI state (selected track/effect, meters).
     mixer_ui: mixer_ui::MixerUiState,
     /// Particles tab UI state (open effect, playhead, selections).

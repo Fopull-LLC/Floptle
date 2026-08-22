@@ -254,11 +254,26 @@ So:
   (8.2 ms/frame)`. The two together answer the question an fps number alone
   cannot. Blocking in `acquire()` is measured and excluded, because waiting for
   the display is not the same thing as being slow.
+- **The engine says which one it is, out loud** (`floptle/0169`). The escape
+  hatch above fixes it once you know to reach for it, but a user staring at
+  "my level runs at 20 fps" has no reason to suspect the display rather than
+  their own content — the first two releases of this fix shipped the knob and
+  not the diagnosis, and the report kept coming in as "my scene is too heavy".
+  `acquire` blocking for very close to a whole multiple (≥2) of the refresh
+  period, while the frame's own accounted cost is a small fraction of that
+  wait, is the signature: the ⏱ panel's "frames arriving" block and the
+  Console both name it — *"the DISPLAY is pacing this frame, not the scene"* —
+  and point at Project Settings ⏵ Rendering ⏵ Frame pacing. A scene that is
+  genuinely slow and happens to land near a multiple is excluded by the second
+  half of the test (its own cost is not small), so this does not misfire on a
+  heavy level that is simply presenting at a reduced rate.
 
 `examples/present_probe.rs` is the tool that settled it and is kept for the next
 time: forty lines of winit and wgpu that clear a window and report the rate. If
 it reads 60 and the editor reads 20, the editor is doing something; if both read
-20, the display path is.
+20, the display path is. `examples/present_stats.rs` is the same idea extended
+with percentiles, an `acquire`-block column and the `current_monitor()` readout
+— reach for it when the plain probe's single number needs a second look.
 
 ## 6c. Where the time goes, per pass (v0.54.0)
 

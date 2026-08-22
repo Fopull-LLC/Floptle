@@ -341,6 +341,33 @@ fn light2d_uniform(
     }
 }
 
+/// The decision behind the 16-light-cap warning (`floptle/0116`, `floptle/0168`):
+/// given how many lights just got cut and what the LAST warning was about,
+/// what should the latch become and what (if anything) should the Console say.
+///
+/// A plain function with no `self` on purpose — both gathers need this, one of
+/// them can't call a `&mut self` method at its call site (see
+/// `Editor::warn_lights_dropped`), and keeping the actual decision in one place
+/// is what stops the two copies from drifting.
+///
+/// Latched on the exact count so it says so again if a scene goes from 24
+/// dropped to 30, and resets once the scene drops back under the cap so going
+/// over it a second time re-warns rather than staying silent forever.
+fn light_cap_warning(dropped: usize, last_warned: usize) -> (usize, Option<String>) {
+    if dropped == 0 {
+        return (0, None);
+    }
+    if dropped == last_warned {
+        return (last_warned, None);
+    }
+    let msg = format!(
+        "💡 {dropped} point light(s) are past the 16-light cap this frame and are not shading \
+         anything — the sixteen contributing most at the camera win, the rest cost placement \
+         time for nothing (docs/lua-api.md, node:setPointLight)."
+    );
+    (dropped, Some(msg))
+}
+
 impl Editor {
 
     /// Re-take the 🎓 Learn tab's project snapshot, at most a few times a second
@@ -364,6 +391,28 @@ impl Editor {
         }
         self.learn.next_scan = now + crate::learn::RESCAN_SECS;
         self.learn.snap = crate::learn::scan(&self.world, &self.project_root, self.learn.played);
+    }
+
+    /// Say once when the scene's lights have gone past the sixteen-slot cap,
+    /// naming how many were cut (`floptle/0116`, `floptle/0168`). Called from
+    /// both gathers — the Scene view and `render_world_into` — because either
+    /// can be the first (or only) one to run in a given session.
+    ///
+    /// The main gather can't call this directly (a live `self.gpu.as_mut()`
+    /// borrow through most of `render()` conflicts with a `&mut self` method
+    /// call, even though the two touch disjoint fields), so the DECISION is
+    /// `light_cap_warning` — a plain function, no `self`, callable from
+    /// anywhere — and this method is the thin wrapper `render_world_into` uses.
+    fn warn_lights_dropped(&mut self, dropped: usize) {
+        if self.lights_dropped_checked_frame == self.frame_no {
+            return;
+        }
+        self.lights_dropped_checked_frame = self.frame_no;
+        let (warned, msg) = light_cap_warning(dropped, self.lights_dropped_warned);
+        self.lights_dropped_warned = warned;
+        if let Some(msg) = msg {
+            self.console.push(floptle_script::LogLevel::Warn, msg, None);
+        }
     }
 
     pub(crate) fn render(&mut self) {
@@ -1705,6 +1754,20 @@ impl Editor {
         );
         self.light_counts =
             (lights_split.three_d.count + lights_split.two_d.count, lights_split.dropped);
+        // `self.warn_lights_dropped(...)` would borrow all of `self`, which
+        // conflicts with `gpu` above (a live `self.gpu.as_mut()` borrow through
+        // most of this function) even though the two touch disjoint fields —
+        // so the frame-guard is inlined here, but the actual decision is the
+        // same `light_cap_warning` `render_world_into`'s copy calls
+        // (`floptle/0168`).
+        if self.lights_dropped_checked_frame != self.frame_no {
+            self.lights_dropped_checked_frame = self.frame_no;
+            let (warned, msg) = light_cap_warning(lights_split.dropped, self.lights_dropped_warned);
+            self.lights_dropped_warned = warned;
+            if let Some(msg) = msg {
+                self.console.push(floptle_script::LogLevel::Warn, msg, None);
+            }
+        }
         // Sun shadows (Lighting node knobs) + the collider-proxy occluders that let
         // raster meshes cast — both ride the raymarch globals, which the raster pass
         // reads too through the shared field bind group.
@@ -2304,11 +2367,22 @@ impl Editor {
             let (lights, lights_dropped) = self.light_counts;
             let voices = self.audio.live_voices();
             let mut prof = profile.borrow_mut();
+            // Grouping every instance into draw-call buckets is a HashSet pass
+            // over the whole submission — worth its cost only when collection
+            // is actually on and something will read the number. `set_counts`
+            // already no-ops while off; this keeps the SUM ahead of it off too
+            // ("off means off", `floptle/0082`, applied to the one count here
+            // pricier than a `.sum()` over an existing small collection).
+            let draws = if prof.enabled() {
+                count_draw_batches(&instances, &flsl_draws, &skin_draws)
+            } else {
+                0
+            };
             prof.set_counts(floptle_core::profile::Counts {
                 nodes: ents.len(),
                 culled: culled_nodes,
                 instances: instances.len(),
-                draws: 0,
+                draws,
                 chunks,
                 props: scatter_props,
                 particles,
@@ -3149,6 +3223,8 @@ impl Editor {
             // `refresh_period` is in SECONDS (it is compared against `dt`).
             refresh_ms: self.refresh_period * 1000.0,
             snap_rate: self.dt_snap_rate,
+            present_wait_ms: self.present_wait_ms,
+            cost_ms: (self.frame_ms - self.present_wait_ms).max(0.0),
         };
         let show_net_panel = &mut self.show_net_panel;
         let show_perf_panel = &mut self.show_perf_panel;
@@ -6655,6 +6731,28 @@ impl Editor {
                     // us". A scene costing 8 ms and presenting at 20 fps is the
                     // second, and used to be indistinguishable from the first.
                     let cost = (self.frame_ms - self.present_wait_ms).max(0.0);
+                    // Reaches the Console too, not only the ⏱ panel and the
+                    // title — the panel is opt-in and the title is easy not to
+                    // read closely, and this is exactly the report a user who
+                    // is NOT looking for it needs to see (`floptle/0169`).
+                    match fifo_pacing_multiple(self.present_wait_ms, cost, self.refresh_period * 1000.0) {
+                        Some(n) if n != self.fifo_pacing_warned => {
+                            self.fifo_pacing_warned = n;
+                            self.console.push(
+                                floptle_script::LogLevel::Warn,
+                                format!(
+                                    "⏱ the DISPLAY is pacing this frame, not the scene: {:.1} ms \
+                                     spent waiting on `acquire` every {n}th refresh, while the \
+                                     scene itself costs {cost:.1} ms. Try Project Settings ⏵ \
+                                     Rendering ⏵ Frame pacing.",
+                                    self.present_wait_ms
+                                ),
+                                None,
+                            );
+                        }
+                        None => self.fifo_pacing_warned = 0,
+                        Some(_) => {} // same multiple as last time — already said
+                    }
                     // The 1% low beside the mean, because a bimodal frame time
                     // is exactly the distribution that feels worst and the only
                     // one a mean cannot show. The ⏱ panel has always reported a
@@ -9580,6 +9678,12 @@ impl Editor {
         // Reused scratch for CPU vertex skinning (deformed vertices, re-uploaded per part),
         // exactly like the main gather — so offscreen views animate skinned meshes too.
         let mut skin_scratch: Vec<floptle_render::Vertex> = Vec::new();
+        // How much the frustum cull skipped, published below alongside the rest
+        // of this gather's counts — see `floptle/0167`: this whole gather used
+        // to publish nothing, so a Game-view session's `perf.counts()` was
+        // whatever the Scene view had last computed, or all zero if it never
+        // ran this session.
+        let mut culled_nodes = 0usize;
         for (ent, matter) in &ents {
             if matches!(self.world.get::<floptle_core::Visible>(*ent), Some(floptle_core::Visible(false))) {
                 continue;
@@ -9616,6 +9720,7 @@ impl Editor {
                 &self.world, &self.mesh_registry, &self.anim.poses,
                 *ent, matter, &t, cam.world_position, &off_frustum, sprite_px,
             ) {
+                culled_nodes += 1;
                 continue;
             }
             let mat = self.world.get::<Material>(*ent).cloned();
@@ -9892,6 +9997,50 @@ impl Editor {
                 self.now(),
                 &mut instances,
             );
+        }
+        // …and the counts a game can read via `perf.counts()` (`floptle/0077`,
+        // `floptle/0167`). This gather used to publish none of this: every view
+        // that comes through it — the docked or split Game view, `floptle
+        // shot`, a render target — left the profile holding whatever the
+        // Scene-view gather in `render()` had last written, or all zero if that
+        // gather never ran this session. That is exactly why a real 40-light
+        // scene read `lights=0` in one session and correctly in another: the
+        // number was never this camera's, it was whichever gather happened to
+        // run last. `lights`/`lightsDropped` come from `off_split` above,
+        // computed for THIS camera and THIS frame.
+        self.light_counts = (off_split.three_d.count + off_split.two_d.count, off_split.dropped);
+        self.warn_lights_dropped(off_split.dropped);
+        {
+            let chunks: usize = self.terrain_render.values().map(|r| r.slots.len()).sum();
+            let particles = self.vfx.live_particles();
+            let (effects, effects_dropped) = self.vfx.detached_counts();
+            let (lights, lights_dropped) = self.light_counts;
+            let voices = self.audio.live_voices();
+            let profile = self.script_host.profile().clone();
+            // Same "off means off" guard as the main gather — see there.
+            let draws = if profile.borrow().enabled() {
+                count_draw_batches(&instances, &flsl_draws, &skin_draws)
+            } else {
+                0
+            };
+            profile.borrow_mut().set_counts(floptle_core::profile::Counts {
+                nodes: ents.len(),
+                culled: culled_nodes,
+                instances: instances.len(),
+                draws,
+                chunks,
+                // This gather does not draw scatter (unlike the Scene view's),
+                // so a scatter-heavy scene under-reports its props here. A
+                // separate, real gap — not this card — see the ledger.
+                props: 0,
+                particles,
+                effects,
+                effects_dropped,
+                lights,
+                lights_dropped,
+                voices,
+                flat2d: flat2d.len(),
+            });
         }
         let show_blobs = self.project.matter && !blobs.is_empty();
         // A textured skybox is DRAWN by the raymarch pass (missed rays sample the
@@ -10334,6 +10483,39 @@ pub(crate) fn apply_node_tint(
     }
 }
 
+/// How many draw calls this frame's meshes cost (`floptle/0167`).
+///
+/// `Counts::draws` was a literal `0` — never computed, always answering the
+/// question it exists for with a lie. `draw_scene_with` (`floptle-render`)
+/// buckets by `(mesh, texture[, flsl binding])` and issues one instanced
+/// `draw_indexed` per bucket, opaque and blended kept apart; this counts the
+/// same groups without duplicating that bucketing GPU-side. It folds opaque
+/// and blended together, so a group that has instances in both phases is one
+/// real draw call counted as one here — a coarse number a game can act on
+/// beats the `0` it replaces. Terrain chunks, particle batches and 2D/UI
+/// batches are their own passes with their own counts already (`chunks`,
+/// `particles`) and are not included here.
+fn count_draw_batches(
+    instances: &[(MeshId, Option<TexId>, InstanceRaw)],
+    flsl: &[floptle_render::FlslDraw],
+    skins: &[floptle_render::SkinDraw],
+) -> usize {
+    let mut mesh_tex: std::collections::HashSet<(u32, Option<u32>)> = std::collections::HashSet::new();
+    for (mesh, tex, _) in instances {
+        mesh_tex.insert((mesh.0, tex.map(|t| t.0)));
+    }
+    let mut flsl_groups: std::collections::HashSet<(u32, Option<u32>, u32)> =
+        std::collections::HashSet::new();
+    for (mesh, tex, bind, _) in flsl {
+        flsl_groups.insert((mesh.0, tex.map(|t| t.0), bind.0));
+    }
+    let mut skin_groups: std::collections::HashSet<(u32, Option<u32>)> = std::collections::HashSet::new();
+    for s in skins {
+        skin_groups.insert((s.mesh.0, s.tex.map(|t| t.0)));
+    }
+    mesh_tex.len() + flsl_groups.len() + skin_groups.len()
+}
+
 /// **Which material one part of a model draws with.**
 ///
 ///   this object's override  ▸  the node's Material  ▸  the part as imported
@@ -10591,6 +10773,13 @@ struct Pacing {
     refresh_ms: f32,
     /// Share of recent frames the dt snap actually applied to, 0..1.
     snap_rate: f32,
+    /// Smoothed time blocked inside `acquire` (`Editor::present_wait_ms`) —
+    /// the display path, not the scene. `floptle/0169`: the piece the ⏱ panel
+    /// had the numbers for and never compared.
+    present_wait_ms: f32,
+    /// `mean_ms - present_wait_ms`: what the frame cost apart from waiting on
+    /// the display. The same subtraction the window-title `cost` figure does.
+    cost_ms: f32,
 }
 
 impl PerfSnapshot {
@@ -10677,6 +10866,53 @@ mod readout_tests {
         }
         assert!((steady.frame_time_low() - 6.9).abs() < 0.01);
     }
+
+    /// The 16-light cap says so ONCE per count, not every frame, and says
+    /// nothing while nothing is being cut (`floptle/0168`).
+    #[test]
+    fn the_light_cap_warns_once_per_count_and_falls_silent_under_it() {
+        fn warns(ed: &crate::Editor) -> usize {
+            ed.console
+                .entries
+                .iter()
+                .filter(|e| e.level == floptle_script::LogLevel::Warn)
+                .count()
+        }
+        let mut ed = crate::Editor::default();
+        // Each `ed.frame_no += 1` moves to a new simulated frame.
+        // `render_world_into` runs several times per `render()` (Game view,
+        // camera previews, a GI bake), each a different camera, so two calls
+        // at the SAME frame_no simulate two cameras in one frame — which must
+        // not each get their own say.
+
+        ed.frame_no += 1;
+        ed.warn_lights_dropped(0);
+        assert_eq!(warns(&ed), 0, "nothing was cut — nothing to say");
+
+        ed.frame_no += 1;
+        ed.warn_lights_dropped(24);
+        assert_eq!(warns(&ed), 1, "24 dropped lights must say so");
+        // SAME frame, a second camera reporting a DIFFERENT count (an
+        // orthographic minimap beside a perspective main camera, say) — must
+        // not be read as the count "changing" and re-warn.
+        ed.warn_lights_dropped(30);
+        assert_eq!(warns(&ed), 1, "a second gather in the SAME frame must not get its own warning");
+
+        ed.frame_no += 1;
+        ed.warn_lights_dropped(24);
+        assert_eq!(warns(&ed), 1, "the same count again must not repeat itself every frame");
+
+        ed.frame_no += 1;
+        ed.warn_lights_dropped(30);
+        assert_eq!(warns(&ed), 2, "MORE lights dropped is new information and re-warns");
+
+        ed.frame_no += 1;
+        ed.warn_lights_dropped(0);
+        assert_eq!(warns(&ed), 2, "back under the cap — quiet again");
+        ed.frame_no += 1;
+        ed.warn_lights_dropped(24);
+        assert_eq!(warns(&ed), 3, "over the cap a second time must warn again, not stay latched off");
+    }
 }
 
 /// Which refresh period to hold, given what the platform just said.
@@ -10698,6 +10934,70 @@ fn chosen_refresh_period(held: f32, current: Option<u32>, any: impl FnOnce() -> 
         return held;
     }
     any().filter(|&m| m > 0).map(|mhz| 1000.0 / mhz as f32).unwrap_or(0.0)
+}
+
+/// Is the DISPLAY pacing the frame, rather than the scene being slow
+/// (`floptle/0169`)?
+///
+/// The signature `docs/subsystems/renderer.md` already describes: `acquire`
+/// blocks for very close to a whole multiple (≥2) of the refresh period —
+/// the compositor presenting every Nth vblank rather than every one — while
+/// the frame's OWN work (`cost_ms`, the same subtraction the window title's
+/// "cost" figure already does) is small next to that wait. A scene that is
+/// genuinely heavy can also land near a multiple by coincidence, which is
+/// exactly why `cost_ms` is the second half of the test: a real 40 ms scene
+/// waiting 50 ms is a slow scene, not this.
+///
+/// Returns the multiple when detected, so a message can say "every Nth
+/// refresh" rather than just "something is off".
+fn fifo_pacing_multiple(present_wait_ms: f32, cost_ms: f32, refresh_ms: f32) -> Option<u32> {
+    if refresh_ms <= 0.0 || present_wait_ms <= 0.0 {
+        return None;
+    }
+    let n = (present_wait_ms / refresh_ms).round();
+    // Same 12% band `smooth_dt` snaps dt within, so "close to a multiple"
+    // means the same thing in both places.
+    if n < 2.0 || (present_wait_ms - n * refresh_ms).abs() > refresh_ms * 0.12 {
+        return None;
+    }
+    if cost_ms > refresh_ms * 0.5 {
+        return None; // the frame is doing real work — this is not a null scene
+    }
+    Some(n as u32)
+}
+
+#[cfg(test)]
+mod fifo_pacing_tests {
+    use super::fifo_pacing_multiple;
+
+    /// The card's own capture: 50.0 ms `acquire` on a 16.68 ms (59.95 Hz)
+    /// refresh — three refreshes, near-zero scene cost either side of it.
+    #[test]
+    fn the_cards_own_capture_is_detected_as_three_refreshes() {
+        assert_eq!(fifo_pacing_multiple(50.0, 0.3, 16.68), Some(3));
+    }
+
+    /// An ordinary vsynced frame — `acquire` near ONE refresh — is not this.
+    /// One refresh of waiting is just vsync working; the signature is being
+    /// held for *more* than the display's own pace warrants.
+    #[test]
+    fn one_refresh_of_waiting_is_ordinary_vsync_not_the_bug() {
+        assert_eq!(fifo_pacing_multiple(16.7, 0.3, 16.68), None);
+    }
+
+    /// A GENUINELY slow scene that happens to cost close to two refreshes is
+    /// not this — the whole point of the `cost_ms` half of the test.
+    #[test]
+    fn a_scene_that_is_actually_slow_is_not_reported_as_display_pacing() {
+        assert_eq!(fifo_pacing_multiple(33.3, 30.0, 16.68), None);
+    }
+
+    /// No known refresh rate, or nothing waited on `acquire`: nothing to say.
+    #[test]
+    fn nothing_to_compare_against_says_nothing() {
+        assert_eq!(fifo_pacing_multiple(50.0, 0.3, 0.0), None);
+        assert_eq!(fifo_pacing_multiple(0.0, 0.3, 16.68), None);
+    }
 }
 
 #[cfg(test)]
@@ -10772,6 +11072,22 @@ fn pacing_readout(ui: &mut egui::Ui, p: &Pacing) {
                 "⚠ the worst 1% of frames take {:.1}x the average. That is what a \
                  stutter is, and an fps number cannot show it.",
                 p.p99_ms / p.mean_ms.max(1e-4)
+            ))
+            .color(warn),
+        );
+    }
+    // The display pacing the frame, not the scene being slow (`floptle/0169`):
+    // `acquire` blocked for a whole multiple of the refresh period while the
+    // frame's own work barely registers. This used to be indistinguishable
+    // from "the scene is heavy" — both numbers were already on screen and
+    // never compared.
+    if let Some(n) = fifo_pacing_multiple(p.present_wait_ms, p.cost_ms, p.refresh_ms) {
+        ui.small(
+            egui::RichText::new(format!(
+                "⚠ the DISPLAY is pacing this, not the scene: {:.1} ms of every frame is \
+                 spent waiting on `acquire` — every {n}th refresh — while the scene itself \
+                 costs {:.1} ms. Try Project Settings ⏵ Rendering ⏵ Frame pacing.",
+                p.present_wait_ms, p.cost_ms
             ))
             .color(warn),
         );

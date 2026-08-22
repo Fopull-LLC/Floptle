@@ -44,7 +44,7 @@ const SRC: &str = include_str!("../src/render_frame.rs");
 /// The calls that put world geometry into a frame. Each must appear on both
 /// paths; a call that exists on only one is a kind of object some views cannot
 /// see.
-const GATHERS: [(&str, &str); 11] = [
+const GATHERS: [(&str, &str); 12] = [
     ("push_mesh_instances", "imported models, map meshes, skinned characters"),
     // Not geometry either, but the same failure with a different face: a node's
     // Tint multiplies over everything it drew. Applied on one path only, a
@@ -89,6 +89,16 @@ const GATHERS: [(&str, &str); 11] = [
     // room — which is the exact failure this file exists for, in the exact
     // feature that was added to fix it.
     ("probe_uniforms", "where each reflection probe's room is, from this eye"),
+    // Not geometry, and not even something drawn — but the same failure shape
+    // pointed at `perf.counts()` instead of a pixel: this gather ran and drew
+    // correctly while never publishing what it drew. A real 40-light scene
+    // then read `lights=0` through the Game view (which comes through here)
+    // while a Scene-view session of the very same scene read it correctly —
+    // the number was never THIS camera's, it was whichever gather had run
+    // last. Draws, lights, nodes, chunks, particles: none of it reached
+    // `perf.counts()` from the one path that draws every OTHER view
+    // (`floptle/0167`).
+    ("set_counts", "the render counts a game reads via perf.counts()"),
 ];
 
 /// The body of `render_world_into`, from its signature to the end of the file.

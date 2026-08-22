@@ -38,6 +38,15 @@
 //! project whose `start` waits for a press will sit still and report nothing
 //! wrong. That is correct and is also why "no errors" from this verb means
 //! "nothing raised", not "the game is good".
+//!
+//! **`perf.counts()` is honest about the same gap.** `scripts` and `physics`
+//! are real numbers here — they cost the same whether or not anything ever
+//! draws them. `draws`, `instances`, `lights`, `nodes` and the rest of the
+//! render-gather counts stay `0`, for the same reason nothing above draws:
+//! there is no gather to have counted them. That is a real "not measured
+//! here", not the bug `floptle/0167` was — a project asserting a script or
+//! physics budget in CI gets a real answer from `run`; one asserting on draw
+//! calls or light counts wants `floptle shot` or `--play` instead.
 
 use std::path::Path;
 
@@ -141,6 +150,17 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool) -> i
         // which is why a run of a project raising on every step reported
         // "nothing raised".
         ed.drain_script_logs();
+        // Fold this step into the profiler's history, the way `Editor::render`
+        // folds one windowed frame (`floptle/0167`). Without this, `perf.ms`
+        // and friends read every bucket as "no frame has completed yet" for
+        // the whole run — enabled, and silently wrong in the same shape the
+        // whole `perf` API exists to refuse: a value that reads as zero and
+        // means "never measured". `record`/`record_script` already run during
+        // `play_step` (scripts, physics), so this is the one missing piece,
+        // not new instrumentation. Counts that come from a GPU gather (draws,
+        // instances, lights…) stay at their true value here: `run` has no
+        // renderer at all, so zero is what they honestly are, not a bug.
+        ed.script_host.profile().borrow_mut().end_frame();
         // A script that asked to quit has said the run is over, and stepping a
         // stopped session further would report on a world nobody is in.
         if !ed.playing {
