@@ -447,6 +447,32 @@ shader hooks {
             .unwrap_or_else(|e| panic!("naga rejects: {} (chunk line {:?})\n{}", e.message, e.chunk_line, compiled.chunk));
     }
 
+    /// The new stdlib batch — `lerp`, `inverseLerp`, `remap`, `rotate2D` and
+    /// `refract` — each exercised at a width naga can catch a lane mismatch
+    /// at (scalar for the FnByLanes ones, vec3/vec2 for the rest), so a typo
+    /// in a support function's signature fails here instead of at the first
+    /// artist who reaches for the node.
+    #[test]
+    fn the_lerp_batch_emits_valid_wgsl() {
+        let src = r#"
+shader lerp_batch {
+  stage fragment
+  uniform t: float = 0.5
+
+  let a = lerp(0, 10, t)
+  let b = inverseLerp(0, 10, a)
+  let c = remap(b, 0, 1, -1, 1)
+  let spun = rotate2D(uv, 3.14159)
+  let bent = refract(normalize(worldPos), normal, 0.75)
+
+  output color = vec4(vec3(c) + spun.x + bent, 1)
+}
+"#;
+        let compiled = compile_fragment(src).expect("compiles");
+        transpile::validate(transpile::TEST_PRELUDE, &compiled.chunk)
+            .unwrap_or_else(|e| panic!("naga rejects: {} (chunk line {:?})\n{}", e.message, e.chunk_line, compiled.chunk));
+    }
+
     #[test]
     fn type_errors_are_caught_with_spans() {
         // cross() wants vec3s; uv is a vec2.

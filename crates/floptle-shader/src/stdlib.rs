@@ -120,14 +120,29 @@ pub static OPS: &[OpSpec] = &[
     OpSpec { name: "clamp", inputs: &[req("x", G), req("lo", G), req("hi", G)], output: G, stages: ANY, emit: Emit::Fn("clamp"), doc: "Constrain x to [lo, hi].", category: "math" },
     OpSpec { name: "saturate", inputs: &[req("x", G)], output: G, stages: ANY, emit: Emit::Fn("saturate"), doc: "Clamp to [0, 1].", category: "math" },
     OpSpec { name: "mix", inputs: &[req("a", G), req("b", G), req("t", G)], output: G, stages: ANY, emit: Emit::Fn("mix"), doc: "Linear blend: a + (b-a)·t.", category: "math" },
+    // Same op as `mix` (WGSL's own spelling), under the name most artists
+    // coming from Unity/Unreal/HLSL reach for first.
+    OpSpec { name: "lerp", inputs: &[req("a", G), req("b", G), req("t", G)], output: G, stages: ANY, emit: Emit::Fn("mix"), doc: "Linear blend: a + (b-a)·t. Same as mix, under the other engines' name.", category: "math" },
     OpSpec { name: "step", inputs: &[req("edge", G), req("x", G)], output: G, stages: ANY, emit: Emit::Fn("step"), doc: "0 below edge, 1 at/above.", category: "math" },
     OpSpec { name: "smoothstep", inputs: &[req("lo", G), req("hi", G), req("x", G)], output: G, stages: ANY, emit: Emit::Fn("smoothstep"), doc: "Smooth 0→1 ramp between lo and hi.", category: "math" },
+    // The two ends of "where does this value sit in a range" — filed
+    // alongside `lerp` as the pair every gameplay-driven shader effect
+    // reaches for (health → colour, distance → fade, a knob → a whole curve).
+    OpSpec { name: "inverseLerp", inputs: &[req("a", G), req("b", G), req("value", G)], output: G, stages: ANY, emit: Emit::FnByLanes("flsl_inv_lerp"), doc: "The t for which mix(a, b, t) == value — the inverse of lerp/mix.", category: "math" },
+    OpSpec { name: "remap", inputs: &[req("value", G), req("inMin", G), req("inMax", G), req("outMin", G), req("outMax", G)], output: G, stages: ANY, emit: Emit::FnByLanes("flsl_remap"), doc: "Linearly rescale value from [inMin, inMax] into [outMin, outMax] (no clamping).", category: "math" },
     OpSpec { name: "dot", inputs: &[req("a", G), req("b", G)], output: F, stages: ANY, emit: Emit::Fn("dot"), doc: "Dot product.", category: "math" },
     OpSpec { name: "cross", inputs: &[req("a", V3), req("b", V3)], output: V3, stages: ANY, emit: Emit::Fn("cross"), doc: "Cross product.", category: "math" },
     OpSpec { name: "normalize", inputs: &[req("v", G)], output: G, stages: ANY, emit: Emit::Fn("normalize"), doc: "Unit-length vector.", category: "math" },
     OpSpec { name: "length", inputs: &[req("v", G)], output: F, stages: ANY, emit: Emit::Fn("length"), doc: "Vector length.", category: "math" },
     OpSpec { name: "distance", inputs: &[req("a", G), req("b", G)], output: F, stages: ANY, emit: Emit::Fn("distance"), doc: "Distance between points.", category: "math" },
     OpSpec { name: "reflect", inputs: &[req("i", G), req("n", G)], output: G, stages: ANY, emit: Emit::Fn("reflect"), doc: "Reflect i around normal n.", category: "math" },
+    // `reflect`'s other half. Glass/water still want their own whole-scene
+    // pass to sample anything with it, but the math itself was a gap: nothing
+    // in the stdlib could bend a ray, only mirror one.
+    OpSpec { name: "refract", inputs: &[req("i", GV), req("n", GV), req("eta", F)], output: GV, stages: ANY, emit: Emit::Fn("refract"), doc: "Bend i through a surface of normal n with index-of-refraction ratio eta (e.g. 1.0/1.33 entering water). Zero vector past the critical angle (total internal reflection).", category: "math" },
+    // A UV/plane rotation, spelled out so "spin this texture" is one node
+    // instead of hand-building a rotation matrix from sin/cos.
+    OpSpec { name: "rotate2D", inputs: &[req("p", V2), req("radians", F)], output: V2, stages: ANY, emit: Emit::Fn("flsl_rotate2d"), doc: "Rotate a 2D point/vector by an angle (radians, counter-clockwise).", category: "math" },
 
     // ---- noise -------------------------------------------------------------
     OpSpec { name: "valueNoise", inputs: &[req("p", GV)], output: F, stages: ANY, emit: Emit::FnByLanes("flsl_vnoise"), doc: "Smooth value noise in [0, 1].", category: "noise" },
@@ -241,6 +256,38 @@ fn flsl_mod1(x: f32, y: f32) -> f32 { return x - y * floor(x / y); }
 fn flsl_mod2(x: vec2<f32>, y: vec2<f32>) -> vec2<f32> { return x - y * floor(x / y); }
 fn flsl_mod3(x: vec3<f32>, y: vec3<f32>) -> vec3<f32> { return x - y * floor(x / y); }
 fn flsl_mod4(x: vec4<f32>, y: vec4<f32>) -> vec4<f32> { return x - y * floor(x / y); }
+
+// The inverse of mix/lerp: what t gives mix(a, b, t) == value. Divides by
+// zero exactly when a == b, same as every other divide in this file — the
+// caller's problem, not this function's to guard.
+fn flsl_inv_lerp1(a: f32, b: f32, value: f32) -> f32 { return (value - a) / (b - a); }
+fn flsl_inv_lerp2(a: vec2<f32>, b: vec2<f32>, value: vec2<f32>) -> vec2<f32> { return (value - a) / (b - a); }
+fn flsl_inv_lerp3(a: vec3<f32>, b: vec3<f32>, value: vec3<f32>) -> vec3<f32> { return (value - a) / (b - a); }
+fn flsl_inv_lerp4(a: vec4<f32>, b: vec4<f32>, value: vec4<f32>) -> vec4<f32> { return (value - a) / (b - a); }
+
+// Rescale value out of [inMin, inMax] and into [outMin, outMax] — inverse-lerp
+// then lerp, fused into the one node an effect actually reaches for (health
+// 20..100 -> alpha 1..0, distance 0..range -> fade 0..1, and so on).
+fn flsl_remap1(value: f32, in_min: f32, in_max: f32, out_min: f32, out_max: f32) -> f32 {
+    return out_min + (value - in_min) * (out_max - out_min) / (in_max - in_min);
+}
+fn flsl_remap2(value: vec2<f32>, in_min: vec2<f32>, in_max: vec2<f32>, out_min: vec2<f32>, out_max: vec2<f32>) -> vec2<f32> {
+    return out_min + (value - in_min) * (out_max - out_min) / (in_max - in_min);
+}
+fn flsl_remap3(value: vec3<f32>, in_min: vec3<f32>, in_max: vec3<f32>, out_min: vec3<f32>, out_max: vec3<f32>) -> vec3<f32> {
+    return out_min + (value - in_min) * (out_max - out_min) / (in_max - in_min);
+}
+fn flsl_remap4(value: vec4<f32>, in_min: vec4<f32>, in_max: vec4<f32>, out_min: vec4<f32>, out_max: vec4<f32>) -> vec4<f32> {
+    return out_min + (value - in_min) * (out_max - out_min) / (in_max - in_min);
+}
+
+// A plain 2D rotation — sin/cos built once so a UV spin is one node instead
+// of a shader author hand-rolling the matrix every time they want one.
+fn flsl_rotate2d(p: vec2<f32>, radians: f32) -> vec2<f32> {
+    let c = cos(radians);
+    let s = sin(radians);
+    return vec2<f32>(p.x * c - p.y * s, p.x * s + p.y * c);
+}
 
 // Integer-lattice hashes (PCG-style bit mixing). The old float hashes
 // (`fract(p * 456.21)`…) silently quantized once the product outgrew f32
