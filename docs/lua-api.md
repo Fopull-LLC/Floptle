@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 57
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 70
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 26
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -275,6 +275,22 @@ function start(node) — runs once when play begins.
 
 Steam integration: identity, app/build info, and steam.available() for branching. Always present so steam.available() is always safe to call — nil (not an error) is what every other steam.* getter answers when it's false. See docs/steam-integration-proposal.md.
 
+### `steam.achievementDescription`
+
+steam.achievementDescription(id) — id's display description, in Steam's own current language.
+
+### `steam.achievementGlobalPercent`
+
+steam.achievementGlobalPercent(id) — the percentage of players globally who've unlocked id, once Steam has it cached; nil before then.
+
+### `steam.achievementName`
+
+steam.achievementName(id) — id's display name, in Steam's own current language.
+
+### `steam.achievementUnlocked`
+
+steam.achievementUnlocked(id) — true/false, or nil if stats aren't ready or id isn't a real achievement (check it against the Steamworks App Admin — a mistyped id is the single most common cause).
+
 ### `steam.available`
 
 steam.available() — true only for a floptle run/exported/served session with a real Steam client initialized. false in the editor's own docked Play-mode viewport, in every other session, and whenever no Steam client is running — branch on this before any other steam.* call, none of which raise when it's false (they answer nil).
@@ -286,6 +302,14 @@ steam.betaName() — the beta branch this build was installed from. nil on the d
 ### `steam.buildId`
 
 steam.buildId() — this build's Steam build id. nil when steam.available() is false.
+
+### `steam.clearAchievement`
+
+steam.clearAchievement(id) -> ok, err — resets id to locked, locally. Same batching as steam.unlockAchievement.
+
+### `steam.flushStats`
+
+steam.flushStats() — sends every pending achievement/stat write to Steam now, instead of waiting for the automatic batch (every 5s while something's pending). Safe to call with nothing pending.
 
 ### `steam.installDir`
 
@@ -310,6 +334,34 @@ steam.onPersonaChanged(fn) — fires once when the local user's persona (name or
 ### `steam.personaName`
 
 steam.personaName() — the local user's current display name. nil when steam.available() is false.
+
+### `steam.resetAllStats`
+
+steam.resetAllStats(achievementsToo) -> ok, err — wipes every stat, and every achievement if achievementsToo. Development/QA only — never call this from a shipping build's own normal logic.
+
+### `steam.setStatFloat`
+
+steam.setStatFloat(name, value) -> ok, err — writes a float stat LOCALLY. Same batching as steam.unlockAchievement.
+
+### `steam.setStatInt`
+
+steam.setStatInt(name, value) -> ok, err — writes an integer stat LOCALLY. Same batching as steam.unlockAchievement.
+
+### `steam.statFloat`
+
+steam.statFloat(name) — a float stat's current value, or nil.
+
+### `steam.statInt`
+
+steam.statInt(name) — an integer stat's current value, or nil before stats are ready / if name isn't real.
+
+### `steam.statsReady`
+
+steam.statsReady() — true once achievements/stats have finished loading from Steam. Every achievement/stat call below answers nil (reads) or false with a message (writes) before this, rather than guessing.
+
+### `steam.unlockAchievement`
+
+steam.unlockAchievement(id) -> ok, err — unlocks LOCALLY (cheap, in-memory); reaches Steam's server and triggers its own unlock notification on the next automatic batch or steam.flushStats(). err is nil on success, an actionable message (e.g. an unknown id) otherwise.
 
 ### `time`
 

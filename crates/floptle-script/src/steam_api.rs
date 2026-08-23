@@ -18,6 +18,15 @@
 //! infrastructure, not a Steam-specific gap, and is deliberately left for a
 //! follow-up rather than shipped as bytes a script has no way to use.
 //!
+//! **Achievement/stat writes never hit the network directly.** Every unlock,
+//! clear or stat write marks the backend dirty; an automatic batch (or an
+//! explicit `steam.flushStats()`) sends everything pending in one call,
+//! reconciling with the backend's own async confirmation rather than trusting
+//! the synchronous call's own `Ok` — see `floptle_steam::SteamPlatform`'s
+//! `pump`/`flush`. **Average-rate stats and progress-indicator notifications
+//! are out of scope** — the Steamworks binding this engine uses doesn't wrap
+//! either at all (`docs/steam-integration-proposal.md`).
+//!
 //! Installed unconditionally (`ScriptHost::new()`), same as every other
 //! `install_*_api` — the `steam` global always exists so `steam.available()`
 //! is always safe to call. What varies is only what `platform` currently
@@ -32,7 +41,7 @@ use std::rc::Rc;
 use mlua::{Lua, Value};
 
 use crate::{LogLevel, ScriptLog};
-use floptle_services::Platform;
+use floptle_services::{Achievements, Platform};
 
 /// The platform backend, swappable after `ScriptHost::new()` via
 /// `set_platform` — every Lua closure below holds a clone of this same cell,
@@ -48,6 +57,30 @@ pub(crate) struct SteamState {
 
 fn log(logs: &Rc<RefCell<Vec<ScriptLog>>>, level: LogLevel, msg: String) {
     logs.borrow_mut().push(ScriptLog { level, msg, source: None });
+}
+
+/// Runs `f` against the current backend's `Achievements` surface, or answers
+/// a plain "not available" error when there is none — every achievement/stat
+/// WRITE call here goes through this, so `steam.unlockAchievement(...)`
+/// against `NullPlatform` (no Steam) answers `(false, "...")`, not a crash on
+/// calling a method that doesn't exist.
+fn achievements_call(
+    platform: &SharedPlatform,
+    f: impl FnOnce(&dyn Achievements) -> Result<(), String>,
+) -> Result<(), String> {
+    match platform.borrow().achievements() {
+        Some(a) => f(a),
+        None => Err("Steam isn't available in this session".into()),
+    }
+}
+
+/// `Result<(), String>` as the `(ok, err)` pair every write call here
+/// returns to Lua — `err` is `nil` on success, never an empty string.
+fn result_tuple(lua: &Lua, r: Result<(), String>) -> mlua::Result<(bool, Value)> {
+    match r {
+        Ok(()) => Ok((true, Value::Nil)),
+        Err(msg) => Ok((false, Value::String(lua.create_string(msg)?))),
+    }
 }
 
 /// Install the `steam` global table.
@@ -115,6 +148,114 @@ pub(crate) fn install_steam_api(
     t.set(
         "isCybercafe",
         lua.create_function(move |_, ()| Ok(p.borrow().identity().map(|id| id.is_cybercafe())))?,
+    )?;
+
+    let p = platform.clone();
+    t.set("statsReady", lua.create_function(move |_, ()| Ok(p.borrow().achievements().is_some_and(|a| a.stats_ready())))?)?;
+
+    let p = platform.clone();
+    t.set(
+        "achievementUnlocked",
+        lua.create_function(move |_, id: String| {
+            Ok(p.borrow().achievements().and_then(|a| a.achievement_unlocked(&id)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "unlockAchievement",
+        lua.create_function(move |lua, id: String| {
+            result_tuple(lua, achievements_call(&p, |a| a.unlock_achievement(&id)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "clearAchievement",
+        lua.create_function(move |lua, id: String| {
+            result_tuple(lua, achievements_call(&p, |a| a.clear_achievement(&id)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "achievementGlobalPercent",
+        lua.create_function(move |_, id: String| {
+            Ok(p.borrow().achievements().and_then(|a| a.achievement_global_percent(&id)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "achievementName",
+        lua.create_function(move |lua, id: String| {
+            match p.borrow().achievements().and_then(|a| a.achievement_name(&id)) {
+                Some(name) => Ok(Value::String(lua.create_string(name)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "achievementDescription",
+        lua.create_function(move |lua, id: String| {
+            match p.borrow().achievements().and_then(|a| a.achievement_description(&id)) {
+                Some(desc) => Ok(Value::String(lua.create_string(desc)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "statInt",
+        lua.create_function(move |_, name: String| {
+            Ok(p.borrow().achievements().and_then(|a| a.stat_int(&name)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "setStatInt",
+        lua.create_function(move |lua, (name, value): (String, i32)| {
+            result_tuple(lua, achievements_call(&p, |a| a.set_stat_int(&name, value)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "statFloat",
+        lua.create_function(move |_, name: String| {
+            Ok(p.borrow().achievements().and_then(|a| a.stat_float(&name)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "setStatFloat",
+        lua.create_function(move |lua, (name, value): (String, f32)| {
+            result_tuple(lua, achievements_call(&p, |a| a.set_stat_float(&name, value)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "flushStats",
+        lua.create_function(move |_, ()| {
+            if let Some(a) = p.borrow().achievements() {
+                a.flush();
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "resetAllStats",
+        lua.create_function(move |lua, achievements_too: bool| {
+            result_tuple(lua, achievements_call(&p, |a| a.reset_all_stats(achievements_too)))
+        })?,
     )?;
 
     t.set(
@@ -209,5 +350,49 @@ mod tests {
         let f = fresh();
         drain(&f.platform, &f.state, &f.logs);
         assert!(f.logs.borrow().is_empty());
+    }
+
+    /// Every achievement/stat READ is nil, and `statsReady` is false, under
+    /// `NullPlatform` — the ordinary "not on Steam" branch, not an error.
+    #[test]
+    fn achievement_and_stat_reads_are_nil_under_null_platform() {
+        let f = fresh();
+        let ready: bool = f.lua.load("return steam.statsReady()").eval().unwrap();
+        assert!(!ready);
+        for call in [
+            "steam.achievementUnlocked(\"WIN\")",
+            "steam.achievementGlobalPercent(\"WIN\")",
+            "steam.achievementName(\"WIN\")",
+            "steam.achievementDescription(\"WIN\")",
+            "steam.statInt(\"kills\")",
+            "steam.statFloat(\"distance\")",
+        ] {
+            let is_nil: bool = f.lua.load(format!("return {call} == nil")).eval().unwrap();
+            assert!(is_nil, "{call} should be nil under NullPlatform");
+        }
+    }
+
+    /// Every achievement/stat WRITE answers `(false, "not available")`
+    /// under `NullPlatform`, rather than raising on a method that doesn't
+    /// exist — a script can check `ok` without wrapping every call in
+    /// `pcall`.
+    #[test]
+    fn achievement_and_stat_writes_fail_cleanly_under_null_platform() {
+        let f = fresh();
+        for call in [
+            "steam.unlockAchievement(\"WIN\")",
+            "steam.clearAchievement(\"WIN\")",
+            "steam.setStatInt(\"kills\", 1)",
+            "steam.setStatFloat(\"distance\", 1.5)",
+            "steam.resetAllStats(false)",
+        ] {
+            let (ok, err): (bool, Option<String>) =
+                f.lua.load(format!("return {call}")).eval().unwrap();
+            assert!(!ok, "{call} should fail under NullPlatform");
+            assert!(err.is_some_and(|e| !e.is_empty()), "{call} should carry a real message");
+        }
+        // flushStats is fire-and-forget — never raises, nothing to assert
+        // beyond "it runs".
+        f.lua.load("steam.flushStats()").exec().unwrap();
     }
 }

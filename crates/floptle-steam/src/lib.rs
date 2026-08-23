@@ -27,7 +27,30 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "steam")]
-use floptle_services::{Identity, Platform};
+use std::cell::Cell;
+#[cfg(feature = "steam")]
+use std::time::{Duration, Instant};
+
+#[cfg(feature = "steam")]
+use floptle_services::{Achievements, Identity, Platform};
+
+/// How long to leave achievement/stat writes queued before an automatic
+/// [`Achievements::flush`] — a game that never calls `flush` itself still
+/// reaches the server, just not on every single write.
+#[cfg(feature = "steam")]
+const AUTO_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Whether enough time has passed since the last flush attempt to try again —
+/// pulled out pure so the boundary (never on the very first pump, never
+/// before the interval elapses, always once it has) is testable without a
+/// live Steam session.
+#[cfg(feature = "steam")]
+fn flush_is_due(last_attempt: Option<Instant>, now: Instant, interval: Duration) -> bool {
+    match last_attempt {
+        None => true,
+        Some(t) => now.saturating_duration_since(t) >= interval,
+    }
+}
 
 /// Returns `true` if the app wasn't launched through Steam and Steam has
 /// begun relaunching it — the caller should exit as soon as possible and
@@ -47,16 +70,39 @@ pub struct SteamPlatform {
     client: steamworks::Client,
     app_id: steamworks::AppId,
     persona_changed: Arc<AtomicBool>,
-    // Held only to keep the registration alive — dropping it unregisters the
-    // callback. Never read directly.
+    /// Set by the `UserStatsReceived` callback — every `Achievements` method
+    /// answers honestly (`None`/`Err`) before this, rather than guessing.
+    /// This SDK version has no `RequestCurrentStats` to wait on explicitly
+    /// (removed from the interface Valve ships in this `steamworks-sys`
+    /// vendor — confirmed against the header, not guessed); stats arrive on
+    /// their own shortly after init, and this flag is how a caller actually
+    /// knows "shortly" has passed.
+    stats_ready: Arc<AtomicBool>,
+    /// Set on any local achievement/stat write, cleared once a `store_stats`
+    /// call is accepted — but see `store_failed` for why "accepted" isn't
+    /// "confirmed".
+    dirty: Arc<AtomicBool>,
+    /// Set by the `UserStatsStored` callback when a store's ASYNC server
+    /// round-trip comes back failed (offline, a transient backend error) —
+    /// `flush` re-checks this and re-marks `dirty` rather than trusting the
+    /// synchronous `store_stats()` call's own `Ok` (which only means "the
+    /// local request was accepted", not "the server confirmed it"). This is
+    /// the whole of "offline queue + reconcile on reconnect": nothing is
+    /// dropped, the next automatic batch or explicit `flush` just tries again.
+    store_failed: Arc<AtomicBool>,
+    last_flush_attempt: Cell<Option<Instant>>,
+    // Held only to keep the registrations alive — dropping one unregisters
+    // its callback. Never read directly.
     _persona_cb: steamworks::CallbackHandle,
+    _stats_received_cb: steamworks::CallbackHandle,
+    _stats_stored_cb: steamworks::CallbackHandle,
 }
 
 #[cfg(feature = "steam")]
 impl SteamPlatform {
     /// Initializes the Steamworks API for `app_id` and registers the
-    /// persona-state-change callback [`Identity::poll_persona_change`]
-    /// drains. Call [`restart_app_if_necessary`] first and exit if it
+    /// callbacks [`Identity::poll_persona_change`] and every [`Achievements`]
+    /// method drain. Call [`restart_app_if_necessary`] first and exit if it
     /// returns `true` — this must never run in that case.
     ///
     /// Fails if no Steam client is running, the app isn't set up on the
@@ -65,12 +111,42 @@ impl SteamPlatform {
     /// `docs/steam-integration-proposal.md`), not bugs.
     pub fn init(app_id: u32) -> Result<Self, steamworks::SteamAPIInitError> {
         let client = steamworks::Client::init_app(app_id)?;
+
         let persona_changed = Arc::new(AtomicBool::new(false));
         let flag = persona_changed.clone();
         let _persona_cb = client.register_callback::<steamworks::PersonaStateChange, _>(move |_| {
             flag.store(true, Ordering::Relaxed);
         });
-        Ok(Self { client, app_id: app_id.into(), persona_changed, _persona_cb })
+
+        let stats_ready = Arc::new(AtomicBool::new(false));
+        let ready = stats_ready.clone();
+        let _stats_received_cb =
+            client.register_callback::<steamworks::UserStatsReceived, _>(move |cb| {
+                if cb.result.is_ok() {
+                    ready.store(true, Ordering::Relaxed);
+                }
+            });
+
+        let store_failed = Arc::new(AtomicBool::new(false));
+        let failed = store_failed.clone();
+        let _stats_stored_cb = client.register_callback::<steamworks::UserStatsStored, _>(move |cb| {
+            if cb.result.is_err() {
+                failed.store(true, Ordering::Relaxed);
+            }
+        });
+
+        Ok(Self {
+            client,
+            app_id: app_id.into(),
+            persona_changed,
+            stats_ready,
+            dirty: Arc::new(AtomicBool::new(false)),
+            store_failed,
+            last_flush_attempt: Cell::new(None),
+            _persona_cb,
+            _stats_received_cb,
+            _stats_stored_cb,
+        })
     }
 }
 
@@ -81,8 +157,23 @@ impl Platform for SteamPlatform {
     }
     fn pump(&self) {
         self.client.run_callbacks();
+        // Reconcile FIRST: a store's async server round-trip can fail on a
+        // frame long after `dirty` was already cleared for it, and the due/
+        // dirty check right below is the only thing deciding whether `flush`
+        // gets called at all — checking `store_failed` only INSIDE `flush`
+        // would mean it's never read until something else re-dirties first.
+        if self.store_failed.swap(false, Ordering::Relaxed) {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        let due = flush_is_due(self.last_flush_attempt.get(), Instant::now(), AUTO_FLUSH_INTERVAL);
+        if due && self.dirty.load(Ordering::Relaxed) {
+            Achievements::flush(self);
+        }
     }
     fn identity(&self) -> Option<&dyn Identity> {
+        Some(self)
+    }
+    fn achievements(&self) -> Option<&dyn Achievements> {
         Some(self)
     }
 }
@@ -124,6 +215,158 @@ impl Identity for SteamPlatform {
     }
 }
 
+#[cfg(feature = "steam")]
+impl Achievements for SteamPlatform {
+    fn stats_ready(&self) -> bool {
+        self.stats_ready.load(Ordering::Relaxed)
+    }
+    fn achievement_unlocked(&self, id: &str) -> Option<bool> {
+        if !self.stats_ready() {
+            return None;
+        }
+        self.client.user_stats().achievement(id).get().ok()
+    }
+    fn unlock_achievement(&self, id: &str) -> Result<(), String> {
+        self.client
+            .user_stats()
+            .achievement(id)
+            .set()
+            .map_err(|()| self.achievement_write_failed(id))?;
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+    fn clear_achievement(&self, id: &str) -> Result<(), String> {
+        self.client
+            .user_stats()
+            .achievement(id)
+            .clear()
+            .map_err(|()| self.achievement_write_failed(id))?;
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+    fn achievement_global_percent(&self, id: &str) -> Option<f32> {
+        if !self.stats_ready() {
+            return None;
+        }
+        self.client.user_stats().achievement(id).get_achievement_achieved_percent().ok()
+    }
+    fn achievement_name(&self, id: &str) -> Option<String> {
+        if !self.stats_ready() {
+            return None;
+        }
+        self.client
+            .user_stats()
+            .achievement(id)
+            .get_achievement_display_attribute("name")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+    fn achievement_description(&self, id: &str) -> Option<String> {
+        if !self.stats_ready() {
+            return None;
+        }
+        self.client
+            .user_stats()
+            .achievement(id)
+            .get_achievement_display_attribute("desc")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+    fn stat_int(&self, name: &str) -> Option<i32> {
+        if !self.stats_ready() {
+            return None;
+        }
+        self.client.user_stats().get_stat_i32(name).ok()
+    }
+    fn set_stat_int(&self, name: &str, value: i32) -> Result<(), String> {
+        self.client
+            .user_stats()
+            .set_stat_i32(name, value)
+            .map_err(|()| self.stat_write_failed(name))?;
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+    fn stat_float(&self, name: &str) -> Option<f32> {
+        if !self.stats_ready() {
+            return None;
+        }
+        self.client.user_stats().get_stat_f32(name).ok()
+    }
+    fn set_stat_float(&self, name: &str, value: f32) -> Result<(), String> {
+        self.client
+            .user_stats()
+            .set_stat_f32(name, value)
+            .map_err(|()| self.stat_write_failed(name))?;
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+    fn flush(&self) {
+        // Callable directly (e.g. from Lua) without going through `pump`
+        // first, so this reconciles too — see the comment in `pump`.
+        if self.store_failed.swap(false, Ordering::Relaxed) {
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        if !self.dirty.load(Ordering::Relaxed) {
+            return;
+        }
+        self.last_flush_attempt.set(Some(Instant::now()));
+        // The synchronous call only means "the local request was accepted" —
+        // clear optimistically. If the actual async server round-trip later
+        // comes back failed, the `UserStatsStored` callback sets
+        // `store_failed`, and the reconcile above (on the NEXT `pump`/`flush`)
+        // re-marks `dirty` so the write isn't lost. A synchronous `Err` here
+        // (stats not ready yet, most likely) leaves `dirty` set so the next
+        // attempt retries.
+        if self.client.user_stats().store_stats().is_ok() {
+            self.dirty.store(false, Ordering::Relaxed);
+        }
+    }
+    fn reset_all_stats(&self, achievements_too: bool) -> Result<(), String> {
+        self.client
+            .user_stats()
+            .reset_all_stats(achievements_too)
+            .map_err(|()| self.not_ready_reason())
+    }
+}
+
+#[cfg(feature = "steam")]
+impl SteamPlatform {
+    /// A stats-not-ready failure is the one case worth distinguishing —
+    /// "not ready yet" is a transient state a caller can just retry once
+    /// `stats_ready()` is true; anything else genuinely means the backend
+    /// rejected the call.
+    fn not_ready_reason(&self) -> String {
+        if self.stats_ready() {
+            "the Steam backend rejected the call".into()
+        } else {
+            "stats/achievements haven't finished loading from Steam yet".into()
+        }
+    }
+
+    /// A mistyped achievement id is the single most common Steamworks
+    /// partner-site foot-gun (`docs/steam-integration-proposal.md`) — name it
+    /// explicitly once stats ARE known ready, since "not ready" is then ruled
+    /// out and an unknown id is what's left.
+    fn achievement_write_failed(&self, id: &str) -> String {
+        if self.stats_ready() {
+            format!("\"{id}\" isn't a known achievement id — check it against the Steamworks App Admin")
+        } else {
+            self.not_ready_reason()
+        }
+    }
+
+    /// Same reasoning as [`achievement_write_failed`](Self::achievement_write_failed), for stats.
+    fn stat_write_failed(&self, name: &str) -> String {
+        if self.stats_ready() {
+            format!("\"{name}\" isn't a known stat name — check it against the Steamworks App Admin")
+        } else {
+            self.not_ready_reason()
+        }
+    }
+}
+
 #[cfg(all(test, feature = "steam"))]
 mod tests {
     use super::*;
@@ -145,5 +388,29 @@ mod tests {
         // false — asserting it runs at all is the point (it must be safe to
         // call unconditionally, before any other Steam call).
         let _ = restart_app_if_necessary(480);
+    }
+
+    /// The batching boundary the whole "automatic flush" behavior hangs off:
+    /// never on the very first pump before anything was ever tried, never
+    /// before the interval has actually elapsed, always once it has —
+    /// exactly on the boundary too, since `>=` (not `>`) is what makes
+    /// `AUTO_FLUSH_INTERVAL` mean what it says.
+    #[test]
+    fn flush_is_due_respects_the_interval_boundary() {
+        let now = Instant::now();
+        let interval = Duration::from_secs(5);
+        assert!(flush_is_due(None, now, interval), "nothing tried yet — always due");
+        assert!(
+            !flush_is_due(Some(now), now + Duration::from_secs(4), interval),
+            "under the interval — not due yet"
+        );
+        assert!(
+            flush_is_due(Some(now), now + Duration::from_secs(5), interval),
+            "exactly the interval — due"
+        );
+        assert!(
+            flush_is_due(Some(now), now + Duration::from_secs(6), interval),
+            "past the interval — due"
+        );
     }
 }

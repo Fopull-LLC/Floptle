@@ -22,8 +22,61 @@
 
 #![warn(missing_docs)]
 
-/// Achievement unlock/query surface. Empty until Phase 2 gives it methods.
-pub trait Achievements {}
+/// Achievement unlock/query + int/float stats. Landed Phase 2 — Steamworks
+/// groups both under one interface (`ISteamUserStats`), and so does this
+/// trait, rather than inventing a category Phase 0 didn't name.
+///
+/// **Average-rate stats are out of scope.** The Steamworks binding this
+/// engine uses doesn't wrap `UpdateAvgRateStat`/its `GetStatValue` variant at
+/// all — a real gap, not an oversight; see
+/// `docs/steam-integration-proposal.md`. **So is progress-indicator
+/// notifications** (`IndicateAchievementProgress`) — also unbound. Both would
+/// need raw FFI to close.
+pub trait Achievements {
+    /// Whether stats/achievements have finished loading from the backend —
+    /// every other method here answers honestly (`None`/`Err`, never a
+    /// guess) until this is `true`.
+    fn stats_ready(&self) -> bool;
+    /// Is `id` unlocked? `None` when stats aren't ready yet, or `id` isn't a
+    /// real achievement — a mistyped id is the single most common
+    /// Steamworks-backend misconfiguration.
+    fn achievement_unlocked(&self, id: &str) -> Option<bool>;
+    /// Unlocks `id` LOCALLY — cheap, in-memory. Reaches the backend's server
+    /// (and triggers its native unlock notification) on the next automatic
+    /// batch or an explicit [`flush`](Self::flush). `Err`'s message is
+    /// actionable — a mistyped id says so, rather than a bare failure.
+    fn unlock_achievement(&self, id: &str) -> Result<(), String>;
+    /// Resets `id` to locked, locally — same batching as
+    /// [`unlock_achievement`](Self::unlock_achievement).
+    fn clear_achievement(&self, id: &str) -> Result<(), String>;
+    /// The percentage of players globally who have unlocked `id`, once the
+    /// backend has this cached (`None` before then).
+    fn achievement_global_percent(&self, id: &str) -> Option<f32>;
+    /// `id`'s display name, in the backend's own current language.
+    fn achievement_name(&self, id: &str) -> Option<String>;
+    /// `id`'s display description, in the backend's own current language.
+    fn achievement_description(&self, id: &str) -> Option<String>;
+
+    /// Reads an integer stat. `None` before stats are ready or if `name`
+    /// isn't a real stat.
+    fn stat_int(&self, name: &str) -> Option<i32>;
+    /// Writes an integer stat LOCALLY — same batching as achievement writes.
+    fn set_stat_int(&self, name: &str, value: i32) -> Result<(), String>;
+    /// Reads a float stat.
+    fn stat_float(&self, name: &str) -> Option<f32>;
+    /// Writes a float stat LOCALLY.
+    fn set_stat_float(&self, name: &str, value: f32) -> Result<(), String>;
+
+    /// Sends every pending achievement/stat write to the backend now, rather
+    /// than waiting for the next automatic batch. Safe to call with nothing
+    /// pending (a no-op). A failed send (offline, a transient backend error)
+    /// is NOT lost — it stays queued and the next automatic batch (or the
+    /// next explicit `flush`) retries it.
+    fn flush(&self);
+    /// Wipes every stat, and every achievement if `achievements_too` — for
+    /// development/QA, never for a shipping build's own use.
+    fn reset_all_stats(&self, achievements_too: bool) -> Result<(), String>;
+}
 
 /// Cloud save read/write/enumerate surface. Empty until Phase 4.
 pub trait Cloud {}
