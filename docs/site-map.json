@@ -151,6 +151,7 @@
     "2d-lighting-proposal.md": "a design doc whose later steps are unshipped",
     "animation-system-proposal.md": "a proposal; the shipped guide is animation.md",
     "galaxy-streaming-proposal.md": "a proposal for unshipped work",
+    "steam-integration-proposal.md": "a proposal for unshipped work, deferred and not started",
     "cli-proposal.md": "the designed command line \u2014 subcommands on the one binary, JSON out, and the verbs that check, run, render and change a project from a terminal; the flags that ship today are documented in export-builds.md",
     "hub-proposal.md": "a proposal; the shipped guide is updating-the-hub.md",
     "image-editor-proposal.md": "a proposal; the shipped guide is image-editor.md",

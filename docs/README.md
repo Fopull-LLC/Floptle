@@ -158,6 +158,8 @@ proposal is **not** documentation of what shipped — for that, use the guides a
   modes; the finalized rollback plan.
 - [rollback-p7-fofighter-checklist.md](rollback-p7-fofighter-checklist.md) — the acceptance
   run over the relay.
+- [steam-integration-proposal.md](steam-integration-proposal.md) — the phased plan for
+  Steamworks integration. Deferred, not started.
 - [hub-proposal.md](hub-proposal.md) — the launcher and version manager.
 - [cli-proposal.md](cli-proposal.md) — the designed command line: subcommands on the one
   binary, JSON out, and the verbs that let a script — or an assistant — check, run, look
