@@ -74,8 +74,11 @@ impl Span {
     }
 }
 
-/// Run `root` for `span`. Returns the process exit code.
-pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool) -> i32 {
+/// Run `root` for `span`. Returns the process exit code. `steam` is
+/// `--steam`: the explicit opt-in that lets this verb talk to a real Steam
+/// client (Spacewar 480 if the project sets no app id) — off by default, so
+/// an ordinary run (CI included) never tries to reach one.
+pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool, steam: bool) -> i32 {
     if !root.join("project.ron").is_file() {
         eprintln!("{} is not a project directory (no project.ron)", root.display());
         return 2;
@@ -90,6 +93,15 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool) -> i
         ..Default::default()
     };
     ed.open_project(root.to_path_buf());
+    // Resolved from the project's OWN project.ron, not whatever `ed` cached
+    // while opening — `open_project` doesn't hand the config back, and this
+    // is a small file, cheap to read again.
+    let cfg = floptle_scene::load_project(&root.join("project.ron"));
+    if let Some(app_id) = crate::steam_boot::resolve_app_id(cfg.steam, steam)
+        && let Some(platform) = crate::steam_boot::boot(app_id)
+    {
+        ed.script_host.set_platform(platform);
+    }
     if let Some(s) = scene {
         let Some(path) = crate::inspect::resolve_scene(root, s) else {
             eprintln!("no scene called {s} under {}", root.join("scenes").display());

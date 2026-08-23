@@ -106,6 +106,7 @@ mod prefab;
 mod report;
 mod run;
 mod responsive;
+mod steam_boot;
 pub(crate) use report::{open_issue_tracker, DOCS_URL, ISSUES_URL};
 mod shader_graph;
 mod shader_preview;
@@ -1406,14 +1407,35 @@ fn main() {
     // An exported build: a `floptle-game.ron` manifest next to the binary makes
     // this process a GAME, not an editor — the project rides alongside it.
     let mut game_title = String::new();
+    let mut steam_settings: Option<floptle_scene::SteamProjectSettings> = None;
     if !player_mode
         && project_path.is_none()
         && let Some((manifest, dir)) = export::load_game_manifest()
     {
         player_mode = true;
         game_title = manifest.title;
+        steam_settings = manifest.steam;
         project_path = Some(dir.join(manifest.project));
     }
+    // A player_mode launch with no manifest (`floptle play <project>`, `--play
+    // <project>`) has its Steam settings in the project's own project.ron
+    // instead — the manifest path above already covers an exported build.
+    if player_mode
+        && steam_settings.is_none()
+        && let Some(p) = project_path.as_deref()
+    {
+        steam_settings = floptle_scene::load_project(&p.join("project.ron")).steam;
+    }
+    // Steam lifecycle activates ONLY here — never for the authoring editor,
+    // and never for the docked Play-mode viewport inside it, both of which
+    // leave `player_mode` false. Before the event loop, so RestartAppIfNecessary
+    // can exit the process before any window/GPU exists. Handed to `editor`
+    // once it's constructed, below.
+    let steam_platform = if player_mode {
+        crate::steam_boot::resolve_app_id(steam_settings, false).and_then(crate::steam_boot::boot)
+    } else {
+        None
+    };
 
     if player_mode {
         let name = if game_title.is_empty() { "game".to_string() } else { game_title.clone() };
@@ -1441,6 +1463,9 @@ fn main() {
     };
     if let Some(p) = project_path {
         editor.project_root = p;
+    }
+    if let Some(platform) = steam_platform {
+        editor.script_host.set_platform(platform);
     }
     event_loop.run_app(&mut editor).expect("run editor");
 }

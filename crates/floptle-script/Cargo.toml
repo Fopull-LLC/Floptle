@@ -25,6 +25,7 @@ floptle-net = { path = "../floptle-net" }
 # `account.*`: the device flow + the Cloud client. The token stays in there —
 # a script asks for a player, never a token.
 floptle-account = { path = "../floptle-account" }
+floptle-services = { path = "../floptle-services" }
 ron = { workspace = true }
 serde = { workspace = true }
 # `http.*` / `json.*` (proposal §4): blocking requests on worker threads, never

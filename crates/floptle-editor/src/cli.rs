@@ -499,6 +499,14 @@ pub(crate) const VERBS: &[Verb] = &[
                 required: false,
                 help: "answer as JSON",
             },
+            Arg {
+                name: "--steam",
+                value: Value::Flag,
+                required: false,
+                help: "initialize Steam (the project's app id, or Spacewar 480 if unset) and \
+                       pump it once per step — off by default, since most runs (CI included) \
+                       have no Steam client to talk to",
+            },
         ],
         needs_gpu: false,
         // It opens the project the way the editor does, and that tops up a
@@ -1084,7 +1092,13 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 // sit through after every edit.
                 (None, None) => crate::run::Span::Frames(120),
             };
-            Outcome::Exit(crate::run::run(&project, text(a, "scene").as_deref(), span, a.get_flag("json")))
+            Outcome::Exit(crate::run::run(
+                &project,
+                text(a, "scene").as_deref(),
+                span,
+                a.get_flag("json"),
+                a.get_flag("steam"),
+            ))
         }
         Some(("serve", a)) => {
             // **Built for the runtime's own parser, not parsed again here.**

@@ -28,8 +28,37 @@ pub trait Achievements {}
 /// Cloud save read/write/enumerate surface. Empty until Phase 4.
 pub trait Cloud {}
 
-/// Local-user identity: SteamID, persona, avatar. Empty until Phase 1.
-pub trait Identity {}
+/// Identity of the local user and the running app/build. Landed Phase 1.
+pub trait Identity {
+    /// The signed-in local user's platform-account id (a Steam64 id, on the
+    /// Steam backend).
+    fn local_user_id(&self) -> u64;
+    /// The local user's current persona (display) name.
+    fn persona_name(&self) -> String;
+    /// A 32×32 RGBA8 avatar for the local user, if the backend has one cached.
+    fn avatar_small(&self) -> Option<Vec<u8>>;
+    /// A 64×64 RGBA8 avatar for the local user, if the backend has one cached.
+    fn avatar_medium(&self) -> Option<Vec<u8>>;
+    /// A 184×184 RGBA8 avatar for the local user, if the backend has one cached.
+    fn avatar_large(&self) -> Option<Vec<u8>>;
+    /// `true` since the last poll if the local user's persona (name or
+    /// avatar) changed — a drain, not a push, matching the engine's per-frame
+    /// callback-drain pattern (`docs/steam-integration-proposal.md`).
+    fn poll_persona_change(&self) -> bool;
+    /// This build's build id, as the backend reports it.
+    fn build_id(&self) -> i32;
+    /// This app's install directory, as the backend reports it.
+    fn install_dir(&self) -> String;
+    /// The beta branch this build was installed from, if any (not the
+    /// default branch).
+    fn beta_name(&self) -> Option<String>;
+    /// `true` if this app is being played on a license borrowed from another
+    /// account (Steam Family Sharing), not one the signed-in user owns.
+    fn is_family_shared(&self) -> bool;
+    /// `true` if the backend has flagged this as a cybercafe/shared-computer
+    /// license.
+    fn is_cybercafe(&self) -> bool;
+}
 
 /// DLC/entitlement ownership surface. Empty until Phase 8.
 pub trait Entitlements {}
@@ -54,6 +83,19 @@ pub trait Social {}
 /// point of use, rather than the whole engine gaining a compile-time feature
 /// matrix.
 pub trait Platform {
+    /// Whether this backend is actually available right now — a real backend
+    /// whose runtime prerequisite succeeded (a Steam client was running and
+    /// `SteamAPI_Init` succeeded, for `floptle_steam::SteamPlatform`), not
+    /// just "compiled in". `NullPlatform` always answers `false`.
+    fn available(&self) -> bool {
+        false
+    }
+    /// Pumps pending backend callbacks. Call once per frame, main thread
+    /// only, for `floptle run`/exported/served builds — never inside the
+    /// editor's own docked Play-mode viewport (see
+    /// `docs/steam-integration-proposal.md`'s "Where Steam activates").
+    /// `NullPlatform` has nothing to pump.
+    fn pump(&self) {}
     /// The [`Achievements`] surface, if this backend has one.
     fn achievements(&self) -> Option<&dyn Achievements> {
         None
@@ -103,6 +145,7 @@ mod tests {
     #[test]
     fn null_platform_answers_none_for_every_capability() {
         let p = NullPlatform;
+        assert!(!p.available());
         assert!(p.achievements().is_none());
         assert!(p.cloud().is_none());
         assert!(p.identity().is_none());
@@ -120,6 +163,8 @@ mod tests {
     fn platform_is_object_safe() {
         let p = NullPlatform;
         let dyn_p: &dyn Platform = &p;
+        dyn_p.pump();
+        assert!(!dyn_p.available());
         assert!(dyn_p.achievements().is_none());
     }
 }

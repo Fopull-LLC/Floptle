@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 47
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 57
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 26
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -270,6 +270,46 @@ end)
 ### `start`
 
 function start(node) — runs once when play begins.
+
+### `steam`
+
+Steam integration: identity, app/build info, and steam.available() for branching. Always present so steam.available() is always safe to call — nil (not an error) is what every other steam.* getter answers when it's false. See docs/steam-integration-proposal.md.
+
+### `steam.available`
+
+steam.available() — true only for a floptle run/exported/served session with a real Steam client initialized. false in the editor's own docked Play-mode viewport, in every other session, and whenever no Steam client is running — branch on this before any other steam.* call, none of which raise when it's false (they answer nil).
+
+### `steam.betaName`
+
+steam.betaName() — the beta branch this build was installed from. nil on the default branch, and nil when steam.available() is false.
+
+### `steam.buildId`
+
+steam.buildId() — this build's Steam build id. nil when steam.available() is false.
+
+### `steam.installDir`
+
+steam.installDir() — this app's install directory, as Steam reports it. nil when steam.available() is false.
+
+### `steam.isCybercafe`
+
+steam.isCybercafe() — true if Steam has flagged this as a cybercafe/shared-computer license. nil when steam.available() is false.
+
+### `steam.isFamilyShared`
+
+steam.isFamilyShared() — true if this app is being played on a license borrowed from another account (Steam Family Sharing), not one the signed-in user owns. nil when steam.available() is false.
+
+### `steam.localUserId`
+
+steam.localUserId() — the signed-in local user's SteamID64, as a STRING (it exceeds what an f64 represents exactly). nil when steam.available() is false.
+
+### `steam.onPersonaChanged`
+
+steam.onPersonaChanged(fn) — fires once when the local user's persona (name or avatar) changes. Re-read steam.personaName() from inside it; avatars aren't exposed to Lua yet (no engine primitive turns raw bytes into a drawable texture at runtime — see docs/steam-integration-proposal.md).
+
+### `steam.personaName`
+
+steam.personaName() — the local user's current display name. nil when steam.available() is false.
 
 ### `time`
 

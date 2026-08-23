@@ -12,8 +12,16 @@ rust-version.workspace = true
 name = "floptle"
 path = "src/main.rs"
 
+[features]
+default = []
+# Off by default — matching floptle-steam's own feature, which this just
+# forwards to. See crates/floptle-editor/src/steam_boot.rs.
+steam = ["dep:floptle-steam", "floptle-steam/steam"]
+
 [dependencies]
 floptle-core = { path = "../floptle-core" }
+floptle-services = { path = "../floptle-services" }
+floptle-steam = { path = "../floptle-steam", optional = true }
 floptle-gi = { path = "../floptle-gi" }
 floptle-render = { path = "../floptle-render" }
 floptle-scene = { path = "../floptle-scene" }

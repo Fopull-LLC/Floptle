@@ -1802,6 +1802,18 @@ impl ScriptHost {
             logs.clone(),
             http_in_fixed.clone(),
         );
+        // `steam.*` — always installed (`steam.available()` must always be
+        // callable), backed by `NullPlatform` until a caller opts a session
+        // into a real backend via `set_platform`.
+        let platform: crate::steam_api::SharedPlatform =
+            Rc::new(RefCell::new(Rc::new(floptle_services::NullPlatform) as Rc<dyn floptle_services::Platform>));
+        let steam_state: Rc<RefCell<crate::steam_api::SteamState>> =
+            Rc::new(RefCell::new(crate::steam_api::SteamState::default()));
+        if let Err(e) =
+            crate::steam_api::install_steam_api(&lua, platform.clone(), steam_state.clone())
+        {
+            eprintln!("[lua] failed to install the steam API: {e}");
+        }
 
         // The rollback `replaying` flag (§4) — shared so `net.replaying()` can
         // answer it, which is the escape hatch for any cosmetic the engine's
@@ -2058,7 +2070,18 @@ impl ScriptHost {
             http,
             account,
             http_in_fixed,
+            platform,
+            steam_state,
         }
+    }
+
+    /// Points the `steam.*` bridge at a real backend — called (at most once,
+    /// before any script runs) only when the caller has decided this session
+    /// IS the game: `floptle run --steam`, an exported/served build, never
+    /// the editor's own docked Play-mode viewport. Left uncalled, every
+    /// `steam.*` getter keeps answering through `NullPlatform`.
+    pub fn set_platform(&self, platform: Rc<dyn floptle_services::Platform>) {
+        *self.platform.borrow_mut() = platform;
     }
 
     /// Every name the engine adds to a script's environment, as dotted paths
@@ -4046,6 +4069,9 @@ impl ScriptHost {
         crate::http_api::set_now(&self.http, time as f64);
         crate::http_api::drain(&self.lua, &self.http, &self.logs);
         crate::account_api::drain(&self.lua, &self.account, &self.logs);
+        // Pumps the platform backend's callbacks and fires
+        // `steam.onPersonaChanged` — a no-op under `NullPlatform`.
+        crate::steam_api::drain(&self.platform, &self.steam_state, &self.logs);
         // Pass 2: run each script's start/update.
         self.run_pass(world, &work, dt, time, Pass::Frame, floptle_input::Domain::Frame);
         // Every `nav.agent` walks HERE: after the orders this frame's scripts

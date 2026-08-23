@@ -270,6 +270,7 @@ mod sched_api;
 mod shape_api;
 mod assembly_api;
 mod space_api;
+mod steam_api;
 mod terrain_api;
 pub mod ui_make;
 mod view_api;
@@ -689,6 +690,14 @@ pub struct ScriptHost {
     /// True while the tick pass is running — `http.*` warns once when called
     /// from there, because nothing about a reply's timing can be replayed.
     http_in_fixed: Rc<std::cell::Cell<bool>>,
+    /// The `steam.*` bridge's backend — `NullPlatform` unless a caller has
+    /// explicitly decided this session IS the game and called
+    /// [`ScriptHost::set_platform`] (see `docs/steam-integration-proposal.md`'s
+    /// "Where Steam activates").
+    platform: steam_api::SharedPlatform,
+    /// The `steam.*` bridge's own state: just the registered
+    /// `onPersonaChanged` callback.
+    steam_state: Rc<RefCell<steam_api::SteamState>>,
     /// Per-assembly mirror (`assembly.info`), fed by the driver each frame.
     assembly_info: Rc<RefCell<HashMap<u32, assembly_api::AssemblyInfo>>>,
     /// Per-part contact loads for the last tick (`assembly.impacts`), fed by
