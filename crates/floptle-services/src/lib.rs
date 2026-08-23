@@ -78,8 +78,46 @@ pub trait Achievements {
     fn reset_all_stats(&self, achievements_too: bool) -> Result<(), String>;
 }
 
-/// Cloud save read/write/enumerate surface. Empty until Phase 4.
-pub trait Cloud {}
+/// Cloud save read/write/enumerate surface. Landed Phase 4.
+///
+/// **Quota reporting is out of scope.** The Steamworks binding this engine
+/// uses doesn't wrap `GetQuota` at all — a real gap, not an oversight; see
+/// `docs/steam-integration-proposal.md`.
+///
+/// **Conflict policy is the caller's to build, on purpose.** Steam Cloud has
+/// no built-in multi-writer conflict concept to expose — [`file_timestamp`]
+/// is the primitive a caller compares against its own local save's
+/// modification time to decide what "newer" means for itself, rather than
+/// this trait silently picking a winner.
+pub trait Cloud {
+    /// Whether Cloud is enabled for this app specifically (independent of
+    /// the account-wide setting).
+    fn is_enabled_for_app(&self) -> bool;
+    /// Toggles [`is_enabled_for_app`](Self::is_enabled_for_app).
+    fn set_enabled_for_app(&self, enabled: bool);
+    /// Whether Cloud is enabled account-wide (independent of the per-app
+    /// setting) — read-only: a player controls this from the Steam client
+    /// itself, not from inside a game.
+    fn is_enabled_for_account(&self) -> bool;
+    /// Every file currently in Cloud storage for this app, as `(name, size in
+    /// bytes)`.
+    fn files(&self) -> Vec<(String, u64)>;
+    /// Whether `name` exists in Cloud storage. The file needn't exist to be
+    /// named in any other call here — `write_file` creates it.
+    fn file_exists(&self, name: &str) -> bool;
+    /// `name`'s last-write timestamp (Unix seconds), if it exists.
+    fn file_timestamp(&self, name: &str) -> Option<i64>;
+    /// Deletes `name` locally AND remotely. `false` if there was nothing to
+    /// delete.
+    fn delete_file(&self, name: &str) -> Result<(), String>;
+    /// Deletes `name` from the Cloud while keeping the local copy — for a
+    /// player who wants this specific save to stop syncing without losing it.
+    fn forget_file(&self, name: &str) -> Result<(), String>;
+    /// Reads `name`'s full contents.
+    fn read_file(&self, name: &str) -> Result<Vec<u8>, String>;
+    /// Writes `data` as `name`'s full contents, replacing whatever was there.
+    fn write_file(&self, name: &str, data: &[u8]) -> Result<(), String>;
+}
 
 /// Identity of the local user and the running app/build. Landed Phase 1.
 pub trait Identity {

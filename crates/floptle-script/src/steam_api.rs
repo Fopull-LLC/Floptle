@@ -27,6 +27,12 @@
 //! are out of scope** — the Steamworks binding this engine uses doesn't wrap
 //! either at all (`docs/steam-integration-proposal.md`).
 //!
+//! **Cloud saves (`steam.cloud*`) have no conflict policy of their own** —
+//! `steam.cloudFileTimestamp` is the primitive a script compares against its
+//! own local save's modification time to decide what "newer" means for
+//! itself. Data is a binary-safe Lua string in and out, same as
+//! `ed.readBytes` elsewhere in this engine.
+//!
 //! Installed unconditionally (`ScriptHost::new()`), same as every other
 //! `install_*_api` — the `steam` global always exists so `steam.available()`
 //! is always safe to call. What varies is only what `platform` currently
@@ -41,7 +47,7 @@ use std::rc::Rc;
 use mlua::{Lua, Value};
 
 use crate::{LogLevel, ScriptLog};
-use floptle_services::{Achievements, Platform};
+use floptle_services::{Achievements, Cloud, Platform};
 
 /// The platform backend, swappable after `ScriptHost::new()` via
 /// `set_platform` — every Lua closure below holds a clone of this same cell,
@@ -80,6 +86,19 @@ fn result_tuple(lua: &Lua, r: Result<(), String>) -> mlua::Result<(bool, Value)>
     match r {
         Ok(()) => Ok((true, Value::Nil)),
         Err(msg) => Ok((false, Value::String(lua.create_string(msg)?))),
+    }
+}
+
+/// Runs `f` against the current backend's `Cloud` surface, or answers a
+/// plain "not available" error when there is none — same shape as
+/// `achievements_call`, generic over the read/write return type.
+fn cloud_call<T>(
+    platform: &SharedPlatform,
+    f: impl FnOnce(&dyn Cloud) -> Result<T, String>,
+) -> Result<T, String> {
+    match platform.borrow().cloud() {
+        Some(c) => f(c),
+        None => Err("Steam isn't available in this session".into()),
     }
 }
 
@@ -279,6 +298,101 @@ pub(crate) fn install_steam_api(
         })?,
     )?;
 
+    let p = platform.clone();
+    t.set(
+        "cloudEnabled",
+        lua.create_function(move |_, ()| Ok(p.borrow().cloud().map(|c| c.is_enabled_for_app())))?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "setCloudEnabled",
+        lua.create_function(move |lua, enabled: bool| {
+            result_tuple(
+                lua,
+                cloud_call(&p, |c| {
+                    c.set_enabled_for_app(enabled);
+                    Ok(())
+                }),
+            )
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "cloudEnabledForAccount",
+        lua.create_function(move |_, ()| Ok(p.borrow().cloud().map(|c| c.is_enabled_for_account())))?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "cloudFiles",
+        lua.create_function(move |lua, ()| match p.borrow().cloud() {
+            Some(c) => {
+                let t = lua.create_table()?;
+                for (i, (name, size)) in c.files().into_iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("name", name)?;
+                    row.set("size", size)?;
+                    t.set(i + 1, row)?;
+                }
+                Ok(Value::Table(t))
+            }
+            None => Ok(Value::Nil),
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "cloudFileExists",
+        lua.create_function(move |_, name: String| {
+            Ok(p.borrow().cloud().map(|c| c.file_exists(&name)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "cloudFileTimestamp",
+        lua.create_function(move |_, name: String| {
+            Ok(p.borrow().cloud().and_then(|c| c.file_timestamp(&name)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "cloudDelete",
+        lua.create_function(move |lua, name: String| {
+            result_tuple(lua, cloud_call(&p, |c| c.delete_file(&name)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "cloudForget",
+        lua.create_function(move |lua, name: String| {
+            result_tuple(lua, cloud_call(&p, |c| c.forget_file(&name)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "cloudRead",
+        lua.create_function(move |lua, name: String| {
+            match cloud_call(&p, |c| c.read_file(&name)) {
+                Ok(bytes) => Ok((Value::String(lua.create_string(&bytes)?), Value::Nil)),
+                Err(msg) => Ok((Value::Nil, Value::String(lua.create_string(msg)?))),
+            }
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "cloudWrite",
+        lua.create_function(move |lua, (name, data): (String, mlua::String)| {
+            result_tuple(lua, cloud_call(&p, |c| c.write_file(&name, &data.as_bytes())))
+        })?,
+    )?;
+
     t.set(
         "onPersonaChanged",
         lua.create_function(move |_, f: mlua::Function| {
@@ -418,5 +532,45 @@ mod tests {
         // flushStats is fire-and-forget — never raises, nothing to assert
         // beyond "it runs".
         f.lua.load("steam.flushStats()").exec().unwrap();
+    }
+
+    /// Every cloud READ is nil under `NullPlatform` — the ordinary "not on
+    /// Steam" branch.
+    #[test]
+    fn cloud_reads_are_nil_under_null_platform() {
+        let f = fresh();
+        for call in [
+            "steam.cloudEnabled()",
+            "steam.cloudEnabledForAccount()",
+            "steam.cloudFiles()",
+            "steam.cloudFileExists(\"save.dat\")",
+            "steam.cloudFileTimestamp(\"save.dat\")",
+        ] {
+            let is_nil: bool = f.lua.load(format!("return {call} == nil")).eval().unwrap();
+            assert!(is_nil, "{call} should be nil under NullPlatform");
+        }
+    }
+
+    /// Every cloud WRITE — including `cloudRead`, which answers `(nil, err)`
+    /// rather than plain `nil` when the file can't be reached — carries a
+    /// real error under `NullPlatform`, never raises.
+    #[test]
+    fn cloud_writes_fail_cleanly_under_null_platform() {
+        let f = fresh();
+        for call in [
+            "steam.setCloudEnabled(true)",
+            "steam.cloudDelete(\"save.dat\")",
+            "steam.cloudForget(\"save.dat\")",
+            "steam.cloudRead(\"save.dat\")",
+            "steam.cloudWrite(\"save.dat\", \"data\")",
+        ] {
+            let (first, err): (Value, Option<String>) =
+                f.lua.load(format!("return {call}")).eval().unwrap();
+            assert!(
+                matches!(first, Value::Boolean(false) | Value::Nil),
+                "{call} should not succeed under NullPlatform"
+            );
+            assert!(err.is_some_and(|e| !e.is_empty()), "{call} should carry a real message");
+        }
     }
 }

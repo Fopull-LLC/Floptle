@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 73
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 83
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 26
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -307,6 +307,42 @@ steam.buildId() — this build's Steam build id. nil when steam.available() is f
 
 steam.clearAchievement(id) -> ok, err — resets id to locked, locally. Same batching as steam.unlockAchievement.
 
+### `steam.cloudDelete`
+
+steam.cloudDelete(name) -> ok, err — deletes name locally AND remotely.
+
+### `steam.cloudEnabled`
+
+steam.cloudEnabled() — whether Cloud is enabled for THIS app specifically (independent of the account-wide setting). nil when steam.available() is false.
+
+### `steam.cloudEnabledForAccount`
+
+steam.cloudEnabledForAccount() — whether Cloud is enabled account-wide. Read-only: a player controls this from the Steam client itself, not from inside a game.
+
+### `steam.cloudFileExists`
+
+steam.cloudFileExists(name) — whether name exists in Cloud storage. It needn't exist to be named in any other steam.cloud* call — steam.cloudWrite creates it.
+
+### `steam.cloudFileTimestamp`
+
+steam.cloudFileTimestamp(name) — name's last-write time (Unix seconds), or nil if it doesn't exist. Compare against your own local save's modification time to build your own conflict policy — Steam Cloud has no built-in one to expose.
+
+### `steam.cloudFiles`
+
+steam.cloudFiles() — every file in Cloud storage for this app, as a list of { name, size } tables. nil when steam.available() is false.
+
+### `steam.cloudForget`
+
+steam.cloudForget(name) -> ok, err — deletes name from the Cloud while keeping the local copy, for a player who wants this one save to stop syncing without losing it.
+
+### `steam.cloudRead`
+
+steam.cloudRead(name) -> data, err — reads name's full contents (a binary-safe Lua string), or nil, message on failure (not in Cloud storage, most commonly).
+
+### `steam.cloudWrite`
+
+steam.cloudWrite(name, data) -> ok, err — writes data (a binary-safe Lua string) as name's full contents, replacing whatever was there and creating the file if it didn't exist.
+
 ### `steam.flushStats`
 
 steam.flushStats() — sends every pending achievement/stat write to Steam now, instead of waiting for the automatic batch (every 5s while something's pending). Safe to call with nothing pending.
@@ -346,6 +382,10 @@ steam.personaName() — the local user's current display name. nil when steam.av
 ### `steam.resetAllStats`
 
 steam.resetAllStats(achievementsToo) -> ok, err — wipes every stat, and every achievement if achievementsToo. Development/QA only — never call this from a shipping build's own normal logic.
+
+### `steam.setCloudEnabled`
+
+steam.setCloudEnabled(enabled) -> ok, err — toggles steam.cloudEnabled().
 
 ### `steam.setStatFloat`
 

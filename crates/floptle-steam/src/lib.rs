@@ -5,11 +5,13 @@
 //! dependency itself needs the Steamworks SDK present at build time, which
 //! most builds of this workspace (CI's default gate included) never provide.
 //!
-//! Phase 1 of `docs/steam-integration-proposal.md`: [`SteamPlatform`]'s
-//! init/pump/shutdown lifecycle and [`floptle_services::Identity`] (local
-//! user + app/build info). Phase 6 adds `impl Transport for SteamTransport`;
-//! the rest of `floptle_services`' sub-traits land as their own phases give
-//! them methods to implement.
+//! [`SteamPlatform`]'s init/pump/shutdown lifecycle landed Phase 1, alongside
+//! [`floptle_services::Identity`] (local user + app/build info, later
+//! extended with environment facts in Phase 13). [`floptle_services::
+//! Achievements`] (achievements + stats) landed Phase 2,
+//! [`floptle_services::Cloud`] (cloud saves) Phase 4. Phase 6 adds `impl
+//! Transport for SteamTransport`; the rest of `floptle_services`' sub-traits
+//! land as their own phases give them methods to implement.
 //!
 //! **Callers, not this crate, own `restart_app_if_necessary` and any
 //! logging.** [`restart_app_if_necessary`] is re-exported so a caller can run
@@ -32,7 +34,10 @@ use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "steam")]
-use floptle_services::{Achievements, Identity, Platform};
+use std::io::{Read, Write};
+
+#[cfg(feature = "steam")]
+use floptle_services::{Achievements, Cloud, Identity, Platform};
 
 /// How long to leave achievement/stat writes queued before an automatic
 /// [`Achievements::flush`] — a game that never calls `flush` itself still
@@ -176,6 +181,9 @@ impl Platform for SteamPlatform {
     fn achievements(&self) -> Option<&dyn Achievements> {
         Some(self)
     }
+    fn cloud(&self) -> Option<&dyn Cloud> {
+        Some(self)
+    }
 }
 
 #[cfg(feature = "steam")]
@@ -221,6 +229,56 @@ impl Identity for SteamPlatform {
     }
     fn is_big_picture_mode(&self) -> bool {
         self.client.utils().is_steam_in_big_picture_mode()
+    }
+}
+
+#[cfg(feature = "steam")]
+impl Cloud for SteamPlatform {
+    fn is_enabled_for_app(&self) -> bool {
+        self.client.remote_storage().is_cloud_enabled_for_app()
+    }
+    fn set_enabled_for_app(&self, enabled: bool) {
+        self.client.remote_storage().set_cloud_enabled_for_app(enabled);
+    }
+    fn is_enabled_for_account(&self) -> bool {
+        self.client.remote_storage().is_cloud_enabled_for_account()
+    }
+    fn files(&self) -> Vec<(String, u64)> {
+        self.client.remote_storage().files().into_iter().map(|f| (f.name, f.size)).collect()
+    }
+    fn file_exists(&self, name: &str) -> bool {
+        self.client.remote_storage().file(name).exists()
+    }
+    fn file_timestamp(&self, name: &str) -> Option<i64> {
+        let file = self.client.remote_storage().file(name);
+        file.exists().then(|| file.timestamp())
+    }
+    fn delete_file(&self, name: &str) -> Result<(), String> {
+        if self.client.remote_storage().file(name).delete() {
+            Ok(())
+        } else {
+            Err(format!("\"{name}\" wasn't in Cloud storage to delete"))
+        }
+    }
+    fn forget_file(&self, name: &str) -> Result<(), String> {
+        if self.client.remote_storage().file(name).forget() {
+            Ok(())
+        } else {
+            Err(format!("\"{name}\" wasn't in Cloud storage to forget"))
+        }
+    }
+    fn read_file(&self, name: &str) -> Result<Vec<u8>, String> {
+        let file = self.client.remote_storage().file(name);
+        if !file.exists() {
+            return Err(format!("\"{name}\" isn't in Cloud storage"));
+        }
+        let mut buf = Vec::new();
+        file.read().read_to_end(&mut buf).map_err(|e| format!("reading \"{name}\": {e}"))?;
+        Ok(buf)
+    }
+    fn write_file(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        let file = self.client.remote_storage().file(name);
+        file.write().write_all(data).map_err(|e| format!("writing \"{name}\": {e}"))
     }
 }
 
