@@ -649,9 +649,14 @@ impl EditorTabViewer<'_> {
                                         });
                                     });
                                     ui.separator();
-                                    if ui.button("All on").clicked() {
-                                        *f = crate::GizmoFilter::default();
-                                    }
+                                    ui.horizontal(|ui| {
+                                        if ui.button("All on").clicked() {
+                                            *f = crate::GizmoFilter::default();
+                                        }
+                                        if ui.button("All off").clicked() {
+                                            *f = crate::GizmoFilter::all_off();
+                                        }
+                                    });
                                 });
                             })
                             .response
@@ -999,44 +1004,63 @@ impl EditorTabViewer<'_> {
             let joint_col = egui::Color32::from_rgb(180, 190, 210);
             let sel_col = egui::Color32::from_rgb(255, 190, 90);
             for r in self.rig_gizmos {
-                for b in &r.bones {
-                    // A Blender-style octahedron: four edges fanning from the
-                    // head out to a belt, the belt ring, and four more closing on
-                    // the tail. The belt is squared to the bone's OWN frame, so
-                    // the shape twists when the bone rolls — the thing a bare
-                    // line could never show.
-                    let (head, tail) = (pt(b.head), pt(b.tail));
-                    let belt: [egui::Pos2; 4] =
-                        [pt(b.belt[0]), pt(b.belt[1]), pt(b.belt[2]), pt(b.belt[3])];
-                    let sel = r.selected == Some(b.head_joint);
-                    let col = if sel { sel_col } else { bone_col };
-                    // A selected bone fills, so the one you are posing is
-                    // unmistakable in a thicket of white sticks.
-                    if sel {
-                        for k in 0..4 {
-                            let n = belt[(k + 1) % 4];
-                            for apex in [head, tail] {
-                                painter.add(egui::Shape::convex_polygon(
-                                    vec![apex, belt[k], n],
-                                    sel_col.gamma_multiply(0.22),
-                                    egui::Stroke::NONE,
-                                ));
+                if r.fan_muted {
+                    // The "Armature" row itself is selected: every bone hangs
+                    // straight off that one point, so the full octahedron fan
+                    // would bury the model in a starburst nobody can click
+                    // around — and `pick_bone` already refuses to hit-test it
+                    // (see viz.rs). Trace it faint and dashed for context only;
+                    // the root's own joint dot below is the real, deliberate
+                    // handle.
+                    for b in &r.bones {
+                        painter.add(egui::Shape::dashed_line(
+                            &[pt(b.head), pt(b.tail)],
+                            egui::Stroke::new(1.0, bone_col.gamma_multiply(0.35)),
+                            3.0,
+                            4.0,
+                        ));
+                    }
+                } else {
+                    for b in &r.bones {
+                        // A Blender-style octahedron: four edges fanning from the
+                        // head out to a belt, the belt ring, and four more closing on
+                        // the tail. The belt is squared to the bone's OWN frame, so
+                        // the shape twists when the bone rolls — the thing a bare
+                        // line could never show.
+                        let (head, tail) = (pt(b.head), pt(b.tail));
+                        let belt: [egui::Pos2; 4] =
+                            [pt(b.belt[0]), pt(b.belt[1]), pt(b.belt[2]), pt(b.belt[3])];
+                        let sel = r.selected == Some(b.head_joint);
+                        let col = if sel { sel_col } else { bone_col };
+                        // A selected bone fills, so the one you are posing is
+                        // unmistakable in a thicket of white sticks.
+                        if sel {
+                            for k in 0..4 {
+                                let n = belt[(k + 1) % 4];
+                                for apex in [head, tail] {
+                                    painter.add(egui::Shape::convex_polygon(
+                                        vec![apex, belt[k], n],
+                                        sel_col.gamma_multiply(0.22),
+                                        egui::Stroke::NONE,
+                                    ));
+                                }
                             }
                         }
-                    }
-                    // A thin dark line under the light one, so the rig reads
-                    // against a white wall as well as a dark floor.
-                    let edge = |a: egui::Pos2, c: egui::Pos2| {
-                        painter.line_segment(
-                            [a, c],
-                            egui::Stroke::new(3.0, egui::Color32::from_black_alpha(90)),
-                        );
-                        painter.line_segment([a, c], egui::Stroke::new(if sel { 2.0 } else { 1.4 }, col));
-                    };
-                    for k in 0..4 {
-                        edge(head, belt[k]);
-                        edge(belt[k], belt[(k + 1) % 4]);
-                        edge(belt[k], tail);
+                        // A thin dark line under the light one, so the rig reads
+                        // against a white wall as well as a dark floor.
+                        let edge = |a: egui::Pos2, c: egui::Pos2| {
+                            painter.line_segment(
+                                [a, c],
+                                egui::Stroke::new(3.0, egui::Color32::from_black_alpha(90)),
+                            );
+                            painter
+                                .line_segment([a, c], egui::Stroke::new(if sel { 2.0 } else { 1.4 }, col));
+                        };
+                        for k in 0..4 {
+                            edge(head, belt[k]);
+                            edge(belt[k], belt[(k + 1) % 4]);
+                            edge(belt[k], tail);
+                        }
                     }
                 }
                 for (s, idx, _) in &r.joints {

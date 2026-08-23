@@ -1059,6 +1059,13 @@ pub(crate) struct RigViz {
     pub joints: Vec<(Vec2, usize, f32)>,
     /// The selected bone, when the selection is on this mesh.
     pub selected: Option<usize>,
+    /// The selection is the skeleton ROOT — the "Armature" row, not a bone
+    /// anyone poses. Every direct child hangs off that one point, so the full
+    /// rig draws as a starburst covering the whole model right when there is
+    /// nothing useful to click. Muted: `bones` draws faint and dashed instead
+    /// of solid, and none of it is pickable — only the root's own joint dot
+    /// (the sole entry left in `joints`) still selects anything.
+    pub fan_muted: bool,
 }
 
 /// Project one mesh's rig. `pose` is the live animated pose when there is one,
@@ -1090,10 +1097,16 @@ pub(crate) fn rig_viz(
         mats.push(mesh_world * (local * Mat4::from_translation(n.pivot)).as_dmat4());
     }
     let world: Vec<DVec3> = mats.iter().map(|m| m.w_axis.truncate()).collect();
-    let mut out = RigViz { mesh, bones: Vec::new(), joints: Vec::new(), selected };
+    // Root selected = the "Armature" row itself, not a bone anyone poses —
+    // see `RigViz::fan_muted`.
+    let fan_muted =
+        selected.is_some_and(|i| rig.skeleton.nodes.get(i).is_some_and(|n| n.parent.is_none()));
+    let mut out = RigViz { mesh, bones: Vec::new(), joints: Vec::new(), selected, fan_muted };
     for (i, n) in rig.skeleton.nodes.iter().enumerate() {
         let Some(s) = project(world[i], cam_world, vp, w, h) else { continue };
-        out.joints.push((s, i, (world[i] - cam_world).length() as f32));
+        if !fan_muted || selected == Some(i) {
+            out.joints.push((s, i, (world[i] - cam_world).length() as f32));
+        }
         if let Some(p) = n.parent
             && let Some(b) = octahedron(&mats, &world, p, i, cam_world, vp, w, h)
         {
@@ -1167,6 +1180,12 @@ fn octahedron(
 pub(crate) fn pick_bone(rigs: &[RigViz], cursor: Vec2) -> Option<(floptle_core::Entity, usize)> {
     let mut best: Option<(floptle_core::Entity, usize, f32)> = None;
     for r in rigs {
+        // The muted fan (the "Armature" row selected) is look-only — clicking
+        // it must never steal the selection out from under the deliberate
+        // handle at the root's own joint.
+        if r.fan_muted {
+            continue;
+        }
         for b in &r.bones {
             // How fat the bone actually looks from here, floored so a thin one
             // is still a target. `seg_dist` measures to the head→tail spine.
@@ -1214,6 +1233,7 @@ mod rig_pick_tests {
             bones: Vec::new(),
             joints: joints.iter().map(|&(x, y, i, d)| (Vec2::new(x, y), i, d)).collect(),
             selected: None,
+            fan_muted: false,
         }
     }
 
@@ -1268,6 +1288,7 @@ mod rig_pick_tests {
             }],
             joints: Vec::new(),
             selected: None,
+            fan_muted: false,
         }
     }
 
@@ -1318,5 +1339,19 @@ mod rig_pick_tests {
         let mesh = w.spawn();
         let rigs = [boned(mesh, 1, 9.0), boned(mesh, 2, 3.0)];
         assert_eq!(pick_bone(&rigs, Vec2::new(200.0, 100.0)), Some((mesh, 2)));
+    }
+
+    /// **The reported problem.** The "Armature" row selected mutes the whole
+    /// fan: a click dead on the bone body — which would otherwise select it —
+    /// must reach whatever is behind the rig instead, leaving only the root's
+    /// own joint dot as a deliberate way back in.
+    #[test]
+    fn a_muted_fan_refuses_a_click_on_its_own_bone_body() {
+        let mut w = World::new();
+        let mesh = w.spawn();
+        let mut rig = boned(mesh, 4, 5.0);
+        rig.fan_muted = true;
+        let rigs = [rig];
+        assert_eq!(pick_bone(&rigs, Vec2::new(200.0, 100.0)), None);
     }
 }

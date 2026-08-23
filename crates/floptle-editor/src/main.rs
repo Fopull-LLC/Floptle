@@ -3196,6 +3196,23 @@ impl Default for GizmoFilter {
     }
 }
 
+impl GizmoFilter {
+    /// Every category off — the "All off" counterpart to `default()`'s "All on".
+    pub(crate) fn all_off() -> Self {
+        Self {
+            cameras: false,
+            lights: false,
+            physics: false,
+            colliders: false,
+            particles: false,
+            script: false,
+            bones: false,
+            volumes: false,
+            audio: false,
+        }
+    }
+}
+
 /// An offscreen target the Inspector renders an asset preview into (a spinning
 /// model or a material sphere), exposed to egui as a texture id.
 struct PreviewTarget {
