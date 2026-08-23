@@ -1,0 +1,18 @@
+# floptle-services — the platform capability boundary.
+#
+# One trait, `Platform`, that everything downstream depends on so a platform
+# SDK's own types (Steamworks today, maybe another storefront later) never
+# reach floptle-script/floptle-runtime/floptle-editor directly. See
+# docs/steam-integration-proposal.md, Phase 0.
+
+[package]
+name = "floptle-services"
+description = "Platform capability boundary (Platform trait + NullPlatform) — Steam integration Phase 0."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]

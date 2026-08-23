@@ -2337,6 +2337,18 @@ impl LightDoc {
     }
 }
 
+/// Project-wide Steam integration settings. `None` = not a Steam build —
+/// Steam lifecycle never activates and every `steam.*` Lua call answers
+/// through `NullPlatform`. See `docs/steam-integration-proposal.md`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct SteamProjectSettings {
+    /// This project's Steamworks App ID. `floptle run` with a `steam` block
+    /// present but `app_id` left at `0` falls back to Spacewar (480) so
+    /// dev-time testing never needs a partner account.
+    #[serde(default)]
+    pub app_id: u32,
+}
+
 /// Project-wide render settings — the PS1/PS2-style knobs that apply to every
 /// scene. Saved to `project.ron`, edited in the editor's Project Settings.
 ///
@@ -2430,6 +2442,11 @@ pub struct ProjectConfigDoc {
     /// `None` on projects created before the Hub existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_version: Option<String>,
+    /// Steam integration settings. `None` = not a Steam build. Copied forward
+    /// into the exported `GameManifest` at export time, since `project.ron`
+    /// itself isn't part of the shipped bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam: Option<SteamProjectSettings>,
     /// The project's collision/query **layers**, by name (up to 32; "Default"
     /// is implicit and always index 0 — it need not be listed). Nodes reference
     /// these by name ([`NodeDoc::layer`]); Project Settings edits them.
@@ -2522,6 +2539,7 @@ impl ProjectConfigDoc {
             title: None,
             entry_scene: None,
             engine_version: None,
+            steam: None,
             layers: Vec::new(),
             no_collide: Vec::new(),
             sorting_layers: Vec::new(),
@@ -3830,6 +3848,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(off.render_aspect(4.0 / 3.0), 4.0 / 3.0);
+    }
+
+    /// `steam: None` must not write a `steam` line at all — an existing
+    /// `project.ron` from before this field existed has to round-trip
+    /// byte-for-byte through load→save, and `Some` round-trips its `app_id`.
+    #[test]
+    fn steam_settings_round_trip_and_stay_absent_when_unset() {
+        let none = ProjectConfigDoc::default();
+        let text = ron::ser::to_string_pretty(&none, ron::ser::PrettyConfig::default()).unwrap();
+        assert!(!text.contains("steam"), "an unset steam block must not appear in project.ron: {text}");
+
+        let with_steam =
+            ProjectConfigDoc { steam: Some(SteamProjectSettings { app_id: 480 }), ..Default::default() };
+        let text = ron::ser::to_string_pretty(&with_steam, ron::ser::PrettyConfig::default()).unwrap();
+        let back: ProjectConfigDoc = ron::from_str(&text).unwrap();
+        assert_eq!(back.steam, Some(SteamProjectSettings { app_id: 480 }));
     }
     use super::*;
 

@@ -140,3 +140,28 @@ jobs:
           name: probe-images
           path: ${{ runner.temp }}/probes
           if-no-files-found: warn
+
+  steam-gate:
+    # The main `gate` job above never turns the `steam` feature on, so
+    # floptle-steam's Steamworks-backed path (docs/steam-integration-proposal.md)
+    # would otherwise go unbuilt and untested by anything. This job is that
+    # coverage, scoped to just the two Steam-plan crates — nothing else in the
+    # workspace depends on `steam` yet. `steamworks-sys` builds clean off
+    # crates.io with no Steamworks SDK present (verified locally against
+    # v0.13.1); that only covers compiling and unit-testing the Rust binding
+    # surface, not exercising a live Steam client, which no phase does yet.
+    name: steam feature (services + steam crates)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: clippy (zero warnings, steam feature on)
+        run: cargo clippy -p floptle-services -p floptle-steam --features floptle-steam/steam --all-targets -- -D warnings
+
+      - name: test (steam feature on)
+        run: cargo test -p floptle-services -p floptle-steam --features floptle-steam/steam

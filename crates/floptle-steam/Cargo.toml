@@ -1,0 +1,28 @@
+# floptle-steam — the Steamworks-backed Platform impl.
+#
+# Gated behind the `steam` feature, off by default, so `cargo test --workspace`
+# and the workspace's own clippy gate stay Steam-free unless explicitly opted
+# in — matching how `floptle-audio`'s "backend" and `floptle-input`'s "pads"
+# keep their native deps optional. Unlike those, `steam` OFF leaves this crate
+# with nothing real in it yet: no Steamworks types exist to implement
+# `floptle_services::Platform` against until a phase actually needs them (the
+# `steamworks` dependency itself also needs the Steamworks SDK present at
+# build time — see docs/steam-integration-proposal.md, Phase 0).
+
+[package]
+name = "floptle-steam"
+description = "Steamworks-backed Platform impl, behind the `steam` feature — Steam integration Phase 0+."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+steam = ["dep:floptle-services", "dep:steamworks"]
+
+[dependencies]
+floptle-services = { path = "../floptle-services", optional = true }
+steamworks = { version = "0.13.1", optional = true }

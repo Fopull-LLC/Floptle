@@ -1,0 +1,125 @@
+//! # floptle-services — the platform capability boundary
+//!
+//! Phase 0 of `docs/steam-integration-proposal.md`. [`Platform`] is the one
+//! trait every downstream crate depends on; a platform SDK's own types
+//! (Steamworks today, in [`floptle_steam`](../floptle_steam/index.html), gated
+//! behind its `steam` feature) never reach `floptle-script`,
+//! `floptle-runtime`, or `floptle-editor` directly.
+//!
+//! Shape mirrors `floptle_net::Transport`: one small trait per concern,
+//! composed, with an always-available no-dependency default —
+//! [`NullPlatform`] here, `MemoryTransport` there. Each sub-trait
+//! ([`Achievements`], [`Cloud`], [`Identity`], [`Entitlements`], [`Ugc`],
+//! [`Overlay`], [`Input`], [`Social`]) starts empty on purpose: its methods
+//! land with the phase that actually needs them (Achievements in Phase 2,
+//! Overlay in Phase 3, and so on), so this crate's job is the boundary shape,
+//! not a guessed-ahead capability surface.
+//!
+//! [`NullPlatform`] is meant to be the default across the whole workspace
+//! test suite: a project with no `steam` project setting, an in-editor Play
+//! session, or a headless test all run against it, so nothing here needs a
+//! platform SDK present to compile or to pass.
+
+#![warn(missing_docs)]
+
+/// Achievement unlock/query surface. Empty until Phase 2 gives it methods.
+pub trait Achievements {}
+
+/// Cloud save read/write/enumerate surface. Empty until Phase 4.
+pub trait Cloud {}
+
+/// Local-user identity: SteamID, persona, avatar. Empty until Phase 1.
+pub trait Identity {}
+
+/// DLC/entitlement ownership surface. Empty until Phase 8.
+pub trait Entitlements {}
+
+/// Workshop/UGC item surface. Empty until Phase 10.
+pub trait Ugc {}
+
+/// Overlay page-open / activation-event surface. Empty until Phase 3.
+pub trait Overlay {}
+
+/// Platform-specific controller input (action sets, glyphs, haptics). Empty
+/// until Phase 7 — distinct from `floptle_input`, which already owns
+/// device-agnostic action mapping; this is the per-platform layer beneath it.
+pub trait Input {}
+
+/// Friends, presence and invites surface. Empty until Phase 5.
+pub trait Social {}
+
+/// The platform capability boundary. One accessor per capability group,
+/// defaulting to `None` — a backend that hasn't grown a capability yet (or
+/// never will) needs no impl for it at all, and a caller checks once, at the
+/// point of use, rather than the whole engine gaining a compile-time feature
+/// matrix.
+pub trait Platform {
+    /// The [`Achievements`] surface, if this backend has one.
+    fn achievements(&self) -> Option<&dyn Achievements> {
+        None
+    }
+    /// The [`Cloud`] surface, if this backend has one.
+    fn cloud(&self) -> Option<&dyn Cloud> {
+        None
+    }
+    /// The [`Identity`] surface, if this backend has one.
+    fn identity(&self) -> Option<&dyn Identity> {
+        None
+    }
+    /// The [`Entitlements`] surface, if this backend has one.
+    fn entitlements(&self) -> Option<&dyn Entitlements> {
+        None
+    }
+    /// The [`Ugc`] surface, if this backend has one.
+    fn ugc(&self) -> Option<&dyn Ugc> {
+        None
+    }
+    /// The [`Overlay`] surface, if this backend has one.
+    fn overlay(&self) -> Option<&dyn Overlay> {
+        None
+    }
+    /// The [`Input`] surface, if this backend has one.
+    fn input(&self) -> Option<&dyn Input> {
+        None
+    }
+    /// The [`Social`] surface, if this backend has one.
+    fn social(&self) -> Option<&dyn Social> {
+        None
+    }
+}
+
+/// The always-available, no-external-dependency default: every capability
+/// accessor answers `None`. This is what a headless test, an in-editor Play
+/// session, or a project with no `steam` setting runs against.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NullPlatform;
+
+impl Platform for NullPlatform {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_platform_answers_none_for_every_capability() {
+        let p = NullPlatform;
+        assert!(p.achievements().is_none());
+        assert!(p.cloud().is_none());
+        assert!(p.identity().is_none());
+        assert!(p.entitlements().is_none());
+        assert!(p.ugc().is_none());
+        assert!(p.overlay().is_none());
+        assert!(p.input().is_none());
+        assert!(p.social().is_none());
+    }
+
+    /// `Platform` must be usable as `&dyn Platform` (call sites hold a boxed
+    /// or referenced backend, never a concrete type) — a bound or method that
+    /// broke object-safety would fail here, not at some downstream call site.
+    #[test]
+    fn platform_is_object_safe() {
+        let p = NullPlatform;
+        let dyn_p: &dyn Platform = &p;
+        assert!(dyn_p.achievements().is_none());
+    }
+}

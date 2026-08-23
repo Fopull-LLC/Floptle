@@ -36,6 +36,8 @@ members = [
     "crates/floptle-account",  # Foverse account: device-flow sign-in + Floptle Cloud client
     "crates/floptle-relay",    # open rendezvous relay: lobby codes, no port-forwarding (bin)
     "crates/floptle-dist",     # release manifest + bundle download/verify/unpack (Hub + export templates)
+    "crates/floptle-services", # platform capability boundary: Platform trait + NullPlatform (steam plan, Phase 0)
+    "crates/floptle-steam",    # Steamworks-backed Platform impl, behind the `steam` feature (steam plan, Phase 0)
     "crates/floptle-editor",   # egui + egui_dock authoring application (bin)
     "crates/floptle-hub",      # cross-platform launcher / version + project manager (bin)
     "crates/floptle-runtime",  # game runtime / exported build entrypoint (bin)

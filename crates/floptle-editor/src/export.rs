@@ -35,6 +35,11 @@ use std::time::Instant;
 pub(crate) struct GameManifest {
     pub(crate) title: String,
     pub(crate) project: String,
+    /// Copied from `ProjectConfigDoc::steam` at export time — `project.ron`
+    /// itself isn't part of the shipped bundle, so this is the only place a
+    /// player's own binary can read its Steam App ID from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) steam: Option<floptle_scene::SteamProjectSettings>,
 }
 
 /// A `floptle-game.ron` beside the running binary, if any → (manifest, its dir).
@@ -567,7 +572,7 @@ pub(crate) fn export_game_with(
         std::fs::write(out_c.join("README.txt"), tpl.replace("{exe}", &exe_name))
             .map_err(|e| format!("write README: {e}"))?;
     }
-    let manifest = GameManifest { title: title.to_string(), project: "assets".into() };
+    let manifest = GameManifest { title: title.to_string(), project: "assets".into(), steam: cfg.steam };
     let text = ron::ser::to_string_pretty(&manifest, ron::ser::PrettyConfig::default())
         .map_err(|e| format!("manifest: {e}"))?;
     std::fs::write(out_c.join("floptle-game.ron"), text)
@@ -1052,6 +1057,28 @@ mod tests {
         assert!(readme.contains("com.apple.quarantine"));
 
         for d in [&proj, &out, &out2] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// `ProjectConfigDoc::steam` is copied into the exported manifest — the
+    /// player's own binary has no other way to learn its Steamworks App ID,
+    /// since `project.ron` itself isn't part of the shipped bundle.
+    #[test]
+    fn export_carries_the_steam_app_id_into_the_manifest() {
+        let proj = temp("proj-steam");
+        std::fs::write(proj.join("project.ron"), "(steam: Some((app_id: 480)))").unwrap();
+        let out = temp("out-steam");
+
+        let me = std::env::current_exe().unwrap();
+        export_game_with(&proj, &out, "Steam Game", &me, &EXPORT_TARGETS[0])
+            .expect("export succeeds");
+        let manifest: GameManifest =
+            ron::from_str(&std::fs::read_to_string(out.join("floptle-game.ron")).unwrap())
+                .expect("manifest parses");
+        assert_eq!(manifest.steam.map(|s| s.app_id), Some(480));
+
+        for d in [&proj, &out] {
             let _ = std::fs::remove_dir_all(d);
         }
     }
