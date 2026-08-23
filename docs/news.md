@@ -1,5 +1,16 @@
 ## Just shipped
 
+**v0.75.1 "On Purpose"** — **a freshly placed Shader Graph "combine" node can
+be wired right away.** It used to show a single locked-looking value with no
+way to reach its individual lanes, so building a `vec4` from separate values
+meant hand-typing the shader as text; each lane is its own wireable input
+from the moment the node appears. **Selecting a rig's Armature no longer
+buries the model in bone lines** — clicking that row used to draw every bone
+as a solid, clickable fan reaching out from one point, making it hard to
+select the bone you actually meant to pose; it now draws faint and dashed
+for context only, and the Armature is reselected by clicking its own handle.
+**The Gizmos menu got an "All off" button** next to "All on".
+
 **v0.75.0 "Own Look"** — **a part of a model can finally wear its own
 shader.** Giving one part its own material and picking a custom shader for
 it never actually took effect — the part kept its plain look regardless, and
