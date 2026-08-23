@@ -1,5 +1,23 @@
 ## Just shipped
 
+**v0.76.0 "Who You Are"** — **the first slice of Steam support: a script can
+check whether the game is actually running through Steam, and who's signed
+in.** Set a Steam App ID in ⚙ Settings ▸ Game and `steam.available()` turns
+`true` for `floptle run --steam`, `floptle play`, or an exported/served
+build — everywhere else (the editor's own Play-mode preview, no Steam client
+running, no App ID set) it's `false`, never an error. From there,
+`steam.personaName()`, `steam.localUserId()`, `steam.onPersonaChanged()`,
+`steam.buildId()`, `steam.installDir()`, `steam.betaName()`,
+`steam.isFamilyShared()` and `steam.isCybercafe()` cover who's playing and
+what build they're on. No App ID yet? `floptle run --steam` still works,
+falling back to Valve's public test app so trying it out needs no partner
+account. This is the foundation, not the whole of Steam — achievements, the
+overlay, cloud saves and the rest are still ahead. **Posing a bone no longer
+buries the model in lines** — the fix in the last release only covered
+selecting the Armature row itself; selecting an ordinary bone under it,
+which is what posing a character actually means doing, still drew the full
+fan. Every bone now draws and clicks cleanly on its own, whatever's selected.
+
 **v0.75.1 "On Purpose"** — **a freshly placed Shader Graph "combine" node can
 be wired right away.** It used to show a single locked-looking value with no
 way to reach its individual lanes, so building a `vec4` from separate values
