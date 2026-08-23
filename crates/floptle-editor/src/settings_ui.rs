@@ -515,6 +515,26 @@ impl<'a> SettingsCtx<'a> {
             .small(),
         );
 
+        row(
+            ui,
+            "Steam App ID",
+            Some("0 = not a Steam build — floptle run --steam falls back to Spacewar (480) for \
+                  dev-time testing regardless"),
+            |ui| {
+                let mut id = project.steam.map(|s| s.app_id).unwrap_or(0);
+                if ui
+                    .add_sized(
+                        [fit(ui, 220.0), 20.0],
+                        egui::DragValue::new(&mut id).range(0u32..=u32::MAX).speed(1.0),
+                    )
+                    .changed()
+                {
+                    project.steam =
+                        (id != 0).then_some(floptle_scene::SteamProjectSettings { app_id: id });
+                    out.save_project = true;
+                }
+            },
+        );
     }
 
     // --- Rendering ------------------------------------------------------
