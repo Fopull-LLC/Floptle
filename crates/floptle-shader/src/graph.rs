@@ -426,8 +426,14 @@ impl ViewBuilder<'_> {
             return;
         }
         let root = self.ir.lets[i].1;
-        // A literal root renders as a named Constant node.
-        if let Some(v) = inline_val(self.ir, root) {
+        // A bare literal root renders as a named Constant node. A `vecN(...)`
+        // constructor does NOT, even when every lane is still a literal
+        // default — collapsing it here would leave a freshly placed "combine"
+        // node with a single unwireable port and no way to ever reach its
+        // individual lanes (see `NodeKind::VecCtor`'s per-lane ports below).
+        if let Some(v @ (InlineVal::Num(_) | InlineVal::Color(_) | InlineVal::Str(_))) =
+            inline_val(self.ir, root)
+        {
             self.seen.insert(key, ());
             self.nodes.push(GNode {
                 key: NodeKey::Let(self.ir.lets[i].0.clone()),
@@ -619,6 +625,13 @@ pub fn node_height(n: &GNode) -> f32 {
         NodeKind::Swizzle(_) => NODE_ROW_H,
         // Constants: a type-switch row.
         NodeKind::Constant(_) => NODE_ROW_H,
+        // A combine node whose lanes are still all-literal defaults gets the
+        // same type-switch row a Constant does (see the editor's draw_node).
+        NodeKind::VecCtor(_)
+            if n.inputs.iter().all(|p| p.wired.is_none() && matches!(p.inline, Some(InlineVal::Num(_)))) =>
+        {
+            NODE_ROW_H
+        }
         // Textures: a slot-name row + the image picker that fills it.
         NodeKind::Texture(_) => 2.0 * NODE_ROW_H,
         _ => 0.0,
@@ -1941,6 +1954,36 @@ shader plasma {
         let (fbm_id, _) = find_call(&ir, "fbm");
         let p = site_value(&ir, Site::Arg { call: fbm_id, slot: 0 }).unwrap();
         assert!(matches!(ir.expr(p).kind, ExprKind::Input(Input::Uv)));
+    }
+
+    /// A brand-new "combine 4" node is four literal-zero args. `inline_val`
+    /// would happily read that as one collapsed Constant value — the exact
+    /// trap that left a freshly placed combine node with a single unwireable
+    /// port and no way to ever reach an individual lane.
+    #[test]
+    fn fresh_combine_node_keeps_its_lanes_wireable() {
+        let mut ir = parse("shader s {\n  stage fragment\n  output color = vec4(1, 1, 1, 1)\n}\n")
+            .unwrap();
+        let key = add_vec_node(&mut ir, 4, (0.0, 0.0)).unwrap();
+        let view = build_view(&ir, None);
+        let node = view.iter().find(|n| n.key == key).expect("combine node visible");
+        assert!(matches!(node.kind, NodeKind::VecCtor(_)), "collapsed to {:?}", node.kind);
+        assert_eq!(node.inputs.len(), 4, "all four lanes are real, wireable ports");
+        for p in &node.inputs {
+            assert!(p.wired.is_none());
+            assert_eq!(p.inline, Some(InlineVal::Num(0.0)));
+        }
+        // Wiring one lane keeps it a VecCtor, still with all four ports —
+        // this already worked before the fix, it's the fresh/all-literal
+        // moment above that was actually broken.
+        let NodeKey::Let(name) = &key else { panic!("combine node is a let") };
+        let idx = ir.lets.iter().position(|(n, _)| n == name).unwrap();
+        let call_id = ir.lets[idx].1;
+        connect(&mut ir, &NodeKey::Input(Input::Time), Site::Arg { call: call_id, slot: 0 }).unwrap();
+        let view = build_view(&ir, None);
+        let node = view.iter().find(|n| n.key == key).expect("still visible after wiring");
+        assert_eq!(node.inputs.len(), 4);
+        assert!(node.inputs[0].wired.is_some());
     }
 
     #[test]

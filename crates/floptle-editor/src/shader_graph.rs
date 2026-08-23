@@ -1881,39 +1881,25 @@ impl EditorTabViewer<'_> {
                 // A quick type switch: number / vec2 / vec3 / vec4 / color.
                 let site = n.inputs.first().map(|p| p.site);
                 let cur = n.inputs.first().and_then(|p| p.inline.clone());
-                ui.scope_builder(salted(0), |ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
-                    ui.horizontal_centered(|ui| {
-                        let variants: [(&str, InlineVal); 5] = [
-                            ("#", InlineVal::Num(1.0)),
-                            ("v2", InlineVal::Vec { ctor: ir::ExprId(0), lanes: 2, vals: [0.0; 4] }),
-                            ("v3", InlineVal::Vec { ctor: ir::ExprId(0), lanes: 3, vals: [0.0; 4] }),
-                            ("v4", InlineVal::Vec { ctor: ir::ExprId(0), lanes: 4, vals: [0.0; 4] }),
-                            ("🎨", InlineVal::Color([1.0, 1.0, 1.0, 1.0])),
-                        ];
-                        for (label, proto) in variants {
-                            let on = matches!(
-                                (&cur, &proto),
-                                (Some(InlineVal::Num(_)), InlineVal::Num(_))
-                                    | (Some(InlineVal::Color(_)), InlineVal::Color(_))
-                            ) || matches!(
-                                (&cur, &proto),
-                                (Some(InlineVal::Vec { lanes: a, .. }), InlineVal::Vec { lanes: b, .. }) if a == b
-                            );
-                            if ui
-                                .selectable_label(on, egui::RichText::new(label).small())
-                                .clicked()
-                                && !on
-                                && let Some(site) = site
-                            {
-                                acts.push(Act::Commit {
-                                    edit: Box::new(move |ir| graph::set_inline(ir, site, &proto)),
-                                    strict: false,
-                                });
-                            }
-                        }
+                ui.scope_builder(salted(0), |ui| quick_type_switch(ui, site, cur, acts));
+            }
+            NodeKind::VecCtor(_)
+                if n.name.is_some()
+                    && n.inputs.iter().all(|p| p.wired.is_none() && matches!(p.inline, Some(InlineVal::Num(_)))) =>
+            {
+                // A combine node whose lanes are still all-literal defaults:
+                // offer the same quick type switch a Constant gets, without
+                // touching its real per-lane ports below — wiring any single
+                // lane takes it out of this arm for good, same as a Constant.
+                if let Some(i) = ir.lets.iter().position(|(name, _)| Some(name) == n.name.as_ref()) {
+                    let site = Some(Site::LetRoot(i));
+                    let cur = Some(InlineVal::Vec {
+                        ctor: ir::ExprId(0),
+                        lanes: n.inputs.len() as u8,
+                        vals: [0.0; 4],
                     });
-                });
+                    ui.scope_builder(salted(0), |ui| quick_type_switch(ui, site, cur, acts));
+                }
             }
             _ => {}
         }
@@ -2297,6 +2283,43 @@ impl EditorTabViewer<'_> {
             }
         });
     }
+}
+
+/// The "# / v2 / v3 / v4 / 🎨" quick type switch: shared by a Constant node
+/// and a combine node still sitting at its all-literal defaults (see the
+/// `NodeKind::Constant`/`NodeKind::VecCtor` arms in `draw_node`'s body
+/// extras). `site` is `None` only when there's nowhere to commit an edit —
+/// the row still draws so the layout stays stable, it just can't be clicked.
+fn quick_type_switch(ui: &mut egui::Ui, site: Option<Site>, cur: Option<InlineVal>, acts: &mut Vec<Act>) {
+    ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
+    ui.horizontal_centered(|ui| {
+        let variants: [(&str, InlineVal); 5] = [
+            ("#", InlineVal::Num(1.0)),
+            ("v2", InlineVal::Vec { ctor: ir::ExprId(0), lanes: 2, vals: [0.0; 4] }),
+            ("v3", InlineVal::Vec { ctor: ir::ExprId(0), lanes: 3, vals: [0.0; 4] }),
+            ("v4", InlineVal::Vec { ctor: ir::ExprId(0), lanes: 4, vals: [0.0; 4] }),
+            ("🎨", InlineVal::Color([1.0, 1.0, 1.0, 1.0])),
+        ];
+        for (label, proto) in variants {
+            let on = matches!(
+                (&cur, &proto),
+                (Some(InlineVal::Num(_)), InlineVal::Num(_))
+                    | (Some(InlineVal::Color(_)), InlineVal::Color(_))
+            ) || matches!(
+                (&cur, &proto),
+                (Some(InlineVal::Vec { lanes: a, .. }), InlineVal::Vec { lanes: b, .. }) if a == b
+            );
+            if ui.selectable_label(on, egui::RichText::new(label).small()).clicked()
+                && !on
+                && let Some(site) = site
+            {
+                acts.push(Act::Commit {
+                    edit: Box::new(move |ir| graph::set_inline(ir, site, &proto)),
+                    strict: false,
+                });
+            }
+        }
+    });
 }
 
 /// The right-click palette: search + everything addable, grouped the way a
