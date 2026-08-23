@@ -151,6 +151,27 @@ pub(crate) fn install_steam_api(
     )?;
 
     let p = platform.clone();
+    t.set(
+        "uiLanguage",
+        lua.create_function(move |lua, ()| match p.borrow().identity() {
+            Some(id) => Ok(Value::String(lua.create_string(id.ui_language())?)),
+            None => Ok(Value::Nil),
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "isSteamDeck",
+        lua.create_function(move |_, ()| Ok(p.borrow().identity().map(|id| id.is_steam_deck())))?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "isBigPictureMode",
+        lua.create_function(move |_, ()| Ok(p.borrow().identity().map(|id| id.is_big_picture_mode())))?,
+    )?;
+
+    let p = platform.clone();
     t.set("statsReady", lua.create_function(move |_, ()| Ok(p.borrow().achievements().is_some_and(|a| a.stats_ready())))?)?;
 
     let p = platform.clone();
@@ -337,6 +358,9 @@ mod tests {
             "steam.betaName()",
             "steam.isFamilyShared()",
             "steam.isCybercafe()",
+            "steam.uiLanguage()",
+            "steam.isSteamDeck()",
+            "steam.isBigPictureMode()",
         ] {
             let is_nil: bool = f.lua.load(format!("return {call} == nil")).eval().unwrap();
             assert!(is_nil, "{call} should be nil under NullPlatform");

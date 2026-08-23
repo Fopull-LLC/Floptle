@@ -111,6 +111,16 @@ pub trait Identity {
     /// `true` if the backend has flagged this as a cybercafe/shared-computer
     /// license.
     fn is_cybercafe(&self) -> bool;
+    /// The backend UI's current language (e.g. `"english"`, `"french"`) — a
+    /// reasonable default for the engine's own localization, landed Phase 13.
+    fn ui_language(&self) -> String;
+    /// `true` if the backend reports this session as running on its own
+    /// handheld hardware (Steam Deck). No physical keyboard/mouse should be
+    /// assumed when this is `true`.
+    fn is_steam_deck(&self) -> bool;
+    /// `true` if the backend's own "10-foot" full-screen mode (Big Picture)
+    /// is active.
+    fn is_big_picture_mode(&self) -> bool;
 }
 
 /// DLC/entitlement ownership surface. Empty until Phase 8.

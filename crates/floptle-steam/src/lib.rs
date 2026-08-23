@@ -213,6 +213,15 @@ impl Identity for SteamPlatform {
     fn is_cybercafe(&self) -> bool {
         self.client.apps().is_cybercafe()
     }
+    fn ui_language(&self) -> String {
+        self.client.utils().ui_language()
+    }
+    fn is_steam_deck(&self) -> bool {
+        self.client.utils().is_steam_running_on_steam_deck()
+    }
+    fn is_big_picture_mode(&self) -> bool {
+        self.client.utils().is_steam_in_big_picture_mode()
+    }
 }
 
 #[cfg(feature = "steam")]

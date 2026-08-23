@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 70
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 73
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 26
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -315,6 +315,10 @@ steam.flushStats() — sends every pending achievement/stat write to Steam now, 
 
 steam.installDir() — this app's install directory, as Steam reports it. nil when steam.available() is false.
 
+### `steam.isBigPictureMode`
+
+steam.isBigPictureMode() — true if Steam's own full-screen "10-foot" mode is active. nil when steam.available() is false.
+
 ### `steam.isCybercafe`
 
 steam.isCybercafe() — true if Steam has flagged this as a cybercafe/shared-computer license. nil when steam.available() is false.
@@ -322,6 +326,10 @@ steam.isCybercafe() — true if Steam has flagged this as a cybercafe/shared-com
 ### `steam.isFamilyShared`
 
 steam.isFamilyShared() — true if this app is being played on a license borrowed from another account (Steam Family Sharing), not one the signed-in user owns. nil when steam.available() is false.
+
+### `steam.isSteamDeck`
+
+steam.isSteamDeck() — true if this session is running on Steam's own handheld hardware. Assume no physical keyboard/mouse when true. nil when steam.available() is false.
 
 ### `steam.localUserId`
 
@@ -358,6 +366,10 @@ steam.statInt(name) — an integer stat's current value, or nil before stats are
 ### `steam.statsReady`
 
 steam.statsReady() — true once achievements/stats have finished loading from Steam. Every achievement/stat call below answers nil (reads) or false with a message (writes) before this, rather than guessing.
+
+### `steam.uiLanguage`
+
+steam.uiLanguage() — Steam's own UI language right now (e.g. "english", "french") — a reasonable default for your own localization. nil when steam.available() is false.
 
 ### `steam.unlockAchievement`
 
