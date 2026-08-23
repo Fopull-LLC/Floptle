@@ -1052,20 +1052,32 @@ pub(crate) struct BoneViz {
 pub(crate) struct RigViz {
     /// The mesh node the rig hangs off.
     pub mesh: floptle_core::Entity,
-    /// Parent joint → joint, as octahedra. A root bone contributes none.
+    /// Parent joint → joint, as octahedra. Never includes a bone whose head
+    /// is the skeleton ROOT (see [`is_root_bone`]) — that bone has no real
+    /// shape (a root anchors nothing), so it never draws as one, in EVERY
+    /// selection state. Its child still gets its own dot in `joints`.
     pub bones: Vec<BoneViz>,
     /// Per joint: where it is on screen, its skeleton index, and how far it is
-    /// from the camera (nearest wins a contested click).
+    /// from the camera (nearest wins a contested click). Every joint in the
+    /// skeleton is here, always — the root included — regardless of `selected`.
     pub joints: Vec<(Vec2, usize, f32)>,
     /// The selected bone, when the selection is on this mesh.
     pub selected: Option<usize>,
-    /// The selection is the skeleton ROOT — the "Armature" row, not a bone
-    /// anyone poses. Every direct child hangs off that one point, so the full
-    /// rig draws as a starburst covering the whole model right when there is
-    /// nothing useful to click. Muted: `bones` draws faint and dashed instead
-    /// of solid, and none of it is pickable — only the root's own joint dot
-    /// (the sole entry left in `joints`) still selects anything.
-    pub fan_muted: bool,
+}
+
+/// A bone's head has no parent of its own — it IS the skeleton root. A root
+/// anchors nothing, so a bone hanging directly off it (`Head`, `LeftArm`, …
+/// in a flat rig, which is most of them) has no meaningful shape: head and
+/// tail don't bound a limb, they bound "the model's core" and one point on
+/// it. Drawing that as an octahedron is exactly what used to read as a
+/// starburst fanning out from the model's center, competing with every real
+/// bone for clicks — and it happened whether the mesh, a leaf bone, or the
+/// root itself was selected, because the shape was never about selection to
+/// begin with. Never drawn as a bone shape now, in any selection state; the
+/// child's own joint dot — always present in `RigViz::joints` — is the real,
+/// deliberate handle onto it.
+fn is_root_bone(skeleton: &floptle_anim::Skeleton, head_joint: usize) -> bool {
+    skeleton.nodes.get(head_joint).is_some_and(|n| n.parent.is_none())
 }
 
 /// Project one mesh's rig. `pose` is the live animated pose when there is one,
@@ -1097,17 +1109,13 @@ pub(crate) fn rig_viz(
         mats.push(mesh_world * (local * Mat4::from_translation(n.pivot)).as_dmat4());
     }
     let world: Vec<DVec3> = mats.iter().map(|m| m.w_axis.truncate()).collect();
-    // Root selected = the "Armature" row itself, not a bone anyone poses —
-    // see `RigViz::fan_muted`.
-    let fan_muted =
-        selected.is_some_and(|i| rig.skeleton.nodes.get(i).is_some_and(|n| n.parent.is_none()));
-    let mut out = RigViz { mesh, bones: Vec::new(), joints: Vec::new(), selected, fan_muted };
+    let mut out = RigViz { mesh, bones: Vec::new(), joints: Vec::new(), selected };
     for (i, n) in rig.skeleton.nodes.iter().enumerate() {
         let Some(s) = project(world[i], cam_world, vp, w, h) else { continue };
-        if !fan_muted || selected == Some(i) {
-            out.joints.push((s, i, (world[i] - cam_world).length() as f32));
-        }
+        // Every joint is clickable, always — see `RigViz::joints`.
+        out.joints.push((s, i, (world[i] - cam_world).length() as f32));
         if let Some(p) = n.parent
+            && !is_root_bone(&rig.skeleton, p)
             && let Some(b) = octahedron(&mats, &world, p, i, cam_world, vp, w, h)
         {
             out.bones.push(b);
@@ -1180,12 +1188,6 @@ fn octahedron(
 pub(crate) fn pick_bone(rigs: &[RigViz], cursor: Vec2) -> Option<(floptle_core::Entity, usize)> {
     let mut best: Option<(floptle_core::Entity, usize, f32)> = None;
     for r in rigs {
-        // The muted fan (the "Armature" row selected) is look-only — clicking
-        // it must never steal the selection out from under the deliberate
-        // handle at the root's own joint.
-        if r.fan_muted {
-            continue;
-        }
         for b in &r.bones {
             // How fat the bone actually looks from here, floored so a thin one
             // is still a target. `seg_dist` measures to the head→tail spine.
@@ -1233,7 +1235,6 @@ mod rig_pick_tests {
             bones: Vec::new(),
             joints: joints.iter().map(|&(x, y, i, d)| (Vec2::new(x, y), i, d)).collect(),
             selected: None,
-            fan_muted: false,
         }
     }
 
@@ -1288,7 +1289,6 @@ mod rig_pick_tests {
             }],
             joints: Vec::new(),
             selected: None,
-            fan_muted: false,
         }
     }
 
@@ -1341,17 +1341,44 @@ mod rig_pick_tests {
         assert_eq!(pick_bone(&rigs, Vec2::new(200.0, 100.0)), Some((mesh, 2)));
     }
 
-    /// **The reported problem.** The "Armature" row selected mutes the whole
-    /// fan: a click dead on the bone body — which would otherwise select it —
-    /// must reach whatever is behind the rig instead, leaving only the root's
-    /// own joint dot as a deliberate way back in.
+    /// **The reported problem.** A bone whose head IS the skeleton root has
+    /// no shape of its own — the root anchors nothing, so `LeftArm`,
+    /// `LeftLeg`, and every other bone hanging straight off "Armature" in a
+    /// flat rig used to draw as a starburst of lines fanning out from the
+    /// model's core, and — worse — was only muted when the "Armature" row
+    /// ITSELF was selected. Selecting an ordinary bone under it (exactly what
+    /// posing a character means doing) left the starburst fully solid and
+    /// pickable, competing with the real bone dots for every click. The fix
+    /// is structural, not selection-dependent: a root-attached bone is never
+    /// classified as drawable, in ANY selection state.
     #[test]
-    fn a_muted_fan_refuses_a_click_on_its_own_bone_body() {
-        let mut w = World::new();
-        let mesh = w.spawn();
-        let mut rig = boned(mesh, 4, 5.0);
-        rig.fan_muted = true;
-        let rigs = [rig];
-        assert_eq!(pick_bone(&rigs, Vec2::new(200.0, 100.0)), None);
+    fn a_bone_hanging_off_the_root_has_no_shape_of_its_own() {
+        let nodes = vec![
+            floptle_anim::SkelNode {
+                name: "Armature".into(),
+                parent: None,
+                rest: floptle_anim::TransformTRS::IDENTITY,
+                pivot: Vec3::ZERO,
+            },
+            floptle_anim::SkelNode {
+                name: "LeftLeg".into(),
+                parent: Some(0),
+                rest: floptle_anim::TransformTRS::IDENTITY,
+                pivot: Vec3::ZERO,
+            },
+            floptle_anim::SkelNode {
+                name: "LeftLeg#toe".into(),
+                parent: Some(1),
+                rest: floptle_anim::TransformTRS::IDENTITY,
+                pivot: Vec3::ZERO,
+            },
+        ];
+        let skeleton = floptle_anim::Skeleton::new(nodes);
+        // Armature → LeftLeg: the head (Armature) has no parent of its own —
+        // this is the starburst edge, never drawn.
+        assert!(is_root_bone(&skeleton, 0));
+        // LeftLeg → LeftLeg#toe: the head (LeftLeg) has a real parent
+        // (Armature) — a genuine bone, drawn as normal, whatever's selected.
+        assert!(!is_root_bone(&skeleton, 1));
     }
 }
