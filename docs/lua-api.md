@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 83
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 87
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 26
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -307,6 +307,10 @@ steam.buildId() — this build's Steam build id. nil when steam.available() is f
 
 steam.clearAchievement(id) -> ok, err — resets id to locked, locally. Same batching as steam.unlockAchievement.
 
+### `steam.clearRichPresence`
+
+steam.clearRichPresence() — clears every rich-presence key set via steam.setRichPresence.
+
 ### `steam.cloudDelete`
 
 steam.cloudDelete(name) -> ok, err — deletes name locally AND remotely.
@@ -347,6 +351,14 @@ steam.cloudWrite(name, data) -> ok, err — writes data (a binary-safe Lua strin
 
 steam.flushStats() — sends every pending achievement/stat write to Steam now, instead of waiting for the automatic batch (every 5s while something's pending). Safe to call with nothing pending.
 
+### `steam.friendRichPresence`
+
+steam.friendRichPresence(id, key) — reads one of a FRIEND's own rich-presence values (id from steam.friends(), a string) — different from your own, which you set with steam.setRichPresence. nil if they haven't set it or aren't reachable.
+
+### `steam.friends`
+
+steam.friends() — the local user's friend list, as a list of { id, name, state, playingThisGame } tables. id is a STRING (a SteamID64 exceeds what an f64 represents exactly). state is one of "online"/"away"/"busy"/"snooze"/"looking to trade"/"looking to play"/"invisible"/"offline". nil when steam.available() is false. Group/clan membership isn't exposed — Steam doesn't wrap that.
+
 ### `steam.installDir`
 
 steam.installDir() — this app's install directory, as Steam reports it. nil when steam.available() is false.
@@ -386,6 +398,10 @@ steam.resetAllStats(achievementsToo) -> ok, err — wipes every stat, and every 
 ### `steam.setCloudEnabled`
 
 steam.setCloudEnabled(enabled) -> ok, err — toggles steam.cloudEnabled().
+
+### `steam.setRichPresence`
+
+steam.setRichPresence(key, value) -> ok, err — sets a rich-presence key for the local user, visible to friends in their friend list. Steam caps the number of keys and their length; err names the reason, not a bare failure.
 
 ### `steam.setStatFloat`
 

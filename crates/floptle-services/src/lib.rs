@@ -175,8 +175,53 @@ pub trait Overlay {}
 /// device-agnostic action mapping; this is the per-platform layer beneath it.
 pub trait Input {}
 
-/// Friends, presence and invites surface. Empty until Phase 5.
-pub trait Social {}
+/// One friend, as the local user's backend reports them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FriendInfo {
+    /// Their platform-account id (a Steam64 id, on the Steam backend) — a
+    /// `u64` here; convert to a string at any boundary where exactness past
+    /// 2^53 matters (Lua numbers, JSON), same reason as
+    /// [`Identity::local_user_id`].
+    pub id: u64,
+    /// Their current display name.
+    pub name: String,
+    /// Their online state, lowercase (`"online"`, `"away"`, `"busy"`,
+    /// `"snooze"`, `"looking to trade"`, `"looking to play"`,
+    /// `"invisible"`, `"offline"`) — a plain string rather than a typed enum
+    /// on purpose: this is read-only, display-shaped data, and the backend's
+    /// own state list is unlikely to gain new values a caller must switch
+    /// on exhaustively.
+    pub state: String,
+    /// `true` if they're currently playing THIS app (not just online).
+    pub playing_this_game: bool,
+}
+
+/// Friends and presence. Landed Phase 5a — **not** invites/join (5b, which
+/// needs Phase 6's transport to route a cold launch into the right session)
+/// and **not** the overlay dialogs that open a friend/invite UI (those are
+/// `Overlay`/Phase 3 calls, gated on the swapchain spike the source spec
+/// calls a go/no-go check before that phase lands).
+///
+/// **Group/clan membership is out of scope.** The Steamworks binding this
+/// engine uses doesn't wrap clan enumeration at all — a real gap, not an
+/// oversight; see `docs/steam-integration-proposal.md`.
+pub trait Social {
+    /// Sets a rich-presence key for the local user, visible to friends in
+    /// their friend list — e.g. `("status", "In the lobby")`. The backend
+    /// caps the number of keys and their length; `Err` names the reason
+    /// (an unknown/malformed key, or the cap reached), not a bare failure.
+    fn set_rich_presence(&self, key: &str, value: &str) -> Result<(), String>;
+    /// Clears every rich-presence key set via
+    /// [`set_rich_presence`](Self::set_rich_presence).
+    fn clear_rich_presence(&self);
+    /// The local user's friend list.
+    fn friends(&self) -> Vec<FriendInfo>;
+    /// Reads one of `friend_id`'s OWN rich-presence keys (set via their
+    /// own `set_rich_presence`) — `None` if they haven't set it, aren't a
+    /// friend, or aren't currently in a session the backend can read it
+    /// from.
+    fn friend_rich_presence(&self, friend_id: u64, key: &str) -> Option<String>;
+}
 
 /// The platform capability boundary. One accessor per capability group,
 /// defaulting to `None` — a backend that hasn't grown a capability yet (or

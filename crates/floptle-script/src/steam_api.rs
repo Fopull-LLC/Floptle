@@ -33,6 +33,12 @@
 //! itself. Data is a binary-safe Lua string in and out, same as
 //! `ed.readBytes` elsewhere in this engine.
 //!
+//! **Friend ids (`steam.friends`, `steam.friendRichPresence`) are strings**,
+//! same reasoning as `localUserId`. `steam.friends()` returns the CALLER's
+//! friend list; `steam.friendRichPresence(id, key)` reads one of THAT
+//! friend's own rich-presence values, set by their own game calling
+//! `steam.setRichPresence` — different from reading your own.
+//!
 //! Installed unconditionally (`ScriptHost::new()`), same as every other
 //! `install_*_api` — the `steam` global always exists so `steam.available()`
 //! is always safe to call. What varies is only what `platform` currently
@@ -47,7 +53,7 @@ use std::rc::Rc;
 use mlua::{Lua, Value};
 
 use crate::{LogLevel, ScriptLog};
-use floptle_services::{Achievements, Cloud, Platform};
+use floptle_services::{Achievements, Cloud, Platform, Social};
 
 /// The platform backend, swappable after `ScriptHost::new()` via
 /// `set_platform` — every Lua closure below holds a clone of this same cell,
@@ -98,6 +104,19 @@ fn cloud_call<T>(
 ) -> Result<T, String> {
     match platform.borrow().cloud() {
         Some(c) => f(c),
+        None => Err("Steam isn't available in this session".into()),
+    }
+}
+
+/// Runs `f` against the current backend's `Social` surface, or answers a
+/// plain "not available" error when there is none — same shape as
+/// `achievements_call`/`cloud_call`.
+fn social_call<T>(
+    platform: &SharedPlatform,
+    f: impl FnOnce(&dyn Social) -> Result<T, String>,
+) -> Result<T, String> {
+    match platform.borrow().social() {
+        Some(s) => f(s),
         None => Err("Steam isn't available in this session".into()),
     }
 }
@@ -393,6 +412,59 @@ pub(crate) fn install_steam_api(
         })?,
     )?;
 
+    let p = platform.clone();
+    t.set(
+        "setRichPresence",
+        lua.create_function(move |lua, (key, value): (String, String)| {
+            result_tuple(lua, social_call(&p, |s| s.set_rich_presence(&key, &value)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "clearRichPresence",
+        lua.create_function(move |_, ()| {
+            if let Some(s) = p.borrow().social() {
+                s.clear_rich_presence();
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "friends",
+        lua.create_function(move |lua, ()| match p.borrow().social() {
+            Some(s) => {
+                let t = lua.create_table()?;
+                for (i, f) in s.friends().into_iter().enumerate() {
+                    let row = lua.create_table()?;
+                    row.set("id", lua.create_string(f.id.to_string())?)?;
+                    row.set("name", f.name)?;
+                    row.set("state", f.state)?;
+                    row.set("playingThisGame", f.playing_this_game)?;
+                    t.set(i + 1, row)?;
+                }
+                Ok(Value::Table(t))
+            }
+            None => Ok(Value::Nil),
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "friendRichPresence",
+        lua.create_function(move |lua, (friend_id, key): (String, String)| {
+            let Ok(friend_id) = friend_id.parse::<u64>() else {
+                return Ok(Value::Nil);
+            };
+            match p.borrow().social().and_then(|s| s.friend_rich_presence(friend_id, &key)) {
+                Some(v) => Ok(Value::String(lua.create_string(v)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
     t.set(
         "onPersonaChanged",
         lua.create_function(move |_, f: mlua::Function| {
@@ -572,5 +644,31 @@ mod tests {
             );
             assert!(err.is_some_and(|e| !e.is_empty()), "{call} should carry a real message");
         }
+    }
+
+    /// `friends()` and `friendRichPresence` are nil under `NullPlatform` —
+    /// the ordinary "not on Steam" branch, not an error. A garbage friend id
+    /// must not panic either (it fails the `u64` parse rather than the
+    /// platform lookup, but the observable answer — nil, no crash — is the
+    /// same either way).
+    #[test]
+    fn social_reads_are_nil_under_null_platform() {
+        let f = fresh();
+        for call in ["steam.friends()", "steam.friendRichPresence(\"76561198000000000\", \"status\")", "steam.friendRichPresence(\"not-a-number\", \"status\")"] {
+            let is_nil: bool = f.lua.load(format!("return {call} == nil")).eval().unwrap();
+            assert!(is_nil, "{call} should be nil under NullPlatform");
+        }
+    }
+
+    /// `setRichPresence` carries a real error under `NullPlatform`;
+    /// `clearRichPresence` is fire-and-forget and never raises.
+    #[test]
+    fn social_writes_fail_cleanly_under_null_platform() {
+        let f = fresh();
+        let (ok, err): (bool, Option<String>) =
+            f.lua.load("return steam.setRichPresence(\"status\", \"In the lobby\")").eval().unwrap();
+        assert!(!ok, "setRichPresence should fail under NullPlatform");
+        assert!(err.is_some_and(|e| !e.is_empty()), "setRichPresence should carry a real message");
+        f.lua.load("steam.clearRichPresence()").exec().unwrap();
     }
 }

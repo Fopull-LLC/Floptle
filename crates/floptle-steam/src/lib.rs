@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use std::io::{Read, Write};
 
 #[cfg(feature = "steam")]
-use floptle_services::{Achievements, Cloud, Identity, Platform};
+use floptle_services::{Achievements, Cloud, FriendInfo, Identity, Platform, Social};
 
 /// How long to leave achievement/stat writes queued before an automatic
 /// [`Achievements::flush`] — a game that never calls `flush` itself still
@@ -184,6 +184,9 @@ impl Platform for SteamPlatform {
     fn cloud(&self) -> Option<&dyn Cloud> {
         Some(self)
     }
+    fn social(&self) -> Option<&dyn Social> {
+        Some(self)
+    }
 }
 
 #[cfg(feature = "steam")]
@@ -229,6 +232,57 @@ impl Identity for SteamPlatform {
     }
     fn is_big_picture_mode(&self) -> bool {
         self.client.utils().is_steam_in_big_picture_mode()
+    }
+}
+
+/// `steamworks::FriendState` as the plain lowercase string
+/// `floptle_services::FriendInfo::state` carries — see that field's doc for
+/// why a string, not a typed enum, is the deliberate choice here.
+#[cfg(feature = "steam")]
+fn friend_state_str(state: steamworks::FriendState) -> String {
+    match state {
+        steamworks::FriendState::Offline => "offline",
+        steamworks::FriendState::Online => "online",
+        steamworks::FriendState::Invisible => "invisible",
+        steamworks::FriendState::Busy => "busy",
+        steamworks::FriendState::Away => "away",
+        steamworks::FriendState::Snooze => "snooze",
+        steamworks::FriendState::LookingToTrade => "looking to trade",
+        steamworks::FriendState::LookingToPlay => "looking to play",
+    }
+    .to_string()
+}
+
+#[cfg(feature = "steam")]
+impl Social for SteamPlatform {
+    fn set_rich_presence(&self, key: &str, value: &str) -> Result<(), String> {
+        if self.client.friends().set_rich_presence(key, Some(value)) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Steam rejected rich-presence key \"{key}\" — too many keys set, or the key/value was too long"
+            ))
+        }
+    }
+    fn clear_rich_presence(&self) {
+        self.client.friends().clear_rich_presence();
+    }
+    fn friends(&self) -> Vec<FriendInfo> {
+        let my_app = self.app_id;
+        self.client
+            .friends()
+            .get_friends(steamworks::FriendFlags::IMMEDIATE)
+            .into_iter()
+            .map(|f| FriendInfo {
+                id: f.id().raw(),
+                name: f.name(),
+                state: friend_state_str(f.state()),
+                playing_this_game: f.game_played().is_some_and(|g| g.game.app_id() == my_app),
+            })
+            .collect()
+    }
+    fn friend_rich_presence(&self, friend_id: u64, key: &str) -> Option<String> {
+        self.client.friends().get_friend(steamworks::SteamId::from_raw(friend_id)).rich_presence(key)
     }
 }
 
