@@ -1,5 +1,29 @@
 ## Just shipped
 
+**v0.77.0 "Well Earned"** — **achievements, stats and Cloud saves reach
+Lua.** `steam.unlockAchievement`/`clearAchievement`/`achievementUnlocked`
+cover unlock/clear/query, `steam.achievementGlobalPercent` is the share of
+players worldwide who've earned one, and `steam.achievementName`/
+`achievementDescription` read Steam's own localized text for it.
+`steam.statInt`/`setStatInt` and `statFloat`/`setStatFloat` cover int/float
+stats — every write queues locally and reaches Steam on an automatic batch
+(or `steam.flushStats()` right now), and a failed send is never silently
+lost, just retried on the next batch. Every write answers `ok, err`, and
+`err` names the actual problem — a mistyped achievement ID says so.
+**Cloud saves**: `steam.cloudWrite`/`cloudRead`/`cloudDelete` for the
+basics, `cloudFiles()` to list what's stored, `cloudFileExists`/
+`cloudFileTimestamp` to check before you read, `cloudForget` to stop syncing
+one save without losing it, and `cloudEnabled`/`setCloudEnabled` for the
+per-game toggle (the account-wide one stays the player's, same as anywhere
+else). No built-in save-conflict resolution — `cloudFileTimestamp` is there
+so a game can compare it against its own local save and decide what
+"newer" means for itself. **`steam.uiLanguage()`, `steam.isSteamDeck()`
+and `steam.isBigPictureMode()`** cover the basics of knowing where you're
+running. Not in this release: average-rate stats, achievement-progress
+notifications, achievement icons, and Cloud storage-quota numbers — real
+gaps in what Valve's current toolkit for this engine supports, not
+oversights.
+
 **v0.76.0 "Who You Are"** — **the first slice of Steam support: a script can
 check whether the game is actually running through Steam, and who's signed
 in.** Set a Steam App ID in ⚙ Settings ▸ Game and `steam.available()` turns
