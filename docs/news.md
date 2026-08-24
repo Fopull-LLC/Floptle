@@ -1,5 +1,18 @@
 ## Just shipped
 
+**v0.78.0 "In Good Company"** — **a script can see who's on Steam with them,
+and let them know what you're up to.** `steam.friends()` returns the local
+user's friend list — each entry's name, online state (`"online"`, `"away"`,
+`"busy"`, `"snooze"`, `"looking to trade"`, `"looking to play"`,
+`"invisible"`, or `"offline"`), and whether they're currently playing this
+same game. `steam.setRichPresence(key, value)` sets a status line friends
+see on your name in their own friend list, `steam.clearRichPresence()`
+clears it, and `steam.friendRichPresence` reads a value a friend's own game
+has set for them. Not in this release: group/clan membership (Valve's own
+current toolkit for this engine doesn't support it) and actually inviting a
+friend or reacting to one — this release is about seeing and being seen,
+not joining yet.
+
 **v0.77.0 "Well Earned"** — **achievements, stats and Cloud saves reach
 Lua.** `steam.unlockAchievement`/`clearAchievement`/`achievementUnlocked`
 cover unlock/clear/query, `steam.achievementGlobalPercent` is the share of
