@@ -390,6 +390,211 @@ pub trait Leaderboards {
     fn poll(&self) -> Vec<LeaderboardResult>;
 }
 
+/// Who can see and join a lobby.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LobbyKind {
+    /// Invite-only, and not returned by a search.
+    Private,
+    /// The creator's friends can find it; nobody else can.
+    FriendsOnly,
+    /// Anyone can find it through a search.
+    Public,
+    /// Joinable by anyone who knows its id, but never returned by a search —
+    /// for a game that runs its own matchmaking and uses lobbies only as the
+    /// meeting point.
+    Invisible,
+}
+
+/// How far afield a lobby search should look. Steam works this out from the
+/// data-centre regions involved, not from anything the player configures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LobbyDistance {
+    /// The same region only.
+    Close,
+    /// Nearby regions. Steam's own default.
+    Default,
+    /// A wide radius — half the planet.
+    Far,
+    /// No distance filtering at all.
+    Worldwide,
+}
+
+/// How a numeric lobby filter compares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LobbyCompare {
+    /// The lobby's value equals the one asked for.
+    Equal,
+    /// …does not equal it.
+    NotEqual,
+    /// …is strictly greater.
+    Greater,
+    /// …is greater or equal.
+    GreaterOrEqual,
+    /// …is strictly less.
+    Less,
+    /// …is less or equal.
+    LessOrEqual,
+}
+
+/// What a lobby search should match. Every field is additive — a lobby has to
+/// satisfy all of them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LobbyFilters {
+    /// `(key, value)` pairs a lobby's own data must equal exactly.
+    pub string: Vec<(String, String)>,
+    /// `(key, value, how)` numeric comparisons against a lobby's own data.
+    pub number: Vec<(String, i32, LobbyCompare)>,
+    /// Only lobbies with at least this many free seats.
+    pub slots_available: Option<u8>,
+    /// How far to search.
+    pub distance: Option<LobbyDistance>,
+    /// Stop after this many results.
+    pub max_results: Option<u64>,
+}
+
+/// A lobby, with the metadata that is readable the moment its id is known.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LobbyInfo {
+    /// The lobby's id. Unlike a [`LeaderboardInfo::id`], this one is a real
+    /// identifier: it can be saved, sent to another player, and used to join
+    /// later.
+    pub id: u64,
+    /// How many members are in it now.
+    pub member_count: usize,
+    /// The most it will hold, if the backend reports one.
+    pub member_limit: Option<usize>,
+    /// The member who owns it (the host).
+    pub owner: Option<u64>,
+    /// Every key/value the lobby carries — the game mode, the map, whatever
+    /// the host set. This is what a lobby browser lists.
+    pub data: Vec<(String, String)>,
+}
+
+/// How one lobby request finished.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LobbyOutcome {
+    /// A lobby was created, and the local user is already in it.
+    Created(LobbyInfo),
+    /// A lobby was joined.
+    Joined(LobbyInfo),
+    /// A search finished. An empty vec means nothing matched, which is
+    /// ordinary rather than a failure.
+    Listed(Vec<LobbyInfo>),
+    /// The request failed, with an actionable reason.
+    Failed(String),
+}
+
+/// One finished lobby request, matched to its caller by `request`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LobbyResult {
+    /// The id the originating call returned.
+    pub request: u64,
+    /// How it finished.
+    pub outcome: LobbyOutcome,
+}
+
+/// What happened to a lobby member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LobbyMemberChange {
+    /// They joined.
+    Entered,
+    /// They left deliberately.
+    Left,
+    /// They dropped without leaving first.
+    Disconnected,
+    /// They were kicked.
+    Kicked,
+    /// They were kicked and banned.
+    Banned,
+}
+
+/// Something that happened in a lobby the local user is in, since the last
+/// [`Lobbies::poll_events`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum LobbyEvent {
+    /// A member joined or left.
+    ///
+    /// **Who did it is deliberately not reported.** The Steamworks binding
+    /// this engine uses fills its own "who made this change" field from the
+    /// *changed member's* id — so for a kick it names the person kicked, not
+    /// the person kicking. Exposing a field that is wrong whenever it would
+    /// be interesting is worse than not having it; see
+    /// `docs/steam-integration-proposal.md`.
+    MemberChanged {
+        /// The lobby it happened in.
+        lobby: u64,
+        /// The member whose membership changed.
+        user: u64,
+        /// What happened to them.
+        change: LobbyMemberChange,
+    },
+    /// A lobby's own data, or one member's data, changed. Re-read it with
+    /// [`Lobbies::all_data`] or [`Lobbies::member_data`].
+    DataChanged {
+        /// The lobby whose data changed.
+        lobby: u64,
+        /// Whose data it was — equal to `lobby` when it was the lobby's own.
+        member: u64,
+    },
+}
+
+/// Lobby creation, search and membership. Landed Phase 6a.
+///
+/// **Lobbies are discovery, not transport.** A lobby is how players find each
+/// other and agree on what they're about to play; it carries small key/value
+/// metadata and a member list, and nothing about it decides how the game's
+/// actual packets travel. A game can meet in a Steam lobby and then run its
+/// session over any transport the engine has.
+///
+/// Asynchronous calls follow exactly the contract
+/// [`Leaderboards`] established — a request id now, exactly one
+/// [`LobbyResult`] later through [`poll`](Self::poll), including for a call
+/// that could never have worked. The synchronous half is genuinely
+/// synchronous: once a lobby's id is known, its data and member list are
+/// local reads.
+pub trait Lobbies {
+    /// Creates a lobby and joins it. `max_members` is capped by the backend
+    /// (250 on Steam); a larger number fails the request rather than being
+    /// quietly reduced.
+    fn create(&self, kind: LobbyKind, max_members: u32) -> u64;
+    /// Joins an existing lobby by id.
+    fn join(&self, lobby: u64) -> u64;
+    /// Searches for lobbies matching `filters`.
+    fn list(&self, filters: &LobbyFilters) -> u64;
+    /// Leaves a lobby. Safe to call when not in it.
+    fn leave(&self, lobby: u64);
+
+    /// Reads one of the lobby's own data values.
+    fn data(&self, lobby: u64, key: &str) -> Option<String>;
+    /// Every key/value the lobby carries.
+    fn all_data(&self, lobby: u64) -> Vec<(String, String)>;
+    /// Sets one of the lobby's own data values. **Only the owner may do
+    /// this**, and `Err` says so rather than failing silently.
+    fn set_data(&self, lobby: u64, key: &str, value: &str) -> Result<(), String>;
+    /// Removes one of the lobby's own data values.
+    fn delete_data(&self, lobby: u64, key: &str) -> Result<(), String>;
+    /// Reads one of `member`'s own data values in this lobby.
+    fn member_data(&self, lobby: u64, member: u64, key: &str) -> Option<String>;
+    /// Sets one of the LOCAL user's data values in this lobby — their chosen
+    /// character, their ready flag. Any member may set their own.
+    fn set_member_data(&self, lobby: u64, key: &str, value: &str) -> Result<(), String>;
+
+    /// Everyone currently in the lobby.
+    fn members(&self, lobby: u64) -> Vec<u64>;
+    /// The lobby's owner, if it has one this session can see.
+    fn owner(&self, lobby: u64) -> Option<u64>;
+    /// The most members the lobby will hold.
+    fn member_limit(&self, lobby: u64) -> Option<usize>;
+    /// Opens or closes the lobby to new members. Owner only.
+    fn set_joinable(&self, lobby: u64, joinable: bool) -> Result<(), String>;
+
+    /// Takes every request that has finished since the last call.
+    fn poll(&self) -> Vec<LobbyResult>;
+    /// Takes everything that has happened in the local user's lobbies since
+    /// the last call.
+    fn poll_events(&self) -> Vec<LobbyEvent>;
+}
+
 /// The platform capability boundary. One accessor per capability group,
 /// defaulting to `None` — a backend that hasn't grown a capability yet (or
 /// never will) needs no impl for it at all, and a caller checks once, at the
@@ -445,6 +650,10 @@ pub trait Platform {
     fn leaderboards(&self) -> Option<&dyn Leaderboards> {
         None
     }
+    /// The [`Lobbies`] surface, if this backend has one.
+    fn lobbies(&self) -> Option<&dyn Lobbies> {
+        None
+    }
 }
 
 /// The always-available, no-external-dependency default: every capability
@@ -472,6 +681,7 @@ mod tests {
         assert!(p.input().is_none());
         assert!(p.social().is_none());
         assert!(p.leaderboards().is_none());
+        assert!(p.lobbies().is_none());
     }
 
     /// `Platform` must be usable as `&dyn Platform` (call sites hold a boxed

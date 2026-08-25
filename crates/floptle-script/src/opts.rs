@@ -61,6 +61,8 @@ pub const TABLES: &[OptTable] = &[
     },
     OptTable { call: "steam.uploadScore", keys: crate::steam_api::UPLOAD_KEYS },
     OptTable { call: "steam.downloadScores", keys: crate::steam_api::DOWNLOAD_KEYS },
+    OptTable { call: "steam.createLobby", keys: crate::steam_api::LOBBY_CREATE_KEYS },
+    OptTable { call: "steam.findLobbies", keys: crate::steam_api::LOBBY_FIND_KEYS },
 ];
 
 /// Refuse an options table containing anything the engine does not read.
@@ -342,6 +344,8 @@ mod tests {
             "steam.downloadScores" => {
                 "steam.downloadScores('1', { nonesuch = 1 }, function() end)"
             }
+            "steam.createLobby" => "steam.createLobby({ nonesuch = 1 }, function() end)",
+            "steam.findLobbies" => "steam.findLobbies({ nonesuch = 1 }, function() end)",
             other => panic!(
                 "opts::TABLES lists `{other}` but no test calls it — add a line to \
                  `bogus_call` so the registry entry is a promise the code has to keep"

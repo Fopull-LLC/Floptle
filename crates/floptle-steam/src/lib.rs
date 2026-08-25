@@ -57,8 +57,21 @@ use std::sync::Mutex;
 use floptle_services::{
     Achievements, Cloud, FriendInfo, Identity, LeaderboardDisplay, LeaderboardEntry,
     LeaderboardInfo, LeaderboardOutcome, LeaderboardResult, LeaderboardScope, LeaderboardSort,
-    Leaderboards, Platform, ScoreUploaded, Social, UploadMethod,
+    Leaderboards, Lobbies, LobbyCompare, LobbyDistance, LobbyEvent, LobbyFilters, LobbyInfo,
+    LobbyKind, LobbyMemberChange, LobbyOutcome, LobbyResult, Platform, ScoreUploaded, Social,
+    UploadMethod,
 };
+
+/// The most members Steam will allow in one lobby. `steamworks`'
+/// `create_lobby` **asserts** on anything larger — a panic, not an error — so
+/// this is checked here before the call rather than after it.
+#[cfg(feature = "steam")]
+const MAX_LOBBY_MEMBERS: u32 = 250;
+
+/// The longest a lobby data key may be. `steamworks`' `LobbyKey::new` panics
+/// past this; checked here for the same reason as [`MAX_LOBBY_MEMBERS`].
+#[cfg(feature = "steam")]
+const MAX_LOBBY_KEY: usize = 255;
 
 /// How many `details` ints to ask for per downloaded entry. Steam's own cap
 /// is 64; asking for the maximum costs one stack buffer per entry and means a
@@ -144,9 +157,30 @@ pub struct SteamPlatform {
     /// is never reused, so a result from a finished Play session can only
     /// find its own (already dropped) callback slot, never a new one.
     lb_next_request: Cell<u64>,
+    /// Finished lobby requests, and lobby events, waiting to be polled. Same
+    /// `Send` reasoning as [`lb_results`](Self::lb_results).
+    lobby_results: Arc<Mutex<Vec<LobbyResult>>>,
+    lobby_events: Arc<Mutex<Vec<LobbyEvent>>>,
+    /// Why the last attempt to enter each lobby was refused.
+    ///
+    /// `join_lobby`'s own callback answers `Result<LobbyId, ()>` — an error
+    /// with **no information in it at all**. The separate `LobbyEnter`
+    /// callback carries the real reason (full, banned, doesn't exist…), so it
+    /// is recorded here and used to explain a failed join. If it hasn't
+    /// arrived yet the join still fails, just with a generic message —
+    /// nothing waits on it.
+    lobby_enter_errors: Arc<Mutex<HashMap<u64, &'static str>>>,
+    /// Which lobby each in-flight join request was aimed at, so `poll` can
+    /// pair a failure with the reason [`lobby_enter_errors`](Self::lobby_enter_errors)
+    /// recorded for that same lobby. Read and cleared in `poll`.
+    lobby_join_targets: Arc<Mutex<HashMap<u64, u64>>>,
+    lobby_next_request: Cell<u64>,
     // Held only to keep the registrations alive — dropping one unregisters
     // its callback. Never read directly.
     _persona_cb: steamworks::CallbackHandle,
+    _lobby_chat_update_cb: steamworks::CallbackHandle,
+    _lobby_data_update_cb: steamworks::CallbackHandle,
+    _lobby_enter_cb: steamworks::CallbackHandle,
     _stats_received_cb: steamworks::CallbackHandle,
     _stats_stored_cb: steamworks::CallbackHandle,
 }
@@ -188,6 +222,43 @@ impl SteamPlatform {
             }
         });
 
+        let lobby_events: Arc<Mutex<Vec<LobbyEvent>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let events = lobby_events.clone();
+        let _lobby_chat_update_cb =
+            client.register_callback::<steamworks::LobbyChatUpdate, _>(move |cb| {
+                // `cb.making_change` is deliberately not read — see
+                // `LobbyEvent::MemberChanged`; the binding fills it from the
+                // wrong SDK field.
+                lock(&events).push(LobbyEvent::MemberChanged {
+                    lobby: cb.lobby.raw(),
+                    user: cb.user_changed.raw(),
+                    change: member_change_from_steam(cb.member_state_change),
+                });
+            });
+
+        let events = lobby_events.clone();
+        let _lobby_data_update_cb =
+            client.register_callback::<steamworks::LobbyDataUpdate, _>(move |cb| {
+                if cb.success {
+                    lock(&events).push(LobbyEvent::DataChanged {
+                        lobby: cb.lobby.raw(),
+                        member: cb.member.raw(),
+                    });
+                }
+            });
+
+        let lobby_enter_errors: Arc<Mutex<HashMap<u64, &'static str>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let errors = lobby_enter_errors.clone();
+        let _lobby_enter_cb = client.register_callback::<steamworks::LobbyEnter, _>(move |cb| {
+            if let Some(why) = enter_refusal(cb.chat_room_enter_response) {
+                lock(&errors).insert(cb.lobby.raw(), why);
+            } else {
+                lock(&errors).remove(&cb.lobby.raw());
+            }
+        });
+
         Ok(Self {
             client,
             app_id: app_id.into(),
@@ -199,7 +270,15 @@ impl SteamPlatform {
             lb_results: Arc::new(Mutex::new(Vec::new())),
             lb_boards: Arc::new(Mutex::new(HashMap::new())),
             lb_next_request: Cell::new(1),
+            lobby_results: Arc::new(Mutex::new(Vec::new())),
+            lobby_events,
+            lobby_enter_errors,
+            lobby_join_targets: Arc::new(Mutex::new(HashMap::new())),
+            lobby_next_request: Cell::new(1),
             _persona_cb,
+            _lobby_chat_update_cb,
+            _lobby_data_update_cb,
+            _lobby_enter_cb,
             _stats_received_cb,
             _stats_stored_cb,
         })
@@ -239,6 +318,9 @@ impl Platform for SteamPlatform {
         Some(self)
     }
     fn leaderboards(&self) -> Option<&dyn Leaderboards> {
+        Some(self)
+    }
+    fn lobbies(&self) -> Option<&dyn Lobbies> {
         Some(self)
     }
 }
@@ -612,6 +694,95 @@ fn method_to_steam(m: UploadMethod) -> steamworks::UploadScoreMethod {
 }
 
 #[cfg(feature = "steam")]
+fn member_change_from_steam(c: steamworks::ChatMemberStateChange) -> LobbyMemberChange {
+    use steamworks::ChatMemberStateChange as C;
+    match c {
+        C::Entered => LobbyMemberChange::Entered,
+        C::Left => LobbyMemberChange::Left,
+        C::Disconnected => LobbyMemberChange::Disconnected,
+        C::Kicked => LobbyMemberChange::Kicked,
+        C::Banned => LobbyMemberChange::Banned,
+    }
+}
+
+/// Why entering a lobby was refused, or `None` if it wasn't.
+///
+/// This exists because `join_lobby`'s own error is the unit type — it carries
+/// nothing a player could act on. These strings are what turn "couldn't join"
+/// into a sentence worth showing.
+#[cfg(feature = "steam")]
+fn enter_refusal(r: steamworks::ChatRoomEnterResponse) -> Option<&'static str> {
+    use steamworks::ChatRoomEnterResponse as R;
+    Some(match r {
+        R::Success => return None,
+        R::DoesntExist => "that lobby no longer exists",
+        R::NotAllowed => "you aren't allowed into that lobby",
+        R::Full => "that lobby is full",
+        R::Banned => "you're banned from that lobby",
+        R::Limited => "your Steam account is limited and can't join lobbies",
+        R::ClanDisabled => "that group has been disabled",
+        R::CommunityBan => "your Steam account has a community ban",
+        R::MemberBlockedYou => "someone in that lobby has blocked you",
+        R::YouBlockedMember => "you've blocked someone in that lobby",
+        R::RatelimitExceeded => "you're joining lobbies too quickly — wait a moment",
+        R::Error => "Steam refused the join",
+    })
+}
+
+#[cfg(feature = "steam")]
+fn lobby_kind_to_steam(k: LobbyKind) -> steamworks::LobbyType {
+    match k {
+        LobbyKind::Private => steamworks::LobbyType::Private,
+        LobbyKind::FriendsOnly => steamworks::LobbyType::FriendsOnly,
+        LobbyKind::Public => steamworks::LobbyType::Public,
+        LobbyKind::Invisible => steamworks::LobbyType::Invisible,
+    }
+}
+
+#[cfg(feature = "steam")]
+fn distance_to_steam(d: LobbyDistance) -> steamworks::DistanceFilter {
+    match d {
+        LobbyDistance::Close => steamworks::DistanceFilter::Close,
+        LobbyDistance::Default => steamworks::DistanceFilter::Default,
+        LobbyDistance::Far => steamworks::DistanceFilter::Far,
+        LobbyDistance::Worldwide => steamworks::DistanceFilter::Worldwide,
+    }
+}
+
+#[cfg(feature = "steam")]
+fn compare_to_steam(c: LobbyCompare) -> steamworks::ComparisonFilter {
+    match c {
+        LobbyCompare::Equal => steamworks::ComparisonFilter::Equal,
+        LobbyCompare::NotEqual => steamworks::ComparisonFilter::NotEqual,
+        LobbyCompare::Greater => steamworks::ComparisonFilter::GreaterThan,
+        LobbyCompare::GreaterOrEqual => steamworks::ComparisonFilter::GreaterThanEqualTo,
+        LobbyCompare::Less => steamworks::ComparisonFilter::LessThan,
+        LobbyCompare::LessOrEqual => steamworks::ComparisonFilter::LessThanEqualTo,
+    }
+}
+
+/// Refuse a lobby key/value the binding would PANIC on rather than reject.
+///
+/// `steamworks` builds a `CString` with `.unwrap()` and a `LobbyKey` with a
+/// length assertion, so an interior NUL or an over-long key takes the whole
+/// process down — and both are reachable straight from a script, where a Lua
+/// string may contain any byte at all.
+#[cfg(feature = "steam")]
+fn check_lobby_key(key: &str, value: Option<&str>) -> Result<(), String> {
+    if key.len() > MAX_LOBBY_KEY {
+        return Err(format!(
+            "a lobby data key can be at most {MAX_LOBBY_KEY} characters, and \"{}…\" is {}",
+            &key[..32.min(key.len())],
+            key.len()
+        ));
+    }
+    if key.contains('\0') || value.is_some_and(|v| v.contains('\0')) {
+        return Err("lobby data can't contain a zero byte".into());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "steam")]
 type Results = Arc<Mutex<Vec<LeaderboardResult>>>;
 #[cfg(feature = "steam")]
 type Boards = Arc<Mutex<HashMap<u64, steamworks::Leaderboard>>>;
@@ -805,6 +976,296 @@ impl Leaderboards for SteamPlatform {
     }
 }
 
+#[cfg(feature = "steam")]
+type LobbyQueue = Arc<Mutex<Vec<LobbyResult>>>;
+
+#[cfg(feature = "steam")]
+impl SteamPlatform {
+    fn lobby_next(&self) -> u64 {
+        let id = self.lobby_next_request.get();
+        self.lobby_next_request.set(id.wrapping_add(1));
+        id
+    }
+
+    fn lobby_push(q: &LobbyQueue, request: u64, outcome: LobbyOutcome) {
+        lock(q).push(LobbyResult { request, outcome });
+    }
+
+    /// Read everything about a lobby that is answerable synchronously. Used
+    /// to complete a create/join/list result in `poll`, for the same reason
+    /// as [`Self::fill_board_info`]: the call-result closure is `Send` and
+    /// cannot reach the client.
+    fn lobby_info(&self, id: u64) -> LobbyInfo {
+        let mm = self.client.matchmaking();
+        let lobby = steamworks::LobbyId::from_raw(id);
+        let count = mm.lobby_data_count(lobby);
+        let data = (0..count).filter_map(|i| mm.lobby_data_by_index(lobby, i)).collect();
+        let owner = mm.lobby_owner(lobby).raw();
+        LobbyInfo {
+            id,
+            member_count: mm.lobby_member_count(lobby),
+            member_limit: mm.lobby_member_limit(lobby),
+            // Steam answers 0 for a lobby it knows nothing about, which is
+            // not a Steam id anybody has.
+            owner: (owner != 0).then_some(owner),
+            data,
+        }
+    }
+
+    /// The reason the last enter attempt on `id` was refused, consumed so a
+    /// stale one can't explain a later, different failure.
+    fn take_enter_error(&self, id: u64) -> Option<&'static str> {
+        lock(&self.lobby_enter_errors).remove(&id)
+    }
+}
+
+#[cfg(feature = "steam")]
+impl Lobbies for SteamPlatform {
+    fn create(&self, kind: LobbyKind, max_members: u32) -> u64 {
+        let request = self.lobby_next();
+        // `steamworks::create_lobby` ASSERTS on this rather than returning an
+        // error, so checking after the call is checking after the panic.
+        if max_members == 0 || max_members > MAX_LOBBY_MEMBERS {
+            Self::lobby_push(
+                &self.lobby_results,
+                request,
+                LobbyOutcome::Failed(format!(
+                    "a lobby holds 1 to {MAX_LOBBY_MEMBERS} members, not {max_members}"
+                )),
+            );
+            return request;
+        }
+        let results = self.lobby_results.clone();
+        self.client.matchmaking().create_lobby(
+            lobby_kind_to_steam(kind),
+            max_members,
+            move |r| {
+                let outcome = match r {
+                    Ok(id) => LobbyOutcome::Created(LobbyInfo {
+                        id: id.raw(),
+                        member_count: 0,
+                        member_limit: None,
+                        owner: None,
+                        data: Vec::new(),
+                    }),
+                    Err(e) => LobbyOutcome::Failed(format!("Steam couldn't create a lobby: {e}")),
+                };
+                Self::lobby_push(&results, request, outcome);
+            },
+        );
+        request
+    }
+
+    fn join(&self, lobby: u64) -> u64 {
+        let request = self.lobby_next();
+        lock(&self.lobby_join_targets).insert(request, lobby);
+        let results = self.lobby_results.clone();
+        self.client.matchmaking().join_lobby(
+            steamworks::LobbyId::from_raw(lobby),
+            move |r| {
+                let outcome = match r {
+                    Ok(id) => LobbyOutcome::Joined(LobbyInfo {
+                        id: id.raw(),
+                        member_count: 0,
+                        member_limit: None,
+                        owner: None,
+                        data: Vec::new(),
+                    }),
+                    // The real reason is filled in by `poll`, which can reach
+                    // the `LobbyEnter` callback's record; this closure can't.
+                    Err(()) => LobbyOutcome::Failed(String::new()),
+                };
+                Self::lobby_push(&results, request, outcome);
+            },
+        );
+        request
+    }
+
+    fn list(&self, filters: &LobbyFilters) -> u64 {
+        let request = self.lobby_next();
+        let mm = self.client.matchmaking();
+        for (k, v) in &filters.string {
+            if check_lobby_key(k, Some(v)).is_err() {
+                continue; // a key Steam would panic on simply matches nothing
+            }
+            mm.add_request_lobby_list_string_filter(steamworks::StringFilter(
+                steamworks::LobbyKey::new(k),
+                v,
+                // Explicitly `Equal`: this enum's DEFAULT is
+                // `EqualToOrLessThan`, i.e. a lexicographic `<=`, which is
+                // not what anyone filtering on a game mode means.
+                steamworks::StringFilterKind::Equal,
+            ));
+        }
+        for (k, v, how) in &filters.number {
+            if check_lobby_key(k, None).is_err() {
+                continue;
+            }
+            mm.add_request_lobby_list_numerical_filter(steamworks::NumberFilter(
+                steamworks::LobbyKey::new(k),
+                *v,
+                compare_to_steam(*how),
+            ));
+        }
+        if let Some(slots) = filters.slots_available {
+            mm.set_request_lobby_list_slots_available_filter(slots);
+        }
+        if let Some(d) = filters.distance {
+            mm.set_request_lobby_list_distance_filter(distance_to_steam(d));
+        }
+        if let Some(n) = filters.max_results {
+            mm.set_request_lobby_list_result_count_filter(n);
+        }
+        let results = self.lobby_results.clone();
+        mm.request_lobby_list(move |r| {
+            let outcome = match r {
+                Ok(ids) => LobbyOutcome::Listed(
+                    ids.into_iter()
+                        .map(|id| LobbyInfo {
+                            id: id.raw(),
+                            member_count: 0,
+                            member_limit: None,
+                            owner: None,
+                            data: Vec::new(),
+                        })
+                        .collect(),
+                ),
+                Err(e) => LobbyOutcome::Failed(format!("Steam couldn't search for lobbies: {e}")),
+            };
+            Self::lobby_push(&results, request, outcome);
+        });
+        request
+    }
+
+    fn leave(&self, lobby: u64) {
+        self.client.matchmaking().leave_lobby(steamworks::LobbyId::from_raw(lobby));
+    }
+
+    fn data(&self, lobby: u64, key: &str) -> Option<String> {
+        check_lobby_key(key, None).ok()?;
+        self.client.matchmaking().lobby_data(steamworks::LobbyId::from_raw(lobby), key)
+    }
+
+    fn all_data(&self, lobby: u64) -> Vec<(String, String)> {
+        let mm = self.client.matchmaking();
+        let lobby = steamworks::LobbyId::from_raw(lobby);
+        (0..mm.lobby_data_count(lobby)).filter_map(|i| mm.lobby_data_by_index(lobby, i)).collect()
+    }
+
+    fn set_data(&self, lobby: u64, key: &str, value: &str) -> Result<(), String> {
+        check_lobby_key(key, Some(value))?;
+        if self.client.matchmaking().set_lobby_data(steamworks::LobbyId::from_raw(lobby), key, value)
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "Steam refused to set \"{key}\" — only a lobby's owner can change its data, \
+                 and only while they're still in it"
+            ))
+        }
+    }
+
+    fn delete_data(&self, lobby: u64, key: &str) -> Result<(), String> {
+        check_lobby_key(key, None)?;
+        if self.client.matchmaking().delete_lobby_data(steamworks::LobbyId::from_raw(lobby), key) {
+            Ok(())
+        } else {
+            Err(format!("Steam refused to delete \"{key}\" — owner only, and it must exist"))
+        }
+    }
+
+    fn member_data(&self, lobby: u64, member: u64, key: &str) -> Option<String> {
+        check_lobby_key(key, None).ok()?;
+        let got = self.client.matchmaking().get_lobby_member_data(
+            steamworks::LobbyId::from_raw(lobby),
+            steamworks::SteamId::from_raw(member),
+            key,
+        );
+        // Steam answers an empty string for "no such key", which is
+        // indistinguishable from a key genuinely set to "". `None` is the
+        // honest answer for both.
+        got.filter(|s| !s.is_empty())
+    }
+
+    fn set_member_data(&self, lobby: u64, key: &str, value: &str) -> Result<(), String> {
+        check_lobby_key(key, Some(value))?;
+        self.client.matchmaking().set_lobby_member_data(
+            steamworks::LobbyId::from_raw(lobby),
+            key,
+            value,
+        );
+        Ok(())
+    }
+
+    fn members(&self, lobby: u64) -> Vec<u64> {
+        self.client
+            .matchmaking()
+            .lobby_members(steamworks::LobbyId::from_raw(lobby))
+            .into_iter()
+            .map(|m| m.raw())
+            .collect()
+    }
+
+    fn owner(&self, lobby: u64) -> Option<u64> {
+        let owner = self.client.matchmaking().lobby_owner(steamworks::LobbyId::from_raw(lobby)).raw();
+        (owner != 0).then_some(owner)
+    }
+
+    fn member_limit(&self, lobby: u64) -> Option<usize> {
+        self.client.matchmaking().lobby_member_limit(steamworks::LobbyId::from_raw(lobby))
+    }
+
+    fn set_joinable(&self, lobby: u64, joinable: bool) -> Result<(), String> {
+        if self
+            .client
+            .matchmaking()
+            .set_lobby_joinable(steamworks::LobbyId::from_raw(lobby), joinable)
+        {
+            Ok(())
+        } else {
+            Err("Steam refused — only a lobby's owner can open or close it".into())
+        }
+    }
+
+    fn poll(&self) -> Vec<LobbyResult> {
+        let mut out = std::mem::take(&mut *lock(&self.lobby_results));
+        for r in &mut out {
+            // Whatever happened, this request is no longer in flight.
+            let target = lock(&self.lobby_join_targets).remove(&r.request);
+            match &mut r.outcome {
+                // Fill in everything the `Send` closure could not read.
+                LobbyOutcome::Created(info) | LobbyOutcome::Joined(info) => {
+                    *info = self.lobby_info(info.id);
+                }
+                LobbyOutcome::Listed(list) => {
+                    for info in list.iter_mut() {
+                        *info = self.lobby_info(info.id);
+                    }
+                }
+                // A join failure arrives with an EMPTY message on purpose:
+                // Steam's own join error is the unit type and carries no
+                // reason at all. The reason lives in the `LobbyEnter`
+                // callback's record, and by now `pump` has run every callback
+                // this frame — so whichever of the two Steam dispatched first,
+                // both have landed and the pairing is safe here in a way it
+                // would not be inside either callback.
+                LobbyOutcome::Failed(why) if why.is_empty() => {
+                    *why = match target.and_then(|id| self.take_enter_error(id)) {
+                        Some(reason) => reason.to_string(),
+                        None => "couldn't join that lobby".into(),
+                    };
+                }
+                LobbyOutcome::Failed(_) => {}
+            }
+        }
+        out
+    }
+
+    fn poll_events(&self) -> Vec<LobbyEvent> {
+        std::mem::take(&mut *lock(&self.lobby_events))
+    }
+}
+
 #[cfg(all(test, feature = "steam"))]
 mod tests {
     use super::*;
@@ -889,6 +1350,87 @@ mod tests {
 
         assert!(matches!(method_to_steam(UploadMethod::KeepBest), Method::KeepBest));
         assert!(matches!(method_to_steam(UploadMethod::ForceUpdate), Method::ForceUpdate));
+    }
+
+    /// The two lobby inputs `steamworks` PANICS on rather than rejecting must
+    /// be refused before the call.
+    ///
+    /// `LobbyKey::new` asserts on a key past 255 bytes, and the binding builds
+    /// its `CString` with `.unwrap()`, so an interior NUL aborts too. Both
+    /// arrive straight from a script — a Lua string holds any byte — so
+    /// without this guard a game could take the whole engine down with one
+    /// `steam.setLobbyData` call.
+    #[test]
+    fn lobby_keys_steamworks_would_panic_on_are_refused_first() {
+        assert!(check_lobby_key("mode", Some("coop")).is_ok());
+
+        let long = "k".repeat(MAX_LOBBY_KEY + 1);
+        let e = check_lobby_key(&long, None).unwrap_err();
+        assert!(e.contains(&MAX_LOBBY_KEY.to_string()), "should state the limit: {e}");
+
+        assert!(check_lobby_key("mo\0de", None).is_err(), "an interior NUL in the key");
+        assert!(check_lobby_key("mode", Some("co\0op")).is_err(), "or in the value");
+
+        // Exactly at the limit is fine — an off-by-one here would refuse a
+        // key Steam accepts.
+        assert!(check_lobby_key(&"k".repeat(MAX_LOBBY_KEY), None).is_ok());
+    }
+
+    /// Every enter refusal maps to a sentence worth showing a player, and
+    /// success maps to no error at all.
+    ///
+    /// This is the whole reason the `LobbyEnter` callback is registered:
+    /// `join_lobby`'s own error is the unit type and says nothing.
+    #[test]
+    fn every_enter_refusal_has_a_reason_and_success_has_none() {
+        use steamworks::ChatRoomEnterResponse as R;
+        assert_eq!(enter_refusal(R::Success), None, "success is not a refusal");
+        for r in [
+            R::DoesntExist,
+            R::NotAllowed,
+            R::Full,
+            R::Banned,
+            R::Limited,
+            R::ClanDisabled,
+            R::CommunityBan,
+            R::MemberBlockedYou,
+            R::YouBlockedMember,
+            R::RatelimitExceeded,
+            R::Error,
+        ] {
+            let why = enter_refusal(r).unwrap_or_else(|| panic!("{r:?} has no reason"));
+            assert!(!why.is_empty(), "{r:?}");
+        }
+    }
+
+    /// Every lobby enum maps to the matching Steam variant. `LobbyType` and
+    /// `DistanceFilter` have no reverse mapping, so each arm is pinned.
+    #[test]
+    fn lobby_enums_map_to_the_matching_steam_variant() {
+        use steamworks::{DistanceFilter as D, LobbyType as T};
+        assert!(matches!(lobby_kind_to_steam(LobbyKind::Public), T::Public));
+        assert!(matches!(lobby_kind_to_steam(LobbyKind::Private), T::Private));
+        assert!(matches!(lobby_kind_to_steam(LobbyKind::FriendsOnly), T::FriendsOnly));
+        assert!(matches!(lobby_kind_to_steam(LobbyKind::Invisible), T::Invisible));
+
+        assert!(matches!(distance_to_steam(LobbyDistance::Close), D::Close));
+        assert!(matches!(distance_to_steam(LobbyDistance::Default), D::Default));
+        assert!(matches!(distance_to_steam(LobbyDistance::Far), D::Far));
+        assert!(matches!(distance_to_steam(LobbyDistance::Worldwide), D::Worldwide));
+
+        // Swapping Greater and Less here would silently invert a skill-based
+        // matchmaking filter — the search still works and finds the wrong
+        // players.
+        use steamworks::ComparisonFilter as C;
+        assert!(matches!(compare_to_steam(LobbyCompare::Equal), C::Equal));
+        assert!(matches!(compare_to_steam(LobbyCompare::NotEqual), C::NotEqual));
+        assert!(matches!(compare_to_steam(LobbyCompare::Greater), C::GreaterThan));
+        assert!(matches!(
+            compare_to_steam(LobbyCompare::GreaterOrEqual),
+            C::GreaterThanEqualTo
+        ));
+        assert!(matches!(compare_to_steam(LobbyCompare::Less), C::LessThan));
+        assert!(matches!(compare_to_steam(LobbyCompare::LessOrEqual), C::LessThanEqualTo));
     }
 
     /// A poisoned lock must still hand back the data. These mutexes guard a

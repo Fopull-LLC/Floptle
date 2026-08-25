@@ -69,7 +69,8 @@ use mlua::{Lua, Table, Value};
 use crate::{LogLevel, ScriptLog};
 use floptle_services::{
     Achievements, Cloud, LeaderboardDisplay, LeaderboardInfo, LeaderboardOutcome, LeaderboardScope,
-    LeaderboardSort, Platform, Social, UploadMethod,
+    LeaderboardSort, LobbyCompare, LobbyDistance, LobbyEvent, LobbyFilters, LobbyInfo, LobbyKind,
+    LobbyMemberChange, LobbyOutcome, Platform, Social, UploadMethod,
 };
 
 /// The message every `steam.*` call answers with when no backend is present.
@@ -101,6 +102,12 @@ pub(crate) struct SteamState {
     /// failure instead of one for "Steam said no" and another for "there was
     /// no Steam to ask".
     lb_failed: Vec<(mlua::Function, String)>,
+    /// Lobby callbacks, keyed and invalidated exactly like `lb_pending`.
+    lobby_pending: HashMap<u64, mlua::Function>,
+    lobby_failed: Vec<(mlua::Function, String)>,
+    /// `steam.onLobbyEvent` — one handler for member joins/leaves and data
+    /// changes, drained per frame like `onPersonaChanged`.
+    lobby_event_cb: Option<mlua::Function>,
 }
 
 impl SteamState {
@@ -113,6 +120,9 @@ impl SteamState {
     pub(crate) fn cancel_all(&mut self) {
         self.lb_pending.clear();
         self.lb_failed.clear();
+        self.lobby_pending.clear();
+        self.lobby_failed.clear();
+        self.lobby_event_cb = None;
         self.persona_changed_cb = None;
     }
 
@@ -120,6 +130,11 @@ impl SteamState {
     /// (`steam.leaderboardsInFlight()`).
     pub(crate) fn in_flight(&self) -> usize {
         self.lb_pending.len() + self.lb_failed.len()
+    }
+
+    /// How many lobby requests are still waiting (`steam.lobbiesInFlight()`).
+    pub(crate) fn lobbies_in_flight(&self) -> usize {
+        self.lobby_pending.len() + self.lobby_failed.len()
     }
 }
 
@@ -351,6 +366,179 @@ fn board_table(lua: &Lua, info: &LeaderboardInfo) -> mlua::Result<Table> {
     t.set("sort", info.sort.map(sort_str))?;
     t.set("display", info.display.map(display_str))?;
     Ok(t)
+}
+
+/// Keys `steam.createLobby`'s options table reads.
+pub(crate) const LOBBY_CREATE_KEYS: &[&str] = &["kind", "maxMembers"];
+/// Keys `steam.findLobbies`' options table reads.
+pub(crate) const LOBBY_FIND_KEYS: &[&str] =
+    &["match", "compare", "openSlots", "distance", "maxResults"];
+
+const LOBBY_KINDS: &[&str] = &["public", "private", "friendsOnly", "invisible"];
+const DISTANCES: &[&str] = &["close", "default", "far", "worldwide"];
+
+fn parse_lobby_kind(s: &str) -> Option<LobbyKind> {
+    match s {
+        "public" => Some(LobbyKind::Public),
+        "private" => Some(LobbyKind::Private),
+        "friendsOnly" => Some(LobbyKind::FriendsOnly),
+        "invisible" => Some(LobbyKind::Invisible),
+        _ => None,
+    }
+}
+
+fn parse_distance(s: &str) -> Option<LobbyDistance> {
+    match s {
+        "close" => Some(LobbyDistance::Close),
+        "default" => Some(LobbyDistance::Default),
+        "far" => Some(LobbyDistance::Far),
+        "worldwide" => Some(LobbyDistance::Worldwide),
+        _ => None,
+    }
+}
+
+/// `{ key = value }` string filters, and `{ key = { ">=", 5 } }` numeric ones.
+fn parse_compare(s: &str) -> Option<LobbyCompare> {
+    match s {
+        "==" => Some(LobbyCompare::Equal),
+        "~=" | "!=" => Some(LobbyCompare::NotEqual),
+        ">" => Some(LobbyCompare::Greater),
+        ">=" => Some(LobbyCompare::GreaterOrEqual),
+        "<" => Some(LobbyCompare::Less),
+        "<=" => Some(LobbyCompare::LessOrEqual),
+        _ => None,
+    }
+}
+
+const COMPARES: &[&str] = &["==", "~=", ">", ">=", "<", "<="];
+
+fn member_change_str(c: LobbyMemberChange) -> &'static str {
+    match c {
+        LobbyMemberChange::Entered => "entered",
+        LobbyMemberChange::Left => "left",
+        LobbyMemberChange::Disconnected => "disconnected",
+        LobbyMemberChange::Kicked => "kicked",
+        LobbyMemberChange::Banned => "banned",
+    }
+}
+
+/// A lobby id as a script carries it: a STRING, same reasoning as
+/// `localUserId` — a Steam lobby id is a full `u64`.
+fn parse_lobby_id(id: &str) -> Option<u64> {
+    id.parse::<u64>().ok()
+}
+
+fn bad_lobby(call: &str, id: &str) -> String {
+    format!("{call}: \"{id}\" isn't a lobby id — pass the `id` from a lobby table, as a string")
+}
+
+/// `LobbyInfo` as the Lua table a script reads.
+fn lobby_table(lua: &Lua, info: &LobbyInfo) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("id", lua.create_string(info.id.to_string())?)?;
+    t.set("memberCount", info.member_count)?;
+    t.set("memberLimit", info.member_limit)?;
+    t.set("owner", info.owner.map(|o| o.to_string()))?;
+    let data = lua.create_table()?;
+    for (k, v) in &info.data {
+        data.set(k.as_str(), v.as_str())?;
+    }
+    t.set("data", data)?;
+    Ok(t)
+}
+
+/// Read the lobby filters out of `steam.findLobbies`' options table.
+fn read_lobby_filters(call: &str, opts: &Option<Table>) -> mlua::Result<LobbyFilters> {
+    let mut f = LobbyFilters::default();
+    let Some(t) = opts else { return Ok(f) };
+
+    if let Value::Table(m) = t.get::<Value>("match")? {
+        for pair in m.pairs::<String, Value>() {
+            let (k, v) = pair?;
+            match v {
+                Value::String(s) => f.string.push((k, s.to_str()?.to_string())),
+                Value::Integer(i) => {
+                    let n = i32::try_from(i).map_err(|_| too_big_filter(call, &k))?;
+                    f.number.push((k, n, LobbyCompare::Equal));
+                }
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "{call}: `match.{k}` takes a string or a whole number, got {}",
+                        other.type_name()
+                    )));
+                }
+            }
+        }
+    }
+
+    if let Value::Table(c) = t.get::<Value>("compare")? {
+        for pair in c.pairs::<String, Table>() {
+            let (k, pair_t) = pair?;
+            // `{ skill = { ">=", 500 } }` — an ordered pair, so this is the
+            // one place a positional table is what's meant.
+            let how: String = pair_t.get(1).map_err(|_| missing_compare(call, &k))?;
+            let value: i64 = pair_t.get(2).map_err(|_| missing_compare(call, &k))?;
+            let how = crate::opts::parse_enum(call, &k, &how, COMPARES, parse_compare)?;
+            f.number.push((
+                k.clone(),
+                i32::try_from(value).map_err(|_| too_big_filter(call, &k))?,
+                how,
+            ));
+        }
+    }
+
+    if let Value::Integer(n) = t.get::<Value>("openSlots")? {
+        f.slots_available = Some(u8::try_from(n).map_err(|_| {
+            mlua::Error::RuntimeError(format!("{call}: `openSlots = {n}` is outside 0 – 255"))
+        })?);
+    }
+    if let Value::String(d) = t.get::<Value>("distance")? {
+        f.distance = Some(crate::opts::parse_enum(
+            call,
+            "distance",
+            &d.to_str()?,
+            DISTANCES,
+            parse_distance,
+        )?);
+    }
+    if let Value::Integer(n) = t.get::<Value>("maxResults")? {
+        f.max_results = Some(n.max(0) as u64);
+    }
+    Ok(f)
+}
+
+fn too_big_filter(call: &str, key: &str) -> mlua::Error {
+    mlua::Error::RuntimeError(format!(
+        "{call}: the number for `{key}` is outside what a lobby filter holds \
+         ({} to {})",
+        i32::MIN,
+        i32::MAX
+    ))
+}
+
+fn missing_compare(call: &str, key: &str) -> mlua::Error {
+    mlua::Error::RuntimeError(format!(
+        "{call}: `compare.{key}` takes an operator and a number, as in \
+         {{ {key} = {{ \">=\", 500 }} }} — it reads: {}",
+        COMPARES.join(", ")
+    ))
+}
+
+/// Queue a lobby callback, or hold the failure for the next drain — the same
+/// exactly-once contract as [`queue`].
+fn queue_lobby(
+    state: &Rc<RefCell<SteamState>>,
+    request: Option<u64>,
+    cb: mlua::Function,
+    why: &str,
+) {
+    let mut s = state.borrow_mut();
+    match request {
+        Some(id) => {
+            s.lobby_pending.insert(id, cb);
+        }
+        None => s.lobby_failed.push((cb, why.to_string())),
+    }
 }
 
 /// Install the `steam` global table.
@@ -819,6 +1007,208 @@ pub(crate) fn install_steam_api(
         lua.create_function(move |_, ()| Ok(st.borrow().in_flight()))?,
     )?;
 
+    let (p, st) = (platform.clone(), state.clone());
+    t.set(
+        "createLobby",
+        lua.create_function(move |_, (a, b): (Value, Value)| {
+            let call = "steam.createLobby";
+            let (opts, cb) = opts_and_callback(call, a, b)?;
+            if let Some(o) = &opts {
+                crate::opts::check_keys(o, LOBBY_CREATE_KEYS, call)?;
+            }
+            let kind =
+                opt_enum(&opts, call, "kind", LOBBY_KINDS, parse_lobby_kind, LobbyKind::Public)?;
+            let max = opt_i32(&opts, call, "maxMembers", 8)?;
+            let request = p.borrow().lobbies().map(|l| l.create(kind, max.max(0) as u32));
+            queue_lobby(&st, request, cb, NO_STEAM);
+            Ok(())
+        })?,
+    )?;
+
+    let (p, st) = (platform.clone(), state.clone());
+    t.set(
+        "joinLobby",
+        lua.create_function(move |_, (id, cb): (String, mlua::Function)| {
+            let Some(lobby) = parse_lobby_id(&id) else {
+                queue_lobby(&st, None, cb, &bad_lobby("steam.joinLobby", &id));
+                return Ok(());
+            };
+            let request = p.borrow().lobbies().map(|l| l.join(lobby));
+            queue_lobby(&st, request, cb, NO_STEAM);
+            Ok(())
+        })?,
+    )?;
+
+    let (p, st) = (platform.clone(), state.clone());
+    t.set(
+        "findLobbies",
+        lua.create_function(move |_, (a, b): (Value, Value)| {
+            let call = "steam.findLobbies";
+            let (opts, cb) = opts_and_callback(call, a, b)?;
+            if let Some(o) = &opts {
+                crate::opts::check_keys(o, LOBBY_FIND_KEYS, call)?;
+            }
+            let filters = read_lobby_filters(call, &opts)?;
+            let request = p.borrow().lobbies().map(|l| l.list(&filters));
+            queue_lobby(&st, request, cb, NO_STEAM);
+            Ok(())
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "leaveLobby",
+        lua.create_function(move |_, id: String| {
+            if let (Some(lobby), Some(l)) = (parse_lobby_id(&id), p.borrow().lobbies()) {
+                l.leave(lobby);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "lobbyData",
+        lua.create_function(move |lua, (id, key): (String, Option<String>)| {
+            let Some(lobby) = parse_lobby_id(&id) else { return Ok(Value::Nil) };
+            let backend = p.borrow();
+            let Some(l) = backend.lobbies() else { return Ok(Value::Nil) };
+            match key {
+                // No key: the whole table, which is what a lobby browser
+                // wants and what `all_data` answers in one call.
+                None => {
+                    let t = lua.create_table()?;
+                    for (k, v) in l.all_data(lobby) {
+                        t.set(k, v)?;
+                    }
+                    Ok(Value::Table(t))
+                }
+                Some(key) => match l.data(lobby, &key) {
+                    Some(v) => Ok(Value::String(lua.create_string(v)?)),
+                    None => Ok(Value::Nil),
+                },
+            }
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "setLobbyData",
+        lua.create_function(move |lua, (id, key, value): (String, String, Option<String>)| {
+            let Some(lobby) = parse_lobby_id(&id) else {
+                return result_tuple(lua, Err(bad_lobby("steam.setLobbyData", &id)));
+            };
+            let backend = p.borrow();
+            let Some(l) = backend.lobbies() else {
+                return result_tuple(lua, Err(NO_STEAM.into()));
+            };
+            // A nil value deletes, matching how `save.set` and the rest of
+            // this engine treat "set it to nothing".
+            let r = match value {
+                Some(v) => l.set_data(lobby, &key, &v),
+                None => l.delete_data(lobby, &key),
+            };
+            result_tuple(lua, r)
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "lobbyMemberData",
+        lua.create_function(move |lua, (id, member, key): (String, String, String)| {
+            let (Some(lobby), Ok(member)) = (parse_lobby_id(&id), member.parse::<u64>()) else {
+                return Ok(Value::Nil);
+            };
+            match p.borrow().lobbies().and_then(|l| l.member_data(lobby, member, &key)) {
+                Some(v) => Ok(Value::String(lua.create_string(v)?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "setLobbyMemberData",
+        lua.create_function(move |lua, (id, key, value): (String, String, String)| {
+            let Some(lobby) = parse_lobby_id(&id) else {
+                return result_tuple(lua, Err(bad_lobby("steam.setLobbyMemberData", &id)));
+            };
+            let backend = p.borrow();
+            let r = match backend.lobbies() {
+                Some(l) => l.set_member_data(lobby, &key, &value),
+                None => Err(NO_STEAM.into()),
+            };
+            result_tuple(lua, r)
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "lobbyMembers",
+        lua.create_function(move |lua, id: String| {
+            let Some(lobby) = parse_lobby_id(&id) else { return Ok(Value::Nil) };
+            let backend = p.borrow();
+            let Some(l) = backend.lobbies() else { return Ok(Value::Nil) };
+            let t = lua.create_table()?;
+            for (i, m) in l.members(lobby).into_iter().enumerate() {
+                t.set(i + 1, lua.create_string(m.to_string())?)?;
+            }
+            Ok(Value::Table(t))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "lobbyOwner",
+        lua.create_function(move |lua, id: String| {
+            let Some(lobby) = parse_lobby_id(&id) else { return Ok(Value::Nil) };
+            match p.borrow().lobbies().and_then(|l| l.owner(lobby)) {
+                Some(o) => Ok(Value::String(lua.create_string(o.to_string())?)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "lobbyMemberLimit",
+        lua.create_function(move |_, id: String| {
+            let Some(lobby) = parse_lobby_id(&id) else { return Ok(None) };
+            Ok(p.borrow().lobbies().and_then(|l| l.member_limit(lobby)))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "setLobbyJoinable",
+        lua.create_function(move |lua, (id, joinable): (String, bool)| {
+            let Some(lobby) = parse_lobby_id(&id) else {
+                return result_tuple(lua, Err(bad_lobby("steam.setLobbyJoinable", &id)));
+            };
+            let backend = p.borrow();
+            let r = match backend.lobbies() {
+                Some(l) => l.set_joinable(lobby, joinable),
+                None => Err(NO_STEAM.into()),
+            };
+            result_tuple(lua, r)
+        })?,
+    )?;
+
+    let st = state.clone();
+    t.set(
+        "lobbiesInFlight",
+        lua.create_function(move |_, ()| Ok(st.borrow().lobbies_in_flight()))?,
+    )?;
+
+    let st = state.clone();
+    t.set(
+        "onLobbyEvent",
+        lua.create_function(move |_, f: mlua::Function| {
+            st.borrow_mut().lobby_event_cb = Some(f);
+            Ok(())
+        })?,
+    )?;
+
     t.set(
         "onPersonaChanged",
         lua.create_function(move |_, f: mlua::Function| {
@@ -856,12 +1246,14 @@ pub(crate) fn drain(
 ) {
     // `pump` is what runs the backend's own callbacks, so leaderboard results
     // land DURING this borrow and are waiting by the time it is released.
-    let (changed, results) = {
+    let (changed, results, lobby_results, lobby_events) = {
         let backend = platform.borrow();
         backend.pump();
         (
             backend.identity().map(|id| id.poll_persona_change()).unwrap_or(false),
             backend.leaderboards().map(|l| l.poll()).unwrap_or_default(),
+            backend.lobbies().map(|l| l.poll()).unwrap_or_default(),
+            backend.lobbies().map(|l| l.poll_events()).unwrap_or_default(),
         )
     };
 
@@ -884,6 +1276,22 @@ pub(crate) fn drain(
         out
     };
 
+    let lobby_ready: Vec<(mlua::Function, LobbyOutcome)> = {
+        let mut s = state.borrow_mut();
+        let mut out: Vec<_> = s
+            .lobby_failed
+            .drain(..)
+            .map(|(cb, why)| (cb, LobbyOutcome::Failed(why)))
+            .collect();
+        for r in lobby_results {
+            if let Some(cb) = s.lobby_pending.remove(&r.request) {
+                out.push((cb, r.outcome));
+            }
+        }
+        out
+    };
+    let lobby_event_cb = state.borrow().lobby_event_cb.clone();
+
     let persona_cb = changed.then(|| state.borrow().persona_changed_cb.clone()).flatten();
     if let Some(cb) = persona_cb
         && let Err(e) = cb.call::<()>(())
@@ -896,6 +1304,61 @@ pub(crate) fn drain(
             log(logs, LogLevel::Error, format!("steam leaderboard callback: {e}"));
         }
     }
+
+    for (cb, outcome) in lobby_ready {
+        if let Err(e) = deliver_lobby(lua, &cb, outcome) {
+            log(logs, LogLevel::Error, format!("steam lobby callback: {e}"));
+        }
+    }
+
+    if let Some(cb) = lobby_event_cb {
+        for e in lobby_events {
+            if let Err(err) = fire_lobby_event(lua, &cb, e) {
+                log(logs, LogLevel::Error, format!("steam.onLobbyEvent callback: {err}"));
+            }
+        }
+    }
+}
+
+/// Call one lobby callback with `(value, err)` — the same shape as every
+/// other asynchronous answer in this API.
+fn deliver_lobby(lua: &Lua, cb: &mlua::Function, outcome: LobbyOutcome) -> mlua::Result<()> {
+    match outcome {
+        LobbyOutcome::Failed(why) => cb.call::<()>((Value::Nil, lua.create_string(why)?)),
+        LobbyOutcome::Created(info) | LobbyOutcome::Joined(info) => {
+            cb.call::<()>((lobby_table(lua, &info)?, Value::Nil))
+        }
+        LobbyOutcome::Listed(list) => {
+            let t = lua.create_table()?;
+            for (i, info) in list.iter().enumerate() {
+                t.set(i + 1, lobby_table(lua, info)?)?;
+            }
+            cb.call::<()>((t, Value::Nil))
+        }
+    }
+}
+
+/// Fire `steam.onLobbyEvent` for one event.
+fn fire_lobby_event(lua: &Lua, cb: &mlua::Function, e: LobbyEvent) -> mlua::Result<()> {
+    let t = lua.create_table()?;
+    match e {
+        LobbyEvent::MemberChanged { lobby, user, change } => {
+            t.set("kind", "member")?;
+            t.set("lobby", lua.create_string(lobby.to_string())?)?;
+            t.set("user", lua.create_string(user.to_string())?)?;
+            t.set("change", member_change_str(change))?;
+        }
+        LobbyEvent::DataChanged { lobby, member } => {
+            t.set("kind", "data")?;
+            t.set("lobby", lua.create_string(lobby.to_string())?)?;
+            // Steam reports the lobby's own id here when it was the lobby's
+            // data rather than a member's; saying so plainly beats making
+            // every caller compare two ids to find out.
+            t.set("whose", if member == lobby { "lobby" } else { "member" })?;
+            t.set("member", lua.create_string(member.to_string())?)?;
+        }
+    }
+    cb.call::<()>(t)
 }
 
 /// Call one leaderboard callback with `(value, err)` — the same two-value
@@ -944,7 +1407,8 @@ fn deliver(lua: &Lua, cb: &mlua::Function, outcome: LeaderboardOutcome) -> mlua:
 mod tests {
     use super::*;
     use floptle_services::{
-        LeaderboardEntry, LeaderboardResult, Leaderboards, NullPlatform, ScoreUploaded,
+        LeaderboardEntry, LeaderboardResult, Leaderboards, Lobbies, LobbyResult, NullPlatform,
+        ScoreUploaded,
     };
     use std::cell::Cell;
 
@@ -1010,7 +1474,85 @@ mod tests {
         }
     }
 
-    struct FakePlatform(Rc<FakeBoards>);
+    /// The lobby equivalent of [`FakeBoards`], recording what was asked and
+    /// answering whatever a test queues.
+    #[derive(Default)]
+    struct FakeLobbies {
+        asked: RefCell<Vec<String>>,
+        ready: RefCell<Vec<LobbyResult>>,
+        events: RefCell<Vec<LobbyEvent>>,
+        data: RefCell<Vec<(String, String)>>,
+        next: Cell<u64>,
+    }
+
+    impl FakeLobbies {
+        fn request(&self, what: String) -> u64 {
+            self.asked.borrow_mut().push(what);
+            let id = self.next.get() + 1;
+            self.next.set(id);
+            id
+        }
+        fn answer(&self, request: u64, outcome: LobbyOutcome) {
+            self.ready.borrow_mut().push(LobbyResult { request, outcome });
+        }
+    }
+
+    impl Lobbies for FakeLobbies {
+        fn create(&self, kind: LobbyKind, max_members: u32) -> u64 {
+            self.request(format!("create {kind:?} {max_members}"))
+        }
+        fn join(&self, lobby: u64) -> u64 {
+            self.request(format!("join {lobby}"))
+        }
+        fn list(&self, filters: &LobbyFilters) -> u64 {
+            self.request(format!("list {filters:?}"))
+        }
+        fn leave(&self, lobby: u64) {
+            self.asked.borrow_mut().push(format!("leave {lobby}"));
+        }
+        fn data(&self, _lobby: u64, key: &str) -> Option<String> {
+            self.data.borrow().iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+        }
+        fn all_data(&self, _lobby: u64) -> Vec<(String, String)> {
+            self.data.borrow().clone()
+        }
+        fn set_data(&self, lobby: u64, key: &str, value: &str) -> Result<(), String> {
+            self.asked.borrow_mut().push(format!("setData {lobby} {key}={value}"));
+            self.data.borrow_mut().push((key.into(), value.into()));
+            Ok(())
+        }
+        fn delete_data(&self, lobby: u64, key: &str) -> Result<(), String> {
+            self.asked.borrow_mut().push(format!("deleteData {lobby} {key}"));
+            Ok(())
+        }
+        fn member_data(&self, _lobby: u64, _member: u64, _key: &str) -> Option<String> {
+            None
+        }
+        fn set_member_data(&self, _l: u64, _k: &str, _v: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn members(&self, _lobby: u64) -> Vec<u64> {
+            vec![76561198000000000, 76561198000000001]
+        }
+        fn owner(&self, _lobby: u64) -> Option<u64> {
+            Some(76561198000000000)
+        }
+        fn member_limit(&self, _lobby: u64) -> Option<usize> {
+            Some(8)
+        }
+        fn set_joinable(&self, _lobby: u64, _joinable: bool) -> Result<(), String> {
+            Ok(())
+        }
+        fn poll(&self) -> Vec<LobbyResult> {
+            std::mem::take(&mut self.ready.borrow_mut())
+        }
+        fn poll_events(&self) -> Vec<LobbyEvent> {
+            std::mem::take(&mut self.events.borrow_mut())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakePlatform(Rc<FakeBoards>, Rc<FakeLobbies>);
 
     impl Platform for FakePlatform {
         fn available(&self) -> bool {
@@ -1019,14 +1561,27 @@ mod tests {
         fn leaderboards(&self) -> Option<&dyn Leaderboards> {
             Some(&*self.0)
         }
+        fn lobbies(&self) -> Option<&dyn Lobbies> {
+            Some(&*self.1)
+        }
     }
 
     /// A fixture whose backend answers leaderboard calls.
     fn with_boards() -> (Fixture, Rc<FakeBoards>) {
         let f = fresh();
         let boards = Rc::new(FakeBoards::default());
-        *f.platform.borrow_mut() = Rc::new(FakePlatform(boards.clone()));
+        *f.platform.borrow_mut() =
+            Rc::new(FakePlatform(boards.clone(), Rc::new(FakeLobbies::default())));
         (f, boards)
+    }
+
+    /// A fixture whose backend answers lobby calls.
+    fn with_lobbies() -> (Fixture, Rc<FakeLobbies>) {
+        let f = fresh();
+        let lobbies = Rc::new(FakeLobbies::default());
+        *f.platform.borrow_mut() =
+            Rc::new(FakePlatform(Rc::new(FakeBoards::default()), lobbies.clone()));
+        (f, lobbies)
     }
 
     /// Installs a Lua callback that appends `(value, err)` to a global `seen`
@@ -1544,6 +2099,256 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("callback"), "{e}");
+    }
+
+    /// Lobby calls keep the same exactly-once contract leaderboards
+    /// established — including with no Steam at all.
+    #[test]
+    fn every_lobby_call_fires_its_callback_once_when_there_is_no_steam() {
+        for call in [
+            "steam.createLobby(record)",
+            "steam.joinLobby(\"12\", record)",
+            "steam.findLobbies(record)",
+        ] {
+            let f = fresh();
+            recorder(&f);
+            f.lua.load(call).exec().unwrap();
+            assert_eq!(seen_count(&f), 0, "{call} must not call back inline");
+            drain(&f.lua, &f.platform, &f.state, &f.logs);
+            assert_eq!(seen_count(&f), 1, "{call} should have called back once");
+            drain(&f.lua, &f.platform, &f.state, &f.logs);
+            assert_eq!(seen_count(&f), 1, "{call} called back twice");
+        }
+    }
+
+    /// A created lobby reaches Lua with its id a string and its data a plain
+    /// keyed table — what a lobby browser reads straight out.
+    #[test]
+    fn a_created_lobby_arrives_with_a_string_id_and_keyed_data() {
+        let (f, lobbies) = with_lobbies();
+        recorder(&f);
+        f.lua.load("steam.createLobby(record)").exec().unwrap();
+        lobbies.answer(
+            1,
+            LobbyOutcome::Created(LobbyInfo {
+                id: 109775240000000001,
+                member_count: 1,
+                member_limit: Some(8),
+                owner: Some(76561198000000000),
+                data: vec![("mode".into(), "coop".into())],
+            }),
+        );
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+
+        let (id, count, limit, owner, mode): (String, usize, usize, String, String) = f
+            .lua
+            .load(
+                "local l = seen[1].v
+                 return l.id, l.memberCount, l.memberLimit, l.owner, l.data.mode",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(id, "109775240000000001");
+        assert_eq!((count, limit), (1, 8));
+        assert_eq!(owner, "76561198000000000");
+        assert_eq!(mode, "coop");
+    }
+
+    /// The default lobby is a public one — the thing a game asking for no
+    /// options means.
+    #[test]
+    fn the_default_lobby_is_public() {
+        let (f, lobbies) = with_lobbies();
+        recorder(&f);
+        f.lua.load("steam.createLobby(record)").exec().unwrap();
+        assert_eq!(lobbies.asked.borrow()[0], "create Public 8");
+    }
+
+    /// String and numeric filters both come out of one `match` table, and a
+    /// `compare` entry carries an operator.
+    #[test]
+    fn lobby_filters_read_strings_numbers_and_comparisons() {
+        let (f, lobbies) = with_lobbies();
+        recorder(&f);
+        f.lua
+            .load(
+                "steam.findLobbies({ match = { mode = \"coop\" }, \
+                 compare = { skill = { \">=\", 500 } }, openSlots = 2, \
+                 distance = \"far\", maxResults = 20 }, record)",
+            )
+            .exec()
+            .unwrap();
+        let asked = lobbies.asked.borrow()[0].clone();
+        for want in [
+            "(\"mode\", \"coop\")",
+            "(\"skill\", 500, GreaterOrEqual)",
+            "slots_available: Some(2)",
+            "distance: Some(Far)",
+            "max_results: Some(20)",
+        ] {
+            assert!(asked.contains(want), "missing {want} in {asked}");
+        }
+    }
+
+    /// A `compare` entry missing its operator or its number is refused,
+    /// naming the shape it wants — an options table that silently ignored it
+    /// would filter on nothing and return the whole lobby list.
+    #[test]
+    fn a_malformed_comparison_filter_is_refused() {
+        let (f, _l) = with_lobbies();
+        recorder(&f);
+        let e = f
+            .lua
+            .load("steam.findLobbies({ compare = { skill = { 500 } } }, record)")
+            .exec()
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("skill") && e.contains(">="), "{e}");
+    }
+
+    /// An unknown comparison operator is refused naming what IS accepted.
+    #[test]
+    fn an_unknown_comparison_operator_is_refused() {
+        let (f, _l) = with_lobbies();
+        recorder(&f);
+        let e = f
+            .lua
+            .load("steam.findLobbies({ compare = { skill = { \"=>\", 5 } } }, record)")
+            .exec()
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("=>") && e.contains(">="), "{e}");
+    }
+
+    /// `steam.lobbyData(id)` with no key answers the whole table; with a key,
+    /// one value.
+    #[test]
+    fn lobby_data_reads_one_key_or_the_whole_table() {
+        let (f, lobbies) = with_lobbies();
+        lobbies.data.borrow_mut().push(("mode".into(), "coop".into()));
+        lobbies.data.borrow_mut().push(("map".into(), "dust".into()));
+
+        let one: String = f.lua.load("return steam.lobbyData(\"12\", \"map\")").eval().unwrap();
+        assert_eq!(one, "dust");
+        let (mode, map): (String, String) = f
+            .lua
+            .load("local d = steam.lobbyData(\"12\") return d.mode, d.map")
+            .eval()
+            .unwrap();
+        assert_eq!((mode.as_str(), map.as_str()), ("coop", "dust"));
+    }
+
+    /// Setting a lobby value to nil DELETES it, matching how the rest of this
+    /// engine treats "set it to nothing".
+    #[test]
+    fn setting_lobby_data_to_nil_deletes_it() {
+        let (f, lobbies) = with_lobbies();
+        f.lua.load("steam.setLobbyData(\"12\", \"mode\", \"coop\")").exec().unwrap();
+        f.lua.load("steam.setLobbyData(\"12\", \"mode\")").exec().unwrap();
+        let asked = lobbies.asked.borrow().clone();
+        assert_eq!(asked, vec!["setData 12 mode=coop", "deleteData 12 mode"]);
+    }
+
+    /// Member ids come back as strings, for the same reason every other id in
+    /// this API does.
+    #[test]
+    fn lobby_members_and_owner_are_strings() {
+        let (f, _l) = with_lobbies();
+        let (n, first, owner): (usize, String, String) = f
+            .lua
+            .load(
+                "local m = steam.lobbyMembers(\"12\")
+                 return #m, m[1], steam.lobbyOwner(\"12\")",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(first, "76561198000000000");
+        assert_eq!(owner, "76561198000000000");
+    }
+
+    /// A lobby event reaches `steam.onLobbyEvent` once per event, and a data
+    /// change says WHOSE data it was rather than making the caller compare
+    /// two ids to find out.
+    #[test]
+    fn lobby_events_reach_the_handler_and_name_whose_data_changed() {
+        let (f, lobbies) = with_lobbies();
+        f.lua
+            .load(
+                "events = {}
+                 steam.onLobbyEvent(function(e) events[#events+1] = e end)",
+            )
+            .exec()
+            .unwrap();
+        lobbies.events.borrow_mut().push(LobbyEvent::MemberChanged {
+            lobby: 12,
+            user: 76561198000000000,
+            change: LobbyMemberChange::Kicked,
+        });
+        lobbies.events.borrow_mut().push(LobbyEvent::DataChanged { lobby: 12, member: 12 });
+        lobbies.events.borrow_mut().push(LobbyEvent::DataChanged { lobby: 12, member: 99 });
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+
+        let (n, kind, user, change, whose1, whose2): (
+            usize,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = f
+            .lua
+            .load(
+                "return #events, events[1].kind, events[1].user, events[1].change, \
+                 events[2].whose, events[3].whose",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(n, 3);
+        assert_eq!((kind.as_str(), change.as_str()), ("member", "kicked"));
+        assert_eq!(user, "76561198000000000");
+        assert_eq!(
+            (whose1.as_str(), whose2.as_str()),
+            ("lobby", "member"),
+            "member == lobby means the LOBBY's data changed"
+        );
+    }
+
+    /// Stop drops lobby callbacks and the event handler too — same hazard as
+    /// every other callback here.
+    #[test]
+    fn stop_drops_lobby_callbacks_and_the_event_handler() {
+        let (f, lobbies) = with_lobbies();
+        recorder(&f);
+        f.lua.load("steam.createLobby(record)").exec().unwrap();
+        f.lua.load("steam.onLobbyEvent(record)").exec().unwrap();
+        assert_eq!(f.lua.load("return steam.lobbiesInFlight()").eval::<usize>().unwrap(), 1);
+
+        f.state.borrow_mut().cancel_all();
+        lobbies.answer(1, LobbyOutcome::Created(LobbyInfo {
+            id: 12,
+            member_count: 1,
+            member_limit: None,
+            owner: None,
+            data: vec![],
+        }));
+        lobbies.events.borrow_mut().push(LobbyEvent::DataChanged { lobby: 12, member: 12 });
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+
+        assert_eq!(seen_count(&f), 0, "nothing from a stopped session may fire");
+    }
+
+    /// A lobby id that isn't a number fails through the callback rather than
+    /// reaching the backend.
+    #[test]
+    fn a_malformed_lobby_id_fails_without_reaching_the_backend() {
+        let (f, lobbies) = with_lobbies();
+        recorder(&f);
+        f.lua.load("steam.joinLobby(\"not-an-id\", record)").exec().unwrap();
+        assert!(lobbies.asked.borrow().is_empty());
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+        let err: String = f.lua.load("return seen[1].e").eval().unwrap();
+        assert!(err.contains("lobby id"), "{err}");
     }
 
     /// `setRichPresence` carries a real error under `NullPlatform`;

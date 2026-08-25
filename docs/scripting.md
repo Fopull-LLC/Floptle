@@ -3726,6 +3726,64 @@ Creating boards from `steam.findOrCreateLeaderboard` is a development
 convenience. A shipping game's boards are normally declared on the Steamworks
 admin site, where you can also reset and moderate them.
 
+## 28b. Steam lobbies: finding other players
+
+A lobby is **discovery, not transport**. It is how players find each other and
+agree on what they are about to play — a small key/value table plus a member
+list. It decides nothing about how your game's packets travel; meet in a lobby,
+then run the session over whatever `net.*` transport you like (§16).
+
+```lua
+-- Host
+steam.createLobby({ kind = "public", maxMembers = 8 }, function(lobby, err)
+  if not lobby then log(err) return end
+  steam.setLobbyData(lobby.id, "mode", "coop")     -- what searches match on
+  steam.setLobbyData(lobby.id, "map", "dust")
+end)
+
+-- Everyone else
+steam.findLobbies({ match = { mode = "coop" }, openSlots = 1 }, function(found)
+  for _, l in ipairs(found or {}) do
+    print(l.data.map, l.memberCount .. "/" .. l.memberLimit)
+  end
+end)
+
+steam.joinLobby(id, function(lobby, err)
+  if not lobby then log(err) end          -- "that lobby is full", etc.
+end)
+```
+
+Same rules as §28a: every one of these calls back **on a later frame, exactly
+once**, including when the player isn't on Steam. Ids are strings.
+
+**Two kinds of data, with different permissions.** `setLobbyData` is the
+lobby's own — the mode, the map, what a search matches — and **only the owner
+may change it**. `setLobbyMemberData` is each player's own, and anyone may set
+theirs; that's where a ready flag or a chosen character goes.
+
+```lua
+steam.onLobbyEvent(function(e)
+  if e.kind == "member" then
+    print(e.user, e.change)               -- entered / left / disconnected / kicked / banned
+  elseif e.whose == "member" then
+    print(steam.lobbyMemberData(e.lobby, e.member, "ready"))
+  else
+    print(steam.lobbyData(e.lobby).mode)  -- the lobby's own data changed
+  end
+end)
+```
+
+`steam.setLobbyJoinable(id, false)` closes the lobby when the match starts.
+`steam.lobbyOwner`, `steam.lobbyMembers` and `steam.lobbyMemberLimit` fill in
+the rest of a lobby screen, and `steam.lobbyData(id)` with no key hands you the
+whole table at once.
+
+Two things Steam itself won't tell you, so this doesn't pretend to: **who
+performed a kick** (Steam's binding fills that field with the kicked player's
+own id, so reporting it would be wrong exactly when it mattered), and **lobby
+chat** — Steam's message handle is only valid inside its own callback, which is
+not where this engine can read it. Lobby *data* is the channel to use.
+
 ## 29. Options that refuse — and why an error is the kind answer
 
 Every options table in this engine is **closed**. A key it does not read is an

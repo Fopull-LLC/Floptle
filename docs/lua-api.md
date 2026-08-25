@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 92
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 106
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 26
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -347,6 +347,10 @@ steam.cloudRead(name) -> data, err — reads name's full contents (a binary-safe
 
 steam.cloudWrite(name, data) -> ok, err — writes data (a binary-safe Lua string) as name's full contents, replacing whatever was there and creating the file if it didn't exist.
 
+### `steam.createLobby`
+
+steam.createLobby(opts, cb) — creates a lobby and puts you in it. A lobby is DISCOVERY, not transport: it's how players find each other and agree what they're about to play, and it decides nothing about how the game's packets travel. opts (optional): kind = "public" (default; anyone can find it), "friendsOnly", "private" (invite only) or "invisible" (joinable by id but never returned by a search); maxMembers = 8 by default, 1 to 250. cb(lobby, err) on a later frame, exactly once — lobby is { id, memberCount, memberLimit, owner, data }.
+
 ### `steam.downloadScores`
 
 steam.downloadScores(boardId, opts, cb) — downloads leaderboard rows. opts (optional): scope = "global" (default, ranks from the top), "friends" (only your friends) or "aroundUser" (ranks RELATIVE to your own — start = -4 with count = 9 gives you plus the four either side); start (default 1) and count (default 10). cb(rows, err) with rows a list of { userId, rank, score, details }; userId is a STRING and details is an empty list when none was uploaded.
@@ -354,6 +358,10 @@ steam.downloadScores(boardId, opts, cb) — downloads leaderboard rows. opts (op
 ### `steam.findLeaderboard`
 
 steam.findLeaderboard(name, cb) — looks a leaderboard up by name. cb(board, err) runs on a LATER frame, exactly once, in every session — including when there is no Steam at all, where err says so. board is { id, name, entryCount, sort, display }, or nil with NO err when there simply is no board by that name (a normal answer to branch on, not a failure). board.id is a STRING and lasts only this session — find the board again next run rather than saving it.
+
+### `steam.findLobbies`
+
+steam.findLobbies(opts, cb) — searches for lobbies. opts (optional, all additive): match = a table of lobby data that must be equal (a string compares as a string, a whole number as a number); compare = numeric comparisons, each an operator and a value as in { skill = { ">=", 500 } } — takes ==, ~=, >, >=, <, <=; openSlots = only lobbies with at least this many free seats; distance = "close", "default", "far" or "worldwide"; maxResults. cb(lobbies, err) with a list of lobby tables — an empty list means nothing matched, which is not an error.
 
 ### `steam.findOrCreateLeaderboard`
 
@@ -391,13 +399,49 @@ steam.isFamilyShared() — true if this app is being played on a license borrowe
 
 steam.isSteamDeck() — true if this session is running on Steam's own handheld hardware. Assume no physical keyboard/mouse when true. nil when steam.available() is false.
 
+### `steam.joinLobby`
+
+steam.joinLobby(id, cb) — joins a lobby by id (a string). cb(lobby, err) exactly once, on a later frame. When it fails, err is a real reason where Steam gives one — "that lobby is full", "you're banned from that lobby", "that lobby no longer exists" — worth showing the player as-is.
+
 ### `steam.leaderboardsInFlight`
 
 steam.leaderboardsInFlight() — how many leaderboard requests have been made and not yet called back. What a "loading scores…" spinner hangs off. Pressing Stop drops every pending callback, so this returns to 0.
 
+### `steam.leaveLobby`
+
+steam.leaveLobby(id) — leaves a lobby. Safe to call when you aren't in it, and safe when there's no Steam; never raises.
+
+### `steam.lobbiesInFlight`
+
+steam.lobbiesInFlight() — how many lobby requests have been made and not yet called back. Pressing Stop drops every pending callback, so this returns to 0.
+
+### `steam.lobbyData`
+
+steam.lobbyData(id, key) — one of the lobby's own data values, or nil. Called with NO key, steam.lobbyData(id) answers the whole table at once, which is what a lobby browser wants. nil when there's no Steam.
+
+### `steam.lobbyMemberData`
+
+steam.lobbyMemberData(id, memberId, key) — one of THAT member's own values in this lobby (their character, their ready flag), or nil. Steam cannot tell a key set to "" from one never set, so both answer nil.
+
+### `steam.lobbyMemberLimit`
+
+steam.lobbyMemberLimit(id) — the most members the lobby will hold, or nil.
+
+### `steam.lobbyMembers`
+
+steam.lobbyMembers(id) — everyone currently in the lobby, as a list of id STRINGS (a Steam id exceeds what an f64 represents exactly). nil when there's no Steam.
+
+### `steam.lobbyOwner`
+
+steam.lobbyOwner(id) — the lobby's owner (the host) as an id string, or nil. Only the owner may change lobby data or open and close the lobby.
+
 ### `steam.localUserId`
 
 steam.localUserId() — the signed-in local user's SteamID64, as a STRING (it exceeds what an f64 represents exactly). nil when steam.available() is false.
+
+### `steam.onLobbyEvent`
+
+steam.onLobbyEvent(fn) — fires for each thing that happens in a lobby you're in. e.kind is "member" — with e.user and e.change of "entered", "left", "disconnected", "kicked" or "banned" — or "data", with e.whose telling you whether the LOBBY's data or a MEMBER's changed, so re-read the right one. Who did the kicking is deliberately not reported: Steam's binding fills that field from the wrong id. One handler; registering again replaces it, and Stop clears it.
 
 ### `steam.onPersonaChanged`
 
@@ -414,6 +458,18 @@ steam.resetAllStats(achievementsToo) -> ok, err — wipes every stat, and every 
 ### `steam.setCloudEnabled`
 
 steam.setCloudEnabled(enabled) -> ok, err — toggles steam.cloudEnabled().
+
+### `steam.setLobbyData`
+
+steam.setLobbyData(id, key, value) -> ok, err — sets one of the lobby's own data values; this is what a lobby search matches against. Passing NO value deletes the key. ONLY THE OWNER may change lobby data, and err says so rather than failing quietly.
+
+### `steam.setLobbyJoinable`
+
+steam.setLobbyJoinable(id, joinable) -> ok, err — opens or closes the lobby to new members; close it when the match starts. Owner only.
+
+### `steam.setLobbyMemberData`
+
+steam.setLobbyMemberData(id, key, value) -> ok, err — sets one of YOUR OWN values in this lobby. Any member may set their own, unlike steam.setLobbyData which is owner-only.
 
 ### `steam.setRichPresence`
 
