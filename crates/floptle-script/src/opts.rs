@@ -55,6 +55,12 @@ pub const TABLES: &[OptTable] = &[
     OptTable { call: "raycast", keys: crate::shape_api::QUERY_KEYS },
     OptTable { call: "nav.agent", keys: crate::nav_api::AGENT_KEYS },
     OptTable { call: "agent:set", keys: crate::nav_api::AGENT_KEYS },
+    OptTable {
+        call: "steam.findOrCreateLeaderboard",
+        keys: crate::steam_api::CREATE_KEYS,
+    },
+    OptTable { call: "steam.uploadScore", keys: crate::steam_api::UPLOAD_KEYS },
+    OptTable { call: "steam.downloadScores", keys: crate::steam_api::DOWNLOAD_KEYS },
 ];
 
 /// Refuse an options table containing anything the engine does not read.
@@ -327,6 +333,15 @@ mod tests {
             "raycast" => "raycast(0,0,0, 0,-1,0, 10, { nonesuch = 1 })",
             "nav.agent" => "nav.agent(node, { nonesuch = 1 })",
             "agent:set" => "local a = nav.agent(node) a:set{ nonesuch = 1 }",
+            "steam.findOrCreateLeaderboard" => {
+                "steam.findOrCreateLeaderboard('HI', { nonesuch = 1 }, function() end)"
+            }
+            "steam.uploadScore" => {
+                "steam.uploadScore('1', 5, { nonesuch = 1 }, function() end)"
+            }
+            "steam.downloadScores" => {
+                "steam.downloadScores('1', { nonesuch = 1 }, function() end)"
+            }
             other => panic!(
                 "opts::TABLES lists `{other}` but no test calls it — add a line to \
                  `bogus_call` so the registry entry is a promise the code has to keep"

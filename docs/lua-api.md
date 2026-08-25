@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 87
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 92
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 26
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -347,6 +347,18 @@ steam.cloudRead(name) -> data, err — reads name's full contents (a binary-safe
 
 steam.cloudWrite(name, data) -> ok, err — writes data (a binary-safe Lua string) as name's full contents, replacing whatever was there and creating the file if it didn't exist.
 
+### `steam.downloadScores`
+
+steam.downloadScores(boardId, opts, cb) — downloads leaderboard rows. opts (optional): scope = "global" (default, ranks from the top), "friends" (only your friends) or "aroundUser" (ranks RELATIVE to your own — start = -4 with count = 9 gives you plus the four either side); start (default 1) and count (default 10). cb(rows, err) with rows a list of { userId, rank, score, details }; userId is a STRING and details is an empty list when none was uploaded.
+
+### `steam.findLeaderboard`
+
+steam.findLeaderboard(name, cb) — looks a leaderboard up by name. cb(board, err) runs on a LATER frame, exactly once, in every session — including when there is no Steam at all, where err says so. board is { id, name, entryCount, sort, display }, or nil with NO err when there simply is no board by that name (a normal answer to branch on, not a failure). board.id is a STRING and lasts only this session — find the board again next run rather than saving it.
+
+### `steam.findOrCreateLeaderboard`
+
+steam.findOrCreateLeaderboard(name, opts, cb) — like steam.findLeaderboard, but creates the board if it doesn't exist. opts (optional): sort = "descending" (default; higher is better) or "ascending" (lower is better, for times); display = "numeric" (default), "seconds" or "milliseconds". Creating boards this way is a development convenience — a shipping game's boards are normally declared on the Steamworks admin site, where they can also be reset and moderated.
+
 ### `steam.flushStats`
 
 steam.flushStats() — sends every pending achievement/stat write to Steam now, instead of waiting for the automatic batch (every 5s while something's pending). Safe to call with nothing pending.
@@ -378,6 +390,10 @@ steam.isFamilyShared() — true if this app is being played on a license borrowe
 ### `steam.isSteamDeck`
 
 steam.isSteamDeck() — true if this session is running on Steam's own handheld hardware. Assume no physical keyboard/mouse when true. nil when steam.available() is false.
+
+### `steam.leaderboardsInFlight`
+
+steam.leaderboardsInFlight() — how many leaderboard requests have been made and not yet called back. What a "loading scores…" spinner hangs off. Pressing Stop drops every pending callback, so this returns to 0.
 
 ### `steam.localUserId`
 
@@ -430,6 +446,10 @@ steam.uiLanguage() — Steam's own UI language right now (e.g. "english", "frenc
 ### `steam.unlockAchievement`
 
 steam.unlockAchievement(id) -> ok, err — unlocks LOCALLY (cheap, in-memory); reaches Steam's server and triggers its own unlock notification on the next automatic batch or steam.flushStats(). err is nil on success, an actionable message (e.g. an unknown id) otherwise.
+
+### `steam.uploadScore`
+
+steam.uploadScore(boardId, score, opts, cb) — uploads a score for the local user. opts (optional): method = "keepBest" (default — keeps whichever score ranks better) or "forceUpdate" (overwrite even with a worse one, for a "most recent run" board); details = a list of whole numbers stored alongside the score (ghost data, a replay seed), up to 64. cb(res, err) with res = { score, changed, rank, previousRank } — score is what is STORED, which under keepBest is not necessarily what you uploaded, and changed is how a "new personal best!" banner knows.
 
 ### `time`
 

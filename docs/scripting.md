@@ -3679,6 +3679,53 @@ because vsync, the OS and the GPU finishing are outside every bucket; a number
 claiming to be the frame time without being it would be worse than not offering
 one.
 
+## 28a. Steam leaderboards: `steam.*`
+
+Not to be confused with §27's — `account.*` leaderboards live on **fopull.com**
+and work for every player of your game; these are **Steam's**, and exist only
+for players who launched through Steam. A game can use either, or both.
+
+```lua
+steam.findLeaderboard("HIGH_SCORES", function(board, err)
+  if err then log(err) return end
+  if not board then log("no such board") return end   -- nil, no error
+
+  steam.uploadScore(board.id, score, function(res)
+    if res and res.changed then log("new personal best: " .. res.score) end
+  end)
+
+  steam.downloadScores(board.id, { scope = "friends", count = 5 }, function(rows)
+    for _, r in ipairs(rows or {}) do print(r.rank, r.userId, r.score) end
+  end)
+end)
+```
+
+**Every one of these answers through a callback, on a later frame, exactly
+once.** Including when the player isn't on Steam at all — there the callback
+gets `(nil, "Steam isn't available in this session")`. That's the whole reason
+it works this way: the obvious alternative is to fail immediately when there's
+no Steam and call back when there is, which leaves your game with two failure
+paths, and the second one is the one nobody remembers to write.
+
+Three things worth knowing before you build a scoreboard on it:
+
+- **`board.id` is a string, and it only lasts this session.** Steam can read a
+  handle's raw value but can't turn one back into a handle, so there's nothing
+  useful to save. Call `steam.findLeaderboard` again next run.
+- **`nil` with no error means "no board by that name."** That's a successful
+  answer to a real question, not a failure — branch on it, don't report it.
+- **`uploadScore` defaults to `keepBest`**, so `res.score` is what is now
+  *stored*, which may not be what you just uploaded. `res.changed` is how a
+  "new best!" banner knows.
+
+`scope = "aroundUser"` counts ranks **relative to the player's own** — `start =
+-4` with `count = 9` gives them plus the four either side. `steam.leaderboardsInFlight()`
+is what a "loading scores…" spinner hangs off.
+
+Creating boards from `steam.findOrCreateLeaderboard` is a development
+convenience. A shipping game's boards are normally declared on the Steamworks
+admin site, where you can also reset and moderate them.
+
 ## 29. Options that refuse — and why an error is the kind answer
 
 Every options table in this engine is **closed**. A key it does not read is an

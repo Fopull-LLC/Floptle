@@ -9,9 +9,21 @@
 //! [`floptle_services::Identity`] (local user + app/build info, later
 //! extended with environment facts in Phase 13). [`floptle_services::
 //! Achievements`] (achievements + stats) landed Phase 2,
-//! [`floptle_services::Cloud`] (cloud saves) Phase 4. Phase 6 adds `impl
-//! Transport for SteamTransport`; the rest of `floptle_services`' sub-traits
-//! land as their own phases give them methods to implement.
+//! [`floptle_services::Cloud`] (cloud saves) Phase 4,
+//! [`floptle_services::Social`] (friends + presence) Phase 5a, and
+//! [`floptle_services::Leaderboards`] Phase 9. Phase 6 adds `impl Transport
+//! for SteamTransport`; the rest of `floptle_services`' sub-traits land as
+//! their own phases give them methods to implement.
+//!
+//! **Leaderboards is where this crate grew its asynchronous half.** Steamworks
+//! answers find/upload/download through a *call result* — a one-shot closure
+//! Steam invokes from inside `run_callbacks()`, which is to say from inside
+//! [`Platform::pump`]. That closure must be `Send + 'static`, so it cannot
+//! borrow the client or touch anything Lua; it pushes plain data into
+//! [`SteamPlatform`]'s own queue, and [`floptle_services::Leaderboards::poll`]
+//! drains it on the next frame with the client back in hand. Any future
+//! call-result-shaped surface (lobbies, Phase 6) should reuse that shape
+//! rather than invent a second one.
 //!
 //! **Callers, not this crate, own `restart_app_if_necessary` and any
 //! logging.** [`restart_app_if_necessary`] is re-exported so a caller can run
@@ -37,7 +49,22 @@ use std::time::{Duration, Instant};
 use std::io::{Read, Write};
 
 #[cfg(feature = "steam")]
-use floptle_services::{Achievements, Cloud, FriendInfo, Identity, Platform, Social};
+use std::collections::HashMap;
+#[cfg(feature = "steam")]
+use std::sync::Mutex;
+
+#[cfg(feature = "steam")]
+use floptle_services::{
+    Achievements, Cloud, FriendInfo, Identity, LeaderboardDisplay, LeaderboardEntry,
+    LeaderboardInfo, LeaderboardOutcome, LeaderboardResult, LeaderboardScope, LeaderboardSort,
+    Leaderboards, Platform, ScoreUploaded, Social, UploadMethod,
+};
+
+/// How many `details` ints to ask for per downloaded entry. Steam's own cap
+/// is 64; asking for the maximum costs one stack buffer per entry and means a
+/// caller never silently loses a payload another build uploaded.
+#[cfg(feature = "steam")]
+const MAX_DETAILS: usize = 64;
 
 /// How long to leave achievement/stat writes queued before an automatic
 /// [`Achievements::flush`] — a game that never calls `flush` itself still
@@ -96,6 +123,27 @@ pub struct SteamPlatform {
     /// dropped, the next automatic batch or explicit `flush` just tries again.
     store_failed: Arc<AtomicBool>,
     last_flush_attempt: Cell<Option<Instant>>,
+    /// Finished leaderboard requests waiting for the next
+    /// [`Leaderboards::poll`]. `Mutex`, not `RefCell`, because Steamworks
+    /// requires every call-result closure to be `Send` — the closure owns a
+    /// clone of this `Arc`. In practice the lock is uncontended: Steam fires
+    /// its call results from inside `run_callbacks()`, on the same thread
+    /// that drains them.
+    lb_results: Arc<Mutex<Vec<LeaderboardResult>>>,
+    /// Every board handle resolved this session, keyed by its raw value.
+    ///
+    /// This registry is not a cache — it is load-bearing. `steamworks`'
+    /// `Leaderboard` exposes `raw()` but has NO constructor from a raw value,
+    /// so a handle that leaves Rust can never be turned back into one. Keeping
+    /// the real values here is what lets a caller name a board with a plain
+    /// number.
+    lb_boards: Arc<Mutex<HashMap<u64, steamworks::Leaderboard>>>,
+    /// The next request id. Monotonic for the whole life of this backend and
+    /// never reset — which is why the script layer needs no generation
+    /// counter to tell a stale result from a live one, unlike `http.*`: an id
+    /// is never reused, so a result from a finished Play session can only
+    /// find its own (already dropped) callback slot, never a new one.
+    lb_next_request: Cell<u64>,
     // Held only to keep the registrations alive — dropping one unregisters
     // its callback. Never read directly.
     _persona_cb: steamworks::CallbackHandle,
@@ -148,6 +196,9 @@ impl SteamPlatform {
             dirty: Arc::new(AtomicBool::new(false)),
             store_failed,
             last_flush_attempt: Cell::new(None),
+            lb_results: Arc::new(Mutex::new(Vec::new())),
+            lb_boards: Arc::new(Mutex::new(HashMap::new())),
+            lb_next_request: Cell::new(1),
             _persona_cb,
             _stats_received_cb,
             _stats_stored_cb,
@@ -185,6 +236,9 @@ impl Platform for SteamPlatform {
         Some(self)
     }
     fn social(&self) -> Option<&dyn Social> {
+        Some(self)
+    }
+    fn leaderboards(&self) -> Option<&dyn Leaderboards> {
         Some(self)
     }
 }
@@ -488,19 +542,298 @@ impl SteamPlatform {
     }
 }
 
+/// Locks `m`, recovering from poisoning rather than propagating a panic.
+///
+/// Every critical section guarded by these mutexes is a `push`, a `take` or a
+/// map insert — none of them can leave the data half-updated, so a lock
+/// poisoned by an unrelated panic elsewhere still holds a perfectly valid
+/// value. Answering `unwrap()` here would turn one panic into a second one
+/// that loses a player's uploaded score.
+#[cfg(feature = "steam")]
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(feature = "steam")]
+fn sort_from_steam(s: steamworks::LeaderboardSortMethod) -> LeaderboardSort {
+    match s {
+        steamworks::LeaderboardSortMethod::Ascending => LeaderboardSort::Ascending,
+        steamworks::LeaderboardSortMethod::Descending => LeaderboardSort::Descending,
+    }
+}
+
+#[cfg(feature = "steam")]
+fn sort_to_steam(s: LeaderboardSort) -> steamworks::LeaderboardSortMethod {
+    match s {
+        LeaderboardSort::Ascending => steamworks::LeaderboardSortMethod::Ascending,
+        LeaderboardSort::Descending => steamworks::LeaderboardSortMethod::Descending,
+    }
+}
+
+#[cfg(feature = "steam")]
+fn display_from_steam(d: steamworks::LeaderboardDisplayType) -> LeaderboardDisplay {
+    match d {
+        steamworks::LeaderboardDisplayType::Numeric => LeaderboardDisplay::Numeric,
+        steamworks::LeaderboardDisplayType::TimeSeconds => LeaderboardDisplay::TimeSeconds,
+        steamworks::LeaderboardDisplayType::TimeMilliSeconds => {
+            LeaderboardDisplay::TimeMilliseconds
+        }
+    }
+}
+
+#[cfg(feature = "steam")]
+fn display_to_steam(d: LeaderboardDisplay) -> steamworks::LeaderboardDisplayType {
+    match d {
+        LeaderboardDisplay::Numeric => steamworks::LeaderboardDisplayType::Numeric,
+        LeaderboardDisplay::TimeSeconds => steamworks::LeaderboardDisplayType::TimeSeconds,
+        LeaderboardDisplay::TimeMilliseconds => {
+            steamworks::LeaderboardDisplayType::TimeMilliSeconds
+        }
+    }
+}
+
+#[cfg(feature = "steam")]
+fn scope_to_steam(s: LeaderboardScope) -> steamworks::LeaderboardDataRequest {
+    match s {
+        LeaderboardScope::Global => steamworks::LeaderboardDataRequest::Global,
+        LeaderboardScope::GlobalAroundUser => {
+            steamworks::LeaderboardDataRequest::GlobalAroundUser
+        }
+        LeaderboardScope::Friends => steamworks::LeaderboardDataRequest::Friends,
+    }
+}
+
+#[cfg(feature = "steam")]
+fn method_to_steam(m: UploadMethod) -> steamworks::UploadScoreMethod {
+    match m {
+        UploadMethod::KeepBest => steamworks::UploadScoreMethod::KeepBest,
+        UploadMethod::ForceUpdate => steamworks::UploadScoreMethod::ForceUpdate,
+    }
+}
+
+#[cfg(feature = "steam")]
+type Results = Arc<Mutex<Vec<LeaderboardResult>>>;
+#[cfg(feature = "steam")]
+type Boards = Arc<Mutex<HashMap<u64, steamworks::Leaderboard>>>;
+
+#[cfg(feature = "steam")]
+impl SteamPlatform {
+    /// The next request id. See [`lb_next_request`](Self::lb_next_request)
+    /// for why these are never reused.
+    fn lb_next(&self) -> u64 {
+        let id = self.lb_next_request.get();
+        self.lb_next_request.set(id.wrapping_add(1));
+        id
+    }
+
+    /// A live board by its raw handle, or `None` if this session never
+    /// resolved it.
+    fn lb_board(&self, id: u64) -> Option<steamworks::Leaderboard> {
+        lock(&self.lb_boards).get(&id).cloned()
+    }
+
+    fn lb_push(results: &Results, request: u64, outcome: LeaderboardOutcome) {
+        lock(results).push(LeaderboardResult { request, outcome });
+    }
+
+    /// The failure a caller gets for a board handle this session never
+    /// resolved — by far the likeliest way to misuse this API, since a handle
+    /// looks like an ordinary number that could have come from anywhere.
+    fn lb_stale(results: &Results, request: u64, board: u64) {
+        Self::lb_push(
+            results,
+            request,
+            LeaderboardOutcome::Failed(format!(
+                "{board} isn't a leaderboard handle from this session — call steam.findLeaderboard again (handles don't survive a restart)"
+            )),
+        );
+    }
+
+    /// Shared by `find` and `find_or_create`: register the resolved board and
+    /// queue the result. Runs inside Steam's own callback, so it is `Send` and
+    /// has no access to the client — the returned [`LeaderboardInfo`] carries
+    /// only the id, and [`Self::fill_board_info`] completes it in `poll`.
+    fn lb_deliver_board(
+        results: &Results,
+        boards: &Boards,
+        request: u64,
+        r: Result<Option<steamworks::Leaderboard>, steamworks::SteamError>,
+    ) {
+        let outcome = match r {
+            Err(e) => LeaderboardOutcome::Failed(format!("Steam couldn't reach the leaderboard: {e}")),
+            Ok(None) => LeaderboardOutcome::Board(None),
+            Ok(Some(b)) => {
+                let id = b.raw();
+                lock(boards).insert(id, b);
+                LeaderboardOutcome::Board(Some(LeaderboardInfo {
+                    id,
+                    name: String::new(),
+                    entry_count: 0,
+                    sort: None,
+                    display: None,
+                }))
+            }
+        };
+        Self::lb_push(results, request, outcome);
+    }
+
+    /// Fill in the metadata Steam only answers synchronously, through the
+    /// client the `Send` call-result closure could not capture.
+    fn fill_board_info(&self, info: &mut LeaderboardInfo) {
+        let Some(board) = self.lb_board(info.id) else {
+            return;
+        };
+        let stats = self.client.user_stats();
+        info.name = stats.get_leaderboard_name(&board);
+        info.entry_count = stats.get_leaderboard_entry_count(&board);
+        info.sort = stats.get_leaderboard_sort_method(&board).map(sort_from_steam);
+        info.display = stats.get_leaderboard_display_type(&board).map(display_from_steam);
+    }
+}
+
+#[cfg(feature = "steam")]
+impl Leaderboards for SteamPlatform {
+    fn find(&self, name: &str) -> u64 {
+        let request = self.lb_next();
+        let (results, boards) = (self.lb_results.clone(), self.lb_boards.clone());
+        self.client.user_stats().find_leaderboard(name, move |r| {
+            Self::lb_deliver_board(&results, &boards, request, r);
+        });
+        request
+    }
+
+    fn find_or_create(
+        &self,
+        name: &str,
+        sort: LeaderboardSort,
+        display: LeaderboardDisplay,
+    ) -> u64 {
+        let request = self.lb_next();
+        let (results, boards) = (self.lb_results.clone(), self.lb_boards.clone());
+        self.client.user_stats().find_or_create_leaderboard(
+            name,
+            sort_to_steam(sort),
+            display_to_steam(display),
+            move |r| Self::lb_deliver_board(&results, &boards, request, r),
+        );
+        request
+    }
+
+    fn upload(&self, board: u64, method: UploadMethod, score: i32, details: &[i32]) -> u64 {
+        let request = self.lb_next();
+        let Some(b) = self.lb_board(board) else {
+            Self::lb_stale(&self.lb_results, request, board);
+            return request;
+        };
+        let results = self.lb_results.clone();
+        self.client.user_stats().upload_leaderboard_score(
+            &b,
+            method_to_steam(method),
+            score,
+            details,
+            move |r| {
+                let outcome = match r {
+                    Err(e) => LeaderboardOutcome::Failed(format!("Steam rejected the score: {e}")),
+                    // Steam reports a refused upload as a success carrying no
+                    // payload; a caller that only checked for `Err` would
+                    // otherwise read that as "uploaded".
+                    Ok(None) => LeaderboardOutcome::Failed(
+                        "Steam accepted the request but stored no score — the leaderboard may be read-only for this build".into(),
+                    ),
+                    Ok(Some(u)) => LeaderboardOutcome::Uploaded(ScoreUploaded {
+                        score: u.score,
+                        changed: u.was_changed,
+                        global_rank_new: u.global_rank_new,
+                        global_rank_previous: u.global_rank_previous,
+                    }),
+                };
+                Self::lb_push(&results, request, outcome);
+            },
+        );
+        request
+    }
+
+    fn download(&self, board: u64, scope: LeaderboardScope, start: i32, end: i32) -> u64 {
+        let request = self.lb_next();
+        let Some(b) = self.lb_board(board) else {
+            Self::lb_stale(&self.lb_results, request, board);
+            return request;
+        };
+        let results = self.lb_results.clone();
+        // `start`/`end` are signed on purpose and the binding takes `usize`:
+        // an around-user request uses NEGATIVE ranks for "better than me", and
+        // the binding casts straight back down to a C `int`. The sign-extend
+        // out and truncate back in round-trips exactly, which is the only
+        // reason passing a negative rank through a `usize` is correct here.
+        self.client.user_stats().download_leaderboard_entries(
+            &b,
+            scope_to_steam(scope),
+            start as usize,
+            end as usize,
+            MAX_DETAILS,
+            move |r| {
+                let outcome = match r {
+                    Err(e) => LeaderboardOutcome::Failed(format!(
+                        "Steam couldn't download the leaderboard: {e}"
+                    )),
+                    Ok(entries) => LeaderboardOutcome::Entries(
+                        entries
+                            .into_iter()
+                            .map(|e| LeaderboardEntry {
+                                user_id: e.user.raw(),
+                                global_rank: e.global_rank,
+                                score: e.score,
+                                details: e.details,
+                            })
+                            .collect(),
+                    ),
+                };
+                Self::lb_push(&results, request, outcome);
+            },
+        );
+        request
+    }
+
+    fn poll(&self) -> Vec<LeaderboardResult> {
+        let mut out = std::mem::take(&mut *lock(&self.lb_results));
+        for r in &mut out {
+            if let LeaderboardOutcome::Board(Some(info)) = &mut r.outcome {
+                self.fill_board_info(info);
+            }
+        }
+        out
+    }
+}
+
 #[cfg(all(test, feature = "steam"))]
 mod tests {
     use super::*;
 
-    /// `SteamPlatform` never actually inits without a live Steam client
-    /// (Spacewar 480, no client running in CI) — this exercises the one path
-    /// that IS reachable headless: the failure itself is a plain `Result`,
-    /// not a panic, which is what lets a caller fall back to `NullPlatform`
+    /// `init` answers a plain `Result` either way, and never panics — which
+    /// is what lets a caller fall back to [`floptle_services::NullPlatform`]
     /// rather than crash.
+    ///
+    /// **This deliberately does not assert WHICH way.** It used to assert
+    /// `is_err()`, on the reasoning that no Steam client runs in CI — true
+    /// there, and false on the machine of anybody actually developing this
+    /// crate, who has Steam open. App 480 (Spacewar) is free to every Steam
+    /// account, so with a client running `SteamAPI_Init` genuinely SUCCEEDS
+    /// and the old assertion failed. Worse, it failed by panicking mid-test:
+    /// unwinding dropped a live client, whose `SteamAPI_Shutdown` then
+    /// deadlocked against the callback thread and hung the whole suite in
+    /// `futex_wait` — a test-suite hang whose cause looks nothing like "an
+    /// assertion about an unrelated thing was environment-dependent".
+    ///
+    /// The environment-independent claim is the one the caller actually
+    /// relies on, so that is what this asserts.
     #[test]
-    fn init_without_a_steam_client_fails_cleanly_not_a_panic() {
-        let result = SteamPlatform::init(480);
-        assert!(result.is_err(), "no Steam client is running in this test environment");
+    fn init_answers_a_result_either_way_and_never_panics() {
+        // Dropping an `Ok` here shuts Steam back down; that is fine, and
+        // deliberately the last thing this test does.
+        match SteamPlatform::init(480) {
+            Ok(p) => assert!(p.available(), "a live backend must report itself available"),
+            Err(_) => { /* no client running — equally correct */ }
+        }
     }
 
     #[test]
@@ -516,6 +849,64 @@ mod tests {
     /// before the interval has actually elapsed, always once it has —
     /// exactly on the boundary too, since `>=` (not `>`) is what makes
     /// `AUTO_FLUSH_INTERVAL` mean what it says.
+    /// Every leaderboard enum survives a round trip through Steam's own.
+    ///
+    /// A swapped arm here is invisible: the call succeeds, the board is real,
+    /// and the scores are simply ranked the wrong way round — or a lap time
+    /// is displayed as a point score. Nothing errors, and the only symptom is
+    /// a leaderboard that looks wrong to players. The round trip is what
+    /// makes a swap fail HERE instead.
+    #[test]
+    fn every_leaderboard_enum_survives_a_round_trip_through_steams_own() {
+        for s in [LeaderboardSort::Ascending, LeaderboardSort::Descending] {
+            assert_eq!(sort_from_steam(sort_to_steam(s)), s, "{s:?} did not round-trip");
+        }
+        for d in [
+            LeaderboardDisplay::Numeric,
+            LeaderboardDisplay::TimeSeconds,
+            LeaderboardDisplay::TimeMilliseconds,
+        ] {
+            assert_eq!(display_from_steam(display_to_steam(d)), d, "{d:?} did not round-trip");
+        }
+    }
+
+    /// Steam has no reverse mapping for these two (and `LeaderboardDataRequest`
+    /// carries no derives at all, not even `Debug`), so a round trip can't
+    /// guard them — pin each arm to the variant it must produce instead.
+    ///
+    /// Swapping `KeepBest` and `ForceUpdate` is the one that costs a player
+    /// something real: a worse run would overwrite their best score, and the
+    /// call would report success doing it.
+    #[test]
+    fn scope_and_method_map_to_the_matching_steam_variant() {
+        use steamworks::{LeaderboardDataRequest as Req, UploadScoreMethod as Method};
+        assert!(matches!(scope_to_steam(LeaderboardScope::Global), Req::Global));
+        assert!(matches!(
+            scope_to_steam(LeaderboardScope::GlobalAroundUser),
+            Req::GlobalAroundUser
+        ));
+        assert!(matches!(scope_to_steam(LeaderboardScope::Friends), Req::Friends));
+
+        assert!(matches!(method_to_steam(UploadMethod::KeepBest), Method::KeepBest));
+        assert!(matches!(method_to_steam(UploadMethod::ForceUpdate), Method::ForceUpdate));
+    }
+
+    /// A poisoned lock must still hand back the data. These mutexes guard a
+    /// `push` and a `take`, neither of which can leave a half-written value,
+    /// so panicking a second time would only lose a score somebody earned.
+    #[test]
+    fn a_poisoned_lock_still_yields_its_value() {
+        let m = Arc::new(Mutex::new(vec![1i32, 2, 3]));
+        let m2 = m.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = m2.lock().unwrap();
+            panic!("poison it");
+        })
+        .join();
+        assert!(m.is_poisoned(), "the lock should be poisoned for this test to mean anything");
+        assert_eq!(*lock(&m), vec![1, 2, 3]);
+    }
+
     #[test]
     fn flush_is_due_respects_the_interval_boundary() {
         let now = Instant::now();

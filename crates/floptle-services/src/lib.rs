@@ -10,10 +10,16 @@
 //! composed, with an always-available no-dependency default —
 //! [`NullPlatform`] here, `MemoryTransport` there. Each sub-trait
 //! ([`Achievements`], [`Cloud`], [`Identity`], [`Entitlements`], [`Ugc`],
-//! [`Overlay`], [`Input`], [`Social`]) starts empty on purpose: its methods
-//! land with the phase that actually needs them (Achievements in Phase 2,
-//! Overlay in Phase 3, and so on), so this crate's job is the boundary shape,
-//! not a guessed-ahead capability surface.
+//! [`Overlay`], [`Input`], [`Social`], [`Leaderboards`]) starts empty on
+//! purpose: its methods land with the phase that actually needs them
+//! (Achievements in Phase 2, Overlay in Phase 3, and so on), so this crate's
+//! job is the boundary shape, not a guessed-ahead capability surface.
+//!
+//! [`Leaderboards`] is the one sub-trait Phase 0 did not name. It got its own
+//! rather than being folded into [`Achievements`]: that trait absorbed stats
+//! because *Steamworks itself* puts both behind one interface, which is a
+//! reason about the backend rather than about the name — and no equivalent
+//! reason makes a leaderboard an achievement.
 //!
 //! [`NullPlatform`] is meant to be the default across the whole workspace
 //! test suite: a project with no `steam` project setting, an in-editor Play
@@ -223,6 +229,167 @@ pub trait Social {
     fn friend_rich_presence(&self, friend_id: u64, key: &str) -> Option<String>;
 }
 
+/// Which direction a leaderboard ranks scores — fixed when the board is
+/// created and not changeable afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaderboardSort {
+    /// A lower score ranks better (lap times, stroke counts).
+    Ascending,
+    /// A higher score ranks better (points, kills, distance).
+    Descending,
+}
+
+/// How a leaderboard's scores should be formatted for display. The backend
+/// stores every score as a plain `i32` regardless — this is presentation
+/// metadata a caller reads to format it, not a change of storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaderboardDisplay {
+    /// A plain number.
+    Numeric,
+    /// The score is a count of seconds.
+    TimeSeconds,
+    /// The score is a count of milliseconds.
+    TimeMilliseconds,
+}
+
+/// Which slice of a leaderboard to download.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaderboardScope {
+    /// Ranks counted from the top of the board.
+    Global,
+    /// Ranks counted RELATIVE to the local user's own — a negative start and
+    /// a positive end give the rows either side of them.
+    GlobalAroundUser,
+    /// Only the local user's friends, ranks counted from the best of them.
+    Friends,
+}
+
+/// What to do when a score is uploaded for a user who already has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadMethod {
+    /// Keep whichever score ranks better under the board's own sort. The
+    /// right choice for a high-score board.
+    KeepBest,
+    /// Overwrite unconditionally, even with a worse score. The right choice
+    /// for a "most recent run" board.
+    ForceUpdate,
+}
+
+/// A leaderboard the backend has resolved, with the metadata its synchronous
+/// getters answer once the handle exists.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LeaderboardInfo {
+    /// The backend's own handle for this board. Opaque — meaningful only to
+    /// the backend that issued it, and only for as long as this session
+    /// lives; do NOT save it and expect it to resolve next time.
+    pub id: u64,
+    /// The board's name, as it was created on the backend.
+    pub name: String,
+    /// How many entries the board holds in total.
+    pub entry_count: i32,
+    /// The board's sort direction, if the backend reports one.
+    pub sort: Option<LeaderboardSort>,
+    /// The board's display formatting, if the backend reports one.
+    pub display: Option<LeaderboardDisplay>,
+}
+
+/// One row of a downloaded leaderboard.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LeaderboardEntry {
+    /// The entry owner's platform-account id — a `u64` for the same reason as
+    /// [`Identity::local_user_id`]; convert to a string at any boundary where
+    /// exactness past 2^53 matters.
+    pub user_id: u64,
+    /// Their rank on the board, 1-based.
+    pub global_rank: i32,
+    /// Their score.
+    pub score: i32,
+    /// The opaque per-entry payload uploaded alongside the score (ghost data,
+    /// a replay seed, a loadout). Empty when none was uploaded.
+    pub details: Vec<i32>,
+}
+
+/// What came back from an [`Leaderboards::upload`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScoreUploaded {
+    /// The score now stored — NOT necessarily the one uploaded, under
+    /// [`UploadMethod::KeepBest`].
+    pub score: i32,
+    /// Whether this upload actually changed the stored score.
+    pub changed: bool,
+    /// The user's rank after the upload.
+    pub global_rank_new: i32,
+    /// The user's rank before it — `0` if they had no entry.
+    pub global_rank_previous: i32,
+}
+
+/// How one leaderboard request finished.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LeaderboardOutcome {
+    /// A find/create resolved. `None` means the backend answered
+    /// successfully that no board by that name exists — a normal answer, not
+    /// a failure, and worth distinguishing from [`Failed`](Self::Failed).
+    Board(Option<LeaderboardInfo>),
+    /// A score upload finished.
+    Uploaded(ScoreUploaded),
+    /// A download finished. An empty vec means the requested range held no
+    /// rows, which is ordinary for an around-user request on an empty board.
+    Entries(Vec<LeaderboardEntry>),
+    /// The request failed. The message is actionable — a stale handle says
+    /// so, rather than a bare failure.
+    Failed(String),
+}
+
+/// One finished leaderboard request, matched to its caller by `request`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LeaderboardResult {
+    /// The id the originating call returned.
+    pub request: u64,
+    /// How it finished.
+    pub outcome: LeaderboardOutcome,
+}
+
+/// Leaderboard find/upload/download. Landed Phase 9.
+///
+/// **This is the engine's first asynchronous platform surface.** Every call
+/// here returns a request id immediately and finishes later, through
+/// [`poll`](Self::poll) — the backend's own results arrive on a callback the
+/// engine can only observe while [`Platform::pump`] is running, so a
+/// synchronous answer is not available to give.
+///
+/// **Exactly one [`LeaderboardResult`] comes back per request id**, always,
+/// including for a call that was doomed the moment it was made (an unknown
+/// board handle). A caller can therefore key pending state on the id and know
+/// it will be cleared, rather than needing a timeout of its own.
+///
+/// **A board handle is session-scoped**, because the backend binding this
+/// engine uses can read a handle's raw value but cannot construct one back
+/// from it. Find the board by name each session; don't persist the id.
+pub trait Leaderboards {
+    /// Looks up a board by name. Resolves to
+    /// [`LeaderboardOutcome::Board`]`(None)` if no such board exists.
+    fn find(&self, name: &str) -> u64;
+    /// Looks up a board by name, creating it with `sort`/`display` if it
+    /// doesn't exist. Creating boards this way is a development convenience —
+    /// a shipping game's boards are normally declared on the backend's own
+    /// admin site, where they can also be reset and moderated.
+    fn find_or_create(&self, name: &str, sort: LeaderboardSort, display: LeaderboardDisplay)
+    -> u64;
+    /// Uploads `score` for the local user, with an opaque `details` payload
+    /// (the backend caps its length; anything past the cap is dropped rather
+    /// than failing the upload).
+    fn upload(&self, board: u64, method: UploadMethod, score: i32, details: &[i32]) -> u64;
+    /// Downloads rows `start..=end` of `board` under `scope`. Ranks are
+    /// 1-based for [`LeaderboardScope::Global`]/[`Friends`](LeaderboardScope::Friends)
+    /// and relative (negative = better than the local user) for
+    /// [`GlobalAroundUser`](LeaderboardScope::GlobalAroundUser).
+    fn download(&self, board: u64, scope: LeaderboardScope, start: i32, end: i32) -> u64;
+    /// Takes every request that has finished since the last call. A drain,
+    /// not a peek — matching [`Identity::poll_persona_change`] and the
+    /// engine's per-frame callback-drain pattern.
+    fn poll(&self) -> Vec<LeaderboardResult>;
+}
+
 /// The platform capability boundary. One accessor per capability group,
 /// defaulting to `None` — a backend that hasn't grown a capability yet (or
 /// never will) needs no impl for it at all, and a caller checks once, at the
@@ -274,6 +441,10 @@ pub trait Platform {
     fn social(&self) -> Option<&dyn Social> {
         None
     }
+    /// The [`Leaderboards`] surface, if this backend has one.
+    fn leaderboards(&self) -> Option<&dyn Leaderboards> {
+        None
+    }
 }
 
 /// The always-available, no-external-dependency default: every capability
@@ -300,6 +471,7 @@ mod tests {
         assert!(p.overlay().is_none());
         assert!(p.input().is_none());
         assert!(p.social().is_none());
+        assert!(p.leaderboards().is_none());
     }
 
     /// `Platform` must be usable as `&dyn Platform` (call sites hold a boxed

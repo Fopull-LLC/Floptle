@@ -2081,6 +2081,11 @@ impl ScriptHost {
     /// the editor's own docked Play-mode viewport. Left uncalled, every
     /// `steam.*` getter keeps answering through `NullPlatform`.
     pub fn set_platform(&self, platform: Rc<dyn floptle_services::Platform>) {
+        // Request ids are only unique WITHIN one backend. Swapping backends
+        // restarts that counter, so any callback still keyed on the old
+        // backend's ids has to go — otherwise the new backend's request #1
+        // delivers into the old backend's request #1's callback.
+        self.steam_state.borrow_mut().cancel_all();
         *self.platform.borrow_mut() = platform;
     }
 
@@ -2893,12 +2898,20 @@ impl ScriptHost {
         // the OS keyring, and signing in again every time you press Play would
         // be absurd. Only the callbacks and an unfinished sign-in are dropped.
         self.account.borrow_mut().set_playing(playing);
+        // Stop drops every leaderboard callback still waiting, for the same
+        // reason as `http.*` — the backend's own request stays in flight and
+        // its result lands on nothing. A `steam.onPersonaChanged` registered
+        // last session goes too; scripts re-register in `start`.
+        if !playing {
+            self.steam_state.borrow_mut().cancel_all();
+        }
     }
 
     /// A scene load mid-session: same rule as Stop for anything on the wire.
     pub fn cancel_web_requests(&self) {
         self.http.borrow_mut().cancel_all();
         self.account.borrow_mut().cancel_all();
+        self.steam_state.borrow_mut().cancel_all();
     }
 
     /// How many web requests are still waiting on a reply (`http.inFlight()`).
@@ -4071,7 +4084,7 @@ impl ScriptHost {
         crate::account_api::drain(&self.lua, &self.account, &self.logs);
         // Pumps the platform backend's callbacks and fires
         // `steam.onPersonaChanged` — a no-op under `NullPlatform`.
-        crate::steam_api::drain(&self.platform, &self.steam_state, &self.logs);
+        crate::steam_api::drain(&self.lua, &self.platform, &self.steam_state, &self.logs);
         // Pass 2: run each script's start/update.
         self.run_pass(world, &work, dt, time, Pass::Frame, floptle_input::Domain::Frame);
         // Every `nav.agent` walks HERE: after the orders this frame's scripts
