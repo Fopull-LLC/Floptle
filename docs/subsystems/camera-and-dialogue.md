@@ -6,8 +6,8 @@ cutscene shots are data you place, and blends between them are one call.
 **Dialogue**: a customizable-but-good-default, typewriter system built on the UI
 that can drive cutscenes, events, and scripts mid-line.
 
-> Reads on: [ADR-0003 Lua scripting](../decisions/0003-scripting-lua.md) ·
-> [ADR-0005 ECS/Node facade](../decisions/0005-scene-model-ecs-node-hybrid.md).
+> Reads on: ADR-0003 Lua scripting ·
+> ADR-0005 ECS/Node facade.
 > Sits beside: [`./ui.md`](./ui.md) (dialogue box *is* a UI subtree) ·
 > [`./input.md`](./input.md) (dialogue pushes an input context to eat advance/skip)
 > · [`./scene-and-nodes.md`](./scene-and-nodes.md) · [`./physics.md`](./physics.md)

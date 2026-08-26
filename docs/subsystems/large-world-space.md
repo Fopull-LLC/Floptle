@@ -4,7 +4,7 @@ Default-on, behind-the-scenes coordinate space: the world moves around the playe
 the player never actually moves — so a galaxy-scale or infinitely-deep world renders
 and simulates with **zero jitter and zero developer work**.
 
-> Decision & rationale: [`../decisions/0015-large-world-space.md`](../decisions/0015-large-world-space.md).
+> Decision & rationale: ADR-0015.
 > Reads-with: the authoring model [`./scene-and-nodes.md`](./scene-and-nodes.md)
 > (`Transform` lives in `floptle-core`), the GPU upload path
 > [`./renderer.md`](./renderer.md), the SDF sim [`./physics.md`](./physics.md), and

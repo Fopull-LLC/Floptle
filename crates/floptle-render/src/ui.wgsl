@@ -1,4 +1,4 @@
-// The game-UI pass (docs/ui-system-2-proposal.md §A): one instanced pipeline
+// The game-UI pass (docs/ui-styles.md §A): one instanced pipeline
 // draws EVERYTHING — rounded-rect shapes with per-corner radii, per-side
 // borders and two-stop gradients; images; text glyphs; and the three flavours
 // of soft edge (drop shadow, glow, inset shadow). Instances arrive in painter's

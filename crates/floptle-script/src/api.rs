@@ -815,7 +815,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
             ]),
         );
     }
-    // Game-UI components (docs/ui-system-proposal.md): drive HUDs from scripts.
+    // Game-UI components (docs/ui-make.md): drive HUDs from scripts.
     // Fields are camelCase (user-facing API); `node.text` covers the string side.
     if let Some(spec) = world.get::<floptle_ui::ElementSpec>(e) {
         let b = |v: bool| if v { 1.0 } else { 0.0 };
@@ -1004,7 +1004,7 @@ pub fn mirror_components(world: &World, e: Entity) -> HashMap<String, HashMap<St
                 // Pushbox-only (1/0): the solver never resolves this body's
                 // contacts — it integrates its velocity and nothing else. The
                 // supported rollback profile; the script owns gravity, ground
-                // and separation (`docs/rollback-netcode-design.md` §3).
+                // and separation (`docs/multiplayer.md` §3).
                 ("pushboxOnly".to_string(), b(rb.pushbox_only)),
                 ("radius".to_string(), rb.radius as f64),
                 ("height".to_string(), rb.height as f64),
@@ -3243,7 +3243,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             // building a hurtbox from them inside `fixedUpdate` is an
             // alpha-dependent read: frame-rate-dependent, and therefore
             // impossible for any replay to reproduce
-            // (`docs/rollback-netcode-design.md` §3). The own-node table
+            // (`docs/multiplayer.md` §3). The own-node table
             // carries live raw tick fields (possibly written earlier this
             // hook), so prefer those; a cross-node handle reads the body
             // bridge. Neither answers on a node with no body.
@@ -3635,7 +3635,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             // anyway, which is what makes `node.x = node.x + d` inside
             // fixedUpdate teleport a fighter back onto its visual position:
             // the classic "the visuals take the knockback, the hitbox stays
-            // put" bug (`docs/rollback-netcode-design.md` §3).
+            // put" bug (`docs/multiplayer.md` §3).
             if matches!(key.as_str(), "tickPos" | "tickX" | "tickY" | "tickZ") {
                 let own = this.raw_get::<f64>("tickX").is_ok();
                 let mut p = match (
@@ -4571,7 +4571,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             // same opts table terrain.generatePlanet takes): the body's field
             // generates from it, on a background thread, when something first
             // approaches — no .cfield on disk, no up-front generation (G2 galaxy
-            // streaming; docs/galaxy-streaming-proposal.md). Player edits saved
+            // streaming; docs/subsystems/large-world-space.md). Player edits saved
             // under terrain.saveDir take priority over regeneration. nil clears.
             let q = q.clone();
             methods.set(

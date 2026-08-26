@@ -1,5 +1,5 @@
 # Floptle Hub — the cross-platform launcher / version manager / project manager.
-# See ADR-0021 + docs/hub-proposal.md. Depends only on light crates (floptle-scene for
+# See ADR-0021 + docs/updating-the-hub.md. Depends only on light crates (floptle-scene for
 # reading project.ron); never on render/editor, so it stays small and fast to launch.
 [package]
 name = "floptle-hub"

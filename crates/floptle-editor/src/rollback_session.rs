@@ -403,7 +403,7 @@ impl Editor {
     }
 
     /// Host: start the referee and the match recording, if the project wants
-    /// them (`docs/rollback-netcode-design.md` §5).
+    /// them (`docs/multiplayer.md` §5).
     ///
     /// Both ride the same input log, and both are the host's job: it is the one
     /// peer that sees every input, because it is the one fanning them out.

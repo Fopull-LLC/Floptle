@@ -7,7 +7,7 @@
 # with nothing real in it yet: no Steamworks types exist to implement
 # `floptle_services::Platform` against until a phase actually needs them (the
 # `steamworks` dependency itself also needs the Steamworks SDK present at
-# build time — see docs/steam-integration-proposal.md, Phase 0).
+# build time — see the Steam integration plan, Phase 0).
 
 [package]
 name = "floptle-steam"

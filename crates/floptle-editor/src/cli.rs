@@ -1446,7 +1446,7 @@ mod tests {
 
     /// **A verb that exists is a verb the design page lists.**
     ///
-    /// `docs/cli-proposal.md` is what somebody picking this up reads, and its
+    /// `docs/export-builds.md` is what somebody picking this up reads, and its
     /// verb block marks with `[x]` what is built. A verb added to the table and
     /// not to that list is a surface nobody is told about; a tick against a verb
     /// that does not exist is worse, because it is a promise. Same class as the
@@ -1455,7 +1455,7 @@ mod tests {
     #[test]
     fn every_verb_is_listed_on_the_design_page() {
         let page = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../docs/cli-proposal.md");
+            .join("../../docs/export-builds.md");
         let text = std::fs::read_to_string(&page)
             .unwrap_or_else(|e| panic!("read {}: {e}", page.display()));
         // The block that lists the verb set, ticked for what is built.
@@ -1470,7 +1470,7 @@ mod tests {
             let head = v.split().0;
             assert!(
                 ticked.iter().any(|t| t == v.name || t.starts_with(head)),
-                "`floptle {}` is built and docs/cli-proposal.md does not tick it",
+                "`floptle {}` is built and docs/export-builds.md does not tick it",
                 v.name
             );
         }
@@ -1478,7 +1478,7 @@ mod tests {
             let head = t.split(' ').next().unwrap_or(t);
             assert!(
                 VERBS.iter().any(|v| v.name == *t || v.split().0 == head),
-                "docs/cli-proposal.md ticks `floptle {t}` and no such verb exists"
+                "docs/export-builds.md ticks `floptle {t}` and no such verb exists"
             );
         }
     }

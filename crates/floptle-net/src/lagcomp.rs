@@ -1,4 +1,4 @@
-//! Lag-compensation history (`docs/netcode-design.md` §7): the server keeps a
+//! Lag-compensation history (`docs/multiplayer.md` §7): the server keeps a
 //! short ring of authoritative per-tick state — networked entities' positions
 //! plus their `synced` combat vars — so a combat intent stamped with the tick
 //! its sender PERCEIVED can be judged against the world as that player saw it.

@@ -1,6 +1,6 @@
 //! `NetValue` — the Lua-compatible value tree that crosses the wire (RPC args
 //! and `synced` script vars), with the §13.2 guardrails from
-//! `docs/netcode-design.md` enforced at construction: scalars + nested tables
+//! `docs/multiplayer.md` enforced at construction: scalars + nested tables
 //! only, **depth ≤ 4**, **≤ 1 KB encoded per value**. Functions/userdata never
 //! convert — the scripting layer rejects them with a Console error before a
 //! `NetValue` exists.
@@ -73,7 +73,7 @@ impl NetValue {
     }
 
     /// An order-independent fingerprint — the rollback desync checksum
-    /// (`docs/rollback-netcode-design.md` §6), FNV-1a like
+    /// (`docs/multiplayer.md` §6), FNV-1a like
     /// [`floptle_input::InputMap::hash`].
     ///
     /// **The canonicalization trap, which is why this exists at all.** A

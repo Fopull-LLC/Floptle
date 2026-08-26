@@ -30,17 +30,17 @@ pub(crate) enum EditorTab {
     /// The vertex-paint brush settings (color, radius, strength, falloff, channels).
     Paint,
     /// The image editor: one canvas for pixels, paint and vectors, exporting the
-    /// PNG the rest of the engine already references (docs/image-editor-proposal.md).
+    /// PNG the rest of the engine already references (docs/image-editor.md).
     Image,
     /// The map-building suite: blockout shapes, sub-object mode, modeling ops,
-    /// per-face material slots (docs/map-tools-proposal.md).
+    /// per-face material slots (docs/map-tools.md).
     Map,
     /// The tilemap suite: layers, tools, the palette, and the tileset editor
     /// (per-tile collision, tags, autotile groups, animation). See docs/tilemaps.md.
     Tiles,
     /// The UI authoring canvas: one game-UI layer at design resolution, with
     /// rulers, guides, snapping, align/distribute, state preview and an
-    /// element outline (docs/ui-system-2-proposal.md, phase C).
+    /// element outline (docs/ui-styles.md, phase C).
     UiDesign,
     /// 🎓 Learn: follow-along tutorials whose steps tick themselves off as the
     /// project comes to match them (see `learn.rs`).

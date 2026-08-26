@@ -213,7 +213,7 @@ pub(crate) fn install_terrain_api(
     // a body's field from here FIRST (before the project file or its genspec)
     // and writes edited fields back here on evict/stop — so a player's digs
     // persist per save slot without ever touching the authored project data.
-    // Pass "" to clear. G2 galaxy streaming (docs/galaxy-streaming-proposal.md).
+    // Pass "" to clear. G2 galaxy streaming (docs/subsystems/large-world-space.md).
     {
         let sd = save_dir.clone();
         if let Ok(f) = lua.create_function(move |_, path: Option<String>| {

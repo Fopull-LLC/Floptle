@@ -1,4 +1,4 @@
-//! Script state capture for rollback (`docs/rollback-netcode-design.md` §2.3, §5).
+//! Script state capture for rollback (`docs/multiplayer.md` §2.3, §5).
 //!
 //! A rollback restores a confirmed tick and re-simulates every tick since. For
 //! that to be correct, everything the simulation can *read* has to come back —

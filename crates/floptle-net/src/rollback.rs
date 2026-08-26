@@ -1,4 +1,4 @@
-//! Rollback bookkeeping (`docs/rollback-netcode-design.md`): per-peer input
+//! Rollback bookkeeping (`docs/multiplayer.md`): per-peer input
 //! rings, input delay, remote-input prediction, the confirmed frontier, and
 //! mispredict detection.
 //!

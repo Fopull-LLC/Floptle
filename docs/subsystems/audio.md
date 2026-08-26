@@ -4,7 +4,7 @@ Everything audible: decoded clips, playing voices (spatial or flat), and the
 project mixer — tracks with faders, effect chains, and routing, all folding
 down into Master.
 
-> Reads on: [ADR-0023 Audio system](../decisions/0023-audio-system.md) ·
+> Reads on: ADR-0023 Audio system ·
 > [Scripting §11](../scripting.md#11-audio-audioplay-nodesound--the-mixer) ·
 > [Editor](./editor.md). Crate: `floptle-audio` (glam + serde; `cpal` +
 > `symphonia` behind the `backend` feature).

@@ -65,7 +65,7 @@ pub struct FixedTimestep {
 }
 
 impl Default for FixedTimestep {
-    /// The engine's default GAMEPLAY tick rate: 60 Hz (`docs/netcode-design.md` §3 —
+    /// The engine's default GAMEPLAY tick rate: 60 Hz (`docs/multiplayer.md` §3 —
     /// parry-tight input granularity; per-project configurable later).
     fn default() -> Self {
         Self::new(60.0)

@@ -273,7 +273,7 @@ function start(node) — runs once when play begins.
 
 ### `steam`
 
-Steam integration: identity, app/build info, and steam.available() for branching. Always present so steam.available() is always safe to call — nil (not an error) is what every other steam.* getter answers when it's false. See docs/steam-integration-proposal.md.
+Steam integration: identity, app/build info, and steam.available() for branching. Always present so steam.available() is always safe to call — nil (not an error) is what every other steam.* getter answers when it's false. See the Steam integration plan.
 
 ### `steam.achievementDescription`
 
@@ -445,7 +445,7 @@ steam.onLobbyEvent(fn) — fires for each thing that happens in a lobby you're i
 
 ### `steam.onPersonaChanged`
 
-steam.onPersonaChanged(fn) — fires once when the local user's persona (name or avatar) changes. Re-read steam.personaName() from inside it; avatars aren't exposed to Lua yet (no engine primitive turns raw bytes into a drawable texture at runtime — see docs/steam-integration-proposal.md).
+steam.onPersonaChanged(fn) — fires once when the local user's persona (name or avatar) changes. Re-read steam.personaName() from inside it; avatars aren't exposed to Lua yet (no engine primitive turns raw bytes into a drawable texture at runtime — see the Steam integration plan).
 
 ### `steam.personaName`
 

@@ -195,7 +195,7 @@ impl SteamPlatform {
     /// Fails if no Steam client is running, the app isn't set up on the
     /// Steamworks backend, or the user doesn't own a license — all real,
     /// expected outcomes in dev (see the Spacewar-480 fallback in
-    /// `docs/steam-integration-proposal.md`), not bugs.
+    /// the Steam integration plan), not bugs.
     pub fn init(app_id: u32) -> Result<Self, steamworks::SteamAPIInitError> {
         let client = steamworks::Client::init_app(app_id)?;
 
@@ -603,7 +603,7 @@ impl SteamPlatform {
     }
 
     /// A mistyped achievement id is the single most common Steamworks
-    /// partner-site foot-gun (`docs/steam-integration-proposal.md`) — name it
+    /// partner-site foot-gun (the Steam integration plan) — name it
     /// explicitly once stats ARE known ready, since "not ready" is then ruled
     /// out and an unknown id is what's left.
     fn achievement_write_failed(&self, id: &str) -> String {

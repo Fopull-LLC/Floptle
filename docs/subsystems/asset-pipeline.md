@@ -2,11 +2,11 @@
 
 > Model in Blender, export glTF, drop it in — meshes, materials, skins, and
 > animations land intact, get stable ids, and hot-reload on save. See
-> [`../decisions/0006-asset-pipeline-gltf.md`](../decisions/0006-asset-pipeline-gltf.md),
+> ADR-0006,
 > materials in [`./materials-and-textures.md`](./materials-and-textures.md),
 > animation in [`./animation.md`](./animation.md), the editor's asset browser in
 > [`./editor.md`](./editor.md), temp assets in
-> [`../decisions/0010-temporary-assets.md`](../decisions/0010-temporary-assets.md),
+> ADR-0010,
 > and [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §6.
 
 `floptle-assets` is the bridge from *files on disk* to *engine resources on the
@@ -17,7 +17,7 @@ up live in the running editor.
 ## 1. glTF 2.0 import (the Blender path)
 
 Blender exports **glTF 2.0** (`.glb` preferred — single binary file) via its
-native exporter ([ADR-0006](../decisions/0006-asset-pipeline-gltf.md)); we read it
+native exporter (ADR-0006); we read it
 with the `gltf` crate, which gives direct buffer access for fast upload.
 
 **What we import:**
@@ -141,7 +141,7 @@ all show up live in the running editor with no manual reimport.
 Images decode via the `image` crate (PNG/JPG/etc.), then:
 
 1. Convert to the import format (sRGB vs linear per `srgb`).
-2. Upload to a wgpu texture; pooled staging buffers ([ADR-0008](../decisions/0008-object-pooling.md)).
+2. Upload to a wgpu texture; pooled staging buffers (ADR-0008).
 3. **Generate mipmaps** (when `generate_mips`) — a small compute/blit downsample
    chain — so tiled/triplanar textures ([`./materials-and-textures.md`](./materials-and-textures.md))
    stay crisp at distance and don't shimmer.
@@ -178,7 +178,7 @@ project dir ─▶ walk deps from entry scene ─▶ strip editor data
 
 ## 5. Temporary OoT test textures
 
-Per [ADR-0010](../decisions/0010-temporary-assets.md): Ocarina of Time textures
+Per ADR-0010: Ocarina of Time textures
 are **local-only placeholders** under `assets/textures/_oot_temp/`, which is
 **git-ignored**. They are never committed (keeps history clean for the future OSS
 release) and are **replaced with original Fopull art before any release**
@@ -208,7 +208,7 @@ A panel ([`./editor.md`](./editor.md) §2) listing project assets by folder/kind
   slot; drag a model into the scene to instantiate it.
 - **Reimport** — right-click to re-run import (after changing settings); the
   sidecar panel edits `ImportSettings`.
-- **Open in VSCode** for `.flsl`/`.lua` ([ADR-0011](../decisions/0011-vscode-integration.md)).
+- **Open in VSCode** for `.flsl`/`.lua` (ADR-0011).
 
 ## 7. Converting a model the engine cannot open
 
@@ -250,7 +250,7 @@ found, a scale that had to be assumed.
 We are lightweight — **not a content-management platform.**
 
 - **FBX / USD as a runtime format** — the engine loads glTF and only glTF
-  ([ADR-0006](../decisions/0006-asset-pipeline-gltf.md)). That has not changed
+  (ADR-0006). That has not changed
   and should not: one well-specified load path is worth more than four
   half-supported ones. **Converting at authoring time is a different question,
   and is now answered** — see §7. USD remains out of scope.

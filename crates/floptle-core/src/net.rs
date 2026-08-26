@@ -1,5 +1,5 @@
 //! Networking identity + replication description (Phase 2a of ADR-0022 —
-//! see `docs/netcode-design.md`).
+//! see `docs/multiplayer.md`).
 //!
 //! These are the *authored/data* halves of the netcode: which nodes replicate
 //! and how, plus the stable network identity. The behavior (sessions, wire
@@ -25,7 +25,7 @@ impl NetId {
     }
 }
 
-/// How clients treat a replicated node (see `docs/netcode-design.md` §4.2).
+/// How clients treat a replicated node (see `docs/multiplayer.md` §4.2).
 ///
 /// Authority is binary and server-rooted: the server owns everything.
 /// `Predicted` is not client authority — it's client *optimism*: the owning
@@ -42,7 +42,7 @@ pub enum ReplicationMode {
     /// **Every** peer simulates this node locally, every tick, from the session's
     /// per-tick input set — never interpolated, never authoritative. When a
     /// remote input arrives that contradicts what was predicted, the whole tick
-    /// range since is re-simulated (`docs/rollback-netcode-design.md`).
+    /// range since is re-simulated (`docs/multiplayer.md`).
     ///
     /// This exists because `Predicted` is the wrong shape for a fighting game.
     /// There, only your own avatar feels instant and everyone else renders
@@ -93,7 +93,7 @@ pub struct Replicated {
     /// when `interp` is off.
     pub interp_delay: u8,
     /// Exempt from interest culling: replicated to every client regardless of
-    /// where they are (`docs/netcode-design.md` §5.2). For the handful of
+    /// where they are (`docs/multiplayer.md` §5.2). For the handful of
     /// things every player must agree on wherever they stand — the match
     /// clock, the objective, the boss. Ignored when interest management is off,
     /// which is the default.

@@ -128,7 +128,7 @@ pub struct DrawTri {
 /// Queued `node:getcomponent(name).field = value` writes: (entity index,
 /// component, field) → value, flushed to the ECS after `run`.
 ///
-/// DETERMINISM INVARIANT (audited 2026-07-06, `docs/netcode-design.md` §3): the
+/// DETERMINISM INVARIANT (audited 2026-07-06, `docs/multiplayer.md` §3): the
 /// host's `HashMap`/`HashSet` state is only ever *iterated* where order cannot
 /// change simulation results — each queued write lands on a distinct key
 /// (entity/component/field), scripts themselves run in ECS insertion order
@@ -448,7 +448,7 @@ pub struct ScriptHost {
     /// Raycastable dynamic-body hulls for this frame ([`Sim::body_hulls`] copies —
     /// players, crates), fed alongside the colliders so `raycast(...)` can hit
     /// bodies AND name the node it hit (`hit.node`). `net.rewind` re-poses these
-    /// for lag-compensated combat queries (`docs/netcode-design.md` §7).
+    /// for lag-compensated combat queries (`docs/multiplayer.md` §7).
     hulls: Rc<RefCell<Vec<floptle_physics::BodyHull>>>,
     /// World position of the sim's local origin (ADR-0015). Scripts speak world
     /// coordinates; `raycast` converts to the sim frame in f64 at this boundary.
@@ -692,7 +692,7 @@ pub struct ScriptHost {
     http_in_fixed: Rc<std::cell::Cell<bool>>,
     /// The `steam.*` bridge's backend — `NullPlatform` unless a caller has
     /// explicitly decided this session IS the game and called
-    /// [`ScriptHost::set_platform`] (see `docs/steam-integration-proposal.md`'s
+    /// [`ScriptHost::set_platform`] (see the Steam integration plan's
     /// "Where Steam activates").
     platform: steam_api::SharedPlatform,
     /// The `steam.*` bridge's own state: just the registered
@@ -711,7 +711,7 @@ pub struct ScriptHost {
     /// and its physics bodies.
     destroy_queue: Rc<RefCell<Vec<u32>>>,
     /// The `net.*` bridge: queued session commands, mirrored session state,
-    /// `net.on` handlers, and the current-instance marker (docs/netcode-design.md §8).
+    /// `net.on` handlers, and the current-instance marker (docs/multiplayer.md §8).
     net: net_api::SharedNet,
     /// Per-(entity, script) `synced` STORE tables (the raw values behind the
     /// proxy scripts see) — the host collects them for the server session and
@@ -742,7 +742,7 @@ pub struct ScriptHost {
     upvalue_warned: std::collections::HashSet<(String, u64)>,
     /// Entities whose scripts are SKIPPED this session (a networked CLIENT
     /// doesn't run server-authoritative nodes' scripts — their state arrives
-    /// in snapshots; docs/netcode-design.md §6). Set by the driver.
+    /// in snapshots; docs/multiplayer.md §6). Set by the driver.
     script_skip: std::collections::HashSet<u32>,
     /// Entities skipped in the PER-FRAME pass only: a predicted node's
     /// `update` re-runs on the gameplay tick (`run_frame_for`) so client and
@@ -755,7 +755,7 @@ pub struct ScriptHost {
     /// locally simulated; only the scheduling moved. floptle/0042.
     driver_skip: std::collections::HashSet<u32>,
     /// Set while the rollback driver is RE-SIMULATING ticks it already ran
-    /// (`docs/rollback-netcode-design.md` §4). Scripts read it as
+    /// (`docs/multiplayer.md` §4). Scripts read it as
     /// `net.replaying()`; the engine uses it to discard the one-shot side
     /// effects a replay re-fires. Shared with the Lua closures.
     replaying: Rc<std::cell::Cell<bool>>,
@@ -1621,7 +1621,7 @@ pub struct BodyState {
     /// reproduce — and writing `node.x = node.x + d` there teleports the body
     /// onto the visual position, which is the classic "the visuals take the
     /// knockback but the hitbox stays put" bug
-    /// (`docs/rollback-netcode-design.md` §3).
+    /// (`docs/multiplayer.md` §3).
     pub pos: [f64; 3],
     /// The floor under the body (`node.groundNormal`) — `Some` exactly when
     /// `grounded`. Align a character to the slope, judge how steep it is, or
@@ -2511,7 +2511,7 @@ end
 
     #[test]
     fn fixed_update_runs_per_tick_with_constant_dt() {
-        // The gameplay-tick hook (docs/netcode-design.md §3): `fixedUpdate(node, dt)`
+        // The gameplay-tick hook (docs/multiplayer.md §3): `fixedUpdate(node, dt)`
         // runs once per run_fixed call with the constant tick delta, only AFTER the
         // frame pass has started the script, and `update` does NOT run in the fixed
         // pass (nor fixedUpdate in the frame pass).
@@ -2552,7 +2552,7 @@ end
 
     #[test]
     fn net_bridge_rpc_synced_events_round_trip() {
-        // The Lua net.* bridge (docs/netcode-design.md §8): rpc queueing with
+        // The Lua net.* bridge (docs/multiplayer.md §8): rpc queueing with
         // guardrails, replicated→synced declaration + collect/apply, onRpc
         // dispatch with sender, and net.on event handlers.
         let dir = std::env::temp_dir().join("floptle_script_test_net");
@@ -7806,7 +7806,7 @@ end
         );
     }
 
-    /// The tick-pose channel (`docs/rollback-netcode-design.md` §3).
+    /// The tick-pose channel (`docs/multiplayer.md` §3).
     ///
     /// `node.x` between ticks is the INTERPOLATED render pose — lerped by the
     /// frame's alpha, so reading it inside `fixedUpdate` is a frame-rate-
@@ -7867,7 +7867,7 @@ end
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
     }
 
-    /// `net.random()` (`docs/rollback-netcode-design.md` §3): identical on
+    /// `net.random()` (`docs/multiplayer.md` §3): identical on
     /// every peer for a tick, identical again when that tick is re-simulated.
     ///
     /// The second half is the one a hand-rolled `rng(matchSeed + tick)` gets
@@ -7978,7 +7978,7 @@ end
         assert!(env.get::<bool>("refused").unwrap(), "and writing it is an error, not a no-op");
     }
 
-    /// The `replaying` gate (`docs/rollback-netcode-design.md` §4): a
+    /// The `replaying` gate (`docs/multiplayer.md` §4): a
     /// re-simulated tick runs the same Lua the live tick ran, so its one-shot
     /// cosmetics must not fire a second time — while everything the simulation
     /// depends on still lands, and a raised error still reaches the Console.

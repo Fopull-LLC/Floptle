@@ -2,9 +2,9 @@
 
 > One shader, one source of truth — editable as a node graph *and* as readable
 > text (`.flsl`), transpiled to WGSL. See
-> [`../decisions/0007-shader-ir.md`](../decisions/0007-shader-ir.md),
+> ADR-0007,
 > the "Open in VSCode" workflow
-> [`../decisions/0011-vscode-integration.md`](../decisions/0011-vscode-integration.md),
+> ADR-0011,
 > [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §5, the renderer in
 > [`./renderer.md`](./renderer.md), and materials in
 > [`./materials-and-textures.md`](./materials-and-textures.md).

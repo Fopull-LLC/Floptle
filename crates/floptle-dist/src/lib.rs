@@ -3,7 +3,7 @@
 //! One release bundle — an engine binary plus its `version.json` — is what the
 //! Hub installs to run the editor AND what an exported game ships as its player.
 //! They are the same artifact, so they share the same code for finding,
-//! fetching, and verifying it. See docs/hub-proposal.md §3–§4.4 and
+//! fetching, and verifying it. See docs/updating-the-hub.md §3–§4.4 and
 //! docs/export-builds.md.
 
 mod fetch;
@@ -15,7 +15,7 @@ pub use manifest::{Artifact, Manifest, PreId, ReleaseInfo, version_key};
 /// The manifest that lists installable engine versions. Lives on the PUBLIC
 /// releases repo — anyone can fetch it and download bundles, no token needed
 /// (the engine source stays private; only distribution is public). Swappable
-/// to another host without code changes (docs/hub-proposal.md §3.4).
+/// to another host without code changes (docs/updating-the-hub.md §3.4).
 pub const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/Fopull-LLC/Floptle-releases/releases/download/manifest/releases.json";
 
@@ -27,7 +27,7 @@ pub const PLATFORMS: &[&str] =
     &["linux-x86_64", "windows-x86_64", "macos-aarch64", "macos-x86_64"];
 
 /// The platform target key ("linux-x86_64", "macos-aarch64", "windows-x86_64", …) — matches
-/// the artifact keys the release pipeline emits (docs/hub-proposal.md §3.1). `cfg!` is a
+/// the artifact keys the release pipeline emits (docs/updating-the-hub.md §3.1). `cfg!` is a
 /// compile-time constant, so this resolves to this build's platform.
 pub fn platform_target() -> String {
     let os = if cfg!(target_os = "windows") {

@@ -1,4 +1,4 @@
-//! The game-UI render pass (docs/ui-system-proposal.md §10).
+//! The game-UI render pass (docs/ui-make.md §10).
 //!
 //! Consumes a [`floptle_ui::DrawList`] (design units) and draws it in ONE
 //! instanced pipeline: solid rounded-rect shapes (SDF mask in the fragment),

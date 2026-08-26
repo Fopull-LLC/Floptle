@@ -149,7 +149,7 @@ fn rings_for_body(body_radius: Option<f64>, chunk_units: f64) -> [i32; 3] {
 /// a handful of pixels).
 const IMPOSTOR_RADII: f64 = 60.0;
 
-/// G1 RESIDENCY (docs/galaxy-streaming-proposal.md): a COLD celestial terrain's
+/// G1 RESIDENCY (docs/subsystems/large-world-space.md): a COLD celestial terrain's
 /// field starts loading (background) when the camera comes inside this many body
 /// radii — outside the impostor flip at 60, so the field is always resident
 /// before its meshes could possibly draw. Evict sits farther out again, so
@@ -1901,7 +1901,7 @@ impl Editor {
         }
     }
 
-    // ---- G1 residency (docs/galaxy-streaming-proposal.md) ---------------------
+    // ---- G1 residency (docs/subsystems/large-world-space.md) ---------------------
 
     /// The world-streaming work a frame does, with none of the drawing: hand
     /// queued `terrain.generatePlanet` fills to the generator, drive residency,

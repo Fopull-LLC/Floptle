@@ -5,9 +5,9 @@ promise: **arrange elements, then script what they do.** Drag a panel, anchor it
 attach a script. No CSS engine, no data-binding framework, no fifty-field
 inspector — but real creative control over look and behavior.
 
-> Reads on: [ADR-0003 Lua scripting](../decisions/0003-scripting-lua.md) ·
-> [ADR-0005 ECS/Node facade](../decisions/0005-scene-model-ecs-node-hybrid.md) ·
-> [ADR-0004 Editor](../decisions/0004-editor-egui.md).
+> Reads on: ADR-0003 Lua scripting ·
+> ADR-0005 ECS/Node facade ·
+> ADR-0004 Editor.
 > Sits beside: [`./scene-and-nodes.md`](./scene-and-nodes.md) (UI elements *are*
 > nodes) · [`./input.md`](./input.md) (modal UI pushes an input context) ·
 > [`./camera-and-dialogue.md`](./camera-and-dialogue.md) (dialogue is built on this).

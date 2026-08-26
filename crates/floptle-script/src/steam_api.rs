@@ -25,7 +25,7 @@
 //! the synchronous call's own `Ok` — see `floptle_steam::SteamPlatform`'s
 //! `pump`/`flush`. **Average-rate stats and progress-indicator notifications
 //! are out of scope** — the Steamworks binding this engine uses doesn't wrap
-//! either at all (`docs/steam-integration-proposal.md`).
+//! either at all (the Steam integration plan).
 //!
 //! **Cloud saves (`steam.cloud*`) have no conflict policy of their own** —
 //! `steam.cloudFileTimestamp` is the primitive a script compares against its
@@ -58,7 +58,7 @@
 //! points at: `NullPlatform` by default, swapped for a real
 //! `floptle_steam::SteamPlatform` by `ScriptHost::set_platform` when (and
 //! only when) the caller has decided this session IS the game — see
-//! `docs/steam-integration-proposal.md`'s "Where Steam activates".
+//! the Steam integration plan's "Where Steam activates".
 
 use std::cell::RefCell;
 use std::collections::HashMap;

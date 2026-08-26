@@ -1,5 +1,5 @@
 //! The ◫ UI tab — the authoring surface for game UI
-//! (docs/ui-system-2-proposal.md, phase C).
+//! (docs/ui-styles.md, phase C).
 //!
 //! Every other subsystem in the engine has a tab of its own; UI didn't, and it
 //! shows in real projects: 53 elements hand-placed at typed pixel offsets,

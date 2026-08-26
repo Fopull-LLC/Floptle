@@ -265,7 +265,7 @@ pub fn raycast_colliders(
 /// A raycastable snapshot of a dynamic body, in the sim frame. Lent to the
 /// script layer alongside the colliders so rays can hit players/crates AND
 /// identify which node they hit — and the thing `net.rewind` re-poses for
-/// lag-compensated combat queries (`docs/netcode-design.md` §7): rewinding
+/// lag-compensated combat queries (`docs/multiplayer.md` §7): rewinding
 /// moves these copies, never the bodies themselves.
 #[derive(Clone, Copy, Debug)]
 pub struct BodyHull {
@@ -1102,7 +1102,7 @@ impl PhysicsWorld {
     /// Step ONE body by `dt`. Because the solver has no body-vs-body pass
     /// (bodies collide only with static colliders), a single body's step is
     /// EXACTLY the trajectory it takes inside a full [`Self::step`] — the
-    /// property prediction replay depends on (`docs/netcode-design.md` §6:
+    /// property prediction replay depends on (`docs/multiplayer.md` §6:
     /// replay touches only the predicted body, and it's exact, not
     /// approximate). Does NOT clear `contacts`; the frame driver owns that.
     pub fn step_body(&mut self, bi: usize, dt: f32) {
@@ -1205,7 +1205,7 @@ impl PhysicsWorld {
             // position locks — is exactly the machinery a rollback session
             // cannot rely on to agree in the last bit on two different
             // machines, and exactly the machinery a fighting game replaces with
-            // integer frame data anyway (`docs/rollback-netcode-design.md` §3).
+            // integer frame data anyway (`docs/multiplayer.md` §3).
             //
             // Not `kinematic`: this body still MOVES under its own velocity, so
             // the controller's whole existing velocity channel keeps working.

@@ -981,7 +981,7 @@ impl Raster {
         // Group 0: frame globals (uniform) + the vertex-paint block store (storage).
         // `vpaint` is here, not on the per-mesh group(1), because it is ONE global
         // buffer every draw indexes with its own base offset — which is what keeps
-        // painted nodes inside their instanced batches (see docs/vertex-paint-proposal.md
+        // painted nodes inside their instanced batches (see docs/subsystems/materials-and-textures.md
         // §2.1/§4.1). It is VERTEX-visible only: `vs` resolves paint to a varying.
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("raster-globals"),
@@ -3544,7 +3544,7 @@ impl Raster {
         self.palette.quantize(gpu, color, size, q);
     }
 
-    /// **2D lighting** (`docs/2d-lighting-proposal.md`, step 2): fill the flat
+    /// **2D lighting** (`docs/2d.md`, step 2): fill the flat
     /// G-buffer and composite the lit result over `color`.
     ///
     /// `flat` is the *same* `(mesh, texture)` pairing the main gather produced —

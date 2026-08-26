@@ -4,7 +4,7 @@
 //!
 //! The manifest types and the HTTP fetch live in `floptle-dist`, shared with the editor's
 //! export templates — a template and an installable engine are the same bundle, so they
-//! resolve it the same way. See docs/hub-proposal.md §3–§4.4.
+//! resolve it the same way. See docs/updating-the-hub.md §3–§4.4.
 
 pub use floptle_dist::{Artifact, Manifest, ReleaseInfo, platform_target, version_key};
 use std::path::PathBuf;

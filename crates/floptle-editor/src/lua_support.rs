@@ -719,7 +719,7 @@ function color.hex(s) end
 ---@return table
 function color.lerp(a, b, t) end
 
----Multiplayer (docs/netcode-design.md). Mark nodes with the Networked component,
+---Multiplayer (docs/multiplayer.md). Mark nodes with the Networked component,
 ---declare synced vars with a top-level `replicated = { hp = 100 }` table (read/
 ---write them as `synced.hp` — the server owns them), handle remote calls with
 ---`onRpc = {}` + `function onRpc.name(args, sender) end`.

@@ -1,4 +1,4 @@
-//! Headless probe for text fields (docs/ui-system-2-proposal.md §D).
+//! Headless probe for text fields (docs/ui-styles.md §D).
 //!
 //! A caret is the one UI element where "the assertions pass" is worth very
 //! little on its own: it is two pixels wide, its position comes from a prefix

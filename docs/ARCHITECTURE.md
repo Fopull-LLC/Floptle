@@ -4,7 +4,7 @@
 > **subsystem** pages — [the renderer](subsystems/renderer.md),
 > [physics](subsystems/physics.md), [shaders](subsystems/shaders.md) and the
 > rest — and the *why* of each major choice lives in the **decision records**,
-> starting with [why Rust](decisions/0001-language-rust.md).
+> starting with why Rust (ADR-0001).
 
 ## 1. Layering
 

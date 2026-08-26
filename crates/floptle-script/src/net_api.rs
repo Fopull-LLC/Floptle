@@ -1,4 +1,4 @@
-//! The Lua `net.*` API + `synced` vars (`docs/netcode-design.md` §8) — the
+//! The Lua `net.*` API + `synced` vars (`docs/multiplayer.md` §8) — the
 //! script-facing face of `floptle-net`. Follows the host's queue-drain shape:
 //! `net.host{}` / `net.rpc(...)` / `net.spawn(...)` queue [`NetCmd`]s the
 //! editor drains each tick; session state (role/peers/ping) is mirrored IN via
@@ -38,7 +38,7 @@ pub enum NetCmd {
         port: Option<u16>,
         relay: Option<String>,
         /// `interest = <metres>` — turn on interest management with that
-        /// radius (`docs/netcode-design.md` §5.2). Absent = broadcast to
+        /// radius (`docs/multiplayer.md` §5.2). Absent = broadcast to
         /// everyone, which is the default and the right answer below a few
         /// dozen players.
         interest: Option<f64>,
@@ -84,7 +84,7 @@ pub enum NetRoleState {
 }
 
 /// Live ROLLBACK state fed by the driver each tick
-/// (`docs/rollback-netcode-design.md` §7 P6), read by `net.rollbackDepth()` and
+/// (`docs/multiplayer.md` §7 P6), read by `net.rollbackDepth()` and
 /// friends — and the per-tick seed behind `net.random()`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RollbackInfo {
@@ -167,7 +167,7 @@ pub(crate) struct NetHandler {
 }
 
 /// The lag-compensation context for the RPC currently being dispatched on the
-/// server (`docs/netcode-design.md` §7): the world state at the tick the
+/// server (`docs/multiplayer.md` §7): the world state at the tick the
 /// SENDER perceived, precomputed by the driver from its history ring. Staged
 /// via `ScriptHost::set_rewind` around `dispatch_rpc`; `net.rewind(peer, fn)`
 /// applies it for the duration of `fn`.
@@ -271,7 +271,7 @@ pub fn input_to_net(
 
 /// The wire form back into a resolved action state — what the server (and the
 /// client's replay) feed `fixedUpdate` so the SAME controller runs on both
-/// sides (`docs/netcode-design.md` §6, the one-script model).
+/// sides (`docs/multiplayer.md` §6, the one-script model).
 ///
 /// `held_secs` is NOT transmitted: it's derivable and would cost 4 bytes per
 /// action every tick. It is reconstructed by the receiver advancing its own
@@ -387,7 +387,7 @@ pub(crate) fn install_net_api(
     // --- rollback --------------------------------------------------------
     {
         // `net.replaying()` — true while the rollback driver is re-simulating
-        // ticks it already ran (`docs/rollback-netcode-design.md` §4). The
+        // ticks it already ran (`docs/multiplayer.md` §4). The
         // engine already discards the side-effect queues a replay re-fires;
         // this is for the cosmetics it cannot see, like a script poking a
         // material or a UI label. Simulation code must NOT branch on it: a

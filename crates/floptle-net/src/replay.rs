@@ -1,4 +1,4 @@
-//! The session input log (`docs/rollback-netcode-design.md` §5) — what makes
+//! The session input log (`docs/multiplayer.md` §5) — what makes
 //! match replays and the referee the same feature wearing different hats.
 //!
 //! A rollback match is a pure function of (scene, match seed, input delay,

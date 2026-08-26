@@ -1,7 +1,7 @@
 # Physics — implementation slices
 
-The design lives in [`physics.md`](./physics.md) + ADRs [`0012-physics-sdf-first`](../decisions/0012-physics-sdf-first.md)
-and [`0014-gravity-fields`](../decisions/0014-gravity-fields.md). This file slices
+The design lives in [`physics.md`](./physics.md) + ADRs 0012-physics-sdf-first (ADR-0012)
+and 0014-gravity-fields (ADR-0014). This file slices
 that design into committed, independently-shippable increments. Slices 1–2 are pure
 `floptle-physics` and fully headless-unit-testable; 3+ touch the editor/ECS and need
 playtesting. The defining bets: **SDF-first collision** (collide against the same

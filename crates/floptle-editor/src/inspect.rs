@@ -6,7 +6,7 @@
 //!
 //! ## It reads the files, not a running world
 //!
-//! `docs/cli-proposal.md` leaves this open, and this is the answer for the read
+//! `docs/export-builds.md` leaves this open, and this is the answer for the read
 //! verbs: the caller is almost always about to *edit those files*, so the files
 //! are the truth it needs. A verb that answered from a loaded world would need
 //! the editor, and would report a hierarchy the caller cannot find anything to

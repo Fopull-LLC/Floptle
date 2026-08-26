@@ -178,7 +178,7 @@ pub struct NodeDoc {
     /// session (`None` = local-only). See [`floptle_core::Replicated`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net: Option<ReplicatedDoc>,
-    /// A game-UI layer root on this node (docs/ui-system-proposal.md §3).
+    /// A game-UI layer root on this node (docs/ui-make.md §3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_layer: Option<floptle_ui::UiLayer>,
     /// A game-UI element on this node (place/size/shape/text/image/stack).
@@ -402,7 +402,7 @@ pub struct RigidBodyDoc {
     pub assembly: bool,
     /// Pushbox-only: the solver never resolves this body's contacts — it
     /// integrates its velocity and nothing else. The rollback profile
-    /// (`docs/rollback-netcode-design.md` §3). Omitted when off, so every scene
+    /// (`docs/multiplayer.md` §3). Omitted when off, so every scene
     /// that predates it loads unchanged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pushbox_only: bool,
@@ -2339,7 +2339,7 @@ impl LightDoc {
 
 /// Project-wide Steam integration settings. `None` = not a Steam build —
 /// Steam lifecycle never activates and every `steam.*` Lua call answers
-/// through `NullPlatform`. See `docs/steam-integration-proposal.md`.
+/// through `NullPlatform`. See the Steam integration plan.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct SteamProjectSettings {
     /// This project's Steamworks App ID. `floptle run` with a `steam` block

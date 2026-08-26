@@ -1,4 +1,4 @@
-//! The rollback driver (`docs/rollback-netcode-design.md` §7 P3) — the half of
+//! The rollback driver (`docs/multiplayer.md` §7 P3) — the half of
 //! rollback that actually runs a simulation.
 //!
 //! [`floptle_net::Rollback`] is the bookkeeping brain: it decides *whether* and
@@ -714,7 +714,7 @@ impl RollbackDriver {
     }
 
     /// Step the simulation BACKWARDS one tick, from the state ring
-    /// (`docs/rollback-netcode-design.md` §7 P5 — closes 0024's deferred item).
+    /// (`docs/multiplayer.md` §7 P5 — closes 0024's deferred item).
     ///
     /// Frame-stepping forwards is easy; stepping back is not, because a
     /// simulation is not invertible. It only works here because rollback

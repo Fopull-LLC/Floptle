@@ -1,4 +1,4 @@
-//! On-rails celestial driver (solar demo S2, `docs/solar-demo-plan.md`).
+//! On-rails celestial driver (solar demo S2, the Solar demo build order).
 //!
 //! Each gameplay tick: advance space time by `warp × dt`, assemble the scene's
 //! `CelestialBody` nodes into a [`floptle_core::frames::System`], WRITE every

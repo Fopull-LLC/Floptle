@@ -1,4 +1,4 @@
-//! Focus and directional navigation (docs/ui-system-2-proposal.md §D).
+//! Focus and directional navigation (docs/ui-styles.md §D).
 //!
 //! A menu that can only be driven with a mouse is a menu that can't be driven
 //! with a gamepad, and writing the navigation by hand is how you end up with a

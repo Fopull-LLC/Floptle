@@ -4,7 +4,7 @@ A game is a simulated **universe** whose developer-defined laws **compose**; thi
 object that says *which laws hold where* — a serializable, inheritable `Lawset` bound to an SDF `Realm`,
 resolved by the inside-test the engine already runs.
 
-> Decision & rationale: [`../decisions/0018-lawset-realm.md`](../decisions/0018-lawset-realm.md).
+> Decision & rationale: ADR-0018.
 > Reads-with: the cross-field coupling graph [`./field-interaction.md`](./field-interaction.md) (ADR-0019, the
 > sibling half), and the four law-axes it indexes — gravity [`./gravity-and-density.md`](./gravity-and-density.md),
 > light [`./light.md`](./light.md), and time [`./time.md`](./time.md).

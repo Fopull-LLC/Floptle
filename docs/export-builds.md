@@ -123,6 +123,37 @@ the dialog runs, so CI gets exactly the editor's behaviour:
 floptle --export ~/games/MyGame ~/builds/MyGame-win windows-x86_64 "My Game"
 ```
 
+## The command line
+
+Every verb below is built and ships in the one `floptle` binary. Most take an
+optional `PROJECT` (defaulting to the current directory) and most accept
+`--json`, so a script or CI job can read the answer instead of a human reading
+the screen. `floptle help <VERB>` explains any one of them.
+
+```
+[x] floptle new <DIR> [--template NAME] [--engine-version V]
+[x] floptle templates
+[x] floptle open [PROJECT]                     # the bare invocation, said out loud
+[x] floptle play [PROJECT]
+[x] floptle run [PROJECT] [--scene S] [--frames N | --seconds T] [--json]
+[x] floptle shot [PROJECT] [--scene S] [--camera NAME] [--size WxH] [--out FILE]
+[x] floptle inspect [PROJECT] [--scene S] [--select QUERY] [--json]
+[x] floptle check [PROJECT] [--json]
+[x] floptle exec <SCRIPT.lua> [PROJECT] [--json]
+[x] floptle api [QUERY] [--json]
+[x] floptle export <PROJ> <OUT> <PLATFORM> [--title T]
+[x] floptle bake gi | clips [ARGS]             # both headless
+[x] floptle migrate <DIR> [--engine-version V]
+[x] floptle serve <PROJ> [--port N | --relay URL] [--scene S] [--tick HZ]
+[x] floptle doctor [--json]                    # can THIS machine render?
+[x] floptle help [VERB] [--json]
+[x] floptle version [--json]
+```
+
+The older flag forms (`--export`, `--new`, `--migrate`, `--version`,
+`--engine-version`) still work and mean the same thing; the subcommands are the
+documented spelling.
+
 ## Multi-device LAN testing
 
 1. Export (or copy the repo and use `--play`).

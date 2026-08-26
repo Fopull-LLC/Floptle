@@ -1,5 +1,5 @@
 //! Surface nets: turn a [`ChunkField`] chunk into triangles
-//! (`docs/terrain-mesh-proposal.md` §3.2).
+//! (`docs/subsystems/deformable-matter.md` §3.2).
 //!
 //! # Why surface nets, and not the alternatives
 //!

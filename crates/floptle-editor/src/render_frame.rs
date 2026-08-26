@@ -3167,7 +3167,7 @@ impl Editor {
         // Client-side input timing, from the server's InputAck feedback —
         // the only place a JOINER can see whether its inputs run late.
         let net_input_ack = self.net_play_client.as_ref().and_then(|c| c.input_ack());
-        // Rollback health (docs/rollback-netcode-design.md §7 P6): a fighting
+        // Rollback health (docs/multiplayer.md §7 P6): a fighting
         // game's connection quality is rollback depth and mispredict rate, not
         // ping — and the stall indicator is the one readout a player NEEDS,
         // because a stalled sim looks like the game running slightly slow and
@@ -3584,7 +3584,7 @@ impl Editor {
                     }
                     if ui
                         .button(if net_hosting { "🌐 hosting" } else { "🌐" })
-                        .on_hover_text("Multiplayer — host & join locally, latency/loss sliders (docs/netcode-design.md)")
+                        .on_hover_text("Multiplayer — host & join locally, latency/loss sliders (docs/multiplayer.md)")
                         .clicked()
                     {
                         *show_net_panel = !*show_net_panel;
@@ -7400,7 +7400,7 @@ impl Editor {
                             sim.set_body_velocity(eid, Vec3::new(v[0], v[1], v[2]));
                         }
                     }
-                    // Netcode rides the tick (docs/netcode-design.md §9): session
+                    // Netcode rides the tick (docs/multiplayer.md §9): session
                     // commands, server snapshot send, ghost-client apply, RPC/event
                     // dispatch — all after physics, all on the deterministic clock.
                     self.net_tick(self.game_tick_no);

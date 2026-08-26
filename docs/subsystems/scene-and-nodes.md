@@ -3,10 +3,10 @@
 The authoring model: a friendly **Node tree** you build and script, sitting on a
 data-oriented **archetype ECS** that actually runs. One scene, two views.
 
-> Decision & rationale: [`../decisions/0005-scene-model-ecs-node-hybrid.md`](../decisions/0005-scene-model-ecs-node-hybrid.md).
-> Scripting: [`../decisions/0003-scripting-lua.md`](../decisions/0003-scripting-lua.md) ·
-> Open-in-VSCode: [`../decisions/0011-vscode-integration.md`](../decisions/0011-vscode-integration.md) ·
-> Pooling: [`../decisions/0008-object-pooling.md`](../decisions/0008-object-pooling.md).
+> Decision & rationale: ADR-0005.
+> Scripting: ADR-0003 ·
+> Open-in-VSCode: ADR-0011 ·
+> Pooling: ADR-0008.
 > Siblings: [`./particles-vfx.md`](./particles-vfx.md) · [`./physics.md`](./physics.md) ·
 > [`./ui.md`](./ui.md) · [`./animation.md`](./animation.md). Where it sits:
 > [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §2.
@@ -203,7 +203,7 @@ Runtime transitions are script-driven — `scene.load(name)` (plus
 swaps to the new scene, physics/animators/particles/audio rebuild, every
 script's `start` re-fires. In the editor, Stop still restores the scene you
 were editing (name and all). In multiplayer only the server switches; clients
-follow via the wire protocol's scene epoch (docs/netcode-design.md §5.2b), and
+follow via the wire protocol's scene epoch (docs/multiplayer.md §5.2b), and
 late joiners land in the session's current scene from the Welcome handshake.
 Full guide: docs/scripting.md §17.
 

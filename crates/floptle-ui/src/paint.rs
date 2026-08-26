@@ -1,5 +1,5 @@
 //! The paint box: everything an element can *look like*
-//! (docs/ui-system-2-proposal.md §A).
+//! (docs/ui-styles.md §A).
 //!
 //! The first cut of the UI system gave an element one flat fill, one uniform
 //! radius, one uniform border and one drop shadow. That is a small enough

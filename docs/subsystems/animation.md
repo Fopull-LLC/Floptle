@@ -4,9 +4,9 @@ Skeletal clips from Blender, driven by a **small** state machine, blended into a
 final pose, with timeline **events** that fire gameplay. Built for dreamlike
 adventure and snappy combat — *not* Unreal-tier graph sprawl.
 
-> Asset path: [`../decisions/0006-asset-pipeline-gltf.md`](../decisions/0006-asset-pipeline-gltf.md).
-> Scripting: [`../decisions/0003-scripting-lua.md`](../decisions/0003-scripting-lua.md) ·
-> Editor: [`../decisions/0004-editor-egui.md`](../decisions/0004-editor-egui.md).
+> Asset path: ADR-0006.
+> Scripting: ADR-0003 ·
+> Editor: ADR-0004.
 > Siblings: [`./scene-and-nodes.md`](./scene-and-nodes.md) ·
 > [`./particles-vfx.md`](./particles-vfx.md) · [`./physics.md`](./physics.md).
 > Where it sits: [`../ARCHITECTURE.md`](../ARCHITECTURE.md).
@@ -240,7 +240,7 @@ no motion warping, no curve remapping.
 
 ## Editor UX
 
-A dark/retro ([ADR-0004](../decisions/0004-editor-egui.md)) **Animation workspace**,
+A dark/retro (ADR-0004) **Animation workspace**,
 two custom egui widgets:
 
 ```

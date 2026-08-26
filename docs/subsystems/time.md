@@ -4,7 +4,7 @@ Promote time from a single global scalar to a **rate field `r(p)`**, so a region
 slow, freeze, or dilate the flow of time the same way a region already bends gravity
 or light — locally, spatially, deterministically.
 
-> Decision & rationale: [`../decisions/0017-time-as-a-field.md`](../decisions/0017-time-as-a-field.md).
+> Decision & rationale: ADR-0017.
 > Reads-with: the SDF sim [`./physics.md`](./physics.md), the matter that morphs over
 > time [`./deformable-matter.md`](./deformable-matter.md), the reference-frame tree
 > [`./large-world-space.md`](./large-world-space.md), and the law-axis authoring model

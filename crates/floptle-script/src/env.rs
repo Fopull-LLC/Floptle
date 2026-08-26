@@ -205,7 +205,7 @@ pub(crate) fn stamp_node_table(
             t.raw_set("up_z", b.up[2] as f64)?;
             t.raw_set("grounded", b.grounded)?;
             t.raw_set("height", b.height as f64)?; // write to crouch (capsule resizes, feet planted)
-            // The TICK pose channel (`docs/rollback-netcode-design.md` §3):
+            // The TICK pose channel (`docs/multiplayer.md` §3):
             // the body's own position, not the interpolated render pose that
             // `x`/`y`/`z` carry between ticks. Read it to build a hurtbox;
             // write it to move the body without going through the transform.

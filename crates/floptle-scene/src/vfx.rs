@@ -1,5 +1,5 @@
 //! Particle effect asset DTOs (RON) — the on-disk form of `floptle-vfx`'s
-//! authoring model (`docs/particle-system-proposal.md`).
+//! authoring model (`docs/subsystems/particles-vfx.md`).
 //!
 //! One effect per **`*.vfx.ron`** file, discovered anywhere under `assets/` by
 //! extension (the `.anim.ron` discipline). Asset keys are project-relative paths

@@ -1,4 +1,4 @@
-//! Keyboard / gamepad navigation of game UI (docs/ui-system-2-proposal.md §D).
+//! Keyboard / gamepad navigation of game UI (docs/ui-styles.md §D).
 //!
 //! The geometry and the auto-repeat live in `floptle_ui::nav` (headless and
 //! tested). This is the editor/runtime half: reading the direction, deciding

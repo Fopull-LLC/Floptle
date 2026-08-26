@@ -929,7 +929,7 @@ impl Editor {
     }
 
     /// Frame-step BACKWARDS: put the simulation back exactly one gameplay tick
-    /// (`docs/rollback-netcode-design.md` §7 P5 — closes 0024's deferred item).
+    /// (`docs/multiplayer.md` §7 P5 — closes 0024's deferred item).
     ///
     /// A simulation is not invertible, so this is not a general feature: it
     /// reads the rollback driver's state ring, which exists because rollback

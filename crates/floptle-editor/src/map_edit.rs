@@ -1,4 +1,4 @@
-//! Map-building suite (docs/map-tools-proposal.md): the editor-side store for
+//! Map-building suite (docs/map-tools.md): the editor-side store for
 //! editable map meshes and their GPU/registry sync.
 //!
 //! A `Matter::MapMesh { id }` node carries only its stable id; the geometry

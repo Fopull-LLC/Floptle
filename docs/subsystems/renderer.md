@@ -2,7 +2,7 @@
 
 > The otherworldly renderer: a render graph whose default toolbox is SDFs and
 > raymarching, not just triangles. See [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §4,
-> [`../decisions/0002-render-backend-wgpu.md`](../decisions/0002-render-backend-wgpu.md),
+> ADR-0002,
 > the shader IR in [`./shaders.md`](./shaders.md), materials in
 > [`./materials-and-textures.md`](./materials-and-textures.md), and SDF physics in
 > [`./physics.md`](./physics.md).
@@ -77,7 +77,7 @@ The signature look is assembled from four stages, in graph order:
 ```
 
 1. **Raster pass** — ordinary triangle meshes: Blender glTF imports
-   ([ADR-0006](../decisions/0006-asset-pipeline-gltf.md)) and the scene-builder's
+   (ADR-0006) and the scene-builder's
    procedural shapes. Standard forward draw into an HDR `Rgba16Float` target with
    a depth buffer. Material/shader from the IR.
 2. **SDF / raymarch pass** — the headline. Fractals and impossible/volumetric
@@ -93,7 +93,7 @@ The signature look is assembled from four stages, in graph order:
 
 We render fractals and volumes by **sphere marching** a signed distance / distance
 estimator function `f(p, t)`. The same `f` is what `floptle-physics` collides
-against ([ADR-0012](../decisions/0012-physics-sdf-first.md)) — one field, drawn
+against (ADR-0012) — one field, drawn
 and collided.
 
 **Distance-estimator fractals.** Stdlib SDF nodes provide the canonical set:

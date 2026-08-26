@@ -1,5 +1,5 @@
 //! In-editor multiplayer: drives `floptle-net` sessions from the play loop and
-//! provides the **"Host & Join locally"** test harness (`docs/netcode-design.md`
+//! provides the **"Host & Join locally"** test harness (`docs/multiplayer.md`
 //! §12/§13.3) — the play world hosts, a hidden ghost world joins over an
 //! in-process [`floptle_net::MemoryHub`] with latency/loss sliders, and cyan
 //! ghost gizmos show exactly what a remote client would see (interp delay,
@@ -15,7 +15,7 @@ use floptle_script::{NetCmd, NetRoleState, NetState};
 
 use crate::{anim, Editor};
 
-/// The rewound world for a stamped combat intent (`docs/netcode-design.md`
+/// The rewound world for a stamped combat intent (`docs/multiplayer.md`
 /// §7): every networked node's pose (+ its scripts' `synced` vars) at the
 /// tick the SENDER perceived — their stamp minus each node's interp delay,
 /// clamped to the rewind window. Poses only exist for transform-synced nodes;
@@ -48,7 +48,7 @@ fn build_rewind_scope(
 /// The hidden authoritative SERVER behind "Test as remote player": a full
 /// second simulation (world + physics + its own Lua host) consuming the play
 /// world's replayed inputs, exactly like a dedicated server would
-/// (`docs/netcode-design.md` §6/§12 2c).
+/// (`docs/multiplayer.md` §6/§12 2c).
 pub(crate) struct HiddenServer {
     pub session: NetSession,
     pub world: World,
@@ -63,7 +63,7 @@ pub(crate) struct HiddenServer {
     /// simulates tick T, and mid-session slider drags don't cause repeat-last
     /// mispredictions (= jitter) on the owner. 0 = not yet started.
     pub next_tick: u64,
-    /// Lag-compensation history (`docs/netcode-design.md` §7): the last ~600 ms
+    /// Lag-compensation history (`docs/multiplayer.md` §7): the last ~600 ms
     /// of authoritative poses + synced vars, per networked node — what
     /// `net.rewind` re-poses combat queries to.
     pub history: floptle_net::LagHistory,
@@ -75,7 +75,7 @@ pub(crate) struct HiddenServer {
 }
 
 impl Editor {
-    /// Once per gameplay tick, after physics (`docs/netcode-design.md` §9):
+    /// Once per gameplay tick, after physics (`docs/multiplayer.md` §9):
     /// drain Lua session commands, advance the hub clock, run the server and
     /// ghost-client sessions, and dispatch received RPCs/events into scripts.
     pub(crate) fn net_tick(&mut self, tick: u64) {
@@ -1239,7 +1239,7 @@ impl Editor {
         // networked node's pose + synced vars at the tick its sender PERCEIVED
         // (their stamp minus that node's interp delay, clamped to the rewind
         // window). `net.rewind(peer, fn)` applies it around the handler's
-        // queries (`docs/netcode-design.md` §7).
+        // queries (`docs/multiplayer.md` §7).
         for r in hs.session.take_rpcs() {
             let scope = r
                 .tick

@@ -2,7 +2,7 @@
 
 Make geometry a *physical material* — morphing, blending, sticky, breakable — that stays renderable and collidable for free because it is always the same implicit field.
 
-> Decision & rationale: [`../decisions/0013-deformable-matter.md`](../decisions/0013-deformable-matter.md), built on SDF-first physics [`../decisions/0012-physics-sdf-first.md`](../decisions/0012-physics-sdf-first.md).
+> Decision & rationale: ADR-0013, built on SDF-first physics ADR-0012.
 > Reads-with: the SDF collision core [`./physics.md`](./physics.md), the raymarch/mesh renderer [`./renderer.md`](./renderer.md), and the shader IR [`./shaders.md`](./shaders.md).
 
 `floptle-matter` depends on `floptle-core` (math · ECS · node facade · time),

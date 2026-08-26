@@ -1,4 +1,4 @@
-//! Headless probe for vertex painting (docs/vertex-paint-proposal.md phase 1).
+//! Headless probe for vertex painting (docs/subsystems/materials-and-textures.md phase 1).
 //!
 //! This exists to catch ONE specific bug the design is built around. `params.z` packs
 //! the paint base beside the `unlit` bit, but `fs` reads that lane as `> 0.5` — a

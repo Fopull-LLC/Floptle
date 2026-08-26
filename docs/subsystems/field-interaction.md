@@ -2,7 +2,7 @@
 
 A typed graph where "field A modulates field B" is an **authored edge** — the seam that lets gravity, density, light, time, and geometry *affect each other*, turning coincidental composition into designed composition.
 
-> Decision & rationale: [`../decisions/0019-field-interaction-graph.md`](../decisions/0019-field-interaction-graph.md).
+> Decision & rationale: ADR-0019.
 > Reads-with: the law-axis spine [`./world-rules.md`](./world-rules.md) (the `floptle-rules` crate, ADR-0018), the matter solver + its interaction matrix [`./deformable-matter.md`](./deformable-matter.md) (ADR-0013), and gravity-as-field [`./gravity-and-density.md`](./gravity-and-density.md) (ADR-0014).
 
 This document designs the **emergence seam**: not a new subsystem, but the wiring between the ones we already have. The graph **data** is pure RON in `floptle-rules`; the **executor** is a runtime system in the fixed-step loop that may form cycles the crate dependency graph deliberately cannot. Build it **thin, with one proof** — the discipline note (§9) is load-bearing, not a footnote.

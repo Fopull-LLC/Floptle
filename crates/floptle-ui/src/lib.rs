@@ -1,4 +1,4 @@
-//! # floptle-ui — the game-facing UI system (docs/ui-system-proposal.md)
+//! # floptle-ui — the game-facing UI system (docs/ui-make.md)
 //!
 //! NOT the editor UI (that's egui). This crate is the renderer-agnostic core:
 //! the element vocabulary (shapes, images, text — no premade widgets, no
@@ -2947,7 +2947,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // The paint box (docs/ui-system-2-proposal.md §A)
+    // The paint box (docs/ui-styles.md §A)
     // -----------------------------------------------------------------------
 
     /// A shape with a fill, so cascade tests have something coloured to look at.

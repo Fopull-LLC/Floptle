@@ -1357,7 +1357,7 @@ for the full list). `rng()` with no seed rolls a fresh stream from the clock
 
 **Streaming worlds (galaxy scale)** — instead of pre-generating every body,
 attach the *recipe* and let the engine generate it when someone actually goes
-there (`docs/galaxy-streaming-proposal.md`):
+there:
 
 ```lua
 n:setTerrain(2)
@@ -2027,7 +2027,7 @@ defines it.
 
 Any node with a **Particle System** component exposes a particle handle, so
 scripts can fire and stop effects on cue — muzzle flashes, footstep dust,
-thruster plumes, pickups. See `docs/particle-system-proposal.md` for authoring
+thruster plumes, pickups. See `docs/subsystems/particles-vfx.md` for authoring
 effects on the ❋ Particles timeline.
 
 ```lua
@@ -2557,7 +2557,7 @@ the decision you make is made against your opponent's exact state *this frame*.
 the session's per-tick inputs. Nothing about a hit ever crosses the wire — only
 inputs do — so hit resolution, hitstop and meter agree because the *simulation*
 agrees. Why it works this way:
-[the rollback decision record](decisions/0025-rollback-netcode.md).
+the rollback decision record (ADR-0025).
 
 ### The contract: two hooks
 

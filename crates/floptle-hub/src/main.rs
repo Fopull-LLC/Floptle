@@ -1,5 +1,5 @@
 //! Floptle Hub — the cross-platform launcher / version manager / project manager.
-//! See ADR-0021 and docs/hub-proposal.md.
+//! See ADR-0021 and docs/updating-the-hub.md.
 //!
 //! Deliberately light: it installs & launches engine versions and tracks projects, and
 //! depends only on `floptle-scene` (to read a project's `project.ron`) — never on the

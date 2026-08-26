@@ -1,4 +1,4 @@
-# Release pipeline (ADR-0021 / docs/hub-proposal.md §3). On a semver tag `v*`, build a
+# Release pipeline (ADR-0021 / docs/updating-the-hub.md §3). On a semver tag `v*`, build a
 # self-contained editor bundle per OS, checksum it, publish the archives + a machine-
 # readable `releases.json` manifest to GitHub Releases. The Floptle Hub reads that manifest
 # to list + install versions.

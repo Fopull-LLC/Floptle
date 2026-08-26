@@ -1,5 +1,5 @@
 //! `NetSession` — one endpoint of a running multiplayer session
-//! (`docs/netcode-design.md` §9). The driver (editor play loop, later the
+//! (`docs/multiplayer.md` §9). The driver (editor play loop, later the
 //! headless runtime) owns one per world and calls it once per gameplay tick:
 //!
 //! - **Server**: [`NetSession::tick_server`] AFTER physics — polls the
@@ -214,7 +214,7 @@ pub struct NetSession {
     /// Client: how the join attempt is going. `net.joinState()` reads it, so a
     /// lobby screen can say "no such lobby" instead of counting to ten.
     join_state: JoinState,
-    /// Interest management (`docs/netcode-design.md` §5.2). Off by default.
+    /// Interest management (`docs/multiplayer.md` §5.2). Off by default.
     interest: crate::interest::InterestConfig,
     /// Per-client relevant sets and priority accumulators. Empty and unused
     /// while `interest.enabled` is false.
@@ -330,7 +330,7 @@ pub struct NetSession {
     anim_started: HashSet<(u64, u8)>,
     /// Animator updates due this tick, for the driver's apply step.
     anims_due: Vec<(Entity, AnimEntry)>,
-    // --- rollback (docs/rollback-netcode-design.md §5) ---
+    // --- rollback (docs/multiplayer.md §5) ---
     /// Is this session simulating by rollback? Set by the driver from the
     /// scene's `Rollback` nodes. It changes what the host does with inputs
     /// (fan them out to everyone, rather than consume them itself) and turns
@@ -597,7 +597,7 @@ impl NetSession {
     }
 
     /// Assign deterministic ids to the scene-authored `Replicated` nodes. Both
-    /// sides call this at session start on the SAME scene (`docs/netcode-design.md`
+    /// sides call this at session start on the SAME scene (`docs/multiplayer.md`
     /// §4.1). Iterates in NODE order (the `Transform` column — the order
     /// `spawn_into`/`to_doc` write nodes), NOT `Replicated`-insertion order:
     /// a Networked component added in the Inspector mid-session lands at an
@@ -904,7 +904,7 @@ impl NetSession {
     }
 
     // -----------------------------------------------------------------------
-    // Rollback (docs/rollback-netcode-design.md §5)
+    // Rollback (docs/multiplayer.md §5)
     // -----------------------------------------------------------------------
 
     /// Host: put this session into (or out of) rollback mode with a fixed input
@@ -916,7 +916,7 @@ impl NetSession {
     /// (a peer joined or left) restarts the match clock, which is why v1 does
     /// not support joining a rollback match in progress.
     /// Server: turn interest management on or off, and configure it
-    /// (`docs/netcode-design.md` §5.2). Off is the default — below a few dozen
+    /// (`docs/multiplayer.md` §5.2). Off is the default — below a few dozen
     /// players broadcasting is cheaper, and a feature that changes what reaches
     /// the wire should be one a project asks for.
     ///
@@ -1631,7 +1631,7 @@ impl NetSession {
 
     /// One snapshot per client, carrying only what that client is near enough
     /// to care about and only as much of it as its byte budget allows
-    /// (`docs/netcode-design.md` §5.2, [`crate::interest`]).
+    /// (`docs/multiplayer.md` §5.2, [`crate::interest`]).
     fn send_interest_snapshots(&mut self, world: &World, tick: u64, keyframe: bool) {
         let snaps_per_sec = if self.tick_dt > 0.0 {
             1.0 / (self.tick_dt * SNAPSHOT_EVERY as f32)
@@ -2406,7 +2406,7 @@ impl NetSession {
                     }
                     // OUR OWN predicted node never interpolates — its
                     // authoritative states go to the reconcile queue instead
-                    // (docs/netcode-design.md §6).
+                    // (docs/multiplayer.md §6).
                     if let Some(&e) = self.net_to_ent.get(&en.id)
                         && let Some(rep) = world.get::<Replicated>(e)
                         && rep.mode == floptle_core::ReplicationMode::Predicted

@@ -8,7 +8,7 @@
 > **⚠ Scope update (2026-07-04):** the **technical foundation below stands** (roles,
 > replication, the `Transport` trait, authoritative dedicated servers), but the
 > "*your server, your infra — not a platform*" stance in §7 has been **superseded by
-> [ADR-0022 — Networking & Floptle Cloud](../decisions/0022-networking-and-cloud.md)**
+> ADR-0022 — Networking & Floptle Cloud**
 > and [`../multiplayer.md`](../multiplayer.md), the shipped guide. Self-hosting stays
 > first-class *and* Fopull now offers an optional managed service (relay,
 > matchmaking, dedicated hosting) as an open-source-friendly way to fund the engine.
@@ -58,7 +58,7 @@ single-player reasons:
   Determinism is the foundation of prediction + reconciliation and of cheap
   lockstep options.
 - **Serializable component state** — everything authored is RON, and component
-  data is plain data in the ECS ([ADR-0005](../decisions/0005-scene-model-ecs-node-hybrid.md)),
+  data is plain data in the ECS (ADR-0005),
   so state is already (de)serializable to RON or a compact binary form.
 - **A clean seam in `floptle-net`** — gameplay code is written against an
   authoritative-update model and never talks to a socket directly, so it stays

@@ -5,14 +5,14 @@ button, sticks/triggers/buttons on a gamepad — then decide what the action *do
 in a node script. Devices are an implementation detail; gameplay code talks to
 actions and axes, never raw keys.
 
-**Status: shipped.** See [ADR-0024](../decisions/0024-input-action-map.md) for the
+**Status: shipped.** See ADR-0024 for the
 four decisions taken during implementation — chiefly that the fighting-game
 layer (buffering, motion inputs, SOCD) moved *into* the engine, and that the
 netcode wire now carries actions instead of keys.
 
-> Reads on: [ADR-0024 Input action map](../decisions/0024-input-action-map.md) ·
-> [ADR-0003 Lua scripting](../decisions/0003-scripting-lua.md) ·
-> [ADR-0005 ECS/Node facade](../decisions/0005-scene-model-ecs-node-hybrid.md).
+> Reads on: ADR-0024 Input action map ·
+> ADR-0003 Lua scripting ·
+> ADR-0005 ECS/Node facade.
 > Sits beside: [`./scene-and-nodes.md`](./scene-and-nodes.md) (scripts that read
 > input) · [`./ui.md`](./ui.md) and [`./camera-and-dialogue.md`](./camera-and-dialogue.md)
 > (which own input *contexts*). Where it runs: [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §3.

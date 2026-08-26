@@ -1,5 +1,5 @@
 //! The image-document kernel behind the editor's 🖼 Image tab
-//! (docs/image-editor-proposal.md).
+//! (docs/image-editor.md).
 //!
 //! Everything here is pure CPU and has no window, no egui and no GPU: the
 //! document model, the compositor, the brush engine, selections, adjustments,

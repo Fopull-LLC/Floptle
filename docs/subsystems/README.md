@@ -2,8 +2,7 @@
 
 Deep-dive design notes for each part of Floptle. Each is opinionated and
 concrete (data structures, data flow, editor UX, what's out of scope). They build
-on the [`../decisions/`](../decisions/) ADRs and the top-level
-[`../ARCHITECTURE.md`](../ARCHITECTURE.md).
+on the top-level [`../ARCHITECTURE.md`](../ARCHITECTURE.md).
 
 ### The rules substrate (the spine)
 - [world-rules.md](world-rules.md) — the **Lawset/Realm** meta-spine: a world's laws as inheritable data, resolved by the SDF inside-test.

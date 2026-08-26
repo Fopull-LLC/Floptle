@@ -1,6 +1,6 @@
 //! # floptle-services — the platform capability boundary
 //!
-//! Phase 0 of `docs/steam-integration-proposal.md`. [`Platform`] is the one
+//! Phase 0 of the Steam integration plan. [`Platform`] is the one
 //! trait every downstream crate depends on; a platform SDK's own types
 //! (Steamworks today, in [`floptle_steam`](../floptle_steam/index.html), gated
 //! behind its `steam` feature) never reach `floptle-script`,
@@ -35,7 +35,7 @@
 /// **Average-rate stats are out of scope.** The Steamworks binding this
 /// engine uses doesn't wrap `UpdateAvgRateStat`/its `GetStatValue` variant at
 /// all — a real gap, not an oversight; see
-/// `docs/steam-integration-proposal.md`. **So is progress-indicator
+/// the Steam integration plan. **So is progress-indicator
 /// notifications** (`IndicateAchievementProgress`) — also unbound. Both would
 /// need raw FFI to close.
 pub trait Achievements {
@@ -88,7 +88,7 @@ pub trait Achievements {
 ///
 /// **Quota reporting is out of scope.** The Steamworks binding this engine
 /// uses doesn't wrap `GetQuota` at all — a real gap, not an oversight; see
-/// `docs/steam-integration-proposal.md`.
+/// the Steam integration plan.
 ///
 /// **Conflict policy is the caller's to build, on purpose.** Steam Cloud has
 /// no built-in multi-writer conflict concept to expose — [`file_timestamp`]
@@ -140,7 +140,7 @@ pub trait Identity {
     fn avatar_large(&self) -> Option<Vec<u8>>;
     /// `true` since the last poll if the local user's persona (name or
     /// avatar) changed — a drain, not a push, matching the engine's per-frame
-    /// callback-drain pattern (`docs/steam-integration-proposal.md`).
+    /// callback-drain pattern (the Steam integration plan).
     fn poll_persona_change(&self) -> bool;
     /// This build's build id, as the backend reports it.
     fn build_id(&self) -> i32;
@@ -210,7 +210,7 @@ pub struct FriendInfo {
 ///
 /// **Group/clan membership is out of scope.** The Steamworks binding this
 /// engine uses doesn't wrap clan enumeration at all — a real gap, not an
-/// oversight; see `docs/steam-integration-proposal.md`.
+/// oversight; see the Steam integration plan.
 pub trait Social {
     /// Sets a rich-presence key for the local user, visible to friends in
     /// their friend list — e.g. `("status", "In the lobby")`. The backend
@@ -519,7 +519,7 @@ pub enum LobbyEvent {
     /// *changed member's* id — so for a kick it names the person kicked, not
     /// the person kicking. Exposing a field that is wrong whenever it would
     /// be interesting is worse than not having it; see
-    /// `docs/steam-integration-proposal.md`.
+    /// the Steam integration plan.
     MemberChanged {
         /// The lobby it happened in.
         lobby: u64,
@@ -611,7 +611,7 @@ pub trait Platform {
     /// Pumps pending backend callbacks. Call once per frame, main thread
     /// only, for `floptle run`/exported/served builds — never inside the
     /// editor's own docked Play-mode viewport (see
-    /// `docs/steam-integration-proposal.md`'s "Where Steam activates").
+    /// the Steam integration plan's "Where Steam activates").
     /// `NullPlatform` has nothing to pump.
     fn pump(&self) {}
     /// The [`Achievements`] surface, if this backend has one.

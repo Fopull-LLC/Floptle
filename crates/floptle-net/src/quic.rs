@@ -1,4 +1,4 @@
-//! The QUIC transport (phase 2e, `docs/netcode-design.md` §5.3/§10): the same
+//! The QUIC transport (phase 2e, `docs/multiplayer.md` §5.3/§10): the same
 //! [`Transport`] seam the sessions already speak, over a real network.
 //!
 //! quinn runs on a small background tokio runtime; the sync game loop talks to

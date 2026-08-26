@@ -1,4 +1,4 @@
-//! Interest management (`docs/netcode-design.md` §5.2) — the player-count
+//! Interest management (`docs/multiplayer.md` §5.2) — the player-count
 //! feature.
 //!
 //! Replicating everything to everyone is right up to a few dozen players and

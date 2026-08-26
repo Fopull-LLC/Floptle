@@ -1,4 +1,4 @@
-//! Game-UI editor integration (docs/ui-system-proposal.md, phase 1).
+//! Game-UI editor integration (docs/ui-make.md, phase 1).
 //!
 //! - `gather_game_ui`: walk the scene for `UiLayer` nodes, build each layer's
 //!   element tree, solve layout (CPU — cheap, readable), emit draw lists, and

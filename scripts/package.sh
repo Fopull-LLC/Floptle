@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build a self-contained Floptle editor bundle for THIS platform, plus a local
 # releases.json the Hub can install from via its LocalBuilds/manifest source — the offline
-# dev loop for the Hub (ADR-0021 / docs/hub-proposal.md). The CI (.github/workflows/
+# dev loop for the Hub (ADR-0021 / docs/updating-the-hub.md). The CI (.github/workflows/
 # release.yml) does the same across all OSes for real releases.
 #
 # Usage:  VERSION=0.1.0 scripts/package.sh          # OUT defaults to dist/

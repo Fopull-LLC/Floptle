@@ -1,4 +1,4 @@
-//! Client-side prediction bookkeeping (`docs/netcode-design.md` §6): the
+//! Client-side prediction bookkeeping (`docs/multiplayer.md` §6): the
 //! input/predicted-state ring, reconciliation against authoritative
 //! snapshots, and the visual error-smoothing offset.
 //!

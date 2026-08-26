@@ -4,7 +4,7 @@
 //! source of truth, presented to the artist as either a node graph (in-editor,
 //! later phase) or as readable text (`.flsl`, opened in VSCode for AI-assisted
 //! editing). The IR transpiles to WGSL, validated by naga — the same naga wgpu
-//! embeds. See `docs/shader-system-proposal.md` + `docs/subsystems/shaders.md`.
+//! embeds. See `docs/subsystems/shaders.md` + `docs/subsystems/shaders.md`.
 //!
 //! Modules:
 //! - [`ir`]        : the in-memory shader IR (expression DAG, types, checking).

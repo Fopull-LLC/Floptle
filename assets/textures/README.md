@@ -54,4 +54,4 @@ on purpose so the copyrighted files never enter version history (we plan to
 open-source later, and scrubbing history is painful).
 
 Before any public release these must be replaced with original Fopull textures.
-See `docs/decisions/0010-temporary-assets.md`.
+See ADR-0010.

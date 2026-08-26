@@ -1,5 +1,5 @@
 //! Text styling beyond "a colour"
-//! (docs/ui-system-2-proposal.md §A, gap 2).
+//! (docs/ui-styles.md §A, gap 2).
 //!
 //! Type is the loudest signal of whether a screen was designed or assembled.
 //! The first cut gave a run `size`, `color`, `align`, `valign`, `fit`, `font` —

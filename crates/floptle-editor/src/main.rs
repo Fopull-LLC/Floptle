@@ -292,7 +292,7 @@ struct EditorCmd {
     net_join_quic: Option<String>,
     /// Host through a rendezvous relay at this address.
     net_host_relay: Option<String>,
-    /// Re-simulate a recorded match (`docs/rollback-netcode-design.md` §5).
+    /// Re-simulate a recorded match (`docs/multiplayer.md` §5).
     net_play_replay: Option<std::path::PathBuf>,
     /// Export the project as a runnable game build: (folder, target index —
     /// see `EXPORT_TARGETS`).
@@ -1254,7 +1254,7 @@ fn main() {
     }
     // Before anything can crash: a panic leaves a note the next launch offers to file.
     report::install_panic_hook();
-    // CLI surface the Hub (docs/hub-proposal.md) drives. --version / --new / --migrate run
+    // CLI surface the Hub (docs/updating-the-hub.md) drives. --version / --new / --migrate run
     // HEADLESS (no window or GPU) and exit; a positional path opens that project instead
     // of the default `assets/`.
     let args: Vec<String> = std::env::args().collect();
@@ -2325,7 +2325,7 @@ struct Editor {
     input_typed: String,
     /// The per-tick twin, drained by `fixedUpdate` like every other edge.
     tick_typed: String,
-    /// Per-GAMEPLAY-TICK input accumulators (docs/netcode-design.md §3): edges and
+    /// Per-GAMEPLAY-TICK input accumulators (docs/multiplayer.md §3): edges and
     /// deltas bank here in parallel with the per-frame sets above, and are consumed
     /// by each `fixedUpdate` tick — so a key pressed between ticks is never lost,
     /// and the per-tick snapshot is exactly what netcode input commands will carry.
@@ -2377,7 +2377,7 @@ struct Editor {
     /// Said once, if a scene render ever finds its device incomplete. See the
     /// `else` at the end of `render_world_into`'s six-way bind.
     warned_incomplete_device: bool,
-    /// The in-editor multiplayer session (docs/netcode-design.md §12 2b): the play
+    /// The in-editor multiplayer session (docs/multiplayer.md §12 2b): the play
     /// world hosts, an optional ghost-client world joins over the in-process hub
     /// with simulated latency/loss, and cyan gizmos show its view. Torn down on Stop.
     net_hub: Option<floptle_net::MemoryHub>,
@@ -2454,12 +2454,12 @@ struct Editor {
     /// keeps its own inside `HiddenServer`).
     net_history: floptle_net::LagHistory,
     /// The rollback session's driver, when the scene has `Rollback` nodes and a
-    /// session is running (`docs/rollback-netcode-design.md`). `None` offline
+    /// session is running (`docs/multiplayer.md`). `None` offline
     /// and in an `Authority`/`Predicted`-only session — a Rollback node with no
     /// driver behind it is just a local node, which is exactly what local versus
     /// wants.
     net_rollback: Option<rollback::RollbackDriver>,
-    /// Host: the REFEREE (`docs/rollback-netcode-design.md` §5) — a second,
+    /// Host: the REFEREE (`docs/multiplayer.md` §5) — a second,
     /// headless simulation of the same match advanced only to the confirmed
     /// frontier. It never guesses and never rolls back, so its state is the
     /// authoritative one and every peer's checksum is judged against it.

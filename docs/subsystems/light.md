@@ -4,7 +4,7 @@ Light is not a fixed renderer feature — it is a composable **transport rule**
 sampled along the rays the marcher already shoots, the fourth peer field
 (space · matter · gravity · **light**), off by default and bit-identical when unused.
 
-> Decision & rationale: [`../decisions/0016-programmable-light.md`](../decisions/0016-programmable-light.md).
+> Decision & rationale: ADR-0016.
 > Reads-with: the raymarch loop & post stack [`./renderer.md`](./renderer.md) (§3 is the host),
 > the shader IR [`./shaders.md`](./shaders.md) (light-rules are additive stdlib nodes),
 > and the gravity field [`./gravity-and-density.md`](./gravity-and-density.md) (whose `g(p)` we reuse verbatim).
@@ -269,7 +269,7 @@ Same lever as every other Floptle visual — the shader IR ([`./shaders.md`](./s
 
 - **Light-rule nodes** live in the shader graph as a new stdlib category (`light.bend`,
   `light.radiance`, `light.emit`, `light.media`), wired with typed ports like any node.
-- **Open in VSCode** ([ADR-0011](../decisions/0011-vscode-integration.md)) prints the
+- **Open in VSCode** (ADR-0011) prints the
   rule to `.flsl`; edit by hand or with AI; save re-syncs the graph. A `bend` field is
   just a `Vec3`-returning subgraph — author it like any SDF warp.
 - **Live preview** recompiles on edit; flip a `light.set_mode` preset in the inspector

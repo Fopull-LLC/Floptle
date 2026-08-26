@@ -1,4 +1,4 @@
-//! The rendezvous relay (`docs/netcode-design.md` §10): hosts register and get
+//! The rendezvous relay (`docs/multiplayer.md` §10): hosts register and get
 //! a **lobby code**; clients join with the code; the relay forwards opaque
 //! session traffic both ways. Nobody port-forwards — the only reachable
 //! address anyone needs is the relay's. This is the open, self-hostable

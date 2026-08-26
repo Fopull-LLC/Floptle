@@ -1,4 +1,4 @@
-//! Headless probe for the ◫ UI tab's canvas (docs/ui-system-2-proposal.md §C).
+//! Headless probe for the ◫ UI tab's canvas (docs/ui-styles.md §C).
 //!
 //! The tab's canvas is not an approximation of the UI — it is the shipping path
 //! (`solve` → `draw_list` → `Ui::pack` → `Ui::draw`) rendered into an offscreen

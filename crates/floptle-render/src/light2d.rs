@@ -1,4 +1,4 @@
-//! **2D lighting** — the deferred pass (`docs/2d-lighting-proposal.md`, step 2).
+//! **2D lighting** — the deferred pass (`docs/2d.md`, step 2).
 //!
 //! A flat scene's surfaces are drawn a second time into a small G-buffer, and one
 //! full-screen pass adds every 2D light that reaches each pixel's sorting layer.

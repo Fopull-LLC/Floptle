@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn step_tick_advances_in_exact_gameplay_ticks() {
-        // The netcode-era driver (docs/netcode-design.md §3): step_tick(1/60) must run
+        // The netcode-era driver (docs/multiplayer.md §3): step_tick(1/60) must run
         // exactly the substeps of one gameplay tick and be reproducible — two sims fed
         // the same ticks land bit-identically (same build/machine determinism).
         let build = || {
@@ -669,7 +669,7 @@ mod tests {
     }
 
     /// A driver-stepped body must land BIT-IDENTICALLY where the whole-world
-    /// step would have put it (`docs/rollback-netcode-design.md` §7 P3).
+    /// step would have put it (`docs/multiplayer.md` §7 P3).
     ///
     /// This is the foundation the whole feature stands on: the rollback driver
     /// runs `step_body_tick` both live and during a re-simulation, so if that
@@ -718,7 +718,7 @@ mod tests {
     fn body_snapshot_round_trips_absolute_world_state() {
         // Capture → mutate → restore must return the body to the captured state, in
         // ABSOLUTE world coordinates even with a far-out floating origin (rollback's
-        // core contract, docs/netcode-design.md §6).
+        // core contract, docs/multiplayer.md §6).
         let far = DVec3::new(1.0e6, 0.0, 1.0e6); // origin-relative sim, far from 0
         let mut ecs = World::default();
         let e = ecs.spawn();

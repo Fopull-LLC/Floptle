@@ -1,5 +1,5 @@
 //! Celestial reference frames — the on-rails orbital core (solar demo S2,
-//! `docs/solar-demo-plan.md`).
+//! the Solar demo build order).
 //!
 //! The model is KSP's, because it is the right one for a game:
 //!

@@ -32,7 +32,7 @@ impl Tiling {
 /// Which lighting model a surface answers to.
 ///
 /// Two models, not one, because the engine serves two looks equally
-/// (`docs/engine-roadmap.md`): a stylised/retro surface wants a highlight it can
+/// (the engine roadmap): a stylised/retro surface wants a highlight it can
 /// dial by hand, and a realistic one wants a highlight that falls out of a
 /// measured roughness. Neither is a degraded version of the other, so neither is
 /// simulated with the other's knobs.

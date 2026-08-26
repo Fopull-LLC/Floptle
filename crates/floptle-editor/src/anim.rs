@@ -1443,7 +1443,7 @@ fn anim_subtree_in(
 }
 
 /// Gather every networked animator's replicable state for the session's
-/// snapshot diffing (`docs/netcode-design.md`): each `Replicated.animator`
+/// snapshot diffing (`docs/multiplayer.md`): each `Replicated.animator`
 /// node contributes its own animator AND its subtree's (addressed by the
 /// deterministic `sub` walk index). Cheap: (state index, time, weight) per
 /// layer, no poses, no strings.
@@ -2220,7 +2220,7 @@ mod tests {
     ///
     /// A ratio, and both halves measured in the same run, because a duration on a
     /// shared runner is a coin flip — the same rule the rest of the suite's perf
-    /// guards follow (`docs/HANDOFF.md`).
+    /// guards follow (the engine handoff notes).
     #[test]
     fn gpu_skinning_leaves_the_cpu_a_fraction_of_the_work() {
         let v = |i: usize| floptle_render::Vertex {

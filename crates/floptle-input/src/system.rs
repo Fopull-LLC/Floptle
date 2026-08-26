@@ -235,7 +235,7 @@ impl InputSystem {
 
     /// Resolve one player's devices for the wire WITHOUT touching the tick
     /// domain — the local-input sample a rollback session ships to its peers
-    /// (`docs/rollback-netcode-design.md` §2.2).
+    /// (`docs/multiplayer.md` §2.2).
     ///
     /// In a rollback session the tick domain is authored entirely by the
     /// driver: every peer's input, including the local player's, arrives back

@@ -1,4 +1,4 @@
-//! Headless probe for the UI paint box (docs/ui-system-2-proposal.md §A).
+//! Headless probe for the UI paint box (docs/ui-styles.md §A).
 //!
 //! Renders one PNG per feature through the real production path — `DrawList` →
 //! `Ui::pack` → `Ui::draw` against the actual `ui.wgsl` — and then ASSERTS on

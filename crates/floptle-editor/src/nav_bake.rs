@@ -2271,7 +2271,7 @@ mod tests {
         // of simulated time, matching `TICKS × DT / NAV_WATCH_INTERVAL`). The
         // bound sits well below the old number and with headroom above the
         // new one for a shared runner, per this repo's ratio-guard
-        // convention (`docs/HANDOFF.md` § The gates) — it is the SHAPE
+        // convention (the engine handoff notes § The gates) — it is the SHAPE
         // (bounded vs unbounded in stream length) that this pins, not a
         // specific multiple.
         assert!(

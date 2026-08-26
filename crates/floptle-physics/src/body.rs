@@ -83,7 +83,7 @@ pub struct Body {
     /// Inactive bodies are skipped by the step AND the transform writeback —
     /// a networked CLIENT deactivates server-authoritative bodies so local
     /// physics never fights the interpolated snapshots driving their
-    /// transforms (`docs/netcode-design.md` §6). Default true.
+    /// transforms (`docs/multiplayer.md` §6). Default true.
     pub active: bool,
     /// Collision-layer bit index (resolved from the node's named layer by
     /// `floptle_core::Layers`). The solver only resolves this body against
@@ -102,7 +102,7 @@ pub struct Body {
     pub sensor: bool,
     /// DRIVER-STEPPED: the whole-world step skips this body because something
     /// else advances it one tick at a time — the rollback driver
-    /// (`docs/rollback-netcode-design.md` §7 P3), which must run the identical
+    /// (`docs/multiplayer.md` §7 P3), which must run the identical
     /// integration live and during re-simulation. Stepping it here as well
     /// would advance a rollback fighter twice per live tick and once per
     /// replayed one, so a correction would visibly shorten every jump.
@@ -114,7 +114,7 @@ pub struct Body {
     /// there — no gravity, no depenetration, no ground detection, no locks. The
     /// body remains fully visible to raycasts and hulls; the script owns where
     /// it is allowed to be. The supported rollback profile
-    /// (`docs/rollback-netcode-design.md` §3).
+    /// (`docs/multiplayer.md` §3).
     pub pushbox_only: bool,
     /// Mass, kg — from the node's `RigidBody::mass`.
     ///

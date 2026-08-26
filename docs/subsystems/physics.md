@@ -2,7 +2,7 @@
 
 Custom, SDF-first collision: collide against the same distance function the renderer draws, so morphing fractal worlds are *interactable* without ever re-meshing.
 
-> Decision & rationale: [`../decisions/0012-physics-sdf-first.md`](../decisions/0012-physics-sdf-first.md).
+> Decision & rationale: ADR-0012.
 > The shared distance field & raymarch: [`./renderer.md`](./renderer.md).
 > Where this sits in the engine: [`../ARCHITECTURE.md`](../ARCHITECTURE.md).
 

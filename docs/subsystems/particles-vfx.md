@@ -9,7 +9,7 @@ Timeline-driven particle authoring: name an effect, give it a lifetime, drop
 particle groups onto a video-editor-style timeline, and shape every property
 with a constant or a hand-drawn curve.
 
-> Reads on: [ADR-0008 Object pooling](../decisions/0008-object-pooling.md) ·
+> Reads on: ADR-0008 Object pooling ·
 > [Shaders](./shaders.md) · [Editor](./editor.md). Crate: `floptle-vfx`
 > (depends on `floptle-core`, `floptle-render`).
 

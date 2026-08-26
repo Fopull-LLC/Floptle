@@ -47,7 +47,7 @@ members = [
 [workspace.package]
 version = "0.78.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"     # dual, Rust-ecosystem norm — docs/decisions/0009-license.md
+license = "MIT OR Apache-2.0"     # dual, Rust-ecosystem norm — ADR-0009
 authors = ["Ty Johnston <tplordtp3@gmail.com>"]
 repository = "https://github.com/Fopull-LLC/Floptle"
 rust-version = "1.96"

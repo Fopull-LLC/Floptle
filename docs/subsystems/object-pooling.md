@@ -4,8 +4,8 @@ Pooling is **built into the engine**, not bolted onto every project. Declare a p
 `take()` an instance, `return()` it (or just drop the guard) — the engine handles
 allocation, reuse, growth, and reset.
 
-> Decision & rationale: [`../decisions/0008-object-pooling.md`](../decisions/0008-object-pooling.md).
-> Scripting: [`../decisions/0003-scripting-lua.md`](../decisions/0003-scripting-lua.md).
+> Decision & rationale: ADR-0008.
+> Scripting: ADR-0003.
 > Siblings: [`./scene-and-nodes.md`](./scene-and-nodes.md) ·
 > [`./particles-vfx.md`](./particles-vfx.md). Where it sits:
 > [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §6.

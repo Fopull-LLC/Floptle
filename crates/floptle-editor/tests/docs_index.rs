@@ -61,11 +61,6 @@ fn every_subsystem_doc_is_linked() {
     assert_indexed("docs/subsystems", "README.md");
 }
 
-#[test]
-fn every_adr_is_linked() {
-    assert_indexed("docs/decisions", "README.md");
-}
-
 /// Release notes are indexed by the folder listing and by `scope.json`, not by
 /// prose — but a version with no notes at all would ship a blank page to every
 /// player who clicks it in the Hub.
@@ -74,9 +69,6 @@ fn every_release_has_notes_with_a_title() {
     let dir = repo().join("docs/releases");
     let mut bad = Vec::new();
     for name in pages(&dir) {
-        if name == "STYLE.md" {
-            continue;
-        }
         let body = std::fs::read_to_string(dir.join(&name)).unwrap_or_default();
         if !body.trim_start().starts_with('#') {
             bad.push(name);

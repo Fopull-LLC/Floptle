@@ -1,4 +1,4 @@
-//! The wire vocabulary (`docs/netcode-design.md` §5.1), postcard-encoded.
+//! The wire vocabulary (`docs/multiplayer.md` §5.1), postcard-encoded.
 //! Control (hello/spawn/rpc/events) rides [`Channel::Reliable`]; snapshots ride
 //! [`Channel::UnreliableSequenced`] — only the newest matters, loss is healed
 //! by periodic keyframes (full-state snapshots), not resends.
@@ -97,7 +97,7 @@ pub struct SnapEntry {
 
 /// A serializable per-tick input snapshot — what a client's `fixedUpdate` saw,
 /// shipped to the server so the SAME controller script re-runs there with the
-/// SAME input (`docs/netcode-design.md` §6, the one-script model).
+/// SAME input (`docs/multiplayer.md` §6, the one-script model).
 ///
 /// This carries **resolved actions**, not raw keys: bitmasks and axis values,
 /// which are both device-agnostic and fixed-size, so encoding is inherently
@@ -164,7 +164,7 @@ pub enum Msg {
     /// fixed rollback input delay.
     ///
     /// `input_delay` is host-set and identical on every peer, because mismatched
-    /// delay is mismatched simulation (`docs/rollback-netcode-design.md` §2.2).
+    /// delay is mismatched simulation (`docs/multiplayer.md` §2.2).
     /// It is carried even for a non-rollback session so a client never has to
     /// ask; a session with no `Rollback` nodes simply never applies it.
     Welcome {
@@ -215,7 +215,7 @@ pub enum Msg {
     /// SERVER when relaying/receiving (clients can't spoof it). `tick` is the
     /// sender's PERCEIVED server tick (`{withInput = true}`, client → server
     /// only): the newest snapshot tick the client had applied when it fired —
-    /// what lag compensation rewinds to (`docs/netcode-design.md` §7).
+    /// what lag compensation rewinds to (`docs/multiplayer.md` §7).
     Rpc { name: String, args: NetValue, sender: PeerId, tick: Option<u64> },
     /// Server → clients: another player joined/left (for `net.on` events).
     PeerJoined { peer: PeerId },
@@ -282,7 +282,7 @@ pub enum Msg {
     /// repeat-last in use — mispredictions on the owner); `late` is the
     /// running repeat-last count for that peer. The client auto-tunes its
     /// input lead from this, so clock hitches and drift self-heal instead of
-    /// turning into permanent correction storms (`docs/netcode-design.md` §6).
+    /// turning into permanent correction storms (`docs/multiplayer.md` §6).
     InputAck { margin: i32, late: u64 },
     /// Round-trip probe. Whoever receives one replies with a [`Msg::Pong`]
     /// carrying the same `id`, immediately — the point is to measure the link,

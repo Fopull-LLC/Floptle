@@ -1,5 +1,5 @@
 //! Styles, tokens, states and transitions — the consistency engine
-//! (docs/ui-system-2-proposal.md §B).
+//! (docs/ui-styles.md §B).
 //!
 //! # Why this exists
 //!

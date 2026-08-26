@@ -1,4 +1,4 @@
-//! The transport seam (`docs/netcode-design.md` §5.3): sessions speak
+//! The transport seam (`docs/multiplayer.md` §5.3): sessions speak
 //! [`Transport`], never sockets, so the same replication code runs over the
 //! in-memory hub (tests + the editor's "Host & Join locally" harness), QUIC
 //! (phase 2e), or anything else.

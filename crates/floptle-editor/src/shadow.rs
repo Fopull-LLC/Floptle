@@ -1,5 +1,5 @@
 //! A **second, headless simulation** of a rollback match, driven from an input
-//! log (`docs/rollback-netcode-design.md` §5, §7 P6).
+//! log (`docs/multiplayer.md` §5, §7 P6).
 //!
 //! Two features want this, and they want the same thing, which is why they are
 //! built together rather than one growing a private copy the other would have

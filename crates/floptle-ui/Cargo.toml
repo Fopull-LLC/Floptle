@@ -1,6 +1,6 @@
 [package]
 name = "floptle-ui"
-description = "In-game UI (docs/ui-system-proposal.md): element tree, Free/Pin/Stack layout, draw-list builder. Renderer-agnostic leaf crate by design."
+description = "In-game UI (docs/ui-make.md): element tree, Free/Pin/Stack layout, draw-list builder. Renderer-agnostic leaf crate by design."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,5 +1,5 @@
 //! The value-or-curve affordance and the drawn-curve editor — phase 3 of the
-//! particle system (`docs/particle-system-proposal.md` §6.3–6.4).
+//! particle system (`docs/subsystems/particles-vfx.md` §6.3–6.4).
 //!
 //! A property is a constant OR a curve over a normalized domain (`[0,1]` — the
 //! particle's life, or effect time for automation lanes). Constants edit inline;

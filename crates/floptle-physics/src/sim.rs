@@ -159,7 +159,7 @@ impl<'a> TerrainVolume<'a> {
 
 /// One body's full dynamic state, in ABSOLUTE world coordinates (f64 position,
 /// floating-origin safe) — the serializable capture the netcode snapshots and
-/// prediction rollback restore. See `docs/netcode-design.md` §2/§6.
+/// prediction rollback restore. See `docs/multiplayer.md` §2/§6.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BodySnapshot {
     /// World-space position (absolute — NOT sim-frame/origin-relative).
@@ -767,7 +767,7 @@ impl Sim {
     /// that make up the tick (e.g. 2 × 1/120). NO transform writeback — the caller runs
     /// every banked tick, then calls [`Self::writeback_interpolated`] once per frame.
     ///
-    /// This is the netcode-era driver (`docs/netcode-design.md` §3): the gameplay tick
+    /// This is the netcode-era driver (`docs/multiplayer.md` §3): the gameplay tick
     /// is the deterministic unit scripts' `fixedUpdate`, input commands, snapshots, and
     /// prediction all share, so physics must advance in exact tick multiples.
     /// Override the floating-origin rebase distance (default 4096 world
@@ -1447,7 +1447,7 @@ impl Sim {
     }
 
     /// Advance ONE body by one gameplay tick (the prediction-replay driver,
-    /// `docs/netcode-design.md` §6): runs the tick's physics substeps for just
+    /// `docs/multiplayer.md` §6): runs the tick's physics substeps for just
     /// that body — exact, because the solver has no body-vs-body pass. No
     /// floating-origin rebase, no transform writeback. The render anchor
     /// (`tick_prev`) advances with each replayed tick: [`Self::restore_body`]
@@ -1475,7 +1475,7 @@ impl Sim {
     /// handed back.
     ///
     /// This is what lets the rollback driver run the SAME integration live and
-    /// during a re-simulation (`docs/rollback-netcode-design.md` §7 P3). If the
+    /// during a re-simulation (`docs/multiplayer.md` §7 P3). If the
     /// live tick used the whole-world step and the replay used per-body steps,
     /// the two would have to agree by coincidence rather than by construction —
     /// and the acceptance test for the whole feature is that they agree bit for
@@ -1487,7 +1487,7 @@ impl Sim {
     }
 
     /// Capture a body's full dynamic state by entity index, in absolute world
-    /// coordinates — the serializable unit netcode snapshots (`docs/netcode-design.md`).
+    /// coordinates — the serializable unit netcode snapshots (`docs/multiplayer.md`).
     pub fn body_snapshot(&self, eid: u32) -> Option<BodySnapshot> {
         self.map.iter().find(|l| l.entity.index() == eid).map(|l| {
             let b = &self.world.bodies[l.body];
@@ -1532,7 +1532,7 @@ impl Sim {
     ///
     /// The position is the body's own, in absolute world coordinates — NOT the
     /// node's transform, which between ticks holds the *interpolated render
-    /// pose* (`docs/rollback-netcode-design.md` §3). Reading the render pose
+    /// pose* (`docs/multiplayer.md` §3). Reading the render pose
     /// inside `fixedUpdate` is an alpha-dependent read, which is a
     /// frame-rate-dependent read, which no replay can reproduce; this is where
     /// `node.tickX/tickY/tickZ/tickPos` come from.

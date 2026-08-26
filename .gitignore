@@ -27,7 +27,7 @@ Thumbs.db
 # development. They MUST NOT enter git history (we plan to open-source later, and
 # scrubbing history is painful). Drop them under assets/textures/_oot_temp/.
 # They are git-ignored on purpose; replace with original Fopull textures before
-# any public release. See docs/decisions/0010-temporary-assets.md.
+# any public release.
 assets/textures/_oot_temp/
 assets/**/_oot_temp/
 
@@ -41,7 +41,7 @@ assets/.cache/
 *.blend1
 out.png
 
-# Terrain fields are STREAMING DATA, not source (docs/galaxy-streaming-proposal.md):
+# Terrain fields are STREAMING DATA, not source:
 # bodies carry a genspec in the scene and (re)generate deterministically on
 # approach; player edits persist in game SAVE SLOTS (terrain.saveDir), and the
 # editor's local project files stay on disk — none of it belongs in git history
@@ -84,6 +84,14 @@ assets/shaders/examples/ui/
 # Claude Code's per-project state (session transcripts, local settings). Machine-
 # and person-specific, and it can carry conversation content — never in history.
 .claude/
+
+# --- Internal working material (local only) -----------------------------------
+# Working notes: handoffs, proposals for unshipped systems, roadmaps, and the
+# decision records behind them. They are drafts and intentions rather than
+# documentation of the engine, and docs/ is the shipped surface. Kept on disk,
+# out of the repo.
+/.internal/
+/CLAUDE.md
 
 # Python bytecode from the repo's helper scripts (solar/tools/…). Regenerated on
 # every run and interpreter-version-specific, so it is pure churn in a diff.

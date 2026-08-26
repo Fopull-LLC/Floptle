@@ -109,7 +109,7 @@ mantissa to resolve finer detail from a fixed coordinate. Truly *unbounded* desc
 needs a floating-origin **rebase** of the fractal coordinate each level — which the
 current `mod(p·3ⁱ,2)` Menger can't do seamlessly (measured ~140% seam); it needs the
 IFS *folding* form. That's the engine's job, captured in
-[ADR-0020](../../docs/decisions/0020-fractal-shape-primitive.md).
+[ADR-0020](../../ADR-0020).
 
 **Optimization — detail exactly where you are:** the renderer uses **distance LOD** —
 full Menger iterations only in a bubble around you (the bubble scales down with the
@@ -155,7 +155,7 @@ each octave reads as its own chromatic stratum.
 - It renders at half-res then upscales — that's the single biggest perf lever; if
   it ever feels heavy, the raymarch `MAX_STEPS` and half-res factor are the dials.
 - This binary is intentionally a dead-end-by-design *proof*. Once the look is
-  undeniable, the real engine (per `docs/ROADMAP.md`) grows from Phase 1 — and the
+  undeniable, the real engine (per the build roadmap) grows from Phase 1 — and the
   shader here eventually becomes content of the shader IR, not hand-written WGSL.
 - Next obvious upgrades: GPU-timestamp profiling (separate GPU ms from CPU),
   and exposing the morph/feedback/palette knobs live.

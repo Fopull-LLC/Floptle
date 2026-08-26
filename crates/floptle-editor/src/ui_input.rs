@@ -1,4 +1,4 @@
-//! Text fields, drag & drop, and tooltips at run time (docs/ui-system-2-proposal.md §D).
+//! Text fields, drag & drop, and tooltips at run time (docs/ui-styles.md §D).
 //!
 //! The three of them share one idea: **the engine runs the mechanism and the
 //! game owns the look.** A field has a caret but no border of its own; a drag

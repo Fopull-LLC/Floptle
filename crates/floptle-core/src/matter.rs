@@ -832,7 +832,7 @@ pub struct RigidBody {
     /// point — it is a box you can hit, not a box the physics engine moves.
     ///
     /// This is the supported profile for rollback
-    /// (`docs/rollback-netcode-design.md` §3, §8). Determinism across builds
+    /// (`docs/multiplayer.md` §3, §8). Determinism across builds
     /// and platforms is only *expected*, not proven, and the iterative
     /// depenetration relaxation — order-dependent, sampling SDF terrain — is
     /// the part most likely to disagree in the last bit and turn a match into
@@ -991,7 +991,7 @@ pub struct Trigger;
 /// This is an ADDITIVE component rather than a `Matter` field on purpose. Paint is
 /// orthogonal to what a node *is* (a Mesh and a Primitive are both paintable), and
 /// every primitive of a shape shares ONE `MeshId` — so paint cannot live on the
-/// geometry. See `docs/vertex-paint-proposal.md` §3.1/§9.1.
+/// geometry. See `docs/subsystems/materials-and-textures.md` §3.1/§9.1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VertexPaint {
     pub id: u32,
@@ -1388,7 +1388,7 @@ pub enum Matter {
     /// nodes (a folder for organizing the scene, or a rig root like a player).
     Empty,
     /// An editable map-building polygon mesh (blockout shapes, per-face
-    /// materials, vertex/edge/face modeling — docs/map-tools-proposal.md).
+    /// materials, vertex/edge/face modeling — docs/map-tools.md).
     /// Like `Terrain`, the geometry does NOT live on the component: `id` is a
     /// stable per-mesh key into the editor's map store, persisted to a
     /// per-scene sidecar (`maps/<scene>.map.ron`), because Entity indices die

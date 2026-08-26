@@ -5,7 +5,7 @@
 > [`./shaders.md`](./shaders.md), the asset database & import in
 > [`./asset-pipeline.md`](./asset-pipeline.md), the editor's drag-on-object flow
 > in [`./editor.md`](./editor.md), the renderer in [`./renderer.md`](./renderer.md),
-> and [`../decisions/0007-shader-ir.md`](../decisions/0007-shader-ir.md).
+> and ADR-0007.
 
 The pain we're solving: in most engines, tiling a texture onto a non-UV-mapped
 object means *writing a shader*. Floptle says no. Tiling, clamping, mirroring,
@@ -185,7 +185,7 @@ reports poor UVs.
 
 Floptle ships defaults so a new project is *immediately buildable* — no blank
 canvas (these become real Fopull art before release,
-replacing any OoT temps per [ADR-0010](../decisions/0010-temporary-assets.md)):
+replacing any OoT temps per ADR-0010):
 
 - **Built-in shaders** (`.flsl`): `unlit`, `lit_textured` (basic directional +
   ambient), `lit_color`, `triplanar_lit`, `emissive`, plus a couple surreal
@@ -240,7 +240,7 @@ A focused panel ([`./editor.md`](./editor.md) §2), live-previewed:
 - **Drop a texture** onto a slot (from the Asset Browser) to bind it.
 - **Tiling controls** sit right under each slot — radio for Repeat/Clamp/Triplanar,
   then count/offset/rotation/flip. Changes preview instantly.
-- **Open in VSCode** jumps to the bound shader's `.flsl` ([ADR-0011](../decisions/0011-vscode-integration.md)).
+- **Open in VSCode** jumps to the bound shader's `.flsl` (ADR-0011).
 
 ### Drag-texture-onto-object-in-scene
 

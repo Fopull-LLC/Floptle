@@ -10,7 +10,7 @@
 //! **Never called from the editor's own docked Play-mode viewport** — only
 //! from `floptle run --steam` (headless) and a player_mode session boot
 //! (`floptle play` / an exported or served build), per
-//! `docs/steam-integration-proposal.md`'s "Where Steam activates".
+//! the Steam integration plan's "Where Steam activates".
 
 use std::rc::Rc;
 

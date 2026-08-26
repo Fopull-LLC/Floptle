@@ -1777,7 +1777,7 @@ impl ScriptHost {
         if let Err(e) = crate::audio_api::install_audio_api(&lua, &audio_bridges) {
             eprintln!("[lua] failed to install the audio API: {e}");
         }
-        // The `net.*` API (docs/netcode-design.md §8): command queue out,
+        // The `net.*` API (docs/multiplayer.md §8): command queue out,
         // session state in, `net.on` handler registry, `net.rewind` (§7).
         let synced_stores: Rc<RefCell<HashMap<(u32, String), Table>>> =
             Rc::new(RefCell::new(HashMap::new()));
@@ -3319,7 +3319,7 @@ impl ScriptHost {
     }
 
     // -------------------------------------------------------------------
-    // net.* bridge (docs/netcode-design.md §8)
+    // net.* bridge (docs/multiplayer.md §8)
     // -------------------------------------------------------------------
 
     /// Drain the session commands scripts queued (`net.host{}`, `net.rpc`, …).
@@ -3614,7 +3614,7 @@ impl ScriptHost {
     }
 
     /// Stage (or clear) the lag-compensation context for the RPC about to be
-    /// dispatched (`docs/netcode-design.md` §7): the rewound world as the
+    /// dispatched (`docs/multiplayer.md` §7): the rewound world as the
     /// sender perceived it, precomputed by the driver from its history ring.
     /// `net.rewind(peer, fn)` applies it for the duration of `fn`. Clear after
     /// the dispatch — a stale scope must never leak into the next handler.
@@ -3821,7 +3821,7 @@ impl ScriptHost {
         }
     }
 
-    /// Enter re-simulation (`docs/rollback-netcode-design.md` §4).
+    /// Enter re-simulation (`docs/multiplayer.md` §4).
     ///
     /// A re-simulated tick runs the same Lua the live tick ran, so without a
     /// gate every replay re-fires the cosmetics: `spawnEffect` doubles the hit
@@ -4111,7 +4111,7 @@ impl ScriptHost {
     }
 
     /// Run every script's `fixedUpdate(node, dt)` for ONE gameplay tick (the netcode-era
-    /// fixed step, `docs/netcode-design.md` §3). Called zero or more times per frame by
+    /// fixed step, `docs/multiplayer.md` §3). Called zero or more times per frame by
     /// the play loop, between [`Self::run`] (which handles `start`/`update`, instance
     /// lifecycle, and hot reload) and the physics tick — so `dt` here is the CONSTANT
     /// tick delta and gameplay code sees the same cadence the sim steps at.
@@ -4164,7 +4164,7 @@ impl ScriptHost {
     }
 
     /// Run ONE entity's `fixedUpdate` for one tick — the prediction-replay
-    /// driver (`docs/netcode-design.md` §6): after a correction, the owner's
+    /// driver (`docs/multiplayer.md` §6): after a correction, the owner's
     /// controller re-runs its buffered inputs off the server state, touching
     /// only the predicted node's scripts.
     pub fn run_fixed_for(&mut self, world: &mut World, eid: u32, dt: f32, time: f32) {
@@ -5677,7 +5677,7 @@ impl ScriptHost {
             }
             // A write to the TICK channel is a body teleport that never touches
             // the render transform — which is the whole point of having it
-            // (`docs/rollback-netcode-design.md` §3). It is read back AFTER the
+            // (`docs/multiplayer.md` §3). It is read back AFTER the
             // transform write above, so a script that sets both gets the one it
             // meant: the deterministic one.
             let tick = [

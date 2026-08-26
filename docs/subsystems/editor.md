@@ -2,15 +2,15 @@
 
 > The app that ties everything together: dockable panels, a live wgpu viewport,
 > and a Scene View where you *build geometry by drawing it*. See
-> [`../decisions/0004-editor-egui.md`](../decisions/0004-editor-egui.md),
-> the VSCode workflow [`../decisions/0011-vscode-integration.md`](../decisions/0011-vscode-integration.md),
+> ADR-0004,
+> the VSCode workflow ADR-0011,
 > and the panels it hosts: [`./particles-vfx.md`](./particles-vfx.md),
 > [`./shaders.md`](./shaders.md), [`./materials-and-textures.md`](./materials-and-textures.md),
 > [`./asset-pipeline.md`](./asset-pipeline.md), [`./physics.md`](./physics.md),
 > plus [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §2.
 
 `floptle-editor` is one of two binaries ([ARCHITECTURE](../ARCHITECTURE.md) §1).
-Built on **egui + egui_dock** ([ADR-0004](../decisions/0004-editor-egui.md)) — pure
+Built on **egui + egui_dock** (ADR-0004) — pure
 Rust, immediate-mode, rendered through the same wgpu device as the game, so editor
 chrome and the live viewport coexist. It dogfoods the engine: building the editor
 pressure-tests it.
@@ -36,7 +36,7 @@ presets (Scene, Shading, VFX).
 ```
 
 **Theme:** dark, somewhat **high-contrast**, **retro / pixel-art-inspired** but
-organized, readable, and clear (VISION §6, [ADR-0004](../decisions/0004-editor-egui.md)).
+organized, readable, and clear (VISION §6, ADR-0004).
 Crisp 1px borders, a tight pixel font option, saturated accent colors on a deep
 neutral base. **Highly customizable**: a theme editor exposes palette, accents,
 spacing, font, and corner radius as a `theme.ron` users can tweak and share.
@@ -71,7 +71,7 @@ Each is an `egui_dock` tab over the shared `EditorState`:
   was. The viewport rect is expanded to the full body rather than merely painted
   over it, so the picture is rendered at the size it is shown at and the pointer
   still maps to where it looks like it does.
-- **Hierarchy** — the node tree (the Node facade over the ECS, [ADR-0005](../decisions/0005-scene-model-ecs-node-hybrid.md));
+- **Hierarchy** — the node tree (the Node facade over the ECS, ADR-0005);
   reparent by drag, multi-select, rename.
 - **Inspector** — a **modular component stack** (Unity-style). The selection shows
   *only the components it actually has* — its **Type** (geometry / camera / light /
@@ -273,7 +273,7 @@ rig survives that clear. Under **Rig bones** in the gizmo filter menu.
 ## 5. Open in VSCode
 
 Scripts (`.lua`) and textual shaders (`.flsl`) open externally
-([ADR-0011](../decisions/0011-vscode-integration.md)): the editor shells out to
+(ADR-0011): the editor shells out to
 
 ```
 code <projectRoot> --goto <file>:<line>

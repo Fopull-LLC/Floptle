@@ -2,7 +2,7 @@
 
 Gravity is not a global constant — it is a composable **vector field** `g(p)` you sample as "down," and density is a first-class material property from which mass, the gravity matter emits, and crush/compaction all follow.
 
-> Decision & rationale: [`../decisions/0014-gravity-fields.md`](../decisions/0014-gravity-fields.md), with density-as-matter from [`../decisions/0013-deformable-matter.md`](../decisions/0013-deformable-matter.md).
+> Decision & rationale: ADR-0014, with density-as-matter from ADR-0013.
 > Reads-with: the SDF collision core [`./physics.md`](./physics.md) (gradient, character controller, baked brickmap) and the matter solver [`./deformable-matter.md`](./deformable-matter.md) (compaction, XPBD).
 
 `gravity` is a module inside **`floptle-physics`**. It consumes scalar/vector

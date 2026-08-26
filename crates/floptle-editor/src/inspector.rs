@@ -5747,7 +5747,7 @@ impl EditorTabViewer<'_> {
                 }
 
                 // ===== Networked (replication; only when the node has one) =====
-                // The authored half of the netcode (docs/netcode-design.md §4.2): which
+                // The authored half of the netcode (docs/multiplayer.md §4.2): which
                 // props sync and whether the owner-client predicts it. Owner/NetId are
                 // session state, assigned at runtime — not edited here.
                 if world.get::<floptle_core::Replicated>(e).is_some() {

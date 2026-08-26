@@ -1,5 +1,5 @@
 //! Sparse chunked SDF — the authoring/physics/shadow substrate for Terrain 2.0
-//! (`docs/terrain-mesh-proposal.md` §3.1).
+//! (`docs/subsystems/deformable-matter.md` §3.1).
 //!
 //! # Why this exists
 //!

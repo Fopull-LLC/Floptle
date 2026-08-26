@@ -1,6 +1,6 @@
 //! # floptle-net — open, transport-agnostic netcode (ADR-0022)
 //!
-//! Phase 2b of `docs/netcode-design.md`: server-authoritative replication over
+//! Phase 2b of `docs/multiplayer.md`: server-authoritative replication over
 //! a swappable [`Transport`]. The pieces:
 //!
 //! - [`transport`] — the `Transport` trait + [`MemoryHub`] (in-process loopback
@@ -653,7 +653,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Rollback wire (docs/rollback-netcode-design.md §5, §6)
+    // Rollback wire (docs/multiplayer.md §5, §6)
     // -----------------------------------------------------------------------
 
     /// An arbitrary but fixed match seed — the point is that both peers get

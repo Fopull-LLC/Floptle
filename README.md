@@ -56,24 +56,24 @@ Blender models drop straight in. Nothing is buried under a thousand properties.
 
 ## The stack (decided)
 
-| Layer | Choice | ADR |
-|---|---|---|
-| Language | **Rust** (edition 2024) | [0001](docs/decisions/0001-language-rust.md) |
-| Window/GPU portability | **winit + wgpu** | [0002](docs/decisions/0002-render-backend-wgpu.md) |
-| Scripting | **Lua (LuaJIT via mlua)**, hot-reload | [0003](docs/decisions/0003-scripting-lua.md) |
-| Editor UI | **egui + egui_dock** (dark/retro) | [0004](docs/decisions/0004-editor-egui.md) |
-| Scene model | **ECS core + Node/Component facade** | [0005](docs/decisions/0005-scene-model-ecs-node-hybrid.md) |
-| Blender pipeline | **glTF 2.0** | [0006](docs/decisions/0006-asset-pipeline-gltf.md) |
-| Shaders | **Custom IR: graph ⇄ text → WGSL** | [0007](docs/decisions/0007-shader-ir.md) |
-| Pooling | **Engine-native automatic pools** | [0008](docs/decisions/0008-object-pooling.md) |
-| Serialization | **RON** | (see ARCHITECTURE) |
-| Physics/collision | **Custom SDF-first** (collide morphing fractals) | [0012](docs/decisions/0012-physics-sdf-first.md) |
-| Deformable matter | **Unified field substrate + opt-in tiers** | [0013](docs/decisions/0013-deformable-matter.md) |
-| Gravity & space | **Mass/density gravity fields** (walk on fractals) | [0014](docs/decisions/0014-gravity-fields.md) |
-| World scale | **Large-world / floating-origin** (default-on) | [0015](docs/decisions/0015-large-world-space.md) |
-| Light | **Programmable light transport** (light as a field) | [0016](docs/decisions/0016-programmable-light.md) |
-| Time | **Time as a rate field** (local clocks) | [0017](docs/decisions/0017-time-as-a-field.md) |
-| World rules | **Lawset/Realm spine + field-interaction** | [0018](docs/decisions/0018-lawset-realm.md) · [0019](docs/decisions/0019-field-interaction-graph.md) |
+| Layer | Choice |
+|---|---|
+| Language | **Rust** (edition 2024) |
+| Window/GPU portability | **winit + wgpu** |
+| Scripting | **Lua (LuaJIT via mlua)**, hot-reload |
+| Editor UI | **egui + egui_dock** (dark/retro) |
+| Scene model | **ECS core + Node/Component facade** |
+| Blender pipeline | **glTF 2.0** |
+| Shaders | **Custom IR: graph ⇄ text → WGSL** |
+| Pooling | **Engine-native automatic pools** |
+| Serialization | **RON** |
+| Physics/collision | **Custom SDF-first** (collide morphing fractals) |
+| Deformable matter | **Unified field substrate + opt-in tiers** |
+| Gravity & space | **Mass/density gravity fields** (walk on fractals) |
+| World scale | **Large-world / floating-origin** (default-on) |
+| Light | **Programmable light transport** (light as a field) |
+| Time | **Time as a rate field** (local clocks) |
+| World rules | **Lawset/Realm spine + field-interaction** |
 
 ## Repository layout
 
@@ -125,8 +125,7 @@ Free and open source, **dual-licensed under
 option (the Rust-ecosystem norm). Permissive forever: the engine will never be
 relicensed out from under you; Fopull LLC's revenue comes from optional hosted
 services and donations, never license terms. The "Floptle" name and branding
-remain Fopull LLC trademarks. See
-[`docs/decisions/0009-license.md`](docs/decisions/0009-license.md).
+remain Fopull LLC trademarks.
 
 Unless you explicitly state otherwise, any contribution intentionally
 submitted for inclusion in Floptle by you shall be dual-licensed as above,

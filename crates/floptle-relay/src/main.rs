@@ -1,4 +1,4 @@
-//! The reference relay (`docs/netcode-design.md` §10, ADR-0022): hosts get a
+//! The reference relay (`docs/multiplayer.md` §10, ADR-0022): hosts get a
 //! lobby code, clients join with it, traffic forwards both ways — nobody
 //! port-forwards. Self-hostable by anyone; Floptle Cloud runs the managed one.
 //!

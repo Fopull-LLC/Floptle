@@ -4,9 +4,8 @@ Floptle is a lightweight, hyperoptimized Rust game engine for surreal, otherworl
 visuals (Fopull LLC). **Everything that exists is listed on this page.** If it isn't
 linked here, it isn't finished — a test enforces that.
 
-> **Picking this up cold?** [HANDOFF.md](HANDOFF.md) is the current state — what shipped,
-> how a release reaches a player, the two gates, and the gotchas that have already cost
-> somebody a day. Everything below is the reference; that is the orientation.
+> **New here?** [getting-started.md](getting-started.md) installs the engine and gets
+> something on screen; [ARCHITECTURE.md](ARCHITECTURE.md) is how the pieces fit together.
 
 ## Find it fast
 
@@ -34,8 +33,8 @@ linked here, it isn't finished — a test enforces that.
 | Talk to a website / sell something | [web-api.md](web-api.md) |
 | Install a package, or write one to share | [packages.md](packages.md) |
 | Add my own tools to the editor | [editor-scripting.md](editor-scripting.md) |
-| Understand *why* it's built this way | [decisions/](decisions/README.md) |
-| Light a 2D scene | [2d.md](2d.md#2d-lighting) — and [2d-lighting-proposal.md](2d-lighting-proposal.md) for what is still to come |
+| Understand *why* it's built this way | [VISION.md](VISION.md) |
+| Light a 2D scene | [2d.md](2d.md#2d-lighting) |
 
 ## Learning it
 
@@ -108,67 +107,11 @@ The build-something guides. Each one is a path from nothing to a working result.
 
 1. [VISION.md](VISION.md) — the north star: the feeling we chase, who it's for, the headline features.
 2. [ARCHITECTURE.md](ARCHITECTURE.md) — how the crates and subsystems fit together.
-3. [ROADMAP.md](ROADMAP.md) — the phased build plan; each phase ends in a runnable demo.
-4. [decisions/](decisions/) — ADRs: every significant choice and *why* (start at [the index](decisions/README.md)).
-5. [subsystems/](subsystems/) — deep-dive design per system (start at [the index](subsystems/README.md)).
-
-## Plans and proposals
-
-Where a system was argued out before it was built. Useful when you want the reasoning
-behind a design, or when you are picking up work that was scoped but not finished. A
-proposal is **not** documentation of what shipped — for that, use the guides above.
-
-- [perf-brief.md](perf-brief.md) — the **performance view of the engine**: what is
-  measured and with which tool, what has already been optimised, and what is still
-  outstanding. The cold start for a performance pass.
-- [engine-roadmap.md](engine-roadmap.md) — the four workstreams from "great editor" to
-  "ship a whole game".
-- [2d-release-proposal.md](2d-release-proposal.md) — where the 2D layer stands against
-  Godot's, and the release that closes the gap.
-- [game-roadmap.md](game-roadmap.md) — **Floptle Solar**, the space-company game built in
-  the engine to prove the engine.
-- [solar-demo-plan.md](solar-demo-plan.md) — the KSP-class demo build order (superseded as
-  the forward plan by the game roadmap).
-- [galaxy-streaming-proposal.md](galaxy-streaming-proposal.md) — terrain residency,
-  on-demand generation, multi-system worlds.
-- [terrain-mesh-proposal.md](terrain-mesh-proposal.md) — Terrain 2.0: meshed SDF terrain,
-  surface nets and LOD rings.
-- [shader-system-proposal.md](shader-system-proposal.md) — `.flsl`, the shader IR and the
-  ◈ graph editor.
-- [particle-system-proposal.md](particle-system-proposal.md) — the ❋ timeline and the
-  automation lanes.
-- [animation-system-proposal.md](animation-system-proposal.md) — skeletal animation,
-  controllers, layers, Lua control.
-- [vertex-paint-proposal.md](vertex-paint-proposal.md) — painting colour straight onto
-  meshes.
-- [map-tools-proposal.md](map-tools-proposal.md) — the in-engine blockout and polygon
-  modelling suite.
-- [image-editor-proposal.md](image-editor-proposal.md) — one canvas for pixels, paint and
-  vectors.
-- [ui-system-proposal.md](ui-system-proposal.md) — the designer-first UI system.
-- [ui-system-2-proposal.md](ui-system-2-proposal.md) — making good-looking UI the cheap
-  path.
-- [scripting-experience-proposal.md](scripting-experience-proposal.md) — why
-  discoverability *was* the gap, and the plan that closed it.
-- [scripting-experience-handoff.md](scripting-experience-handoff.md) — the working notes
-  for executing that plan.
-- [networking-proposal.md](networking-proposal.md) — networking and Floptle Cloud.
-- [netcode-design.md](netcode-design.md) — the `floptle-net` transport and replication design.
-- [rollback-netcode-design.md](rollback-netcode-design.md) — one netcode, three replication
-  modes; the finalized rollback plan.
-- [rollback-p7-fofighter-checklist.md](rollback-p7-fofighter-checklist.md) — the acceptance
-  run over the relay.
-- [steam-integration-proposal.md](steam-integration-proposal.md) — the phased plan for
-  Steamworks integration. Deferred, not started.
-- [hub-proposal.md](hub-proposal.md) — the launcher and version manager.
-- [cli-proposal.md](cli-proposal.md) — the designed command line: subcommands on the one
-  binary, JSON out, and the verbs that let a script — or an assistant — check, run, look
-  at and change a project without opening the editor.
+3. [subsystems/](subsystems/) — deep-dive design per system (start at [the index](subsystems/README.md)).
 
 ## Releases
 
-- [releases/](releases/) — the notes for every version. These are what a player reads;
-  [releases/STYLE.md](releases/STYLE.md) is the rule they are written to.
+- [releases/](releases/) — the notes for every version. These are what a player reads.
 - [news.md](news.md) — what's on the Hub's 📰 News tab right now.
 
 ## The three signature ideas (what makes Floptle unlike other engines)

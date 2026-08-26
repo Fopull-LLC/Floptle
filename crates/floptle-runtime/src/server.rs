@@ -1,4 +1,4 @@
-//! The **dedicated server** (`docs/netcode-design.md` §12, 2e) — a project's
+//! The **dedicated server** (`docs/multiplayer.md` §12, 2e) — a project's
 //! authoritative simulation with no window, no GPU and nobody sitting at it.
 //!
 //! Until now every session was hosted by an editor or a player's game, which is

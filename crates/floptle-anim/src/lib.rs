@@ -6,7 +6,7 @@
 //! binds `.anim.ron` / `.actl.ron` docs (floptle-scene) to these types and
 //! drives [`Controller::advance`] each frame between scripts and physics.
 //!
-//! Design notes (docs/animation-system-proposal.md):
+//! Design notes (docs/animation.md):
 //! - Clips are **name-bound at the asset layer, index-bound here**: the binder
 //!   resolves node names → indices once, so per-frame sampling does zero string
 //!   work and a clip retargets to any rig with matching node names.
