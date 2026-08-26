@@ -3076,7 +3076,7 @@ fn api_category(label: &str) -> &'static str {
     // Handle members first: these are prefixed by the local name a script
     // conventionally binds the handle to (`local rb = node:getcomponent(...)`),
     // so they must be matched before the broader `node.` / `math.` arms below.
-    if label == "node:getcomponent"
+    if label == "node:getComponent"
         || starts(label, "rb")
         || starts(label, "light")
         || starts(label, "cam")
@@ -3465,8 +3465,8 @@ const API_EXAMPLES: &[(&str, &str)] = &[
         "local hit = raycast(node.pos, vec3(0, -1, 0), params.ground_ray)\nif hit then log(\"ground at \" .. hit.y) end",
     ),
     (
-        "node:getcomponent",
-        "local rb = node:getcomponent(\"RigidBody\")\nif rb then rb.friction = on_ice and 0.02 or 0.6 end",
+        "node:getComponent",
+        "local rb = node:getComponent(\"RigidBody\")\nif rb then rb.friction = on_ice and 0.02 or 0.6 end",
     ),
     (
         "node:setMaterial",
@@ -4054,13 +4054,13 @@ const LUA_API: &[ApiEntry] = &[
     ApiEntry { label: "draw.circle", insert: "draw.circle(", doc: "draw.circle(x, y, radius, r,g,b [, a]) — a filled circle in screen pixels, x/y its CENTRE. draw.circleOutline(..., [px]) is the hollow twin. Same immediate-mode rules as draw.rect: over the scene, over the HUD, one frame each." },
     ApiEntry { label: "draw.circleOutline", insert: "draw.circleOutline(", doc: "draw.circleOutline(x, y, radius, r,g,b [, a] [, px]) — a hollow circle, `px` thick (default 2)." },
     ApiEntry { label: "draw.line", insert: "draw.line(", doc: "draw.line(x1,y1,z1, x2,y2,z2, r,g,b [, a]) — queue one world-space 3D line for THIS frame (immediate mode: re-draw every lateUpdate — the camera pass — while wanted). Drawn OVER the scene, never occluded — the KSP-style map draws its orbit conics with these." },
-    ApiEntry { label: "node:getparent", insert: "node:getparent()", doc: "The parent node handle, or nil (same as node.parent)." },
+    ApiEntry { label: "node:getParent", insert: "node:getParent()", doc: "The parent node handle, or nil (same as node.parent)." },
     ApiEntry { label: "node:children", insert: "node:children()", doc: "An array of this node's child handles." },
     ApiEntry { label: "node:uiRect", insert: "node:uiRect()", doc: "node:uiRect() -> x, y, w, h — where this UI element was actually laid out on screen this frame, in pixels, or nil if it is not a UI element or has not been drawn yet. The layout is the engine\'s, so this is the only way to find out where a Stack or a Pin put something — for a tooltip that follows a button, an arrow pointing at it, or a hit test of your own." },
-    ApiEntry { label: "node:getchild", insert: "node:getchild(", doc: "node:getchild(\"Gun\") — the first child with that name (a node handle), or nil." },
+    ApiEntry { label: "node:getChild", insert: "node:getChild(", doc: "node:getChild(\"Gun\") — the first child with that name (a node handle), or nil." },
     ApiEntry { label: "node:find", insert: "node:find(", doc: "node:find(\"Muzzle\") — the first descendant (any depth) with that name, or nil." },
-    ApiEntry { label: "node:getscript", insert: "node:getscript(", doc: "node:getscript(\"health\") — a script handle for that script on this node, or nil. Read/write its state, call its methods, reach .node / .params." },
-    ApiEntry { label: "node:getcomponent", insert: "node:getcomponent(", doc: "node:getcomponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z, two_d — 2D mode), PointLight (intensity, range, r/g/b, and the EMITTER: shape 0 point / 1 sphere / 2 rect / 3 disk / 4 tube, plus width, height, radius, length, thickness, twoSided — a rect light IS a window, so growing one softens the highlight it leaves on everything — plus shadows, which stops this lamp at the walls between it and what it lights instead of shining through them), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace), PostProcess (enabled, bloom, bloomThreshold, bloomIntensity, vignette, vignetteStrength, vignetteRadius, aoStrength, aoRadius, posterizeBands, posterizeDither, tonemap, and the lens: dofFocus, dofRange, dofNearRange, dofBlur, dofBlades, dofBladeAngle, dofHighlight, dofSamples, plus the shutter: motionBlur, motionSamples — a cutscene pushing a vignette, pulling a rack focus, or opening the shutter for a slow-motion beat), LightProbes (enabled, intensity, leak, normalBias — the baked bounce's live knobs; the bake-time ones are not here because a script cannot bake), ReflectionProbe (enabled, intensity, fade — what a room reflects when what it is reflecting is off screen; the box is the node's own shape, and moving or resizing it re-captures). e.g. node:getcomponent(\"RigidBody\").friction = 0.02 for ice." },
+    ApiEntry { label: "node:getScript", insert: "node:getScript(", doc: "node:getScript(\"health\") — a script handle for that script on this node, or nil. Read/write its state, call its methods, reach .node / .params." },
+    ApiEntry { label: "node:getComponent", insert: "node:getComponent(", doc: "node:getComponent(name) — a component handle whose fields you can read AND assign at runtime (applies live during play), or nil if absent. Components: RigidBody (friction, restitution, gravity, kinematic 1/0 — live Dynamic/Kinematic switch, shape 0/1/2, radius, height, half_x/y/z, lock_x/y/z, lock_rot_x/y/z, two_d — 2D mode), PointLight (intensity, range, r/g/b, and the EMITTER: shape 0 point / 1 sphere / 2 rect / 3 disk / 4 tube, plus width, height, radius, length, thickness, twoSided — a rect light IS a window, so growing one softens the highlight it leaves on everything — plus shadows, which stops this lamp at the walls between it and what it lights instead of shining through them), Camera (fovY radians, active — assign true to switch cameras), ParticleSystem (play_on_start), UiElement (visible, opacity, posX/posY, width/height, radius, border, fillRGBA, textSize, textRGBA, tintRGBA, cell — spritesheet frame), UiSlider (value/min/max — drive a health bar), UiLayer (enabled, z, designHeight, worldSpace), PostProcess (enabled, bloom, bloomThreshold, bloomIntensity, vignette, vignetteStrength, vignetteRadius, aoStrength, aoRadius, posterizeBands, posterizeDither, tonemap, and the lens: dofFocus, dofRange, dofNearRange, dofBlur, dofBlades, dofBladeAngle, dofHighlight, dofSamples, plus the shutter: motionBlur, motionSamples — a cutscene pushing a vignette, pulling a rack focus, or opening the shutter for a slow-motion beat), LightProbes (enabled, intensity, leak, normalBias — the baked bounce's live knobs; the bake-time ones are not here because a script cannot bake), ReflectionProbe (enabled, intensity, fade — what a room reflects when what it is reflecting is off screen; the box is the node's own shape, and moving or resizing it re-captures). e.g. node:getcomponent(\"RigidBody\").friction = 0.02 for ice." },
     ApiEntry { label: "node:animator", insert: "node:animator()", doc: "node:animator() — the animation handle for this node's Animation Controller (or a rigged model's embedded clips). Setters: :play/:restart/:crossfade/:stop/:setSpeed/:setLayerWeight/:seek. Getters: :state/:time/:finished/:isPlaying/:clips/:layers." },
     ApiEntry { label: "anim:play", insert: ":play(", doc: "anim:play(\"Run\" [, fade [, layer]]) — transition to a state. The controller supplies the crossfade (default fade, per-arrow overrides, and a state's ⇥ fade-in override which beats everything — 0 = instant); pass `fade` to override the first two. Safe to call every frame — re-playing the current state is a no-op." },
     ApiEntry { label: "anim:restart", insert: ":restart(", doc: "anim:restart(\"Attack\" [, fade [, layer]]) — like play, but re-enters even if that state is already playing (re-trigger a one-shot)." },
@@ -5320,15 +5320,26 @@ mod tests {
     fn lua_api_reference_covers_every_node_method() {
         let documented: std::collections::HashSet<&str> =
             LUA_API.iter().map(|e| e.label).collect();
-        // Short aliases of a documented method. Documenting both would put two
+        // Other spellings of a documented method. Documenting both would put two
         // rows in the reference for one call, which is worse than a name people
         // find by autocomplete anyway — so each is named here beside the entry
         // that covers it, rather than being silently absent.
+        //
+        // The all-lowercase `getchild` / `getscript` / `getcomponent` /
+        // `getparent` were the ORIGINAL spellings and go on working; they are
+        // here rather than in the reference because every other node method is
+        // camelCase, and one exception that only autocomplete knows about is
+        // exactly how `node:getChild(...)` came to die as "a nil value".
         const ALIASES: &[(&str, &str)] = &[
-            ("node:child", "node:getchild"),
-            ("node:script", "node:getscript"),
-            ("node:component", "node:getcomponent"),
+            ("node:child", "node:getChild"),
+            ("node:getchild", "node:getChild"),
+            ("node:script", "node:getScript"),
+            ("node:getscript", "node:getScript"),
+            ("node:component", "node:getComponent"),
+            ("node:getcomponent", "node:getComponent"),
+            ("node:getparent", "node:getParent"),
             ("node:getsorting", "node:sorting"),
+            ("node:getSorting", "node:sorting"),
         ];
         for (alias, of) in ALIASES {
             assert!(
@@ -5891,14 +5902,14 @@ Prose with `inline code` in it.
     #[test]
     fn ac_member_completion_works_on_any_variable() {
         // `node:getc` — base + colon member completes the method, keeping the base.
-        let items = ac_matches("node:getc", "");
-        assert!(items[0].label.starts_with("node:getc")); // getchild/getcomponent tie
-        let comp = items.iter().find(|i| i.label == "node:getcomponent").unwrap();
-        assert_eq!(comp.insert, "getcomponent(");
+        let items = ac_matches("node:getC", "");
+        assert!(items[0].label.starts_with("node:getC")); // getChild/getComponent tie
+        let comp = items.iter().find(|i| i.label == "node:getComponent").unwrap();
+        assert_eq!(comp.insert, "getComponent(");
         assert_eq!(comp.keep, 5); // "node:" kept, member replaced
         // Any variable name works: `body:getc` ranks the same method next.
-        let items = ac_matches("body:getc", "");
-        assert!(items.iter().any(|i| i.label == "node:getcomponent" && i.keep == 5));
+        let items = ac_matches("body:getC", "");
+        assert!(items.iter().any(|i| i.label == "node:getComponent" && i.keep == 5));
         // `anim:pl` reaches the animator methods.
         let items = ac_matches("anim:pl", "");
         assert_eq!(items[0].label, "anim:play");
@@ -5923,8 +5934,8 @@ Prose with `inline code` in it.
     #[test]
     fn ac_plain_words_prefix_then_substring() {
         // Prefix beats substring: "gro" → node.grounded via substring too.
-        let items = ac_matches("getcomp", "");
-        assert!(items.iter().any(|i| i.label == "node:getcomponent"), "substring should match");
+        let items = ac_matches("getComp", "");
+        assert!(items.iter().any(|i| i.label == "node:getComponent"), "substring should match");
         let items = ac_matches("inp", "local input_speed = 1\n");
         assert_eq!(items[0].label, "input"); // API prefix outranks buffer words
         // A word with no API competition comes from the buffer.

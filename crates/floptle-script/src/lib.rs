@@ -1128,6 +1128,72 @@ impl SceneMirror {
             FindScope::Disabled => self.off(id),
         }
     }
+
+    /// The script kinds attached to a node, in the order they were attached.
+    pub(crate) fn kinds_on(&self, id: u32) -> &[String] {
+        self.scripts.get(&id).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+}
+
+/// The part of a script kind after the last `/` — the name the editor puts on
+/// the tab, the Inspector row and the Hierarchy.
+///
+/// A script's `kind` is its path under `scripts/` without the extension, so a
+/// file the author filed in a folder is `"forgery/playermovement"`. Nothing on
+/// screen ever says that: the tab says `playermovement.lua`, the Console
+/// attributes its output to `playermovement`, and every example in the docs
+/// passes a bare name. See [`match_kind`].
+pub(crate) fn kind_stem(kind: &str) -> &str {
+    kind.rsplit('/').next().unwrap_or(kind)
+}
+
+/// How a script name asked for in Lua matched the kinds actually in play.
+pub(crate) enum KindMatch {
+    /// Exactly one kind answers to that name — the canonical kind to use.
+    One(String),
+    /// Nothing does.
+    None,
+    /// The bare stem fits several kinds. Refused rather than guessed: whichever
+    /// one got picked would be a coin flip, and the fix — say which folder — is
+    /// one word.
+    Ambiguous(Vec<String>),
+}
+
+/// Match a name a script asked for against the kinds available.
+///
+/// An exact kind wins outright, so a project that already spells them in full
+/// keeps the meaning it had. Otherwise the trailing [`kind_stem`] answers, which
+/// is what makes `node:getscript("playermovement")` reach
+/// `scripts/forgery/playermovement.lua` — the name the author sees everywhere
+/// they look, and the one they type first.
+///
+/// This is the lookup behind `node:getscript`, `node:getcomponent`'s sibling
+/// `findScript`/`findScripts`, and the `scriptref(...)` param binding, so all of
+/// them agree on what a script is called.
+pub(crate) fn match_kind<'a>(kinds: impl IntoIterator<Item = &'a str>, name: &str) -> KindMatch {
+    let mut stem_hits: Vec<String> = Vec::new();
+    for k in kinds {
+        if k == name {
+            return KindMatch::One(k.to_string());
+        }
+        if kind_stem(k) == name && !stem_hits.iter().any(|h| h == k) {
+            stem_hits.push(k.to_string());
+        }
+    }
+    match stem_hits.len() {
+        0 => KindMatch::None,
+        1 => KindMatch::One(stem_hits.swap_remove(0)),
+        _ => KindMatch::Ambiguous(stem_hits),
+    }
+}
+
+/// The sentence an ambiguous script name is refused with.
+pub(crate) fn ambiguous_kind_error(call: &str, name: &str, hits: &[String]) -> mlua::Error {
+    mlua::Error::runtime(format!(
+        "{call}: \"{name}\" could mean {} — say which one, since a script's name is its \
+         path under scripts/ without the .lua.",
+        hits.join(" or ")
+    ))
 }
 
 /// A prefab instance a script requested via `spawn(prefab [, pos [, fn]])`:
@@ -1573,6 +1639,15 @@ struct Shared {
     /// for the bug in your own script. One line naming the node it skipped and
     /// the option that brings it back turns it into a five-second fix.
     find_scope_warned: Rc<RefCell<std::collections::HashSet<String>>>,
+    /// Lookups that came back empty and have already said so — keyed by the
+    /// call plus what it was asked for, so a `getscript` polled in `update`
+    /// costs one Console line rather than sixty a second.
+    ///
+    /// The engine's most expensive bug shape is a reference call that answers
+    /// `nil` and says nothing: the symptom lands in somebody else's script,
+    /// several frames later, as a value that was never set. Every miss that can
+    /// name a likely cause routes through here.
+    miss_warned: Rc<RefCell<std::collections::HashSet<String>>>,
     /// The Console feed, shared with the host — a handle read is the one place
     /// in the reference layer that has something to say.
     logs: Rc<RefCell<Vec<ScriptLog>>>,
@@ -3132,6 +3207,275 @@ end
             strs: Vec::new(),
         }]));
         (world, e)
+    }
+
+    /// A script filed in a subfolder must answer to the name on its tab.
+    ///
+    /// This is the bug as reported: `scripts/forgery/playermovement.lua` is
+    /// stored on the node as the kind `forgery/playermovement`, because a kind
+    /// is a path under `scripts/` without the extension. Nothing a person looks
+    /// at says so — the editor tab says `playermovement.lua`, the Inspector row
+    /// says `playermovement`, the Console prefixes its output `playermovement:22`
+    /// — so `node:getscript("playermovement")` is what everybody writes, and it
+    /// matched nothing and returned `nil` with no complaint. The `nil` then
+    /// surfaced two scripts away as a value that was never set.
+    #[test]
+    fn a_script_in_a_subfolder_answers_to_its_bare_name() {
+        let dir = std::env::temp_dir().join("floptle_script_test_kind_stem");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("forgery")).unwrap();
+        write_script(&dir, "forgery/playermovement", "state = \"idle\"\n");
+        write_script(
+            &dir,
+            "reader",
+            "function update(node, dt)\n  \
+             local m = findTagged(\"Player\")[1]:getscript(\"playermovement\")\n  \
+             if m and m.state == \"idle\" then node.x = 1 end\n\
+             end\n",
+        );
+
+        let mut world = World::default();
+        let player = world.spawn();
+        world.insert(player, Transform::IDENTITY);
+        world.insert(player, floptle_core::Tags(vec!["Player".into()]));
+        world.insert(
+            player,
+            Scripts(vec![floptle_core::ScriptInst::new("forgery/playermovement")]),
+        );
+        let reader = world.spawn();
+        world.insert(reader, Transform::IDENTITY);
+        world.insert(reader, Scripts(vec![floptle_core::ScriptInst::new("reader")]));
+
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(
+            world.get::<Transform>(reader).unwrap().translation.x,
+            1.0,
+            "the bare file name must reach a script filed in a folder"
+        );
+    }
+
+    /// …and the full path still means exactly what it meant, so a project that
+    /// already spells them out is untouched.
+    #[test]
+    fn the_full_script_path_still_resolves() {
+        let dir = std::env::temp_dir().join("floptle_script_test_kind_path");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("forgery")).unwrap();
+        write_script(&dir, "forgery/mover", "state = 7\n");
+        write_script(
+            &dir,
+            "reader",
+            "function update(node, dt)\n  \
+             local m = findScript(\"forgery/mover\")\n  \
+             if m then node.x = m.state end\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let a = world.spawn();
+        world.insert(a, Transform::IDENTITY);
+        world.insert(a, Scripts(vec![floptle_core::ScriptInst::new("forgery/mover")]));
+        let b = world.spawn();
+        world.insert(b, Transform::IDENTITY);
+        world.insert(b, Scripts(vec![floptle_core::ScriptInst::new("reader")]));
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(world.get::<Transform>(b).unwrap().translation.x, 7.0);
+    }
+
+    /// Two files with the same name in different folders: refuse, naming both.
+    /// Picking one would be a coin flip whose loser is silent.
+    #[test]
+    fn an_ambiguous_bare_script_name_is_refused_by_name() {
+        let dir = std::env::temp_dir().join("floptle_script_test_kind_ambig");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        write_script(&dir, "a/thing", "who = \"a\"\n");
+        write_script(&dir, "b/thing", "who = \"b\"\n");
+        write_script(
+            &dir,
+            "reader",
+            "function update(node, dt)\n  local _ = findScript(\"thing\")\nend\n",
+        );
+        let mut world = World::default();
+        for k in ["a/thing", "b/thing", "reader"] {
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(e, Scripts(vec![floptle_core::ScriptInst::new(k)]));
+        }
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        let errs = host.errors().join("\n");
+        assert!(errs.contains("a/thing") && errs.contains("b/thing"), "{errs}");
+    }
+
+    /// A `getscript` that finds nothing says what the node DOES carry — once,
+    /// however many frames poll it.
+    #[test]
+    fn a_getscript_miss_names_what_the_node_carries() {
+        let dir = std::env::temp_dir().join("floptle_script_test_getscript_miss");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "held", "hp = 1\n");
+        write_script(
+            &dir,
+            "reader",
+            "function update(node, dt)\n  local _ = node:getscript(\"helth\")\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, floptle_core::Name("Hero".into()));
+        world.insert(
+            e,
+            Scripts(vec![
+                floptle_core::ScriptInst::new("held"),
+                floptle_core::ScriptInst::new("reader"),
+            ]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        let said: Vec<String> = host
+            .drain_logs()
+            .into_iter()
+            .filter(|l| l.level == LogLevel::Warn)
+            .map(|l| l.msg)
+            .collect();
+        assert_eq!(said.len(), 1, "exactly one line: {said:?}");
+        assert!(said[0].contains("Hero") && said[0].contains("held"), "{}", said[0]);
+        // Three more frames of the same miss must stay at one line.
+        host.run(&mut world, &dir, 0.1, 0.2);
+        host.run(&mut world, &dir, 0.1, 0.3);
+        assert!(
+            host.drain_logs().iter().all(|l| l.level != LogLevel::Warn),
+            "a miss polled every frame is still one Console line"
+        );
+    }
+
+    /// Every other node method is camelCase (`hasTag`, `setWorldPos`,
+    /// `distanceTo`), so `node:getChild` / `node:getParent` / `node:getScript`
+    /// is what gets written — and all three used to die at the call with
+    /// "attempt to call method 'getChild' (a nil value)", which names the
+    /// symptom and nothing to do about it.
+    #[test]
+    fn the_get_node_methods_take_the_camel_case_spelling() {
+        let dir = std::env::temp_dir().join("floptle_script_test_camel_get");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "kid", "hp = 3\n");
+        write_script(
+            &dir,
+            "reader",
+            "function update(node, dt)\n  \
+             local k = node:getChild(\"Kid\")\n  \
+             if k and k:getParent().name == \"Root\" then node.x = k:getScript(\"kid\").hp end\n\
+             end\n",
+        );
+        let mut world = World::default();
+        let root = world.spawn();
+        world.insert(root, Transform::IDENTITY);
+        world.insert(root, floptle_core::Name("Root".into()));
+        world.insert(root, Scripts(vec![floptle_core::ScriptInst::new("reader")]));
+        let kid = world.spawn();
+        world.insert(kid, Transform::IDENTITY);
+        world.insert(kid, floptle_core::Name("Kid".into()));
+        world.insert(kid, floptle_core::Parent(root));
+        world.insert(kid, Scripts(vec![floptle_core::ScriptInst::new("kid")]));
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(world.get::<Transform>(root).unwrap().translation.x, 3.0);
+    }
+
+    /// A CASING slip on any other node method names its fix rather than dying
+    /// at the call site. Genuinely unknown keys still read nil, so a feature
+    /// probe (`if node.someday then`) keeps working.
+    #[test]
+    fn a_node_method_casing_slip_names_the_fix() {
+        let dir = std::env::temp_dir().join("floptle_script_test_node_casing");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "typo",
+            "function update(node, dt)\n  \
+             if dt < 0.15 then\n    if node.someday == nil then node.y = 4 end\n  \
+             else\n    node.x = node:HasTag(\"x\") and 1 or 0\n  end\n\
+             end\n",
+        );
+        let (mut world, e) = world_with_script("typo");
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "a nil probe must not raise: {:?}", host.errors());
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.y, 4.0);
+        host.run(&mut world, &dir, 0.2, 0.3);
+        let errs = host.errors().join("\n");
+        assert!(errs.contains("did you mean `hasTag`"), "{errs}");
+    }
+
+    /// `findTagged(...)[0]` is the first hour of every Lua API, and the engine's
+    /// answer was a `nil` that died one call later as "attempt to index a nil
+    /// value" — pointing at the line, saying nothing about the cause. An index
+    /// below 1 is never an element of a Lua list, so it can say so outright.
+    /// A positive index past the end still reads nil: `if findTagged("x")[1]`
+    /// is how you ask whether there are any.
+    #[test]
+    fn indexing_a_result_list_from_zero_says_lists_start_at_one() {
+        let dir = std::env::temp_dir().join("floptle_script_test_zero_index");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "zero",
+            "function update(node, dt)\n  \
+             if dt < 0.15 then\n    \
+             if findTagged(\"me\")[9] == nil then node.y = 2 end\n  \
+             else\n    local _ = findTagged(\"me\")[0]\n  end\n\
+             end\n",
+        );
+        let (mut world, e) = world_with_script("zero");
+        world.insert(e, floptle_core::Tags(vec!["me".into()]));
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "past-the-end must stay nil: {:?}", host.errors());
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.y, 2.0);
+        host.run(&mut world, &dir, 0.2, 0.3);
+        let errs = host.errors().join("\n");
+        assert!(errs.contains("1-based") && errs.contains("[0]"), "{errs}");
+    }
+
+    /// A script that is attached but switched OFF reads nil through a handle,
+    /// exactly like a live script with no such export. They want completely
+    /// different fixes, so the handle says which one it is.
+    #[test]
+    fn reading_a_switched_off_script_says_it_is_switched_off() {
+        let dir = std::env::temp_dir().join("floptle_script_test_off_script");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "engine", "power = 9\n");
+        write_script(
+            &dir,
+            "reader",
+            "function update(node, dt)\n  local _ = node:getscript(\"engine\").power\nend\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![
+                floptle_core::ScriptInst { enabled: false, ..floptle_core::ScriptInst::new("engine") },
+                floptle_core::ScriptInst::new("reader"),
+            ]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        let said = host
+            .drain_logs()
+            .into_iter()
+            .filter(|l| l.level == LogLevel::Warn)
+            .map(|l| l.msg)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(said.contains("attached but not running"), "{said}");
     }
 
     /// A cross-script `h.name(...)` calls the script's own function

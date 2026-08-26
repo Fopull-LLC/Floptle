@@ -1274,7 +1274,29 @@ pub fn resolve_attachments(
         // pin a mirrored offset's negative scale to the X axis. The result is the
         // child's LOCAL transform; world_transform re-applies the mesh f64 world
         // (Parent chain intact), so a negative-scale mesh mirrors consistently.
-        let local = Transform::from_matrix(bone_local.as_dmat4()).mul_transform(&offset);
+        let bone_offset = Transform::from_matrix(bone_local.as_dmat4()).mul_transform(&offset);
+        // …but only while the node really is a child of the mesh, which is what
+        // `attach_to_bone` sets up and what makes the line above a LOCAL
+        // transform at all. Nothing holds that afterwards: drag the node
+        // anywhere else in the Hierarchy and this kept writing a local in the
+        // mesh's space onto a node whose parent chain is somebody else's, so
+        // the attachment sat wherever the difference between the two chains put
+        // it — with no error and no clue, because it still tracked the bone's
+        // MOTION perfectly and was merely in the wrong place.
+        //
+        // So place it by WORLD transform and divide out whatever parent it
+        // actually has. The normalized case takes the branch above and is
+        // untouched, byte for byte.
+        let parent = world.get::<floptle_core::Parent>(child).map(|p| p.0);
+        let local = if parent == Some(target) {
+            bone_offset
+        } else {
+            let want = floptle_core::world_transform(world, target).mul_transform(&bone_offset);
+            match parent {
+                Some(p) => floptle_core::world_transform(world, p).inv_mul(&want),
+                None => want,
+            }
+        };
         if let Some(t) = world.get_mut::<Transform>(child) {
             *t = local;
         }

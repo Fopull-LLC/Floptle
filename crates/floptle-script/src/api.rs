@@ -13,6 +13,112 @@ use mlua::{Lua, Table, Value};
 use crate::env::{as_num, new_component_handle, new_node_handle, new_script_handle};
 use crate::{AnimCmd, AnimInfo, Shared, VfxCmd};
 
+/// The 1-based array every `find*` and `node:children()` answers with.
+///
+/// Under [`LIST_MT`], so a 0 or negative index says what it is instead of
+/// handing back a `nil` that dies one call later as "attempt to index a nil
+/// value" — the single most common first-hour mistake in a Lua API, because
+/// every other language the caller knows counts from zero.
+fn list_table(
+    lua: &Lua,
+    ids: &[u32],
+    mut make: impl FnMut(&Lua, u32) -> mlua::Result<Table>,
+) -> mlua::Result<Table> {
+    let arr = lua.create_table()?;
+    for (i, e) in ids.iter().enumerate() {
+        arr.raw_set(i + 1, make(lua, *e)?)?;
+    }
+    if let Ok(mt) = lua.named_registry_value::<Table>(LIST_MT) {
+        arr.set_metatable(Some(mt));
+    }
+    Ok(arr)
+}
+
+/// Registry name of the shared list metatable — see [`list_table`].
+const LIST_MT: &str = "floptle_list_mt";
+
+/// Install [`LIST_MT`]: an `__index` that refuses a non-positive index and
+/// stays out of the way otherwise.
+///
+/// Only `[0]` and below raise. An out-of-range POSITIVE index still reads nil,
+/// because `if findTagged("enemy")[1] then` is how you ask whether there are
+/// any and breaking that would trade one bad afternoon for a hundred.
+fn install_list_mt(lua: &Lua) -> mlua::Result<()> {
+    let mt = lua.create_table()?;
+    mt.set(
+        "__index",
+        lua.create_function(|_, (this, key): (Table, Value)| {
+            let n = match key {
+                Value::Integer(n) => Some(n),
+                Value::Number(n) if n.fract() == 0.0 => Some(n as i64),
+                _ => None,
+            };
+            if let Some(n) = n
+                && n < 1
+            {
+                let len = this.raw_len();
+                return Err(mlua::Error::runtime(format!(
+                    "this list is 1-based, so [{n}] is never one of its elements — the first \
+                     is [1] and the last is [#list]. It holds {len}."
+                )));
+            }
+            Ok(Value::Nil)
+        })?,
+    )?;
+    lua.set_named_registry_value(LIST_MT, mt)
+}
+
+/// The sentence a `findScript*` miss is reported with.
+///
+/// Names what the scene actually carries, because the useful half of "no such
+/// script" is nearly always one line of that list.
+fn no_such_kind_in_scene(call: &str, kind: &str, s: &crate::SceneMirror) -> String {
+    let mut names: Vec<&str> = s.by_kind.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    if names.is_empty() {
+        return format!(
+            "{call}(\"{kind}\") found nothing — no node in this scene has a script attached at \
+             all."
+        );
+    }
+    let hint = crate::opts::near_miss_hint(kind, &names);
+    if hint.starts_with(" (did you mean") {
+        return format!("{call}(\"{kind}\") found nothing —{}", &hint[1..]);
+    }
+    // No near miss: list what IS there, capped — a forty-name list buries the
+    // answer as surely as no list at all.
+    const CAP: usize = 12;
+    let more = names.len().saturating_sub(CAP);
+    let shown = names.iter().take(CAP).copied().collect::<Vec<_>>().join(", ");
+    let tail = if more > 0 { format!(", … (+{more} more)") } else { String::new() };
+    format!(
+        "{call}(\"{kind}\") found nothing — no node in this scene carries a script by that \
+         name. This scene runs: {shown}{tail}."
+    )
+}
+
+/// Say something to the Console **once**.
+///
+/// `key` is what makes it once — the call plus what it was asked for, never the
+/// rendered message. A lookup that misses in `update` misses sixty times a
+/// second, and a diagnostic that scrolls its own explanation off the screen is
+/// worse than none; keying on the message text would let a number in the
+/// sentence defeat that.
+fn warn_once(
+    logs: &Rc<RefCell<Vec<crate::ScriptLog>>>,
+    warned: &Rc<RefCell<std::collections::HashSet<String>>>,
+    key: String,
+    msg: impl FnOnce() -> String,
+) {
+    if warned.borrow_mut().insert(key) {
+        logs.borrow_mut().push(crate::ScriptLog {
+            level: crate::LogLevel::Warn,
+            msg: msg(),
+            source: None,
+        });
+    }
+}
+
 /// How far up a parent chain the world composers walk before giving up. A cycle
 /// in the parent map must cost a frame nothing, not hang it.
 const MAX_PARENT_DEPTH: usize = 64;
@@ -3576,9 +3682,27 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 }
                 _ => {}
             }
-            // Otherwise a method (children / getchild / getscript / find …) or nil.
+            // Otherwise a method (children / getChild / getscript / find …) or nil.
             let methods: Table = lua.named_registry_value("floptle_node_methods")?;
-            methods.get::<Value>(key)
+            let hit = methods.get::<Value>(key.as_str())?;
+            if hit != Value::Nil {
+                return Ok(hit);
+            }
+            // A CASING slip on a real method used to die at the CALL — "attempt
+            // to call method 'getChild' (a nil value)" — which names the symptom
+            // and not one thing to do about it. Answer it here instead, the way
+            // the animator metatable does. Only a case-insensitive exact match
+            // raises: anything genuinely unknown still indexes to nil, so
+            // feature probes (`if node.someday then`) keep working.
+            for pair in methods.pairs::<String, Value>() {
+                let (known, _) = pair?;
+                if known.eq_ignore_ascii_case(&key) {
+                    return Err(mlua::Error::runtime(format!(
+                        "a node has no `{key}` — did you mean `{known}`?"
+                    )));
+                }
+            }
+            Ok(Value::Nil)
         })?;
         node_mt.set("__index", idx)?;
     }
@@ -3599,6 +3723,8 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let ui_text_changes = shared.ui_text_changes.clone();
         let ui_style_changes = shared.ui_style_changes.clone();
         let node_strs = shared.component_strs.clone();
+        let logs = shared.logs.clone();
+        let warned = shared.miss_warned.clone();
         let newidx = lua.create_function(move |_, (this, key, val): (Table, String, Value)| {
             let e: u32 = this.raw_get("__id")?;
             // `node.pos = vec3(...)` (or any {x=,y=,z=} / node) — the own-node
@@ -3925,7 +4051,28 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 }
                 _ => {}
             }
-            // Unknown key: stash it on the handle table (harmless; lets scripts tag nodes).
+            // Unknown key: stash it on the handle table. That is a real
+            // affordance on the script's OWN `node` — there is one table per
+            // instance, re-stamped each hook rather than rebuilt (see
+            // `env::node_table`), so `node.myFlag = true` in `start` is still
+            // there in `update`.
+            //
+            // On a handle from `find(...)` / `:getchild(...)` it is not. Those
+            // are built fresh per call, so the write lands on a table nobody
+            // will hold again and reads back nil from the very next lookup —
+            // and the same is true of a casing slip on a field that does exist
+            // (`node.Yaw = 3`). Both used to be silent. Say it once.
+            let own = this.raw_get::<f64>("x").is_ok();
+            if !own {
+                warn_once(&logs, &warned, format!("nodestash:{e}:{key}"), || {
+                    format!(
+                        "a node has no `{key}` to write, so `.{key} = ...` on a handle from \
+                         find/getChild/findTagged goes nowhere — that handle is built fresh \
+                         each time you ask for it. Check the spelling, or keep the value in \
+                         your own script (or on your own `node`, which does persist)."
+                    )
+                });
+            }
             this.raw_set(key, val)?;
             Ok(())
         })?;
@@ -4209,7 +4356,9 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         lua.set_named_registry_value("floptle_sprite_mt", sprite_mt)?;
     }
 
-    // ---- node methods (children / getchild / getparent / getscript / find) ----------
+    install_list_mt(lua)?;
+
+    // ---- node methods (children / getChild / getParent / getscript / find) ----------
     let methods = lua.create_table()?;
     {
         let scene = shared.scene.clone();
@@ -4218,11 +4367,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             lua.create_function(move |lua, this: Table| {
                 let e: u32 = this.raw_get("__id")?;
                 let kids = scene.borrow().children.get(&e).cloned().unwrap_or_default();
-                let arr = lua.create_table()?;
-                for (i, c) in kids.iter().enumerate() {
-                    arr.set(i + 1, new_node_handle(lua, *c)?)?;
-                }
-                Ok(arr)
+                list_table(lua, &kids, new_node_handle)
             })?,
         )?;
     }
@@ -4245,58 +4390,132 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             })
         })?;
         methods.set("child", f.clone())?;
-        methods.set("getchild", f)?;
+        methods.set("getchild", f.clone())?;
+        methods.set("getChild", f)?;
     }
     {
         let scene = shared.scene.clone();
-        methods.set(
-            "getparent",
-            lua.create_function(move |lua, this: Table| {
-                let e: u32 = this.raw_get("__id")?;
-                let p = scene.borrow().parent.get(&e).copied();
-                Ok(match p {
-                    Some(p) => Value::Table(new_node_handle(lua, p)?),
-                    None => Value::Nil,
-                })
-            })?,
-        )?;
-    }
-    {
-        let scene = shared.scene.clone();
-        let f = lua.create_function(move |lua, (this, name): (Table, String)| {
+        let f = lua.create_function(move |lua, this: Table| {
             let e: u32 = this.raw_get("__id")?;
-            let has = scene
-                .borrow()
-                .scripts
-                .get(&e)
-                .map(|v| v.iter().any(|k| k == &name))
-                .unwrap_or(false);
-            Ok(if has {
-                Value::Table(new_script_handle(lua, e, &name)?)
-            } else {
-                Value::Nil
+            let p = scene.borrow().parent.get(&e).copied();
+            Ok(match p {
+                Some(p) => Value::Table(new_node_handle(lua, p)?),
+                None => Value::Nil,
             })
         })?;
+        methods.set("getparent", f.clone())?;
+        methods.set("getParent", f)?;
+    }
+    // node:getscript("health") — a handle on that script, by the name the editor
+    // shows. The kind stored on the node is its PATH under `scripts/` without the
+    // extension, so a file in a folder is "forgery/playermovement" while every
+    // surface a person reads — the tab, the Inspector row, the Console prefix —
+    // says `playermovement`. Matching the stored kind exactly meant asking by the
+    // name on screen returned `nil` and said nothing (`floptle/0201`); the lookup
+    // takes either spelling now, and a genuine miss names what the node does
+    // carry. See [`crate::match_kind`].
+    {
+        let scene = shared.scene.clone();
+        let logs = shared.logs.clone();
+        let warned = shared.miss_warned.clone();
+        let f = lua.create_function(move |lua, (this, name): (Table, String)| {
+            let e: u32 = this.raw_get("__id")?;
+            let matched = {
+                let s = scene.borrow();
+                crate::match_kind(s.kinds_on(e).iter().map(String::as_str), &name)
+            };
+            match matched {
+                crate::KindMatch::One(kind) => Ok(Value::Table(new_script_handle(lua, e, &kind)?)),
+                crate::KindMatch::Ambiguous(hits) => {
+                    Err(crate::ambiguous_kind_error("node:getscript", &name, &hits))
+                }
+                crate::KindMatch::None => {
+                    let (who, has) = {
+                        let s = scene.borrow();
+                        let who = s
+                            .names
+                            .get(&e)
+                            .cloned()
+                            .unwrap_or_else(|| format!("#{e}"));
+                        (who, s.kinds_on(e).to_vec())
+                    };
+                    warn_once(&logs, &warned, format!("getscript:{e}:{name}"), || {
+                        if has.is_empty() {
+                            format!(
+                                "{who}:getscript(\"{name}\") found nothing — that node has no \
+                                 scripts attached at all. Attach one in the Inspector, or check \
+                                 this is the node you meant."
+                            )
+                        } else {
+                            format!(
+                                "{who}:getscript(\"{name}\") found nothing — that node carries \
+                                 {}. A script is named by its file without the .lua, and the \
+                                 folder in front of it is optional.",
+                                has.join(", ")
+                            )
+                        }
+                    });
+                    Ok(Value::Nil)
+                }
+            }
+        })?;
         methods.set("script", f.clone())?;
-        methods.set("getscript", f)?;
+        methods.set("getscript", f.clone())?;
+        methods.set("getScript", f)?;
     }
     // node:getcomponent("PointLight" | "RigidBody") → a component handle whose numeric
     // fields you can read + assign (writes flush to the ECS after the frame), or nil if the
     // node has no such component.
     {
         let scene = shared.scene.clone();
+        let logs = shared.logs.clone();
+        let warned = shared.miss_warned.clone();
         let f = lua.create_function(move |lua, (this, name): (Table, String)| {
             let e: u32 = this.raw_get("__id")?;
             let has =
                 scene.borrow().components.get(&e).map(|c| c.contains_key(&name)).unwrap_or(false);
-            Ok(if has {
-                Value::Table(new_component_handle(lua, e, &name)?)
-            } else {
-                Value::Nil
-            })
+            if has {
+                return Ok(Value::Table(new_component_handle(lua, e, &name)?));
+            }
+            // A miss here is nearly always a casing slip on a name the node DOES
+            // carry ("rigidbody" for "RigidBody"), and the old answer to that was
+            // a bare nil. Say which components are actually on the node — that
+            // list IS the did-you-mean, and it is short.
+            let (who, mut have) = {
+                let s = scene.borrow();
+                let who = s.names.get(&e).cloned().unwrap_or_else(|| format!("#{e}"));
+                let have: Vec<String> = s
+                    .components
+                    .get(&e)
+                    .map(|c| c.keys().cloned().collect())
+                    .unwrap_or_default();
+                (who, have)
+            };
+            have.sort();
+            warn_once(&logs, &warned, format!("getcomponent:{e}:{name}"), || {
+                if have.is_empty() {
+                    format!(
+                        "{who}:getcomponent(\"{name}\") found nothing — that node has no \
+                         components with script-readable fields. Add one in the Inspector."
+                    )
+                } else {
+                    let known: Vec<&str> = have.iter().map(String::as_str).collect();
+                    // `near_miss_hint` falls back to listing everything when
+                    // nothing is close, and the sentence already does that — so
+                    // only the pointed half of it is worth appending.
+                    let hint = crate::opts::near_miss_hint(&name, &known);
+                    let hint = if hint.starts_with(" (did you mean") { hint } else { String::new() };
+                    format!(
+                        "{who}:getcomponent(\"{name}\") found nothing — that node carries {}.{hint}",
+                        have.join(", ")
+                    )
+                }
+            });
+            Ok(Value::Nil)
         })?;
         methods.set("component", f.clone())?;
-        methods.set("getcomponent", f)?;
+        methods.set("getcomponent", f.clone())?;
+        methods.set("getComponent", f)?;
     }
     // node:setTint(color [, alpha]) / node:setTint() — a colour multiplied over
     // everything this node draws, its own textures and its parts' own colours
@@ -4843,7 +5062,8 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 Ok(t)
             })?;
             methods.set("sorting", f.clone())?;
-            methods.set("getsorting", f)?;
+            methods.set("getsorting", f.clone())?;
+            methods.set("getSorting", f)?;
         }
         {
             let q = q.clone();
@@ -5953,6 +6173,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
         let broken = shared.broken.clone();
         let broken_read_warned = shared.broken_read_warned.clone();
         let logs = shared.logs.clone();
+        let scene = shared.scene.clone();
         let idx = lua.create_function(move |lua, (this, key): (Table, String)| {
             let e: u32 = this.raw_get("__id")?;
             let name: String = this.raw_get("__script")?;
@@ -6000,14 +6221,32 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 // polled in `update` would otherwise say it sixty times a
                 // second.
                 None => {
-                    if broken.borrow().contains(&name)
-                        && broken_read_warned.borrow_mut().insert((name.clone(), key.clone()))
-                    {
-                        logs.borrow_mut().push(crate::ScriptLog {
-                            level: crate::LogLevel::Warn,
-                            msg: crate::load_error::unavailable(&name, &key),
-                            source: None,
-                        });
+                    if broken_read_warned.borrow_mut().insert((name.clone(), key.clone())) {
+                        // Three things reach here and they want three different
+                        // fixes. A script that FAILED TO LOAD has no exports at
+                        // all; one that is attached but SWITCHED OFF never got
+                        // an environment built; and a live script simply has no
+                        // export by that name — which is the only one of the
+                        // three a bare `nil` describes.
+                        let msg = if broken.borrow().contains(&name) {
+                            Some(crate::load_error::unavailable(&name, &key))
+                        } else if scene.borrow().kinds_on(e).iter().any(|k| k == &name) {
+                            Some(format!(
+                                "reading `.{key}` from the \"{name}\" script on node #{e}: that \
+                                 script is attached but not running — its tickbox is off in the \
+                                 Inspector, or the node itself is switched off — so it has no \
+                                 state to read and everything on this handle is nil."
+                            ))
+                        } else {
+                            None
+                        };
+                        if let Some(msg) = msg {
+                            logs.borrow_mut().push(crate::ScriptLog {
+                                level: crate::LogLevel::Warn,
+                                msg,
+                                source: None,
+                            });
+                        }
                     }
                     Ok(Value::Nil)
                 }
@@ -6188,18 +6427,38 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         })
                         .collect()
                 };
-                let arr = lua.create_table()?;
-                for (i, e) in ids.iter().enumerate() {
-                    arr.set(i + 1, new_node_handle(lua, *e)?)?;
-                }
-                Ok(arr)
+                list_table(lua, &ids, new_node_handle)
             })?,
         )?;
     }
     {
         let scene = shared.scene.clone();
+        let logs = shared.logs.clone();
+        let warned = shared.miss_warned.clone();
         let f = lua.create_function(move |lua, (kind, opts): (String, Option<Value>)| {
             let scope = find_scope(&opts)?;
+            // Resolve the name the caller typed to the kind the scene stores —
+            // the bare file name reaches a script filed in a folder, same rule as
+            // `node:getscript`. See [`crate::match_kind`].
+            let resolved = {
+                let s = scene.borrow();
+                crate::match_kind(s.by_kind.keys().map(String::as_str), &kind)
+            };
+            let canonical = match resolved {
+                crate::KindMatch::One(k) => k,
+                crate::KindMatch::Ambiguous(hits) => {
+                    return Err(crate::ambiguous_kind_error("findScript", &kind, &hits));
+                }
+                // Nothing in the scene carries it. Worth saying out loud: the
+                // alternative is a `nil` that surfaces as an unset value in a
+                // different script several frames later.
+                crate::KindMatch::None => {
+                    warn_once(&logs, &warned, format!("findScript:{kind}"), || {
+                        no_such_kind_in_scene("findScript", &kind, &scene.borrow())
+                    });
+                    return Ok(Value::Nil);
+                }
+            };
             // O(1) against the kind index (`floptle/0063`). Still the FIRST in
             // scene order, because the index is built in scene order — call
             // sites depend on which one they get. The scope filter runs over the
@@ -6207,12 +6466,11 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             let found = {
                 let s = scene.borrow();
                 s.by_kind
-                    .get(&kind)
+                    .get(&canonical)
                     .and_then(|v| v.iter().copied().find(|e| s.in_scope(*e, scope)))
-                    .map(|e| (e, kind.clone()))
             };
             Ok(match found {
-                Some((e, k)) => Value::Table(new_script_handle(lua, e, &k)?),
+                Some(e) => Value::Table(new_script_handle(lua, e, &canonical)?),
                 None => Value::Nil,
             })
         })?;
@@ -6224,22 +6482,36 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
     // the one player controller that is net.isMine, out of many avatars).
     {
         let scene = shared.scene.clone();
+        let logs = shared.logs.clone();
+        let warned = shared.miss_warned.clone();
         lua.globals().set(
             "findScripts",
             lua.create_function(move |lua, (kind, opts): (String, Option<Value>)| {
                 let scope = find_scope(&opts)?;
+                let resolved = {
+                    let s = scene.borrow();
+                    crate::match_kind(s.by_kind.keys().map(String::as_str), &kind)
+                };
+                let canonical = match resolved {
+                    crate::KindMatch::One(k) => k,
+                    crate::KindMatch::Ambiguous(hits) => {
+                        return Err(crate::ambiguous_kind_error("findScripts", &kind, &hits));
+                    }
+                    crate::KindMatch::None => {
+                        warn_once(&logs, &warned, format!("findScripts:{kind}"), || {
+                            no_such_kind_in_scene("findScripts", &kind, &scene.borrow())
+                        });
+                        return list_table(lua, &[], |_, _| unreachable!("empty"));
+                    }
+                };
                 let ids: Vec<u32> = {
                     let s = scene.borrow();
                     s.by_kind
-                        .get(&kind)
+                        .get(&canonical)
                         .map(|v| v.iter().copied().filter(|e| s.in_scope(*e, scope)).collect())
                         .unwrap_or_default()
                 };
-                let arr = lua.create_table()?;
-                for (i, e) in ids.iter().enumerate() {
-                    arr.set(i + 1, new_script_handle(lua, *e, &kind)?)?;
-                }
-                Ok(arr)
+                list_table(lua, &ids, |lua, e| new_script_handle(lua, e, &canonical))
             })?,
         )?;
     }
@@ -6258,11 +6530,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         .map(|v| v.iter().copied().filter(|e| s.in_scope(*e, scope)).collect())
                         .unwrap_or_default()
                 };
-                let arr = lua.create_table()?;
-                for (i, e) in ids.iter().enumerate() {
-                    arr.set(i + 1, new_node_handle(lua, *e)?)?;
-                }
-                Ok(arr)
+                list_table(lua, &ids, new_node_handle)
             })?,
         )?;
     }

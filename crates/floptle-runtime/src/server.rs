@@ -215,6 +215,7 @@ pub fn run(args: ServerArgs) -> i32 {
     let scripts = root.join("scripts");
     // One pass to build instances and fire `start`, as Play does.
     host.run(&mut world, &scripts, step, 0.0);
+    drain_logs(&mut host);
 
     println!(
         "  serving {} — {} node(s), {} networked, {:.0} Hz tick. Ctrl-C to stop.",
@@ -243,6 +244,7 @@ pub fn run(args: ServerArgs) -> i32 {
         feed_session(&mut session, &mut host, &sim, &world);
         session.tick_server(&world, tick);
         drain_session(&mut session, &mut world, &mut host);
+        drain_logs(&mut host);
 
         // A heartbeat, because a headless server that is silent and a headless
         // server that is wedged look identical from the outside.
@@ -290,6 +292,21 @@ fn feed_session(
         .filter_map(|(eid, kind, vars)| by_index.get(&eid).map(|e| (*e, kind, vars)))
         .collect();
     session.update_synced(synced);
+}
+
+/// Move whatever the scripts said this tick onto the terminal.
+///
+/// A dedicated server has no Console panel, so this is the only place its
+/// scripts can be heard — `print(...)`, `log(...)`, and every warning the
+/// engine raises on their behalf. It is also what keeps the host's log buffer
+/// from growing for the whole uptime of a server nobody ever asks.
+///
+/// On **stderr**, matching the editor: stdout carries the server's own
+/// heartbeat, which an operator may well be parsing.
+fn drain_logs(host: &mut floptle_script::ScriptHost) {
+    for l in host.drain_logs() {
+        eprintln!("[lua] {}", l.msg);
+    }
 }
 
 /// Apply whatever arrived: RPCs into scripts, and peer lifecycle into events.

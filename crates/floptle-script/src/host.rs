@@ -236,7 +236,12 @@ impl ScriptHost {
         {
             let sink = logs.clone();
             if let Ok(log) = lua.create_function(move |lua, msg: String| {
-                eprintln!("[lua] {msg}");
+                // Pushed, not printed. Whoever owns this host mirrors the drained
+                // feed to stderr itself (`Editor::drain_script_logs`), so an
+                // `eprintln!` here put every `log(...)` on the terminal TWICE
+                // while `print(...)` — which only pushes — appeared once. Two
+                // copies of one line reads as the code having run twice, which
+                // is a bad thing for a logging call to imply.
                 sink.borrow_mut().push(ScriptLog { level: LogLevel::Debug, msg, source: caller(lua) });
                 Ok(())
             }) {
@@ -257,7 +262,7 @@ impl ScriptHost {
                 } else {
                     parts.join("\t")
                 };
-                eprintln!("[lua] {msg}");
+                // Pushed, not printed — see the note on `log` above.
                 sink.borrow_mut().push(ScriptLog { level: LogLevel::Debug, msg, source: caller(lua) });
                 Ok(())
             }) {
@@ -1744,6 +1749,7 @@ impl ScriptHost {
             broken: Rc::new(RefCell::new(std::collections::HashSet::new())),
             broken_read_warned: Rc::new(RefCell::new(std::collections::HashSet::new())),
             find_scope_warned: Rc::new(RefCell::new(std::collections::HashSet::new())),
+            miss_warned: Rc::new(RefCell::new(std::collections::HashSet::new())),
             logs: logs.clone(),
         };
         if let Err(e) = install_handle_api(&lua, &shared) {

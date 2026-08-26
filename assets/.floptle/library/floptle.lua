@@ -42,6 +42,7 @@
 ---@field height number Physics (capsule bodies): standing height - write a smaller value to crouch.
 ---@field text string|nil UI elements: the label's text (write to change it — numbers coerce, so `hp.text = 42` works).
 ---@field getcomponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|LightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Live component handle (RigidBody / PointLight / Light / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer / Material), nil if the node lacks it.
+---@field getComponent fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|LightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Live component handle (RigidBody / PointLight / Light / Camera / ParticleSystem / AudioSource / UiElement / UiSlider / UiLayer / Material), nil if the node lacks it.
 ---@field particles fun(self: Node): ParticleSystemHandle The particle handle for this node's Particle System: play / stop / restart the effect and read its live state.
 ---@field setShaderParam fun(self: Node, name: string, x: number, y?: number, z?: number, w?: number) Drive a `.flsl` uniform on this node every tick (a GPU uniform write, never a recompile): the node's Material shader, or its UI element's `stage ui` shader (instruments like the navball). Unset lanes are 0.
 ---@field setCelestial fun(self: Node, t: table) Construction API: set (and create if absent) the node's CelestialBody. Fields (camelCase): mu, bodyRadius, soi, parent (name string), a, e, i, lan, argPe, m0, atmoColor {r,g,b}, atmoHeight, atmoDensity, clouds, luminosity, starColor, occluderRadius (occlusion culling: radius of the solid core geometry never pierces — chunks fully behind it skip their draws; keep it BELOW the deepest cave/dig; 0 = off).
@@ -54,11 +55,14 @@
 ---@field sound fun(self: Node): AudioSourceHandle The sound handle for this node's Audio Source: play / stop / pause / swap clips and read playback state.
 ---@field parent Node|nil The parent node handle, or nil at the root.
 ---@field getparent fun(self: Node): Node|nil The parent node handle, or nil (same as node.parent).
+---@field getParent fun(self: Node): Node|nil The parent node handle, or nil (same as node.parent).
 ---@field children fun(self: Node): Node[] An array of this node's child handles.
 ---@field getchild fun(self: Node, name: string): Node|nil The first CHILD with that name, or nil.
+---@field getChild fun(self: Node, name: string): Node|nil The first CHILD with that name, or nil.
 ---@field child fun(self: Node, name: string): Node|nil Short alias of getchild.
 ---@field find fun(self: Node, name: string): Node|nil The first DESCENDANT at any depth with that name, or nil. getchild only looks one level down.
 ---@field getscript fun(self: Node, name: string): table|nil A script handle for that script on this node, or nil: read/write its state, call its methods, reach .node / .params.
+---@field getScript fun(self: Node, name: string): table|nil A script handle for that script on this node, or nil: read/write its state, call its methods, reach .node / .params.
 ---@field script fun(self: Node, name: string): table|nil Short alias of getscript.
 ---@field component fun(self: Node, name: string): RigidBodyHandle|PointLightHandle|LightHandle|CameraHandle|UiElementHandle|UiSliderHandle|UiLayerHandle|MaterialHandle|nil Short alias of getcomponent.
 ---@field animator fun(self: Node): table The animation handle for this node's Animation Controller (or a rigged model's embedded clips): :play / :restart / :crossfade / :stop / :setSpeed / :setLayerWeight / :seek, and :state / :time / :finished / :isPlaying.
@@ -85,6 +89,7 @@
 ---@field setSorting fun(self: Node, t: table) Where this 2D node draws in the stack. Keys (both optional): layer, one of the project's sorting layers by NAME, and order, higher being nearer the camera.
 ---@field sorting fun(self: Node): table Where this node sits in the 2D stack: { layer =, order =, mode = }. A node that has never said anything about sorting answers with the DEFAULT rather than nil, because that IS where it draws.
 ---@field getsorting fun(self: Node): table Short alias of sorting.
+---@field getSorting fun(self: Node): table Short alias of sorting.
 ---@field setParallax fun(self: Node, t: table) How much of the camera's movement this layer KEEPS, per axis: x and y. 1 moves with the world (the default), 0 pins it to the camera as if infinitely far away.
 ---@field setCamera2D fun(self: Node, t: table) How this ORTHOGRAPHIC camera follows. Keys (all optional, each per axis): follow, smoothing, deadZoneX, deadZoneY, limits, minX, minY, maxX, maxY, pixelSnap, off. pixelSnap is pixels per world unit and lands the DRAWN camera on a whole pixel of that grid (0 = off), which is what stops pixel art shimmering when the camera stops between two. Dead zone, then smoothing, then limits. Does nothing on anything that is not an orthographic camera.
 ---@field shake fun(self: Node, amount: number, seconds?: number) Shake a 2D camera: amount is a distance in world units, seconds defaults to 0.3, and it fades out. Added to what is DRAWN and never fed back into the follow. Calling it again takes the LOUDER amplitude and the LONGER time, each independently.

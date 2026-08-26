@@ -5055,6 +5055,36 @@ impl EditorTabViewer<'_> {
                     // One row per sub-object, because that is what an override is
                     // keyed by. A flattened prop's object name IS its material
                     // name, so the two read the same there.
+                    // Which part is SELECTED right now — the object picked in the
+                    // viewport or in Objects & Rig. When that changes, this list
+                    // follows it: the selected part's editor opens and the rest
+                    // shut. A model with a dozen parts otherwise makes you scroll
+                    // past eleven open material editors to reach the one you are
+                    // looking at, which is the opposite of what clicking it meant.
+                    //
+                    // Forced only on the frame the selection CHANGES (`open(None)`
+                    // every other frame), so opening a second part to compare, or
+                    // closing the one you are on, still works and still sticks.
+                    let sel_part: Option<String> = cur_bone
+                        .filter(|(m, _)| *m == e)
+                        .and_then(|(_, i)| bone_names.get(&e).and_then(|n| n.get(i)))
+                        .filter(|n| n.is_object)
+                        .map(|n| n.name.clone());
+                    let sel_changed = {
+                        let id = egui::Id::new(("mat_focus", e));
+                        ui.data_mut(|d| {
+                            let prev: Option<Option<String>> = d.get_temp(id);
+                            let moved = prev.as_ref() != Some(&sel_part);
+                            if moved {
+                                d.insert_temp(id, sel_part.clone());
+                            }
+                            // Never on the first frame this node is inspected:
+                            // there is no selection to have moved TO yet, and
+                            // slamming every part shut on arrival would look like
+                            // the panel losing its place.
+                            moved && prev.is_some()
+                        })
+                    };
                     let mut dedup: std::collections::BTreeSet<String> = Default::default();
                     for (key, mat_name, base_color, textured) in parts {
                         if !dedup.insert(key.clone()) {
@@ -5111,6 +5141,7 @@ impl EditorTabViewer<'_> {
                         if overridden {
                             egui::CollapsingHeader::new(crate::responsive::header_text(ui, "edit"))
                                 .id_salt(("model_mat", e, &key))
+                                .open(sel_changed.then(|| sel_part.as_deref() == Some(key.as_str())))
                                 .default_open(crate::responsive::start_open(false))
                                 .show(ui, |ui| {
                                     let mut save_as = None;
