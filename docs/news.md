@@ -1,5 +1,19 @@
 ## Just shipped
 
+**v0.79.0 "Out Loud"** — **when a script asks for something that isn't
+there, the engine says so.** A script filed in a folder now answers to its
+own short name, so `node:getscript("playermovement")` finds
+`scripts/forgery/playermovement.lua` instead of quietly returning nothing.
+`node:getChild`, `getParent`, `getScript`, `getComponent` and `getSorting`
+are spelled like the rest of the API (the old lowercase spellings still
+work), and mistyping any other node call now names the one you meant.
+`findTagged("enemy")[0]` explains that lists start at 1 rather than failing
+a line later. Lookups that find nothing name what IS there, a script that's
+attached but switched off says so, `log` and `print` no longer print twice,
+and a dedicated server prints them at all. Items attached to a bone stay put
+wherever you file them in the Hierarchy, and selecting a part of a model
+opens that part's material and closes the rest.
+
 **v0.78.0 "In Good Company"** — **a script can see who's on Steam with them,
 and let them know what you're up to.** `steam.friends()` returns the local
 user's friend list — each entry's name, online state (`"online"`, `"away"`,
