@@ -1,5 +1,20 @@
 ## Just shipped
 
+**v0.80.0 "Mind The Gap"** — **characters stop treating every ledge as a
+wall.** The navmesh works out for itself where they can drop down and jump
+across, from the shape of your level: two new numbers on the Nav Mesh node —
+**drop height** and **jump distance** — and a real 23,000 m² level came back
+with 651 drops and 55 jumps where it had none. A character that does not leave
+the floor refuses a whole kind of crossing with
+`filter = { canJump = false }`, and `agent.linkKind` says whether it is on a
+fall, a vault or a ladder. The overlay is coloured by what a character can
+actually reach rather than by how the bake grouped the floor, links are drawn
+as arcs whose shape is the crossing, and agents follow the same curve. Scraps
+of walkable ground too small to stand on are thrown away — that level went
+from 494 separate pieces to 156. Turning gizmos off no longer leaves the
+navmesh frozen on screen, big levels draw far less of it, and
+`floptle bake nav` bakes one with no window and no graphics card.
+
 **v0.79.0 "Out Loud"** — **when a script asks for something that isn't
 there, the engine says so.** A script filed in a folder now answers to its
 own short name, so `node:getscript("playermovement")` finds
