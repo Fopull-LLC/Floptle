@@ -186,6 +186,11 @@ pub struct Ride {
     /// names one, else the walk it would have been. Fixed when the ride
     /// starts, so `progress` advances at one honest rate.
     pub seconds: f32,
+    /// A ladder somebody placed, or a drop the bake found. It decides the shape
+    /// of the crossing — see [`crate::link::arc_point`] — and it is what a
+    /// script needs to pick an animation: a climb and a fall are not the same
+    /// move, and only this tells them apart.
+    pub kind: crate::LinkKind,
 }
 
 /// One character that walks.
@@ -1075,8 +1080,15 @@ impl Crowd {
         let seconds = Self::crossing_seconds(link.duration, dist(from, to), agent.params.speed);
         agent.pos = from;
         agent.vel = [0.0; 3];
-        agent.ride =
-            Some(Ride { link: c.link, forwards: c.forwards, progress: 0.0, from, to, seconds });
+        agent.ride = Some(Ride {
+            link: c.link,
+            forwards: c.forwards,
+            progress: 0.0,
+            from,
+            to,
+            seconds,
+            kind: link.kind,
+        });
         agent.state = AgentState::Crossing;
         // The mouth is walked; what remains is the far side onwards.
         if !agent.path.is_empty() {
@@ -1094,16 +1106,29 @@ impl Crowd {
         let seconds = ride.seconds.max(0.05);
         ride.progress = (ride.progress + dt / seconds).min(1.0);
         let t = ride.progress;
-        agent.pos = [
-            ride.from[0] + (ride.to[0] - ride.from[0]) * t,
-            ride.from[1] + (ride.to[1] - ride.from[1]) * t,
-            ride.from[2] + (ride.to[2] - ride.from[2]) * t,
-        ];
-        agent.vel = [
-            (ride.to[0] - ride.from[0]) / seconds,
-            (ride.to[1] - ride.from[1]) / seconds,
-            (ride.to[2] - ride.from[2]) / seconds,
-        ];
+        let was = agent.pos;
+        // Along the crossing's own curve, not a straight line between its ends.
+        // A drop used to slide down an invisible ramp — the one place the agent
+        // layer visibly disagreed with the overlay drawn over it — and now both
+        // ask `arc_point`. A placed link is still a straight line, because a
+        // ladder that arcs is a ladder nobody built.
+        agent.pos = crate::link::arc_point(ride.kind, ride.from, ride.to, t);
+        // Read off the movement rather than off the ends, so a script watching
+        // `velocity` during a fall sees a fall. `dt` can be zero on a paused
+        // frame, and dividing by it would hand out infinities.
+        agent.vel = if dt > 1e-6 {
+            [
+                (agent.pos[0] - was[0]) / dt,
+                (agent.pos[1] - was[1]) / dt,
+                (agent.pos[2] - was[2]) / dt,
+            ]
+        } else {
+            [
+                (ride.to[0] - ride.from[0]) / seconds,
+                (ride.to[1] - ride.from[1]) / seconds,
+                (ride.to[2] - ride.from[2]) / seconds,
+            ]
+        };
         if t >= 1.0 {
             agent.pos = ride.to;
             agent.vel = [0.0; 3];

@@ -213,7 +213,10 @@ impl NavMesh {
         // way round when its estimate overshoots.
         let mut scale = filter.cheapest(&self.areas);
         for l in &self.off_links {
-            if !(l.usable(true) || l.usable(false)) || !filter.passable(l.area) {
+            if !(l.usable(true) || l.usable(false))
+                || !filter.passable(l.area)
+                || !filter.crosses(l.kind)
+            {
                 continue;
             }
             let (mouth, landing) = l.ends(true);
@@ -278,7 +281,7 @@ impl NavMesh {
             if let Some(range) = leaving.get(&i) {
                 for &(at, forwards) in range {
                     let l = &self.off_links[at as usize];
-                    if !l.usable(forwards) || !filter.passable(l.area) {
+                    if !l.usable(forwards) || !filter.passable(l.area) || !filter.crosses(l.kind) {
                         continue;
                     }
                     let j = l.target(forwards) as usize;

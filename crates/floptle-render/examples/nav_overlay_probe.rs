@@ -12,6 +12,14 @@
 //! - `nav_overlay_slope.png` — the same level with `max_slope` dropped below the
 //!   ramp's angle, so the connection comes apart. The two put side by side are
 //!   the reactivity claim.
+//! - `nav_links.png` — a courtyard with a raised platform, a chasm and a wall,
+//!   with the drops and jumps the bake found for itself drawn as arcs. The
+//!   claim here is that a person can tell at a glance which way a one-way link
+//!   goes, that a drop and a hop are different pictures, and that nothing
+//!   crosses the wall.
+//! - `nav_links_off.png` — the same courtyard with both numbers at zero. Three
+//!   islands and no way between them, which is what every level looked like
+//!   before the bake found its own links.
 //!
 //! The level is deliberately awkward: a floor with a hole, a ramp up to a
 //! mezzanine, and a flight of steps. A plain floor bakes into ONE rectangle and
@@ -105,6 +113,24 @@ fn rooms() -> Vec<Tri> {
     t
 }
 
+/// A courtyard in three pieces: the ground, a platform a metre up, and a strip
+/// across a chasm — with a solid wall standing in a fourth gap that nothing may
+/// cross. Every case the link finder has to get right, in one picture.
+fn courtyard() -> Vec<Tri> {
+    let mut t = Vec::new();
+    // The ground.
+    quad(0.0, 12.0, 0.0, 8.0, 0.0, &mut t);
+    // A platform one metre up, touching it in plan: a sheer ledge to drop off.
+    quad(12.0, 20.0, 0.0, 8.0, 1.0, &mut t);
+    // A strip across a 0.7 m chasm — a jump, at the same height.
+    quad(20.7, 26.0, 0.0, 8.0, 1.0, &mut t);
+    // And a second ground slab a metre away with a wall standing between them,
+    // which must stay unreachable.
+    quad(-7.0, -1.0, 0.0, 8.0, 0.0, &mut t);
+    solid([-1.0, 0.0, 0.0], [-0.4, 2.5, 8.0], &mut t);
+    t
+}
+
 fn main() {
     let gpu = Gpu::headless(W, H);
     let mut raster = Raster::new(&gpu);
@@ -113,12 +139,23 @@ fn main() {
 
     let open = level();
     let built = rooms();
+    let yard = courtyard();
     // Looking down the length of the level from above and to one side — the
     // angle somebody actually judges a navmesh from. The room set is looked at
     // from more directly overhead, because what is being judged there is a plan:
     // where the ground stops.
     let over_level = (Vec3::new(-14.0, 22.0, -22.0), Vec3::new(19.0, 1.0, 7.0));
     let over_rooms = (Vec3::new(6.0, 15.0, -5.0), Vec3::new(8.4, 0.0, 6.4));
+    let over_yard = (Vec3::new(4.0, 11.0, -13.0), Vec3::new(11.0, 0.5, 4.0));
+    // Small enough to fit the courtyard's ledges, and a cell size sound against
+    // it — `cell_size_advice` is quiet at a third of the radius.
+    let walker = NavSettings {
+        agent_radius: 0.3,
+        agent_height: 1.8,
+        step_height: 0.3,
+        cell_size: 0.1,
+        ..Default::default()
+    };
 
     for (name, geometry, settings, cells, (eye, at)) in [
         ("nav_overlay_old", &open, NavSettings::default(), true, over_level),
@@ -135,6 +172,16 @@ fn main() {
         // four different thicknesses, none of them lined up with the bake grid.
         ("nav_walls", &built, NavSettings { agent_radius: 0.3, ..Default::default() }, false, over_rooms),
         ("nav_walls_cells", &built, NavSettings { agent_radius: 0.3, ..Default::default() }, true, over_rooms),
+        // The links the bake finds for itself: a drop off the platform, a jump
+        // across the chasm, and nothing at all over the wall.
+        ("nav_links", &yard, walker, false, over_yard),
+        (
+            "nav_links_off",
+            &yard,
+            NavSettings { max_drop: 0.0, max_jump: 0.0, ..walker },
+            false,
+            over_yard,
+        ),
     ] {
         let view = Mat4::look_at_rh(Vec3::ZERO, at - eye, Vec3::Y);
         let proj = Mat4::perspective_rh(0.9, W as f32 / H as f32, 0.1, 500.0);
@@ -143,6 +190,8 @@ fn main() {
 
         let mesh = bake(geometry, &settings).expect("this level bakes");
         let overlay = Overlay::build(&mesh, settings.cell_size * 0.5);
+        // Per ISLAND, the way the Scene view colours it: one colour per
+        // piece of ground a character can actually get around.
         let hue = |r: u32| hue_rgb((r as f32 * 0.618_034).fract());
 
         let color_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -187,27 +236,27 @@ fn main() {
         if cells {
             // The OLD picture: every rectangle outlined, nothing filled.
             for e in &overlay.cells {
-                let c = hue(e.region);
+                let c = hue(e.island);
                 let c = [c[0], c[1], c[2], 1.0];
                 edges.push(LineVertex { pos: rel(e.a), color: c });
                 edges.push(LineVertex { pos: rel(e.b), color: c });
             }
         } else {
             for t in &overlay.tris {
-                let c = hue(t.region);
+                let c = hue(t.island);
                 let c = [c[0], c[1], c[2], 0.22];
                 for p in [t.a, t.b, t.c] {
                     fill.push(TriVertex { pos: rel(p), color: c });
                 }
             }
             for e in &overlay.boundary {
-                let c = hue(e.region);
+                let c = hue(e.island);
                 let c = [c[0], c[1], c[2], 1.0];
                 edges.push(LineVertex { pos: rel(e.a), color: c });
                 edges.push(LineVertex { pos: rel(e.b), color: c });
             }
             for s in &overlay.steps {
-                let c = hue(s.region);
+                let c = hue(s.island);
                 let f = [c[0], c[1], c[2], 0.40];
                 for p in [s.low[0], s.low[1], s.high[1], s.low[0], s.high[1], s.high[0]] {
                     fill.push(TriVertex { pos: rel(p), color: f });
@@ -223,6 +272,35 @@ fn main() {
                 }
             }
         }
+        // The links, as arcs, coloured the way the Scene view colours them —
+        // amber for a drop, green for a jump, blue for one somebody placed.
+        for l in &overlay.links {
+            let c = match l.kind {
+                floptle_nav::LinkKind::Drop => [1.0, 0.72, 0.25, 1.0],
+                floptle_nav::LinkKind::Jump => [0.45, 1.0, 0.55, 1.0],
+                floptle_nav::LinkKind::Placed => [0.45, 0.95, 1.0, 1.0],
+            };
+            let steps = floptle_nav::overlay::ARC_STEPS;
+            let mut prev = l.from;
+            for k in 1..=steps {
+                let next = l.point_at(k as f32 / steps as f32);
+                edges.push(LineVertex { pos: rel(prev), color: c });
+                edges.push(LineVertex { pos: rel(next), color: c });
+                prev = next;
+            }
+            // A tick at every end you can enter from, so a one-way drop and a
+            // two-way jump are not the same picture.
+            for (end, draw_it) in [(l.to, true), (l.from, l.bidirectional)] {
+                if !draw_it {
+                    continue;
+                }
+                edges.push(LineVertex { pos: rel(end), color: c });
+                edges.push(LineVertex {
+                    pos: rel([end[0], end[1] + 0.35, end[2]]),
+                    color: c,
+                });
+            }
+        }
         if !fill.is_empty() {
             tris.draw(&gpu, &color_view, gpu.depth_view(), view_proj, &fill);
         }
@@ -231,9 +309,13 @@ fn main() {
         let regions: std::collections::HashSet<u32> =
             mesh.polys.iter().map(|p| p.region).collect();
         let (drawn, naive) = overlay.outline_saving();
+        let drops =
+            mesh.off_links.iter().filter(|l| l.kind == floptle_nav::LinkKind::Drop).count();
+        let jumps =
+            mesh.off_links.iter().filter(|l| l.kind == floptle_nav::LinkKind::Jump).count();
         println!(
             "{name}: {} rectangles in {} region(s) — outline {drawn} segments vs {naive} \
-             the old way, {} step ribbon(s)",
+             the old way, {} step ribbon(s), {drops} drop(s) + {jumps} jump(s)",
             mesh.polys.len(),
             regions.len(),
             overlay.steps.len(),
@@ -242,7 +324,7 @@ fn main() {
     }
     println!(
         "look at nav_overlay_old.png, nav_overlay_new.png, nav_overlay_slope.png, \
-         nav_walls.png and nav_walls_cells.png"
+         nav_walls.png, nav_walls_cells.png, nav_links.png and nav_links_off.png"
     );
 }
 

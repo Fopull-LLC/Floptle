@@ -75,6 +75,10 @@ pub(crate) struct NavStatus {
     pub triangles: usize,
     /// Settings that will quietly do something other than what they say.
     pub advice: Option<String>,
+    /// …and the same for the two numbers that join the level up: a drop height
+    /// or a jump distance set to a value that means zero while the slider still
+    /// reads as switched on.
+    pub link_advice: Option<String>,
     /// The file this bake came off disk from, shown as a plain relative path.
     ///
     /// "My bake vanished when I reopened the project" is a report nobody can act
@@ -89,6 +93,26 @@ pub(crate) struct NavStatus {
     /// because it is a fact about the bake you are looking at, and the panel is
     /// where somebody looks when a character will not walk somewhere.
     pub coverage: Option<String>,
+    /// Links in the bake, split by who made them: the ladders and doors placed
+    /// by hand, and the drops and jumps the bake found for itself.
+    ///
+    /// Split because they fail differently. A placed link that does nothing is
+    /// somebody's mistake and gets named in the Console; **no** generated links
+    /// at all is a number set to zero, and the panel is where that gets noticed.
+    pub placed_links: usize,
+    pub drops: usize,
+    pub jumps: usize,
+    /// Links whose end missed the ground, counted rather than named — the names
+    /// go to the Console, and the panel just has to say that some did.
+    pub lost_links: usize,
+    /// Link generation stopped at its ceiling. A level this is true of has
+    /// numbers worth looking at.
+    pub capped: bool,
+    /// The largest island's share of the walkable ground, 0..1.
+    ///
+    /// "494 separate areas" is a number nobody can act on. "the biggest holds
+    /// 3% of the walkable ground" is the same fact saying what is wrong.
+    pub biggest_share: f32,
 }
 
 /// What the Inspector should say about the navmesh this frame.
@@ -115,6 +139,7 @@ pub(crate) fn nav_status(
     st.sources = world.query::<Matter>().filter(|(e, _)| counts(world, *e, layers)).count();
     if let Some(s) = settings_of(m) {
         st.advice = floptle_nav::cell_size_advice(&s);
+        st.link_advice = floptle_nav::link_advice(&s);
         if let Some(b) = baked {
             // The settings the bake was made with, against the ones on the node
             // now. This is the whole of "stale": a moved node or a moved wall
@@ -124,14 +149,32 @@ pub(crate) fn nav_status(
         }
     }
     if let Some(b) = baked {
+        use floptle_nav::LinkKind;
         st.polys = b.polys.len();
-        st.area = b.area();
-        st.regions = {
-            let mut seen: Vec<u32> = b.polys.iter().map(|p| p.region).collect();
-            seen.sort_unstable();
-            seen.dedup();
-            seen.len()
-        };
+        // One cached read rather than three walks of every polygon. This runs
+        // EVERY FRAME to fill in two labels, and on a real level that is
+        // seventy thousand polygons — see `NavMesh::summary`.
+        //
+        // **Islands, not regions.** A region is where the walking surface
+        // flooded to, so a level with one ledge in it is two regions whether or
+        // not anything can get down — reporting that as "2 separate areas" is
+        // reporting the bake's working as if it were the answer. An island
+        // counts the links in, which is what a character can actually reach.
+        let sum = b.summary();
+        st.area = sum.walkable_area;
+        st.regions = sum.islands;
+        st.biggest_share = sum.biggest_island_share;
+        for l in &b.off_links {
+            match l.kind {
+                LinkKind::Placed => st.placed_links += 1,
+                LinkKind::Drop => st.drops += 1,
+                LinkKind::Jump => st.jumps += 1,
+            }
+            if !l.resolved() {
+                st.lost_links += 1;
+            }
+        }
+        st.capped = st.drops + st.jumps >= floptle_nav::autolink::MAX_GENERATED;
     }
     st
 }
@@ -507,6 +550,9 @@ pub(crate) fn settings_of(m: &Matter) -> Option<NavSettings> {
         max_slope,
         step_height,
         cell_size,
+        max_drop,
+        max_jump,
+        min_region_area,
         ..
     } = m
     else {
@@ -518,6 +564,9 @@ pub(crate) fn settings_of(m: &Matter) -> Option<NavSettings> {
         max_slope: *max_slope,
         step_height: *step_height,
         cell_size: *cell_size,
+        max_drop: *max_drop,
+        max_jump: *max_jump,
+        min_region_area: *min_region_area,
     })
 }
 
@@ -831,7 +880,11 @@ const MAGIC: &[u8; 4] = b"FNAV";
 /// So a bake carries its version, and a reader that does not recognise one
 /// **says so, by name, with what to do about it**. Bump this whenever
 /// `NavMesh`'s serialized shape changes.
-const VERSION: u32 = 2;
+///
+/// 3: links carry a [`floptle_nav::LinkKind`], because the bake now finds its
+/// own drops and jumps and a reader has to be able to tell those from a ladder
+/// somebody placed.
+const VERSION: u32 = 3;
 
 /// Why a bake could not be read. Every variant is something somebody can act on,
 /// which is the whole reason this is not an `Option`.
@@ -992,7 +1045,20 @@ impl crate::Editor {
         let Some((_, matter)) = nav_node(&self.world) else { return 0 };
         let Matter::NavMesh { layers, .. } = &matter else { return 0 };
         if let Some(s) = settings_of(&matter) {
-            for f in [s.agent_radius, s.agent_height, s.max_slope, s.step_height, s.cell_size] {
+            // Every field, listed rather than taken as a whole, because
+            // `NavSettings` is `f32`s and `f32` is not `Hash`. A field left out
+            // is a setting you can change without the watcher noticing — the
+            // bake stays as it was and the only sign is that nothing happened.
+            for f in [
+                s.agent_radius,
+                s.agent_height,
+                s.max_slope,
+                s.step_height,
+                s.cell_size,
+                s.max_drop,
+                s.max_jump,
+                s.min_region_area,
+            ] {
                 f.to_bits().hash(&mut h);
             }
         }
@@ -1374,6 +1440,13 @@ impl crate::Editor {
         for w in area_warnings.into_iter().chain(link_warnings) {
             self.console.push(LogLevel::Warn, format!("navmesh: {w}"), None);
         }
+        // A drop height or a jump distance that cannot fire is a bake that comes
+        // back saying "no drops or jumps found" and looks exactly like a level
+        // with no ledges in it. Said before the bake rather than after, because
+        // it is knowable from the numbers alone.
+        if let Some(msg) = floptle_nav::link_advice(&settings) {
+            self.console.push(LogLevel::Warn, format!("navmesh: {msg}"), None);
+        }
 
         // Over the wall. Everything from here is arithmetic on numbers that have
         // already been read out of the world, so nothing the main thread does
@@ -1480,7 +1553,13 @@ impl crate::Editor {
         // exactly like a route that simply preferred the long way. Naming the
         // ones that missed is the whole difference between a feature people
         // trust and one they stop using.
-        let lost: Vec<String> = mesh.unresolved_links().map(|l| l.name.clone()).collect();
+        // Only the ones somebody placed are named: a generated link's ends are
+        // cells the bake itself chose, so one of those missing the ground is a
+        // fault in this engine and not something the level's author can move.
+        // Counted rather than named, so it still shows.
+        let lost: Vec<String> =
+            mesh.unresolved_links().filter(|l| !l.generated()).map(|l| l.name.clone()).collect();
+        let lost_generated = mesh.unresolved_links().filter(|l| l.generated()).count();
         if !lost.is_empty() {
             self.console.push(
                 LogLevel::Warn,
@@ -1495,7 +1574,43 @@ impl crate::Editor {
                 None,
             );
         }
-        let crossings = mesh.off_links.len() - lost.len();
+        if lost_generated > 0 {
+            self.console.push(
+                LogLevel::Warn,
+                format!(
+                    "navmesh: {lost_generated} generated link(s) did not land on the mesh they \
+                     were measured from. Nothing in the level causes this — please report it."
+                ),
+                None,
+            );
+        }
+        let drops = mesh.off_links.iter().filter(|l| l.kind == floptle_nav::LinkKind::Drop).count();
+        let jumps = mesh.off_links.iter().filter(|l| l.kind == floptle_nav::LinkKind::Jump).count();
+        let crossings = mesh.off_links.len() - lost.len() - lost_generated;
+        // Islands AFTER the links, which is the number somebody can act on: it
+        // is what a character can actually reach, not what the walking surface
+        // happened to flood into. Counted here, while the mesh is still in hand.
+        // …and how lopsided they are, because a count on its own is not
+        // actionable: "155 areas" could be a level with 155 cupboards in it or a
+        // bake that has shattered, and the biggest island's share of the ground
+        // is what tells them apart.
+        let islands = mesh.summary().islands;
+        let biggest_share = mesh.summary().biggest_island_share;
+        // The one thing worth interrupting for when nothing is wrong: a level
+        // whose ledges are joined up and a level whose ledges are walls look the
+        // same in the viewport, and the number is the difference.
+        if drops + jumps >= floptle_nav::autolink::MAX_GENERATED {
+            self.console.push(
+                LogLevel::Warn,
+                format!(
+                    "navmesh: stopped at {} generated links — this level has more ledges than \
+                     the router can afford, and some were left out. Raise the cell size, or \
+                     lower the drop height, so the ones that matter are the ones it finds.",
+                    floptle_nav::autolink::MAX_GENERATED
+                ),
+                None,
+            );
+        }
 
         self.nav_baked = Some(mesh);
         self.publish_nav_mesh();
@@ -1529,6 +1644,20 @@ impl crate::Editor {
         let mut extras = String::new();
         if crossings > 0 {
             extras.push_str(&format!(", {crossings} link(s)"));
+        }
+        if drops + jumps > 0 {
+            extras.push_str(&format!(" — {drops} drop(s), {jumps} jump(s) found"));
+        }
+        // Only when there is more than one: "1 separate area" is a level that
+        // works and does not need a line about it. The SHARE comes with it,
+        // because a count on its own is not actionable — "155 areas" could be a
+        // level with 155 cupboards in it or a bake that has shattered, and the
+        // biggest island's share of the ground is what tells them apart.
+        if islands > 1 {
+            extras.push_str(&format!(
+                ", {islands} separate area(s) — the largest holds {:.0}% of the ground",
+                biggest_share * 100.0
+            ));
         }
         if areas > 1 {
             extras.push_str(&format!(", {} area(s)", areas - 1));
@@ -1888,6 +2017,9 @@ mod tests {
                 cell_size: 0.5,
                 enabled: true,
                 auto_rebake: false,
+                max_drop: 1.5,
+                max_jump: 2.0,
+                min_region_area: 1.0,
             },
         );
         let floor = ed.world.spawn();
@@ -1975,6 +2107,9 @@ mod tests {
                 cell_size: 0.5,
                 enabled: true,
                 auto_rebake: false,
+                max_drop: 1.5,
+                max_jump: 2.0,
+                min_region_area: 1.0,
             },
         );
         let floor = ed.world.spawn();

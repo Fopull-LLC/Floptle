@@ -194,6 +194,8 @@ impl NavMesh {
         // be here. Both go, on every mutation, before anything can ask.
         self.index.take();
         self.link_index.take();
+        self.island_index.take();
+        self.summary_cache.take();
 
         if self.obstacles.is_empty() {
             self.polys = base.polys.clone();
@@ -326,8 +328,11 @@ impl NavMesh {
             self.off_links[i].to_poly = b;
         }
         // `nearest` built the index against the mesh mid-fixup; the off-link
-        // half of the cache is now stale either way.
+        // half of the cache is now stale either way — and so is the island
+        // grouping, which is exactly what a link losing its ground changes.
         self.link_index.take();
+        self.island_index.take();
+        self.summary_cache.take();
     }
 
     /// Give fresh region ids to the islands a carve broke apart.

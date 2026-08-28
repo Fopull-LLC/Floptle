@@ -3368,6 +3368,9 @@ impl EditorTabViewer<'_> {
                                 cell_size,
                                 enabled,
                                 auto_rebake,
+                                max_drop,
+                                max_jump,
+                                min_region_area,
                             } => {
                                 let nav = self.nav.clone();
                                 if crate::responsive::check(ui, enabled, "characters can path on this").changed() {
@@ -3500,6 +3503,63 @@ impl EditorTabViewer<'_> {
                                 if touched {
                                     cmd.inspector_changed = true;
                                 }
+
+                                // ---- what joins it up, and what it drops --------
+                                //
+                                // A navmesh is a surface, and a surface stops at
+                                // every ledge. The first two turn the stopping
+                                // points back into a level a character can cross —
+                                // the difference between "the AI is stuck on a
+                                // kerb" and an AI. The third throws away the ground
+                                // that was never worth stopping at.
+                                ui.add_space(4.0);
+                                ui.small("how the ledges are joined up");
+                                let mut joined = false;
+                                joined |= crate::responsive::slider(ui, egui::Slider::new(max_drop, 0.0..=10.0),
+                                            "drop height")
+                                    .on_hover_text(
+                                        "The tallest ledge it steps off deliberately. Anything \
+                                         between the step height above and this gets a one-way \
+                                         link off the edge, so a route can take it rather than \
+                                         treating a knee-high lip as a wall.\n\n0 switches drop \
+                                         links off.",
+                                    )
+                                    .changed();
+                                joined |= crate::responsive::slider(ui, egui::Slider::new(max_jump, 0.0..=10.0),
+                                            "jump distance")
+                                    .on_hover_text(
+                                        "The widest gap it will jump, measured between the two \
+                                         edges of the walkable surface — the distance you can \
+                                         see in the overlay, which is wider than the hole in the \
+                                         floor by the radius at each side. Gets a two-way \
+                                         link.\n\n0 switches jump links off.",
+                                    )
+                                    .changed();
+                                joined |= crate::responsive::slider(ui, egui::Slider::new(min_region_area, 0.0..=20.0)
+                                            .suffix(" m²"),
+                                            "smallest patch")
+                                    .on_hover_text(
+                                        "Walkable ground in a patch smaller than this is \
+                                         thrown away. A level bakes hundreds of specks — a \
+                                         window sill, the top of a crate — and each one is an \
+                                         island nothing can reach and somewhere a character can \
+                                         be put by mistake. The biggest patch is never thrown \
+                                         away.",
+                                    )
+                                    .changed();
+                                if joined {
+                                    cmd.inspector_changed = true;
+                                }
+                                if *max_drop <= 0.0 && *max_jump <= 0.0 {
+                                    ui.small(
+                                        egui::RichText::new(
+                                            "both off — every ledge in the level is a wall, \
+                                             and the only ways across are the Nav Link nodes \
+                                             you place by hand.",
+                                        )
+                                        .color(egui::Color32::from_rgb(230, 180, 90)),
+                                    );
+                                }
                                 // The one setting that quietly does something other
                                 // than what it says, named with the number to use.
                                 if let Some(advice) = nav.advice.as_deref() {
@@ -3579,15 +3639,83 @@ impl EditorTabViewer<'_> {
                                             );
                                         }
                                     }
+                                    // What actually joins the level up. Said before
+                                    // the island count, because it is the answer to
+                                    // the question the island count raises.
+                                    let made = nav.drops + nav.jumps;
+                                    if made > 0 {
+                                        ui.small(format!(
+                                            "{made} way{} across found: {} drop{}, {} jump{}",
+                                            if made == 1 { "" } else { "s" },
+                                            nav.drops,
+                                            if nav.drops == 1 { "" } else { "s" },
+                                            nav.jumps,
+                                            if nav.jumps == 1 { "" } else { "s" },
+                                        ));
+                                    } else if *max_drop > 0.0 || *max_jump > 0.0 {
+                                        ui.small(
+                                            "no drops or jumps found — every ledge in this bake \
+                                             is either taller than the drop height or wider than \
+                                             the jump distance.",
+                                        );
+                                    }
+                                    if nav.placed_links > 0 {
+                                        ui.small(format!(
+                                            "{} nav link{} placed by hand",
+                                            nav.placed_links,
+                                            if nav.placed_links == 1 { "" } else { "s" }
+                                        ));
+                                    }
+                                    if nav.lost_links > 0 {
+                                        ui.small(
+                                            egui::RichText::new(format!(
+                                                "{} link{} could not find the ground at one end \
+                                                 and do nothing — the Console names them",
+                                                nav.lost_links,
+                                                if nav.lost_links == 1 { "" } else { "s" }
+                                            ))
+                                            .color(egui::Color32::from_rgb(230, 180, 90)),
+                                        );
+                                    }
+                                    if nav.capped {
+                                        ui.small(
+                                            egui::RichText::new(
+                                                "the level hit the ceiling on generated links. \
+                                                 A coarser cell size, or a smaller drop height, \
+                                                 will find the ones that matter instead of every \
+                                                 one there is.",
+                                            )
+                                            .color(egui::Color32::from_rgb(230, 180, 90)),
+                                        );
+                                    }
                                     // More than one island is worth seeing rather than
                                     // finding out about when a character will not go
-                                    // somewhere: it is usually a door nobody fits through.
+                                    // somewhere: it is usually a door nobody fits
+                                    // through. The SHARE is what makes the number
+                                    // actionable — "494 areas" says nothing, "the
+                                    // biggest holds 3% of the floor" says the bake
+                                    // is shattered and points at the settings.
                                     if nav.regions > 1 {
-                                        ui.small(format!(
-                                            "{} separate areas — a character cannot walk \
-                                             between them.",
+                                        let share = nav.biggest_share * 100.0;
+                                        let line = format!(
+                                            "{} separate areas — a character cannot walk between \
+                                             them. The largest holds {share:.0}% of the walkable \
+                                             ground.",
                                             nav.regions
-                                        ));
+                                        );
+                                        if nav.biggest_share < 0.5 {
+                                            ui.small(
+                                                egui::RichText::new(line)
+                                                    .color(egui::Color32::from_rgb(230, 180, 90)),
+                                            );
+                                            ui.small(
+                                                "A bake in this many pieces is usually a cell \
+                                                 size too coarse next to the agent radius, or a \
+                                                 drop height too low for the level's ledges.",
+                                            );
+                                        } else {
+                                            ui.small(line);
+                                        }
                                     }
                                     if nav.stale {
                                         ui.small(

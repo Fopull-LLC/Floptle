@@ -50,9 +50,13 @@ use crate::mesh::NavMesh;
 pub struct Edge {
     pub a: [f32; 3],
     pub b: [f32; 3],
-    /// Which walkable region it belongs to — the overlay is coloured per region
-    /// so two islands that merely look adjacent are visibly not one island.
+    /// Which walkable region it belongs to — the bake's own grouping, before
+    /// any link joined two of them.
     pub region: u32,
+    /// Which **island** it belongs to: what a character can actually reach, once
+    /// the links are counted. **This is what to colour by.** See
+    /// [`NavMesh::islands`](crate::NavMesh::islands).
+    pub island: u32,
 }
 
 /// A filled triangle of walkable surface.
@@ -62,6 +66,8 @@ pub struct SurfaceTri {
     pub b: [f32; 3],
     pub c: [f32; 3],
     pub region: u32,
+    /// What a character can actually reach — see [`Edge::island`].
+    pub island: u32,
     /// Which kind of ground this is. Painted ground has to *look* painted, or
     /// "did my mud volume do anything" is a question the picture cannot answer
     /// and everyone answers by baking again and squinting.
@@ -80,6 +86,8 @@ pub struct Step {
     /// The same portal at the higher polygon's height.
     pub high: [[f32; 3]; 2],
     pub region: u32,
+    /// What a character can actually reach — see [`Edge::island`].
+    pub island: u32,
     /// How far up it goes. Worth showing: a 5cm kerb and a 70cm clamber are both
     /// "connected" and only one of them is what the designer meant.
     pub rise: f32,
@@ -103,7 +111,29 @@ pub struct LinkArc {
     /// nobody can debug.
     pub enabled: bool,
     pub name: String,
+    /// A ladder somebody placed, or a drop the bake found. Drawn differently,
+    /// because "the bake decided this" and "I put this here" are different
+    /// claims and only one of them is worth arguing with.
+    pub kind: crate::LinkKind,
+    /// How far the two ends are apart, so a drawing can bow an arc in
+    /// proportion rather than by a constant that looks right at one scale.
+    pub span: f32,
 }
+
+impl LinkArc {
+    /// Where the drawn arc is, `t` running 0 at the mouth to 1 at the landing.
+    ///
+    /// The curve itself is [`crate::link::arc_point`], shared with the crowd
+    /// that carries an agent across — so what the overlay draws is the path the
+    /// character takes, rather than a second curve that merely resembles it.
+    pub fn point_at(&self, t: f32) -> [f32; 3] {
+        crate::link::arc_point(self.kind, self.from, self.to, t)
+    }
+}
+
+/// How many segments an arc is drawn with. Enough to read as a curve, few
+/// enough that a level's worth of them is still a handful of thousand lines.
+pub const ARC_STEPS: usize = 8;
 
 /// Everything needed to draw one baked navmesh.
 #[derive(Clone, Debug, Default)]
@@ -140,6 +170,11 @@ impl Overlay {
         }
         let cell = mesh.cell_size;
         let y_of = |i: usize| mesh.polys[i].centre[1] + lift;
+        // What a character can actually reach, once the links are counted.
+        // Colouring by REGION was right when a region was the only kind of
+        // connection there was; it is actively misleading now, because a ledge
+        // and the floor its drop lands on are two regions and one place.
+        let island = mesh.islands();
 
         // Which polygons cover each column. A column can hold more than one —
         // a walkway over a floor is exactly that — so this is a list, and
@@ -174,6 +209,7 @@ impl Overlay {
                 b: corner(x1, z0),
                 c: corner(x1, z1),
                 region: p.region,
+                island: island[i],
                 area: p.area,
             });
             out.tris.push(SurfaceTri {
@@ -181,13 +217,19 @@ impl Overlay {
                 b: corner(x1, z1),
                 c: corner(x0, z1),
                 region: p.region,
+                island: island[i],
                 area: p.area,
             });
 
             // --- the rectangle, for the cells view ------------------------
             let c = [corner(x0, z0), corner(x1, z0), corner(x1, z1), corner(x0, z1)];
             for k in 0..4 {
-                out.cells.push(Edge { a: c[k], b: c[(k + 1) % 4], region: p.region });
+                out.cells.push(Edge {
+                    a: c[k],
+                    b: c[(k + 1) % 4],
+                    region: p.region,
+                    island: island[i],
+                });
             }
 
             // --- the outline, where the surface actually ends --------------
@@ -237,7 +279,7 @@ impl Overlay {
                                 let xb = x0 + e as f32 * cell;
                                 ([xa, y, fixed], [xb, y, fixed])
                             };
-                            out.boundary.push(Edge { a, b, region: p.region });
+                            out.boundary.push(Edge { a, b, region: p.region, island: island[i] });
                             run = None;
                         }
                         (false, None) => {}
@@ -265,6 +307,7 @@ impl Overlay {
                     low: [at(l.left, lo), at(l.right, lo)],
                     high: [at(l.left, hi), at(l.right, hi)],
                     region: mesh.polys[i].region,
+                    island: island[i],
                     rise,
                 });
             }
@@ -283,6 +326,8 @@ impl Overlay {
                 resolved: l.resolved(),
                 enabled: l.enabled,
                 name: l.name.clone(),
+                kind: l.kind,
+                span: l.length(),
             });
         }
         out

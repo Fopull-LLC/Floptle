@@ -53,12 +53,29 @@ Triangles in, convex polygons out, through four stages:
 4. **Portals.** Two rectangles that share a run of cell edges are linked, and the
    link carries that shared segment, stored left-and-right *as seen walking
    through it*, once per direction.
+5. **Links.** Every ledge the flood fill stopped at is probed outward for ground
+   to drop onto or jump to, and each one that joins two otherwise separate
+   pieces becomes an off-mesh link. See [Links the bake finds for
+   itself](#links-the-bake-finds-for-itself).
+
+Between 2 and 3 there is a **prune**: any island of walkable ground smaller than
+`min_region_area` square metres is thrown away. A real level bakes hundreds of
+specks — the top of a crate, a window sill, the triangle of floor behind a pillar
+— and every one of them is an island nothing can reach, a patch in the overlay,
+and somewhere `nearest` can strand a character that asked to be put on the
+navmesh. The **largest** island is never pruned, however small it is, so a bake
+of a tiny level is still a bake of that level.
 
 ### The four numbers
 
 `agent_radius`, `agent_height`, `max_slope`, `step_height` — Unity's four, in the
 same words, because they are the four that actually describe walking and nobody
 should have to learn a second vocabulary for the same idea.
+
+`max_drop` and `max_jump` are the two that decide what the bake joins up for
+itself, and `min_region_area` is what it throws away. They are covered under
+[Links the bake finds for itself](#links-the-bake-finds-for-itself) and in the
+prune above.
 
 `cell_size` is the fifth and it is the performance knob: halving it quadruples
 the bake. It also has to stay small next to the radius, because erosion happens
@@ -205,7 +222,7 @@ crossing, because halfway up a ladder is the one state nothing downstream can
 recover from.
 
 `nav.offLinks()` reads them all back as data — `{ id, name, from, to,
-bidirectional, cost, duration, enabled, ground }`, world space. **Careful with
+bidirectional, cost, duration, enabled, ground, kind, generated }`, world space. **Careful with
 the two things called links:** that one is the handful an author placed;
 `nav.links()` is the thousands of portals the bake derived between neighbouring
 rectangles. The names are inherited from both genuinely being links, and are
@@ -215,6 +232,71 @@ worth checking before reading either.
 and the bake names it in the Console. A door that quietly does nothing is exactly
 the silent-failure shape this engine's own audit found again and again: the level
 looks right, the route goes the long way, and nothing anywhere says why.
+
+### Links the bake finds for itself
+
+Placing a link at every ledge is not an answer. A room has dozens, a level has
+hundreds, and every one of them moves the moment somebody moves the geometry. So
+the bake works out two kinds itself, from two numbers on the Nav Mesh node:
+
+| | | |
+|---|---|---|
+| **drop height** (`max_drop`) | ground more than `step_height` below and no further down than this | a **one-way** drop, because falling is |
+| **jump distance** (`max_jump`) | ground within `step_height` either way and no further across than this | a **two-way** jump, because a gap you can clear you can clear coming back |
+
+Set either to `0` to switch that kind off. With both off, every ledge in the
+level is a wall and the only ways across are the Nav Link nodes you place.
+
+Each generated link carries a `kind` of `"drop"` or `"jump"`; a Nav Link node is
+`"placed"`. A character refuses a whole kind in the query rather than by needing
+its own bake — `nav.agent(node, { filter = { canJump = false } })` — which is
+what a turret, a cart or a chained dog wants.
+
+**Jump distance is measured between the two edges of the walkable surface**,
+which is the distance the overlay draws — *not* the width of the hole in the
+floor. Erosion has already pulled the surface back by `agent_radius` at each
+side, so a metre of real chasm is a two-metre gap in the navmesh to a
+half-metre-wide character, and any jump distance under `2 × agent_radius` can
+never fire at all. This was found by looking at a rendered picture of a level
+whose chasm produced no jumps, which is why the default is 2 m rather than the
+1 m that reads as reasonable and does nothing.
+
+Four rules keep the count sane and the result honest:
+
+- **Only where walking cannot already get there.** A candidate whose two ends are
+  in the same region is thrown away — the two being in one region *means* there
+  is already a way to walk between them, so the link would be a shortcut. A
+  level's ledges offer tens of thousands of shortcuts and the router pays for
+  every edge on every query for the rest of the game.
+- **A wall is not a gap.** The probe stops the moment a column has something
+  standing up in it taller than the ledge, so two rooms either side of a partition
+  are never joined by a hop over it.
+- **A carve is not a gap either.** Ground carved out with a blocking Nav Area is
+  the designer saying *nothing may walk here*; a bake that answered that by
+  inventing a way over the top would be a tool overruling the person using it.
+- **Spacing.** A twenty-metre balcony would otherwise get a drop per cell. Once
+  one is taken, nothing within a body's width or so of its mouth is taken again,
+  and a two-way jump suppresses the far bank looking back — so a chasm is one
+  crossing rather than two.
+
+There is a ceiling of 4096 generated links per bake. It is not a guess at what is
+reasonable; it is a guard against the level that would otherwise hand the router
+a hundred thousand edges. A bake that reaches it says so, with what to change.
+
+### Regions, and islands
+
+They are different numbers and the difference matters.
+
+A **region** is what the walking surface flooded into, so a level with one ledge
+in it is two regions whether or not anything can get down. An **island** counts
+the links in — `NavMesh::islands()` — so it is what a character can actually
+reach. The Inspector's *"N separate areas"* is the second one, alongside how much
+of the walkable ground the biggest island holds: *"494 separate areas"* is a
+number nobody can act on, and *"the largest holds 3% of the ground"* says the
+bake has shattered and points at the settings that did it.
+
+Connectivity is read either way round, so a one-way drop counts as joining two
+pieces. Whether you can get back out is a different question.
 
 ### On a level that builds itself, the navmesh arrives late
 
@@ -489,3 +571,15 @@ finds out the hard way.
 - **A very thick solid with inconsistent winding** can leave a stranded walkable
   patch inside it — unreachable, and harmless to a path, but it shows in the
   overlay.
+- **Generated links are found along the four axis directions only**, so a ledge
+  running diagonally is probed from its stair-stepped cells rather than square-on
+  to its own edge. The links come out slightly off perpendicular; none are
+  missed.
+- **A generated link cannot be edited.** It belongs to the bake and a rebake
+  makes it again. Turn one off with `nav.link(name, false)` for the session, or
+  place a Nav Link and lower the drop height if you want the decision by hand.
+- **Re-measuring one box does not find new drops or jumps in it.**
+  `nav.rebake(box)` splices fresh ground in and re-resolves the links that were
+  already there — an end that lost its floor comes back unresolved, and one that
+  gained floor snaps onto it — but it does not probe the new ledges. A streamed
+  level that wants links inside a chunk needs a full rebake for now.

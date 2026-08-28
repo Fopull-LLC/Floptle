@@ -1944,6 +1944,24 @@ pub enum Matter {
         /// bakes **on another thread** so the editor and the game keep their
         /// frame rate.
         auto_rebake: bool,
+        /// The tallest ledge the character steps off deliberately.
+        ///
+        /// The other half of `step_height`. A lip under `step_height` is walked
+        /// over; a drop between there and here gets a **one-way link** the bake
+        /// makes for itself, so a route can take it. Beyond this the ledge is a
+        /// wall and the route goes round. `0` switches drop links off.
+        max_drop: f32,
+        /// The widest gap the character jumps across, measured between the two
+        /// edges of the walkable surface — the distance you can see in the
+        /// overlay, which is wider than the hole in the floor by the agent's
+        /// radius at each side. Gets a **two-way link**. `0` switches jump links
+        /// off, and anything under `2 × agent_radius` never fires.
+        max_jump: f32,
+        /// The smallest patch of walkable ground worth keeping, in square
+        /// metres. A real level bakes hundreds of specks — a window sill, the
+        /// top of a crate — and every one of them is an island nothing can
+        /// reach. The biggest patch is never dropped.
+        min_region_area: f32,
     },
     /// A **nav link**: a way across that is not walking.
     ///
@@ -2179,6 +2197,14 @@ impl Matter {
             // building a level turns this on; nobody should have to turn it off
             // to stop their machine baking a finished level over and over.
             auto_rebake: false,
+            // Unity ships the equivalents at zero and lets you find them. That
+            // is the wrong default: a level with a ledge in it and no links
+            // looks exactly like a level with a ledge in it, right up until a
+            // character walks the long way round a knee-high step and nothing
+            // says why.
+            max_drop: 1.5,
+            max_jump: 2.0,
+            min_region_area: 1.0,
         }
     }
 

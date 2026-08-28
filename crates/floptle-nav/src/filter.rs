@@ -35,6 +35,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::link::LinkKind;
+
 /// How many kinds of ground one bake can tell apart.
 pub const MAX_AREAS: usize = 32;
 
@@ -75,11 +77,25 @@ pub struct QueryFilter {
     costs: [f32; MAX_AREAS],
     /// Bit per area: set means this character will walk on it.
     allowed: u32,
+    /// Bit per [`LinkKind`]: set means this character will cross links of that
+    /// kind. Areas cannot answer this — a drop and a ladder are both plain
+    /// ground, and "this one cannot jump" is a fact about the character, which
+    /// is exactly what a filter is for.
+    links: u8,
 }
 
 impl Default for QueryFilter {
     fn default() -> Self {
-        QueryFilter { costs: [1.0; MAX_AREAS], allowed: u32::MAX }
+        QueryFilter { costs: [1.0; MAX_AREAS], allowed: u32::MAX, links: u8::MAX }
+    }
+}
+
+/// Which bit of [`QueryFilter::links`] a kind owns.
+fn link_bit(kind: LinkKind) -> u8 {
+    match kind {
+        LinkKind::Placed => 1,
+        LinkKind::Drop => 2,
+        LinkKind::Jump => 4,
     }
 }
 
@@ -106,6 +122,35 @@ impl QueryFilter {
         if (area as usize) < MAX_AREAS {
             self.allowed |= 1 << area;
         }
+    }
+
+    /// Refuse a whole kind of crossing.
+    ///
+    /// The bake finds every drop and every jump in the level, which is what a
+    /// person walking through it would take. A turret does not jump; a chained
+    /// dog does not drop off a balcony; a cart does neither. Saying so here
+    /// costs one bit and needs no second bake.
+    ///
+    /// ```
+    /// # use floptle_nav::{LinkKind, QueryFilter};
+    /// let cart = QueryFilter::default().refusing(LinkKind::Jump).refusing(LinkKind::Drop);
+    /// assert!(!cart.crosses(LinkKind::Jump));
+    /// assert!(cart.crosses(LinkKind::Placed), "it still goes through doors");
+    /// ```
+    pub fn refusing(mut self, kind: LinkKind) -> Self {
+        self.links &= !link_bit(kind);
+        self
+    }
+
+    /// Take a kind of crossing back up.
+    pub fn allowing(mut self, kind: LinkKind) -> Self {
+        self.links |= link_bit(kind);
+        self
+    }
+
+    /// Will this character cross a link of that kind?
+    pub fn crosses(&self, kind: LinkKind) -> bool {
+        self.links & link_bit(kind) != 0
     }
 
     pub fn set_cost(&mut self, area: u8, multiplier: f32) {

@@ -33,6 +33,76 @@ use serde::{Deserialize, Serialize};
 /// A link's end is not on the navmesh.
 pub const NOWHERE: u32 = u32::MAX;
 
+/// What a link is, and — the part that matters — who put it there.
+///
+/// A level's ladders and doors are placed by hand and are nobody's business but
+/// the designer's. A drop off a ledge and a jump across a gap are neither: they
+/// are facts about the shape of the floor, there are hundreds of them, and
+/// asking somebody to place each one is asking them not to. The bake works those
+/// out itself, and this is how everything downstream tells the two apart —
+/// which one to draw differently, which ones a character that cannot jump must
+/// refuse, and which ones a rebake is free to throw away and make again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LinkKind {
+    /// Put here by a person: a ladder, a door, a lift, a rope, a teleport. The
+    /// bake never invents one of these and never removes one.
+    #[default]
+    Placed,
+    /// Worked out by the bake: off a ledge onto ground below. **One-way**,
+    /// because falling is.
+    Drop,
+    /// Worked out by the bake: across a gap onto ground at about the same
+    /// height. **Two-way**, because a gap you can clear you can clear coming
+    /// back.
+    Jump,
+}
+
+impl LinkKind {
+    /// Whether the bake made this one, and would make it again.
+    pub fn generated(self) -> bool {
+        !matches!(self, LinkKind::Placed)
+    }
+
+    /// The name a script and the Inspector use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LinkKind::Placed => "placed",
+            LinkKind::Drop => "drop",
+            LinkKind::Jump => "jump",
+        }
+    }
+}
+
+/// Where a crossing is at `t`, running 0 at the mouth to 1 at the landing.
+///
+/// **The shape is the kind of crossing.** A drop leaves the ledge flat and
+/// accelerates downward, which is what falling does; a jump bows over its gap; a
+/// ladder, a lift and everything else somebody placed goes straight, because a
+/// ladder that arcs is a ladder nobody built.
+///
+/// One function, used by both the editor's overlay and the crowd that carries an
+/// agent across. Two copies of a curve is two curves, and the one thing this
+/// engine's overlay is for is showing what a character will actually do.
+pub fn arc_point(kind: LinkKind, from: [f32; 3], to: [f32; 3], t: f32) -> [f32; 3] {
+    let t = t.clamp(0.0, 1.0);
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    let y = match kind {
+        LinkKind::Drop => from[1] + (to[1] - from[1]) * t * t,
+        LinkKind::Jump => {
+            // Bowed in proportion to the crossing rather than by a constant
+            // that looks right at one scale and silly at every other, and
+            // capped so a long link does not launch anybody into orbit.
+            let span = {
+                let (dx, dy, dz) = (to[0] - from[0], to[1] - from[1], to[2] - from[2]);
+                (dx * dx + dy * dy + dz * dz).sqrt()
+            };
+            lerp(from[1], to[1]) + (span * 0.22).min(1.0) * 4.0 * t * (1.0 - t)
+        }
+        LinkKind::Placed => lerp(from[1], to[1]),
+    };
+    [lerp(from[0], to[0]), y, lerp(from[2], to[2])]
+}
+
 /// A connection between two places on the navmesh with no walking in between.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OffLink {
@@ -63,6 +133,12 @@ pub struct OffLink {
     /// The polygon each end landed on, or [`NOWHERE`].
     pub from_poly: u32,
     pub to_poly: u32,
+    /// A ladder somebody placed, or a drop the bake found. See [`LinkKind`].
+    ///
+    /// `serde(default)` so a link read back out of an older shape is a placed
+    /// one, which is what every link was before the bake could find its own.
+    #[serde(default)]
+    pub kind: LinkKind,
 }
 
 impl OffLink {
@@ -85,7 +161,20 @@ impl OffLink {
             enabled: true,
             from_poly: NOWHERE,
             to_poly: NOWHERE,
+            kind: LinkKind::Placed,
         }
+    }
+
+    /// The same link, said to be of a kind. What the bake's own link finder
+    /// uses; hand-placed links never call it.
+    pub fn of_kind(mut self, kind: LinkKind) -> OffLink {
+        self.kind = kind;
+        self
+    }
+
+    /// Whether the bake made this one.
+    pub fn generated(&self) -> bool {
+        self.kind.generated()
     }
 
     /// Both ends found ground to sit on.
@@ -116,6 +205,11 @@ impl OffLink {
         }
     }
 
+    /// Where a crossing of this link is at `t` — see [`arc_point`].
+    pub fn point_at(&self, t: f32) -> [f32; 3] {
+        arc_point(self.kind, self.from, self.to, t)
+    }
+
     /// How far apart its ends are.
     pub fn length(&self) -> f32 {
         let (dx, dy, dz) =
@@ -135,6 +229,41 @@ mod tests {
         assert!(!l.bidirectional, "a jump down is not a jump up");
         assert!(!l.resolved(), "nothing has told it where the ground is yet");
         assert!(!l.usable(true), "and an unresolved link must never be walked");
+    }
+
+    /// The shape of a crossing is the kind of crossing — and the overlay and the
+    /// crowd both read it here, so a picture of a fall and a fall are the same
+    /// curve.
+    #[test]
+    fn the_arc_falls_for_a_drop_bows_for_a_jump_and_is_straight_for_a_ladder() {
+        let (high, low) = ([0.0, 4.0, 0.0], [2.0, 0.0, 0.0]);
+
+        // A drop hangs on at the lip and accelerates down: halfway ACROSS is
+        // still well above halfway DOWN. A straight line would be exactly 2.0,
+        // and that is the invisible ramp this replaced.
+        let mid = arc_point(LinkKind::Drop, high, low, 0.5);
+        assert!(mid[1] > 2.5, "halfway across a drop is not halfway down: {}", mid[1]);
+        assert!((mid[0] - 1.0).abs() < 1e-5, "it still moves across at a steady rate");
+
+        // A jump bows above both of its ends.
+        let (a, b) = ([0.0, 0.0, 0.0], [4.0, 0.0, 0.0]);
+        let over = arc_point(LinkKind::Jump, a, b, 0.5);
+        assert!(over[1] > 0.1, "a jump goes over the gap: {}", over[1]);
+
+        // A ladder does not arc.
+        let rung = arc_point(LinkKind::Placed, high, low, 0.5);
+        assert!((rung[1] - 2.0).abs() < 1e-5, "a placed link is a straight line: {}", rung[1]);
+
+        // Every kind starts and ends exactly where it says, or an agent
+        // teleports on the first and last frame of every crossing.
+        for kind in [LinkKind::Drop, LinkKind::Jump, LinkKind::Placed] {
+            assert_eq!(arc_point(kind, high, low, 0.0), high, "{kind:?}");
+            assert_eq!(arc_point(kind, high, low, 1.0), low, "{kind:?}");
+            // …and `t` outside 0..1 is clamped rather than extrapolated into
+            // the ground.
+            assert_eq!(arc_point(kind, high, low, -3.0), high, "{kind:?}");
+            assert_eq!(arc_point(kind, high, low, 9.0), low, "{kind:?}");
+        }
     }
 
     #[test]

@@ -508,11 +508,11 @@ origin needs no arithmetic at your end.
 | | |
 | --- | --- |
 | `nav.ready()` | is there a bake to ask |
-| `nav.settings()` | the character it was baked for: `radius`, `height`, `maxSlope`, `stepHeight`, `cellSize`, plus `area` in square metres and `areaCount`, the number of polygons |
+| `nav.settings()` | the character it was baked for: `radius`, `height`, `maxSlope`, `stepHeight`, `cellSize`, `maxDrop` (the tallest ledge it steps off), `maxJump` (the widest gap it clears), `minRegionArea` (the smallest patch of ground kept), plus `area` in square metres and `areaCount`, the number of polygons |
 | `nav.areas()` | the walkable surface — see below |
 | `nav.links()` | the portals between those rectangles |
 | `nav.ground()` | `{ {name, cost}… }`, the kinds of ground the level named |
-| `nav.offLinks()` | the ladders, jumps and doors somebody placed |
+| `nav.offLinks()` | every off-mesh link — each carries a `kind` of `"placed"` (a Nav Link node), `"drop"` or `"jump"` (worked out by the bake), and a `generated` boolean saying the same |
 | `nav.nearest(p [, max])` | the closest standable point, or `nil` |
 | `nav.onMesh(p)` · `nav.regionOf(p)` · `nav.reachable(a, b)` | |
 | `nav.path(a, b)` · `nav.distance(a, b)` · `nav.raycast(a, b)` | |

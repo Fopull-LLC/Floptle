@@ -240,6 +240,12 @@ fn nav_node_matter(span: f32) -> floptle_core::Matter {
         cell_size: 0.5,
         enabled: true,
         auto_rebake: false,
+        // This is a bake-throughput benchmark, and link generation is a
+        // separate cost with its own guard. Off, so the number this measures
+        // stays the number it measured before.
+        max_drop: 0.0,
+        max_jump: 0.0,
+        min_region_area: 1.0,
     }
 }
 

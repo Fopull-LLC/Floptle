@@ -1124,6 +1124,12 @@ pub enum MatterDoc {
         enabled: bool,
         #[serde(default)]
         auto_rebake: bool,
+        #[serde(default = "default_max_drop")]
+        max_drop: f32,
+        #[serde(default = "default_max_jump")]
+        max_jump: f32,
+        #[serde(default = "default_min_region_area")]
+        min_region_area: f32,
     },
     /// A nav link ([`Matter::NavLink`]) — a ladder, a jump, a door. A
     /// hand-written `NavLink()` is a one-way step two metres forward.
@@ -1443,6 +1449,20 @@ fn default_step_height() -> f32 {
 fn default_nav_cell() -> f32 {
     0.15
 }
+/// A drop a person takes without thinking about it, and a gap they step across.
+/// Both default ON: a scene that writes `NavMesh()` and bakes gets a level whose
+/// ledges are joined up, which is what somebody typing that means.
+fn default_max_drop() -> f32 {
+    1.5
+}
+fn default_max_jump() -> f32 {
+    2.0
+}
+/// A square metre — smaller than anywhere anybody puts a character, bigger than
+/// every speck a bake finds on the furniture.
+fn default_min_region_area() -> f32 {
+    1.0
+}
 /// Two metres forward: far enough that a link written by hand is visible where
 /// it was put rather than a dot at the origin.
 fn default_link_to() -> [f32; 3] {
@@ -1609,6 +1629,9 @@ impl From<&Matter> for MatterDoc {
                 cell_size,
                 enabled,
                 auto_rebake,
+                max_drop,
+                max_jump,
+                min_region_area,
             } => MatterDoc::NavMesh {
                 id: *id,
                 half_extents: *half_extents,
@@ -1621,6 +1644,9 @@ impl From<&Matter> for MatterDoc {
                 cell_size: *cell_size,
                 enabled: *enabled,
                 auto_rebake: *auto_rebake,
+                max_drop: *max_drop,
+                max_jump: *max_jump,
+                min_region_area: *min_region_area,
             },
             Matter::NavLink { id, to, bidirectional, cost, area, duration, enabled } => {
                 MatterDoc::NavLink {
@@ -1874,6 +1900,9 @@ impl MatterDoc {
                 cell_size,
                 enabled,
                 auto_rebake,
+                max_drop,
+                max_jump,
+                min_region_area,
             } => Matter::NavMesh {
                 id: *id,
                 half_extents: *half_extents,
@@ -1890,6 +1919,11 @@ impl MatterDoc {
                 cell_size: cell_size.max(0.01),
                 enabled: *enabled,
                 auto_rebake: *auto_rebake,
+                // Negative is the one value with no meaning at all here; zero
+                // has one and it is "off", so it is left alone.
+                max_drop: max_drop.max(0.0),
+                max_jump: max_jump.max(0.0),
+                min_region_area: min_region_area.max(0.0),
             },
             MatterDoc::NavLink { id, to, bidirectional, cost, area, duration, enabled } => {
                 Matter::NavLink {

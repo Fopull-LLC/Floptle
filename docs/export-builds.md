@@ -142,7 +142,7 @@ the screen. `floptle help <VERB>` explains any one of them.
 [x] floptle exec <SCRIPT.lua> [PROJECT] [--json]
 [x] floptle api [QUERY] [--json]
 [x] floptle export <PROJ> <OUT> <PLATFORM> [--title T]
-[x] floptle bake gi | clips [ARGS]             # both headless
+[x] floptle bake gi | clips | nav [ARGS]       # all three headless
 [x] floptle migrate <DIR> [--engine-version V]
 [x] floptle serve <PROJ> [--port N | --relay URL] [--scene S] [--tick HZ]
 [x] floptle doctor [--json]                    # can THIS machine render?

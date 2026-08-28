@@ -46,6 +46,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod agent;
+pub mod autolink;
 pub mod carve;
 mod splice;
 pub mod filter;
@@ -58,12 +59,13 @@ pub mod path;
 pub mod walkable;
 
 pub use agent::{Agent, AgentId, AgentParams, AgentState, Crowd, Ride};
+pub use autolink::Found;
 pub use carve::Obstacle;
 pub use filter::{Area, AreaVolume, QueryFilter, MAX_AREAS, WALKABLE};
 pub use heightfield::{Column, Heightfield, Surface};
 pub use index::PolyIndex;
-pub use link::OffLink;
-pub use mesh::{Link, NavMesh, Poly};
+pub use link::{LinkKind, OffLink};
+pub use mesh::{Link, NavMesh, Poly, Summary};
 pub use overlay::{Edge, Overlay, Step, SurfaceTri};
 pub use path::{Crossing, Path};
 pub use walkable::{Cell, WalkableGrid};
@@ -85,9 +87,7 @@ pub use walkable::{Cell, WalkableGrid};
 /// assert!(path.complete);
 /// ```
 pub fn bake(tris: &[Tri], settings: &NavSettings) -> Option<NavMesh> {
-    let field = Heightfield::build(tris, settings)?;
-    let grid = WalkableGrid::build(&field, settings)?;
-    NavMesh::build(&grid, settings)
+    bake_with(tris, settings, &[], Vec::new())
 }
 
 /// Bake with everything a designer put in the level besides its geometry:
@@ -122,9 +122,53 @@ pub fn bake_with(
     volumes: &[AreaVolume],
     links: Vec<OffLink>,
 ) -> Option<NavMesh> {
+    bake_reporting(tris, settings, volumes, links).map(|(mesh, _)| mesh)
+}
+
+/// [`bake_with`], and what the bake's own link finder did — which is the
+/// difference between "no drops were found" and "drops are switched off", and
+/// the editor has to be able to say which.
+pub fn bake_reporting(
+    tris: &[Tri],
+    settings: &NavSettings,
+    volumes: &[AreaVolume],
+    links: Vec<OffLink>,
+) -> Option<(NavMesh, Found)> {
     let field = Heightfield::build(tris, settings)?;
     let grid = WalkableGrid::build_with(&field, settings, volumes)?;
-    Some(NavMesh::build(&grid, settings)?.with_links(links))
+    // Past the highest id anybody placed by hand, so a generated link can never
+    // answer to a name a script meant for a door.
+    let first_id = links.iter().map(|l| l.id).max().map_or(0, |m| m.saturating_add(1));
+    let (found, report) = autolink::generate(&grid, &field, settings, volumes, first_id);
+    let mut all = links;
+    // **Both halves of a link's identity have to stay unique**, and neither is
+    // guaranteed by the arithmetic above: an id counted up from the highest
+    // placed one saturates rather than wrapping if somebody hand-wrote
+    // `id: 4294967295`, and a link a person named "drop 1" collides with a
+    // generated one whatever the ids do. Either way two links answer to one
+    // handle, `nav.link` toggles whichever it finds first, and the level has a
+    // door that opens something else. Renaming and renumbering the GENERATED
+    // one is right: the placed one is somebody's decision.
+    let mut used_ids: std::collections::HashSet<u32> = all.iter().map(|l| l.id).collect();
+    let mut used_names: std::collections::HashSet<String> =
+        all.iter().map(|l| l.name.to_ascii_lowercase()).collect();
+    let mut next = first_id;
+    for mut l in found {
+        while used_ids.contains(&l.id) {
+            // Wrapping, not saturating: at the very top the free ids are at the
+            // bottom, and a loop that stops moving is a loop that hands out the
+            // same id for ever.
+            next = next.wrapping_add(1);
+            l.id = next;
+        }
+        used_ids.insert(l.id);
+        while used_names.contains(&l.name.to_ascii_lowercase()) {
+            l.name = format!("{} #{}", l.name, l.id);
+        }
+        used_names.insert(l.name.to_ascii_lowercase());
+        all.push(l);
+    }
+    Some((NavMesh::build(&grid, settings)?.with_links(all), report))
 }
 
 /// What a bake needs to know. Defaults describe a human-ish character on a
@@ -147,6 +191,57 @@ pub struct NavSettings {
     /// quadruples the columns and the bake's cost with them. Small enough to
     /// resolve the gaps that matter, no smaller.
     pub cell_size: f32,
+    /// The tallest ledge the character will step off deliberately.
+    ///
+    /// This is the other half of `step_height`. A lip inside `step_height` is
+    /// walked over as if it were flat; a drop between there and here is a real
+    /// drop, and the bake makes a one-way [`OffLink`] for it so a route can take
+    /// it. Beyond this the ledge is a wall the route goes round.
+    ///
+    /// `0` turns drop links off entirely.
+    #[serde(default = "default_max_drop")]
+    pub max_drop: f32,
+    /// The widest gap the character will jump across, measured between the two
+    /// edges of the walkable surface — which is what the overlay draws, so it is
+    /// the distance you can see.
+    ///
+    /// **That is not the same as the width of the hole in the floor.** Erosion
+    /// has already pulled the walkable surface back by `agent_radius` on each
+    /// side, so a metre of real chasm is a two-metre gap in the navmesh to a
+    /// half-metre-wide character. Anything under `2 × agent_radius` can never
+    /// fire at all.
+    ///
+    /// The bake makes a two-way [`OffLink`] wherever a gap this wide or less has
+    /// ground at about the same height on the far side. `0` turns jump links
+    /// off.
+    #[serde(default = "default_max_jump")]
+    pub max_jump: f32,
+    /// The smallest island of walkable ground worth keeping, in square metres.
+    ///
+    /// A real level bakes hundreds of specks — a window sill, the top of a
+    /// crate, a triangle of floor behind a pillar. None of them is anywhere a
+    /// character can get to or would want to be, and every one of them is an
+    /// island in the count, a patch in the overlay, and a place `nearest` can
+    /// strand somebody who asked to be put on the navmesh. Ground in a patch
+    /// smaller than this is dropped.
+    ///
+    /// The largest island is **never** dropped, however small it is: a bake of a
+    /// tiny level has to come back with the tiny level in it.
+    #[serde(default = "default_min_region_area")]
+    pub min_region_area: f32,
+}
+
+// Serde defaults, so a `NavSettings` written before these existed reads back as
+// one with them at their ordinary values rather than at zero — which for all
+// three means "off", and silently off is the failure this engine keeps finding.
+fn default_max_drop() -> f32 {
+    1.5
+}
+fn default_max_jump() -> f32 {
+    2.0
+}
+fn default_min_region_area() -> f32 {
+    1.0
 }
 
 impl Default for NavSettings {
@@ -166,6 +261,24 @@ impl Default for NavSettings {
             max_slope: 45.0,
             step_height: 0.75,
             cell_size: 0.15,
+            // Unity ships these two at zero and lets you find them. That is the
+            // wrong default here: a level with a ledge in it and no links looks
+            // exactly like a level with a ledge in it, right up until a
+            // character stands at the top of a knee-high step and walks the
+            // long way round — and nothing anywhere says why. A metre and a
+            // half is a drop a person takes without thinking about it, and a
+            // metre is a gap they step across.
+            // Two metres of GAP, not two metres of leap: erosion has already
+            // pulled the walkable surface back by the agent's radius on both
+            // sides, so a 0.5 m-wide character facing a metre of real chasm is
+            // looking at a two-metre hole in the navmesh. A jump distance under
+            // twice the radius can never fire, which is what the render probe
+            // caught the first time this number was set to one.
+            max_drop: 1.5,
+            max_jump: 2.0,
+            // A square metre is smaller than anything anybody puts a character
+            // on and bigger than every speck a bake finds on the furniture.
+            min_region_area: 1.0,
         }
     }
 }
@@ -224,6 +337,46 @@ pub fn cell_size_advice(settings: &NavSettings) -> Option<String> {
         ));
     }
     None
+}
+
+/// A drop height or a jump distance that can never fire, or `None` when both are
+/// sound.
+///
+/// The same failure `cell_size_advice` exists for, in the two numbers added
+/// alongside it. Both have a threshold below which they are **exactly
+/// equivalent to zero**, and neither threshold is visible from the slider:
+///
+/// - A drop is only a drop past `step_height` — under that the lip is walked
+///   over. So a drop height at or below the step height finds nothing, ever.
+/// - A jump is measured between the **eroded** edges of the walkable surface,
+///   and erosion has already taken `agent_radius` off each side. So a jump
+///   distance at or below `2 × agent_radius` finds nothing, ever.
+///
+/// A number set to something that means zero, doing nothing, with the setting
+/// still reading as switched on, is the shape this engine's audit kept finding.
+/// Zero itself says nothing — that is somebody switching the feature off, and
+/// advice that fires on a deliberate choice is advice people learn to scroll
+/// past.
+pub fn link_advice(settings: &NavSettings) -> Option<String> {
+    let mut said: Vec<String> = Vec::new();
+    if settings.max_drop > 0.0 && settings.max_drop <= settings.step_height {
+        said.push(format!(
+            "a drop height of {:.2} is inside the step height of {:.2}, so nothing is ever \
+             far enough down to be a drop — it will find none. Raise it above {:.2}, or set \
+             it to 0 to mean it.",
+            settings.max_drop, settings.step_height, settings.step_height,
+        ));
+    }
+    let erosion = settings.agent_radius * 2.0;
+    if settings.max_jump > 0.0 && settings.max_jump <= erosion {
+        said.push(format!(
+            "a jump distance of {:.2} is inside the {:.2} the agent's own radius erodes off \
+             the two edges, so no gap is ever narrow enough to jump — it will find none. \
+             Raise it above {:.2}, or set it to 0 to mean it.",
+            settings.max_jump, erosion, erosion,
+        ));
+    }
+    (!said.is_empty()).then(|| said.join(" "))
 }
 
 /// One triangle of level geometry, in world space.
@@ -342,6 +495,29 @@ mod tests {
         // A point-sized agent erodes nothing, so there is nothing to warn about.
         let point = NavSettings { agent_radius: 0.0, ..Default::default() };
         assert!(cell_size_advice(&point).is_none());
+    }
+
+    /// A number set to something that means zero, still reading as switched on.
+    #[test]
+    fn a_drop_or_jump_that_can_never_fire_is_called_out() {
+        // A drop inside the step height: the lip is walked over, so nothing is
+        // ever a drop.
+        let dead_drop = NavSettings { step_height: 0.75, max_drop: 0.5, ..Default::default() };
+        let said = link_advice(&dead_drop).expect("this must not pass silently");
+        assert!(said.contains("drop height"), "{said}");
+        assert!(!said.contains("jump distance"), "the jump is fine here: {said}");
+
+        // A jump inside what the radius erodes off both sides.
+        let dead_jump = NavSettings { agent_radius: 0.5, max_jump: 0.8, ..Default::default() };
+        let said = link_advice(&dead_jump).expect("this must not pass silently");
+        assert!(said.contains("jump distance"), "{said}");
+        assert!(said.contains("1.00"), "it should name the number to beat: {said}");
+
+        // Zero is somebody switching it off and must say nothing — advice that
+        // fires on a deliberate choice is advice people learn to scroll past.
+        let off = NavSettings { max_drop: 0.0, max_jump: 0.0, ..Default::default() };
+        assert!(link_advice(&off).is_none());
+        assert!(link_advice(&NavSettings::default()).is_none(), "the defaults must be sound");
     }
 
     #[test]

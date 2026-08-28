@@ -15,6 +15,13 @@
 //! The editor keeps its own path exactly as it was — a bake you can watch, that
 //! you can cancel, with a progress bar. This is the same bake with nobody
 //! watching.
+//!
+//! `floptle bake nav` is the same idea for the navmesh, and it needs no
+//! adapter at all: a bake is triangles and numbers, and the triangles are read
+//! straight off disk. It was the one bake with no way to run it from a script,
+//! which meant a level's navmesh could only ever be made by a person sitting in
+//! front of the editor — and a level whose geometry is generated is a level
+//! whose navmesh has to be too.
 
 use std::path::Path;
 
@@ -123,6 +130,95 @@ fn report(
     // The bake's own summary line is the answer, so it goes to stdout — it says
     // how many probes, how many bounces, how long, and what it wrote.
     for e in all().filter(|e| e.level == LogLevel::Debug && e.msg.starts_with("baked GI")) {
+        println!("{}", e.msg);
+    }
+    i32::from(errors > 0)
+}
+
+/// `floptle bake nav` — **bake a scene's navmesh, and exit.**
+///
+/// No GPU: `gather` reads a model's geometry off disk rather than out of the
+/// renderer, so this runs on a build server with no display and no adapter.
+///
+/// The bake itself runs on a worker thread — the editor's own, unchanged, so
+/// there is one bake and not two — and this waits for it rather than spreading
+/// it over frames nobody is drawing.
+pub(crate) fn run_nav(root: &Path, scene: Option<&str>, json: bool) -> i32 {
+    if !root.join("project.ron").is_file() {
+        eprintln!("{} is not a project directory (no project.ron)", root.display());
+        return 2;
+    }
+    let mut ed = crate::Editor {
+        show_gizmos: false,
+        console: crate::console::ConsoleState { mirror_to_stderr: !json, ..Default::default() },
+        ..Default::default()
+    };
+    ed.open_project(root.to_path_buf());
+    if let Some(s) = scene {
+        let Some(path) = crate::inspect::resolve_scene(root, s) else {
+            eprintln!("no scene called {s} under {}", root.join("scenes").display());
+            return 1;
+        };
+        ed.open_scene_file(&path.to_string_lossy());
+    }
+    // Opening reports the bake it could not read, which is the ordinary reason
+    // somebody runs this. Kept, and reported with everything else.
+    let opened: Vec<crate::console::ConsoleEntry> = std::mem::take(&mut ed.console.entries);
+
+    if crate::nav_bake::nav_node(&ed.world).is_none() {
+        eprintln!(
+            "{} has no Nav Mesh node, so there is nothing to bake — add one, or name \
+             another scene with --scene",
+            ed.scene_rel_or_default()
+        );
+        return 1;
+    }
+    ed.bake_nav();
+    // `bake_nav` hands the work to a thread and `poll_nav_bake` takes the
+    // result. Nobody is drawing frames here, so this is the frame loop: ask
+    // until the answer is in. A bake that never returns would be a worker that
+    // panicked, and the job would be gone with it — which `nav_job` going
+    // `None` without a mesh reports as the ordinary "nothing walkable" line.
+    let started = std::time::Instant::now();
+    while ed.nav_job.is_some() {
+        ed.poll_nav_bake();
+        if started.elapsed() > std::time::Duration::from_secs(60 * 30) {
+            eprintln!("the bake was still running after half an hour — giving up");
+            return 1;
+        }
+        std::thread::yield_now();
+    }
+    report_nav(&opened, &ed.console, json)
+}
+
+fn report_nav(
+    opened: &[crate::console::ConsoleEntry],
+    console: &crate::console::ConsoleState,
+    json: bool,
+) -> i32 {
+    use floptle_script::LogLevel;
+    let all = || opened.iter().chain(console.entries.iter());
+    let errors = all().filter(|e| e.level == LogLevel::Error).count();
+    if json {
+        let doc = serde_json::json!({
+            "ok": errors == 0,
+            "errors": errors,
+            "log": all()
+                .map(|e| serde_json::json!({
+                    "level": match e.level {
+                        LogLevel::Error => "error",
+                        LogLevel::Warn => "warning",
+                        LogLevel::Debug => "print",
+                    },
+                    "message": e.msg,
+                    "count": e.count,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        return i32::from(errors > 0);
+    }
+    for e in all().filter(|e| e.level == LogLevel::Debug && e.msg.starts_with("navmesh:")) {
         println!("{}", e.msg);
     }
     i32::from(errors > 0)

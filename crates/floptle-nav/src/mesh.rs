@@ -88,6 +88,27 @@ impl Poly {
     }
 }
 
+/// The shape of a bake, in the three numbers worth reading off it.
+///
+/// `islands` rather than regions, deliberately: a region is what the walking
+/// surface flooded into *before* any link joined two of them, so it is the
+/// bake's working. An island is what a character can actually reach, and that
+/// is the number a person is asking for when they ask how many pieces their
+/// level is in.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Summary {
+    /// Square metres of walkable ground, over the whole bake.
+    pub walkable_area: f32,
+    /// How many pieces it is in, once the links are counted.
+    pub islands: usize,
+    /// What share of the ground the biggest piece holds, 0..1.
+    ///
+    /// The count alone is not actionable — 155 could be a level with 155
+    /// cupboards in it or a bake that has shattered — and this is what tells
+    /// them apart.
+    pub biggest_island_share: f32,
+}
+
 /// A way out of one polygon and into another.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Link {
@@ -152,6 +173,16 @@ pub struct NavMesh {
     pub(crate) index: OnceLock<PolyIndex>,
     #[serde(skip)]
     pub(crate) link_index: OnceLock<HashMap<usize, Vec<(u32, bool)>>>,
+    /// The shape of the bake in three numbers, cached beside the island
+    /// grouping it is derived from — same reason, same lifetime.
+    #[serde(skip)]
+    pub(crate) summary_cache: OnceLock<Summary>,
+    /// Which island each polygon is on. Derived like the other two, and cached
+    /// for the same reason plus a sharper one: the Inspector asks for it EVERY
+    /// FRAME to fill in one label, and on a real level that is a union-find over
+    /// seventy thousand polygons per frame.
+    #[serde(skip)]
+    pub(crate) island_index: OnceLock<Vec<u32>>,
     /// What is currently cut out of this mesh at runtime, and the bake it was
     /// cut out of. `serde(skip)` on both, deliberately: a carve is a fact about
     /// this play session and must never reach the `.fnav` on disk, for the same
@@ -288,6 +319,8 @@ impl NavMesh {
             off_links: Vec::new(),
             index: OnceLock::new(),
             link_index: OnceLock::new(),
+            island_index: OnceLock::new(),
+            summary_cache: OnceLock::new(),
             obstacles: Vec::new(),
             next_obstacle: 0,
             baked: None,
@@ -336,6 +369,8 @@ impl NavMesh {
             }
         }
         self.off_links = resolved;
+        self.island_index.take();
+        self.summary_cache.take();
         self
     }
 
@@ -353,10 +388,72 @@ impl NavMesh {
         match self.off_links.iter_mut().find(|l| l.id == id) {
             Some(l) => {
                 l.enabled = on;
+                // A shut door can cut the level in two, and the island count is
+                // the thing that says so.
+                self.island_index.take();
+                self.summary_cache.take();
                 true
             }
             None => false,
         }
+    }
+
+    /// Which piece of the level each polygon is on, once the links are taken
+    /// into account — dense, from 0.
+    ///
+    /// **Not the same as [`Poly::region`]**, and the difference is the whole
+    /// point. A region is what the *walking* surface flooded into, so a level
+    /// with a ledge in it is two regions whether or not anything can get down
+    /// it. An island is what a character can actually reach: a drop the bake
+    /// found joins two regions into one island, and the Inspector's "N separate
+    /// areas" has to be the second number or it reports a level cut in half
+    /// that is nothing of the kind.
+    ///
+    /// Connectivity is read **either way round**: a one-way drop counts as
+    /// joining the two, because "you can get from one to the other" is the
+    /// question this answers. Whether you can get back is a different question
+    /// and deserves its own.
+    pub fn islands(&self) -> &[u32] {
+        self.island_index.get_or_init(|| self.build_islands())
+    }
+
+    fn build_islands(&self) -> Vec<u32> {
+        let n = self.polys.len();
+        let mut parent: Vec<u32> = (0..n as u32).collect();
+        fn find(parent: &mut [u32], mut i: u32) -> u32 {
+            while parent[i as usize] != i {
+                parent[i as usize] = parent[parent[i as usize] as usize];
+                i = parent[i as usize];
+            }
+            i
+        }
+        let union = |parent: &mut Vec<u32>, a: u32, b: u32| {
+            let (ra, rb) = (find(parent, a), find(parent, b));
+            if ra != rb {
+                parent[rb as usize] = ra;
+            }
+        };
+        for (i, ls) in self.links.iter().enumerate() {
+            for l in ls {
+                union(&mut parent, i as u32, l.to as u32);
+            }
+        }
+        for l in &self.off_links {
+            if !l.enabled || !l.resolved() {
+                continue;
+            }
+            union(&mut parent, l.from_poly, l.to_poly);
+        }
+        // Renumber densely, in polygon order, so island 0 is the one the first
+        // polygon is on and the answer does not depend on a hash.
+        let mut seen: HashMap<u32, u32> = HashMap::new();
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n as u32 {
+            let root = find(&mut parent, i);
+            let next = seen.len() as u32;
+            out.push(*seen.entry(root).or_insert(next));
+        }
+        out
     }
 
     /// The polygon index, built the first time something asks for it.
@@ -418,6 +515,8 @@ impl NavMesh {
             off_links: Vec::new(),
             index: std::sync::OnceLock::new(),
             link_index: std::sync::OnceLock::new(),
+            island_index: std::sync::OnceLock::new(),
+            summary_cache: std::sync::OnceLock::new(),
             obstacles: Vec::new(),
             next_obstacle: 0,
             baked: None,
@@ -503,10 +602,38 @@ impl NavMesh {
     /// moving when you did not expect it to move is the whole point of having
     /// it.
     pub fn area(&self) -> f32 {
-        self.polys
-            .iter()
-            .map(|p| (p.max[0] - p.min[0]) * (p.max[1] - p.min[1]))
-            .sum()
+        self.summary().walkable_area
+    }
+
+    /// The shape of this bake in three numbers — **and the reason it is cached.**
+    ///
+    /// The Inspector asks for all three every frame to fill in two labels. Each
+    /// one walks every polygon, and on a real level that is seventy thousand of
+    /// them: a sort, a sum and a hash map per frame to render text that only
+    /// changes when the bake does. Computed once, thrown away by anything that
+    /// moves the polygons or the links.
+    pub fn summary(&self) -> &Summary {
+        self.summary_cache.get_or_init(|| {
+            let island = self.islands();
+            let count = island.iter().copied().max().map_or(0, |m| m as usize + 1);
+            let mut per_island = vec![0.0f32; count];
+            let mut walkable_area = 0.0f32;
+            for (p, i) in self.polys.iter().zip(island) {
+                let a = (p.max[0] - p.min[0]) * (p.max[1] - p.min[1]);
+                walkable_area += a;
+                per_island[*i as usize] += a;
+            }
+            let biggest = per_island.iter().copied().fold(0.0f32, f32::max);
+            Summary {
+                walkable_area,
+                islands: count,
+                biggest_island_share: if walkable_area > 0.0 {
+                    biggest / walkable_area
+                } else {
+                    0.0
+                },
+            }
+        })
     }
 
     /// Which walkable island a point is on, or `None` if it is not on the mesh.
@@ -915,6 +1042,62 @@ mod tests {
 
     /// The reason the whole step exists: a room of hundreds of cells has to come
     /// out as a handful of shapes, not hundreds of them.
+    /// The Inspector reads all three of these every frame. They have to be the
+    /// same answer twice, and the second one has to be free.
+    #[test]
+    fn the_summary_is_cached_and_thrown_away_when_a_link_changes() {
+        use crate::{bake, NavSettings};
+        let s = NavSettings {
+            agent_radius: 0.2,
+            agent_height: 1.0,
+            step_height: 0.3,
+            cell_size: 0.1,
+            max_drop: 1.5,
+            ..Default::default()
+        };
+        // A high floor and a low one: two regions, joined into one island by the
+        // drops the bake finds.
+        let quad = |x0: f32, y: f32| {
+            [
+                Tri::new([x0, y, 0.0], [x0 + 4.0, y, 0.0], [x0, y, 4.0]),
+                Tri::new([x0 + 4.0, y, 0.0], [x0 + 4.0, y, 4.0], [x0, y, 4.0]),
+            ]
+        };
+        let tris: Vec<Tri> = quad(0.0, 1.0).into_iter().chain(quad(4.0, 0.0)).collect();
+        let mut mesh = bake(&tris, &s).unwrap();
+
+        let first = *mesh.summary();
+        assert_eq!(first, *mesh.summary(), "asking twice must not answer twice");
+        assert!(first.walkable_area > 10.0, "{first:?}");
+        assert_eq!(first.islands, 1, "the drops join the two floors: {first:?}");
+        assert!((first.biggest_island_share - 1.0).abs() < 1e-5);
+
+        // Regions have not changed — only what can be reached. That is the
+        // distinction the whole readout rests on.
+        let regions = {
+            let mut r: Vec<u32> = mesh.polys.iter().map(|p| p.region).collect();
+            r.sort_unstable();
+            r.dedup();
+            r.len()
+        };
+        assert_eq!(regions, 2, "the walking surface is still in two pieces");
+
+        // Shut every way down and the level is two places again — which the
+        // cache has to notice, or the label goes on saying what used to be true.
+        let ids: Vec<u32> = mesh.off_links.iter().map(|l| l.id).collect();
+        assert!(!ids.is_empty(), "this level must have drops in it");
+        for id in ids {
+            assert!(mesh.set_link_enabled(id, false));
+        }
+        let shut = *mesh.summary();
+        assert_eq!(shut.islands, 2, "a shut link cuts the level: {shut:?}");
+        assert!(shut.biggest_island_share < 1.0);
+        assert!(
+            (shut.walkable_area - first.walkable_area).abs() < 1e-3,
+            "shutting a door does not remove floor"
+        );
+    }
+
     #[test]
     fn an_open_room_becomes_one_rectangle() {
         let mesh = bake(&slab(0.0, 0.0, 6.0, 6.0, 0.0), &open(0.5));
@@ -994,6 +1177,7 @@ mod tests {
             agent_height: 1.0,
             step_height: 0.4,
             max_slope: 50.0,
+            ..Default::default()
         };
         // Rises 4 m over 8 m — 26°, walkable, and ten times the step height.
         let ramp = vec![

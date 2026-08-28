@@ -722,7 +722,7 @@ Name the floor `Ground` so the next step has something to check.
         Step {
             title: "Add the Nav Mesh node and bake",
             body: "\
-**+ Add ▸ ⬚ Nav Mesh**. Name it `Navmesh`. Its Inspector is the character the
+**Add ▸ ⬚ Navigation ▸ ⬚ Nav Mesh**. Name it `Navmesh`. Its Inspector is the character the
 level is being measured for:
 
 - **radius** — how wide they are. Ground closer than this to a wall or a drop
@@ -762,10 +762,23 @@ for a finished level.
   corner of the map, and characters walk to its invisible edge and stop. If you
   size it by hand and it misses anything, the Console and the Inspector say so
   with both measurements.
-- **\"N separate areas\"** in the Inspector means the level is in islands: a
-  character cannot walk between them. Usually that's a doorway narrower than
-  the character, and it's better to find out here than to find out from a unit
-  that won't move.
+- **\"N separate areas\"** in the Inspector means the level is in islands with
+  no way between them at all — not walking, and not by any link. Usually that's
+  a doorway narrower than the character, and it's better to find out here than
+  to find out from a unit that won't move. The Inspector also says how much of
+  the walkable ground the biggest island holds, which is the number that tells
+  you whether you have one awkward cupboard or a bake that has shattered.
+- **\"N ways across found\"** is the drops and jumps the bake worked out for
+  itself, from **drop height** and **jump distance** under *the character*. A
+  navmesh is a surface and stops at every ledge; those two numbers are what
+  turn the stopping points back into a level a character can cross. Drops are
+  drawn as amber arcs falling off the ledge, jumps as green arcs bowing over
+  the gap.
+  - **Jump distance is measured between the edges of the walkable surface**,
+    not across the hole in the floor — and the surface has already been pulled
+    back by the radius at each side. So anything under twice the radius can
+    never fire.
+  - Set either to 0 to switch that kind off entirely.
 - **Nothing baked at all?** The Inspector says how many objects the filter
   selects, before you bake. `0 objects` is a collidable problem, not a bake
   problem.
@@ -900,11 +913,12 @@ and lower it if searches ever show up in a frame graph.
         Step {
             title: "A ladder they can climb",
             body: "\
-Build a ledge your units can't walk up to — a raised platform, or a second
-floor. Bake again and you'll see two separate areas in the Inspector: the
-navmesh is a surface, and it has no way to say \"and you can climb here\".
+Build a platform higher than **drop height** — a second floor, or a balcony.
+Bake again and you'll see two separate areas in the Inspector: the bake finds
+the ways *down* that a person would take, and it will not invent a character
+that climbs. Nothing here can guess that there is a ladder.
 
-**+ Add ▸ ⇄ Nav Link** is how you say it. Put the node at the bottom of the
+**Add ▸ ⬚ Navigation ▸ ⇄ Nav Link** is how you say it. Put the node at the bottom of the
 climb and drag the **far end** to the top. In the Inspector:
 
 - **can be crossed both ways** — a ladder can. A jump down cannot, and making
@@ -943,7 +957,7 @@ climb and the movement cannot disagree, however long the ladder is.
         Step {
             title: "Mud they'd rather not cross",
             body: "\
-**+ Add ▸ ▨ Nav Area**, sized over a patch of your floor. Call the area `mud`
+**Add ▸ ⬚ Navigation ▸ ▨ Nav Area**, sized over a patch of your floor. Call the area `mud`
 and leave the cost at 4. Bake again.
 
 Now click across it. Routes go **round** the mud when there's a way round, and

@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use floptle_nav::{Heightfield, NavMesh, NavSettings, Tri, WalkableGrid};
+use floptle_nav::{autolink, Heightfield, NavMesh, NavSettings, Tri, WalkableGrid};
 
 /// A floor `size` metres square, with a grid of pillars in it so the bake has
 /// edges to erode and regions to trace rather than one clean rectangle.
@@ -30,7 +30,10 @@ fn level(size: f32) -> Vec<Tri> {
 fn main() {
     let settings = NavSettings::default();
     println!("cell {} m, radius {} m", settings.cell_size, settings.agent_radius);
-    println!("{:>7} {:>10} {:>10} {:>10} {:>10} {:>9} {:>8}", "size", "tris", "field", "walk", "mesh", "cells", "polys");
+    println!(
+        "{:>7} {:>10} {:>10} {:>10} {:>10} {:>10} {:>9} {:>8} {:>7}",
+        "size", "tris", "field", "walk", "mesh", "links", "cells", "polys", "made"
+    );
 
     for size in [32.0f32, 64.0, 128.0, 256.0] {
         let tris = level(size);
@@ -47,11 +50,22 @@ fn main() {
         let mesh = NavMesh::build(&grid, &settings).unwrap();
         let mesh_ms = t.elapsed().as_secs_f64() * 1000.0;
 
+        // The fourth stage: the drops and jumps the bake finds for itself. It
+        // walks every cell four ways, so it scales like the grid — and it is
+        // the one that is easiest to make accidentally quadratic, since every
+        // ledge probes outward.
+        let t = Instant::now();
+        let (found, report) = autolink::generate(&grid, &field, &settings, &[], 0);
+        let link_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let mesh = mesh.with_links(found);
+
         println!(
-            "{size:>6}m {:>10} {field_ms:>9.1}m {walk_ms:>9.1}m {mesh_ms:>9.1}m {:>9} {:>8}",
+            "{size:>6}m {:>10} {field_ms:>9.1}m {walk_ms:>9.1}m {mesh_ms:>9.1}m {link_ms:>9.1}m \
+             {:>9} {:>8} {:>7}",
             tris.len(),
             grid.cells.len(),
             mesh.polys.len(),
+            report.total(),
         );
 
         // And what a query costs once it is baked, which is the number that runs

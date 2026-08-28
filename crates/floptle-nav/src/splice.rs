@@ -272,6 +272,8 @@ impl NavMesh {
         }));
         self.index.take();
         self.link_index.take();
+        self.island_index.take();
+        self.summary_cache.take();
 
         // Carves are things standing on the level, and re-measuring the ground
         // under a crate does not move the crate. Any that no longer bite
@@ -298,6 +300,8 @@ impl NavMesh {
             off_links: Vec::new(),
             index: std::sync::OnceLock::new(),
             link_index: std::sync::OnceLock::new(),
+            island_index: std::sync::OnceLock::new(),
+            summary_cache: std::sync::OnceLock::new(),
             obstacles: Vec::new(),
             next_obstacle: 0,
             baked: None,

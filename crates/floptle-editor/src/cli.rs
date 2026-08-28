@@ -357,6 +357,49 @@ pub(crate) const VERBS: &[Verb] = &[
         legacy: &["--bake-gi"],
     },
     Verb {
+        name: "bake nav",
+        summary: "bake a scene's navmesh, and exit",
+        detail: "Works out where a character can walk and writes the `.fnav` beside the \
+                 scene — the same bake the Bake button runs, with nobody watching.\n\n\
+                 No graphics adapter needed: a bake is triangles and numbers, and the \
+                 triangles are read straight off disk. That makes it the one to reach for \
+                 on a build server, and the one to reach for when a level's geometry is \
+                 generated rather than placed — a level built by a script needs its navmesh \
+                 built by one too.\n\n\
+                 A scene with no Nav Mesh node has nothing to bake and says so.",
+        args: &[
+            Arg {
+                name: "PROJECT",
+                value: Value::Path,
+                required: false,
+                help: "the project directory (default: assets/)",
+            },
+            Arg {
+                name: "--scene",
+                value: Value::Text,
+                required: false,
+                help: "one scene, by path or by name",
+            },
+            Arg {
+                name: "--json",
+                value: Value::Flag,
+                required: false,
+                help: "answer as JSON",
+            },
+        ],
+        needs_gpu: false,
+        writes_project: true,
+        exits: &[(
+            1,
+            "there is no Nav Mesh node to bake, the named scene is not there, or nothing in \
+             it was walkable",
+        )],
+        output: "the bake's own summary — polygons, square metres, triangles, seconds, and \
+                 the drops and jumps it found; with --json an object with `ok`, `errors` \
+                 and `log`",
+        legacy: &[],
+    },
+    Verb {
         name: "exec",
         summary: "run a Lua script against a project, and exit",
         detail: "The editor's own extension API, headless: `scene.*` to read and write the \
@@ -1005,6 +1048,11 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 Outcome::Exit(crate::extract_clips_cmd(&project, &model))
             }
             Some(("gi", b)) => Outcome::Exit(crate::bake::run(
+                &path(b, "PROJECT").unwrap_or_else(|| PathBuf::from("assets")),
+                text(b, "scene").as_deref(),
+                b.get_flag("json"),
+            )),
+            Some(("nav", b)) => Outcome::Exit(crate::bake::run_nav(
                 &path(b, "PROJECT").unwrap_or_else(|| PathBuf::from("assets")),
                 text(b, "scene").as_deref(),
                 b.get_flag("json"),

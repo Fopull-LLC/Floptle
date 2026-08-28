@@ -110,7 +110,7 @@ pub(crate) const AGENT_KEYS: &[&str] = &[
 ];
 
 /// Keys inside the `filter = {...}` sub-table.
-pub(crate) const FILTER_KEYS: &[&str] = &["avoid", "cost"];
+pub(crate) const FILTER_KEYS: &[&str] = &["avoid", "cost", "canDrop", "canJump"];
 
 /// How an agent's movement reaches the node it belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -157,6 +157,29 @@ pub struct Bound {
     /// index is not.
     pub avoid: Vec<String>,
     pub costs: Vec<(String, f32)>,
+    /// Whether this character takes the drops and jumps the bake found.
+    ///
+    /// Both on unless a script says otherwise, because the bake only makes the
+    /// ones a person would take. A turret, a cart or a chained dog says no —
+    /// and says it here rather than by needing its own bake.
+    pub can_drop: bool,
+    pub can_jump: bool,
+}
+
+impl Default for Bound {
+    fn default() -> Self {
+        Bound {
+            entity: 0,
+            drive: Drive::default(),
+            target: None,
+            pos: [0.0; 3],
+            teleport: None,
+            avoid: Vec::new(),
+            costs: Vec::new(),
+            can_drop: true,
+            can_jump: true,
+        }
+    }
 }
 
 /// Every agent in the scene, and what each one is attached to.
@@ -191,6 +214,15 @@ impl AgentWorld {
                         f.set_cost(i, *c);
                     }
                 }
+            }
+            // Not conditional on a mesh being loaded: refusing to jump is a
+            // fact about the character, and it must not quietly turn itself
+            // back on in the frames before a bake arrives.
+            if !b.can_drop {
+                f = f.refusing(floptle_nav::LinkKind::Drop);
+            }
+            if !b.can_jump {
+                f = f.refusing(floptle_nav::LinkKind::Jump);
             }
             if let Some(a) = self.crowd.agent_mut(*id) {
                 a.params.filter = f;
@@ -365,6 +397,14 @@ impl UserData for LuaAgent {
         fields.add_field_method_get("linkProgress", |_, a| {
             Ok(a.with(|ag, _| ag.crossing().map(|r| r.progress as f64)).flatten())
         });
+        // What KIND of crossing it is: "placed" for a Nav Link node somebody
+        // put there, "drop" or "jump" for one the bake worked out. The name
+        // alone cannot answer this, and a climb and a fall are not the same
+        // animation — a level with six hundred generated drops in it needs one
+        // rule rather than six hundred names.
+        fields.add_field_method_get("linkKind", |_, a| {
+            Ok(a.with(|ag, _| ag.crossing().map(|r| r.kind.as_str())).flatten())
+        });
         fields.add_field_method_get("alive", |_, a| Ok(a.with(|_, _| true).unwrap_or(false)));
     }
 
@@ -526,6 +566,12 @@ fn read_filter(opts: &mlua::Table, b: &mut Bound, call: &str) -> mlua::Result<bo
     if let Ok(Some(list)) = f.get::<Option<mlua::Table>>("avoid") {
         b.avoid = list.sequence_values::<String>().flatten().collect();
     }
+    if let Ok(Some(v)) = f.get::<Option<bool>>("canDrop") {
+        b.can_drop = v;
+    }
+    if let Ok(Some(v)) = f.get::<Option<bool>>("canJump") {
+        b.can_jump = v;
+    }
     if let Ok(Some(costs)) = f.get::<Option<mlua::Table>>("cost") {
         b.costs = costs
             .pairs::<String, f64>()
@@ -606,15 +652,7 @@ pub(crate) fn install_nav_api(
         if let Some(mesh) = m.borrow().as_ref() {
             params.radius = mesh.settings.agent_radius.max(0.05);
         }
-        let mut bound = Bound {
-            entity,
-            drive: Drive::Auto,
-            target: None,
-            pos: [0.0; 3],
-            teleport: None,
-            avoid: Vec::new(),
-            costs: Vec::new(),
-        };
+        let mut bound = Bound { entity, drive: Drive::Auto, ..Bound::default() };
         if let Some(opts) = &opts {
             crate::opts::check_keys(opts, AGENT_KEYS, "nav.agent")?;
             read_params(opts, &mut params);
@@ -947,6 +985,9 @@ pub fn install_mesh_reads(lua: &Lua, t: &mlua::Table, mesh: NavShared) {
         t.set("maxSlope", s.max_slope)?;
         t.set("stepHeight", s.step_height)?;
         t.set("cellSize", s.cell_size)?;
+        t.set("maxDrop", s.max_drop)?;
+        t.set("maxJump", s.max_jump)?;
+        t.set("minRegionArea", s.min_region_area)?;
         t.set("areaCount", mesh.polys.len())?;
         t.set("area", mesh.area())?;
         Ok(Some(t))
@@ -1081,6 +1122,11 @@ pub fn install_mesh_reads(lua: &Lua, t: &mlua::Table, mesh: NavShared) {
             e.set("enabled", l.enabled)?;
             // One-based, matching a rectangle's `ground`.
             e.set("ground", l.area as u32 + 1)?;
+            // "placed", "drop" or "jump" — who made this one. A script playing
+            // an animation for a crossing needs it: a ladder somebody placed and
+            // a ledge the bake found are not the same move.
+            e.set("kind", l.kind.as_str())?;
+            e.set("generated", l.generated())?;
             out.set(i + 1, e)?;
         }
         Ok(Some(out))

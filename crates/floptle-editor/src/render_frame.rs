@@ -946,6 +946,14 @@ impl Editor {
         self.body_gizmos.clear();
         self.contact_gizmos.clear();
         self.terrain_wire_gizmo.clear();
+        // Emptied HERE, outside the `show_gizmos` guard, and not where they are
+        // filled. Inside it, turning gizmos off left the last frame's navmesh
+        // on screen — projected, so frozen in place while the camera moved
+        // around it — until something else happened to make the block run
+        // again. A drawing that outlives the switch that draws it is worse than
+        // no drawing: it is a picture of a level that is no longer there.
+        self.nav_gizmo.clear();
+        self.nav_surface.clear();
         self.mesh_wire_gizmo.clear();
         self.particle_gizmo.clear();
         // Script debug gizmos (`gizmo.*` from Lua), projected for the SURFACE camera and
@@ -1351,8 +1359,6 @@ impl Editor {
             // question somebody is deliberately asking.
             const NAV_FILL_ALPHA: f32 = 0.22;
             const NAV_STEP_ALPHA: f32 = 0.40;
-            self.nav_gizmo.clear();
-            self.nav_surface.clear();
             // While a game is running, the mesh it is walking on is the bake
             // with this session's `nav.obstacle` holes cut into it. Drawing the
             // bake instead would show a clear corridor beside a unit that just
@@ -1383,17 +1389,42 @@ impl Editor {
                     let overlay = self.nav_overlay.get_or_insert_with(|| {
                         std::rc::Rc::new(floptle_nav::Overlay::build(mesh, lift))
                     });
-                    // A distinct hue per region, spun by the golden ratio so
+                    // A distinct hue per ISLAND, spun by the golden ratio so
                     // neighbouring numbers never land on neighbouring colours.
-                    let hue = |region: u32| crate::viz::hue_rgb((region as f32 * 0.618_034).fract());
+                    //
+                    // Per island rather than per region, which is what this was.
+                    // The one question the picture exists to answer is *are
+                    // these two pieces of ground joined?*, and a region is the
+                    // bake's own grouping BEFORE any link is counted — so a
+                    // balcony and the floor its drop lands on came out two
+                    // colours while a character walks between them freely. A
+                    // level with five hundred ledges in it read as five hundred
+                    // colours and answered nothing.
+                    let hue = |island: u32| crate::viz::hue_rgb((island as f32 * 0.618_034).fract());
                     let world = |p: [f32; 3]| {
                         anchor + DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)
+                    };
+                    // A big level's overlay is hundreds of thousands of
+                    // edges, and all of them were being pushed and uploaded
+                    // every frame however little of the level was on screen —
+                    // which is why the picture got heavier the closer you
+                    // looked at it, exactly backwards. A segment with both ends
+                    // outside the viewport cannot cross it, so it is dropped
+                    // before it reaches the line buffer. The margin is generous
+                    // enough that a line grazing the edge still draws.
+                    const OFFSCREEN_MARGIN: f32 = 64.0;
+                    let onscreen = |p: floptle_core::math::Vec2| {
+                        p.x > -OFFSCREEN_MARGIN
+                            && p.y > -OFFSCREEN_MARGIN
+                            && p.x < gw + OFFSCREEN_MARGIN
+                            && p.y < gh + OFFSCREEN_MARGIN
                     };
                     let mut line = |a: [f32; 3], b: [f32; 3], col: [f32; 3]| {
                         if let (Some(pa), Some(pb)) = (
                             project(world(a), cam.world_position, view_proj, gw, gh),
                             project(world(b), cam.world_position, view_proj, gw, gh),
-                        ) {
+                        ) && (onscreen(pa) || onscreen(pb))
+                        {
                             self.nav_gizmo.push((pa, pb, col));
                         }
                     };
@@ -1401,18 +1432,18 @@ impl Editor {
                     if self.nav_cells {
                         // Every rectangle, faintly — the bake's working.
                         for e in &overlay.cells {
-                            let c = hue(e.region);
+                            let c = hue(e.island);
                             line(e.a, e.b, [c[0] * 0.45, c[1] * 0.45, c[2] * 0.45]);
                         }
                     }
                     // The edge of the walkable surface, bright.
                     for e in &overlay.boundary {
-                        line(e.a, e.b, hue(e.region));
+                        line(e.a, e.b, hue(e.island));
                     }
                     // Where two heights are genuinely joined — the picture of
                     // what `max slope` and `step height` just did.
                     for s in &overlay.steps {
-                        let c = hue(s.region);
+                        let c = hue(s.island);
                         for (a, b) in [
                             (s.low[0], s.high[0]),
                             (s.low[1], s.high[1]),
@@ -1431,13 +1462,35 @@ impl Editor {
                     };
                     let fill = |c: [f32; 3]| [c[0], c[1], c[2], NAV_FILL_ALPHA];
                     let strip = |c: [f32; 3]| [c[0], c[1], c[2], NAV_STEP_ALPHA];
+                    // The same cull the lines get, done conservatively: a
+                    // triangle is dropped only when all three corners fall off
+                    // the SAME side of the viewport, which is the one case where
+                    // no part of it can cross the screen. A corner the camera is
+                    // behind projects to nothing, and anything with one of those
+                    // is kept — a wrong answer here would delete floor from the
+                    // middle of the picture, which is far worse than uploading a
+                    // triangle nobody sees.
+                    let offscreen_tri = |a: [f32; 3], b: [f32; 3], c: [f32; 3]| {
+                        let ps = [world(a), world(b), world(c)]
+                            .map(|w| project(w, cam.world_position, view_proj, gw, gh));
+                        let Some(ps) = ps.iter().copied().collect::<Option<Vec<_>>>() else {
+                            return false;
+                        };
+                        ps.iter().all(|p| p.x < -OFFSCREEN_MARGIN)
+                            || ps.iter().all(|p| p.x > gw + OFFSCREEN_MARGIN)
+                            || ps.iter().all(|p| p.y < -OFFSCREEN_MARGIN)
+                            || ps.iter().all(|p| p.y > gh + OFFSCREEN_MARGIN)
+                    };
                     for t in &overlay.tris {
+                        if offscreen_tri(t.a, t.b, t.c) {
+                            continue;
+                        }
                         // Painted ground reads as painted: its own hue, and
                         // brighter, because a volume that did nothing and a
                         // volume that worked have to be tellable apart at a
                         // glance rather than by baking again and squinting.
                         let col = if t.area == floptle_nav::WALKABLE {
-                            fill(hue(t.region))
+                            fill(hue(t.island))
                         } else {
                             let c = crate::viz::hue_rgb(
                                 (0.12 + t.area as f32 * 0.17).fract(),
@@ -1453,28 +1506,53 @@ impl Editor {
                     // placed. An end that missed the floor is drawn in red, and
                     // that is the whole point: the node's own gizmo can only
                     // show where you put it, which is the thing that was wrong.
+                    //
+                    // Drawn as an ARC rather than a straight line, and the shape
+                    // of the arc is the kind of crossing: a jump bows up over
+                    // its gap, a drop leaves the ledge flat and falls away. A
+                    // level with a few hundred of these has to be readable at a
+                    // glance, and a field of identical straight segments is not
+                    // — a drop and a ladder looked the same, and a link that
+                    // went the wrong way looked like one that went the right
+                    // way.
                     for l in &overlay.links {
                         let col = if !l.resolved {
                             [1.0, 0.35, 0.3]
                         } else if !l.enabled {
                             [0.45, 0.45, 0.5]
                         } else {
-                            [0.45, 0.95, 1.0]
+                            match l.kind {
+                                floptle_nav::LinkKind::Drop => [1.0, 0.72, 0.25],
+                                floptle_nav::LinkKind::Jump => [0.45, 1.0, 0.55],
+                                floptle_nav::LinkKind::Placed => [0.45, 0.95, 1.0],
+                            }
                         };
-                        line(l.from, l.to, col);
+                        // The curve itself comes from `floptle-nav`, so the
+                        // Scene view and the render probe that checks it are
+                        // drawing the same shape rather than two of them.
+                        let steps = floptle_nav::overlay::ARC_STEPS;
+                        let mut prev = l.from;
+                        for k in 1..=steps {
+                            let next = l.point_at(k as f32 / steps as f32);
+                            line(prev, next, col);
+                            prev = next;
+                        }
                         // A tick at each end you can enter from, so a one-way
                         // drop and a two-way ladder are not the same picture.
                         let rise = mesh.settings.step_height.max(0.25);
-                        for (at, draw_it) in [(l.to, true), (l.from, l.bidirectional)] {
+                        for (end, draw_it) in [(l.to, true), (l.from, l.bidirectional)] {
                             if draw_it {
-                                line(at, [at[0], at[1] + rise, at[2]], col);
+                                line(end, [end[0], end[1] + rise, end[2]], col);
                             }
                         }
                     }
                     // A step's ribbon is filled too, and more strongly: it is
                     // the answer to a question somebody is actively asking.
                     for s in &overlay.steps {
-                        let col = strip(hue(s.region));
+                        if offscreen_tri(s.low[0], s.low[1], s.high[1]) {
+                            continue;
+                        }
+                        let col = strip(hue(s.island));
                         for p in [
                             s.low[0], s.low[1], s.high[1], s.low[0], s.high[1], s.high[0],
                         ] {

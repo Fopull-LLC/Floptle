@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 106
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 107
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 26
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -77,6 +77,10 @@ Whether the route it is walking actually reaches the order. False means it is he
 ### `agent.link`
 
 The name of the Nav Link being crossed right now, or nil the rest of the time. This is the hook for "play the climb animation": if agent.link == 'ladder' then ... end.
+
+### `agent.linkKind`
+
+What kind of crossing it is on: 'placed' for a Nav Link node somebody put there, or 'drop' / 'jump' for one the bake worked out from the shape of the floor. nil when it is not on one. This is the animation rule — a climb and a fall are not the same move, and a level with six hundred generated drops in it needs one rule rather than six hundred names.
 
 ### `agent.linkProgress`
 
@@ -2149,7 +2153,7 @@ How many numbers nav.links() uses per link (8).
 
 ### `nav.agent`
 
-nav.agent(node[, opts]) — make this node something that walks the navmesh, and get a handle to order about. THE call for "move a unit from A to B": agent:moveTo(point), and it finds its own way, goes round its neighbours, slows down at the end and stops. Options, all optional: speed, accel, radius, arrive (how close counts as there), slow (where it starts easing off), avoid (take other agents into account), priority (who gives way), separation, repath (seconds between route checks), giveUpAfter (seconds of no progress before it reports blocked), drive ('auto' | 'transform' | 'velocity' | 'none'), and filter = { avoid = {'water'}, cost = { mud = 0.5 } }. drive defaults to 'auto': a node with a physics body is steered through the body, one without has its transform moved. The whole crowd is stepped once a frame by the engine, after your update — you never call a step function. ON A PROCEDURAL OR STREAMED LEVEL THE NAVMESH ARRIVES AFTER start(): there is no geometry at all when start() runs, so nav.ready() is false, and asking for the agent once behind that check means it is never made and every routing call silently takes your fallback for the rest of the session. Ask every frame until you have one — a script that handles 'no navmesh yet' gracefully handles 'no navmesh ever' identically, which is why this fails quietly.
+nav.agent(node[, opts]) — make this node something that walks the navmesh, and get a handle to order about. THE call for "move a unit from A to B": agent:moveTo(point), and it finds its own way, goes round its neighbours, slows down at the end and stops. Options, all optional: speed, accel, radius, arrive (how close counts as there), slow (where it starts easing off), avoid (take other agents into account), priority (who gives way), separation, repath (seconds between route checks), giveUpAfter (seconds of no progress before it reports blocked), drive ('auto' | 'transform' | 'velocity' | 'none'), and filter = { avoid = {'water'}, cost = { mud = 0.5 }, canDrop = false, canJump = false }. canDrop and canJump refuse the drops and jumps the bake found for itself — a turret, a cart or anything that does not leave the floor says no here rather than needing its own bake. drive defaults to 'auto': a node with a physics body is steered through the body, one without has its transform moved. The whole crowd is stepped once a frame by the engine, after your update — you never call a step function. ON A PROCEDURAL OR STREAMED LEVEL THE NAVMESH ARRIVES AFTER start(): there is no geometry at all when start() runs, so nav.ready() is false, and asking for the agent once behind that check means it is never made and every routing call silently takes your fallback for the rest of the session. Ask every frame until you have one — a script that handles 'no navmesh yet' gracefully handles 'no navmesh ever' identically, which is why this fails quietly.
 
 ### `nav.agents`
 
@@ -2197,7 +2201,7 @@ nav.obstacles() — how many holes nav.obstacle has cut in the navmesh right now
 
 ### `nav.offLinks`
 
-nav.offLinks() — every Nav Link in the level as data: { id, name, from, to, bidirectional, cost, duration, enabled, ground }, world space. The ladders, jumps and doors somebody placed, as opposed to nav.links(), which is the thousands of portals the bake derived between neighbouring areas. Two things called links is inherited and worth knowing before reading either. Use nav.link(name, open) to change one; this only reads. nil with no bake.
+nav.offLinks() — every off-mesh link in the level as data: { id, name, from, to, bidirectional, cost, duration, enabled, ground, kind, generated }, world space. kind is 'placed' for a Nav Link node somebody put there, or 'drop' / 'jump' for one the bake worked out from the shape of the floor; generated is the same fact as a boolean. Distinct from nav.links(), which is the thousands of portals the bake derived between neighbouring areas — two things called links is inherited and worth knowing before reading either. Use nav.link(name, open) to change one; this only reads. nil with no bake.
 
 ### `nav.onMesh`
 
@@ -2233,7 +2237,7 @@ nav.regionOf(point[, tolerance]) — which walkable island a point is on, or nil
 
 ### `nav.settings`
 
-nav.settings() — the character the mesh was baked for: radius, height, maxSlope, stepHeight, cellSize, plus areaCount and area (square metres of walkable ground). A script moving a body along a path needs the radius the mesh was eroded by; guessing it is how a character ends up scraping the wall the erosion existed to avoid.
+nav.settings() — the character the mesh was baked for: radius, height, maxSlope, stepHeight, cellSize, maxDrop (the tallest ledge it steps off), maxJump (the widest gap it clears), minRegionArea (the smallest patch of ground kept), plus areaCount and area (square metres of walkable ground). A script moving a body along a path needs the radius the mesh was eroded by; guessing it is how a character ends up scraping the wall the erosion existed to avoid.
 
 ## water — depth, buoyancy & ice
 

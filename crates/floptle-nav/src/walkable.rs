@@ -49,6 +49,10 @@ pub struct WalkableGrid {
     /// column.
     pub origin: [f32; 3],
     pub cell_size: f32,
+    /// The lip this grid was connected with, carried through so anything asking
+    /// "could something on that cell step that way?" gets the same answer the
+    /// flood fill got. Link generation asks exactly that, several million times.
+    pub step_height: f32,
     /// Where each column's cells begin in `cells`, with one extra entry on the
     /// end so a column's range is always `start[c]..start[c + 1]`.
     ///
@@ -184,26 +188,56 @@ impl WalkableGrid {
         }
 
         // ---- group -------------------------------------------------------
-        let mut region = vec![u32::MAX; cells.len()];
-        let mut next = 0u32;
-        let mut queue: VecDeque<usize> = VecDeque::new();
-        for seed in 0..cells.len() {
-            if region[seed] != u32::MAX {
-                continue;
+        let (mut region, mut next) = flood(&cells, &start, w, d, step, &mut near);
+
+        // ---- prune ---------------------------------------------------------
+        // A real level bakes specks: the top of a crate, a window sill, the
+        // triangle of floor behind a pillar. Each one is an island nothing can
+        // reach, and left in they are the difference between "3 separate areas"
+        // — which names a door nobody fits through — and "494 separate areas",
+        // which names nothing and is scrolled past. They also give `nearest` a
+        // place to strand somebody who asked to be put on the navmesh.
+        //
+        // The largest survives whatever its size, so a bake of a small level is
+        // still a bake of that level rather than nothing at all.
+        let floor_cells = min_region_cells(settings, hf.cell_size);
+        if floor_cells > 1 && next > 1 {
+            let mut counts = vec![0usize; next as usize];
+            for r in &region {
+                counts[*r as usize] += 1;
             }
-            queue.clear();
-            queue.push_back(seed);
-            region[seed] = next;
-            while let Some(i) = queue.pop_front() {
-                neighbours_into(i, &cells, &start, w, d, step, &mut near);
-                for &j in &near {
-                    if region[j] == u32::MAX {
-                        region[j] = next;
-                        queue.push_back(j);
+            let biggest = counts
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, n)| **n)
+                .map(|(i, _)| i as u32)
+                .unwrap_or(0);
+            if counts.iter().any(|n| *n < floor_cells && *n > 0) {
+                let keep: Vec<bool> = region
+                    .iter()
+                    .map(|r| *r == biggest || counts[*r as usize] >= floor_cells)
+                    .collect();
+                if keep.iter().any(|k| !k) {
+                    let mut kept = Vec::with_capacity(cells.len());
+                    for (i, c) in cells.iter().enumerate() {
+                        if keep[i] {
+                            kept.push(*c);
+                        }
                     }
+                    cells = kept;
+                    if cells.is_empty() {
+                        return None;
+                    }
+                    start = column_starts(&cells, w, d);
+                    // Re-flooded rather than renumbered: dropping cells cannot
+                    // join two regions, but numbering has to stay dense and the
+                    // flood is the one thing that is certain to leave it that
+                    // way.
+                    let regrouped = flood(&cells, &start, w, d, step, &mut near);
+                    region = regrouped.0;
+                    next = regrouped.1;
                 }
             }
-            next += 1;
         }
 
         Some(WalkableGrid {
@@ -214,6 +248,7 @@ impl WalkableGrid {
             depth: d,
             origin: hf.origin,
             cell_size: hf.cell_size,
+            step_height: step,
             column_start: start,
         })
     }
@@ -230,6 +265,40 @@ impl WalkableGrid {
         self.column_start[c] as usize..self.column_start[c + 1] as usize
     }
 
+    /// Where a cell is in the world: the middle of its column, at its own
+    /// height.
+    pub fn world_of(&self, i: usize) -> [f32; 3] {
+        let c = self.cells[i];
+        [
+            self.origin[0] + (c.x as f32 + 0.5) * self.cell_size,
+            c.y,
+            self.origin[2] + (c.z as f32 + 0.5) * self.cell_size,
+        ]
+    }
+
+    /// The cells in the column `k` columns away from `i` in that direction, or
+    /// an empty range when that walks off the grid.
+    pub fn column_offset(&self, i: usize, dx: i32, dz: i32, k: i32) -> std::ops::Range<usize> {
+        let c = self.cells[i];
+        let (nx, nz) = (c.x as i32 + dx * k, c.z as i32 + dz * k);
+        if nx < 0 || nz < 0 {
+            return 0..0;
+        }
+        self.column_range(nx as usize, nz as usize)
+    }
+
+    /// Whether something standing on cell `i` can simply walk to the next
+    /// column that way.
+    ///
+    /// **The definition of a ledge is that this is false**, which is why it is
+    /// public: link generation looks for exactly the places the flood fill
+    /// stopped, and asking the question a second way is how the two drift.
+    pub fn steps_to(&self, i: usize, dx: i32, dz: i32) -> bool {
+        let y = self.cells[i].y;
+        self.column_offset(i, dx, dz, 1)
+            .any(|j| (self.cells[j].y - y).abs() <= self.step_height)
+    }
+
     /// How many cells are in each region, largest first. The shape of a bake in
     /// one line: one big number is a level you can cross, a scatter of small
     /// ones is a level cut into islands.
@@ -241,6 +310,54 @@ impl WalkableGrid {
         counts.sort_unstable_by(|a, b| b.cmp(a));
         counts
     }
+}
+
+/// Group what is left into regions: a breadth-first sweep per unvisited seed.
+/// Returns the per-cell region and how many there are.
+fn flood(
+    cells: &[Cell],
+    start: &[u32],
+    width: usize,
+    depth: usize,
+    step: f32,
+    near: &mut Vec<usize>,
+) -> (Vec<u32>, u32) {
+    let mut region = vec![u32::MAX; cells.len()];
+    let mut next = 0u32;
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    for seed in 0..cells.len() {
+        if region[seed] != u32::MAX {
+            continue;
+        }
+        queue.clear();
+        queue.push_back(seed);
+        region[seed] = next;
+        while let Some(i) = queue.pop_front() {
+            neighbours_into(i, cells, start, width, depth, step, near);
+            for &j in near.iter() {
+                if region[j] == u32::MAX {
+                    region[j] = next;
+                    queue.push_back(j);
+                }
+            }
+        }
+        next += 1;
+    }
+    (region, next)
+}
+
+/// [`NavSettings::min_region_area`] in cells rather than square metres — the
+/// unit the grid actually counts in.
+///
+/// Rounded **down**, and never below one: rounding up would let a coarse cell
+/// size quietly raise the threshold above what the designer asked for, which is
+/// the same trap `cell_size_advice` exists to name.
+fn min_region_cells(settings: &NavSettings, cell_size: f32) -> usize {
+    if settings.min_region_area <= 0.0 || cell_size <= 0.0 {
+        return 0;
+    }
+    let per_cell = cell_size * cell_size;
+    ((settings.min_region_area / per_cell).floor() as usize).max(1)
 }
 
 /// Where each column's cells begin, as a running total. Relies on `cells` being
@@ -554,6 +671,50 @@ mod tests {
         low_wall.extend(wall([3.0, 0.0, 0.0], [3.3, 0.6, 6.0]));
         let g = grid(&low_wall, &s).unwrap();
         assert_ne!(floor_region(&g, 1.5, 3.0), floor_region(&g, 5.0, 3.0), "a 60 cm wall is not");
+    }
+
+    /// **The report this exists for.** A level bakes specks — the top of a
+    /// crate, a window sill — and 494 of them is a number that names nothing.
+    #[test]
+    fn a_speck_of_floor_is_thrown_away_and_a_room_is_not() {
+        let s = NavSettings {
+            cell_size: 0.25,
+            agent_radius: 0.0,
+            agent_height: 1.0,
+            min_region_area: 1.0,
+            ..Default::default()
+        };
+        let mut tris = slab(0.0, 0.0, 6.0, 6.0, 0.0);
+        tris.extend(slab(20.0, 0.0, 0.5, 0.5, 3.0)); // a 0.25 m² speck, out of reach
+        let g = grid(&tris, &s).unwrap();
+        assert_eq!(g.region_count, 1, "the speck is smaller than a square metre");
+        assert!(floor_region(&g, 3.0, 3.0).is_some(), "and the room is untouched");
+
+        // Ask for nothing and nothing is thrown away — the switch has to work
+        // in both directions or it is not a switch.
+        let keep = NavSettings { min_region_area: 0.0, ..s };
+        assert_eq!(grid(&tris, &keep).unwrap().region_count, 2);
+    }
+
+    /// The largest patch survives however small it is, or a bake of a small
+    /// level comes back empty and says nothing about why.
+    #[test]
+    fn the_biggest_patch_is_never_thrown_away() {
+        let s = NavSettings {
+            cell_size: 0.25,
+            agent_radius: 0.0,
+            agent_height: 1.0,
+            min_region_area: 50.0,
+            ..Default::default()
+        };
+        // Two patches, BOTH under the floor — which is the case that can leave
+        // a level with no navmesh at all if the rule is applied literally.
+        let mut tris = slab(0.0, 0.0, 2.0, 2.0, 0.0); // 4 m²
+        tris.extend(slab(20.0, 0.0, 1.0, 1.0, 0.0)); // 1 m², and further from it
+        let g = grid(&tris, &s).expect("a bake of a small level is still a bake of it");
+        assert_eq!(g.region_count, 1, "one survivor, not none and not both");
+        assert!(floor_region(&g, 1.0, 1.0).is_some(), "and it is the larger one");
+        assert!(floor_region(&g, 20.5, 0.5).is_none());
     }
 
     #[test]
