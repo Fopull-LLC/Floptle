@@ -1,5 +1,17 @@
 ## Just shipped
 
+**v0.81.0 "Still There"** — **your bake is there when you open the project.**
+Bake a Nav Mesh, save, reopen, and it was gone — never loaded, though the file
+had been beside the scene the whole time, and nothing said so. Light Probes had
+it too. Launching the editor on a project now loads both, as does a scene a
+script switches to mid-game. And a query hit says what it is made of:
+`hit.material` is the material slot a `raycast`, `spherecast`, `capsulecast` or
+`overlapSphere` actually landed on, so a footstep can tell one building's
+floorboards from its grass — `raycast` names the node it hit for level geometry
+now too, which it never did. `floptle vfx --effect Sparks` renders a particle
+effect to PNGs across its own timeline with no window, tiled into one contact
+sheet through a camera that does not move between frames.
+
 **v0.80.0 "Mind The Gap"** — **characters stop treating every ledge as a
 wall.** The navmesh works out for itself where they can drop down and jump
 across, from the shape of your level: two new numbers on the Nav Mesh node —
