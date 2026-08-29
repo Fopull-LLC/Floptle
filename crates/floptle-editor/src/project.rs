@@ -587,6 +587,47 @@ impl Editor {
         self.load_nav();
     }
 
+    /// Read `project.ron`, and **say so when it will not parse**.
+    ///
+    /// `floptle_scene::load_project` answers a default config for a file it
+    /// could not read, which is right — a project with a broken settings file
+    /// should still open — and silent, which is not. One misplaced bracket and
+    /// the whole project comes up with no title, the wrong frame pacing, none of
+    /// its layers and none of its mixer, looking exactly like a project that was
+    /// never configured. Nothing anywhere says the file was even read.
+    ///
+    /// The distinction is already available (`try_load_project` separates
+    /// absent from unparseable); this is the call site using it. Absent stays
+    /// quiet — a project without a `project.ron` is a project with defaults, and
+    /// that is a real state, not a fault.
+    pub(crate) fn read_project_config(&mut self) -> floptle_scene::ProjectConfigDoc {
+        let path = self.project_cfg_path();
+        match floptle_scene::try_load_project(&path) {
+            Ok(Some(cfg)) => cfg,
+            Ok(None) => Default::default(),
+            Err(e) => {
+                self.console.push(
+                    floptle_script::LogLevel::Error,
+                    format!(
+                        "{} could not be read ({e}) — the project has opened with DEFAULT \
+                         settings, so its title, frame pacing, layers and mixer are not the \
+                         ones in that file. Fix the file and reopen; nothing has overwritten \
+                         it.",
+                        path.display()
+                    ),
+                    None,
+                );
+                self.toast = Some((
+                    "⚠  project.ron did not parse — opened with default settings, see the \
+                     Console"
+                        .into(),
+                    8.0,
+                ));
+                Default::default()
+            }
+        }
+    }
+
     pub(crate) fn project_cfg_path(&self) -> PathBuf {
         self.project_root.join("project.ron")
     }
@@ -1274,7 +1315,7 @@ impl Editor {
         // The reasonable conclusion is that baking does not stick, and the
         // reasonable response is to bake again, every single session.
         self.adopt_scene_bakes();
-        self.project = floptle_scene::load_project(&self.project_cfg_path());
+        self.project = self.read_project_config();
         // The action map belongs to the project, so it reloads with it —
         // otherwise the new project's scripts would resolve against the old
         // project's actions.

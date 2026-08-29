@@ -779,6 +779,12 @@ impl Editor {
             // Persistent `save.*` data flushes on Stop — the one guarantee scripts
             // rely on (periodic flushes during Play only bound crash loss).
             self.script_host.flush_save();
+            // …and the project settings go back to what the project says, so a
+            // video setting a script changed for the run cannot end up in
+            // `project.ron`.
+            if let Some(p) = self.play_project.take() {
+                self.project = p;
+            }
             // Map geometry lives outside the scene doc too — and unlike terrain
             // it has no in-Play authoring path, so a restore here is purely a
             // guard against a script (or a stray Map-tab click) mutating the
@@ -822,6 +828,15 @@ impl Editor {
                 }
             }
             self.play_snapshot = Some(self.snapshot());
+            // **The project settings are part of what Play may change and Stop
+            // must put back.** `app.setVsync` and the retro knobs write the live
+            // `ProjectConfigDoc`, which is also what `save_project` writes to
+            // `project.ron` — the file that ships to everybody. Without this, a
+            // player-facing setting a script changed during a playtest would be
+            // written into the project the next time anybody touched Project
+            // Settings (`floptle/0175`). Same rule the mixer already follows:
+            // changes affect the running session and revert on Stop.
+            self.play_project = Some(self.project.clone());
             self.play_scene_name = Some((self.scene_name.clone(), self.scene_rel.clone()));
             // Snapshot the live terrain fields (id-keyed) + texture palette so
             // Stop restores them exactly — unsaved sculpts survive Play, and a

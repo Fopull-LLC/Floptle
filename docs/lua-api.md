@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 107
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 119
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 26
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -141,6 +141,54 @@ agent:stop() — cancel the order and stand still. Anything mid-crossing finishe
 ### `agent:teleport`
 
 agent:teleport(point) — put it AND its node somewhere without walking there, and forget what it was doing. For spawns, respawns and cutscenes. (With drive = 'none' the engine leaves the node alone, so move it yourself.)
+
+### `app`
+
+The settings a game offers the person playing it, and the one thing every main menu needs: quit. app.quit(), app.title(), app.version(), and the video settings — app.vsync/setVsync, app.retro/setRetro, app.retroHeight/setRetroHeight, app.retroIntegerScale/setRetroIntegerScale. A setting you change here is for THIS SESSION: it lives in project.ron, the file that ships to every player, so Stop puts it back — persist the player's choice yourself with save.*, the same rule access.* follows. Window resolution and fullscreen are NOT here yet; that is one question (windowing) waiting to be answered properly. See docs/scripting.md §30.
+
+### `app.quit`
+
+app.quit() — end the game. What that means depends on where it is running, and they are genuinely different things: an EXPORTED BUILD closes (your save.* data is flushed first, since somebody quitting from a settings menu expects the setting they just changed to have been kept); the EDITOR stops Play and says so in the Console, deliberately NOT a process exit — an editor that closed because a game under test called quit would take your unsaved work with it; `floptle run` ends the run where it stands and reports that it stopped early.
+
+### `app.retro`
+
+app.retro() → whether the retro presentation is on: the game composites at a small internal resolution and upscales, which is what gives it chunky pixels.
+
+### `app.retroHeight`
+
+app.retroHeight() → the internal height the game composites at, in pixels. In a pixel-art game this IS the resolution setting a player means — the window size is a separate question the engine does not answer yet.
+
+### `app.retroIntegerScale`
+
+app.retroIntegerScale() → whether the retro composite is upscaled by a WHOLE number and letterboxed rather than stretched to fill.
+
+### `app.setRetro`
+
+app.setRetro(false) — turn the retro presentation off (or on), so the game composites at the window's own resolution instead. For this session only; persist it with save.*.
+
+### `app.setRetroHeight`
+
+app.setRetroHeight(360) — set the internal height the game composites at, 32–4320 pixels. Outside that range RAISES rather than clamping, the way access.setTextScale does: a settings slider hands over a number it already bounded. For this session only; persist it with save.*.
+
+### `app.setRetroIntegerScale`
+
+app.setRetroIntegerScale(true) — upscale the retro composite by a whole number and centre it, letterboxing the remainder. A fractional upscale puts some source rows on two screen pixels and some on three, which on pixel art with a small font is the difference between crisp and mush. For this session only; persist it with save.*.
+
+### `app.setVsync`
+
+app.setVsync("Adaptive") — set the frame pacing. "On" is classic vsync; "Adaptive" renders freely and lets the display take the newest frame; "Off" presents the instant a frame is ready, tearing and all. A name it does not recognise RAISES and lists the three — a control that silently kept the old value is a control that appears to work. For this session only: Stop puts the project back, so persist the choice with save.*.
+
+### `app.title`
+
+app.title() — the game's title, for a menu to put at the top of itself. The export manifest's title in a build, the project's otherwise, and the project folder's name when neither is set — the same chain the window title uses, so a menu and the title bar never disagree.
+
+### `app.version`
+
+app.version() — the engine version this build was made with, e.g. "0.81.0". For an about box, and for a bug report to quote.
+
+### `app.vsync`
+
+app.vsync() → the current frame pacing as a name: "On", "Adaptive" or "Off" — the same names project.ron uses, so a Video tab can show what is set and save it straight back.
 
 ### `createNode`
 

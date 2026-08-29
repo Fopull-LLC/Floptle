@@ -1774,6 +1774,14 @@ impl ScriptHost {
         if let Err(e) = crate::access_api::install(&lua, &access, &caption_queue) {
             eprintln!("[lua] failed to install the access API: {e}");
         }
+        // `app.*` — the settings a game offers a player, and the one thing every
+        // main menu needs: quit (`floptle/0175`).
+        let app_info: crate::app_api::SharedAppInfo = Rc::new(RefCell::new(Default::default()));
+        let app_requests: crate::app_api::SharedAppRequests =
+            Rc::new(RefCell::new(Default::default()));
+        if let Err(e) = crate::app_api::install(&lua, &app_info, &app_requests) {
+            eprintln!("[lua] failed to install the app API: {e}");
+        }
         // The `audio` API (one-shots, sound handles, mixer tracks) + `node:sound()`.
         // Must come after the handle API: it extends the node methods table.
         let audio_bridges = crate::audio_api::AudioBridges {
@@ -2025,6 +2033,8 @@ impl ScriptHost {
             reserved_keys,
             profile,
             access,
+            app_info,
+            app_requests,
             caption_queue,
             param_writes: RefCell::new(Vec::new()),
             scene_request,
@@ -2757,6 +2767,21 @@ impl ScriptHost {
     /// Drain a pending `space.warp(m)` request (the editor applies + clamps it).
     pub fn take_warp_request(&self) -> Option<f64> {
         self.warp_request.borrow_mut().take()
+    }
+
+    /// Tell `app.*` what the game currently is — its title, its version and the
+    /// video settings a player can change (`floptle/0175`).
+    ///
+    /// Pushed by the driver rather than reached for, because these live in the
+    /// project config, which the script layer has no business knowing about.
+    pub fn set_app_info(&self, info: crate::app_api::AppInfo) {
+        *self.app_info.borrow_mut() = info;
+    }
+
+    /// Drain what `app.*` asked for this frame — a quit, a video setting, or
+    /// nothing, which is the usual answer.
+    pub fn take_app_requests(&self) -> crate::app_api::AppRequests {
+        std::mem::take(&mut *self.app_requests.borrow_mut())
     }
 
     /// Drain a pending `physics.pause(on)` request (the editor gates its step).
@@ -4343,11 +4368,23 @@ impl ScriptHost {
                     // is the whole question and a game author says `planet_walker`,
                     // not entity 4173.
                     let span = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
-                    self.tick_instance(
+                    let called = self.tick_instance(
                         *e, &inst.kind, &inst.params, &inst.refs, &inst.strs, &mut tr, dt, time,
                         pass,
                     );
-                    if let Some(span) = span {
+                    // **Only a script that actually ran gets charged for the
+                    // time.** This is wall clock, so whatever the machine did
+                    // during the span lands on whoever was inside it — and a
+                    // script with no hook for this pass is inside a span that
+                    // does nothing at all. A game profiling itself found 12–21 ms
+                    // "peaks" attributed to a file with no `update` in it, and
+                    // went looking for the problem in the wrong place. A stall
+                    // can still land on a script that IS running; that is
+                    // inherent to sampling a wall clock, and `docs/scripting.md`
+                    // says so rather than implying otherwise.
+                    if let Some(span) = span
+                        && called
+                    {
                         self.profile.borrow_mut().record_script(&inst.kind, span.ms());
                     }
                     ran = true;
@@ -5341,20 +5378,20 @@ impl ScriptHost {
         dt: f32,
         time: f32,
         pass: Pass,
-    ) {
+    ) -> bool {
         let key = (e.index(), name.to_string());
         let (first, env, mut node_slot) = {
-            let Some(inst) = self.instances.get_mut(&key) else { return };
+            let Some(inst) = self.instances.get_mut(&key) else { return false };
             // `fixedUpdate`/`lateUpdate` never run before `start` — a brand-new
             // instance waits for the next frame pass to start it first.
             if pass != Pass::Frame && !inst.started {
-                return;
+                return false;
             }
             let first = !inst.started;
             if pass == Pass::Frame {
                 inst.started = true;
             }
-            let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return };
+            let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return false };
             // Taken out and put back, because `tick` borrows `self` while it runs.
             (first, env, inst.node.take())
         };
@@ -5405,6 +5442,7 @@ impl ScriptHost {
         };
         // Mark the current instance while its hooks run (`net.on` ownership).
         *self.net.current.borrow_mut() = Some((eid, name.to_string()));
+        let mut called = false;
         let result = self.tick(
             &env,
             params,
@@ -5418,6 +5456,7 @@ impl ScriptHost {
             body,
             pass,
             &mut node_slot,
+            &mut called,
         );
         *self.net.current.borrow_mut() = None;
         if let Some(inst) = self.instances.get_mut(&key) {
@@ -5427,6 +5466,7 @@ impl ScriptHost {
             Ok(()) => self.collect_param_writes(&env, name, eid, params, strs),
             Err(err) => self.fail(name, format!("{name}: {err}")),
         }
+        called
     }
 
     /// Persist `params.X = value` writes the hook just made: tunables are
@@ -5547,6 +5587,16 @@ impl ScriptHost {
         body: Option<BodyState>,
         pass: Pass,
         slot: &mut Option<(RegistryKey, crate::env::NodeStamp)>,
+        // **Set to true only if a hook was actually CALLED.**
+        //
+        // Separate from the `ran` flag below, which gates the node read-back and
+        // must keep its existing meaning. This one exists for the profiler: a
+        // script with no `update` at all was still timed, so whatever the
+        // machine did during its (empty) span — a garbage collection, the OS
+        // taking the core away — was reported as that script's cost. A game
+        // measured 12–21 ms "peaks" on a file with no `update` in it and went
+        // looking for the problem there.
+        called: &mut bool,
     ) -> mlua::Result<()> {
         env.set("params", params_table(&self.lua, env, params, refs, strs)?)?;
         env.set("time", time as f64)?;
@@ -5609,6 +5659,7 @@ impl ScriptHost {
                     let Some(f) = lifecycle_fn(env, &["fixedUpdate", "onFixedUpdate"])? else {
                         return Ok(false); // no hook: skip the body read-back (nothing ran)
                     };
+                    *called = true;
                     f.call::<()>((node.clone(), dt as f64))?;
                 }
                 Pass::Late => {
@@ -5616,6 +5667,7 @@ impl ScriptHost {
                     let Some(f) = lifecycle_fn(env, &["lateUpdate", "onLateUpdate"])? else {
                         return Ok(false);
                     };
+                    *called = true;
                     f.call::<()>((node.clone(), dt as f64))?;
                 }
                 Pass::Frame => {
@@ -5623,9 +5675,11 @@ impl ScriptHost {
                     // still work for older scripts.
                     if first
                         && let Some(f) = lifecycle_fn(env, &["start", "on_start"])? {
+                            *called = true;
                             f.call::<()>(node.clone())?;
                         }
                     if let Some(f) = lifecycle_fn(env, &["update", "on_update"])? {
+                        *called = true;
                         f.call::<()>((node.clone(), dt as f64))?;
                     }
                 }

@@ -271,14 +271,23 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     // vec3() = zero; vec3(s) = splat; vec3(x, y, z); vec3(other) = copy.
     lua.globals().set(
         "vec3",
+        // **The three-number form does not collect its arguments.** This is the
+        // most-called function in the whole script API — a game builds thousands
+        // of vectors a frame — and `MultiValue::into_iter().collect::<Vec<_>>()`
+        // is a heap allocation on every one of them, on top of the Lua-side
+        // object. It does not show up in `collectgarbage("count")`, which is why
+        // it survived being profiled: it is the host's malloc, not the script's
+        // garbage.
         lua.create_function(|_, args: mlua::MultiValue| {
-            let a: Vec<Value> = args.into_iter().collect();
-            match a.len() {
+            let n = args.len();
+            let mut it = args.into_iter();
+            match n {
                 0 => Ok(LuaVec3(glam::DVec3::ZERO)),
                 1 => {
-                    if let Some(n) = num_of(&a[0]) {
+                    let a = it.next().unwrap_or(Value::Nil);
+                    if let Some(n) = num_of(&a) {
                         Ok(LuaVec3(glam::DVec3::splat(n)))
-                    } else if let Some(v) = vec3_of(&a[0]) {
+                    } else if let Some(v) = vec3_of(&a) {
                         Ok(LuaVec3(v))
                     } else {
                         Err(mlua::Error::RuntimeError(
@@ -286,10 +295,19 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         ))
                     }
                 }
-                3 => match (num_of(&a[0]), num_of(&a[1]), num_of(&a[2])) {
-                    (Some(x), Some(y), Some(z)) => Ok(LuaVec3(glam::DVec3::new(x, y, z))),
-                    _ => Err(mlua::Error::RuntimeError("vec3(x, y, z) takes numbers".into())),
-                },
+                3 => {
+                    let (x, y, z) = (
+                        it.next().as_ref().and_then(num_of),
+                        it.next().as_ref().and_then(num_of),
+                        it.next().as_ref().and_then(num_of),
+                    );
+                    match (x, y, z) {
+                        (Some(x), Some(y), Some(z)) => Ok(LuaVec3(glam::DVec3::new(x, y, z))),
+                        _ => Err(mlua::Error::RuntimeError(
+                            "vec3(x, y, z) takes numbers".into(),
+                        )),
+                    }
+                }
                 _ => Err(mlua::Error::RuntimeError(
                     "vec3 takes 0, 1 (splat/copy) or 3 (x, y, z) arguments".into(),
                 )),

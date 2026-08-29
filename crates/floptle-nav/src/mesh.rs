@@ -815,54 +815,86 @@ impl NavMesh {
             }
             Some((lo, hi))
         };
-        let mut parts: Vec<(&Poly, [f32; 2], [f32; 2])> = Vec::new();
-        match window {
-            // A windowed ask ("wander somewhere near me") is the per-frame one,
-            // and it must not walk the whole level to answer — the index hands
-            // back the neighbourhood (sorted + deduped, so the pick stays
-            // deterministic whatever bucket order it arrived in).
-            Some((wlo, whi)) => {
-                let mut idx: Vec<usize> = Vec::new();
-                self.index().for_each_in(wlo, whi, |i| idx.push(i));
-                idx.sort_unstable();
-                idx.dedup();
-                for i in idx {
-                    let p = &self.polys[i];
-                    if let Some((lo, hi)) = clip(p) {
-                        parts.push((p, lo, hi));
+        // **Scratch that lives between calls, and one pass instead of three.**
+        //
+        // This is the per-frame query — "wander somewhere near me", a dozen
+        // agents at a time — and it used to allocate three vectors on every one
+        // of them (the index list, the clipped parts, their areas) and walk the
+        // neighbourhood three times over. The cost went up with the window: a
+        // 37 m radius measured 0.28 ms a draw, so a dozen draws was 4 ms in one
+        // frame, and a game had to cache around it.
+        //
+        // The sort and the dedup stay. A polygon spanning several buckets is
+        // handed back once per bucket, and the pick walks the list accumulating
+        // area — so the ORDER decides which polygon a given `u` lands on. Left
+        // in bucket order, the same seed would pick different points depending
+        // on the grid, and this engine rolls back and re-simulates. Determinism
+        // is the whole reason the caller supplies `u` and `v` in the first
+        // place; it would be a strange thing to buy frame time with.
+        /// One eligible polygon, clipped to the window: which one, the box left
+        /// of it, and that box's area.
+        type Part = (u32, [f32; 2], [f32; 2], f32);
+        thread_local! {
+            static IDX: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+            static PARTS: std::cell::RefCell<Vec<Part>> =
+                const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let picked = PARTS.with(|parts| {
+            let mut parts = parts.borrow_mut();
+            parts.clear();
+            // One pass: clip, measure and total, together.
+            let mut total = 0.0f32;
+            let mut take = |i: usize| {
+                let p = &self.polys[i];
+                if let Some((lo, hi)) = clip(p) {
+                    let area = ((hi[0] - lo[0]) * (hi[1] - lo[1])).max(1e-6);
+                    total += area;
+                    parts.push((i as u32, lo, hi, area));
+                }
+            };
+            match window {
+                // A windowed ask must not walk the whole level to answer, so the
+                // index hands back just the neighbourhood.
+                Some((wlo, whi)) => IDX.with(|idx| {
+                    let mut idx = idx.borrow_mut();
+                    idx.clear();
+                    self.index().for_each_in(wlo, whi, |i| idx.push(i as u32));
+                    idx.sort_unstable();
+                    idx.dedup();
+                    for i in idx.iter() {
+                        take(*i as usize);
+                    }
+                }),
+                None => {
+                    for i in 0..self.polys.len() {
+                        take(i);
                     }
                 }
             }
-            None => {
-                for p in &self.polys {
-                    if let Some((lo, hi)) = clip(p) {
-                        parts.push((p, lo, hi));
-                    }
+            if parts.is_empty() {
+                return None;
+            }
+            // Weighted by the area actually available, not by the whole
+            // polygon's: a room the window clips a corner off must not win as if
+            // all of it counted.
+            let mut want = u * total;
+            let mut pick = parts.len() - 1;
+            for (i, (_, _, _, a)) in parts.iter().enumerate() {
+                if want <= *a {
+                    pick = i;
+                    break;
                 }
+                want -= a;
             }
-        }
-        if parts.is_empty() {
-            return None;
-        }
-        // Weighted by the area actually available, not by the whole polygon's:
-        // a room the window clips a corner off must not win as if all of it
-        // counted.
-        let areas: Vec<f32> =
-            parts.iter().map(|(_, lo, hi)| ((hi[0] - lo[0]) * (hi[1] - lo[1])).max(1e-6)).collect();
-        let total: f32 = areas.iter().sum();
-        let mut want = u * total;
-        let mut pick = parts.len() - 1;
-        for (i, a) in areas.iter().enumerate() {
-            if want <= *a {
-                pick = i;
-                break;
-            }
-            want -= a;
-        }
-        let (p, lo, hi) = parts[pick];
-        // `v` places the point in one axis; the leftover of `u` places it in the
-        // other, so one polygon does not always get the same line across it.
-        let frac = (want / areas[pick]).clamp(0.0, 1.0);
+            let (pi, lo, hi, area) = parts[pick];
+            // `v` places the point in one axis; the leftover of `u` places it in
+            // the other, so one polygon does not always get the same line across
+            // it.
+            let frac = (want / area).clamp(0.0, 1.0);
+            Some((pi as usize, lo, hi, frac))
+        });
+        let (pi, lo, hi, frac) = picked?;
+        let p = &self.polys[pi];
         Some([lo[0] + (hi[0] - lo[0]) * frac, p.centre[1], lo[1] + (hi[1] - lo[1]) * v])
     }
 }

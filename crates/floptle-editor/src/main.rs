@@ -37,6 +37,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 // subsystems live in their own modules — main.rs only wires them in.
 mod agents_guide;
 mod anim;
+mod app_settings;
 mod model_textures;
 mod bake;
 mod doctor;
@@ -2510,6 +2511,18 @@ struct Editor {
     player_mode: bool,
     /// The window title in player mode (the export manifest's `title`).
     game_title: String,
+    /// The retro target's dimensions as last applied, so any change to them —
+    /// Project Settings, a window resize, or a script's `app.setRetroHeight` —
+    /// is noticed by one comparison rather than by whichever watcher happened to
+    /// be looking (`floptle/0175`).
+    retro_applied: (u32, u32),
+    /// The project settings as they were when Play started, restored on Stop.
+    ///
+    /// `app.setVsync` and the retro knobs write the live `ProjectConfigDoc`, and
+    /// that same doc is what `save_project` writes to `project.ron` — so a
+    /// player-facing setting changed during a playtest would otherwise be
+    /// written into the file that ships (`floptle/0175`). `None` outside Play.
+    play_project: Option<floptle_scene::ProjectConfigDoc>,
     /// File ⏵ Export Game… dialog state: visibility, target folder, the game
     /// title to stamp, the build-target index (`EXPORT_TARGETS`), and the
     /// last result line.
@@ -3463,7 +3476,7 @@ impl ApplicationHandler for Editor {
         if !self.player_mode {
             self.check_autosave(); // offer crash recovery if an autosave is newer
         }
-        self.project = floptle_scene::load_project(&self.project_cfg_path());
+        self.project = self.read_project_config();
         // The action map, on the SAME boot path an exported game takes — the
         // File ⏵ Open route loads it too, but a launched build never goes
         // through that, so without this every shipped game would start with no
@@ -3484,6 +3497,9 @@ impl ApplicationHandler for Editor {
                 gpu.config.width as f32 / gpu.config.height.max(1) as f32,
             );
             r.resize_to(&gpu, w, h);
+            // Recorded, so the frame loop's own check starts in agreement rather
+            // than resizing the target again on the first frame.
+            self.retro_applied = (w, h);
         }
         self.post = Some(floptle_render::PostStack::new(&gpu, gpu.config.width, gpu.config.height));
         self.outline = Some(Outline::new(&gpu));
@@ -3591,6 +3607,9 @@ impl ApplicationHandler for Editor {
                             .project
                             .retro_size(size.width as f32 / size.height.max(1) as f32);
                         retro.resize_to(gpu, rw, rh);
+                        // Recorded, so the frame loop's own check agrees with
+                        // what the target now is rather than resizing it again.
+                        self.retro_applied = (rw, rh);
                     }
                     if let Some(outline) = self.outline.as_mut() {
                         outline.resize(gpu, size.width, size.height);

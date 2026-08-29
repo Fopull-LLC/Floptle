@@ -2931,8 +2931,6 @@ impl Editor {
             },
             &self.project_root,
         );
-        let old_retro_h = self.project.retro_height;
-        let old_retro_w = self.project.retro_width;
         let ppp = ctx.pixels_per_point();
         let dock_state = self.dock_state.get_or_insert_with(default_dock);
         // Bone names per rigged Mesh entity (name + parent index) — for the hierarchy's
@@ -5682,13 +5680,19 @@ impl Editor {
             // the same bug as one you never freed.
             window.set_cursor_visible(true);
         }
-        if self.project.retro_height != old_retro_h
-            || self.project.retro_width != old_retro_w
-        {
-            let (rw, rh) = self
-                .project
-                .retro_size(gpu.config.width as f32 / gpu.config.height.max(1) as f32);
-            retro.resize_to(gpu, rw, rh);
+        // **Against the dims last APPLIED, not against what they were at the top
+        // of this frame.** The old check captured the value before the UI pass
+        // and compared after it, which caught exactly one source of change:
+        // Project Settings. A script setting `app.setRetroHeight` runs BEFORE
+        // that capture, so its new value was already there to be captured as the
+        // "old" one and the target was never resized — the setting appeared to
+        // do nothing, for ever (`floptle/0175`). Comparing against what the
+        // target actually is has no such blind spot, whoever moved the number.
+        let want_retro =
+            self.project.retro_size(gpu.config.width as f32 / gpu.config.height.max(1) as f32);
+        if want_retro != self.retro_applied {
+            retro.resize_to(gpu, want_retro.0, want_retro.1);
+            self.retro_applied = want_retro;
         }
 
         // Post-processing (SSAO/bloom/vignette, from the scene's PostProcess node —
@@ -6889,6 +6893,15 @@ impl Editor {
     /// advance the animators, then step the sim. Clears stale script errors
     /// when not playing.
     pub(crate) fn play_step(&mut self, dt: f32, game_focused: bool) {
+        // **`app.*` is driven from inside the step, not around it.** There are
+        // two hosts that run gameplay — the windowed frame and `floptle run`'s
+        // headless loop — and a settings API wired into only one of them is a
+        // menu that works in the editor and does nothing in a build. Every host
+        // reaches gameplay through here, so this is the one place that cannot be
+        // half-wired (`floptle/0175`).
+        if self.playing {
+            self.push_app_info();
+        }
         // Play mode: advance the (pausable) script clock and run the Lua scripts
         // attached to nodes (ADR-0003). Scripts hot-reload as their files change.
         if self.playing {
@@ -7654,6 +7667,12 @@ impl Editor {
             // `floptle/0115`: audio had no bucket at all, so a game whose mixer
             // was the expensive thing could profile every frame and never see it.
             self.profile_record(floptle_core::profile::Bucket::Audio, audio_t.ms());
+            // Last in the step, so a setting changed in an `update` takes effect
+            // on the step it was changed on — a control that lags a frame behind
+            // the click reads as one that did not work. `app.quit()` lands here
+            // too, which is why it is after everything else this step wanted to
+            // do rather than in the middle of it.
+            self.apply_app_requests();
         } else if !self.script_errors.is_empty() {
             self.script_errors.clear();
         }

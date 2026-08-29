@@ -116,6 +116,43 @@ fn the_bake_and_its_queries_stay_linear() {
     baking_grows_with_the_area_it_covers(&yard);
     pathing_grows_with_the_level_it_crosses(&yard);
     a_crowd_costs_what_the_crowd_costs(&yard);
+    a_wander_point_costs_what_its_window_costs(&yard);
+}
+
+/// **A wander point is priced by its window, not by the level.**
+///
+/// `nav.random(u, v, near, radius)` is the per-frame "somewhere near me" query —
+/// a dozen agents redrawing a destination in one frame is ordinary. A game
+/// measured it at 0.014 ms with an 8 m radius and 0.71 ms with 80 m, and worked
+/// around it by caching. Some of that is real: a bigger window genuinely covers
+/// more polygons. What was NOT real was the rest of the level: the call
+/// allocated three vectors and walked its neighbourhood three times over, and
+/// that per-call cost is what makes a dozen draws four milliseconds.
+///
+/// This pins the property the game needs — the SAME window on four times the
+/// level costs the same — because that is the one a cache cannot paper over and
+/// the one that breaks silently as a level grows.
+fn a_wander_point_costs_what_its_window_costs(yard: &Yardstick) {
+    let settings = NavSettings { cell_size: 0.5, ..Default::default() };
+    let mut meshes: Vec<(usize, floptle_nav::NavMesh)> = Vec::new();
+    for area in [1600usize, 6400] {
+        meshes.push((area, bake(&level(area), &settings).unwrap()));
+    }
+    let ratio = growth(1600, |area| {
+        let mesh = &meshes.iter().find(|(a, _)| *a == area).unwrap().1;
+        let mut acc = 0.0f32;
+        // The same small neighbourhood in the same corner, whatever the level
+        // around it is doing — and enough draws to be the frame a game has.
+        for i in 0..2000 {
+            let u = (i % 97) as f32 / 97.0;
+            let v = (i % 89) as f32 / 89.0;
+            if let Some(p) = mesh.random_point(Some(([8.0, 0.0, 8.0], 6.0)), u, v) {
+                acc += p[0];
+            }
+        }
+        std::hint::black_box(acc);
+    });
+    yard.assert_linearish("picking a wander point in a fixed window", ratio);
 }
 
 /// The harness has to be able to fail, or the guards below are decoration —

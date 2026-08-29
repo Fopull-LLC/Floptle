@@ -3674,6 +3674,29 @@ end
 
 Names are script file names, because that is what you call them.
 
+**What the number is, and what it is not.** It is a wall clock around the call,
+so it includes everything that happened while your script was on the CPU —
+including things that were not your script. A garbage collection, or the
+operating system taking the core away for a moment, lands on whichever script
+happened to be running, and shows up as a large `worstMs` for a script that did
+nothing unusual.
+
+Two consequences worth knowing before you go optimising:
+
+* A script with **no hook for that pass** is not listed at all. It used to be,
+  and a stall inside its empty span read as a 12–21 ms "peak" against a file
+  with no `update` in it.
+* `ms` (the average) is the number to act on. A single high `worstMs` is at
+  least as likely to be a collection as a slow script — look for one that is
+  high *consistently*, or that moves when you change the script.
+
+If the collector is what you are chasing, the biggest source of it in most games
+is **vectors**: every `vec3` a script builds is an object, so `a + b`,
+`v:normalized()`, `node.pos` and `node.worldPos` each allocate. Scalar reads
+(`node.x`, `v:length()`, `v:dot(o)`) allocate nothing at all, so a hot loop that
+works in components rather than vectors produces no garbage — that is usually the
+biggest single win available to a game script today.
+
 ### Counts
 
 ```lua
@@ -3865,3 +3888,99 @@ neither checks its keys nor is excused in writing.
 
 So this does not decay back. That is the actual deliverable — not the 32 fixes,
 which were already made one at a time.
+
+---
+
+## 30. Settings a game offers its player: `app.*`
+
+Every game has a menu with **Quit** on it, and a Video tab, and an Audio tab.
+Most of what those need has been here for a while and is documented elsewhere on
+this page; `app.*` is the rest.
+
+| | |
+| --- | --- |
+| `app.quit()` | end the game |
+| `app.title()` | the game's title, for the top of a menu |
+| `app.version()` | the engine version this build was made with |
+| `app.vsync()` / `app.setVsync(mode)` | `"On"`, `"Adaptive"` or `"Off"` |
+| `app.retro()` / `app.setRetro(on)` | the retro presentation — compositing small and upscaling |
+| `app.retroHeight()` / `app.setRetroHeight(px)` | the height it composites at: this engine's "resolution" |
+| `app.retroIntegerScale()` / `app.setRetroIntegerScale(on)` | upscale by a whole number and letterbox, instead of stretching |
+
+### What `app.quit()` does depends on where the game is running
+
+There is one honest answer per host, and they are different things:
+
+* **In an exported build** the game is the program, so it closes. Your `save.*`
+  data is flushed first — somebody quitting from a settings menu expects the
+  setting they just changed to have been kept.
+* **In the editor** it stops Play. It is deliberately not a process exit: an
+  editor that closed because a game under test called `quit` would take your
+  unsaved work with it. A line in the Console says which of the two happened.
+* **Under `floptle run`** the run ends where it stands, and the report says it
+  stopped early rather than claiming it ran the whole span.
+
+### A setting you change is for this session only
+
+Vsync and the retro settings live in `project.ron`, which is the file that ships
+to everybody who plays. So changing one changes it **for this run**, and Stop
+puts the project back exactly as it was — the same rule `audio.track(…)` follows.
+
+Which means **persisting it is your game's job**, through `save.*`. That is not
+an omission: a player's preference belongs in the player's save, not in a file
+every player gets a copy of.
+
+```lua
+-- read them back on launch
+function start(node)
+  app.setVsync(save.get("vsync") or "On")
+  app.setRetroHeight(save.get("pixelHeight") or app.retroHeight())
+  access.setTextScale(save.get("textScale") or 1.0)
+  audio.track("Master"):setVolume(save.get("masterDb") or 0)
+end
+```
+
+A mode `setVsync` does not recognise is an **error**, not a shrug — a control
+that silently keeps the old value is a control that appears to work. Same for a
+`setRetroHeight` outside 32–4320.
+
+### A settings screen, in full
+
+The four tabs a player expects, and where each one comes from:
+
+```lua
+-- Audio — the project's mixer tracks (§11)
+audio.track("Master"):setVolume(db)
+audio.track("Music"):setVolume(db)
+
+-- Video — the frame pacing and the internal resolution, plus the scene's
+-- own post-processing, which is a component like any other (§7)
+app.setVsync("Adaptive")
+app.setRetroHeight(360)
+local post = scene.find("Post Processing"):getComponent("PostProcess")
+post.bloom = true          -- a flag
+post.motionBlur = 0        -- an amount, 0..1 — the shutter, not a switch
+
+-- Accessibility — text scale, colour filter, reduced motion, captions
+access.setTextScale(1.25)
+access.setReducedMotion(true)
+
+-- Controls — the action map, rebindable at runtime (§5)
+for _, action in ipairs(input.actions()) do
+  log(action .. ": " .. table.concat(input.bindingsOf(action), ", "))
+end
+input.startRebind("Jump")
+
+-- …and the button that used to have nothing behind it
+function onQuit()
+  save.flush()
+  app.quit()
+end
+```
+
+**Not here yet:** window resolution, fullscreen and monitor choice. Those are one
+question — windowing — and it deserves answering properly rather than by adding
+a resolution setter that only half works. `app.setRetroHeight` is the one that
+already existed as a live render setting, and in a pixel-art game it is the
+"resolution" a player means.
+

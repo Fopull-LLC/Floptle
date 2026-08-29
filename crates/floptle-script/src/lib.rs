@@ -239,6 +239,7 @@ type UiListeners = Rc<RefCell<Vec<UiListener>>>;
 /// answer rather than last frame's.
 type UiFrameEvents = Rc<RefCell<Vec<(u32, String)>>>;
 
+pub mod app_api;
 mod account_api;
 mod api;
 mod audio_api;
@@ -605,6 +606,14 @@ pub struct ScriptHost {
     /// Captions `caption(...)` asked for, drained by the driver and drawn by the
     /// engine so every game gets the same readable placement.
     caption_queue: crate::access_api::CaptionQueue,
+    /// What the game currently IS — title, engine version, and the video
+    /// settings a player can change. Pushed by the driver, read by `app.*`
+    /// (`floptle/0175`).
+    app_info: crate::app_api::SharedAppInfo,
+    /// What `app.*` asked the driver to change or do this frame. Every one of
+    /// them touches something only the driver owns — the swap chain, a GPU
+    /// target, the event loop — so none can be done from inside a Lua call.
+    app_requests: crate::app_api::SharedAppRequests,
     /// `params.X = value` writes queued this pass — (entity, script kind, key,
     /// value). Flushed to the node's stored `ScriptInst` params so tunables are
     /// TWO-WAY: the write persists across frames and shows live in the
@@ -3106,6 +3115,106 @@ end
         );
     }
 
+    /// **A script with no hook for this pass is not charged for the frame.**
+    ///
+    /// Per-script timing is a wall clock around the call, so whatever the
+    /// machine does inside that span — a garbage collection, the OS taking the
+    /// core away — is reported as that script's cost. For a script with no
+    /// `update` at all the span wraps nothing, and a game profiling itself
+    /// found 12–21 ms "peaks" against a file that could not have spent them.
+    /// Anybody reading that goes and optimises the wrong file, which is worse
+    /// than having no per-script numbers at all.
+    #[test]
+    fn a_script_with_no_update_is_not_charged_for_the_frame() {
+        let dir = std::env::temp_dir().join("floptle_script_test_perf_attrib");
+        let _ = std::fs::create_dir_all(&dir);
+        // One script that does real work, and one with no hook for this pass at
+        // all — the shape that was being blamed.
+        write_script(
+            &dir,
+            "worker",
+            "function update(node, dt)\n  local s = 0\n  for i = 1, 20000 do s = s + i end\n               node.y = s * 0.0\nend\n",
+        );
+        write_script(&dir, "marker", "-- a data-only script: no hooks at all\nfoo = 1\n");
+
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![
+                floptle_core::ScriptInst {
+                    kind: "worker".into(),
+                    enabled: true,
+                    params: vec![],
+                    refs: Vec::new(),
+                    strs: Vec::new(),
+                },
+                floptle_core::ScriptInst {
+                    kind: "marker".into(),
+                    enabled: true,
+                    params: vec![],
+                    refs: Vec::new(),
+                    strs: Vec::new(),
+                },
+            ]),
+        );
+        let mut host = ScriptHost::new();
+        host.profile().borrow_mut().enable(true);
+        for _ in 0..3 {
+            host.run(&mut world, &dir, 0.016, 0.016);
+            host.profile().borrow_mut().end_frame();
+        }
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+
+        let by_script = host.profile().borrow().scripts();
+        let named: Vec<&str> = by_script.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(named.contains(&"worker"), "the script that did the work is missing: {named:?}");
+        assert!(
+            !named.contains(&"marker"),
+            "a script with no hook was charged for the frame it was not in: {named:?}"
+        );
+    }
+
+    /// **What the driver feeds is what a script reads.**
+    ///
+    /// The other `app` tests here all set a value and read it back, which passes
+    /// even if the initial state never arrives — a menu would open showing
+    /// defaults rather than the game's real settings, and only the controls
+    /// somebody touched would ever be right.
+    #[test]
+    fn a_menu_opens_showing_the_settings_the_game_actually_has() {
+        let dir = std::env::temp_dir().join("floptle_script_test_app_initial");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "menu",
+            "function update(node, dt)\n\
+            \x20 print(app.title() .. \"|\" .. app.version() .. \"|\" .. app.vsync()\n\
+            \x20   .. \"|\" .. tostring(app.retro()) .. \"|\" .. app.retroHeight())\n\
+            end\n",
+        );
+        let (mut world, _e) = world_with_script("menu");
+        let mut host = ScriptHost::new();
+        host.set_app_info(crate::app_api::AppInfo {
+            title: "Test Game".into(),
+            version: "9.9.9".into(),
+            vsync: crate::app_api::Vsync::Adaptive,
+            retro: true,
+            retro_height: 240,
+            retro_integer_scale: false,
+        });
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let said = host.drain_logs().into_iter().map(|l| l.msg).collect::<Vec<_>>().join("\n");
+        assert!(
+            said.contains("Test Game|9.9.9|Adaptive|true|240"),
+            "a menu asked what the game is and got {said:?}"
+        );
+        // Reading changes nothing — a Video tab paints itself every frame.
+        assert!(host.take_app_requests().is_empty());
+    }
+
     /// The other half of the same promise: something with no per-face material
     /// answers `nil`, not a plausible wrong name. A name that is right for map
     /// meshes and quietly wrong for terrain is worse than no name at all.
@@ -3255,6 +3364,96 @@ end
             Some("Boards")
         );
         assert_eq!(shape.asks.load(Ordering::Relaxed), 1);
+    }
+
+    /// **A settings menu reads back what it just set.**
+    ///
+    /// The driver applies these a moment later — a swap chain and a GPU target
+    /// are not things a Lua call can touch — so if `app.vsync()` answered the
+    /// old value until then, every control in a Video tab would snap back to its
+    /// previous position for a frame after being clicked. That reads as a
+    /// control that did not work, which is the whole failure `floptle/0175` is
+    /// about (`floptle/0082`'s lesson, one layer up).
+    #[test]
+    fn a_settings_menu_reads_back_what_it_just_set() {
+        let dir = std::env::temp_dir().join("floptle_script_test_app_settings");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "menu",
+            "function update(node, dt)\n\
+            \x20 app.setVsync(\"Off\")\n\
+            \x20 app.setRetroHeight(360)\n\
+            \x20 app.setRetroIntegerScale(true)\n\
+            \x20 print(app.vsync() .. \"|\" .. app.retroHeight() .. \"|\" .. tostring(app.retroIntegerScale()))\n\
+            end\n",
+        );
+        let (mut world, _e) = world_with_script("menu");
+        let mut host = ScriptHost::new();
+        host.set_app_info(crate::app_api::AppInfo {
+            title: "Game".into(),
+            version: "0.0.0".into(),
+            vsync: crate::app_api::Vsync::On,
+            retro: true,
+            retro_height: 240,
+            retro_integer_scale: false,
+        });
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let said = host.drain_logs().into_iter().map(|l| l.msg).collect::<Vec<_>>().join("\n");
+        assert!(
+            said.contains("Off|360|true"),
+            "a menu set three settings and read back {said:?} — it must see its own change"
+        );
+        // …and the driver is told to actually go and do it.
+        let req = host.take_app_requests();
+        assert_eq!(req.vsync, Some(crate::app_api::Vsync::Off));
+        assert_eq!(req.retro_height, Some(360));
+        assert_eq!(req.retro_integer_scale, Some(true));
+        assert!(!req.quit, "nobody asked to quit");
+        // Drained: a request left in the queue would be applied again every
+        // frame, which for `quit` is the difference between closing once and
+        // never being able to do anything else.
+        assert!(host.take_app_requests().is_empty());
+    }
+
+    /// `app.quit()` reaches the driver as a request rather than doing anything
+    /// itself — there is no event loop to reach from inside a Lua call, and what
+    /// quitting MEANS differs between a build, the editor and a headless run.
+    #[test]
+    fn quit_is_a_request_the_driver_answers() {
+        let dir = std::env::temp_dir().join("floptle_script_test_app_quit");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "menu", "function update(node, dt)\n  app.quit()\nend\n");
+        let (mut world, _e) = world_with_script("menu");
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert!(host.take_app_requests().quit, "the driver was never told");
+        assert!(!host.take_app_requests().quit, "and it must not be told twice");
+    }
+
+    /// A mode nobody recognises is named, not ignored. A settings menu that
+    /// silently kept the old value would be a control that appears to work.
+    #[test]
+    fn an_unknown_vsync_mode_is_refused_by_name() {
+        let dir = std::env::temp_dir().join("floptle_script_test_app_badmode");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "menu",
+            "function update(node, dt)\n\
+            \x20 local ok, err = pcall(function() app.setVsync(\"vsync\") end)\n\
+            \x20 print(tostring(ok) .. \"|\" .. tostring(err))\n\
+            end\n",
+        );
+        let (mut world, _e) = world_with_script("menu");
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 0.1, 0.1);
+        let said = host.drain_logs().into_iter().map(|l| l.msg).collect::<Vec<_>>().join("\n");
+        assert!(said.contains("false|"), "it was accepted: {said:?}");
+        assert!(said.contains("\"On\""), "the refusal has to list the modes: {said:?}");
+        assert!(host.take_app_requests().vsync.is_none(), "a refused mode must not be queued");
     }
 
     #[test]
