@@ -80,6 +80,13 @@ impl AnchoredCollider {
         self.shape.normal(p - self.offset)
     }
 
+    /// The surface label of the face nearest sim-frame `p`, if this collider
+    /// carries any — see [`CollisionShape::face_label`]. Costs a closest-point
+    /// search, so nothing on the query path calls it.
+    pub fn face_label(&self, p: Vec3) -> Option<&str> {
+        self.shape.face_label(p - self.offset)
+    }
+
     /// The outward normal only where the field resolves one (`None` deep inside
     /// a saturated SDF interior — see [`CollisionShape::normal_reliable`]).
     pub fn normal_reliable(&self, p: Vec3) -> Option<Vec3> {
@@ -204,13 +211,23 @@ impl Default for PhysicsWorld {
     }
 }
 
-/// A raycast result: the world hit point, the surface normal there, and the distance
-/// the ray travelled.
+/// A raycast result: the world hit point, the surface normal there, the distance
+/// the ray travelled, and what it hit.
 #[derive(Clone, Copy, Debug)]
 pub struct RayHit {
     pub point: [f32; 3],
     pub normal: [f32; 3],
     pub distance: f32,
+    /// ECS entity index of the node the ray hit (`None` for an anonymous test
+    /// collider).
+    ///
+    /// **The march has always had this and used to throw it away.** The shape
+    /// queries carried it through as [`ShapeHit::eid`], so `spherecast` named
+    /// the node it hit and `raycast` answered nothing for the entire level —
+    /// two calls the scripting docs describe as returning the same fields, one
+    /// of which silently did not (`floptle/0174`). The collider is in hand one
+    /// line before the hit is built; nothing about this was unavailable.
+    pub eid: Option<u32>,
 }
 
 /// Sphere-trace a ray against a set of colliders (SDF terrain, triangle mesh, analytic).
@@ -254,8 +271,14 @@ pub fn raycast_colliders(
             continue;
         }
         if dmin < 0.02 {
-            let n = colliders[hit].normal(p);
-            return Some(RayHit { point: p.into(), normal: n.into(), distance: t });
+            let c = &colliders[hit];
+            let n = c.normal(p);
+            return Some(RayHit {
+                point: p.into(),
+                normal: n.into(),
+                distance: t,
+                eid: c.eid,
+            });
         }
         t += dmin.clamp(0.02, 1.0); // cap so an unsigned mesh distance can't overshoot
     }
@@ -354,7 +377,12 @@ pub fn raycast_hulls(
         if dmin < 0.02 {
             return Some((
                 h.eid,
-                RayHit { point: p.into(), normal: h.normal(p).into(), distance: t },
+                RayHit {
+                    point: p.into(),
+                    normal: h.normal(p).into(),
+                    distance: t,
+                    eid: Some(h.eid),
+                },
             ));
         }
         t += dmin.max(0.02);
@@ -2016,5 +2044,90 @@ mod shape_query_tests {
             "stepping a body directly must not lose the broadphase"
         );
         assert!(whole.bodies[bi].pos.y > 0.0, "and it must still land on the floor");
+    }
+}
+
+#[cfg(test)]
+mod ray_identity_tests {
+    use super::*;
+    use crate::shapes::{BoxShape, TriMeshCollider};
+
+    fn tagged(shape: Box<dyn crate::shapes::CollisionShape>, eid: u32) -> AnchoredCollider {
+        let mut c = AnchoredCollider::world(shape);
+        c.eid = Some(eid);
+        c
+    }
+
+    /// **A ray that hits the level says which node it hit.**
+    ///
+    /// The march picks a collider, asks it for a normal, and used to throw the
+    /// collider away — so `raycast` answered no node for the whole of static
+    /// geometry while `spherecast`, documented as returning the same fields,
+    /// answered one. Nothing about this was unavailable; it was dropped one line
+    /// before the hit was built (`floptle/0174`).
+    #[test]
+    fn a_ray_reports_the_node_whose_geometry_it_hit() {
+        let cols = vec![tagged(
+            Box::new(BoxShape::new(Vec3::ZERO, Vec3::new(4.0, 0.5, 4.0), Quat::IDENTITY)),
+            42,
+        )];
+        let h = raycast_colliders(&cols, Vec3::new(0.0, 5.0, 0.0), -Vec3::Y, 20.0, !0)
+            .expect("the ray hits the box");
+        assert_eq!(h.eid, Some(42), "the ray hit a node and would not say which");
+    }
+
+    /// An anonymous collider — a test fixture, anything registered without a
+    /// node — answers `None` rather than an entity index that means nothing.
+    #[test]
+    fn an_anonymous_collider_reports_no_node() {
+        let cols = vec![AnchoredCollider::world(Box::new(BoxShape::new(
+            Vec3::ZERO,
+            Vec3::new(4.0, 0.5, 4.0),
+            Quat::IDENTITY,
+        )))];
+        let h = raycast_colliders(&cols, Vec3::new(0.0, 5.0, 0.0), -Vec3::Y, 20.0, !0)
+            .expect("the ray still hits it");
+        assert_eq!(h.eid, None);
+    }
+
+    /// The two halves of `floptle/0174` meeting: a ray hits a labelled map
+    /// mesh, names the node, and the collider it named can then be asked what
+    /// the surface at that point is made of.
+    ///
+    /// The lookup is deliberately NOT part of the hit — it costs a
+    /// closest-point search of its own, and a line-of-sight ray that never asks
+    /// must not pay for it.
+    #[test]
+    fn the_node_a_ray_names_can_be_asked_what_its_surface_is() {
+        // Two floor quads meeting at x = 0, different materials.
+        let verts = [
+            Vec3::new(-4.0, 0.0, -4.0),
+            Vec3::new(0.0, 0.0, -4.0),
+            Vec3::new(0.0, 0.0, 4.0),
+            Vec3::new(-4.0, 0.0, 4.0),
+            Vec3::new(4.0, 0.0, -4.0),
+            Vec3::new(4.0, 0.0, 4.0),
+        ];
+        let indices = [0, 1, 2, 0, 2, 3, 1, 4, 5, 1, 5, 2];
+        let cols = vec![tagged(
+            Box::new(TriMeshCollider::labelled(
+                &verts,
+                &indices,
+                &[0, 0, 1, 1],
+                vec!["Grass".into(), "Boards".into()],
+            )),
+            7,
+        )];
+        for (x, want) in [(-2.0f32, "Grass"), (2.0, "Boards")] {
+            let h = raycast_colliders(&cols, Vec3::new(x, 5.0, 0.0), -Vec3::Y, 20.0, !0)
+                .expect("the ray hits the floor");
+            assert_eq!(h.eid, Some(7));
+            let c = cols.iter().find(|c| c.eid == h.eid).expect("the node it named");
+            assert_eq!(
+                c.face_label(Vec3::from(h.point)),
+                Some(want),
+                "standing at x={x} the floor is {want}"
+            );
+        }
     }
 }

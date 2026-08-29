@@ -9503,7 +9503,7 @@ impl Editor {
     /// deterministically), every saved effect, every live play instance, and the
     /// tab preview. Idempotent. Called at the top of `render()`, before the gather
     /// resolves batch textures / mesh handles.
-    fn ensure_vfx_assets(&mut self) {
+    pub(crate) fn ensure_vfx_assets(&mut self) {
         let mut tex: Vec<String> = Vec::new();
         let mut meshes: Vec<String> = Vec::new();
         let push = |v: &mut Vec<String>, p: &str| {

@@ -612,24 +612,25 @@ impl ScriptHost {
                     mask,
                 );
                 // Nearest surface wins between static geometry and body hulls.
-                let (h, eid) = match (solid, body) {
-                    (Some(s), Some((be, b))) if b.distance < s.distance => (b, Some(be)),
-                    (Some(s), _) => (s, None),
-                    (None, Some((be, b))) => (b, Some(be)),
+                //
+                // **`hit.node` is answered for both.** It used to be set only
+                // for a body hull, so a ray down at the floor of a level came
+                // back with no node at all while `spherecast` — documented as
+                // returning the same fields — named the map mesh. The march had
+                // the collider in hand the whole time; the field was dropped,
+                // not unavailable, and reading the docs it looked like the
+                // engine could not tell you (`floptle/0174`).
+                let h = match (solid, body) {
+                    (Some(s), Some((_, b))) if b.distance < s.distance => b,
+                    (Some(s), _) => s,
+                    (None, Some((_, b))) => b,
                     (None, None) => return Ok(Value::Nil),
                 };
-                let t = lua.create_table()?;
-                t.set("x", origin.x + h.point[0] as f64)?;
-                t.set("y", origin.y + h.point[1] as f64)?;
-                t.set("z", origin.z + h.point[2] as f64)?;
-                t.set("nx", h.normal[0] as f64)?;
-                t.set("ny", h.normal[1] as f64)?;
-                t.set("nz", h.normal[2] as f64)?;
-                t.set("distance", h.distance as f64)?;
-                if let Some(be) = eid {
-                    t.set("node", new_node_handle(lua, be)?)?;
-                }
-                Ok(Value::Table(t))
+                // Built by the same function every shape query uses, so the two
+                // cannot drift apart again.
+                Ok(Value::Table(crate::shape_api::hit_table(
+                    lua, h.point, h.normal, h.distance, h.eid, origin,
+                )?))
             }) {
                 let _ = lua.globals().set("raycast", f);
             }

@@ -100,32 +100,116 @@ fn query_opts(
     Ok((exclude, mask))
 }
 
+/// The registry key the shared hit metatable lives under.
+const HIT_MT: &str = "floptle_hit_mt";
+
+/// Install the metatable every query hit carries, which is what makes
+/// `hit.material` cost nothing until somebody reads it.
+///
+/// **Lazy rather than a flag.** The obvious alternative is an opt-in —
+/// `raycast(o, d, max, { material = true })` — and it is the wrong shape for
+/// this engine: a flag you can forget, whose forgotten form answers `nil`
+/// rather than failing, is the silent-failure pattern this codebase keeps
+/// paying for. A line-of-sight ray that never touches `hit.material` pays
+/// nothing here, and a footstep check that does pays one closest-point search,
+/// which is the cost split `floptle/0174` asked for.
+///
+/// Registered once per host, not per hit: `overlapSphere` can return dozens of
+/// hits in a frame and building a closure for each would cost more than the
+/// lookup it defers.
+pub(crate) fn install_hit_meta(lua: &Lua, shared: &QueryShared) {
+    let cols = shared.colliders.clone();
+    let origin = shared.sim_origin.clone();
+    let Ok(index) = lua.create_function(move |lua, (t, key): (Table, String)| {
+        // Only the one field is lazy. Everything else about a hit is already in
+        // the table, and answering nil here for an unknown key is what a table
+        // without a metatable would have done.
+        if key != "material" {
+            return Ok(Value::Nil);
+        }
+        // Which node was hit, and where. Read back off the hit itself rather
+        // than captured per-hit, so this metatable can be shared by every query.
+        let Ok(node) = t.raw_get::<Table>("node") else { return Ok(Value::Nil) };
+        let Ok(eid) = node.raw_get::<u32>("__id") else { return Ok(Value::Nil) };
+        let (Ok(x), Ok(y), Ok(z)) =
+            (t.raw_get::<f64>("x"), t.raw_get::<f64>("y"), t.raw_get::<f64>("z"))
+        else {
+            return Ok(Value::Nil);
+        };
+        // Scripts speak world; the sim runs origin-relative (ADR-0015).
+        let o = *origin.borrow();
+        let p = glam::Vec3::new((x - o.x) as f32, (y - o.y) as f32, (z - o.z) as f32);
+        // The colliders on the node that was hit — usually exactly one. Asking
+        // by entity rather than by a collider index means nothing here depends
+        // on the collider list not having been rebuilt since the query.
+        for c in cols.borrow().iter().filter(|c| c.eid == Some(eid)) {
+            if let Some(name) = c.face_label(p) {
+                return Ok(Value::String(lua.create_string(name)?));
+            }
+        }
+        Ok(Value::Nil)
+    }) else {
+        return;
+    };
+    let Ok(mt) = lua.create_table() else { return };
+    if mt.set("__index", index).is_ok() {
+        let _ = lua.set_named_registry_value(HIT_MT, mt);
+    }
+}
+
 /// Build the Lua table one hit becomes — the same field names `raycast`
 /// returns, so a script that handles one handles the other.
-fn hit_table(
+///
+/// **One builder, because the asymmetry it exists to prevent already
+/// happened.** `raycast` used to assemble its own copy of these fields and set
+/// `node` only for body hulls, so it answered `nil` for the entire level while
+/// `spherecast` — whose comment promised the same fields — named the node
+/// (`floptle/0174`). Two hit tables built in two places is how that survives
+/// being fixed once.
+pub(crate) fn hit_table(
     lua: &Lua,
-    h: &floptle_physics::ShapeHit,
+    point: [f32; 3],
+    normal: [f32; 3],
+    distance: f32,
+    eid: Option<u32>,
     origin: glam::DVec3,
 ) -> mlua::Result<Table> {
     let t = lua.create_table()?;
-    t.set("x", origin.x + h.point[0] as f64)?;
-    t.set("y", origin.y + h.point[1] as f64)?;
-    t.set("z", origin.z + h.point[2] as f64)?;
-    t.set("nx", h.normal[0] as f64)?;
-    t.set("ny", h.normal[1] as f64)?;
-    t.set("nz", h.normal[2] as f64)?;
-    t.set("distance", h.distance as f64)?;
-    if let Some(eid) = h.eid {
+    t.set("x", origin.x + point[0] as f64)?;
+    t.set("y", origin.y + point[1] as f64)?;
+    t.set("z", origin.z + point[2] as f64)?;
+    t.set("nx", normal[0] as f64)?;
+    t.set("ny", normal[1] as f64)?;
+    t.set("nz", normal[2] as f64)?;
+    t.set("distance", distance as f64)?;
+    if let Some(eid) = eid {
         t.set("node", crate::env::new_node_handle(lua, eid)?)?;
+    }
+    // `material` comes from here — see `install_hit_meta`.
+    if let Ok(mt) = lua.named_registry_value::<Table>(HIT_MT) {
+        t.set_metatable(Some(mt));
     }
     Ok(t)
 }
 
-/// Install `overlapSphere`, `overlapBox`, `spherecast` and `capsulecast`.
+/// One [`floptle_physics::ShapeHit`] as its Lua table.
+fn shape_hit_table(
+    lua: &Lua,
+    h: &floptle_physics::ShapeHit,
+    origin: glam::DVec3,
+) -> mlua::Result<Table> {
+    hit_table(lua, h.point, h.normal, h.distance, h.eid, origin)
+}
+
+/// Install `overlapSphere`, `spherecast` and `capsulecast`, and the metatable
+/// their hits (and `raycast`'s) carry.
 pub(crate) fn install_shape_api(
     lua: &Lua,
     shared: QueryShared,
 ) {
+    // The hit metatable first: `raycast` builds its hits through the same
+    // `hit_table` these do, and it was installed before this ran.
+    install_hit_meta(lua, &shared);
     // overlapSphere(center, radius [, opts]) → list of hits, nearest-surface
     // first. Reports BOTH static geometry and body hulls; `hit.node` is the
     // node where there is one.
@@ -165,7 +249,7 @@ pub(crate) fn install_shape_api(
             hits.sort_by(|a, b| b.distance.total_cmp(&a.distance));
             let out = lua.create_table()?;
             for (i, h) in hits.iter().enumerate() {
-                out.set(i + 1, hit_table(lua, h, origin)?)?;
+                out.set(i + 1, shape_hit_table(lua, h, origin)?)?;
             }
             Ok(out)
         }) {
@@ -212,7 +296,7 @@ pub(crate) fn install_shape_api(
                 mask,
             );
             match hit {
-                Some(h) => Ok(Value::Table(hit_table(lua, &h, sim)?)),
+                Some(h) => Ok(Value::Table(shape_hit_table(lua, &h, sim)?)),
                 None => Ok(Value::Nil),
             }
         }) {
@@ -271,7 +355,7 @@ pub(crate) fn install_shape_api(
                 mask,
             );
             match hit {
-                Some(h) => Ok(Value::Table(hit_table(lua, &h, sim)?)),
+                Some(h) => Ok(Value::Table(shape_hit_table(lua, &h, sim)?)),
                 None => Ok(Value::Nil),
             }
         }) {

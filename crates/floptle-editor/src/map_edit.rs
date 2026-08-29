@@ -11,6 +11,7 @@
 //! existing `ObjectMaterials`/`part_look` machinery keyed by slot name.
 
 use crate::{Editor, MeshAsset, PartMeta};
+use floptle_core::math::{Mat4, Vec3};
 use floptle_map::MapMesh;
 use floptle_render::{MeshData, MeshId, Vertex};
 use floptle_scene::MatterDoc;
@@ -247,6 +248,41 @@ pub(crate) fn slot_mesh_data(sm: &floptle_map::SlotMesh) -> MeshData {
         indices: sm.indices.clone(),
         colors: None,
     }
+}
+
+/// A map mesh as collision geometry: world-relative triangles plus, per
+/// triangle, which material slot it draws with.
+///
+/// **One builder, because there are two callers and they were copies.** The play
+/// sim (`play.rs`) and the hidden server's world (`net.rs`) each turned a
+/// `MapMesh` into a triangle soup with the same six lines, and the comment in
+/// the second one says so ("same as the local play sim"). A per-face surface
+/// label added to one of them and not the other is a game whose footsteps are
+/// right offline and stone everywhere in multiplayer — the exact failure the
+/// tilemap builder was factored out to avoid.
+///
+/// Returns `(verts, indices, tri_slot, slot_names)`. `tri_slot[i]` labels the
+/// triangle at `indices[i*3..]` and indexes `slot_names`, which is the map's own
+/// slot list — `"Default"`, `"Trim"`, whatever the level author typed and the
+/// Inspector shows.
+pub(crate) fn map_collision_geometry(
+    mesh: &floptle_map::MapMesh,
+    xf: Mat4,
+) -> (Vec<Vec3>, Vec<u32>, Vec<u16>, Vec<String>) {
+    let mut verts: Vec<Vec3> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut tri_slot: Vec<u16> = Vec::new();
+    for sm in floptle_map::triangulate(mesh) {
+        let base = verts.len() as u32;
+        verts.extend(sm.positions.iter().map(|p| xf.transform_point3(Vec3::from(*p))));
+        indices.extend(sm.indices.iter().map(|i| i + base));
+        // `triangulate` groups BY slot, so every triangle in this run carries
+        // the run's slot. Counted off `indices`, not off `tri_faces`, so a
+        // triangulation that ever stops filling that field cannot silently
+        // shift every label after it.
+        tri_slot.extend(std::iter::repeat_n(sm.slot, sm.indices.len() / 3));
+    }
+    (verts, indices, tri_slot, mesh.slots.clone())
 }
 
 impl Editor {

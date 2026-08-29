@@ -276,15 +276,16 @@ impl Editor {
                 Some(Matter::MapMesh { id }) => {
                     let Some(mesh) = self.maps.meshes.get(id) else { continue };
                     let m = Mat4::from_scale_rotation_translation(s, wt.rotation, Vec3::ZERO);
-                    let mut verts: Vec<Vec3> = Vec::new();
-                    let mut indices: Vec<u32> = Vec::new();
-                    for sm in floptle_map::triangulate(mesh) {
-                        let base = verts.len() as u32;
-                        verts.extend(sm.positions.iter().map(|p| m.transform_point3(Vec3::from(*p))));
-                        indices.extend(sm.indices.iter().map(|i| i + base));
-                    }
+                    // Per-face material slots ride along, so a query can answer
+                    // WHAT it hit and not only which node — one big building
+                    // with nine slots is one node, and the node's own material
+                    // says "stone" for its grass too (`floptle/0174`).
+                    let (verts, indices, tri_slot, slots) =
+                        crate::map_edit::map_collision_geometry(mesh, m);
                     if indices.len() >= 3 {
-                        sim.add_static_mesh(anchor, &verts, &indices, layer);
+                        sim.add_static_mesh_labelled(
+                            anchor, &verts, &indices, &tri_slot, slots, layer,
+                        );
                     }
                 }
                 // Primitive geometry → matching analytic collider, sized to match the
@@ -1121,6 +1122,13 @@ impl Editor {
         self.adopt_maps();
         self.adopt_paint();
         self.adopt_tex_paint();
+        // …and the bakes, on the same terms. A navmesh is a file beside the
+        // scene, so the scene being swapped for is the one whose navmesh the
+        // game should be pathing on. Without this the new level inherited the
+        // old one's bake — agents pathing over ground that is not there, or
+        // standing still on ground that is — which is a bug with no visible
+        // cause at all.
+        self.adopt_scene_bakes();
         // `adopt_maps` frees its own GPU parts, but these two caches are keyed by mesh id
         // and would hand the new scene the old one's CPU geometry to paint and to wire.
         self.paint_meshes.clear();

@@ -52,6 +52,7 @@ floptle api node:setSprite                 # what a call does, before you write 
 ```sh
 floptle run --frames 120           # play it headlessly; reports what raised, and where
 floptle shot --out look.png        # one frame through the active camera, as a PNG
+floptle vfx --effect Sparks        # a particle effect, across its own timeline, as PNGs
 ```
 
 If a render fails, ask the machine before you conclude the project is wrong:
@@ -69,6 +70,13 @@ physics for a fixed number of steps and reports every warning, error and
 `shot` renders through the same path the editor's Game view uses, so the picture
 is what the editor would show. **Look at it.** A render that came out wrong is
 something no assertion will tell you.
+
+`vfx` is the same idea for a particle effect, which a single frame cannot show:
+it renders several moments across the effect's own timeline — through one fixed
+camera, so they can be compared — and tiles them into a contact sheet. Look at
+the sheet first, then `--at <seconds>` for a close look at the moment that turns
+out to be the interesting one. Editing a `.vfx.ron` without doing this is
+guessing.
 
 ## Changing it from a script
 

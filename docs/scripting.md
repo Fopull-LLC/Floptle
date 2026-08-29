@@ -751,14 +751,45 @@ if h then
   -- h.x, h.y, h.z   the hit point
   -- h.nx, h.ny, h.nz the surface normal there
   -- h.distance       how far the ray travelled
-  -- h.node           the node whose BODY was hit (nil for static geometry)
+  -- h.node           the node that was hit — a body OR a piece of level
+  -- h.material       which material slot of it, where that means anything
 end
 ```
 
-When the ray hits a body, `h.node` tells you whose: `h.node:getscript("combat")`
-reaches its scripts. Your own node's body never blocks your rays, and the
-optional `ignore` arg skips one more node's body — the orbit camera passes the
-character it follows, so it never reads as a wall.
+`h.node` tells you what you hit, whether that is a crate, another player or the
+wall of a room: `h.node:getscript("combat")` reaches its scripts, and
+`h.node:material()` its material. Your own node's body never blocks your rays,
+and the optional `ignore` arg skips one more node's body — the orbit camera
+passes the character it follows, so it never reads as a wall.
+
+#### What surface did I hit? — `h.material`
+
+One map mesh usually has several materials on it: a building is one node and its
+brick, its grass and its floorboards are three of its **material slots**. So
+`h.node:material()` answers *the node's* material, which for a level of any size
+is one answer for a lot of different ground. `h.material` is the slot the ray
+actually landed on — the name the level author typed, the one the Inspector
+shows — which is what a footstep, an impact decal or a splash needs:
+
+```lua
+-- Pick a footstep from the floor rather than from a volume drawn over the room.
+local h = raycast(node.x, node.y, node.z, 0, -1, 0, 1.2, { layers = "Level" })
+if h and h.material == "Boards" then
+  audio.play("footstep_wood")
+elseif h and h.material == "Grass" then
+  audio.play("footstep_grass")
+end
+```
+
+**It is `nil` for anything that has one surface**, and that is deliberate: a
+terrain, a Collidable cube, an imported model, a physics body. A name invented
+for those would be right for map meshes and quietly wrong everywhere else, which
+is worse than no name. Branch on `h.material` and fall back to
+`h.node:material()` when it is `nil`.
+
+**It costs nothing until you read it.** The slot is looked up when you ask,
+not when the hit is built, so a line-of-sight ray that only reads `h.distance`
+pays for none of it. Read it once into a local if you need it twice.
 
 The last argument can instead be an **options table**, which also filters by
 [layer](#18-layers--tags):
@@ -803,9 +834,10 @@ local blocked = capsulecast(node.pos, moveDir, 0.4, 0.9, 1.5)
 | `capsulecast(origin, dir, radius, halfHeight, max [, opts])` | the first hit, or `nil` |
 
 Hits carry the same fields a `raycast` hit does — `x/y/z`, `nx/ny/nz`,
-`distance` and `node` — so a script that handles one handles the others. For an
-overlap, `distance` is the **penetration depth** rather than a travel distance.
-`opts` is the same table `raycast` takes, and your own body is skipped for you.
+`distance`, `node` and [`material`](#what-surface-did-i-hit--hmaterial) — so a
+script that handles one handles the others. For an overlap, `distance` is the
+**penetration depth** rather than a travel distance. `opts` is the same table
+`raycast` takes, and your own body is skipped for you.
 
 These are cheap here for a structural reason: every collider already answers a
 signed distance, so an overlap is one distance test and a swept sphere is the
@@ -2531,11 +2563,10 @@ present when the closure returns (it also passes through return values, so
 The fine print, so you can reason about fairness:
 
 - `raycast` hits **physics bodies** (players, crates) as well as static
-  geometry, and tells you who: `hit.node` is the body's node handle (nil for
-  terrain/walls). Your own body is always excluded from your rays, and an
-  optional trailing arg skips one more node: `raycast(…, max, someNode)` —
-  what the orbit camera does so the character it follows never reads as a
-  wall.
+  geometry, and tells you who: `hit.node` is the node's handle either way.
+  Your own body is always excluded from your rays, and an optional trailing
+  arg skips one more node: `raycast(…, max, someNode)` — what the orbit
+  camera does so the character it follows never reads as a wall.
 - Rewind depth is **clamped to ~250 ms** — a very-high-ping attacker can't
   shoot everyone else in the distant past. Beyond the clamp, their disadvantage
   is real (that's the honest tradeoff every game in the genre makes).

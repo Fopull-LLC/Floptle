@@ -219,6 +219,39 @@ same world behind `CollisionShape`; a mesh just answers `distance`/`normal` via 
 BVH instead of a field. (No re-meshing here — that's the whole point of staying SDF
 for the things that *do* deform.)
 
+### What a query hit is made of (v0.81)
+
+A hit — from `raycast`, `spherecast`, `capsulecast` or `overlapSphere` — names
+the **node** it landed on, and where the surface has more than one material, the
+**material slot** it landed on.
+
+`hit.node` is the entity every static collider was already registered with. The
+shape queries reported it from the start; the ray march had it in hand and threw
+it away, so `raycast` answered nothing for the whole of static geometry while
+`spherecast` — documented as returning the same fields — answered the node
+(`floptle/0174`). One builder now assembles every hit table, which is what stops
+the two drifting apart again.
+
+`hit.material` is the interesting half. A map mesh carries a material slot **per
+face**, and a level of any size is a few big nodes with several slots each — a
+building whose brick, grass and floorboards are one node answers "brick"
+everywhere if you ask the node. So the per-triangle slot rides into the collider:
+`TriMeshCollider` keeps a parallel `Vec<u16>` of **labels** beside its triangles,
+and `CollisionShape::face_label(p)` reports the label of the triangle nearest
+`p`. Two things about that:
+
+- **The labels are opaque here.** Physics stores strings it never interprets;
+  the editor fills them with the map mesh's own slot names. This crate has no
+  business knowing what a material is.
+- **Nothing on the query path calls it.** `face_label` costs a closest-point
+  search of its own, and a line-of-sight ray — cast far more often than a ground
+  check, and never interested in the answer — must not pay for a footstep's
+  question. The script layer resolves `hit.material` lazily, on read.
+
+Anything with one surface — an analytic box, a terrain field, an imported model,
+a body hull — answers `None`, deliberately. A name that is right for map meshes
+and quietly wrong for terrain is worse than no name.
+
 ## Friction and slopes (v0.49)
 
 Friction on a `RigidBody` is a **Coulomb coefficient**, not a damping factor. The

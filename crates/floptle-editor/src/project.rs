@@ -428,8 +428,7 @@ impl Editor {
         self.adopt_paint();
         self.adopt_tex_paint();
         // A brand-new scene has no bake; clear whatever the last one had.
-        self.load_gi();
-        self.load_nav();
+        self.adopt_scene_bakes();
         self.selection.clear();
         self.history = History::default();
         self.mesh_registry.clear();
@@ -487,8 +486,7 @@ impl Editor {
         self.adopt_tex_paint();
         // The scene's baked GI (its `.fgi`), if it has one. Absent = no bounce,
         // which is exactly how every scene rendered before v0.45.
-        self.load_gi();
-        self.load_nav();
+        self.adopt_scene_bakes();
         self.register_scene_meshes();
         // A scene saved before its textures were sliced — or whose materials a
         // script built — carries a sheet grid that disagrees with the project's
@@ -570,6 +568,23 @@ impl Editor {
     /// names scenes by it on the wire. It simply was not the thing the save used.
     pub(crate) fn scene_path(&self) -> PathBuf {
         self.project_root.join(self.scene_rel_or_default())
+    }
+
+    /// Load this scene's sidecar bakes — the baked GI (`.fgi`) and the navmesh
+    /// (`.fnav`) — from beside the scene file.
+    ///
+    /// **Every path that opens a scene has to run this**, the same way each of
+    /// them runs `adopt_terrain` / `adopt_maps` / `adopt_paint`: a bake is a
+    /// file keyed to the scene, not a part of its `.ron`. Two of the five ways
+    /// a scene gets opened skipped it — the boot path and a `scene.load` during
+    /// Play — and the symptom was a level that came up with no navmesh overlay
+    /// and no bounce light while both files sat right there on disk, with
+    /// nothing said. `tick_nav_autobake` re-checks `bakes_loaded_scene` every
+    /// frame so a path that forgets is corrected rather than believed.
+    pub(crate) fn adopt_scene_bakes(&mut self) {
+        self.bakes_loaded_scene = Some(self.scene_path());
+        self.load_gi();
+        self.load_nav();
     }
 
     pub(crate) fn project_cfg_path(&self) -> PathBuf {
@@ -1258,8 +1273,7 @@ impl Editor {
         // nothing said. Both files were sitting right there beside the scene.
         // The reasonable conclusion is that baking does not stick, and the
         // reasonable response is to bake again, every single session.
-        self.load_gi();
-        self.load_nav();
+        self.adopt_scene_bakes();
         self.project = floptle_scene::load_project(&self.project_cfg_path());
         // The action map belongs to the project, so it reloads with it —
         // otherwise the new project's scripts would resolve against the old

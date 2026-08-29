@@ -497,6 +497,107 @@ pub(crate) const VERBS: &[Verb] = &[
         legacy: &[],
     },
     Verb {
+        name: "vfx",
+        summary: "render a particle effect to PNGs across its own timeline, and exit",
+        detail: "An effect is a thing that happens over time, so one frame is the wrong \
+                 question: a burst reads as a blank frame before it fires and as drifting \
+                 smoke after it, and both are correct. This renders a spread of moments \
+                 across the effect's own span — the timeline plus however long its last \
+                 particles outlive it — and says what second each picture is at, so the next \
+                 run can ask for a moment between two of them with --at.\n\n\
+                 Every moment is an independent deterministic scrub from t = 0, so --at 0.5 \
+                 on its own gives exactly the frame a spread would put at 0.5s. The middle of \
+                 an effect can be looked at without watching the start of it first.\n\n\
+                 THE CAMERA IS THE SAME IN EVERY FRAME. It is framed once, on every moment at \
+                 once, then held — the frames exist to be compared against each other, and \
+                 two pictures at different zooms cannot be. With more than one frame they are \
+                 also tiled into one contact sheet, which is the picture to look at first.\n\n\
+                 With no --scene the effect is rendered alone on a bare stage: lighting, a \
+                 flat background, and deliberately no ground plane or reference cube — those \
+                 are things the author did not put in their effect. Pass --scene to see it in \
+                 a level instead, at the node that carries it and through that scene's camera.\n\n\
+                 Which moments are worth photographing is decided by LOOKING: the effect is \
+                 rendered at thumbnail size across its whole timeline first, and the frames are \
+                 spread over the part where something actually lands in the picture. So a burst \
+                 that is over in a tenth of a second gets five frames of that tenth, not four \
+                 frames of the empty second after it.\n\n\
+                 Each frame reports how much of the picture the effect covers — measured off \
+                 the rendered pixels, so the number can never disagree with the image beside \
+                 it.",
+        args: &[
+            Arg {
+                name: "PROJECT",
+                value: Value::Path,
+                required: false,
+                help: "the project directory (default: assets/)",
+            },
+            Arg {
+                name: "--effect",
+                value: Value::Text,
+                required: true,
+                help: "which effect, by key (vfx/Sparks) or by name (Sparks)",
+            },
+            Arg {
+                name: "--at",
+                value: Value::Text,
+                required: false,
+                help: "render exactly these moments, in seconds (say 0,0.25,0.5)",
+            },
+            Arg {
+                name: "--frames",
+                value: Value::Text,
+                required: false,
+                help: "how many moments to spread across the effect's span (default: 5)",
+            },
+            Arg {
+                name: "--scene",
+                value: Value::Text,
+                required: false,
+                help: "render it inside this scene, through that scene's camera",
+            },
+            Arg {
+                name: "--camera",
+                value: Value::Text,
+                required: false,
+                help: "with --scene, look through this camera node instead of the active one",
+            },
+            Arg {
+                name: "--background",
+                value: Value::Text,
+                required: false,
+                help: "hex colour behind the effect (default: 1c1c21, a neutral dark grey)",
+            },
+            Arg {
+                name: "--size",
+                value: Value::Text,
+                required: false,
+                help: "WxH per frame, or one number for a square (default: 480x480)",
+            },
+            Arg {
+                name: "--out",
+                value: Value::Path,
+                required: false,
+                help: "directory to write the frames into (default: PROJECT)",
+            },
+            Arg {
+                name: "--json",
+                value: Value::Flag,
+                required: false,
+                help: "answer as JSON",
+            },
+        ],
+        needs_gpu: true,
+        writes_project: true,
+        exits: &[(
+            1,
+            "there is no such effect, it emits nothing at any moment asked for, the scene has \
+             no camera, or a file could not be written",
+        )],
+        output: "one PNG per moment (plus a contact sheet when there is more than one); their \
+                 paths, times and live particle counts on stdout, or an object with --json",
+        legacy: &[],
+    },
+    Verb {
         name: "run",
         summary: "run a project headlessly for a bounded time, and report what happened",
         detail: "The editor's own play loop with no window and no GPU: the scene-transition \
@@ -1087,6 +1188,64 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 &out,
                 a.get_flag("json"),
             ))
+        }
+        Some(("vfx", a)) => {
+            let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
+            let effect = text(a, "effect").expect("required");
+            let at = match text(a, "at").as_deref().map(crate::vfx_shot::parse_times) {
+                Some(Err(e)) => {
+                    eprintln!("{e}");
+                    return Outcome::Exit(2);
+                }
+                Some(Ok(t)) => Some(t),
+                None => None,
+            };
+            let frames = match text(a, "frames").as_deref().map(str::parse::<usize>) {
+                Some(Ok(0)) => {
+                    eprintln!("--frames 0 asks for no pictures");
+                    return Outcome::Exit(2);
+                }
+                Some(Ok(n)) => n,
+                Some(Err(_)) => {
+                    eprintln!("--frames wants a whole number of moments");
+                    return Outcome::Exit(2);
+                }
+                // Five: enough to tell a start from a middle from an end with
+                // two spare, and few enough to look at in one sheet.
+                None => 5,
+            };
+            let size = match text(a, "size").as_deref().map(crate::shot::parse_size) {
+                Some(Err(e)) => {
+                    eprintln!("{e}");
+                    return Outcome::Exit(2);
+                }
+                Some(Ok(s)) => s,
+                // Square, because an effect on the bare stage has no aspect of
+                // its own — and small enough that five of them tile into a sheet
+                // nothing has to shrink to show.
+                None => (480, 480),
+            };
+            let background = match text(a, "background").as_deref().map(crate::vfx_shot::parse_color)
+            {
+                Some(Err(e)) => {
+                    eprintln!("{e}");
+                    return Outcome::Exit(2);
+                }
+                Some(Ok(c)) => Some(c),
+                None => None,
+            };
+            Outcome::Exit(crate::vfx_shot::run(crate::vfx_shot::Args {
+                root: &project,
+                effect: &effect,
+                scene: text(a, "scene").as_deref(),
+                camera: text(a, "camera").as_deref(),
+                at,
+                frames,
+                size,
+                background,
+                out: path(a, "out"),
+                json: a.get_flag("json"),
+            }))
         }
         Some(("run", a)) => {
             let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));

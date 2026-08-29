@@ -1130,7 +1130,7 @@ local heading = math.deg(yawOf(node.vel))
 
 ### `capsulecast`
 
-capsulecast(origin, dir, radius, halfHeight, max [, opts]) — the player-shaped sweep: "can I actually move there", asked with the shape that will be moving. Upright along the capsule's own axis, matching how the solver keeps a capsule body aligned, so the cast and the move agree.
+capsulecast(origin, dir, radius, halfHeight, max [, opts]) — the player-shaped sweep: "can I actually move there", asked with the shape that will be moving. Upright along the capsule's own axis, matching how the solver keeps a capsule body aligned, so the cast and the move agree. Same hit fields as raycast, hit.material included.
 
 ### `find`
 
@@ -1193,11 +1193,11 @@ Contact point Z (world).
 
 ### `overlapSphere`
 
-overlapSphere(center, radius [, opts]) — everything inside a sphere, DEEPEST overlap first, as hit tables ({x,y,z, nx,ny,nz, distance, node}). Reports static geometry AND body hulls. opts takes { exclude = node, layers = {"Enemies"} }. The blast-radius / "what is in this area" query.
+overlapSphere(center, radius [, opts]) — everything inside a sphere, DEEPEST overlap first, as hit tables ({x,y,z, nx,ny,nz, distance, node, material}) — the same fields raycast returns. Reports static geometry AND body hulls. opts takes { exclude = node, layers = {"Enemies"} }. The blast-radius / "what is in this area" query.
 
 ### `raycast`
 
-raycast(origin, dir, max [, ignore]) — or raycast(ox,oy,oz, dx,dy,dz, max [, ignore]). Cast a ray against the terrain + mesh colliders AND every physics body (players, crates). Returns a hit {x,y,z, nx,ny,nz, distance, node} or nil — node is the hit body's node handle (nil for static geometry). Your own node's body is excluded; pass a node as `ignore` to skip its body too. The last arg can instead be an options table: raycast(..., { ignore = target, layers = {"Ground"} }) — layers (name or array, Project Settings → Layers) filters what the ray can hit; a misspelled layer is an error. Use for ground checks, line-of-sight, shooting.
+raycast(origin, dir, max [, ignore]) — or raycast(ox,oy,oz, dx,dy,dz, max [, ignore]). Cast a ray against the terrain + mesh colliders AND every physics body (players, crates). Returns a hit {x,y,z, nx,ny,nz, distance, node, material} or nil. node is the node it hit, whether that is a body or a piece of level. material is WHICH MATERIAL SLOT of it — the name a level author typed on that face — so a footstep can tell the boards from the grass inside one big map mesh; nil for anything with a single surface (terrain, a Collidable cube, an imported model, a body), and it costs nothing until you read it. Your own node's body is excluded; pass a node as `ignore` to skip its body too. The last arg can instead be an options table: raycast(..., { ignore = target, layers = {"Ground"} }) — layers (name or array, Project Settings → Layers) filters what the ray can hit; a misspelled layer is an error. Use for ground checks, line-of-sight, shooting.
 
 ```lua
 local hit = raycast(node.pos, vec3(0, -1, 0), params.ground_ray)
@@ -1206,7 +1206,7 @@ if hit then log("ground at " .. hit.y) end
 
 ### `spherecast`
 
-spherecast(origin, dir, radius, max [, opts]) — the first thing a moving BALL of that radius would hit, or nil. A raycast that can't slip through a gap narrower than the thing you are actually moving.
+spherecast(origin, dir, radius, max [, opts]) — the first thing a moving BALL of that radius would hit, or nil. A raycast that can't slip through a gap narrower than the thing you are actually moving. The hit carries the same fields raycast's does, hit.material included — the usual ground check for a footstep.
 
 ## references — wire nodes in the Inspector
 

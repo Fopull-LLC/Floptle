@@ -137,6 +137,7 @@ the screen. `floptle help <VERB>` explains any one of them.
 [x] floptle play [PROJECT]
 [x] floptle run [PROJECT] [--scene S] [--frames N | --seconds T] [--json]
 [x] floptle shot [PROJECT] [--scene S] [--camera NAME] [--size WxH] [--out FILE]
+[x] floptle vfx [PROJECT] --effect KEY [--at SECS] [--frames N] [--scene S] [--out DIR]
 [x] floptle inspect [PROJECT] [--scene S] [--select QUERY] [--json]
 [x] floptle check [PROJECT] [--json]
 [x] floptle exec <SCRIPT.lua> [PROJECT] [--json]
@@ -153,6 +154,15 @@ the screen. `floptle help <VERB>` explains any one of them.
 The older flag forms (`--export`, `--new`, `--migrate`, `--version`,
 `--engine-version`) still work and mean the same thing; the subcommands are the
 documented spelling.
+
+`shot` and `vfx` are the two that answer "what does it look like" without a
+window. `shot` photographs a scene through its camera. `vfx` photographs one
+particle effect across its own timeline — a single frame cannot show an effect,
+since a burst reads as an empty frame before it fires and as drifting smoke
+after it — and tiles the moments into one contact sheet, through a camera fixed
+across all of them so they can be compared. Which moments are worth
+photographing is decided by rendering the effect at thumbnail size first and
+keeping the part where something actually lands in the picture.
 
 ## Multi-device LAN testing
 

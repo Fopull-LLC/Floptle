@@ -202,11 +202,64 @@ pub(crate) fn run(
     // the character floating over flat grey (`floptle/0166`).
     ed.sync_map_meshes();
     ed.sync_map_paint();
-
-    let Some(gpu) = ed.gpu.take() else {
+    let Some(pixels) = render_frame_pixels(&mut ed, &cam, w, h, cull_mask) else {
         eprintln!("no GPU: this machine has no adapter floptle can render on");
         return 1;
     };
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty())
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("could not create {}: {e}", parent.display());
+        return 1;
+    }
+    let Some(buf) = image::RgbaImage::from_raw(w, h, pixels) else {
+        eprintln!("the render came back the wrong size");
+        return 1;
+    };
+    if let Err(e) = buf.save(out) {
+        eprintln!("could not write {}: {e}", out.display());
+        return 1;
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "path": out.to_string_lossy(),
+                "width": w,
+                "height": h,
+                "camera": ed.world.get::<floptle_core::Name>(e).map(|n| n.0.clone()),
+            })
+        );
+    } else {
+        println!("wrote {} ({w}x{h})", out.display());
+    }
+    0
+}
+
+/// Draw one frame of `ed`'s world from `cam` and read it back as RGBA8.
+///
+/// **The whole presentation, not the tonemap**: the project's post chain, its
+/// depth-of-field focus resolved against the scene, screen ambient occlusion,
+/// its `stage post` shaders, and — because a pixel-art project composites at its
+/// own resolution and upscales — the retro presentation on its own pixel grid.
+///
+/// Shared with `floptle vfx` rather than copied into it. That is the same rule
+/// `offscreen_draws_the_same_world` exists for one level down: the editor's
+/// gathers have drifted apart five times, each time with the same symptom, and a
+/// second verb assembling its own post chain would be a sixth place for the
+/// picture to quietly stop being the editor's.
+///
+/// `None` means no device — this machine has no adapter floptle can render on.
+pub(crate) fn render_frame_pixels(
+    ed: &mut crate::Editor,
+    cam: &RenderCamera,
+    w: u32,
+    h: u32,
+    cull_mask: u32,
+) -> Option<Vec<u8>> {
+    let gpu = ed.gpu.take()?;
     let aspect = w as f32 / h as f32;
     // **Retro composites at the retro resolution and upscales**, exactly as the
     // Game view does — post, AO and dither have to land on the same chunky
@@ -249,7 +302,7 @@ pub(crate) fn run(
     ed.render_world_into(
         post.input_view(),
         &depth_view,
-        &cam,
+        cam,
         aspect,
         0.0,
         cull_mask,
@@ -278,7 +331,7 @@ pub(crate) fn run(
     if let Some(d) = crate::shading::dof_focus_distance(&ed.world, cam.world_position) {
         look.dof_focus = d;
     }
-    let Some(gpu) = ed.gpu.as_ref() else { return 1 };
+    let gpu = ed.gpu.as_ref()?;
     let proj = cam.proj_matrix(aspect);
     let ssao = floptle_render::SsaoFrame {
         depth: &depth_view,
@@ -302,37 +355,7 @@ pub(crate) fn run(
         }
     }
 
-    let pixels = readback(gpu, &color, w, h);
-    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty())
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        eprintln!("could not create {}: {e}", parent.display());
-        return 1;
-    }
-    let Some(buf) = image::RgbaImage::from_raw(w, h, pixels) else {
-        eprintln!("the render came back the wrong size");
-        return 1;
-    };
-    if let Err(e) = buf.save(out) {
-        eprintln!("could not write {}: {e}", out.display());
-        return 1;
-    }
-
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "ok": true,
-                "path": out.to_string_lossy(),
-                "width": w,
-                "height": h,
-                "camera": ed.world.get::<floptle_core::Name>(e).map(|n| n.0.clone()),
-            })
-        );
-    } else {
-        println!("wrote {} ({w}x{h})", out.display());
-    }
-    0
+    Some(readback(gpu, &color, w, h))
 }
 
 /// Copy the rendered texture back into RGBA8, un-swizzling if the adapter's

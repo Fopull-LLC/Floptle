@@ -623,10 +623,30 @@ impl Sim {
         indices: &[u32],
         tag: StaticTag,
     ) {
+        self.add_static_mesh_labelled(anchor, verts, indices, &[], Vec::new(), tag);
+    }
+
+    /// The same, with one **surface label** per source triangle.
+    ///
+    /// `tri_label[i]` labels the triangle at `indices[i*3..]` and indexes
+    /// `labels`. The strings are opaque to this crate (see
+    /// [`CollisionShape::face_label`](crate::shapes::CollisionShape::face_label));
+    /// the editor fills them with a map mesh's material-slot names, which is what
+    /// lets a script ask what it is standing on rather than what node it is
+    /// standing on (`floptle/0174`).
+    pub fn add_static_mesh_labelled(
+        &mut self,
+        anchor: DVec3,
+        verts: &[Vec3],
+        indices: &[u32],
+        tri_label: &[u16],
+        labels: Vec<String>,
+        tag: StaticTag,
+    ) {
         if indices.len() >= 3 && !verts.is_empty() {
             self.world.add_collider_tagged(
                 anchor,
-                Box::new(TriMeshCollider::new(verts, indices)),
+                Box::new(TriMeshCollider::labelled(verts, indices, tri_label, labels)),
                 tag.layer,
                 Some(tag.eid),
                 tag.sensor,

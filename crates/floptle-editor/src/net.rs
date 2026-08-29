@@ -1871,15 +1871,15 @@ impl Editor {
                 Some(Matter::MapMesh { id }) => {
                     let Some(mesh) = self.maps.meshes.get(id) else { continue };
                     let m = Mat4::from_scale_rotation_translation(s, wt.rotation, Vec3::ZERO);
-                    let mut verts: Vec<Vec3> = Vec::new();
-                    let mut indices: Vec<u32> = Vec::new();
-                    for sm in floptle_map::triangulate(mesh) {
-                        let base = verts.len() as u32;
-                        verts.extend(sm.positions.iter().map(|p| m.transform_point3(Vec3::from(*p))));
-                        indices.extend(sm.indices.iter().map(|i| i + base));
-                    }
+                    // Through the SAME builder the play sim uses, per-face
+                    // material slots included — a hit's `material` has to mean
+                    // the same thing on the server as it does offline.
+                    let (verts, indices, tri_slot, slots) =
+                        crate::map_edit::map_collision_geometry(mesh, m);
                     if indices.len() >= 3 {
-                        sim.add_static_mesh(anchor, &verts, &indices, layer);
+                        sim.add_static_mesh_labelled(
+                            anchor, &verts, &indices, &tri_slot, slots, layer,
+                        );
                     }
                 }
                 // Tilemaps: the SAME merged boxes the play sim builds, through the

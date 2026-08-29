@@ -146,6 +146,7 @@ mod vertex_paint;
 mod viewport_panel;
 mod vfx;
 mod vfx_inspector;
+mod vfx_shot;
 mod vfx_ui;
 mod mixer_ui;
 mod viewports;
@@ -2775,6 +2776,24 @@ struct Editor {
     /// nobody can act on until they can see whether one was found and where it
     /// was looked for.
     nav_loaded_from: Option<std::path::PathBuf>,
+    /// Which scene's sidecar bakes — the `.fnav` and the `.fgi` — are the ones
+    /// currently in hand.
+    ///
+    /// **The backstop for `adopt_scene_bakes`.** Five separate places open a
+    /// scene, and the bakes were missing from two of them for months: the boot
+    /// path (which assigns `project_root` directly rather than going through
+    /// `open_project`, so a Hub-launched editor never loaded either file) and a
+    /// `scene.load` during Play. Both failed silently — a level with no navmesh
+    /// looks exactly like a level nobody baked — so the reasonable conclusion
+    /// was that baking does not stick, and the reasonable response was to bake
+    /// again every single session.
+    ///
+    /// Remembering which scene the bakes belong to turns "every entry point has
+    /// to remember to call this" into something the editor can check for itself:
+    /// `tick_nav_autobake` compares this against the open scene every frame and
+    /// loads them if they disagree. A sixth entry point cannot reintroduce the
+    /// bug.
+    bakes_loaded_scene: Option<std::path::PathBuf>,
     /// A navmesh bake running on another thread.
     nav_job: Option<nav_bake::NavJob>,
     /// The level's shape as of the last sample.
@@ -3518,6 +3537,15 @@ impl ApplicationHandler for Editor {
         self.adopt_maps();
         self.adopt_paint();
         self.adopt_tex_paint();
+        // **The sidecar bakes, exactly as opening a scene loads them.** Booting
+        // is a scene load in every way that matters, and it was one of the two
+        // that skipped this: startup assigns `project_root` directly rather than
+        // going through `open_project` (see `ext_booted`), so the editor the Hub
+        // launches — which is how a project actually gets opened — came up with
+        // no navmesh and no baked light every single time, with both files
+        // sitting beside the scene and nothing saying so. Baking looked like
+        // something that does not stick.
+        self.adopt_scene_bakes();
         let now = Instant::now();
         self.last = Some(now);
         self.started = Some(now);

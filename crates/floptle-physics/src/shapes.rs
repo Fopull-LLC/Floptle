@@ -39,6 +39,26 @@ pub trait CollisionShape {
     fn bounds(&self) -> Option<(Vec3, f32)> {
         None
     }
+    /// The **surface label** of the nearest face to `p`, when this shape carries
+    /// per-face labels at all.
+    ///
+    /// Labels are opaque strings this crate never interprets — physics has no
+    /// business knowing what a material is. The editor happens to fill them with
+    /// a map mesh's material-slot names, because that is the string a level
+    /// author typed and the one a script wants to branch on.
+    ///
+    /// `None` for every shape that genuinely has one surface — an analytic box,
+    /// a terrain field, an imported model registered without labels. That is the
+    /// honest answer and it is why this returns an `Option` rather than a
+    /// plausible default: a name that is right for map meshes and quietly wrong
+    /// for terrain is worse than no name.
+    ///
+    /// **Not called by the solver or by any query march.** It costs a
+    /// closest-point search of its own, so it is asked only when somebody wants
+    /// the answer — see the lazy `hit.material` in `floptle-script`.
+    fn face_label(&self, _p: Vec3) -> Option<&str> {
+        None
+    }
     fn chunk_terrain(&self) -> Option<&ChunkTerrain> {
         None
     }
@@ -397,6 +417,19 @@ fn closest_point_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
 /// the face. Resolved every substep, so a body never tunnels to the wrong side.
 pub struct TriMeshCollider {
     tris: Vec<[Vec3; 3]>,
+    /// Per-triangle index into `labels`, parallel to `tris`. **Empty** when this
+    /// mesh has no per-face labels, which is the ordinary case — an imported
+    /// model is one surface as far as this crate is concerned.
+    ///
+    /// Kept in lockstep with `tris` by being pushed in the same loop, because
+    /// the constructor DROPS degenerate triangles: a label list built from the
+    /// caller's index buffer and stored as-is would be off by one from the first
+    /// zero-area triangle onward, and would answer the wrong material for
+    /// everything after it without failing.
+    tri_label: Vec<u16>,
+    /// The label strings `tri_label` indexes. Opaque here — see
+    /// [`CollisionShape::face_label`].
+    labels: Vec<String>,
     cell: f32,
     grid: std::collections::HashMap<(i32, i32, i32), Vec<u32>>,
 }
@@ -409,11 +442,30 @@ impl TriMeshCollider {
     const SEARCH: i32 = 2;
 
     pub fn new(verts: &[Vec3], indices: &[u32]) -> Self {
+        Self::labelled(verts, indices, &[], Vec::new())
+    }
+
+    /// The same collider, carrying one label per SOURCE triangle.
+    ///
+    /// `tri_label[i]` is the label of the triangle at `indices[i*3..]`, and
+    /// indexes `labels`. A short or empty `tri_label` simply leaves those
+    /// triangles unlabelled rather than failing — a collider that refused to
+    /// exist because a label list was the wrong length would take the level's
+    /// collision with it, which is a far worse outcome than an unanswered
+    /// `hit.material`.
+    pub fn labelled(
+        verts: &[Vec3],
+        indices: &[u32],
+        tri_label: &[u16],
+        labels: Vec<String>,
+    ) -> Self {
         let cell = Self::CELL;
         let mut tris = Vec::with_capacity(indices.len() / 3);
+        let mut kept_label = Vec::new();
+        let labelled = !labels.is_empty();
         let mut grid: std::collections::HashMap<(i32, i32, i32), Vec<u32>> =
             std::collections::HashMap::new();
-        for tri in indices.as_chunks::<3>().0 {
+        for (src, tri) in indices.as_chunks::<3>().0.iter().enumerate() {
             let (a, b, c) =
                 (verts[tri[0] as usize], verts[tri[1] as usize], verts[tri[2] as usize]);
             // Skip degenerate (zero-area) triangles — common in imported meshes and a
@@ -423,6 +475,11 @@ impl TriMeshCollider {
             }
             let ti = tris.len() as u32;
             tris.push([a, b, c]);
+            if labelled {
+                // Pushed HERE, beside the triangle it belongs to, so dropping a
+                // degenerate one cannot shift every label after it.
+                kept_label.push(tri_label.get(src).copied().unwrap_or(u16::MAX));
+            }
             let lo = cell_coord(a.min(b).min(c), cell);
             let hi = cell_coord(a.max(b).max(c), cell);
             for cz in lo.2..=hi.2 {
@@ -433,15 +490,16 @@ impl TriMeshCollider {
                 }
             }
         }
-        Self { tris, cell, grid }
+        Self { tris, tri_label: kept_label, labels, cell, grid }
     }
 
-    /// Closest point on the mesh to `p` (and its squared distance), searching the
-    /// ±`SEARCH` cell block around `p`. `None` if no triangle is within that block.
-    fn nearest(&self, p: Vec3) -> Option<(Vec3, f32)> {
+    /// Closest point on the mesh to `p` (its squared distance, and which triangle
+    /// it is on), searching the ±`SEARCH` cell block around `p`. `None` if no
+    /// triangle is within that block.
+    fn nearest_tri(&self, p: Vec3) -> Option<(Vec3, f32, u32)> {
         let c = cell_coord(p, self.cell);
         let s = Self::SEARCH;
-        let mut best: Option<(Vec3, f32)> = None;
+        let mut best: Option<(Vec3, f32, u32)> = None;
         for cz in (c.2 - s)..=(c.2 + s) {
             for cy in (c.1 - s)..=(c.1 + s) {
                 for cx in (c.0 - s)..=(c.0 + s) {
@@ -451,14 +509,19 @@ impl TriMeshCollider {
                         let q = closest_point_on_triangle(p, t[0], t[1], t[2]);
                         let d2 = (p - q).length_squared();
                         // Skip non-finite results defensively (degenerate input).
-                        if d2.is_finite() && best.is_none_or(|(_, bd)| d2 < bd) {
-                            best = Some((q, d2));
+                        if d2.is_finite() && best.is_none_or(|(_, bd, _)| d2 < bd) {
+                            best = Some((q, d2, ti));
                         }
                     }
                 }
             }
         }
         best
+    }
+
+    /// Closest point on the mesh to `p`, and its squared distance.
+    fn nearest(&self, p: Vec3) -> Option<(Vec3, f32)> {
+        self.nearest_tri(p).map(|(q, d2, _)| (q, d2))
     }
 }
 
@@ -472,6 +535,19 @@ impl CollisionShape for TriMeshCollider {
             Some((q, _)) => (p - q).try_normalize().unwrap_or(Vec3::Y),
             None => Vec3::Y,
         }
+    }
+    /// The label of the triangle nearest `p`.
+    ///
+    /// **The nearest triangle, not the one the march decided on**, because the
+    /// march never decided on one: it reports the collider it came within
+    /// tolerance of. The closest face at the hit point is the honest answer to
+    /// "what did I touch", and it costs a closest-point search — which is why
+    /// nothing on the query path calls this and the script layer asks for it
+    /// only when a script reads the field.
+    fn face_label(&self, p: Vec3) -> Option<&str> {
+        let (_, _, ti) = self.nearest_tri(p)?;
+        let li = *self.tri_label.get(ti as usize)?;
+        self.labels.get(li as usize).map(String::as_str)
     }
 }
 
@@ -596,3 +672,86 @@ mod poly_tests {
     }
 }
 
+#[cfg(test)]
+mod face_label_tests {
+    use super::*;
+
+    /// A floor in two halves: `x < 0` is one material, `x > 0` is another, and a
+    /// deliberately degenerate triangle sits between them.
+    ///
+    /// The degenerate one is the point. `TriMeshCollider` drops zero-area
+    /// triangles — they are common in imported meshes and a source of NaNs — so
+    /// a label list stored as the caller handed it in goes off by one from the
+    /// first dropped triangle onward, and every face after it reports the
+    /// material of its neighbour. That fails quietly: the collider works, the
+    /// query answers, and the answer is wrong for half the level.
+    fn split_floor() -> TriMeshCollider {
+        let verts = [
+            Vec3::new(-4.0, 0.0, -4.0), // 0
+            Vec3::new(0.0, 0.0, -4.0),  // 1
+            Vec3::new(0.0, 0.0, 4.0),   // 2
+            Vec3::new(-4.0, 0.0, 4.0),  // 3
+            Vec3::new(4.0, 0.0, -4.0),  // 4
+            Vec3::new(4.0, 0.0, 4.0),   // 5
+        ];
+        let indices = [
+            0, 1, 2, // left half
+            0, 2, 3, //
+            1, 1, 1, // zero-area: dropped by the constructor
+            1, 4, 5, // right half
+            1, 5, 2, //
+        ];
+        let tri_label = [0u16, 0, 0, 1, 1];
+        TriMeshCollider::labelled(
+            &verts,
+            &indices,
+            &tri_label,
+            vec!["Grass".into(), "Boards".into()],
+        )
+    }
+
+    #[test]
+    fn a_labelled_mesh_says_which_material_the_nearest_face_is() {
+        let m = split_floor();
+        assert_eq!(m.face_label(Vec3::new(-2.0, 0.4, 0.0)), Some("Grass"));
+        // The far side of the degenerate triangle. Before the labels were
+        // pushed beside the triangles they belong to, this answered "Grass".
+        assert_eq!(m.face_label(Vec3::new(2.0, 0.4, 0.0)), Some("Boards"));
+        // Right at the seam it must still answer one of them rather than
+        // nothing — a character standing on the join is the ordinary case.
+        assert!(m.face_label(Vec3::new(0.0, 0.3, 0.0)).is_some());
+    }
+
+    /// **A mesh with no labels answers nothing, not a plausible name.** An
+    /// imported model is one surface as far as physics is concerned, and a
+    /// material name invented for it would be wrong in a way nothing could
+    /// catch — which is worse than the field being absent (`floptle/0174`).
+    #[test]
+    fn an_unlabelled_mesh_answers_nothing() {
+        let verts =
+            [Vec3::new(-1.0, 0.0, -1.0), Vec3::new(1.0, 0.0, -1.0), Vec3::new(0.0, 0.0, 1.0)];
+        let m = TriMeshCollider::new(&verts, &[0, 1, 2]);
+        assert_eq!(m.face_label(Vec3::new(0.0, 0.5, 0.0)), None);
+        // …and neither does anything else that has one surface.
+        let b = BoxShape::new(Vec3::ZERO, Vec3::splat(1.0), Quat::IDENTITY);
+        assert_eq!(b.face_label(Vec3::new(0.0, 2.0, 0.0)), None);
+        assert_eq!(Plane::ground(0.0).face_label(Vec3::new(0.0, 1.0, 0.0)), None);
+    }
+
+    /// A label index that names no label answers nothing rather than panicking.
+    /// Hand-edited sidecars reach this crate, and a collider that takes the
+    /// level's collision down with it over a bad material index is a far worse
+    /// outcome than an unanswered field.
+    #[test]
+    fn a_label_index_past_the_end_is_survivable() {
+        let verts =
+            [Vec3::new(-1.0, 0.0, -1.0), Vec3::new(1.0, 0.0, -1.0), Vec3::new(0.0, 0.0, 1.0)];
+        let m = TriMeshCollider::labelled(&verts, &[0, 1, 2], &[9], vec!["Only".into()]);
+        assert_eq!(m.face_label(Vec3::new(0.0, 0.5, 0.0)), None);
+        assert!(m.distance(Vec3::new(0.0, 0.5, 0.0)) > 0.0, "and it still collides");
+        // A label list shorter than the triangles leaves the rest unlabelled,
+        // rather than refusing to build the collider at all.
+        let short = TriMeshCollider::labelled(&verts, &[0, 1, 2], &[], vec!["Only".into()]);
+        assert_eq!(short.face_label(Vec3::new(0.0, 0.5, 0.0)), None);
+    }
+}

@@ -3035,6 +3035,228 @@ end
         assert!(y.abs() < 0.1, "raycast should have set y to the ground (≈0), got {y}");
     }
 
+    /// The two-material floor a `floptle/0174` test needs: `x < 0` is "Grass",
+    /// `x > 0` is "Boards", tagged as node 7.
+    fn labelled_floor(eid: u32) -> floptle_physics::AnchoredCollider {
+        let verts = [
+            glam::Vec3::new(-4.0, 0.0, -4.0),
+            glam::Vec3::new(0.0, 0.0, -4.0),
+            glam::Vec3::new(0.0, 0.0, 4.0),
+            glam::Vec3::new(-4.0, 0.0, 4.0),
+            glam::Vec3::new(4.0, 0.0, -4.0),
+            glam::Vec3::new(4.0, 0.0, 4.0),
+        ];
+        let mut c = floptle_physics::AnchoredCollider::world(Box::new(
+            floptle_physics::TriMeshCollider::labelled(
+                &verts,
+                &[0, 1, 2, 0, 2, 3, 1, 4, 5, 1, 5, 2],
+                &[0, 0, 1, 1],
+                vec!["Grass".into(), "Boards".into()],
+            ),
+        ));
+        c.eid = Some(eid);
+        c
+    }
+
+    /// **The whole of `floptle/0174`, from a script.**
+    ///
+    /// A first-person game asks "what am I standing on" to pick a footstep. It
+    /// got two wrong answers. `raycast` returned no `hit.node` at all for static
+    /// geometry — so the level, which is all static geometry, was invisible to
+    /// the one query the docs point people at. And the best available answer,
+    /// the node's own material, is one material per node: a mansion that is one
+    /// map mesh with nine slots reported stone for its grass, its boards and its
+    /// wallpaper alike.
+    ///
+    /// Both are read here the way a footstep script reads them.
+    #[test]
+    fn a_script_can_ask_what_surface_it_is_standing_on() {
+        let dir = std::env::temp_dir().join("floptle_script_test_surface");
+        let _ = std::fs::create_dir_all(&dir);
+        // Cast down from above each half of the floor and record what came back.
+        write_script(
+            &dir,
+            "footsteps",
+            "function update(node, dt)\n            \x20 local l = raycast(-2, 5, 0, 0, -1, 0, 20)\n            \x20 local r = raycast(2, 5, 0, 0, -1, 0, 20)\n            \x20 local s = spherecast(vec3(2, 5, 0), vec3(0, -1, 0), 0.2, 20)\n            \x20 node.strs = {\n            \x20   left = l and l.material or \"nil\",\n            \x20   right = r and r.material or \"nil\",\n            \x20   sphere = s and s.material or \"nil\",\n            \x20   node = (l and l.node) and \"yes\" or \"no\",\n            \x20 }\n            \x20 print(node.strs.left .. \"|\" .. node.strs.right .. \"|\" .. node.strs.sphere .. \"|\" .. node.strs.node)\n            end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "footsteps".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.set_colliders(vec![labelled_floor(7)], glam::DVec3::ZERO);
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let _ = host.take_colliders();
+        let said =
+            host.drain_logs().into_iter().map(|l| l.msg).collect::<Vec<_>>().join("\n");
+        assert!(
+            said.contains("Grass|Boards|Boards|yes"),
+            "a script asked what it was standing on and got {said:?} — it should read the \
+             floor's own material on each side, and name the node it hit"
+        );
+    }
+
+    /// The other half of the same promise: something with no per-face material
+    /// answers `nil`, not a plausible wrong name. A name that is right for map
+    /// meshes and quietly wrong for terrain is worse than no name at all.
+    #[test]
+    fn a_surface_with_no_per_face_material_answers_nothing() {
+        let dir = std::env::temp_dir().join("floptle_script_test_surface_none");
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "asker",
+            "function update(node, dt)\n            \x20 local h = raycast(0, 5, 0, 0, -1, 0, 20)\n            \x20 print(h and (h.material or \"nil\") or \"miss\")\n            end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "asker".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        let mut plane =
+            floptle_physics::AnchoredCollider::world(Box::new(floptle_physics::Plane::ground(0.0)));
+        plane.eid = Some(3);
+        host.set_colliders(vec![plane], glam::DVec3::ZERO);
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let _ = host.take_colliders();
+        let said =
+            host.drain_logs().into_iter().map(|l| l.msg).collect::<Vec<_>>().join("\n");
+        assert!(said.contains("nil"), "an analytic plane invented a material: {said:?}");
+    }
+
+    /// A collider that counts how many times anything asked it for a surface
+    /// label. The whole of criterion 5 in `floptle/0174` is that this stays at
+    /// zero for a query nobody asks.
+    struct CountsLabelAsks {
+        inner: floptle_physics::TriMeshCollider,
+        asks: std::sync::atomic::AtomicU32,
+    }
+
+    impl floptle_physics::CollisionShape for CountsLabelAsks {
+        fn distance(&self, p: glam::Vec3) -> f32 {
+            self.inner.distance(p)
+        }
+        fn normal(&self, p: glam::Vec3) -> glam::Vec3 {
+            self.inner.normal(p)
+        }
+        fn face_label(&self, p: glam::Vec3) -> Option<&str> {
+            self.asks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.face_label(p)
+        }
+    }
+
+    /// **A line-of-sight ray must not pay for a footstep's question.**
+    ///
+    /// The per-face lookup costs a closest-point search of its own, and the
+    /// ordinary ray — cast far more often than a ground check and never
+    /// interested in the answer — must not run it. Which is why `hit.material`
+    /// is resolved lazily rather than filled in when the hit is built: a script
+    /// that never reads the field never triggers the search.
+    ///
+    /// Counted rather than timed. A timing ratio cannot see one extra
+    /// closest-point search against a march of dozens of steps, so it would pass
+    /// while the promise was broken.
+    #[test]
+    fn a_query_that_never_asks_what_it_hit_pays_nothing_for_the_answer() {
+        use std::sync::atomic::Ordering;
+        let dir = std::env::temp_dir().join("floptle_script_test_surface_cost");
+        let _ = std::fs::create_dir_all(&dir);
+        // Three queries, and not one of them reads `material`.
+        write_script(
+            &dir,
+            "looker",
+            "function update(node, dt)\n\
+            \x20 local a = raycast(-2, 5, 0, 0, -1, 0, 20)\n\
+            \x20 local b = spherecast(vec3(2, 5, 0), vec3(0, -1, 0), 0.2, 20)\n\
+            \x20 local c = overlapSphere(vec3(0, 0, 0), 2)\n\
+            \x20 node.y = (a and a.distance or 0) + (b and b.nx or 0) + #c\n\
+            end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "looker".into(),
+                enabled: true,
+                params: vec![],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let verts = [
+            glam::Vec3::new(-4.0, 0.0, -4.0),
+            glam::Vec3::new(0.0, 0.0, -4.0),
+            glam::Vec3::new(0.0, 0.0, 4.0),
+            glam::Vec3::new(-4.0, 0.0, 4.0),
+            glam::Vec3::new(4.0, 0.0, -4.0),
+            glam::Vec3::new(4.0, 0.0, 4.0),
+        ];
+        let shape = std::sync::Arc::new(CountsLabelAsks {
+            inner: floptle_physics::TriMeshCollider::labelled(
+                &verts,
+                &[0, 1, 2, 0, 2, 3, 1, 4, 5, 1, 5, 2],
+                &[0, 0, 1, 1],
+                vec!["Grass".into(), "Boards".into()],
+            ),
+            asks: std::sync::atomic::AtomicU32::new(0),
+        });
+        struct Shared(std::sync::Arc<CountsLabelAsks>);
+        impl floptle_physics::CollisionShape for Shared {
+            fn distance(&self, p: glam::Vec3) -> f32 {
+                self.0.distance(p)
+            }
+            fn normal(&self, p: glam::Vec3) -> glam::Vec3 {
+                self.0.normal(p)
+            }
+            fn face_label(&self, p: glam::Vec3) -> Option<&str> {
+                self.0.face_label(p)
+            }
+        }
+        let mut c = floptle_physics::AnchoredCollider::world(Box::new(Shared(shape.clone())));
+        c.eid = Some(7);
+
+        let mut host = ScriptHost::new();
+        host.set_colliders(vec![c], glam::DVec3::ZERO);
+        host.run(&mut world, &dir, 0.1, 0.1);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let _ = host.take_colliders();
+        assert_eq!(
+            shape.asks.load(Ordering::Relaxed),
+            0,
+            "three queries ran and none of them read hit.material, yet the per-face lookup was \
+             paid anyway — that cost belongs to the caller that wants the answer"
+        );
+
+        // …and the counter is not stuck at zero: asking DOES reach the shape.
+        assert_eq!(
+            floptle_physics::CollisionShape::face_label(&*shape, glam::Vec3::new(2.0, 0.1, 0.0)),
+            Some("Boards")
+        );
+        assert_eq!(shape.asks.load(Ordering::Relaxed), 1);
+    }
+
     #[test]
     fn script_can_draw_gizmos() {
         let dir = std::env::temp_dir().join("floptle_script_test_gizmos");

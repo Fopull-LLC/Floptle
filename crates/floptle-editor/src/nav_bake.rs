@@ -1121,6 +1121,21 @@ impl crate::Editor {
                 self.start_nav_bake(BakeReason::Reread);
             }
         }
+        // **The bakes in hand have to belong to the scene that is open.**
+        //
+        // Checked here rather than trusted to the five places that open a scene,
+        // because two of them did not call `adopt_scene_bakes` and neither said
+        // so: an unloaded navmesh is indistinguishable from an unbaked one, so
+        // the whole symptom was "I bake, I save, I reopen, it is gone" — every
+        // session, for months, with the `.fnav` sitting beside the scene the
+        // entire time.
+        //
+        // AFTER the heal block, not before it: a load made here sets `nav_heal`,
+        // and the flag is deliberately acted on a frame later — once the scene
+        // it describes has finished arriving.
+        if self.bakes_loaded_scene.as_deref() != Some(self.scene_path().as_path()) {
+            self.adopt_scene_bakes();
+        }
         let auto = matches!(
             nav_node(&self.world),
             Some((_, Matter::NavMesh { auto_rebake: true, enabled: true, .. }))
@@ -2131,8 +2146,10 @@ mod tests {
         assert!(polys > 0);
         assert!(ed.save_scene());
 
-        // Now start the editor on that project — no `open_scene_file` anywhere,
-        // which is exactly what happens when the editor boots.
+        // Now switch to that project — no `open_scene_file` anywhere. (NOT what
+        // booting does: startup assigns `project_root` directly and never calls
+        // `open_project` at all, which is why fixing only this one left the Hub's
+        // editor still coming up unbaked. See the test below.)
         let mut fresh = crate::Editor::default();
         fresh.open_project(dir.clone());
         assert_eq!(
@@ -2143,6 +2160,94 @@ mod tests {
             fresh.nav_baked.as_ref().map(|m| m.polys.len()),
             Some(polys),
             "opening the project came up unbaked — the .fnav is right beside the scene"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The bake comes back for a scene nobody told the editor about.**
+    ///
+    /// The real bug, and the one that survived two fixes: `open_project` learned
+    /// to load the sidecar bakes, and the editor still came up unbaked every
+    /// session — because startup does not call `open_project`. It assigns
+    /// `project_root` and loads the scene itself, and a `scene.load` during Play
+    /// does the same. Both were silent, because a navmesh that was never loaded
+    /// looks exactly like one that was never baked.
+    ///
+    /// So the check does not live at the entry points any more. This is the
+    /// world an entry point that forgot would leave behind — the scene open, the
+    /// `.fnav` on disk, nothing loaded — and one frame of the editor has to fix
+    /// it by itself.
+    #[test]
+    fn a_scene_opened_without_loading_its_bakes_picks_them_up_on_the_next_frame() {
+        use floptle_core::{Collidable, Matter, Shape, Transform};
+        let dir = std::env::temp_dir().join(format!("floptle-nav-backstop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scenes")).unwrap();
+
+        fn level(dir: &std::path::Path) -> crate::Editor {
+            let mut ed = crate::Editor {
+                project_root: dir.to_path_buf(),
+                scene_rel: "scenes/first.ron".into(),
+                scene_name: "first".into(),
+                ..Default::default()
+            };
+            let nav = ed.world.spawn();
+            ed.world.insert(nav, Transform::IDENTITY);
+            ed.world.insert(nav, nav_mesh_matter(false));
+            let floor = ed.world.spawn();
+            ed.world.insert(
+                floor,
+                Transform {
+                    scale: floptle_core::math::Vec3::new(40.0 / 0.7, 1.0, 40.0 / 0.7),
+                    ..Transform::IDENTITY
+                },
+            );
+            ed.world.insert(floor, Matter::Primitive { shape: Shape::Plane, color: [0.5; 3] });
+            ed.world.insert(floor, Collidable);
+            ed
+        }
+
+        let mut ed = level(&dir);
+        ed.bake_nav();
+        while ed.nav_baked.is_none() {
+            ed.poll_nav_bake();
+            std::thread::yield_now();
+        }
+        let polys = ed.nav_baked.as_ref().expect("just baked").polys.len();
+        assert!(polys > 0);
+
+        // A fresh editor holding that scene, with nothing having loaded the
+        // bake — the boot path, exactly.
+        let mut fresh = level(&dir);
+        assert!(fresh.nav_baked.is_none(), "nothing has loaded it yet");
+
+        fresh.tick_nav_autobake(1.0 / 60.0);
+        assert_eq!(
+            fresh.nav_baked.as_ref().map(|m| m.polys.len()),
+            Some(polys),
+            "one frame of the editor and the bake beside the scene is still not loaded — this \
+             is the rebake-every-session bug, and no entry point can be trusted to prevent it"
+        );
+
+        // And it is loaded ONCE. A reload every frame would drop a bake that
+        // had just been made and take an O(scene) file read with it.
+        fresh.nav_baked = None;
+        fresh.tick_nav_autobake(1.0 / 60.0);
+        assert!(
+            fresh.nav_baked.is_none(),
+            "the same scene must not be re-read every frame — only a scene it does not hold \
+             the bakes for"
+        );
+
+        // A different scene IS a reason to look again.
+        fresh.set_scene_file(&dir.join("scenes/first.ron"));
+        fresh.bakes_loaded_scene = Some(dir.join("scenes/other.ron"));
+        fresh.tick_nav_autobake(1.0 / 60.0);
+        assert_eq!(
+            fresh.nav_baked.as_ref().map(|m| m.polys.len()),
+            Some(polys),
+            "the open scene changed under the bakes in hand and they were kept anyway"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
