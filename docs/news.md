@@ -1,5 +1,18 @@
 ## Just shipped
 
+**v0.82.0 "Way Out"** — **your main menu's Quit button works.** There was no
+way for a script to close the game, so that button was drawn dead or not drawn
+at all; `app.quit()` ends it — an exported build closes with your `save.*` data
+flushed first, while the editor stops Play instead so a game under test cannot
+take your unsaved work with it. A Video tab is possible too: `app.setVsync`
+("On"/"Adaptive"/"Off"), `app.setRetroHeight` — which in a pixel-art game is the
+resolution a player means — plus `app.title()` and `app.version()` for the top
+of a menu. A setting changed this way lasts the session and Stop puts it back,
+so persist the player's choice with `save.*`. A `project.ron` that will not
+parse now names the line rather than silently opening the project with default
+settings, and `perf.scripts()` has stopped attributing whole-frame stalls to
+scripts that have no `update` in them.
+
 **v0.81.0 "Still There"** — **your bake is there when you open the project.**
 Bake a Nav Mesh, save, reopen, and it was gone — never loaded, though the file
 had been beside the scene the whole time, and nothing said so. Light Probes had
