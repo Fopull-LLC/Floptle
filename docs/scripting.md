@@ -3838,6 +3838,56 @@ own id, so reporting it would be wrong exactly when it mattered), and **lobby
 chat** — Steam's message handle is only valid inside its own callback, which is
 not where this engine can read it. Lobby *data* is the channel to use.
 
+## 28c. The Steam overlay
+
+The overlay is the Shift+Tab UI the Steam client draws *over* your game, from
+outside your process. Your script never renders it; it only asks for a page, and
+hears when the player opens or closes it.
+
+```lua
+-- A "Community" button on the pause menu:
+local ok, why = steam.openOverlay("community")
+if not ok then
+  find("Hint").text = why       -- show the URL instead, don't strand them
+end
+
+-- The invite button on a lobby screen:
+steam.openInviteDialog(lobby.id)
+
+-- Your own store page, or a DLC's by id:
+steam.openOverlayStore()
+steam.openOverlayStore(1234560)
+
+-- Pause a single-player game while they shop:
+steam.onOverlayChanged(function(active)
+  paused = active
+end)
+```
+
+The pages are the SDK's own names: `"friends"`, `"community"`, `"players"`,
+`"settings"`, `"officialgamegroup"`, `"stats"`, `"achievements"`.
+`steam.openOverlayUser(dialog, id)` opens a page about one user — `"steamid"` is
+their profile — and `steam.openOverlayUrl(url)` opens the overlay's browser at a
+full `http(s)://` URL.
+
+Three things worth knowing:
+
+- **A misspelt page is refused in every session**, with the valid names in the
+  message — you do not need Steam running to find the typo. The backend is never
+  asked.
+- **`(false, why)` is what "it couldn't open" looks like.** Steam's own call
+  silently does nothing when the overlay is disabled in the player's settings,
+  hasn't hooked your renderer yet at startup, or can't inject on their setup
+  (some Linux/Proton configurations). The engine reports it instead, so a
+  purchase or invite button degrades — show the URL, show the lobby code —
+  rather than doing nothing. `steam.overlayEnabled()` is the same answer as a
+  query.
+- **While the overlay is up, your scripts get neutral input**, the same way they
+  do when the Game view isn't focused. A key held through Shift+Tab is released,
+  not stuck down. The simulation keeps running — a networked session cannot
+  pause for one player — so pausing a single-player game is yours to do, from
+  `steam.onOverlayChanged` or `steam.overlayActive()`.
+
 ## 29. Options that refuse — and why an error is the kind answer
 
 Every options table in this engine is **closed**. A key it does not read is an

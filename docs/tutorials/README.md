@@ -9,6 +9,7 @@ Follow-along projects that build a small, finished game from an empty one. Each 
 | [Build a top-down RPG](topdown.md) | Walk a village, talk to someone, pick up a key, unlock a door to another scene. | some coding | ~50 min |
 | [Build Flappy](flappy.md) | One button, endless obstacles, a score, and a game over you can restart. | no experience needed | ~30 min |
 | [Pathfinding — command a squad](pathfinding.md) | Click the ground, and a dozen units find their own way there. | some coding | ~40 min |
+| [Make it multiplayer](multiplayer.md) | The platformer, played by two machines at once — and everything that has to change for that to work. | some coding | ~50 min |
 | [Floptle for programmers](for-programmers.md) | The model, the tick, and the six things that aren't like the engine you came from. | for programmers | ~20 min |
 
 ## Starter templates

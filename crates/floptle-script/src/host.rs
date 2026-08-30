@@ -2106,6 +2106,16 @@ impl ScriptHost {
         *self.platform.borrow_mut() = platform;
     }
 
+    /// Whether the platform's overlay (Steam's Shift+Tab UI) is being shown
+    /// over the game right now. The driver reads this to feed scripts
+    /// neutral input while it is up — the player's keys belong to the
+    /// overlay, and a key held through the open would otherwise stay down
+    /// until it was next physically released. Always `false` with no
+    /// platform backend.
+    pub fn overlay_active(&self) -> bool {
+        self.platform.borrow().overlay().is_some_and(|o| o.is_active())
+    }
+
     /// Every name the engine adds to a script's environment, as dotted paths
     /// (`water.depthAt`, `math.lerp`, `vec3`, …), sorted.
     ///

@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 119
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 127
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 26
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -495,9 +495,41 @@ steam.localUserId() — the signed-in local user's SteamID64, as a STRING (it ex
 
 steam.onLobbyEvent(fn) — fires for each thing that happens in a lobby you're in. e.kind is "member" — with e.user and e.change of "entered", "left", "disconnected", "kicked" or "banned" — or "data", with e.whose telling you whether the LOBBY's data or a MEMBER's changed, so re-read the right one. Who did the kicking is deliberately not reported: Steam's binding fills that field from the wrong id. One handler; registering again replaces it, and Stop clears it.
 
+### `steam.onOverlayChanged`
+
+steam.onOverlayChanged(fn) — fn(active) runs once per open (true) and close (false) of the overlay, in order, on the frame after it happened. Pause a single-player game on true and resume on false; a networked session keeps running regardless. One handler; registering again replaces it, and Stop clears it.
+
 ### `steam.onPersonaChanged`
 
 steam.onPersonaChanged(fn) — fires once when the local user's persona (name or avatar) changes. Re-read steam.personaName() from inside it; avatars aren't exposed to Lua yet (no engine primitive turns raw bytes into a drawable texture at runtime — see the Steam integration plan).
+
+### `steam.openInviteDialog`
+
+steam.openInviteDialog(lobbyId) -> ok, err — opens Steam's invite-friends dialog for a lobby you're in (the id from steam.createLobby / joinLobby). Friends who accept still need YOUR lobby screen to bring them in — put the join in steam.onLobbyEvent. (false, why) when the overlay can't open: show the lobby code instead.
+
+### `steam.openOverlay`
+
+steam.openOverlay(page) -> ok, err — opens one of the overlay's own pages: "friends", "community", "players", "settings", "officialgamegroup", "stats" or "achievements". A misspelt page is refused with the list, in EVERY session — you don't need Steam running to find the typo. (false, why) when the overlay can't open, where Steam's own call would silently do nothing.
+
+### `steam.openOverlayStore`
+
+steam.openOverlayStore([appId]) -> ok, err — opens a store page in the overlay: your own game's with no argument, another app's (a DLC's) with its id. When it can't (false, why): this is the purchase flow to degrade rather than break — tell the player where to look.
+
+### `steam.openOverlayUrl`
+
+steam.openOverlayUrl(url) -> ok, err — opens the overlay's web browser at a full http:// or https:// URL. When it can't (false, why): show the URL on screen instead, so the player can still get there.
+
+### `steam.openOverlayUser`
+
+steam.openOverlayUser(dialog, userId) -> ok, err — opens a page about one user (their id as a string, e.g. from steam.friends()): "steamid" is their profile; also "chat", "jointrade", "stats", "achievements", "friendadd", "friendremove", "friendrequestaccept", "friendrequestignore". Same refusals as steam.openOverlay.
+
+### `steam.overlayActive`
+
+steam.overlayActive() — true while the overlay is being shown over the game (Shift+Tab, or one of your own opens). nil when steam.available() is false — which is falsy, so `if steam.overlayActive() then` is safe in every session. The engine already feeds scripts neutral input while it's up; use this (or steam.onOverlayChanged) to pause a single-player game.
+
+### `steam.overlayEnabled`
+
+steam.overlayEnabled() — true once the Steam overlay has hooked this game and can open; false while it's still attaching at startup, when the player has it disabled in Steam's settings, or on a setup where it can't inject (some Linux/Proton configurations). nil when steam.available() is false. Every steam.openOverlay* call answers (false, why) in the same situations, so you rarely need to poll this yourself.
 
 ### `steam.personaName`
 

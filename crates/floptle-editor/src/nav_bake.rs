@@ -418,6 +418,11 @@ pub(crate) fn gather(
     maps: &crate::map_edit::MapStore,
     terrains: &std::collections::HashMap<Entity, crate::terrain_edit::EditorTerrain>,
     within: Option<([f32; 3], [f32; 3])>,
+    // Mesh refs in a scene are project-relative, and a bake does not always run
+    // from the project dir — `floptle bake nav <PROJECT>` runs from wherever it
+    // was invoked. Read raw, every mesh in the level was skipped and the bake
+    // still "succeeded", producing a navmesh with the geometry missing.
+    project_root: &std::path::Path,
 ) -> Gathered {
     let mut tris: Vec<Tri> = Vec::new();
     let mut sources = 0usize;
@@ -462,9 +467,8 @@ pub(crate) fn gather(
                     // Geometry only, and cached: a bake reads every model in the
                     // level, and a level that changes while you walk through it
                     // bakes over and over. See `gltf_import::geometry`.
-                    let Ok(model) =
-                        floptle_assets::gltf_import::geometry(std::path::Path::new(&path))
-                    else {
+                    let file = crate::project::resolve_asset_path(project_root, &path);
+                    let Ok(model) = floptle_assets::gltf_import::geometry(&file) else {
                         continue;
                     };
                     for part in &model.parts {
@@ -1277,7 +1281,15 @@ impl crate::Editor {
             [local[0] + half[0] + m, local[1] + half[1] + m, local[2] + half[2] + m],
         );
         let t0 = std::time::Instant::now();
-        let g = gather(&self.world, anchor, &layers, &self.maps, &self.terrains, Some(within));
+        let g = gather(
+            &self.world,
+            anchor,
+            &layers,
+            &self.maps,
+            &self.terrains,
+            Some(within),
+            &self.project_root,
+        );
 
         // Nothing walkable here now is a real answer — a building came down —
         // and it has to reach the mesh as an empty region rather than as a
@@ -1359,7 +1371,15 @@ impl crate::Editor {
         let Some(settings) = settings_of(&matter) else { return };
 
         let origin = floptle_core::world_transform(&self.world, e).translation;
-        let g = gather(&self.world, origin, &layers, &self.maps, &self.terrains, None);
+        let g = gather(
+            &self.world,
+            origin,
+            &layers,
+            &self.maps,
+            &self.terrains,
+            None,
+            &self.project_root,
+        );
         if g.tris.is_empty() {
             // A stamp that has already been reported empty stays quiet on a
             // background retry (`floptle/0142`) — a level whose ground has
@@ -1885,7 +1905,7 @@ mod tests {
 
         let maps = crate::map_edit::MapStore::default();
         let terrains = std::collections::HashMap::new();
-        let g = gather(&world, DVec3::ZERO, &[], &maps, &terrains, None);
+        let g = gather(&world, DVec3::ZERO, &[], &maps, &terrains, None, std::path::Path::new("."));
 
         // Twelve triangles, and — the part that matters — they came from the
         // BODY. The asset path does not exist, so a gather that still reached

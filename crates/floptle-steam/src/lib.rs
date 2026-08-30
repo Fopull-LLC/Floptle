@@ -58,8 +58,8 @@ use floptle_services::{
     Achievements, Cloud, FriendInfo, Identity, LeaderboardDisplay, LeaderboardEntry,
     LeaderboardInfo, LeaderboardOutcome, LeaderboardResult, LeaderboardScope, LeaderboardSort,
     Leaderboards, Lobbies, LobbyCompare, LobbyDistance, LobbyEvent, LobbyFilters, LobbyInfo,
-    LobbyKind, LobbyMemberChange, LobbyOutcome, LobbyResult, Platform, ScoreUploaded, Social,
-    UploadMethod,
+    LobbyKind, LobbyMemberChange, LobbyOutcome, LobbyResult, Overlay, Platform, ScoreUploaded,
+    Social, UploadMethod,
 };
 
 /// The most members Steam will allow in one lobby. `steamworks`'
@@ -107,9 +107,9 @@ pub fn restart_app_if_necessary(app_id: u32) -> bool {
 }
 
 /// The Steamworks-backed platform backend: a live `SteamAPI_Init`'d client.
-/// Every [`Platform`] accessor beyond [`Identity`] still answers `None` —
-/// nothing has given Achievements/Cloud/Overlay/etc. anything to implement
-/// yet.
+/// Implements every landed capability trait ([`Identity`], [`Achievements`],
+/// [`Cloud`], [`Social`], [`Leaderboards`], [`Lobbies`], [`Overlay`]); the
+/// accessors for phases that haven't landed still answer `None`.
 #[cfg(feature = "steam")]
 pub struct SteamPlatform {
     client: steamworks::Client,
@@ -175,6 +175,19 @@ pub struct SteamPlatform {
     /// recorded for that same lobby. Read and cleared in `poll`.
     lobby_join_targets: Arc<Mutex<HashMap<u64, u64>>>,
     lobby_next_request: Cell<u64>,
+    /// Whether the overlay is up RIGHT NOW — the level behind
+    /// [`Overlay::is_active`], maintained by the `GameOverlayActivated`
+    /// callback. Distinct from [`overlay_flips`](Self::overlay_flips), which
+    /// records each transition as an event.
+    overlay_active: Arc<AtomicBool>,
+    /// Every overlay shown/hidden flip since last drained, oldest first.
+    /// Same `Send` reasoning as [`lb_results`](Self::lb_results).
+    overlay_flips: Arc<Mutex<Vec<bool>>>,
+    /// When `init` returned, for the overlay-hook diagnostic in `pump`.
+    booted_at: Instant,
+    /// What `pump` has said about the overlay so far: nothing, "hooked", or
+    /// "still not hooked after N seconds" — each printed at most once.
+    overlay_reported: Cell<OverlayReport>,
     // Held only to keep the registrations alive — dropping one unregisters
     // its callback. Never read directly.
     _persona_cb: steamworks::CallbackHandle,
@@ -183,6 +196,7 @@ pub struct SteamPlatform {
     _lobby_enter_cb: steamworks::CallbackHandle,
     _stats_received_cb: steamworks::CallbackHandle,
     _stats_stored_cb: steamworks::CallbackHandle,
+    _overlay_cb: steamworks::CallbackHandle,
 }
 
 #[cfg(feature = "steam")]
@@ -248,6 +262,15 @@ impl SteamPlatform {
                 }
             });
 
+        let overlay_active = Arc::new(AtomicBool::new(false));
+        let overlay_flips: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+        let (active, flips) = (overlay_active.clone(), overlay_flips.clone());
+        let _overlay_cb =
+            client.register_callback::<steamworks::GameOverlayActivated, _>(move |cb| {
+                active.store(cb.active, Ordering::Relaxed);
+                lock(&flips).push(cb.active);
+            });
+
         let lobby_enter_errors: Arc<Mutex<HashMap<u64, &'static str>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let errors = lobby_enter_errors.clone();
@@ -275,12 +298,17 @@ impl SteamPlatform {
             lobby_enter_errors,
             lobby_join_targets: Arc::new(Mutex::new(HashMap::new())),
             lobby_next_request: Cell::new(1),
+            overlay_active,
+            overlay_flips,
+            booted_at: Instant::now(),
+            overlay_reported: Cell::new(OverlayReport::Nothing),
             _persona_cb,
             _lobby_chat_update_cb,
             _lobby_data_update_cb,
             _lobby_enter_cb,
             _stats_received_cb,
             _stats_stored_cb,
+            _overlay_cb,
         })
     }
 }
@@ -292,6 +320,7 @@ impl Platform for SteamPlatform {
     }
     fn pump(&self) {
         self.client.run_callbacks();
+        self.report_overlay_hook();
         // Reconcile FIRST: a store's async server round-trip can fail on a
         // frame long after `dirty` was already cleared for it, and the due/
         // dirty check right below is the only thing deciding whether `flush`
@@ -322,6 +351,137 @@ impl Platform for SteamPlatform {
     }
     fn lobbies(&self) -> Option<&dyn Lobbies> {
         Some(self)
+    }
+    fn overlay(&self) -> Option<&dyn Overlay> {
+        Some(self)
+    }
+}
+
+#[cfg(feature = "steam")]
+impl Overlay for SteamPlatform {
+    fn is_enabled(&self) -> bool {
+        self.client.utils().is_overlay_enabled()
+    }
+
+    fn is_active(&self) -> bool {
+        self.overlay_active.load(Ordering::Relaxed)
+    }
+
+    // Every `open_*` below checks `is_enabled` FIRST: the SDK's own calls
+    // return nothing and silently do nothing when the overlay isn't hooked
+    // (disabled in Steam's settings, not yet attached, an injection-hostile
+    // Linux/Proton setup), and "the button did nothing" is exactly the
+    // failure shape this engine refuses to ship. The strings themselves are
+    // validated by the script layer against `OVERLAY_PAGES` /
+    // `OVERLAY_USER_DIALOGS` before they get here.
+
+    fn open_page(&self, page: &str) -> Result<(), String> {
+        self.overlay_openable()?;
+        self.client.friends().activate_game_overlay(page);
+        Ok(())
+    }
+
+    fn open_user_page(&self, dialog: &str, user: u64) -> Result<(), String> {
+        self.overlay_openable()?;
+        self.client
+            .friends()
+            .activate_game_overlay_to_user(dialog, steamworks::SteamId::from_raw(user));
+        Ok(())
+    }
+
+    fn open_url(&self, url: &str) -> Result<(), String> {
+        self.overlay_openable()?;
+        self.client.friends().activate_game_overlay_to_web_page(url);
+        Ok(())
+    }
+
+    fn open_store(&self, app_id: Option<u32>) -> Result<(), String> {
+        self.overlay_openable()?;
+        let id = app_id.map(steamworks::AppId::from).unwrap_or(self.app_id);
+        self.client
+            .friends()
+            .activate_game_overlay_to_store(id, steamworks::OverlayToStoreFlag::None);
+        Ok(())
+    }
+
+    fn open_invite_dialog(&self, lobby: u64) -> Result<(), String> {
+        self.overlay_openable()?;
+        self.client.friends().activate_invite_dialog(steamworks::LobbyId::from_raw(lobby));
+        Ok(())
+    }
+
+    fn poll_activation(&self) -> Vec<bool> {
+        std::mem::take(&mut *lock(&self.overlay_flips))
+    }
+}
+
+/// See [`SteamPlatform::report_overlay_hook`].
+#[cfg(feature = "steam")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OverlayReport {
+    Nothing,
+    Hooked,
+    NotHooked,
+}
+
+/// How long to give the overlay to attach before saying it hasn't. Valve
+/// documents `IsOverlayEnabled` as false "while the overlay is loading",
+/// which is a few seconds at most; ten is generous on a slow disk.
+#[cfg(feature = "steam")]
+const OVERLAY_HOOK_GRACE: Duration = Duration::from_secs(10);
+
+#[cfg(feature = "steam")]
+impl SteamPlatform {
+    /// Says, once, whether the overlay attached to this process — because a
+    /// session where it silently never does is indistinguishable from one
+    /// where Shift+Tab is simply not being pressed, and the first live test
+    /// of this integration (2026-08-29) spent a round on exactly that.
+    ///
+    /// The overlay is not something the SDK does: it is an injection the
+    /// Steam CLIENT sets up for games IT launches — on Linux an `LD_PRELOAD`
+    /// of `gameoverlayrenderer.so`, a Vulkan implicit layer switched on by
+    /// `ENABLE_VK_LAYER_VALVE_steam_overlay_1=1`, and an X11 (or XWayland)
+    /// window to hook; a native Wayland surface can't be. A game started from
+    /// a terminal has none of that, so the message names the remedy.
+    fn report_overlay_hook(&self) {
+        match self.overlay_reported.get() {
+            OverlayReport::Nothing if self.is_enabled() => {
+                println!("steam: overlay hooked this process — Shift+Tab should open it");
+                self.overlay_reported.set(OverlayReport::Hooked);
+            }
+            OverlayReport::Nothing if self.booted_at.elapsed() > OVERLAY_HOOK_GRACE => {
+                println!(
+                    "steam: overlay has NOT hooked this process after {}s. The overlay is \
+                     injected by the Steam client into games it launches, not by the SDK — the \
+                     supported way is to launch this build FROM Steam (Add a Non-Steam Game), \
+                     which sets everything up. To hook a terminal launch on Linux instead, run \
+                     it with ENABLE_VK_LAYER_VALVE_steam_overlay_1=1 and LD_PRELOAD pointing at \
+                     Steam's gameoverlayrenderer.so (the engine already forces X11 for you when \
+                     Steam is active). steam.openOverlay* answers (false, why) until it hooks.",
+                    OVERLAY_HOOK_GRACE.as_secs()
+                );
+                self.overlay_reported.set(OverlayReport::NotHooked);
+            }
+            // Hooked late, after the warning: say so, so the log doesn't end
+            // on a false alarm.
+            OverlayReport::NotHooked if self.is_enabled() => {
+                println!("steam: overlay hooked this process after all");
+                self.overlay_reported.set(OverlayReport::Hooked);
+            }
+            _ => {}
+        }
+    }
+
+    /// The one gate every `Overlay::open_*` call shares — see the comment on
+    /// the trait impl for why the check happens at all.
+    fn overlay_openable(&self) -> Result<(), String> {
+        if self.is_enabled() {
+            Ok(())
+        } else {
+            Err("the Steam overlay isn't available in this session — it's disabled in Steam's \
+                 settings, or hasn't hooked this game's renderer"
+                .into())
+        }
     }
 }
 

@@ -661,18 +661,31 @@ impl HubApp {
         (v != "0.0.0").then_some(v)
     }
 
-    /// A newer **Hub** on the user's channel that ships a Hub bundle for this platform.
+    /// A newer **Hub** on the user's channel that **actually changed the Hub** and ships a
+    /// Hub bundle for this platform.
     ///
     /// Separate from [`update_available`](Self::update_available), which is about the
     /// engine. They move together in practice — one tag builds both — but they are
     /// different questions: one is "there's a new engine to install", the other is "the
     /// window you are looking at is old", and only the second can go stale silently.
+    ///
+    /// The `changes_hub` check is the mirror of the one `update_available` has always had,
+    /// and it was missing here for ~90 releases. One tag builds both binaries, so CI
+    /// publishes a `hub_artifacts` entry on EVERY release — which made "is there a hub
+    /// bundle above my version" true every single time, and this banner offered a self-update
+    /// on engine releases that had not touched a line of Hub code. Worse, the chip that draws
+    /// it outranks the engine one, so an engine release announced itself as a Hub update and
+    /// the engine banner never appeared at all.
     fn hub_update_available(&self) -> Option<crate::releases::ReleaseInfo> {
         let ManifestState::Loaded(m) = &self.manifest else { return None };
         let mine = crate::releases::version_key(Self::hub_version()?);
         m.on_channel_refs(&self.config.settings.channel)
             .into_iter()
-            .find(|r| r.hub_artifact_here().is_some() && crate::releases::version_key(&r.version) > mine)
+            .find(|r| {
+                r.hub_artifact_here().is_some()
+                    && r.changes_hub()
+                    && crate::releases::version_key(&r.version) > mine
+            })
             .cloned()
     }
 
@@ -2433,6 +2446,75 @@ mod tests {
             engine_version: None,
             last_opened: None,
         }
+    }
+
+    /// The other half of the same bug, and the one that survived it. 0.22.1 taught the
+    /// PROJECT side not to treat a Hub-only release as a new engine; nothing taught the HUB
+    /// side not to treat an engine-only release as a new Hub. One tag builds both binaries,
+    /// so `hub_artifacts` is populated on every release, and "is there a bundle above my
+    /// version" was the whole test — true on all ~90 releases that scope.json marks
+    /// `["engine"]`. Nine of the ten releases before this fix changed zero files under
+    /// `crates/floptle-hub`, and every one of them offered a self-update.
+    ///
+    /// Versions are 99.x deliberately: the check compares against the Hub's OWN compiled-in
+    /// version, so anything near the real one stops testing anything the day it is bumped.
+    #[test]
+    fn an_engine_only_release_is_not_offered_as_a_hub_update() {
+        use super::*;
+
+        let bundle = || {
+            [(
+                crate::releases::platform_target(),
+                crate::releases::Artifact { url: "u".into(), sha256: "s".into(), size: 1 },
+            )]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let app_with = |rels: &[(&str, Vec<&str>)]| {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut app = HubApp::new(Paths::at(tmp.path()));
+            let mut m = Manifest { schema: 1, ..Default::default() };
+            for (v, changed) in rels {
+                m.versions.push(crate::releases::ReleaseInfo {
+                    version: (*v).into(),
+                    channel: "stable".into(),
+                    changed: changed.iter().map(|c| String::from(*c)).collect(),
+                    date: String::new(),
+                    notes_url: String::new(),
+                    title: String::new(),
+                    notes: String::new(),
+                    artifacts: bundle(),
+                    // The point of the whole test: CI ships one of these on EVERY release.
+                    hub_artifacts: bundle(),
+                });
+            }
+            app.manifest = ManifestState::Loaded(m);
+            (app, tmp)
+        };
+
+        // An engine release, alone. It ships a Hub bundle and it is newer than us, and it
+        // is still not an update to the window you are looking at.
+        let (app, _t) = app_with(&[("99.1.0", vec!["engine"])]);
+        assert_eq!(app.hub_update_available().map(|r| r.version), None);
+
+        // Newest-first, so the engine-only one is hit first: the search has to step PAST it
+        // rather than stop there, or a real Hub fix underneath never gets offered.
+        let (app, _t) =
+            app_with(&[("99.1.0", vec!["engine"]), ("99.0.0", vec!["engine", "hub"])]);
+        assert_eq!(app.hub_update_available().map(|r| r.version), Some("99.0.0".into()));
+
+        // Empty `changed` is the back catalogue — every release published before the field
+        // existed. Unknown means both, and reading it as "nothing changed" would quietly
+        // strand anyone running one of them.
+        let (app, _t) = app_with(&[("99.0.0", vec![])]);
+        assert_eq!(app.hub_update_available().map(|r| r.version), Some("99.0.0".into()));
+
+        // A Hub release with no bundle for this platform is still not installable here.
+        let (mut app, _t) = app_with(&[("99.0.0", vec!["hub"])]);
+        if let ManifestState::Loaded(m) = &mut app.manifest {
+            m.versions[0].hub_artifacts.clear();
+        }
+        assert_eq!(app.hub_update_available().map(|r| r.version), None);
     }
 
     #[test]

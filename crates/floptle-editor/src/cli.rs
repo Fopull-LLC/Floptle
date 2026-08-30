@@ -222,12 +222,23 @@ pub(crate) const VERBS: &[Verb] = &[
         summary: "run a project as a game, with no editor UI",
         detail: "The same build, in player mode: no docks, no gizmos, and warnings and errors \
                  go to stderr because there is no Console to read them in.",
-        args: &[Arg {
-            name: "PROJECT",
-            value: Value::Path,
-            required: false,
-            help: "the project directory (default: assets/)",
-        }],
+        args: &[
+            Arg {
+                name: "PROJECT",
+                value: Value::Path,
+                required: false,
+                help: "the project directory (default: assets/)",
+            },
+            Arg {
+                name: "--steam",
+                value: Value::Flag,
+                required: false,
+                help: "initialize Steam even if the project has no App ID set (Spacewar 480) — \
+                       the way to try the overlay, achievements and the rest before a \
+                       partner account exists. Without it, Steam activates only for a \
+                       project with a Steam App ID in ⚙ Settings ▸ Game",
+            },
+        ],
         needs_gpu: true,
         writes_project: false,
         exits: &[],
@@ -915,7 +926,7 @@ pub(crate) enum Outcome {
     /// A verb ran to completion. Exit with this code.
     Exit(i32),
     /// A verb that needs a window. The editor starts with these.
-    Launch { project: Option<PathBuf>, player: bool },
+    Launch { project: Option<PathBuf>, player: bool, steam: bool },
 }
 
 /// `floptle --help`, the flag form.
@@ -1125,11 +1136,13 @@ fn run(m: &clap::ArgMatches) -> Outcome {
             Outcome::Exit(0)
         }
         Some(("open", a)) => {
-            Outcome::Launch { project: path(a, "PROJECT"), player: false }
+            Outcome::Launch { project: path(a, "PROJECT"), player: false, steam: false }
         }
-        Some(("play", a)) => {
-            Outcome::Launch { project: path(a, "PROJECT"), player: true }
-        }
+        Some(("play", a)) => Outcome::Launch {
+            project: path(a, "PROJECT"),
+            player: true,
+            steam: a.get_flag("steam"),
+        },
         Some(("export", a)) => {
             let project = path(a, "PROJECT").expect("required");
             let out = path(a, "OUT").expect("required");
@@ -1605,7 +1618,14 @@ mod tests {
         assert!(matches!(dispatch(&argv(&["open", "assets"])), Outcome::Launch { player: false, .. }));
         assert!(matches!(
             dispatch(&argv(&["play"])),
-            Outcome::Launch { project: None, player: true }
+            Outcome::Launch { project: None, player: true, steam: false }
+        ));
+        // `--steam` is how a dev tries Steam on a project with no App ID yet;
+        // it must reach the launch, or `floptle play --steam` silently plays
+        // without Steam — which is exactly what it was typed to prevent.
+        assert!(matches!(
+            dispatch(&argv(&["play", "--steam"])),
+            Outcome::Launch { project: None, player: true, steam: true }
         ));
         // …and `bake gi` is NOT one of them any more. It renders offscreen and
         // exits, which is what its help always claimed.

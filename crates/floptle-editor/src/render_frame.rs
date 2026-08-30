@@ -1587,7 +1587,8 @@ impl Editor {
                     continue;
                 }
                 if !self.mesh_wire_cache.contains_key(&path) {
-                    let edges = floptle_assets::gltf_import::import(std::path::Path::new(&path))
+                    let file = crate::project::resolve_asset_path(&self.project_root, &path);
+                    let edges = floptle_assets::gltf_import::import(&file)
                         .map(|m| mesh_collider_wire_local(&m))
                         .unwrap_or_default();
                     self.mesh_wire_cache.insert(path.clone(), edges);
@@ -4425,6 +4426,7 @@ impl Editor {
                 mesh_registry,
                 pointer_down,
                 playing,
+                player_mode,
                 settings: crate::settings_ui::SettingsCtx {
                     scene_files: &settings_scene_files,
                     layer_new,
@@ -5623,7 +5625,12 @@ impl Editor {
             // Only while playing, only over the Game view, and only when the
             // pointer is actually contested — a game that never grabs never
             // sees it.
+            // Never in a shipped build: `player_mode` has no editor to hand the
+            // pointer back TO, so the hint names a negotiation that does not
+            // exist there. The build's own way out is the player-mode hint
+            // above, which says Escape once and then goes away.
             if playing
+                && !player_mode
                 && (cursor_held_by_game || cursor_held_by_editor)
                 && let Some(r) = *game_rect
             {
@@ -6981,7 +6988,13 @@ impl Editor {
             // whole way over to the Inspector and every click on it also
             // reaches the game. Keys keep flowing — the game is still playing.
             let mouse_is_the_editors = self.cursor_freed;
-            let frame_input = if game_focused {
+            // …and while the platform's overlay (Steam's Shift+Tab) is up, the
+            // keys are the overlay's, on the same neutral-input rule. The sim
+            // keeps running — a networked session cannot pause for one
+            // player's shopping trip — but a key held through the open is
+            // released here rather than stuck down until it's next pressed.
+            let input_live = game_focused && !self.script_host.overlay_active();
+            let frame_input = if input_live {
                 floptle_script::InputSnapshot {
                     keys_down: self.input_keys.clone(),
                     keys_pressed: self.input_keys_pressed.clone(),
@@ -7014,7 +7027,7 @@ impl Editor {
             // …and the ACTION layer's frame domain, off the same devices and
             // the same focus rule, so `input.action(...)` and `input.key(...)`
             // agree about whether the game is being played this frame.
-            self.resolve_frame_actions(sdt, game_focused);
+            self.resolve_frame_actions(sdt, input_live);
             // Lend the sim's colliders to scripts so `raycast(...)` works this frame
             // (physics doesn't step until after scripts, so this is safe). The sim
             // origin rides along so ray coordinates convert world ↔ sim frame.
@@ -7679,84 +7692,23 @@ impl Editor {
     }
 
     /// GPU-load models a script swapped via `node.model` so they render this
-    /// frame (rigged import first, static fallback).
+    /// frame.
+    ///
+    /// This is [`Editor::import_model`], once per changed node, and nothing
+    /// else. It used to be a second copy of that import — rigged first, static
+    /// fallback — that opened the path with a bare `Path::new` instead of
+    /// resolving it against the project root. In the editor the two agree by
+    /// accident: the CWD *is* the project dir, so a project-relative
+    /// `models/items/medkit.glb` happens to open. In an exported build the
+    /// project ships as `assets/` and the CWD is wherever the player launched
+    /// from, so every runtime model swap missed its file and the node rendered
+    /// as nothing at all — the only trace a `swap-import … failed` line on a
+    /// stderr no player ever sees. A model some scene ALSO referenced
+    /// statically was registered at load and still appeared, which is what made
+    /// the failure present as "some models are missing" rather than all of them.
     pub(crate) fn load_script_swapped_models(&mut self) {
-        let (Some(gpu), Some(raster)) = (self.gpu.as_ref(), self.raster.as_mut()) else {
-            return;
-        };
         for (_eid, path) in self.script_host.take_model_changes() {
-            if !self.mesh_registry.contains_key(&path) {
-                // Rigged first (animated glTF keeps its node tree + clips).
-                match floptle_assets::import_rigged(std::path::Path::new(&path)) {
-                    Ok(Some(model)) => {
-                        let parts: Vec<MeshId> = model
-                            .parts
-                            .iter()
-                            .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
-                            .collect();
-                        let part_meta = model
-                            .parts
-                            .iter()
-                            .map(|p| crate::PartMeta {
-                                material: p.material.clone(),
-                                base_color: p.base_color,
-                                textured: p.texture.is_some(),
-                            })
-                            .collect();
-                        let overrides =
-                            crate::rig_overrides::RigOverrides::load(std::path::Path::new(&path));
-                        if let Some(f) = overrides.texture_filter {
-                            let s = crate::assets::TexSetting { filter: f, ..Default::default() };
-                            for &mid in &parts {
-                                raster.set_mesh_sampling(gpu, mid, s.to_sampling());
-                            }
-                        }
-                        let rig = anim::rig_from_model(&model, &overrides);
-                        self.mesh_registry.insert(
-                            path.clone(),
-                            MeshAsset {
-                                parts,
-                                part_meta,
-                                tex_filter: overrides.texture_filter,
-                                size: model.size,
-                                rig: Some(rig),
-                            },
-                        );
-                        continue;
-                    }
-                    Ok(None) => {}
-                    Err(e) => eprintln!("  rig swap-import {path} failed ({e}); trying static"),
-                }
-                match floptle_assets::gltf_import::import(std::path::Path::new(&path)) {
-                    Ok(model) => {
-                        let parts: Vec<MeshId> = model
-                            .parts
-                            .iter()
-                            .map(|p| raster.register(gpu, &p.mesh, p.texture.map(|i| &model.textures[i])))
-                            .collect();
-                        let part_meta = model
-                            .parts
-                            .iter()
-                            .map(|p| crate::PartMeta {
-                                material: p.material.clone(),
-                                base_color: p.base_color,
-                                textured: p.texture.is_some(),
-                            })
-                            .collect();
-                        self.mesh_registry.insert(
-                            path.clone(),
-                            MeshAsset {
-                                parts,
-                                part_meta,
-                                tex_filter: None,
-                                size: model.size,
-                                rig: None,
-                            },
-                        );
-                    }
-                    Err(e) => eprintln!("  swap-import {path} failed: {e}"),
-                }
-            }
+            self.import_model(&path);
         }
     }
 

@@ -1,9 +1,13 @@
-# Floptle — Networking (`floptle-net`, deferred / future)
+# Floptle — Networking (design record; the system has since shipped)
 
-> **Forward-looking design, not a launch requirement.** `floptle-net` is a
-> boundary stub today; this doc records the target so the engine keeps the right
-> seams. See [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §10, the deterministic sim
-> in [`./physics.md`](./physics.md).
+> **⚠ This document is a design record, not the current state.** Everything it
+> sketched as future work has since been built and shipped: `floptle-net` is a
+> full netcode — relay and direct QUIC transports, server-authoritative
+> replication, client prediction with reconciliation, rollback, lag-compensated
+> queries, interest management, replays — and `floptle serve` runs the headless
+> authoritative dedicated server this doc describes in §5. **The shipped guide is
+> [`../multiplayer.md`](../multiplayer.md)**; start there. This file stays as the
+> record of the target model and why the seams are where they are.
 >
 > **⚠ Scope update (2026-07-04):** the **technical foundation below stands** (roles,
 > replication, the `Transport` trait, authoritative dedicated servers), but the
@@ -14,8 +18,9 @@
 > matchmaking, dedicated hosting) as an open-source-friendly way to fund the engine.
 > Read §7's "out of scope: matchmaking / hosted backend" as **no longer current.**
 
-This is **explicitly deferred** — sequenced *after* the single-player engine is
-solid. We design for it now only enough to avoid painting ourselves into a corner.
+This was written when networking was **explicitly deferred** — sequenced *after* the
+single-player engine was solid — and designed only enough to avoid painting
+ourselves into a corner.
 The motivation is concrete and the developer's own: Ty self-hosts a server
 (website, games, business tools) and wants Floptle games to *optionally* network on
 **his own infrastructure** — make a server build, define its behavior, deploy it

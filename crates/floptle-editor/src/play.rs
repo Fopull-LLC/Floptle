@@ -255,7 +255,14 @@ impl Editor {
             match self.world.get::<Matter>(e) {
                 Some(Matter::Mesh { asset_path }) => {
                     let path = asset_path.clone();
-                    let Ok(model) = floptle_assets::gltf_import::import(std::path::Path::new(&path)) else {
+                    // Resolved against the project, never read as a bare
+                    // relative path: in a shipped build the CWD is wherever the
+                    // player launched from, and the project rides in `assets/`.
+                    // Reading it raw made every mesh collider in an export fail
+                    // to load — a level whose floors and walls are simply not
+                    // there, on a stderr nobody sees.
+                    let file = crate::project::resolve_asset_path(&self.project_root, &path);
+                    let Ok(model) = floptle_assets::gltf_import::import(&file) else {
                         eprintln!("collidable mesh: failed to load {path}");
                         continue;
                     };

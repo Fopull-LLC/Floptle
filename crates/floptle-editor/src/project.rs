@@ -2433,4 +2433,84 @@ mod path_tests {
         assert!(ed.orphaned_field_stems(1).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// Every `.rs` under `src/`, read at test time (see `icons.rs` for the same
+    /// walk and the same reason: adding a module must not quietly fall outside
+    /// a source-level guard).
+    fn editor_sources() -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let mut stack = vec![PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    out.push((name, std::fs::read_to_string(&p).unwrap_or_default()));
+                }
+            }
+        }
+        assert!(out.len() > 40, "found only {} sources — the walk is wrong", out.len());
+        out
+    }
+
+    /// **A model reference out of a scene or a script is never opened raw.**
+    ///
+    /// Those refs are project-relative by design (`models/items/medkit.glb`).
+    /// The editor gets away with reading one as a plain path because its CWD
+    /// *is* the project directory — so `Path::new(ref)` and the resolved path
+    /// name the same file, and the difference between them is invisible for as
+    /// long as you only ever run the editor.
+    ///
+    /// An exported build breaks that tie: the project ships as `assets/` beside
+    /// the binary and the CWD is wherever the player launched from. Every raw
+    /// read then misses, and misses *quietly* — `import` returns `Err`, the
+    /// caller logs to a stderr no player has open, and the node renders as
+    /// nothing. That shipped as: runtime `node.model` swaps invisible (medkit,
+    /// syringe, key), mesh colliders absent, mesh shadow occluders absent —
+    /// while anything a scene ALSO referenced statically still appeared,
+    /// because loading the scene had registered it by another path entirely.
+    ///
+    /// So the rule is structural rather than a matter of remembering:
+    /// [`resolve_asset_path`] stands between every importer and the disk.
+    #[test]
+    fn model_imports_resolve_against_the_project_root() {
+        // Reading a model file. Each is a call that ends at the filesystem.
+        const IMPORTERS: &[&str] =
+            &["gltf_import::import(", "gltf_import::geometry(", "import_rigged("];
+        // `anim.rs` extracts clips for `floptle bake clips <PROJECT> <MODEL>`,
+        // whose MODEL is an argument the caller typed — already absolute or
+        // already relative to THEIR cwd, and not a project-relative ref at all.
+        const RAW_BY_DESIGN: &[&str] = &["anim.rs"];
+        let mut bad = Vec::new();
+        for (name, src) in editor_sources() {
+            if RAW_BY_DESIGN.contains(&name.as_str()) {
+                continue;
+            }
+            // Tests build their own absolute temp paths; the guard is about the
+            // shipping code above them.
+            let code = src.split("#[cfg(test)]").next().unwrap_or(&src);
+            for (i, line) in code.lines().enumerate() {
+                let call = IMPORTERS.iter().find(|c| line.contains(**c));
+                let Some(call) = call else { continue };
+                // The argument may sit on this line or the next one.
+                let arg = format!("{line}{}", code.lines().nth(i + 1).unwrap_or(""));
+                let after = arg.split_once(call).map(|(_, a)| a).unwrap_or("");
+                if after.trim_start().starts_with("Path::new(")
+                    || after.trim_start().starts_with("std::path::Path::new(")
+                {
+                    bad.push(format!("{name}:{} — {}", i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "these open a model reference without resolving it against the project \
+             root, so they work in the editor and fail silently in every exported \
+             build:\n  {}\n\nRead it as \
+             `resolve_asset_path(&self.project_root, path)` instead.",
+            bad.join("\n  ")
+        );
+    }
 }

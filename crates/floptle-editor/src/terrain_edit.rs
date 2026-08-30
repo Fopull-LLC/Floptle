@@ -1126,9 +1126,10 @@ impl Editor {
                 // Bake: rotation + scale applied to the vertices (like the physics
                 // colliders); translation stays in the per-frame f64 anchor.
                 let started = Instant::now();
-                let Ok(model) =
-                    floptle_assets::gltf_import::import(std::path::Path::new(&key.0))
-                else {
+                // Project-resolved: read raw, every mesh shadow occluder in an
+                // exported build failed to load and the scene lost its shadows.
+                let file = crate::project::resolve_asset_path(&self.project_root, &key.0);
+                let Ok(model) = floptle_assets::gltf_import::import(&file) else {
                     self.console.push(
                         floptle_script::LogLevel::Warn,
                         format!("shadow occluder: failed to load {}", key.0),

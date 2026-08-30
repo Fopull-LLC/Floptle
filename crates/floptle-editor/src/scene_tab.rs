@@ -181,7 +181,10 @@ impl EditorTabViewer<'_> {
 
         // The Game tab is the active-camera gameplay view — no editor tools/gizmos.
         // Warn if there's no active camera (the render falls back to the editor view).
-        if game && !self.has_active_camera {
+        // Not in a shipped build: it names "the editor view", which a player
+        // has no way to act on, and a scene that legitimately hands the camera
+        // to a script for its first frames would flash it at them.
+        if game && !self.has_active_camera && !self.player_mode {
             egui::Area::new(egui::Id::new("game_no_cam"))
                 .fixed_pos(rect.left_top() + egui::vec2(8.0, 8.0))
                 .show(ui.ctx(), |ui| {
@@ -209,7 +212,13 @@ impl EditorTabViewer<'_> {
         // Top-CENTRE, and in both views: the Game tab is where somebody watching
         // their game is actually looking, and the top-left corner of the Scene
         // tab is already the tool palette.
-        if self.playing {
+        //
+        // Never in a shipped build. `player_mode` is permanently "playing", so
+        // an unqualified `self.playing` pinned this banner across a whole game
+        // — telling a player their edits are discarded on a Stop they have no
+        // button for. The banner is about the EDITOR's play/stop cycle, so it
+        // belongs only where that cycle exists.
+        if self.playing && !self.player_mode {
             egui::Area::new(egui::Id::new(if game { "play_banner_game" } else { "play_banner" }))
                 .fixed_pos(egui::pos2(rect.center().x - 132.0, rect.top() + 8.0))
                 .order(egui::Order::Middle)

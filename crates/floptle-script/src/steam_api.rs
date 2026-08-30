@@ -52,6 +52,18 @@
 //! value but cannot construct one back from it, so there is nothing useful to
 //! persist.
 //!
+//! **The overlay (`steam.openOverlay*`, `steam.onOverlayChanged`) is drawn
+//! by the Steam client from outside this process** — nothing here renders
+//! it. Every open answers `(false, why)` when the overlay can't show
+//! (disabled in Steam's settings, not hooked into this renderer, no Steam at
+//! all), where the SDK's own call would silently do nothing — so a game can
+//! fall back to showing the URL or the invite code instead. Page and dialog
+//! names are checked against the SDK's own list BEFORE any backend is asked,
+//! so a typo fails in every session, not only on a machine with Steam. While
+//! the overlay is up the engine feeds scripts neutral input, the same way it
+//! does when the Game view isn't focused: a key held through Shift+Tab is
+//! released rather than stuck down for as long as the player is shopping.
+//!
 //! Installed unconditionally (`ScriptHost::new()`), same as every other
 //! `install_*_api` — the `steam` global always exists so `steam.available()`
 //! is always safe to call. What varies is only what `platform` currently
@@ -70,7 +82,8 @@ use crate::{LogLevel, ScriptLog};
 use floptle_services::{
     Achievements, Cloud, LeaderboardDisplay, LeaderboardInfo, LeaderboardOutcome, LeaderboardScope,
     LeaderboardSort, LobbyCompare, LobbyDistance, LobbyEvent, LobbyFilters, LobbyInfo, LobbyKind,
-    LobbyMemberChange, LobbyOutcome, Platform, Social, UploadMethod,
+    LobbyMemberChange, LobbyOutcome, Platform, Social, UploadMethod, OVERLAY_PAGES,
+    OVERLAY_USER_DIALOGS,
 };
 
 /// The message every `steam.*` call answers with when no backend is present.
@@ -108,6 +121,9 @@ pub(crate) struct SteamState {
     /// `steam.onLobbyEvent` — one handler for member joins/leaves and data
     /// changes, drained per frame like `onPersonaChanged`.
     lobby_event_cb: Option<mlua::Function>,
+    /// `steam.onOverlayChanged` — one handler, called with `true`/`false` per
+    /// overlay shown/hidden flip, drained per frame like the rest.
+    overlay_cb: Option<mlua::Function>,
 }
 
 impl SteamState {
@@ -124,6 +140,7 @@ impl SteamState {
         self.lobby_failed.clear();
         self.lobby_event_cb = None;
         self.persona_changed_cb = None;
+        self.overlay_cb = None;
     }
 
     /// How many leaderboard requests are still waiting
@@ -1209,6 +1226,135 @@ pub(crate) fn install_steam_api(
         })?,
     )?;
 
+    // ---- overlay (Phase 3) ----
+    // Page/dialog names are validated BEFORE the backend is consulted, so a
+    // typo is caught in every session — including one with no Steam at all,
+    // where every open would otherwise answer only "not available" and the
+    // misspelling would surface on some other machine, in someone else's
+    // stream.
+
+    let p = platform.clone();
+    t.set(
+        "overlayEnabled",
+        lua.create_function(move |_, ()| {
+            Ok(p.borrow().overlay().map(|o| o.is_enabled()))
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "overlayActive",
+        lua.create_function(move |_, ()| Ok(p.borrow().overlay().map(|o| o.is_active())))?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "openOverlay",
+        lua.create_function(move |lua, page: String| {
+            if let Err(e) = known_name("steam.openOverlay", "page", &page, &OVERLAY_PAGES) {
+                return result_tuple(lua, Err(e));
+            }
+            let backend = p.borrow();
+            let r = match backend.overlay() {
+                Some(o) => o.open_page(&page),
+                None => Err(NO_STEAM.into()),
+            };
+            result_tuple(lua, r)
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "openOverlayUser",
+        lua.create_function(move |lua, (dialog, user): (String, String)| {
+            if let Err(e) =
+                known_name("steam.openOverlayUser", "dialog", &dialog, &OVERLAY_USER_DIALOGS)
+            {
+                return result_tuple(lua, Err(e));
+            }
+            let Ok(id) = user.parse::<u64>() else {
+                return result_tuple(
+                    lua,
+                    Err(format!(
+                        "steam.openOverlayUser: \"{user}\" isn't a user id — pass one as a \
+                         string, e.g. from steam.friends()"
+                    )),
+                );
+            };
+            let backend = p.borrow();
+            let r = match backend.overlay() {
+                Some(o) => o.open_user_page(&dialog, id),
+                None => Err(NO_STEAM.into()),
+            };
+            result_tuple(lua, r)
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "openOverlayUrl",
+        lua.create_function(move |lua, url: String| {
+            // A full protocol is required by the overlay browser itself; and
+            // an interior NUL would panic inside the binding's CString.
+            if !(url.starts_with("http://") || url.starts_with("https://"))
+                || url.contains('\0')
+            {
+                return result_tuple(
+                    lua,
+                    Err(format!(
+                        "steam.openOverlayUrl: \"{}\" isn't a full URL — it must start with \
+                         http:// or https://",
+                        url.replace('\0', "\\0")
+                    )),
+                );
+            }
+            let backend = p.borrow();
+            let r = match backend.overlay() {
+                Some(o) => o.open_url(&url),
+                None => Err(NO_STEAM.into()),
+            };
+            result_tuple(lua, r)
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "openOverlayStore",
+        lua.create_function(move |lua, app: Option<u32>| {
+            let backend = p.borrow();
+            let r = match backend.overlay() {
+                Some(o) => o.open_store(app),
+                None => Err(NO_STEAM.into()),
+            };
+            result_tuple(lua, r)
+        })?,
+    )?;
+
+    let p = platform.clone();
+    t.set(
+        "openInviteDialog",
+        lua.create_function(move |lua, id: String| {
+            let Some(lobby) = parse_lobby_id(&id) else {
+                return result_tuple(lua, Err(bad_lobby("steam.openInviteDialog", &id)));
+            };
+            let backend = p.borrow();
+            let r = match backend.overlay() {
+                Some(o) => o.open_invite_dialog(lobby),
+                None => Err(NO_STEAM.into()),
+            };
+            result_tuple(lua, r)
+        })?,
+    )?;
+
+    let st = state.clone();
+    t.set(
+        "onOverlayChanged",
+        lua.create_function(move |_, f: mlua::Function| {
+            st.borrow_mut().overlay_cb = Some(f);
+            Ok(())
+        })?,
+    )?;
+
     t.set(
         "onPersonaChanged",
         lua.create_function(move |_, f: mlua::Function| {
@@ -1219,6 +1365,21 @@ pub(crate) fn install_steam_api(
 
     lua.globals().set("steam", t)?;
     Ok(())
+}
+
+/// `Err` with a message that lists every valid name when `got` isn't one of
+/// `valid` — the overlay page/dialog validation shared by the `openOverlay*`
+/// calls. Case-sensitive on purpose: the names are the Steam SDK's own,
+/// lowercase, and accepting variants here would teach a spelling the SDK
+/// itself refuses.
+fn known_name(call: &str, what: &str, got: &str, valid: &[&str]) -> Result<(), String> {
+    if valid.contains(&got) {
+        return Ok(());
+    }
+    Err(format!(
+        "{call}: \"{got}\" isn't a {what} — one of {}",
+        valid.iter().map(|v| format!("\"{v}\"")).collect::<Vec<_>>().join(", ")
+    ))
 }
 
 /// The message for a board handle that isn't even a number — distinct from
@@ -1246,7 +1407,7 @@ pub(crate) fn drain(
 ) {
     // `pump` is what runs the backend's own callbacks, so leaderboard results
     // land DURING this borrow and are waiting by the time it is released.
-    let (changed, results, lobby_results, lobby_events) = {
+    let (changed, results, lobby_results, lobby_events, overlay_flips) = {
         let backend = platform.borrow();
         backend.pump();
         (
@@ -1254,6 +1415,7 @@ pub(crate) fn drain(
             backend.leaderboards().map(|l| l.poll()).unwrap_or_default(),
             backend.lobbies().map(|l| l.poll()).unwrap_or_default(),
             backend.lobbies().map(|l| l.poll_events()).unwrap_or_default(),
+            backend.overlay().map(|o| o.poll_activation()).unwrap_or_default(),
         )
     };
 
@@ -1315,6 +1477,18 @@ pub(crate) fn drain(
         for e in lobby_events {
             if let Err(err) = fire_lobby_event(lua, &cb, e) {
                 log(logs, LogLevel::Error, format!("steam.onLobbyEvent callback: {err}"));
+            }
+        }
+    }
+
+    // Every flip is delivered, in order — a same-frame open-and-close still
+    // reaches the script as two calls, so pause/unpause logic driven from
+    // this callback can never wedge in the wrong state.
+    let overlay_cb = state.borrow().overlay_cb.clone();
+    if let Some(cb) = overlay_cb {
+        for active in overlay_flips {
+            if let Err(err) = cb.call::<()>(active) {
+                log(logs, LogLevel::Error, format!("steam.onOverlayChanged callback: {err}"));
             }
         }
     }
@@ -2361,5 +2535,206 @@ mod tests {
         assert!(!ok, "setRichPresence should fail under NullPlatform");
         assert!(err.is_some_and(|e| !e.is_empty()), "setRichPresence should carry a real message");
         f.lua.load("steam.clearRichPresence()").exec().unwrap();
+    }
+
+    // ---- overlay ----
+
+    /// An overlay backend that records every open it was asked for and
+    /// reports whatever flips the test queues.
+    #[derive(Default)]
+    struct FakeOverlay {
+        asked: RefCell<Vec<String>>,
+        flips: RefCell<Vec<bool>>,
+    }
+
+    impl floptle_services::Overlay for FakeOverlay {
+        fn is_enabled(&self) -> bool {
+            true
+        }
+        fn is_active(&self) -> bool {
+            self.flips.borrow().last().copied().unwrap_or(false)
+        }
+        fn open_page(&self, page: &str) -> Result<(), String> {
+            self.asked.borrow_mut().push(format!("page:{page}"));
+            Ok(())
+        }
+        fn open_user_page(&self, dialog: &str, user: u64) -> Result<(), String> {
+            self.asked.borrow_mut().push(format!("user:{dialog}:{user}"));
+            Ok(())
+        }
+        fn open_url(&self, url: &str) -> Result<(), String> {
+            self.asked.borrow_mut().push(format!("url:{url}"));
+            Ok(())
+        }
+        fn open_store(&self, app_id: Option<u32>) -> Result<(), String> {
+            self.asked.borrow_mut().push(format!("store:{app_id:?}"));
+            Ok(())
+        }
+        fn open_invite_dialog(&self, lobby: u64) -> Result<(), String> {
+            self.asked.borrow_mut().push(format!("invite:{lobby}"));
+            Ok(())
+        }
+        fn poll_activation(&self) -> Vec<bool> {
+            std::mem::take(&mut *self.flips.borrow_mut())
+        }
+    }
+
+    struct OverlayPlatform(Rc<FakeOverlay>);
+
+    impl Platform for OverlayPlatform {
+        fn available(&self) -> bool {
+            true
+        }
+        fn overlay(&self) -> Option<&dyn floptle_services::Overlay> {
+            Some(&*self.0)
+        }
+    }
+
+    fn with_overlay() -> (Fixture, Rc<FakeOverlay>) {
+        let f = fresh();
+        let overlay = Rc::new(FakeOverlay::default());
+        *f.platform.borrow_mut() = Rc::new(OverlayPlatform(overlay.clone()));
+        (f, overlay)
+    }
+
+    /// The overlay reads are nil, not false and not an error, with no
+    /// backend — `if steam.overlayActive() then pause() end` is a line a
+    /// script can write once and leave in for every session.
+    #[test]
+    fn overlay_reads_are_nil_under_null_platform() {
+        let f = fresh();
+        for call in ["steam.overlayEnabled()", "steam.overlayActive()"] {
+            let is_nil: bool = f.lua.load(format!("return {call} == nil")).eval().unwrap();
+            assert!(is_nil, "{call} should be nil under NullPlatform");
+        }
+    }
+
+    /// Every open answers `(false, why)` with no backend — never raises, so
+    /// a menu button's handler needs no `pcall`.
+    #[test]
+    fn overlay_opens_fail_cleanly_under_null_platform() {
+        let f = fresh();
+        for call in [
+            "steam.openOverlay(\"friends\")",
+            "steam.openOverlayUser(\"steamid\", \"76561197960287930\")",
+            "steam.openOverlayUrl(\"https://fopull.com\")",
+            "steam.openOverlayStore()",
+            "steam.openOverlayStore(480)",
+            "steam.openInviteDialog(\"109775240975566848\")",
+        ] {
+            let (ok, err): (bool, Option<String>) =
+                f.lua.load(format!("return {call}")).eval().unwrap();
+            assert!(!ok, "{call} should fail under NullPlatform");
+            assert!(err.is_some_and(|e| e.contains("isn't available")), "{call}: wrong message");
+        }
+    }
+
+    /// A misspelt page/dialog name, or a URL with no protocol, is refused
+    /// with the valid spellings named — and it is refused in the SAME
+    /// words whether or not there is a backend, so the developer without
+    /// Steam on their desk finds out on their desk. The backend is never
+    /// asked.
+    #[test]
+    fn a_misspelt_overlay_page_is_refused_before_any_backend_is_asked() {
+        for (f, overlay) in [with_overlay(), {
+            let f = fresh();
+            (f, Rc::new(FakeOverlay::default()))
+        }] {
+            let (ok, err): (bool, String) =
+                f.lua.load("return steam.openOverlay(\"freinds\")").eval().unwrap();
+            assert!(!ok);
+            assert!(err.contains("\"freinds\" isn't a page") && err.contains("\"friends\""), "{err}");
+
+            let (ok, err): (bool, String) = f
+                .lua
+                .load("return steam.openOverlayUser(\"profile\", \"76561197960287930\")")
+                .eval()
+                .unwrap();
+            assert!(!ok);
+            assert!(err.contains("\"profile\" isn't a dialog") && err.contains("\"steamid\""), "{err}");
+
+            let (ok, err): (bool, String) =
+                f.lua.load("return steam.openOverlayUrl(\"fopull.com\")").eval().unwrap();
+            assert!(!ok);
+            assert!(err.contains("http://"), "{err}");
+
+            let (ok, err): (bool, String) = f
+                .lua
+                .load("return steam.openOverlayUser(\"steamid\", \"not-an-id\")")
+                .eval()
+                .unwrap();
+            assert!(!ok);
+            assert!(err.contains("isn't a user id"), "{err}");
+
+            assert!(overlay.asked.borrow().is_empty(), "the backend must never see a bad name");
+        }
+    }
+
+    /// A valid open reaches the backend carrying exactly what the script
+    /// passed — and the reads reflect the backend rather than a cached
+    /// answer.
+    #[test]
+    fn overlay_opens_reach_the_backend_with_the_validated_name() {
+        let (f, overlay) = with_overlay();
+        f.lua
+            .load(
+                "assert(steam.openOverlay(\"achievements\"))
+                 assert(steam.openOverlayUser(\"chat\", \"76561197960287930\"))
+                 assert(steam.openOverlayUrl(\"https://fopull.com/x\"))
+                 assert(steam.openOverlayStore())
+                 assert(steam.openOverlayStore(480))
+                 assert(steam.openInviteDialog(\"109775240975566848\"))
+                 assert(steam.overlayEnabled() == true)
+                 assert(steam.overlayActive() == false)",
+            )
+            .exec()
+            .unwrap();
+        assert_eq!(
+            *overlay.asked.borrow(),
+            vec![
+                "page:achievements",
+                "user:chat:76561197960287930",
+                "url:https://fopull.com/x",
+                "store:None",
+                "store:Some(480)",
+                "invite:109775240975566848",
+            ]
+        );
+    }
+
+    /// Every flip is delivered, in order, exactly once — a same-frame
+    /// open-and-close reaches the script as two calls, so pause logic
+    /// driven from the callback can't be left in the wrong state.
+    #[test]
+    fn overlay_flips_reach_the_script_in_order_and_once() {
+        let (f, overlay) = with_overlay();
+        f.lua
+            .load("seen = {} steam.onOverlayChanged(function(a) seen[#seen+1] = a end)")
+            .exec()
+            .unwrap();
+        overlay.flips.borrow_mut().extend([true, false, true]);
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+        let seen: Vec<bool> = f.lua.load("return seen").eval().unwrap();
+        assert_eq!(seen, vec![true, false, true]);
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+        let n: usize = f.lua.load("return #seen").eval().unwrap();
+        assert_eq!(n, 3, "a drained flip must not fire again");
+        assert!(f.logs.borrow().is_empty());
+    }
+
+    /// Stop forgets the overlay handler like every other callback here — a
+    /// flip arriving after Stop must not run last session's closure.
+    #[test]
+    fn stop_forgets_the_overlay_callback() {
+        let (f, overlay) = with_overlay();
+        f.lua
+            .load("seen = {} steam.onOverlayChanged(function(a) seen[#seen+1] = a end)")
+            .exec()
+            .unwrap();
+        f.state.borrow_mut().cancel_all();
+        overlay.flips.borrow_mut().push(true);
+        drain(&f.lua, &f.platform, &f.state, &f.logs);
+        let n: usize = f.lua.load("return #seen").eval().unwrap();
+        assert_eq!(n, 0, "nothing from a stopped session may fire");
     }
 }

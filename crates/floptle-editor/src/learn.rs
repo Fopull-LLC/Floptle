@@ -69,6 +69,8 @@ pub(crate) enum Check {
     Contains { script: &'static str, needle: &'static str, what: &'static str },
     /// The node named `node` carries the tag `tag`.
     Tagged { node: &'static str, tag: &'static str },
+    /// The node named `node` carries a Networked component.
+    Networked(&'static str),
     /// A scene by this name exists under `scenes/`.
     Scene(&'static str),
     /// `prefabs/<name>.prefab.ron` exists.
@@ -88,6 +90,7 @@ impl Check {
             Check::Script(s) => format!("scripts/{s}.lua exists"),
             Check::Contains { script, what, .. } => format!("{script}.lua {what}"),
             Check::Tagged { node, tag } => format!("{node} is tagged \"{tag}\""),
+            Check::Networked(n) => format!("{n} has a Networked component"),
             Check::Scene(s) => format!("scenes/{s}.ron exists"),
             Check::Prefab(p) => format!("prefabs/{p}.prefab.ron exists"),
             Check::Played => "you've pressed Play".into(),
@@ -110,6 +113,7 @@ impl Check {
             Check::Tagged { node, tag } => {
                 snap.tags.iter().any(|(name, tags)| name == node && tags.iter().any(|t| t == tag))
             }
+            Check::Networked(n) => snap.networked.iter().any(|name| name == n),
             Check::Scene(s) => snap.scenes.iter().any(|n| n == s),
             Check::Prefab(p) => snap.prefabs.iter().any(|n| n == p),
             Check::Played => snap.played,
@@ -169,6 +173,8 @@ pub(crate) struct Snapshot {
     pub(crate) nodes: Vec<(String, Vec<String>)>,
     /// The same nodes, with their tags.
     pub(crate) tags: Vec<(String, Vec<String>)>,
+    /// The names of the nodes that carry a Networked component.
+    pub(crate) networked: Vec<String>,
     /// Script stem → source, for every `.lua` under `scripts/`.
     pub(crate) scripts: HashMap<String, String>,
     /// Scene names (file stems) under `scenes/`.
@@ -206,6 +212,7 @@ pub(crate) const RESCAN_SECS: f32 = 0.4;
 pub(crate) fn scan(world: &World, root: &Path, played: bool) -> Snapshot {
     let mut nodes: Vec<(String, Vec<String>)> = Vec::new();
     let mut tags: Vec<(String, Vec<String>)> = Vec::new();
+    let mut networked: Vec<String> = Vec::new();
     for (e, n) in world.query::<Name>() {
         let scripts = world
             .get::<Scripts>(e)
@@ -215,9 +222,13 @@ pub(crate) fn scan(world: &World, root: &Path, played: bool) -> Snapshot {
         if let Some(t) = world.get::<floptle_core::Tags>(e) {
             tags.push((n.0.clone(), t.0.clone()));
         }
+        if world.get::<floptle_core::Replicated>(e).is_some() {
+            networked.push(n.0.clone());
+        }
     }
     nodes.sort();
     tags.sort();
+    networked.sort();
 
     let mut scripts = HashMap::new();
     for e in std::fs::read_dir(root.join("scripts")).into_iter().flatten().flatten() {
@@ -250,7 +261,7 @@ pub(crate) fn scan(world: &World, root: &Path, played: bool) -> Snapshot {
     }
     prefabs.sort();
 
-    Snapshot { nodes, tags, scripts, scenes, prefabs, played }
+    Snapshot { nodes, tags, networked, scripts, scenes, prefabs, played }
 }
 
 // ---- progress, saved with the project ----------------------------------------
@@ -857,6 +868,7 @@ mod tests {
                     Check::Node(n) => n.to_string(),
                     Check::NodeRuns { node, .. } => node.to_string(),
                     Check::Tagged { node, .. } => node.to_string(),
+                    Check::Networked(n) => n.to_string(),
                     Check::Scene(n) | Check::Prefab(n) => n.to_string(),
                     _ => continue,
                 };
@@ -899,6 +911,7 @@ mod tests {
         let snap = Snapshot {
             nodes: vec![("Player".into(), vec!["platformerPlayer".into()])],
             tags: vec![("Player".into(), vec!["player".into()])],
+            networked: vec!["Player".into()],
             scripts: [("coin".to_string(), "function onTriggerEnter(node)\nend\n".to_string())]
                 .into_iter()
                 .collect(),
@@ -911,6 +924,8 @@ mod tests {
         assert!(Check::NodeRuns { node: "Player", script: "platformerPlayer" }.satisfied(&snap));
         assert!(!Check::NodeRuns { node: "Player", script: "coin" }.satisfied(&snap));
         assert!(Check::Tagged { node: "Player", tag: "player" }.satisfied(&snap));
+        assert!(Check::Networked("Player").satisfied(&snap));
+        assert!(!Check::Networked("Game").satisfied(&snap));
         assert!(Check::Script("coin").satisfied(&snap));
         assert!(Check::Scene("first").satisfied(&snap));
         assert!(Check::Prefab("Pipe").satisfied(&snap));

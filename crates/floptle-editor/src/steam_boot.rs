@@ -37,13 +37,24 @@ pub(crate) fn resolve_app_id(
     }
 }
 
-/// Initializes Steam for `app_id` — `restart_app_if_necessary` first (exits
-/// the process immediately if it says so), then `SteamAPI_Init`. `None` on
-/// any failure (no Steam client running is the ordinary case in dev/CI);
-/// the caller falls back to `NullPlatform` and keeps going.
+/// Initializes Steam for `app_id`: `SteamAPI_Init`, preceded by
+/// `restart_app_if_necessary` — exiting the process if it says so — **only
+/// when `shipped`**. `None` on any failure (no Steam client running is the
+/// ordinary case in dev/CI); the caller falls back to `NullPlatform` and
+/// keeps going.
+///
+/// `shipped` is true for an exported build (one that found a
+/// `floptle-game.ron` manifest beside itself), and false for `floptle play`
+/// and `floptle run --steam`. `RestartAppIfNecessary` exists for exactly one
+/// situation — a player double-clicked a shipped binary instead of launching
+/// it through Steam, so hand the launch back to Steam and get out of the way.
+/// A developer running from a terminal is not that situation, and treating
+/// it as one is a game that "starts, then quits immediately" with Steam
+/// trying to launch an install of app 480 that doesn't exist. That was the
+/// first thing the live overlay test hit, 2026-08-29.
 #[cfg(feature = "steam")]
-pub(crate) fn boot(app_id: u32) -> Option<Rc<dyn floptle_services::Platform>> {
-    if floptle_steam::restart_app_if_necessary(app_id) {
+pub(crate) fn boot(app_id: u32, shipped: bool) -> Option<Rc<dyn floptle_services::Platform>> {
+    if shipped && floptle_steam::restart_app_if_necessary(app_id) {
         std::process::exit(0);
     }
     match floptle_steam::SteamPlatform::init(app_id) {
@@ -61,7 +72,7 @@ pub(crate) fn boot(app_id: u32) -> Option<Rc<dyn floptle_services::Platform>> {
 /// This build was compiled without the `steam` cargo feature — matches
 /// [`boot`]'s signature so call sites never branch on the feature.
 #[cfg(not(feature = "steam"))]
-pub(crate) fn boot(app_id: u32) -> Option<Rc<dyn floptle_services::Platform>> {
+pub(crate) fn boot(app_id: u32, _shipped: bool) -> Option<Rc<dyn floptle_services::Platform>> {
     eprintln!(
         "steam: this build has no `steam` feature compiled in — app {app_id} requested, \
          continuing without it"

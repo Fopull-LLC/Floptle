@@ -98,7 +98,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool, stea
     // is a small file, cheap to read again.
     let cfg = floptle_scene::load_project(&root.join("project.ron"));
     if let Some(app_id) = crate::steam_boot::resolve_app_id(cfg.steam, steam)
-        && let Some(platform) = crate::steam_boot::boot(app_id)
+        && let Some(platform) = crate::steam_boot::boot(app_id, false)
     {
         ed.script_host.set_platform(platform);
     }

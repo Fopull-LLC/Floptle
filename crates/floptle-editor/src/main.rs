@@ -1006,6 +1006,11 @@ struct EditorTabViewer<'a> {
     pointer_down: bool,
     /// Play mode is running (the Animating tab disables preview/record).
     playing: bool,
+    /// This process IS a shipped game (`floptle-game.ron` beside the binary, or
+    /// `--play`), not the editor. `playing` is permanently true here, so every
+    /// overlay that means "the editor is in Play mode" has to say so against
+    /// THIS as well or it becomes permanent chrome on somebody's game.
+    player_mode: bool,
     /// ⚙ Settings tab state (borrows; changes report through `cmd`).
     settings: crate::settings_ui::SettingsCtx<'a>,
     /// 📦 Packages tab state (which sub-tab, the search, the catalogue).
@@ -1242,6 +1247,44 @@ fn json_string_field(json: &str, key: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// The winit event loop — the default backend, except that **when Steam is
+/// live on a Wayland session we force X11 (XWayland)**.
+///
+/// Steam's in-game overlay is drawn by the Steam client injecting into the
+/// window's rendering, and it **cannot hook a native Wayland surface** — it
+/// captures input and draws nothing, which is exactly the dead end the first
+/// live overlay test hit (2026-08-29): `steam.overlayActive()` read true, the
+/// player's input froze, and the overlay never appeared. XWayland gives it a
+/// surface it can hook. This only fires for a session that actually
+/// initialized Steam (`floptle play --steam`, or a build launched through
+/// Steam) — never the authoring editor, which runs no Steam — and only when
+/// `DISPLAY` is present to fall back to. `FLOPTLE_NO_FORCE_X11=1` keeps
+/// Wayland for anyone who would rather have it and doesn't need the overlay.
+fn build_event_loop(steam_active: bool) -> EventLoop<()> {
+    #[cfg(target_os = "linux")]
+    if steam_active {
+        let on_wayland = std::env::var("WAYLAND_DISPLAY").is_ok_and(|v| !v.is_empty());
+        let have_x11 = std::env::var("DISPLAY").is_ok_and(|v| !v.is_empty());
+        let opt_out = std::env::var("FLOPTLE_NO_FORCE_X11").is_ok_and(|v| !v.is_empty());
+        if on_wayland && have_x11 && !opt_out {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            println!(
+                "steam: forcing X11 (XWayland) so the overlay can hook this window — it can't \
+                 attach to a native Wayland surface. FLOPTLE_NO_FORCE_X11=1 to keep Wayland."
+            );
+            match EventLoop::builder().with_x11().build() {
+                Ok(el) => return el,
+                Err(e) => eprintln!(
+                    "steam: could not force X11 ({e}) — using the default backend; the overlay \
+                     may not draw on Wayland"
+                ),
+            }
+        }
+    }
+    let _ = steam_active;
+    EventLoop::new().expect("event loop")
+}
+
 fn main() {
     // The editor's internal log channel is for the editor. A command-line verb
     // reports through its own output — and two of the editor's start-up lines
@@ -1265,10 +1308,14 @@ fn main() {
     // a bare path, every flag the Hub and CI have always passed — falls through
     // to the loop below, which is the code that has always served them.
     let mut verb_launch: Option<(Option<PathBuf>, bool)> = None;
+    // `floptle play --steam`: init Steam even with no App ID in the project
+    // (Spacewar), same as `run --steam`. Only the verb can set it.
+    let mut steam_forced = false;
     match cli::dispatch(&args) {
         cli::Outcome::Exit(code) => std::process::exit(code),
-        cli::Outcome::Launch { project, player } => {
+        cli::Outcome::Launch { project, player, steam } => {
             verb_launch = Some((project, player));
+            steam_forced = steam;
         }
         cli::Outcome::Legacy => {}
     }
@@ -1410,11 +1457,15 @@ fn main() {
     // this process a GAME, not an editor — the project rides alongside it.
     let mut game_title = String::new();
     let mut steam_settings: Option<floptle_scene::SteamProjectSettings> = None;
+    // Only a SHIPPED build hands its launch back to Steam when it wasn't
+    // started through it — see `steam_boot::boot`.
+    let mut shipped = false;
     if !player_mode
         && project_path.is_none()
         && let Some((manifest, dir)) = export::load_game_manifest()
     {
         player_mode = true;
+        shipped = true;
         game_title = manifest.title;
         steam_settings = manifest.steam;
         project_path = Some(dir.join(manifest.project));
@@ -1434,7 +1485,19 @@ fn main() {
     // can exit the process before any window/GPU exists. Handed to `editor`
     // once it's constructed, below.
     let steam_platform = if player_mode {
-        crate::steam_boot::resolve_app_id(steam_settings, false).and_then(crate::steam_boot::boot)
+        match crate::steam_boot::resolve_app_id(steam_settings, steam_forced) {
+            Some(app_id) => crate::steam_boot::boot(app_id, shipped),
+            None => {
+                // Said out loud, because a session that quietly never talked
+                // to Steam is indistinguishable from one where Steam's own
+                // hook failed — and the second is what people are testing for.
+                println!(
+                    "steam: off — no Steam App ID in ⚙ Settings ▸ Game (pass --steam to \
+                     use Spacewar 480 for testing)"
+                );
+                None
+            }
+        }
     } else {
         None
     };
@@ -1445,7 +1508,7 @@ fn main() {
     } else {
         println!("{} editor v{}", floptle_core::ENGINE_NAME, distribution_version());
     }
-    let event_loop = EventLoop::new().expect("event loop");
+    let event_loop = build_event_loop(steam_platform.is_some());
     event_loop.set_control_flow(ControlFlow::Poll);
     // Gizmos/overlays on by default (toggle in the viewport) — but never in a build.
     //

@@ -173,8 +173,72 @@ pub trait Entitlements {}
 /// Workshop/UGC item surface. Empty until Phase 10.
 pub trait Ugc {}
 
-/// Overlay page-open / activation-event surface. Empty until Phase 3.
-pub trait Overlay {}
+/// Every page name [`Overlay::open_page`] accepts, verbatim as the Steam SDK
+/// spells them — so the list is searchable against Valve's own docs. The
+/// script layer validates against this BEFORE any backend is consulted, so a
+/// typo'd page name is caught in every session, including one with no Steam
+/// at all (where the call would otherwise fail with only "not available").
+pub const OVERLAY_PAGES: [&str; 7] =
+    ["friends", "community", "players", "settings", "officialgamegroup", "stats", "achievements"];
+
+/// Every dialog name [`Overlay::open_user_page`] accepts, verbatim as the
+/// Steam SDK spells them. Same early-validation rule as [`OVERLAY_PAGES`].
+pub const OVERLAY_USER_DIALOGS: [&str; 9] = [
+    "steamid",
+    "chat",
+    "jointrade",
+    "stats",
+    "achievements",
+    "friendadd",
+    "friendremove",
+    "friendrequestaccept",
+    "friendrequestignore",
+];
+
+/// The platform's own in-game overlay — Steam's Shift+Tab UI, drawn over the
+/// game **by the Steam client from outside this process**. Landed Phase 3.
+///
+/// Because the overlay is injected from outside, nothing here *renders*
+/// anything: these calls only ask the platform to show one of its own pages,
+/// and [`poll_activation`](Self::poll_activation) reports when the player
+/// opened or closed it (by any means, a programmatic open included).
+///
+/// **`Err` from an `open_*` call means "the overlay can't open in this
+/// session"** — disabled in the user's platform settings, not (yet) hooked
+/// into this process's renderer, or a setup where injection fails (some
+/// Linux/Proton configurations). The SDK's own calls return nothing and
+/// silently do nothing in that state; reporting it instead is what lets a
+/// game degrade — show the URL, copy an invite code — rather than leave the
+/// player at a button that does nothing.
+pub trait Overlay {
+    /// Whether the overlay is hooked into this process and can open. `false`
+    /// during early startup (the overlay attaches after the renderer exists),
+    /// when the user disabled it, and where injection failed.
+    fn is_enabled(&self) -> bool;
+    /// Whether the overlay is being shown right now. Flips are also reported
+    /// as events by [`poll_activation`](Self::poll_activation); this is the
+    /// level, for callers that only want "should the game sit paused?".
+    fn is_active(&self) -> bool;
+    /// Opens one of the overlay's own pages — see [`OVERLAY_PAGES`]. The
+    /// caller validates the name; an implementation may assume it is valid.
+    fn open_page(&self, page: &str) -> Result<(), String>;
+    /// Opens a page about one user — see [`OVERLAY_USER_DIALOGS`]
+    /// (`"steamid"` is their profile). Same validation split as
+    /// [`open_page`](Self::open_page).
+    fn open_user_page(&self, dialog: &str, user: u64) -> Result<(), String>;
+    /// Opens the overlay's web browser at `url` (a full `http(s)://` URL —
+    /// the caller validates).
+    fn open_url(&self, url: &str) -> Result<(), String>;
+    /// Opens a store page: this app's own when `app_id` is `None`, another
+    /// app's (a DLC's, say) when given.
+    fn open_store(&self, app_id: Option<u32>) -> Result<(), String>;
+    /// Opens the platform's invite-friends dialog for `lobby` (a
+    /// [`Lobbies`] id).
+    fn open_invite_dialog(&self, lobby: u64) -> Result<(), String>;
+    /// Every shown/hidden flip since last polled, oldest first (`true` =
+    /// shown). Drained — a second call answers empty until the next flip.
+    fn poll_activation(&self) -> Vec<bool>;
+}
 
 /// Platform-specific controller input (action sets, glyphs, haptics). Empty
 /// until Phase 7 — distinct from `floptle_input`, which already owns
