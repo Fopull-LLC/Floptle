@@ -1,5 +1,20 @@
 ## Just shipped
 
+**v0.83.0 "Ship It Whole"** — **an exported game now contains everything it
+renders.** A script that swaps a model at runtime — `node.model = "…"`, the
+ordinary way to make one pickup node serve every item in a game — worked in the
+editor and quietly drew nothing in a build; so did mesh colliders, mesh shadow
+occluders and the navmesh bake, giving walls you could walk through and shadows
+that never fell. Project-relative paths are read against your project now,
+wherever the game was launched from, so re-exporting is the whole fix. Three
+pieces of editor furniture have stopped shipping with games too: the red PLAY
+banner, the "Esc — free the mouse" hint, and the no-active-camera warning.
+Games can also open Steam's Shift+Tab overlay themselves and hear when the
+player opens or closes it — `steam.openOverlay`, `steam.openInviteDialog`,
+`steam.onOverlayChanged` — enough to pause a single-player game while somebody
+reads their messages. And there is a new follow-along project that takes the
+platformer onto two machines.
+
 **v0.82.0 "Way Out"** — **your main menu's Quit button works.** There was no
 way for a script to close the game, so that button was drawn dead or not drawn
 at all; `app.quit()` ends it — an exported build closes with your `save.*` data
