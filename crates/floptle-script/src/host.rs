@@ -2,6 +2,7 @@
 //! script) sandbox instances, the per-frame update (mirror the scene, call
 //! `start`/`update`, apply node writes), and log/error capture.
 
+use crate::{seed_fingerprint, Hooks};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -218,6 +219,13 @@ impl Default for ScriptHost {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times a `params` table was built from its seed — the guard on
+    /// the fingerprint. Test-only; the number means nothing outside one.
+    pub(crate) static PARAMS_REBUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 impl ScriptHost {
@@ -5189,6 +5197,7 @@ impl ScriptHost {
                     self.drop_net_instance(&key);
                     self.drop_ui_listeners_of(&key);
                     self.setup_synced(&env, &key);
+                    let hooks = Hooks::of(&env);
                     match self.lua.create_registry_value(env) {
                         Ok(reg) => {
                             self.instances.insert(
@@ -5199,6 +5208,9 @@ impl ScriptHost {
                                     started: false,
                                     seen: true,
                                     node: None,
+                                    hooks,
+                                    seed_fp: 0,
+                                    params_dirty: false,
                                 },
                             );
                         }
@@ -5441,7 +5453,9 @@ impl ScriptHost {
         pass: Pass,
     ) -> bool {
         let key = (e.index(), name.to_string());
-        let (first, env, mut node_slot) = {
+        let eid = e.index();
+        let fp = seed_fingerprint(params, refs, strs);
+        let (first, env, mut node_slot, rebuild) = {
             let Some(inst) = self.instances.get_mut(&key) else { return false };
             // `fixedUpdate`/`lateUpdate` never run before `start` — a brand-new
             // instance waits for the next frame pass to start it first.
@@ -5452,22 +5466,49 @@ impl ScriptHost {
             if pass == Pass::Frame {
                 inst.started = true;
             }
+            // No hook for this pass: the script cannot observe anything the
+            // full setup below would do, EXCEPT through the node table — a
+            // handle stashed in `start()` must keep reading the live transform,
+            // and a write made to it from a timer callback must still reach the
+            // world. So the node is stamped and drained exactly as before, and
+            // the rest — the params table, the refs, the write scan — is not
+            // done for a hook that is not there. With three passes a frame this
+            // was most of what a scripted node cost.
+            let wants = match pass {
+                Pass::Frame => inst.hooks.update || (first && inst.hooks.start),
+                Pass::Fixed => inst.hooks.fixed,
+                Pass::Late => inst.hooks.late,
+            };
+            if !wants {
+                let body = self.bodies.borrow().get(&eid).copied();
+                let mut slot = inst.node.take();
+                let r = self.refresh_node(eid, tr, body, &mut slot);
+                if let Some(inst) = self.instances.get_mut(&key) {
+                    inst.node = slot;
+                }
+                if let Err(err) = r {
+                    self.fail(name, format!("{name}: {err}"));
+                }
+                return false;
+            }
             let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return false };
+            let rebuild = inst.seed_fp != fp || inst.params_dirty;
             // Taken out and put back, because `tick` borrows `self` while it runs.
-            (first, env, inst.node.take())
+            (first, env, inst.node.take(), rebuild)
         };
-        let eid = e.index();
         if first {
             self.warn_unread_params(eid, name, params, strs, &env);
             self.warn_shadowed_handle_keys(name, &env);
         }
         let body = self.bodies.borrow().get(&eid).copied();
-        // Resolve reference params by NAME through the O(1) index — per tick, so
-        // a target spawned or renamed mid-play rebinds automatically. The KIND
-        // (node / script / component) comes from the declared `defaults` sentinel,
-        // and script/component targets validate against the live scene so an
-        // invalid wire reads nil rather than a dead handle.
-        let resolved: Vec<(String, crate::env::ResolvedRef)> = {
+        // Resolve reference params by NAME through the O(1) index — a target
+        // spawned or renamed mid-play rebinds when the table is next built. The
+        // KIND (node / script / component) comes from the declared `defaults`
+        // sentinel, and script/component targets validate against the live
+        // scene so an invalid wire reads nil rather than a dead handle. Only
+        // when the params table is going to be rebuilt: they are part of what
+        // goes into it and nothing else reads them.
+        let resolved: Vec<(String, crate::env::ResolvedRef)> = if !rebuild { Vec::new() } else {
             use crate::env::{parse_ref_sentinel, ResolvedRef};
             let s = self.scene.borrow();
             let envs = self.envs.borrow();
@@ -5518,16 +5559,91 @@ impl ScriptHost {
             pass,
             &mut node_slot,
             &mut called,
+            rebuild,
         );
         *self.net.current.borrow_mut() = None;
         if let Some(inst) = self.instances.get_mut(&key) {
             inst.node = node_slot;
+            if rebuild && result.is_ok() {
+                inst.seed_fp = fp;
+                inst.params_dirty = false;
+            }
         }
         match result {
-            Ok(()) => self.collect_param_writes(&env, name, eid, params, strs),
+            // Only a hook that ran can have written into `params`; a pass whose
+            // hook turned out absent has nothing to scan.
+            Ok(()) if called => {
+                let wrote = self.collect_param_writes(&env, name, eid, params, strs);
+                if wrote && let Some(inst) = self.instances.get_mut(&key) {
+                    inst.params_dirty = true;
+                }
+            }
+            Ok(()) => {}
             Err(err) => self.fail(name, format!("{name}: {err}")),
         }
         called
+    }
+
+    /// Hand back this instance's `node` table, re-stamped with the live
+    /// transform and with any write made to it since the last stamp drained
+    /// into the world — the part of a hook call that has to happen even when
+    /// there is no hook. Shared with [`tick`](Self::tick) so the two cannot
+    /// disagree about what a stamp means.
+    ///
+    /// ONE node table per instance, re-stamped each pass — see `node_table`. A
+    /// handle kept from `start()` is therefore the same table, and stays live.
+    /// Held as a REGISTRY key, not a live `Table`: a `Table` alive in Rust
+    /// occupies a slot on mlua's auxiliary ref stack, which is bounded at
+    /// ~8,000, and one per script instance was a hard ceiling on how big a
+    /// scene may be (`floptle/0069`). The registry has no such bound.
+    fn refresh_node(
+        &self,
+        eid: u32,
+        tr: &mut Transform,
+        body: Option<BodyState>,
+        slot: &mut Option<(RegistryKey, crate::env::NodeStamp)>,
+    ) -> mlua::Result<Table> {
+        let cached =
+            slot.as_ref().and_then(|(k, _)| self.lua.registry_value::<Table>(k).ok()).filter(
+                // Entity indices are reused after a despawn; a table tagged with a
+                // different one is not this node's, so start over.
+                |t| t.raw_get::<u32>("__id").ok() == Some(eid),
+            );
+        let node = match cached {
+            Some(t) => t,
+            None => {
+                let t = node_table(&self.lua, eid, tr, body)?;
+                *slot =
+                    Some((self.lua.create_registry_value(&t)?, crate::env::node_stamp(&t, tr)));
+                t
+            }
+        };
+        if let Some((_, stamp)) = slot.as_ref() {
+            // Writes made through a stashed handle from OUTSIDE this script's hooks (a
+            // cross-script `other:knockBack()`, a timer callback) land after the last
+            // read-back has drained. Apply them now, before the re-stamp overwrites them.
+            let drained = crate::env::drain_node_writes(&node, stamp, tr)?;
+            if drained.moved && body.is_some() {
+                self.body_pos_changes.borrow_mut().insert(
+                    eid,
+                    [tr.translation.x, tr.translation.y, tr.translation.z],
+                );
+            }
+            if let Some(v) = drained.vel {
+                self.body_changes.borrow_mut().insert(eid, v);
+            }
+            if let Some(h) = drained.height {
+                self.body_height_changes.borrow_mut().insert(eid, h);
+            }
+            if let Some(p) = drained.tick_pos {
+                self.body_pos_changes.borrow_mut().insert(eid, p);
+            }
+        }
+        crate::env::stamp_node_table(&node, tr, body)?;
+        if let Some((_, stamp)) = slot.as_mut() {
+            *stamp = crate::env::node_stamp(&node, tr);
+        }
+        Ok(node)
     }
 
     /// Persist `params.X = value` writes the hook just made: tunables are
@@ -5538,6 +5654,19 @@ impl ScriptHost {
     /// `defaults` or the stored params; ad-hoc keys stay frame-local, and
     /// reference params (node/script/component handles) never round-trip.
     fn collect_param_writes(
+        &self,
+        env: &Table,
+        name: &str,
+        eid: u32,
+        seeded: &[(String, f32)],
+        seeded_strs: &[(String, String)],
+    ) -> bool {
+        let before = self.param_writes.borrow().len();
+        self.collect_param_writes_into(env, name, eid, seeded, seeded_strs);
+        self.param_writes.borrow().len() != before
+    }
+
+    fn collect_param_writes_into(
         &self,
         env: &Table,
         name: &str,
@@ -5658,59 +5787,22 @@ impl ScriptHost {
         // measured 12–21 ms "peaks" on a file with no `update` in it and went
         // looking for the problem there.
         called: &mut bool,
+        rebuild_params: bool,
     ) -> mlua::Result<()> {
-        env.set("params", params_table(&self.lua, env, params, refs, strs)?)?;
+        // Built from the seed only when the seed changed or the script wrote
+        // into it last time (`Instance::seed_fp`, `Instance::params_dirty`). It
+        // used to be rebuilt on every hook call, which on sixty scripted nodes
+        // was a hundred and eighty tables a frame that were, almost always,
+        // the table already there.
+        if rebuild_params {
+            env.set("params", params_table(&self.lua, env, params, refs, strs)?)?;
+            #[cfg(test)]
+            PARAMS_REBUILDS.with(|c| c.set(c.get() + 1));
+        }
         env.set("time", time as f64)?;
         env.set("dt", dt as f64)?;
 
-        // ONE node table per instance, re-stamped each hook — see `node_table`. A handle
-        // kept from `start()` is therefore the same table, and stays live.
-        // Held as a REGISTRY key, not a live `Table`, and resolved here — a
-        // `Table` alive in Rust occupies a slot on mlua's auxiliary ref stack,
-        // which is bounded at ~8,000, and one per script instance is a hard
-        // ceiling on how big a scene may be (`floptle/0069`). The registry has
-        // no such bound. Resolving costs one raw index, the same thing the
-        // instance's env two lines up already does every tick.
-        let cached =
-            slot.as_ref().and_then(|(k, _)| self.lua.registry_value::<Table>(k).ok()).filter(
-                // Entity indices are reused after a despawn; a table tagged with a
-                // different one is not this node's, so start over.
-                |t| t.raw_get::<u32>("__id").ok() == Some(eid),
-            );
-        let node = match cached {
-            Some(t) => t,
-            None => {
-                let t = node_table(&self.lua, eid, tr, body)?;
-                *slot =
-                    Some((self.lua.create_registry_value(&t)?, crate::env::node_stamp(&t, tr)));
-                t
-            }
-        };
-        if let Some((_, stamp)) = slot.as_ref() {
-            // Writes made through a stashed handle from OUTSIDE this script's hooks (a
-            // cross-script `other:knockBack()`, a timer callback) land after the last
-            // read-back has drained. Apply them now, before the re-stamp overwrites them.
-            let drained = crate::env::drain_node_writes(&node, stamp, tr)?;
-            if drained.moved && body.is_some() {
-                self.body_pos_changes.borrow_mut().insert(
-                    eid,
-                    [tr.translation.x, tr.translation.y, tr.translation.z],
-                );
-            }
-            if let Some(v) = drained.vel {
-                self.body_changes.borrow_mut().insert(eid, v);
-            }
-            if let Some(h) = drained.height {
-                self.body_height_changes.borrow_mut().insert(eid, h);
-            }
-            if let Some(p) = drained.tick_pos {
-                self.body_pos_changes.borrow_mut().insert(eid, p);
-            }
-        }
-        crate::env::stamp_node_table(&node, tr, body)?;
-        if let Some((_, stamp)) = slot.as_mut() {
-            *stamp = crate::env::node_stamp(&node, tr);
-        }
+        let node = self.refresh_node(eid, tr, body, slot)?;
 
         let pre = node_pre(tr);
         let ran = (|| -> mlua::Result<bool> {

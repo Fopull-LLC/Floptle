@@ -413,6 +413,62 @@ struct Instance {
     /// and one per instance put a hard ceiling of a few thousand scripted nodes
     /// on a scene — reached as a PANIC (`floptle/0069`).
     node: Option<(RegistryKey, crate::env::NodeStamp)>,
+    /// Which lifecycle hooks this script's environment defines, read once when
+    /// the chunk is built (and again on hot reload — a rebuild is a new
+    /// `Instance`). A pass the script has no hook for skips everything but the
+    /// node stamp: with three passes a frame, an instance that only defines
+    /// `update` was otherwise paying the full setup twice more for nothing.
+    hooks: Hooks,
+    /// A fingerprint of the `(params, refs, strs)` last seeded into
+    /// `env.params`, so the table is rebuilt when the seed changes rather than
+    /// on every hook call. `0` means "never seeded" and forces a build.
+    seed_fp: u64,
+    /// A script wrote into `params` during its last hook. The table is rebuilt
+    /// from the seed on the next pass — the same reset the per-call rebuild
+    /// always gave an undeclared, frame-local param — and declared params come
+    /// back through the ECS write in `flush_writes`, as they always have.
+    params_dirty: bool,
+}
+
+/// The lifecycle hooks a script's environment defines — see [`Instance::hooks`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Hooks {
+    start: bool,
+    update: bool,
+    fixed: bool,
+    late: bool,
+}
+
+impl Hooks {
+    /// Read from a freshly built environment. Every spelling `tick` accepts is
+    /// asked about here, so the answer agrees with what it would have called.
+    fn of(env: &mlua::Table) -> Self {
+        use crate::env::lifecycle_fn;
+        let has = |names: &[&str]| lifecycle_fn(env, names).ok().flatten().is_some();
+        Self {
+            start: has(&["start", "on_start"]),
+            update: has(&["update", "on_update"]),
+            fixed: has(&["fixedUpdate", "onFixedUpdate"]),
+            late: has(&["lateUpdate", "onLateUpdate"]),
+        }
+    }
+}
+
+/// Fingerprint the seed an instance's `params` table is built from.
+///
+/// `0` is reserved for "never built", so a real hash of zero is nudged.
+fn seed_fingerprint(params: &[(String, f32)], refs: &[(String, String)], strs: &[(String, String)]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::hash::DefaultHasher::new();
+    for (k, v) in params {
+        k.hash(&mut h);
+        v.to_bits().hash(&mut h);
+    }
+    0xffu8.hash(&mut h);
+    refs.hash(&mut h);
+    0xfeu8.hash(&mut h);
+    strs.hash(&mut h);
+    h.finish().max(1)
 }
 
 /// Embeds Lua and runs the scripts attached to a world's nodes.
@@ -4270,6 +4326,83 @@ end
             bucket.ms
         );
         drop(prof);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **`params` is built when its seed changes, not on every hook call.**
+    ///
+    /// The table used to be rebuilt from the ECS seed on every pass of every
+    /// instance — three times a frame per scripted node — and on a scene of
+    /// sixty scripted nodes that was most of what a node cost. It is now
+    /// fingerprinted. The guard is a count, watched: force the rebuild back on
+    /// and this reads twenty instead of one.
+    #[test]
+    fn params_are_rebuilt_only_when_the_seed_changes() {
+        let dir = std::env::temp_dir().join(format!("floptle_seedfp_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "tunable",
+            "defaults = { speed = 1 }\n\
+             function update(node, dt) node.y = params.speed end\n\
+             function fixedUpdate(node, dt) end\n",
+        );
+        let (mut world, e) = world_with_script("tunable");
+        let mut host = ScriptHost::new();
+        crate::host::PARAMS_REBUILDS.with(|c| c.set(0));
+        for i in 0..10 {
+            let t = i as f32 / 60.0;
+            host.run(&mut world, &dir, 1.0 / 60.0, t);
+            host.run_fixed(&mut world, 1.0 / 60.0, t);
+        }
+        assert_eq!(
+            crate::host::PARAMS_REBUILDS.with(|c| c.get()),
+            1,
+            "an unchanged seed must build the table once, not once per hook call"
+        );
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.y, 1.0, "the default reached the script");
+
+        // The editor changes the seed: the next pass must see it — and cost
+        // exactly one more build.
+        world.get_mut::<Scripts>(e).unwrap().0[0].params.push(("speed".into(), 2.0));
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0);
+        assert_eq!(crate::host::PARAMS_REBUILDS.with(|c| c.get()), 2, "a changed seed rebuilds once");
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.y, 2.0, "the new seed reached the script");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A pass the script has no hook for still drains a write made through a
+    /// stashed handle.** The hook-less fast path skips the params table and
+    /// the write scan; it must NOT skip the node — a timer callback writing
+    /// `me.x = 5` through a handle kept from `start()` has to reach the world on
+    /// the very next pass, exactly as it did when every pass paid full price.
+    #[test]
+    fn a_hookless_pass_still_drains_a_timer_write_to_the_node() {
+        let dir = std::env::temp_dir().join(format!("floptle_hookless_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "stasher",
+            "local me\n\
+             function start(node)\n\
+               me = node\n\
+               after(0.01, function() me.x = 5 end)\n\
+             end\n",
+        );
+        let (mut world, e) = world_with_script("stasher");
+        let mut host = ScriptHost::new();
+        // Frame pass: `start` runs, stashes the handle, arms the timer.
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 0.0);
+        // Tick pass: the timer fires in the scheduler, BEFORE the script pass —
+        // and this script has no `fixedUpdate`, so the pass takes the light
+        // path. The write must still land.
+        host.run_fixed(&mut world, 1.0 / 60.0, 1.0 / 60.0);
+        assert_eq!(
+            world.get::<Transform>(e).unwrap().translation.x,
+            5.0,
+            "a hook-less pass dropped a write made through a stashed node handle"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
