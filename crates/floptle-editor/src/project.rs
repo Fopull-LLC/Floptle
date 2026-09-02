@@ -614,6 +614,19 @@ impl Editor {
         };
         if let Err(e) = self.script_host.set_vec3_mode(mode) {
             self.console.push(floptle_script::LogLevel::Warn, e, None);
+        } else if mode == floptle_script::Vec3Mode::Fast {
+            // The one line a developer needs to have read before the first
+            // `v.x = n` raises at them: what they are on, and what to write
+            // instead. Debug level — it is orientation, not a problem.
+            self.console.push(
+                floptle_script::LogLevel::Debug,
+                "scripts run the `fast` vec3: 32-bit, immutable, no allocation. A vector cannot be \
+                 assigned into — write `v = v:withX(n)` rather than `v.x = n` (it works on both \
+                 vec3s), and `type(v)` answers \"vector\". Nodes (`node.x = n`) are unchanged. \
+                 Project Settings → Script vec3 picks `exact` for a world past ~131 km."
+                    .into(),
+                None,
+            );
         }
     }
 
@@ -627,7 +640,21 @@ impl Editor {
                 // "unparseable"), so it has to carry the same rule or opening
                 // a project through the editor would leave the choice implicit
                 // while opening it any other way wrote it down.
-                cfg.pin_script_vec3();
+                if cfg.pin_script_vec3() {
+                    // Said once, the first time — a change written into
+                    // somebody's project file without a word is the kind of
+                    // thing that gets noticed a week later in a diff.
+                    self.console.push(
+                        floptle_script::LogLevel::Debug,
+                        "this project predates the vec3 setting, so it has been pinned to `exact` \
+                         in project.ron — the 64-bit, mutable vector it has always had; nothing \
+                         about its scripts changes. New projects start on `fast` (32-bit, \
+                         immutable, no allocation). Project Settings → Script vec3 switches it, \
+                         and `floptle lint --vec3` lists what switching would take."
+                            .into(),
+                        None,
+                    );
+                }
                 cfg
             }
             Ok(None) => Default::default(),

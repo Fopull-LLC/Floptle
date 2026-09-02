@@ -126,6 +126,12 @@ file — the authored value wins, and nothing says so.
 scene by hand, follow the id. The index is a fallback that a later insertion can
 quietly re-point at a different node.
 
+**`v.x = 5` on a vec3 raises in a project whose `script_vec3` is `Fast`** — which
+is every new project; older ones are pinned to `Exact`, where it still works.
+Write `v = v:withX(5)` and it is right in both. `node.x = 5` is a NODE and is
+fine everywhere. `project.ron` says which one a project is on, and
+`floptle lint --vec3` lists every line that would need changing to switch.
+
 ## Running it
 
 `floptle play` runs the project as a game, and `floptle open` opens the editor.

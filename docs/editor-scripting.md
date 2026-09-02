@@ -1039,6 +1039,10 @@ Standard Lua: `assert` `error` `ipairs` `next` `pairs` `pcall` `xpcall` `select`
 provided on every build, whichever Lua it runs), and `os.time` /
 `os.clock` / `os.date` / `os.difftime`.
 
+`vec3` here is always the **exact** one — 64-bit and mutable — whatever the open
+project's own `script_vec3` says. That setting is about the game's scripts; an
+extension runs in the editor's Lua, which does not change under it.
+
 **There is no `_G`.** The environment is an allow-list, not a view of the real
 globals, so there is nothing to reach through. To probe for something optional,
 just read it — an unknown name is `nil`:
