@@ -417,6 +417,16 @@ fn closest_point_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
 /// the face. Resolved every substep, so a body never tunnels to the wrong side.
 pub struct TriMeshCollider {
     tris: Vec<[Vec3; 3]>,
+    /// A sphere around every triangle, for the world's broadphase.
+    ///
+    /// Without it a mesh was filed with an infinite radius and offered to
+    /// EVERY query — and answering one costs a 5×5×5 walk of this mesh's own
+    /// cell grid whether the probe is touching the mesh or on the other side
+    /// of the level. A level of a couple of hundred meshes paid that walk a
+    /// couple of hundred times per body per tick, almost all of it for meshes
+    /// nowhere near the body. Computed once here; a query outside the sphere
+    /// cannot be in contact with anything inside it, so the narrowing is pure.
+    bound: (Vec3, f32),
     /// Per-triangle index into `labels`, parallel to `tris`. **Empty** when this
     /// mesh has no per-face labels, which is the ordinary case — an imported
     /// model is one surface as far as this crate is concerned.
@@ -490,7 +500,23 @@ impl TriMeshCollider {
                 }
             }
         }
-        Self { tris, tri_label: kept_label, labels, cell, grid }
+        let bound = if tris.is_empty() {
+            (Vec3::ZERO, 0.0)
+        } else {
+            let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+            for t in &tris {
+                for v in t {
+                    lo = lo.min(*v);
+                    hi = hi.max(*v);
+                }
+            }
+            let centre = (lo + hi) * 0.5;
+            // Radius from the centre to the farthest vertex, not the box's
+            // half-diagonal: tighter, and exact for the sphere test the grid does.
+            let r = tris.iter().flatten().map(|v| (*v - centre).length()).fold(0.0, f32::max);
+            (centre, r)
+        };
+        Self { tris, tri_label: kept_label, labels, cell, grid, bound }
     }
 
     /// Closest point on the mesh to `p` (its squared distance, and which triangle
@@ -526,6 +552,9 @@ impl TriMeshCollider {
 }
 
 impl CollisionShape for TriMeshCollider {
+    fn bounds(&self) -> Option<(Vec3, f32)> {
+        Some(self.bound)
+    }
     fn distance(&self, p: Vec3) -> f32 {
         // No nearby triangle → far away (no collision). Unsigned, so always ≥ 0.
         self.nearest(p).map(|(_, d2)| d2.sqrt()).unwrap_or(1e6)
@@ -755,3 +784,34 @@ mod face_label_tests {
         assert_eq!(short.face_label(Vec3::new(0.0, 0.5, 0.0)), None);
     }
 }
+
+#[cfg(test)]
+mod mesh_bound_tests {
+    use super::*;
+
+    /// **A mesh has a bound, and it is the right one.** It used to answer
+    /// `None`, which the world's broadphase files as "everywhere" — so every
+    /// body tested every mesh in the level every tick. The bound must contain
+    /// every vertex (a vertex outside it is a contact the broadphase would
+    /// drop, silently) and must not be the infinite one.
+    #[test]
+    fn a_mesh_reports_a_sphere_that_contains_every_vertex() {
+        let verts = [
+            Vec3::new(10.0, 0.0, 10.0),
+            Vec3::new(14.0, 0.0, 10.0),
+            Vec3::new(10.0, 3.0, 10.0),
+            Vec3::new(12.0, 1.0, 16.0),
+        ];
+        let idx = [0u32, 1, 2, 1, 2, 3];
+        let m = TriMeshCollider::new(&verts, &idx);
+        let (c, r) = m.bounds().expect("a mesh must narrow, not be offered to every query");
+        assert!(r.is_finite() && r > 0.0, "radius {r}");
+        for v in &verts {
+            assert!((*v - c).length() <= r + 1e-4, "vertex {v} outside the bound ({c}, {r})");
+        }
+        // And it is tight enough to be worth having: a probe well away from
+        // the mesh must fall outside it.
+        assert!((Vec3::new(-50.0, 0.0, -50.0) - c).length() > r);
+    }
+}
+

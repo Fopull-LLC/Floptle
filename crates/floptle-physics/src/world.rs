@@ -101,6 +101,13 @@ impl AnchoredCollider {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times the broadphase was actually rebuilt — the guard on the
+    /// input hash in `reindex_colliders`. Test-only.
+    pub(crate) static REINDEXES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// The collision world for one scene: a gravity field, a set of colliders, and the
 /// dynamic bodies, advanced together on a fixed timestep.
 ///
@@ -157,6 +164,11 @@ pub struct PhysicsWorld {
     /// unless `step` just did, which costs the driven path what it cost before
     /// and never risks a stale answer.
     index_fresh: bool,
+    /// A hash of exactly what the broadphase was last built from — every
+    /// collider's `(centre, radius)`, in order. The grid is a pure function of
+    /// that sequence, so an equal hash means an equal grid and the rebuild is
+    /// skipped. See `reindex_colliders`.
+    indexed_hash: u64,
     /// Compound rigid bodies (multi-shape 6-DOF assemblies — see `compound.rs`),
     /// stepped alongside `bodies` with the same collider set and layer matrix.
     pub compounds: Vec<Compound>,
@@ -204,6 +216,7 @@ impl Default for PhysicsWorld {
             collider_index: Default::default(),
             cand: Vec::new(),
             index_fresh: false,
+            indexed_hash: 0,
             resting: Vec::new(),
             resting_check_elapsed: 0.0,
             last_revalidated_collider_count: usize::MAX,
@@ -663,15 +676,40 @@ impl PhysicsWorld {
     /// Rebuild the collider broadphase from the current collider set
     /// (`floptle/0076`).
     pub(crate) fn reindex_colliders(&mut self) {
-        // A collider with no bound (a plane, a terrain field, a mesh) is handed
-        // in with an infinite radius, which the grid files as oversized and
-        // therefore offers to every query. That is what makes this a pure
-        // narrowing: nothing the scan tested can stop being tested.
+        // A collider with no bound (a plane, a terrain field) is handed in with
+        // an infinite radius, which the grid files as oversized and therefore
+        // offers to every query. That is what makes this a pure narrowing:
+        // nothing the scan tested can stop being tested. (Meshes carry a real
+        // bound now — a level of a couple of hundred of them was being offered
+        // whole to every body every tick.)
         let items = self.colliders.iter().map(|c| match c.bounds() {
             Some((centre, r)) => (centre, r),
             None => (Vec3::ZERO, f32::INFINITY),
         });
-        self.collider_index.rebuild(items);
+        // Called every tick, because the driver lends the collider list to the
+        // script host and hands it back every frame, and nothing here can tell
+        // a returned list from a replaced one. The grid does not need to: it is
+        // a pure function of the `(centre, radius)` sequence, so the sequence
+        // is hashed and an equal hash is an equal grid. Hashing what the index
+        // is BUILT from — rather than, say, the list's pointer — is what makes
+        // this safe: a replaced list that happens to land on the same address
+        // would fool a pointer, and a rebase (which moves every centre) or a
+        // shape edit that changed a bound cannot fool this.
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        for (c, r) in items.clone() {
+            c.x.to_bits().hash(&mut h);
+            c.y.to_bits().hash(&mut h);
+            c.z.to_bits().hash(&mut h);
+            r.to_bits().hash(&mut h);
+        }
+        let hash = h.finish().max(1); // 0 is "never built"
+        if hash != self.indexed_hash {
+            self.collider_index.rebuild(items);
+            self.indexed_hash = hash;
+            #[cfg(test)]
+            REINDEXES.with(|c| c.set(c.get() + 1));
+        }
         self.index_fresh = true;
     }
 
@@ -2131,3 +2169,51 @@ mod ray_identity_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod reindex_tests {
+    use super::*;
+
+    /// **The broadphase is rebuilt when its input changes, and only then.**
+    /// The driver hands the same collider list back every frame, and every
+    /// tick used to rebuild the grid from it — on a level of two hundred
+    /// meshes, once each now carries a real bound, that rebuild is the
+    /// expensive part of the tick. Watched failing with the hash check
+    /// removed: ten steps, ten rebuilds.
+    #[test]
+    fn an_unchanged_collider_set_is_not_reindexed_and_a_changed_one_is() {
+        let mut w = PhysicsWorld::default();
+        let mut cols = Vec::new();
+        for i in 0..8 {
+            let mut c = AnchoredCollider::world(Box::new(crate::shapes::SphereShape {
+                center: Vec3::ZERO,
+                radius: 0.5,
+            }));
+            c.re_anchor(DVec3::new(i as f64 * 3.0, 0.0, 0.0), DVec3::ZERO);
+            cols.push(c);
+        }
+        w.set_colliders(cols);
+        REINDEXES.with(|c| c.set(0));
+        for _ in 0..10 {
+            w.step(1.0 / 120.0);
+            // The driver's round trip: the same list, handed back.
+            let lent = std::mem::take(&mut w.colliders);
+            w.set_colliders(lent);
+        }
+        assert_eq!(REINDEXES.with(|c| c.get()), 1, "an unchanged set must be indexed once");
+
+        // A rebase moves every centre: the grid is in origin-relative space and
+        // must be rebuilt.
+        w.rebase(DVec3::new(100.0, 0.0, 0.0));
+        w.step(1.0 / 120.0);
+        assert_eq!(REINDEXES.with(|c| c.get()), 2, "a rebase changes every centre");
+
+        // And a genuinely different list rebuilds too.
+        let mut cols = std::mem::take(&mut w.colliders);
+        cols.pop();
+        w.set_colliders(cols);
+        w.step(1.0 / 120.0);
+        assert_eq!(REINDEXES.with(|c| c.get()), 3, "a changed set must rebuild");
+    }
+}
+

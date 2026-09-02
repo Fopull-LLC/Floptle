@@ -497,13 +497,27 @@ fn install(world: &mut World, e: Entity, node: &MadeNode, mut spec: ElementSpec,
     if !node.mentions("order") {
         spec.order = slot as i32;
     }
-    world.insert(e, spec);
-    world.insert(e, Name(node_name(node, slot)));
-    world.insert(e, Made {
+    // Write only what changed. A `ui.make` that runs every frame — a HUD, a
+    // prompt — re-describes elements that are already exactly right, and an
+    // `insert` of an equal value is not free: the world counts it as a
+    // structural change, and everything downstream that asks "did anything
+    // move?" (the script mirror, for one) answers yes and rebuilds. Three
+    // unchanged elements a frame were costing a full mirror rebuild a frame.
+    if world.get::<ElementSpec>(e) != Some(&spec) {
+        world.insert(e, spec);
+    }
+    let name = node_name(node, slot);
+    if world.get::<Name>(e).map(|n| n.0.as_str()) != Some(name.as_str()) {
+        world.insert(e, Name(name));
+    }
+    let made = Made {
         key: node.key.clone(),
         slot: slot as u32,
         kind: kind_name(node.kind).to_string(),
-    });
+    };
+    if world.get::<Made>(e) != Some(&made) {
+        world.insert(e, made);
+    }
 }
 
 fn descend(
@@ -581,6 +595,27 @@ mod tests {
         let slot = ElementSpec { drop_target: true, ..Default::default() };
         assert!(hook_reaches(&slot, "dropped") && hook_reaches(&slot, "hoverStart"));
         assert!(hook_needs("clicked").contains("Button"));
+    }
+
+    /// **Re-making an unchanged UI changes nothing in the world.** A HUD made
+    /// every frame used to re-insert every element's spec, name and marker,
+    /// which the world counts as structural — and the script mirror, which
+    /// trusts that count, rebuilt itself from scratch every frame because of
+    /// three elements that had not moved.
+    #[test]
+    fn re_installing_an_identical_element_leaves_the_world_revision_alone() {
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Matter::Empty);
+        let node = MadeNode { kind: Kind::Text, key: "hud".into(), ..Default::default() };
+        install(&mut world, e, &node, node.build(), 0);
+        let before = world.revision();
+        install(&mut world, e, &node, node.build(), 0);
+        assert_eq!(world.revision(), before, "an identical install must not touch the world");
+        let changed = MadeNode { kind: Kind::Text, key: "hud2".into(), ..Default::default() };
+        install(&mut world, e, &changed, changed.build(), 0);
+        assert_ne!(world.revision(), before, "a changed element must still be written");
     }
 
     fn container(world: &mut World) -> Entity {
