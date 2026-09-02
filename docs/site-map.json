@@ -54,7 +54,7 @@
       "id": "shipping",
       "title": "Shipping a game",
       "blurb": "Getting it to players, and to more of them.",
-      "pages": ["export-builds.md", "multiplayer.md", "accessibility.md", "updating-the-hub.md"]
+      "pages": ["export-builds.md", "web-export.md", "multiplayer.md", "accessibility.md", "updating-the-hub.md"]
     },
     {
       "id": "engine",

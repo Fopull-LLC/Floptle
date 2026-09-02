@@ -169,7 +169,7 @@ fn new_tilemap_handle(lua: &Lua, id: u32, shared: Rc<Shared>) -> mlua::Result<Ta
                 let s = shared.scene.borrow();
                 match tile_packed_at(&s, id, x, y) {
                     Some(p) if p != floptle_core::EMPTY_TILE => {
-                        Ok(Value::Integer(floptle_core::tile_index(p) as i64))
+                        Ok(Value::Integer(floptle_core::tile_index(p) as mlua::Integer))
                     }
                     _ => Ok(Value::Nil),
                 }
@@ -189,8 +189,8 @@ fn new_tilemap_handle(lua: &Lua, id: u32, shared: Rc<Shared>) -> mlua::Result<Ta
                     Some(p) if p != floptle_core::EMPTY_TILE => {
                         let xf = floptle_core::tile_xform(p);
                         Ok((
-                            Value::Integer(floptle_core::tile_index(p) as i64),
-                            Value::Integer(xf.rot as i64 * 90),
+                            Value::Integer(floptle_core::tile_index(p) as mlua::Integer),
+                            Value::Integer(xf.rot as mlua::Integer * 90),
                             Value::Boolean(xf.flip_x),
                         ))
                     }
@@ -276,7 +276,10 @@ fn new_tilemap_handle(lua: &Lua, id: u32, shared: Rc<Shared>) -> mlua::Result<Ta
                 let p = super::handles::vec3_of(&p)?;
                 let s = shared.scene.borrow();
                 match tile_cell_of_world(&s, id, floptle_core::math::DVec3::from(p)) {
-                    Some((x, y)) => Ok((Value::Integer(x as i64), Value::Integer(y as i64))),
+                    Some((x, y)) => Ok((
+                        Value::Integer(x as mlua::Integer),
+                        Value::Integer(y as mlua::Integer),
+                    )),
                     None => Ok((Value::Nil, Value::Nil)),
                 }
             })?,

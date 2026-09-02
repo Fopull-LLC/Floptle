@@ -16,9 +16,23 @@ path = "src/lib.rs"
 name = "floptle-runtime"
 path = "src/main.rs"
 
+[features]
+# The script VM, forwarded rather than chosen — exactly one, and this crate
+# never picks for whoever depends on it. `default-features = false` on the
+# `floptle-script` dependency below is what makes `--features vm-luajit` mean
+# LuaJIT instead of LuaJIT *and* Luau. See `floptle-script/src/vm.rs` and
+# ADR-0028.
+default = ["vm-luau"]
+vm-luajit = ["floptle-script/vm-luajit"]
+vm-luau = ["floptle-script/vm-luau"]
+# Luau's code generator, forwarded so a native build can ask for it. Off by
+# default; see floptle-script's manifest for why.
+vm-luau-codegen = ["vm-luau", "floptle-script/vm-luau-codegen"]
+
+
 [dependencies]
 floptle-core = { path = "../floptle-core" }
-floptle-render = { path = "../floptle-render" }
+floptle-render = { path = "../floptle-render", default-features = false }
 floptle-field = { path = "../floptle-field" }
 floptle-shader = { path = "../floptle-shader" }
 floptle-vfx = { path = "../floptle-vfx" }
@@ -29,7 +43,7 @@ floptle-rules = { path = "../floptle-rules" }
 floptle-input = { path = "../floptle-input" }
 floptle-ui = { path = "../floptle-ui" }
 floptle-assets = { path = "../floptle-assets" }
-floptle-script = { path = "../floptle-script" }
+floptle-script = { path = "../floptle-script", default-features = false }
 floptle-net = { path = "../floptle-net" }
 floptle-scene = { path = "../floptle-scene" }
 

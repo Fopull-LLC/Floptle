@@ -547,10 +547,30 @@ impl Default for ExtHost {
     }
 }
 
+/// A new Lua state with the VM compatibility layer already in it.
+///
+/// A package is third-party code written against the documented surface, and
+/// `base_globals` copies `bit` out of these globals — so on a VM that spells it
+/// `bit32` the shim has to be in place before the sandbox is built, or every
+/// package that hashes anything silently loses the library (ADR-0028).
+///
+/// The two call sites are construction and `reload`, and they must not drift:
+/// a reload that skipped this would work until the first package reload.
+fn fresh_lua() -> Lua {
+    let lua = Lua::new();
+    if let Err(e) = floptle_script::vm::install_compat(&lua) {
+        panic!(
+            "the {} compatibility layer failed to install in the package host: {e}",
+            floptle_script::vm::VM_NAME
+        );
+    }
+    lua
+}
+
 impl ExtHost {
     pub(crate) fn new() -> Self {
         Self {
-            lua: Lua::new(),
+            lua: fresh_lua(),
             shared: Rc::new(Shared::default()),
             packages: Vec::new(),
             windows: Vec::new(),
@@ -689,7 +709,7 @@ impl ExtHost {
         self.shared.cmds.borrow_mut().clear();
         self.shared.web.borrow_mut().cancel_all();
         // A fresh state, so nothing survives a reload by hiding in a global.
-        self.lua = Lua::new();
+        self.lua = fresh_lua();
         self.dynamic = None;
         self.report = LoadReport::default();
     }

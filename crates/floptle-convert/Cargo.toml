@@ -10,7 +10,10 @@ rust-version.workspace = true
 
 [dependencies]
 floptle-assets = { path = "../floptle-assets" } # the .glb writer, and TextureData
-floptle-render = { path = "../floptle-render" } # TextureData itself
+# `default-features = false`: floptle-render's default is a script VM, for its
+# own tests only (ADR-0028). Carrying it here would put a second VM in the graph
+# of anything that selects the other one.
+floptle-render = { path = "../floptle-render", default-features = false } # TextureData itself
 
 # **The FBX reader, and the OBJ one.** ufbx is a single-file C library built
 # here by `cc` — no system package, no CMake, which is what makes it usable in a

@@ -440,19 +440,26 @@ pub(crate) fn lint(src: &str, api: &[&str]) -> Vec<Lint> {
     }
 
     // Pass 4: upvalue pressure. Every file-scope local is an upvalue of every
-    // function in the file; LuaJIT's ceiling is 60 per function. The count is
-    // the engine's, so the squiggle here and the Console line at load can never
-    // disagree about how close a script is.
-    let file_locals = file_scope_locals(src);
-    if file_locals >= UPVALUE_WARN {
-        out.push(Lint {
-            line: 1,
-            message: format!(
-                "{file_locals} file-scope locals — LuaJIT allows {UPVALUE_LIMIT} upvalues per \
-                 function. Group related state in one table (`local s = {{ … }}`) to stay under it"
-            ),
-            kind: LintKind::UpvaluePressure,
-        });
+    // function in the file, and LuaJIT stops loading the script at 60 of them.
+    // The count is the engine's, so the squiggle here and the Console line at
+    // load can never disagree about how close a script is.
+    //
+    // Where the VM has no such ceiling — Luau does not, measured (ADR-0028) —
+    // there is nothing to warn about, and a squiggle would be advice to
+    // restructure a script to avoid a wall that is not in front of it.
+    if let (Some(limit), Some(warn)) = (UPVALUE_LIMIT, UPVALUE_WARN) {
+        let file_locals = file_scope_locals(src);
+        if file_locals >= warn {
+            out.push(Lint {
+                line: 1,
+                message: format!(
+                    "{file_locals} file-scope locals — this build's Lua allows {limit} upvalues \
+                     per function. Group related state in one table (`local s = {{ … }}`) to \
+                     stay under it"
+                ),
+                kind: LintKind::UpvaluePressure,
+            });
+        }
     }
 
     // Pass 5: raw key polls. The action map is the recommended path and there is
@@ -815,8 +822,13 @@ print(used)
         }
     }
 
+    /// …and where the VM has no ceiling (Luau — ADR-0028), the squiggle must not
+    /// appear at all. Stated in both directions rather than `#[cfg]`-skipped: a
+    /// skipped test asserts nothing about the VM that skipped it, and a lint
+    /// pointing at a wall that is not there is advice to break up a working
+    /// script for nothing.
     #[test]
-    fn upvalue_pressure_warns_before_luajit_errors() {
+    fn upvalue_pressure_warns_before_the_vm_errors_and_only_where_it_would() {
         let mut src = String::new();
         for i in 0..52 {
             src.push_str(&format!("local v{i} = {i}\n"));
@@ -828,8 +840,12 @@ print(used)
         src.push_str("end\n");
         let hits = lint(&src, API);
         let up: Vec<&Lint> = hits.iter().filter(|l| l.kind == LintKind::UpvaluePressure).collect();
+        let Some(limit) = UPVALUE_LIMIT else {
+            assert!(up.is_empty(), "no ceiling on this VM, so no squiggle: {up:?}");
+            return;
+        };
         assert_eq!(up.len(), 1, "{hits:?}");
-        assert!(up[0].message.contains("60 upvalues"), "{}", up[0].message);
+        assert!(up[0].message.contains(&format!("{limit} upvalues")), "{}", up[0].message);
         assert!(up[0].message.contains("one table"), "the fix must be in the message");
 
         // A file with locals inside functions instead is fine — that's the fix.

@@ -30,6 +30,7 @@ linked here, it isn't finished — a test enforces that.
 | Write a shader | [subsystems/shaders.md](subsystems/shaders.md) |
 | Go multiplayer | [multiplayer.md](multiplayer.md) |
 | Ship a build | [export-builds.md](export-builds.md) |
+| Ship it to a **browser** | [web-export.md](web-export.md) — where that stands |
 | Talk to a website / sell something | [web-api.md](web-api.md) |
 | Install a package, or write one to share | [packages.md](packages.md) |
 | Add my own tools to the editor | [editor-scripting.md](editor-scripting.md) |
@@ -88,6 +89,9 @@ The build-something guides. Each one is a path from nothing to a working result.
   panels, Scene-view overlays, world-space handles, scene edits with undo, preferences,
   and talking to a server.
 - [export-builds.md](export-builds.md) — **shipping a build** players can run.
+- [web-export.md](web-export.md) — **the browser**: what a web export will be, the
+  WebGPU decision, what changes about scripting, and what it means for a project
+  you are building today. Not shipped yet — this is the plan and the evidence.
 - [updating-the-hub.md](updating-the-hub.md) — the one **manual Hub update**; from
   v0.21.2 onward the Hub updates itself.
 

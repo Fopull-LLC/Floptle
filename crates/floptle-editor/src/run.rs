@@ -47,6 +47,26 @@
 //! here", not the bug `floptle/0167` was — a project asserting a script or
 //! physics budget in CI gets a real answer from `run`; one asserting on draw
 //! calls or light counts wants `floptle shot` or `--play` instead.
+//!
+//! ## `--timing`: the one thing here that IS a wall clock
+//!
+//! The paragraph above says the span never comes off the clock, and it still
+//! does not — `--timing` changes nothing about how far the run goes or what it
+//! answers. It only reports what the steps COST: a distribution of real
+//! milliseconds per step, p50/p95/p99/max.
+//!
+//! **A distribution, not a mean**, and for the reason `present_stats` prints
+//! one: a mean cannot tell a steady frame from one that is fine four times out
+//! of five and stalls on the fifth, and a collector pause is exactly that
+//! shape. It is why this exists at all — the ADR-0028 VM comparison needs
+//! frame p95 on a real game, and `--seconds` reports simulated time, which is
+//! the same number on both VMs by construction.
+//!
+//! What is inside the measurement is the engine's frame: world streaming and
+//! `play_step`. The runner's own bookkeeping — draining the log, folding the
+//! profiler — is outside it, so the number is the game's cost and not this
+//! file's. What is NOT inside it is anything a window would have done: no
+//! render, no present, no vsync. A step here is the CPU half of a frame.
 
 use std::path::Path;
 
@@ -74,11 +94,103 @@ impl Span {
     }
 }
 
+/// What the steps cost, in real milliseconds.
+///
+/// Built from every sample rather than kept as a running mean, because the
+/// percentiles are the point: `floptle/0176` describes 2415 frames out of ~5100
+/// over 8 ms, which a mean of the same run reports as comfortable.
+///
+/// ## Why a paused step is not a sample
+///
+/// A step is not a frame. A session held at the start of Play while the terrain
+/// worker builds the ground steps happily with `dt = 0` — that is the same
+/// stepped-but-not-simulated gap `floptle/0157` was, and `summary_line` already
+/// says it out loud. Those steps are cheap and they are not gameplay, so
+/// counting them here would answer "what does a frame of this game cost" with a
+/// distribution a third of which is the loading screen.
+///
+/// It is not only an understatement, it is one whose SIZE varies: the hold ends
+/// when the terrain does, so two runs of one project — let alone two builds of
+/// the engine — pause for different numbers of steps and put their p95 at
+/// different points of the real workload. A comparison drawn between two such
+/// runs is measuring the terrain worker.
+///
+/// So the paused ones are counted and excluded, and the count is reported. Not
+/// dropped silently: a caller who sees 400 of 900 steps excluded has learned
+/// something true about the run.
+struct Timing {
+    /// One entry per step that ADVANCED the session clock, in the order they ran.
+    samples: Vec<f32>,
+    /// Steps that were taken without the clock moving. Reported, never averaged in.
+    paused: u32,
+}
+
+impl Timing {
+    fn new(capacity: u32) -> Self {
+        Timing { samples: Vec::with_capacity(capacity as usize), paused: 0 }
+    }
+
+    /// Record one step. `advanced` is whether the session clock moved.
+    fn push(&mut self, ms: f32, advanced: bool) {
+        if advanced {
+            self.samples.push(ms);
+        } else {
+            self.paused += 1;
+        }
+    }
+
+    /// The sorted samples. Sorting a copy, so `samples` keeps the order the
+    /// steps ran in for anything that later wants to see a trend.
+    fn sorted(&self) -> Vec<f32> {
+        let mut v = self.samples.clone();
+        // `total_cmp`, not `partial_cmp().unwrap()`: a NaN sample would panic
+        // there, and a timing probe that takes the process down is worse than
+        // one that reports a strange number.
+        v.sort_by(f32::total_cmp);
+        v
+    }
+
+    fn mean(&self) -> f32 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+        self.samples.iter().sum::<f32>() / self.samples.len() as f32
+    }
+}
+
+/// The `p`th percentile of an ascending slice, by nearest rank.
+///
+/// Nearest rank rather than interpolation: every value it can return is a
+/// sample that actually happened, which is what makes "p95 was 6.4 ms" a
+/// statement about a frame rather than about arithmetic. Empty is 0.0 — a run
+/// with no steps has no p95, and there is nowhere here to say so; the caller
+/// prints the sample count beside it.
+fn pct(sorted: &[f32], p: f32) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    // ceil(p × n), clamped into the slice: p95 of 100 samples is the 95th, p95
+    // of 3 samples is the 3rd, and p0 is the 1st rather than an index of -1.
+    let rank = (p * sorted.len() as f32).ceil() as usize;
+    sorted[rank.clamp(1, sorted.len()) - 1]
+}
+
 /// Run `root` for `span`. Returns the process exit code. `steam` is
 /// `--steam`: the explicit opt-in that lets this verb talk to a real Steam
 /// client (Spacewar 480 if the project sets no app id) — off by default, so
 /// an ordinary run (CI included) never tries to reach one.
-pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool, steam: bool) -> i32 {
+///
+/// `timing` is `--timing`: collect a real-milliseconds sample per step and
+/// report the distribution. It does not change what the run does or how far it
+/// goes — see the module docs.
+pub(crate) fn run(
+    root: &Path,
+    scene: Option<&str>,
+    span: Span,
+    json: bool,
+    steam: bool,
+    timing: bool,
+) -> i32 {
     if !root.join("project.ron").is_file() {
         eprintln!("{} is not a project directory (no project.ron)", root.display());
         return 2;
@@ -139,7 +251,14 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool, stea
     // and a world where `time` never left zero (`floptle/0157`). `play_t` is the
     // clock the scripts themselves read, so it cannot disagree with them.
     let t0 = ed.play_t;
+    // Allocated up front, before the first step, so the loop never grows a Vec
+    // inside the region it is timing.
+    let mut clock = timing.then(|| Timing::new(asked));
     for _ in 0..asked {
+        // The clock BEFORE the step, so the step can be asked afterwards whether
+        // it was a frame of the game or a frame of the loading hold.
+        let was = ed.play_t;
+        let began = std::time::Instant::now();
         // The streaming half of a frame, which this loop is otherwise missing.
         // Without it the Play-start terrain hold never lifts, and a held session
         // is a PAUSED one: no fixed tick, so no rails, no physics, and a `dt` of
@@ -149,6 +268,13 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool, stea
         // not have. See `pump_world_streaming`.
         ed.pump_world_streaming();
         ed.play_step(DT, true);
+        // **The engine's frame, and nothing after it.** Everything below —
+        // draining the log, folding the profiler — is this file's bookkeeping,
+        // and charging the game for it would make the number depend on how
+        // chatty the project's `print`s are.
+        if let Some(c) = clock.as_mut() {
+            c.push(began.elapsed().as_secs_f32() * 1000.0, ed.play_t > was);
+        }
         steps += 1;
         // The same drain the editor's frame does, for the same reason it does it
         // per frame rather than at the end: the host holds every line until
@@ -189,7 +315,7 @@ pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, json: bool, stea
     ed.drain_script_logs();
 
     let simulated = (ed.play_t - t0).max(0.0);
-    report(&opened, &ed.console, steps, asked, simulated, json)
+    report(&opened, &ed.console, steps, asked, simulated, clock.as_ref(), json)
 }
 
 /// The one line a run ends with.
@@ -225,6 +351,41 @@ fn summary_line(steps: u32, asked: u32, simulated: f32, errors: usize, warnings:
     }
 }
 
+/// The line `--timing` adds.
+///
+/// Its own function for the same reason `summary_line` is one: it is a sentence
+/// a reader believes without checking anything else, so a test has to be able
+/// to read it.
+fn timing_line(c: &Timing) -> String {
+    let sorted = c.sorted();
+    // Nothing simulated. Saying so is the whole answer — printing four zeros
+    // would be a frame cost of nothing, which is the "reads as zero, means
+    // never measured" shape this file already refuses elsewhere.
+    if sorted.is_empty() {
+        return format!(
+            "step cost: nothing to time — all {} step(s) were stepped without advancing the clock",
+            c.paused
+        );
+    }
+    let mut line = format!(
+        "step cost over {} simulating step(s): p50 {:.2} ms, p95 {:.2} ms, p99 {:.2} ms, \
+         max {:.2} ms (mean {:.2} ms)",
+        sorted.len(),
+        pct(&sorted, 0.50),
+        pct(&sorted, 0.95),
+        pct(&sorted, 0.99),
+        pct(&sorted, 1.0),
+        c.mean(),
+    );
+    if c.paused > 0 {
+        line.push_str(&format!(
+            " — {} paused step(s) not counted, which is the loading hold and not a frame",
+            c.paused
+        ));
+    }
+    line
+}
+
 fn level_str(l: floptle_script::LogLevel) -> &'static str {
     match l {
         floptle_script::LogLevel::Error => "error",
@@ -242,6 +403,7 @@ fn report(
     steps: u32,
     asked: u32,
     simulated: f32,
+    clock: Option<&Timing>,
     json: bool,
 ) -> i32 {
     use floptle_script::LogLevel;
@@ -269,7 +431,7 @@ fn report(
                 o
             })
             .collect();
-        let doc = serde_json::json!({
+        let mut doc = serde_json::json!({
             "ok": errors == 0,
             // What actually ran, and what was asked for. They differ when the
             // session ended early, and a caller reading only the first number
@@ -288,6 +450,27 @@ fn report(
             "warnings": warnings,
             "log": lines,
         });
+        // Present only under `--timing`, and absent rather than zeroed when it
+        // was not asked for: a reader who finds `p95_ms: 0` in a document has
+        // been told a frame took no time, which is the "reads as zero, means
+        // never measured" shape the whole `perf` API exists to refuse
+        // (`floptle/0167`).
+        if let Some(c) = clock {
+            let sorted = c.sorted();
+            doc["timing"] = serde_json::json!({
+                // How many steps this distribution is OF — the simulating ones.
+                // `steps` above is every step the loop took, and the two differ
+                // by exactly `paused`, so a caller can see the split without
+                // parsing a sentence.
+                "samples": sorted.len(),
+                "paused": c.paused,
+                "mean_ms": c.mean(),
+                "p50_ms": pct(&sorted, 0.50),
+                "p95_ms": pct(&sorted, 0.95),
+                "p99_ms": pct(&sorted, 0.99),
+                "max_ms": pct(&sorted, 1.0),
+            });
+        }
         println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         return i32::from(errors > 0);
     }
@@ -315,6 +498,9 @@ fn report(
         }
     }
     println!("{}", summary_line(steps, asked, simulated, errors, warnings));
+    if let Some(c) = clock {
+        println!("{}", timing_line(c));
+    }
     i32::from(errors > 0)
 }
 
@@ -363,6 +549,118 @@ mod tests {
         let early = summary_line(40, 120, 0.0, 0, 0);
         assert!(early.contains("the session ended after 40 of 120"), "{early}");
         assert!(early.contains("PAUSED"), "{early}");
+    }
+
+    /// **The percentile names a frame that happened.** Nearest rank, so every
+    /// figure printed is a sample and not an average of two.
+    #[test]
+    fn a_percentile_is_one_of_the_samples() {
+        // 1..=100, so the p-th percentile is the number p.
+        let s: Vec<f32> = (1..=100).map(|i| i as f32).collect();
+        assert_eq!(pct(&s, 0.50), 50.0);
+        assert_eq!(pct(&s, 0.95), 95.0);
+        assert_eq!(pct(&s, 0.99), 99.0);
+        assert_eq!(pct(&s, 1.0), 100.0, "p100 is the worst step, not one past the end");
+        assert_eq!(pct(&s, 0.0), 1.0, "p0 is the first sample, not an index of -1");
+
+        // Short runs must not index out of bounds either way.
+        assert_eq!(pct(&[7.0], 0.95), 7.0);
+        assert_eq!(pct(&[], 0.95), 0.0, "no steps, no percentile");
+    }
+
+    /// **p95 is not the mean, and that is the whole reason it is reported.**
+    ///
+    /// The distribution here is the shape `floptle/0176` describes: mostly
+    /// cheap, with a tail. A mean reads as comfortable; p95 does not, and a VM
+    /// comparison that averaged its frames would call a collector pause a pass.
+    #[test]
+    fn the_tail_is_visible_where_a_mean_would_hide_it() {
+        // Every figure distinct, so the line cannot pass by printing the wrong
+        // one in the right place — which is the mistake this test was written
+        // to catch, and did not until the numbers stopped colliding.
+        let mut c = Timing::new(100);
+        for (n, ms) in [(50, 1.0f32), (45, 2.0), (4, 8.0), (1, 21.0)] {
+            for _ in 0..n {
+                c.push(ms, true);
+            }
+        }
+        assert_eq!(c.mean(), 1.93, "the mean of this run reads like a 2 ms frame");
+        let sorted = c.sorted();
+        assert_eq!(pct(&sorted, 0.50), 1.0);
+        assert_eq!(pct(&sorted, 0.95), 2.0);
+        assert_eq!(pct(&sorted, 0.99), 8.0, "…and one frame in a hundred took eight");
+        assert_eq!(pct(&sorted, 1.0), 21.0);
+
+        // The line says which is which. A figure printed under the wrong label
+        // is a wrong answer at exit 0, and this whole verb exists to not give
+        // one of those.
+        let line = timing_line(&c);
+        assert!(line.contains("over 100 simulating step(s)"), "{line}");
+        assert!(line.contains("p50 1.00 ms"), "{line}");
+        assert!(line.contains("p95 2.00 ms"), "{line}");
+        assert!(line.contains("p99 8.00 ms"), "{line}");
+        assert!(line.contains("max 21.00 ms"), "{line}");
+        assert!(line.contains("mean 1.93 ms"), "{line}");
+    }
+
+    /// **A step the clock did not move is not a frame** (`floptle/0157` again,
+    /// one layer down).
+    ///
+    /// The Play-start terrain hold steps with `dt = 0`. Those steps are cheap,
+    /// and worse, how MANY of them there are depends on the terrain worker — so
+    /// letting them into the distribution both understates the frame cost and
+    /// makes two runs of the same project incomparable, which is precisely what
+    /// a timing probe is for.
+    #[test]
+    fn the_loading_hold_is_excluded_and_said_out_loud() {
+        let mut c = Timing::new(20);
+        // Ten paused steps: cheap, and NOT the game.
+        for _ in 0..10 {
+            c.push(0.01, false);
+        }
+        // Ten real ones at 5 ms.
+        for _ in 0..10 {
+            c.push(5.0, true);
+        }
+        assert_eq!(c.paused, 10);
+        assert_eq!(c.sorted().len(), 10, "only the simulating steps are samples");
+        assert_eq!(c.mean(), 5.0, "the hold must not drag the mean towards zero");
+        assert_eq!(pct(&c.sorted(), 0.95), 5.0);
+
+        let line = timing_line(&c);
+        assert!(line.contains("over 10 simulating step(s)"), "{line}");
+        assert!(line.contains("p95 5.00 ms"), "{line}");
+        assert!(line.contains("10 paused step(s) not counted"), "{line}");
+    }
+
+    /// …and a run that simulated NOTHING says that, rather than reporting a
+    /// frame cost of zero. A zero here would read as "free", and this file's
+    /// whole argument is that a number nobody measured must not look like one
+    /// somebody did.
+    #[test]
+    fn a_run_that_never_advanced_reports_no_timing_rather_than_zeroes() {
+        let mut c = Timing::new(4);
+        for _ in 0..4 {
+            c.push(0.02, false);
+        }
+        let line = timing_line(&c);
+        assert!(line.contains("nothing to time"), "{line}");
+        assert!(line.contains("all 4 step(s)"), "{line}");
+        assert!(!line.contains("p95"), "there is no p95 to print: {line}");
+    }
+
+    /// **Samples arrive unsorted and the report must not care.** `sorted()`
+    /// works on a copy so the recorded order survives; a percentile taken off
+    /// the raw order would report whichever step happened to be at that index.
+    #[test]
+    fn the_order_the_steps_ran_in_is_kept() {
+        let mut c = Timing::new(4);
+        for ms in [9.0, 1.0, 5.0, 3.0] {
+            c.push(ms, true);
+        }
+        assert_eq!(c.sorted(), vec![1.0, 3.0, 5.0, 9.0]);
+        assert_eq!(c.samples, vec![9.0, 1.0, 5.0, 3.0], "the run's own order is not destroyed");
+        assert_eq!(pct(&c.sorted(), 0.5), 3.0);
     }
 
     /// **A run is the same length twice.** The whole value of this verb is being

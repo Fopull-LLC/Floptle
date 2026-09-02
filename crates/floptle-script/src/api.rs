@@ -50,7 +50,7 @@ fn install_list_mt(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|_, (this, key): (Table, Value)| {
             let n = match key {
                 Value::Integer(n) => Some(n),
-                Value::Number(n) if n.fract() == 0.0 => Some(n as i64),
+                Value::Number(n) if n.fract() == 0.0 => Some(n as mlua::Integer),
                 _ => None,
             };
             if let Some(n) = n
@@ -2478,12 +2478,19 @@ pub(crate) fn apply_rich_sets(
 /// an out-of-range integer refuses and names the value it got and what it
 /// accepts, rather than truncating to a neighbouring tile.
 fn tile_cell(v: &Value) -> mlua::Result<u32> {
-    let n = match v {
+    // Carried as **f64**, not as `mlua::Integer`. Every `u32` is exactly
+    // representable in an f64, while a Lua integer is 64-bit under LuaJIT and
+    // **32-bit under Luau** (ADR-0028) — so `cell = 4294967295`, which is
+    // `EMPTY_TILE` and the value the editor's own autocomplete names, arrives
+    // on Luau as a `Number` that a cast to `mlua::Integer` SATURATES to
+    // 2147483647. That paints tile 2147483647, reports success, and is exactly
+    // the silent-wrong-answer shape this function was written to end.
+    let n: f64 = match v {
         Value::Nil => return Ok(floptle_core::EMPTY_TILE),
-        Value::Integer(i) => *i,
-        // A number that happens to be whole is fine — `gx * 2` in LuaJIT is a
-        // float. One that is not is a mistake worth naming.
-        Value::Number(f) if f.fract() == 0.0 && f.is_finite() => *f as i64,
+        Value::Integer(i) => *i as f64,
+        // A number that happens to be whole is fine — `gx * 2` is a float in
+        // both VMs. One that is not is a mistake worth naming.
+        Value::Number(f) if f.fract() == 0.0 && f.is_finite() => *f,
         other => {
             return Err(mlua::Error::runtime(format!(
                 "tilemap cell: expected a whole number, a negative for empty, or nil, got {} \
@@ -2493,16 +2500,17 @@ fn tile_cell(v: &Value) -> mlua::Result<u32> {
             )))
         }
     };
-    if n < 0 {
+    if n < 0.0 {
         // The whole point of the task: the obvious guess is now the right answer.
         return Ok(floptle_core::EMPTY_TILE);
     }
-    u32::try_from(n).map_err(|_| {
-        mlua::Error::runtime(format!(
+    if n > f64::from(u32::MAX) {
+        return Err(mlua::Error::runtime(format!(
             "tilemap cell: {n} is out of range ({})",
             describe_cell_range()
-        ))
-    })
+        )));
+    }
+    Ok(n as u32)
 }
 
 /// The accepted-values half of a cell error. Split out so the two messages
@@ -2812,7 +2820,7 @@ fn new_tilemap_handle(
             let s = sg.borrow();
             match packed_at(&s, e, x, y) {
                 Some(p) if p != floptle_core::EMPTY_TILE => {
-                    Ok(Value::Integer(floptle_core::tile_index(p) as i64))
+                    Ok(Value::Integer(floptle_core::tile_index(p) as mlua::Integer))
                 }
                 _ => Ok(Value::Nil),
             }
@@ -2831,8 +2839,8 @@ fn new_tilemap_handle(
                 Some(p) if p != floptle_core::EMPTY_TILE => {
                     let xf = floptle_core::tile_xform(p);
                     Ok((
-                        Value::Integer(floptle_core::tile_index(p) as i64),
-                        Value::Integer(xf.rot as i64 * 90),
+                        Value::Integer(floptle_core::tile_index(p) as mlua::Integer),
+                        Value::Integer(xf.rot as mlua::Integer * 90),
                         Value::Boolean(xf.flip_x),
                     ))
                 }
@@ -2858,7 +2866,9 @@ fn new_tilemap_handle(
                 ));
             };
             match cell_of_world(&s, e, p) {
-                Some((x, y)) => Ok((Value::Integer(x as i64), Value::Integer(y as i64))),
+                Some((x, y)) => {
+                    Ok((Value::Integer(x as mlua::Integer), Value::Integer(y as mlua::Integer)))
+                }
                 None => Ok((Value::Nil, Value::Nil)),
             }
         })?,
@@ -3435,7 +3445,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             }
             // Identity / hierarchy fields.
             match key.as_str() {
-                "id" => return Ok(Value::Integer(e as i64)),
+                "id" => return Ok(Value::Integer(e as mlua::Integer)),
                 "name" => {
                     let n = scene.borrow().names.get(&e).cloned();
                     return Ok(match n {
@@ -3563,7 +3573,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 // perfectly good "am I a row".
                 "index" => {
                     return Ok(match scene.borrow().repeat_index.get(&e) {
-                        Some(i) => Value::Integer(i64::from(*i)),
+                        Some(i) => Value::Integer(*i as mlua::Integer),
                         None => Value::Nil,
                     });
                 }
@@ -4257,7 +4267,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 Ok(match key.as_str() {
                     "ppu" => Value::Number(f64::from(m.ppu)),
                     "size" => Value::Number(f64::from(m.size)),
-                    "cell" => Value::Integer(i64::from(m.cell)),
+                    "cell" => Value::Integer(m.cell as mlua::Integer),
                     // Booleans as BOOLEANS: 0 is truthy in Lua, so a number here
                     // would make `if sp.flipX then` a branch that is always taken.
                     "flipX" => Value::Boolean(m.flip_x),
@@ -6621,7 +6631,7 @@ mod tests {
     /// shipped a level with two-thirds of its walls missing because of it.
     #[test]
     fn a_negative_tilemap_cell_is_the_empty_square() {
-        for n in [-1i64, -2, -999, i32::MIN as i64] {
+        for n in [-1, -2, -999, mlua::Integer::MIN] {
             assert_eq!(
                 tile_cell(&Value::Integer(n)).unwrap(),
                 floptle_core::EMPTY_TILE,
@@ -6632,8 +6642,13 @@ mod tests {
         // agree with it now.
         assert_eq!(tile_cell(&Value::Nil).unwrap(), floptle_core::EMPTY_TILE);
         // And the constant the editor's autocomplete has always named round-trips.
+        //
+        // As a `Number`, deliberately: `EMPTY_TILE` is `u32::MAX`, which is past
+        // what a Lua integer holds under Luau, so that is the shape the value
+        // actually arrives in there — and `u32::MAX as i32` is `-1`, which would
+        // have let this pass for entirely the wrong reason.
         assert_eq!(
-            tile_cell(&Value::Integer(floptle_core::EMPTY_TILE as i64)).unwrap(),
+            tile_cell(&Value::Number(f64::from(floptle_core::EMPTY_TILE))).unwrap(),
             floptle_core::EMPTY_TILE
         );
     }
@@ -6657,8 +6672,14 @@ mod tests {
         let err = tile_cell(&Value::Boolean(true)).unwrap_err().to_string();
         assert!(err.contains("boolean"), "the type it got is not named in: {err}");
         assert!(err.contains("accepted"), "no accepted-values list in: {err}");
-        // Past the top of a u32 is out of range, not a wrap to a low tile.
-        assert!(tile_cell(&Value::Integer(1i64 << 33)).is_err());
+        // Past the top of a u32 is out of range, not a wrap to a low tile — and
+        // not a SATURATION to one either, which is what a 32-bit Lua integer
+        // would do with it. 2^33 as a `Number` is what a script produces on
+        // either VM.
+        assert!(tile_cell(&Value::Number(8589934592.0)).is_err());
+        // The last value that is still a tile, and the first that is not.
+        assert_eq!(tile_cell(&Value::Number(4294967294.0)).unwrap(), u32::MAX - 1);
+        assert!(tile_cell(&Value::Number(4294967296.0)).is_err());
     }
 
     /// A material's spritesheet frame is reachable from a script the same way a UI

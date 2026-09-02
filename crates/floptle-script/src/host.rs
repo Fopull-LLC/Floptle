@@ -157,12 +157,12 @@ fn pretty_table(t: &Table, depth: usize, seen: &mut Vec<*const std::ffi::c_void>
     let is_array = extra == 0
         && items.iter().all(|(k, _)| matches!(k, Value::Integer(i) if *i >= 1))
         && {
-            let mut ks: Vec<i64> = items
+            let mut ks: Vec<mlua::Integer> = items
                 .iter()
                 .filter_map(|(k, _)| if let Value::Integer(i) = k { Some(*i) } else { None })
                 .collect();
             ks.sort_unstable();
-            ks.iter().enumerate().all(|(i, &k)| k == i as i64 + 1)
+            ks.iter().enumerate().all(|(i, &k)| k == i as mlua::Integer + 1)
         };
     let pad = "  ".repeat(depth + 1);
     let close_pad = "  ".repeat(depth);
@@ -223,6 +223,14 @@ impl Default for ScriptHost {
 impl ScriptHost {
     pub fn new() -> Self {
         let lua = Lua::new();
+        // Before anything else touches the globals: make the documented Lua
+        // surface the same on both VMs (ADR-0028). No-op under LuaJIT.
+        if let Err(e) = crate::vm::install_compat(&lua) {
+            // A failure here means a shipped script loses a documented library
+            // silently, which is the one outcome this migration promised not to
+            // produce — so it is loud, and it is not recoverable by ignoring it.
+            panic!("the {} compatibility layer failed to install: {e}", crate::vm::VM_NAME);
+        }
         let logs: Rc<RefCell<Vec<ScriptLog>>> = Rc::new(RefCell::new(Vec::new()));
         // The current script's `(name, line)` taken from the Lua call stack, so a
         // Console line can jump to where it was logged.
@@ -2131,6 +2139,17 @@ impl ScriptHost {
     /// userdata and are covered by the annotation list in the editor instead.
     pub fn api_surface() -> Vec<String> {
         let bare = Lua::new();
+        // The baseline gets the compatibility layer too (ADR-0028).
+        //
+        // It is not engine API — it is *standard library*, put back under a VM
+        // that spells it differently, so that the surface a script sees is the
+        // same on both. Leaving it out of the baseline would report `bit.band`
+        // as a new engine binding on Luau and not on LuaJIT, which is both
+        // wrong and, worse, a difference in the API surface across a VM swap
+        // that promised there would be none. The docs-coverage test comparing
+        // this against `LUA_API` is what enforces that promise, and it caught
+        // this the first time the shim landed.
+        let _ = crate::vm::install_compat(&bare);
         let base = flatten(&bare.globals(), "", &mut std::collections::HashSet::new(), 0);
         let host = Self::new();
         let all = flatten(&host.lua.globals(), "", &mut std::collections::HashSet::new(), 0);
@@ -5770,11 +5789,19 @@ impl ScriptHost {
     fn ensure_source(&mut self, name: &str, path: &Path) -> Option<u64> {
         let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         mtime?;
-        let entry = self.sources.entry(name.to_string()).or_insert(Source {
+        let entry = self.sources.entry(name.to_string()).or_insert_with(|| Source {
             generation: 0,
             mtime: None,
             error: None,
+            path: path.to_path_buf(),
         });
+        // A script can move between package folders and the project's own
+        // (the project wins — see `resolve`), so the path is refreshed rather
+        // than fixed at first sight: quoting a line out of the file that is no
+        // longer the one running would be worse than quoting none.
+        if entry.path != path {
+            entry.path = path.to_path_buf();
+        }
         if entry.mtime != mtime {
             entry.mtime = mtime;
             entry.generation += 1;
@@ -5813,10 +5840,32 @@ impl ScriptHost {
     /// so this is not [`fail_load`](Self::fail_load): nothing here touches
     /// `broken`, and the Console wants every occurrence.
     fn fail(&mut self, name: &str, msg: String) {
+        let msg = self.explain_runtime(name, msg);
         if let Some(src) = self.sources.get_mut(name) {
             src.error = Some(msg.clone());
         }
         self.record_error(name, msg);
+    }
+
+    /// Name what was nil, and quote the line, using the script's own source.
+    ///
+    /// See [`crate::runtime_error`] for why: Luau names the field read FROM the
+    /// nil rather than the expression that was nil, so a one-letter typo — the
+    /// commonest mistake there is — stops naming the letter. The rewrite is
+    /// driven by the source line rather than by the VM's phrasing, so both VMs
+    /// end up printing the same sentence.
+    ///
+    /// Every step is allowed to fail into "leave the message alone": no line
+    /// number, no such script, an unreadable file, a line past the end.
+    fn explain_runtime(&self, name: &str, msg: String) -> String {
+        let line = error_line(&msg);
+        if line == 0 {
+            return msg;
+        }
+        let Some(src) = self.sources.get(name) else { return msg };
+        let Ok(text) = std::fs::read_to_string(&src.path) else { return msg };
+        let line_text = text.lines().nth(line as usize - 1);
+        crate::runtime_error::explain(&msg, line_text)
     }
 
     /// Warn a script that is one edit from unloadable.
@@ -5833,18 +5882,24 @@ impl ScriptHost {
     /// has the file open.
     fn warn_upvalue_pressure(&mut self, name: &str, generation: u64, src: &str) {
         use crate::load_error::{file_scope_locals, UPVALUE_LIMIT, UPVALUE_WARN};
+        // No ceiling, nothing to warn about. Under Luau there is none (ADR-0028,
+        // measured in `tests/vm_dialect.rs`), and a warning about a wall that is
+        // not there would send somebody to restructure a script for no reason.
+        let (Some(limit), Some(warn)) = (UPVALUE_LIMIT, UPVALUE_WARN) else {
+            return;
+        };
         let n = file_scope_locals(src);
-        if n < UPVALUE_WARN {
+        if n < warn {
             return;
         }
         if !self.upvalue_warned.insert((name.to_string(), generation)) {
             return;
         }
-        let left = UPVALUE_LIMIT.saturating_sub(n);
+        let left = limit.saturating_sub(n);
         self.logs.borrow_mut().push(ScriptLog {
             level: LogLevel::Warn,
             msg: format!(
-                "{name}.lua declares {n} file-scope locals and LuaJIT allows {UPVALUE_LIMIT} \
+                "{name}.lua declares {n} file-scope locals and this build's Lua allows {limit} \
                  upvalues per function — {left} to go before the script stops loading at all. \
                  Every file-scope `local` is an upvalue of every function below it, so hold \
                  related state in ONE table (`local s = {{ … }}`) or split the long function."

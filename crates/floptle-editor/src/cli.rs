@@ -655,6 +655,14 @@ pub(crate) const VERBS: &[Verb] = &[
                 help: "answer as JSON",
             },
             Arg {
+                name: "--timing",
+                value: Value::Flag,
+                required: false,
+                help: "also report what the steps really cost, as a distribution of \
+                       milliseconds — p50, p95, p99 and the worst. The span itself stays \
+                       fixed; this measures the machine, not the game clock",
+            },
+            Arg {
                 name: "--steam",
                 value: Value::Flag,
                 required: false,
@@ -671,7 +679,8 @@ pub(crate) const VERBS: &[Verb] = &[
         writes_project: true,
         exits: &[(1, "something raised while opening or playing")],
         output: "one line per log entry, then a summary; with --json an object with \
-                 `ok`, `steps`, `errors`, `warnings` and `log`",
+                 `ok`, `steps`, `errors`, `warnings` and `log`, plus `timing` under \
+                 --timing",
         legacy: &[],
     },
     Verb {
@@ -1318,6 +1327,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 span,
                 a.get_flag("json"),
                 a.get_flag("steam"),
+                a.get_flag("timing"),
             ))
         }
         Some(("serve", a)) => {

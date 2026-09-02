@@ -10,7 +10,10 @@ rust-version.workspace = true
 
 [dependencies]
 floptle-core = { path = "../floptle-core" }
-floptle-render = { path = "../floptle-render" }
+# `default-features = false`: floptle-render's default is a script VM, for its
+# own tests only (ADR-0028). Carrying it here would put a second VM in the graph
+# of anything that selects the other one.
+floptle-render = { path = "../floptle-render", default-features = false }
 
 [dev-dependencies]
 # Offscreen probe (examples/vfx_probe.rs) renders the deterministic sim to PNGs.

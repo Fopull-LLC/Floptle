@@ -1035,7 +1035,8 @@ one level deep rather than `table: 0x…`.
 Standard Lua: `assert` `error` `ipairs` `next` `pairs` `pcall` `xpcall` `select`
 `type` `tostring` `tonumber` `rawget` `rawset` `rawequal` `rawlen`
 `setmetatable` `getmetatable` `unpack`, plus `string`, `table`, `math`,
-`coroutine`, `bit` (LuaJIT's, for hashing and packing), and `os.time` /
+`coroutine`, `bit` (LuaJIT's signed 32-bit semantics, for hashing and packing —
+provided on every build, whichever Lua it runs), and `os.time` /
 `os.clock` / `os.date` / `os.difftime`.
 
 **There is no `_G`.** The environment is an allow-list, not a view of the real

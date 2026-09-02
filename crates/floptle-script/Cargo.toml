@@ -8,6 +8,29 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# **Exactly one script VM.** ADR-0028 takes the engine to Luau everywhere: it is
+# the only one of the two that reaches a browser at all (LuaJIT's interpreter is
+# hand-written assembly per architecture, and wasm is not one of them), and it is
+# *faster* than LuaJIT on this engine's real hot path, where scripts spend their
+# time crossing the Lua<->host boundary and aborting LuaJIT's traces.
+#
+# **Luau is the default as of v0.84.0.** The dual-VM diff harness went green on
+# the whole suite, every shipped game script and every tutorial project, and the
+# real-game bench came back FASTER on both (Solar 4.81 -> 4.15 ms, a
+# Forgery-shaped scene 13.99 -> 12.38 ms, frame p95). `vm-luajit` stays
+# buildable for exactly one release as the escape hatch, and is removed the
+# release after — grep the path before removing it, deleting a thing can delete
+# its test. Both are built in CI; `src/vm.rs` turns "both" or "neither" into a
+# build failure with a message that names the fix.
+default = ["vm-luau"]
+vm-luajit = ["mlua/luajit", "mlua/vendored"]
+vm-luau = ["mlua/luau"]
+# Luau's own code generator, on the architectures that have one. Off by default
+# because it is a performance lever to be benchmarked, not a correctness one —
+# and it does not exist on wasm, so the browser build never sees it.
+vm-luau-codegen = ["vm-luau", "mlua/luau-jit"]
+
 [dependencies]
 # Types only (PlayParams + enums for the audio command queue); no OS audio stack.
 floptle-audio = { path = "../floptle-audio", default-features = false }
@@ -20,7 +43,9 @@ floptle-ui = { path = "../floptle-ui" }
 floptle-physics = { path = "../floptle-physics" }
 floptle-field = { path = "../floptle-field" }
 glam = { workspace = true }
-mlua = { version = "0.10", features = ["luajit", "vendored"] }
+# Which Lua the engine runs is a FEATURE, not a fact — see `[features]` below
+# and `src/vm.rs`, which fails the build for both or neither.
+mlua = { version = "0.10" }
 floptle-net = { path = "../floptle-net" }
 # `account.*`: the device flow + the Cloud client. The token stays in there —
 # a script asks for a player, never a token.

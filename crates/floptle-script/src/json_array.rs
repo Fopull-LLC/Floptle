@@ -77,17 +77,20 @@ pub fn encodes_as_array(t: &Table) -> bool {
 ///   numbers. Two encoders quietly disagreeing about a value is worse than
 ///   either answer, so it is refused and named.
 pub fn problem(t: &Table) -> Option<String> {
-    // Built from the KEYS, not from `#t`. LuaJIT's length operator is free to
-    // stop at a hole — `t[2] = nil` on a three-item list makes `#t` report 1 —
-    // so a range check against it calls the surviving item 3 a stray key and
-    // says something true about the wrong thing.
-    let mut highest: i64 = 0;
-    let mut count: i64 = 0;
+    // Built from the KEYS, not from `#t`. Lua's length operator is free to stop
+    // at a hole — `t[2] = nil` on a three-item list makes `#t` report 1 — so a
+    // range check against it calls the surviving item 3 a stray key and says
+    // something true about the wrong thing. True of both VMs (ADR-0028).
+    //
+    // `mlua::Integer`, not `i64`: these count Lua table indices, and Lua's
+    // integer is 32-bit under Luau and 64-bit under LuaJIT.
+    let mut highest: mlua::Integer = 0;
+    let mut count: mlua::Integer = 0;
     for pair in t.clone().pairs::<Value, Value>() {
         let Ok((k, _)) = pair else { continue };
         let index = match &k {
             Value::Integer(i) => Some(*i),
-            Value::Number(n) if n.fract() == 0.0 => Some(*n as i64),
+            Value::Number(n) if n.fract() == 0.0 => Some(*n as mlua::Integer),
             _ => None,
         };
         match index.filter(|i| *i >= 1) {

@@ -2307,9 +2307,11 @@ open it in the **Scripting** tab — a small but real code editor:
     deliberate publications (§8) and are never flagged.
   - **an unused local** — usually a half-finished rename. Prefix with `_` to
     keep it quiet.
-  - **upvalue pressure** — LuaJIT allows **60** upvalues per function and every
-    file-scope `local` is one; at 50 you get a warning whose message names the
-    fix (group related state into one table).
+  - **upvalue pressure** — on a build whose Lua caps upvalues per function, every
+    file-scope `local` is one, and you get a warning before the cap that names
+    the fix (group related state into one table). LuaJIT's cap is **60**; Luau,
+    which the engine runs by default, has none, so on a stock build this warning
+    does not appear at all.
   - **a hook that forgot the node** — `function update(dt)` looks right and is
     wrong: every lifecycle hook is called with the **node first** (§3), so `dt`
     is bound to the node and the first arithmetic on it raises, every frame,

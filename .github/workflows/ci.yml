@@ -165,3 +165,52 @@ jobs:
 
       - name: test (steam feature on)
         run: cargo test -p floptle-services -p floptle-steam --features floptle-steam/steam
+
+  luajit:
+    # The OTHER script VM, built and tested on every push (ADR-0028).
+    #
+    # **The direction of this job flipped in v0.84.0.** Luau is now the default
+    # and is what the `gate` job above covers; LuaJIT is the escape hatch, kept
+    # buildable for one release so anybody who needs to fall back can. This job
+    # is what makes "buildable" a fact rather than a hope — a fallback nobody
+    # compiles is not a fallback — and it is deleted along with `vm-luajit` the
+    # release after.
+    #
+    # It is a separate job rather than a step in `gate` so the two VMs fail
+    # distinguishably and run in parallel. It is deliberately NOT the whole
+    # workspace: only four crates carry the VM switch, and the rest compile
+    # identically either way — `scripts/vm.sh` derives that list from the
+    # manifests, so a new forwarder joins this job on its own.
+    name: script VM (luajit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # floptle-editor is one of the four, so this job needs the same windowing,
+      # audio and gamepad headers the main gate does.
+      - name: Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev \
+            libwayland-dev libgl1-mesa-dev libasound2-dev libudev-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: clippy (zero warnings, luajit)
+        run: bash scripts/vm.sh luajit clippy --all-targets -- -D warnings
+
+      - name: test (luajit)
+        run: bash scripts/vm.sh luajit test
+
+      # The dialect corpus, named explicitly as well as run above: it is the one
+      # file whose whole purpose is to differ between the VMs, so a reader
+      # scanning a failed run should see it by name rather than inside a total.
+      - name: dialect corpus (both directions)
+        run: |
+          bash scripts/vm.sh luajit test -p floptle-script --test vm_dialect
+          cargo test -p floptle-script --test vm_dialect

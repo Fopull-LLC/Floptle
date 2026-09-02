@@ -17,16 +17,35 @@
 //! So every load error goes through [`explain`] on its way to the Console
 //! (`floptle/0086`).
 
-/// LuaJIT's hard ceiling: a function may close over at most this many upvalues.
+/// LuaJIT's hard ceiling, as its own error message states it.
 ///
-/// The engine staying on LuaJIT is a deliberate call (v0.17.0), so this is not
-/// a number the engine can raise — only one it can name.
-pub const UPVALUE_LIMIT: usize = 60;
+/// This is a **parser detail**, not a policy: it is the number LuaJIT puts in
+/// the text [`explain`] rewrites, so the rewrite can quote it back. Ask
+/// [`UPVALUE_LIMIT`] whether *this build* has a ceiling at all.
+const LUAJIT_UPVALUE_LIMIT: usize = 60;
 
-/// Warn once a function is within this many upvalues of the ceiling. A script
-/// this close is one ordinary edit — one more file-level `local` that a long
-/// function happens to reference — from being unloadable.
-pub const UPVALUE_WARN: usize = 50;
+/// The upvalue ceiling this build's VM enforces — `None` where there is none.
+///
+/// **Measured, not quoted** (`tests/vm_dialect.rs`, which is the only thing
+/// allowed to set this number): LuaJIT refuses a function closing over more
+/// than 60, and refuses a chunk declaring more than 200 file-scope locals
+/// besides. **Luau enforces neither** — a function closing over 4096 file-scope
+/// locals compiles, runs, and returns the right answer.
+///
+/// `None` rather than a very large number on purpose. A warning threshold of
+/// `usize::MAX` is a warning that silently never fires, and every consumer
+/// below would keep telling the reader about a limit that is not there. An
+/// `Option` makes each of them say what it does when the ceiling is gone.
+pub const UPVALUE_LIMIT: Option<usize> =
+    if cfg!(feature = "vm-luau") { None } else { Some(LUAJIT_UPVALUE_LIMIT) };
+
+/// Warn once a function is within ten upvalues of the ceiling, where there is
+/// one. A script that close is one ordinary edit — one more file-level `local`
+/// that a long function happens to reference — from being unloadable.
+pub const UPVALUE_WARN: Option<usize> = match UPVALUE_LIMIT {
+    Some(n) => Some(n - 10),
+    None => None,
+};
 
 /// How many file-scope `local`s a script declares — its upvalue pressure.
 ///
@@ -145,7 +164,7 @@ pub fn explain(name: &str, raw: &str) -> String {
             None => "one of its functions".to_string(),
         };
         return format!(
-            "{name}.lua did not load: {where_} closes over more than {UPVALUE_LIMIT} upvalues, \
+            "{name}.lua did not load: {where_} closes over more than {LUAJIT_UPVALUE_LIMIT} upvalues, \
              which is LuaJIT's hard limit. Every file-scope `local` is an upvalue of every \
              function below it, so the fix is to hold related state in ONE table \
              (`local s = {{ … }}` read as `s.foo`) or to split the function — not to move the \
@@ -156,7 +175,7 @@ pub fn explain(name: &str, raw: &str) -> String {
     // "too many upvalues" — the same wall, phrased differently by some builds.
     if first.contains("too many upvalues") {
         return format!(
-            "{name}.lua did not load: a function closes over more than {UPVALUE_LIMIT} upvalues, \
+            "{name}.lua did not load: a function closes over more than {LUAJIT_UPVALUE_LIMIT} upvalues, \
              which is LuaJIT's hard limit. Every file-scope `local` is an upvalue of every \
              function below it — hold related state in one table (`local s = {{ … }}`) or split \
              the function."

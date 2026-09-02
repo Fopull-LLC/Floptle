@@ -264,6 +264,7 @@ mod net_api;
 pub mod opts;
 mod perf_api;
 pub mod rollback_api;
+pub mod runtime_error;
 mod preprocess;
 mod save_api;
 mod scatter_api;
@@ -274,6 +275,7 @@ mod space_api;
 mod steam_api;
 mod terrain_api;
 pub mod ui_make;
+pub mod vm;
 mod view_api;
 pub mod water_api;
 
@@ -362,6 +364,15 @@ struct Source {
     generation: u64,
     mtime: Option<SystemTime>,
     error: Option<String>,
+    /// Where the file is, so a runtime error can quote the line it names.
+    ///
+    /// The path rather than the text: an error is rare and a script is small,
+    /// so reading one line when something goes wrong costs nothing, while
+    /// keeping every script's source resident costs on every project. The one
+    /// window this opens — a file edited between raising and reporting, inside
+    /// a single frame — resolves itself, because a changed mtime bumps the
+    /// generation and clears the cached error.
+    path: PathBuf,
 }
 
 /// A live `(node, script)` environment — the Lua table the script's functions
@@ -5075,14 +5086,21 @@ end
         assert!(logs.iter().any(|l| l.source.as_ref().is_some_and(|(n, _)| n == "broken")), "error lacks source: {logs:?}");
     }
 
-    /// A script that crosses LuaJIT's 60-upvalue ceiling must be told what
-    /// happened (`floptle/0086`).
+    /// A script that crosses the VM's upvalue ceiling must be told what
+    /// happened (`floptle/0086`) — **and where there is no ceiling it must
+    /// simply run.**
     ///
-    /// The raw message is `…:3669: function at line 2864 has more than 60
-    /// upvalues` — it names the END of the offending function rather than the
-    /// reference that tipped it over, never says a limit exists, and arrives
-    /// from the loader, so the script does not run at all. `vessel_controller`
-    /// hit this twice, a release apart, on mechanical edits.
+    /// On LuaJIT the raw message is `…:3669: function at line 2864 has more
+    /// than 60 upvalues` — it names the END of the offending function rather
+    /// than the reference that tipped it over, never says a limit exists, and
+    /// arrives from the loader, so the script does not run at all.
+    /// `vessel_controller` hit this twice, a release apart, on mechanical edits.
+    ///
+    /// Luau has no such ceiling (ADR-0028; `tests/vm_dialect.rs` measures it
+    /// rather than quoting it), so the same 70-upvalue file that cost two
+    /// releases there loads and runs here. That is a real difference between
+    /// the two VMs and this test states it in both directions, because a
+    /// `#[cfg]`-skipped test asserts nothing about the VM that skipped it.
     #[test]
     fn crossing_the_upvalue_ceiling_names_the_script_the_limit_and_the_fix() {
         let dir = std::env::temp_dir().join(format!("floptle_upvalue_over_{}", std::process::id()));
@@ -5103,6 +5121,22 @@ end
         let (mut world, _e) = world_with_script("huge");
         let mut host = ScriptHost::new();
         host.run(&mut world, &dir, 0.1, 0.1);
+
+        let Some(limit) = crate::load_error::UPVALUE_LIMIT else {
+            // No ceiling: the file the ledger is named after is just a file.
+            assert!(
+                host.errors().is_empty(),
+                "this VM has no upvalue ceiling, so a 70-upvalue script must load: {:?}",
+                host.errors()
+            );
+            let logs = host.drain_logs();
+            assert!(
+                !logs.iter().any(|l| l.level == LogLevel::Error),
+                "…and must not report one either: {logs:?}"
+            );
+            return;
+        };
+        assert_eq!(limit, 60, "the message below quotes the limit; keep them together");
 
         let errs = host.errors().to_vec();
         let msg = errs.iter().find(|e| e.contains("huge")).unwrap_or_else(|| {
@@ -5138,6 +5172,10 @@ end
 
     /// One edit from the wall, the engine says so — because the count is
     /// invisible from inside the editor, and crossing it costs the whole script.
+    ///
+    /// Where there is no wall (Luau — ADR-0028) the engine must say **nothing**.
+    /// A warning about a limit that is not there is worse than silence: it sends
+    /// somebody to restructure a working script for no reason.
     #[test]
     fn a_script_near_the_upvalue_ceiling_is_warned_before_it_crosses() {
         let dir = std::env::temp_dir().join(format!("floptle_upvalue_near_{}", std::process::id()));
@@ -5159,6 +5197,13 @@ end
 
         assert!(host.errors().is_empty(), "it still LOADS: {:?}", host.errors());
         let logs = host.drain_logs();
+        if crate::load_error::UPVALUE_LIMIT.is_none() {
+            assert!(
+                !logs.iter().any(|l| l.msg.contains("upvalues")),
+                "this VM has no upvalue ceiling, so nothing should warn about one: {logs:?}"
+            );
+            return;
+        }
         let warn = logs
             .iter()
             .find(|l| l.level == LogLevel::Warn && l.msg.contains("upvalues"))
@@ -8853,7 +8898,16 @@ end
             logs.iter().any(|l| l.level == LogLevel::Error && l.msg.contains("boom")),
             "the raised error must survive the gate: {logs:?}"
         );
-        assert!(!logs.iter().any(|l| l.msg.contains("quiet")), "…but the print must not");
+        // The PRINT's own line must not be there. Matched with the level as
+        // well as the text, because a runtime error now quotes the source line
+        // it happened on (`crate::runtime_error`) — and in this script the
+        // print and the `error()` share one line, so the error's own log
+        // legitimately contains the word "quiet". Checking the text alone would
+        // be asserting that the error message says less than it does.
+        assert!(
+            !logs.iter().any(|l| l.level != LogLevel::Error && l.msg.contains("quiet")),
+            "…but the print must not: {logs:?}"
+        );
     }
 
     /// Physics moving a body between hooks must NOT read as a pending write through the

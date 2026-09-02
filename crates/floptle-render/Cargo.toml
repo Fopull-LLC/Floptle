@@ -8,6 +8,21 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# The script VM — for this crate's OWN TESTS only. `floptle-script` is a
+# dev-dependency here (the render tests drive a scripted scene); nothing in the
+# shipped renderer embeds Lua. The pair exists so the dual-VM harness can run
+# these tests under either VM; see `floptle-script/src/vm.rs` and ADR-0028.
+#
+# Every crate that depends on this one passes `default-features = false`, so
+# this default reaches `cargo test -p floptle-render` and nothing else. If it
+# leaked, a dependent selecting the other VM would get both, and mlua would
+# refuse to link.
+default = ["vm-luau"]
+vm-luajit = ["floptle-script/vm-luajit"]
+vm-luau = ["floptle-script/vm-luau"]
+vm-luau-codegen = ["vm-luau", "floptle-script/vm-luau-codegen"]
+
 [dependencies]
 floptle-core = { path = "../floptle-core" }
 floptle-field = { path = "../floptle-field" }
@@ -46,6 +61,6 @@ floptle-nav = { path = "../floptle-nav" }
 floptle-assets = { path = "../floptle-assets" }
 # …and the same example runs the demo's OWN Lua, so the `ui.make` panel in the
 # picture is the one the game builds rather than a Rust restatement of it.
-floptle-script = { path = "../floptle-script" }
+floptle-script = { path = "../floptle-script", default-features = false }
 floptle-core = { path = "../floptle-core" }
 ron = { workspace = true }

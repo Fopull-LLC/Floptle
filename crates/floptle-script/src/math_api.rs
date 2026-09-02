@@ -937,7 +937,7 @@ fn install_table_helpers(lua: &Lua) -> mlua::Result<()> {
             for (i, v) in list.sequence_values::<Value>().enumerate() {
                 let v = v?;
                 if f.call::<bool>((v.clone(), i + 1))? {
-                    return Ok((v, Value::Integer(i as i64 + 1)));
+                    return Ok((v, Value::Integer(i as mlua::Integer + 1)));
                 }
             }
             Ok((Value::Nil, Value::Nil))
@@ -949,7 +949,7 @@ fn install_table_helpers(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|_, (list, want): (Table, Value)| {
             for (i, v) in list.sequence_values::<Value>().enumerate() {
                 if v? == want {
-                    return Ok(Value::Integer(i as i64 + 1));
+                    return Ok(Value::Integer(i as mlua::Integer + 1));
                 }
             }
             Ok(Value::Nil)

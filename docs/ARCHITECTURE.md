@@ -148,7 +148,8 @@ and [`subsystems/materials-and-textures.md`](subsystems/materials-and-textures.m
 
 ## 7. Scripting & hot reload
 
-`floptle-script` hosts **Lua (LuaJIT via mlua)**. Each Script component binds a
+`floptle-script` hosts **Lua (Luau via mlua — ADR-0028; LuaJIT is buildable
+for one more release behind `vm-luajit`)**. Each Script component binds a
 `.lua` file and gets lifecycle callbacks (`on_ready`, `on_update`,
 `on_fixed_update`, `on_event`). The engine exposes a curated, safe API (node
 access, input actions, events, pools, vfx spawning). File-watching gives

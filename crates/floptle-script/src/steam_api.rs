@@ -305,7 +305,11 @@ fn opt_enum<T>(
 /// success — the silent-wrong-answer shape `crate::opts` exists to stop.
 fn opt_i32(t: &Option<Table>, call: &str, key: &str, default: i32) -> mlua::Result<i32> {
     let Some(t) = t else { return Ok(default) };
-    let too_big = |v: i64| {
+    // `f64`, not `i64`: the two arms below arrive as a Lua integer (whose width
+    // is the VM's — 32-bit on Luau, ADR-0028) and as a Lua number, and this is
+    // the one type that takes both without a conversion that is a no-op on one
+    // VM and real on the other. It only ever formats the value.
+    let too_big = |v: f64| {
         mlua::Error::RuntimeError(format!(
             "{call}: `{key} = {v}` is outside the range a leaderboard rank can be \
              ({} to {})",
@@ -315,11 +319,17 @@ fn opt_i32(t: &Option<Table>, call: &str, key: &str, default: i32) -> mlua::Resu
     };
     match t.get::<Value>(key)? {
         Value::Nil => Ok(default),
-        Value::Integer(i) => i32::try_from(i).map_err(|_| too_big(i)),
+        // The range check is REAL on LuaJIT, where a Lua integer is 64-bit, and a
+        // no-op on Luau, where it is already 32-bit (ADR-0028). Written as the
+        // intent — "refuse anything an i32 cannot hold" — and allowed rather
+        // than branched, because a `#[cfg]` here would give the two VMs two
+        // different pieces of code to get right.
+        #[allow(clippy::useless_conversion, reason = "necessary on LuaJIT; i32 already on Luau")]
+        Value::Integer(i) => i32::try_from(i).map_err(|_| too_big(i as f64)),
         Value::Number(n) if n.fract() == 0.0 && (i32::MIN as f64..=i32::MAX as f64).contains(&n) => {
             Ok(n as i32)
         }
-        Value::Number(n) if n.fract() == 0.0 => Err(too_big(n as i64)),
+        Value::Number(n) if n.fract() == 0.0 => Err(too_big(n)),
         Value::Number(n) => Err(mlua::Error::RuntimeError(format!(
             "{call}: `{key} = {n}` is not a whole number"
         ))),
@@ -475,6 +485,12 @@ fn read_lobby_filters(call: &str, opts: &Option<Table>) -> mlua::Result<LobbyFil
             match v {
                 Value::String(s) => f.string.push((k, s.to_str()?.to_string())),
                 Value::Integer(i) => {
+                    // Real on LuaJIT (64-bit Lua integer), a no-op on Luau
+                    // (32-bit). See the note in `opt_i32`.
+                    #[allow(
+                        clippy::useless_conversion,
+                        reason = "necessary on LuaJIT; i32 already on Luau"
+                    )]
                     let n = i32::try_from(i).map_err(|_| too_big_filter(call, &k))?;
                     f.number.push((k, n, LobbyCompare::Equal));
                 }
