@@ -2637,6 +2637,21 @@ impl ProjectConfigDoc {
         Self { retro_height: 480, ..Self::ps1() }
     }
 
+    /// The config a project being CREATED starts from.
+    ///
+    /// The one difference from [`ps1`](Self::ps1) is that the `vec3` choice is
+    /// already made — `Fast`, the one that costs nothing to allocate and
+    /// nothing to collect. That is safe to default only for a project that has
+    /// no scripts yet; an existing one is pinned to `Exact` instead
+    /// ([`pin_script_vec3`](Self::pin_script_vec3)), and moves over on purpose
+    /// after `floptle lint --vec3` has said what it would cost.
+    ///
+    /// Exists so the two places that create projects — the editor and the
+    /// headless `floptle new` the Hub drives — cannot drift apart on it.
+    pub fn for_new_project() -> Self {
+        Self { script_vec3: Some(ScriptVec3Doc::Fast), ..Self::ps1() }
+    }
+
     /// Which `vec3` this project's scripts actually get.
     ///
     /// The one place a missing [`script_vec3`](Self::script_vec3) is turned
@@ -3987,6 +4002,25 @@ mod tests {
         assert_eq!(back.script_vec3, Some(super::ScriptVec3Doc::Fast));
         assert_eq!(back.script_vec3_resolved(), super::ScriptVec3Doc::Fast);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A new project starts at `fast`; an existing one never does.** The two
+    /// halves of the compatibility contract, asserted together because it is
+    /// the CONTRAST that matters and either one alone reads as fine.
+    #[test]
+    fn a_new_project_starts_fast_and_an_existing_one_does_not() {
+        assert_eq!(
+            ProjectConfigDoc::for_new_project().script_vec3,
+            Some(super::ScriptVec3Doc::Fast),
+            "a project with no scripts yet has nothing to be compatible with"
+        );
+        let mut existing = ProjectConfigDoc { script_vec3: None, ..Default::default() };
+        existing.pin_script_vec3();
+        assert_eq!(
+            existing.script_vec3,
+            Some(super::ScriptVec3Doc::Exact),
+            "a project that predates the setting keeps today's vector"
+        );
     }
 
     /// `pin_script_vec3` reports whether it changed anything, and is

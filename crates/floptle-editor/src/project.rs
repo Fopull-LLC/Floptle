@@ -1428,6 +1428,13 @@ impl Editor {
             // starter physics shapes. Terrain lives in sidecar field files, so
             // it can't ship inside the scene template — generate + save it here.
             self.project.retro = false;
+            // A project being created now starts at the fast vec3 — see
+            // `ProjectConfigDoc::for_new_project`, which the headless
+            // `floptle new` path uses wholesale. Here the config has already
+            // been loaded (as a default, there being no file), so this takes
+            // the one field rather than replacing everything.
+            self.project.script_vec3 = floptle_scene::ProjectConfigDoc::for_new_project().script_vec3;
+            self.apply_script_vec3_mode();
             let _ = floptle_scene::save_project(&self.project, &self.project_cfg_path());
             self.create_terrain(&crate::terrain_ui::NewTerrainCfg {
                 size_xz: 48.0,

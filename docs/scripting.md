@@ -2919,7 +2919,7 @@ node.pos = node.pos + dir * params.speed * dt
 | `v:length()`, `v:lengthSquared()`, `v:normalized()` | measure / unit |
 | `a:dot(b)`, `a:cross(b)`, `a:lerp(b, t)`, `a:distance(b)` | the classics |
 | `v:flatten(up)` | project onto the plane ⟂ `up`, renormalised — ["on any planet"](#32-on-the-ground-on-any-planet--flattenup) |
-| `v:withX(n)`, `v:withY(n)`, `v:withZ(n)` | the same vector with one component replaced |
+| `v:withX(n)`, `v:withY(n)`, `v:withZ(n)` | the same vector with one component replaced — [prefer these to `v.x = n`](#two-vectors-and-which-one-your-project-uses) |
 | `v:rotatedY(rad)`, `v:rotatedAround(axis, rad)` | spun about +Y, or about any axis |
 | `v:towards(other, maxDelta)` | step toward, never overshooting |
 | `v:angleTo(other)` | the unsigned angle between two directions (0, never NaN) |
@@ -2932,6 +2932,59 @@ form: `distance(x1,y1,z1, x2,y2,z2)`.
 
 Everything that *accepts* a vector accepts anything with numeric `x/y/z`
 fields — vectors, tables, nodes — so there's never a conversion dance.
+
+### Two vectors, and which one your project uses
+
+Project Settings has a **Scripting → vec3** choice, saved to `project.ron` as
+`script_vec3`. It changes what a `vec3` is made of, and nothing else about
+what you write.
+
+| | `exact` | `fast` |
+|---|---|---|
+| components | 64-bit | 32-bit |
+| can be changed in place | yes | **no** |
+| allocates | one small object per vector | nothing at all |
+| useful out to | the solar system | ~131 000 units from the origin |
+
+**Every project that existed before this setting is `exact`**, written into its
+`project.ron` the first time it is opened so it can never drift. New projects
+start at `fast`. Nothing changes under a game that has already shipped.
+
+`fast` is Luau's own vector type, which is why it costs nothing to make and
+nothing to collect — the two things a vector-heavy game spends its frame on.
+The price is precision: past about 131 000 units from the origin, 32-bit
+components can no longer resolve a centimetre, and positions start to jitter.
+If a project crosses that line the engine says so in the Console, once per
+script, naming the setting — you will not have to work it out from the
+symptom. A game whose world is bigger than that wants `exact`, and so does one
+that keeps real distances in script (a solar system, a galaxy map).
+
+**The one thing you write differently** is changing a component. A `fast`
+vector cannot be assigned into:
+
+```lua
+-- Works in exact, RAISES in fast:
+v.x = 0
+
+-- Works in both, and is the better habit either way:
+v = v:withX(0)
+```
+
+`withX` / `withY` / `withZ` exist in both modes, so you can write it this way
+today and switch whenever you like. `node.x = …` and the other node fields are
+untouched by any of this — a **node** is still mutable in both modes; it is the
+vector *value* that is not.
+
+To find out what a project would have to change:
+
+```sh
+floptle lint --vec3
+```
+
+It lists every component assignment and every `type(v)` check, with the line
+and the fix, and exits non-zero if there is anything to do. It is a textual
+scan rather than a type checker, so it cannot promise it found everything —
+but a mutation it misses raises in `fast` rather than passing silently.
 
 ### The node's own vectors
 

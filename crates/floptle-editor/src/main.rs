@@ -1609,7 +1609,9 @@ fn new_project(path: &Path, stamp: &str, template: &str) -> i32 {
     let cfg = floptle_scene::ProjectConfigDoc {
         engine_version: Some(stamp.to_string()),
         title: chosen.map(|t| t.title.to_string()),
-        ..floptle_scene::ProjectConfigDoc::default()
+        // `for_new_project`, not `default`: a project being created now starts
+        // at the fast vec3. An EXISTING one is pinned to exact on load instead.
+        ..floptle_scene::ProjectConfigDoc::for_new_project()
     };
     if let Err(e) = floptle_scene::save_project(&cfg, &ed.project_cfg_path()) {
         eprintln!("could not write project.ron: {e}");

@@ -629,6 +629,50 @@ impl<'a> SettingsCtx<'a> {
                 }
             },
         );
+        row(
+            ui,
+            "Script vec3",
+            Some(
+                "what a `vec3` is made of in this project's scripts. `exact` is 64-bit and \
+                 can be changed in place — every project made before this setting existed is \
+                 pinned to it, and stays that way until you change it here. `fast` is the \
+                 VM's own 32-bit vector: it costs nothing to make and nothing to collect, \
+                 which is most of what a vector-heavy game spends a frame on, but it cannot \
+                 be assigned into (`v = v:withY(0)` instead of `v.y = 0`) and it stops \
+                 resolving a centimetre past ~131000 units from the origin.                  `floptle lint --vec3` lists what a project would have to change",
+            ),
+            |ui| {
+                use floptle_scene::ScriptVec3Doc as V;
+                let mut v = project.script_vec3_resolved();
+                egui::ComboBox::from_id_salt("project-script-vec3")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(match v {
+                        V::Exact => "exact",
+                        V::Fast => "fast",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut v, V::Exact, "exact").on_hover_text(
+                            "64-bit, mutable — today's vector, and what every existing \
+                             project uses. Choose it for a world bigger than ~131000 units, \
+                             or one that keeps real distances in script",
+                        );
+                        ui.selectable_value(&mut v, V::Fast, "fast").on_hover_text(
+                            "32-bit, immutable, no allocation. Faster for a game that lives \
+                             near its origin. Run `floptle lint --vec3` before switching an \
+                             existing project",
+                        );
+                    });
+                if Some(v) != project.script_vec3 {
+                    project.script_vec3 = Some(v);
+                    out.save_project = true;
+                }
+                // Said in the row rather than in a toast that goes away: a Lua
+                // state picks its backing when it is BUILT, so this lands on
+                // the next Play. A setting that appears to do nothing while you
+                // are looking at it is one somebody clicks twice.
+                ui.weak("takes effect on the next Play");
+            },
+        );
         row(ui, "Retro", Some("render at a low resolution and upscale"), |ui| {
             out.save_project |= check(ui, &mut project.retro, "pixelization").changed();
         });

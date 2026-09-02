@@ -515,8 +515,16 @@ impl ScriptHost {
                         _ => None,
                     }
                 };
+                // Which spelling this is, asked as "is the first argument a
+                // vector" rather than "is it one of these two Value variants".
+                // The variant test was right until a vec3 could also be the
+                // VM's own `vector` (ADR-0028 Phase 3) — a native one matched
+                // neither arm, fell through to the six-number form and failed
+                // there, which is how `raycast(node.pos, vec3(0,-1,0), n)`
+                // stopped working the moment a project chose `fast`. Asking
+                // the shared reader means the next backing needs no edit here.
                 let (ox, oy, oz, dx, dy, dz, max, ignore) = if a.len() >= 3
-                    && matches!(a[0], Value::Table(_) | Value::UserData(_))
+                    && crate::math_api::vec3_of(&a[0]).is_some()
                 {
                     let (Some(o), Some(d)) = (
                         crate::math_api::vec3_of(&a[0]),
