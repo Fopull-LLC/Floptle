@@ -48,6 +48,7 @@ mod audio;
 mod assets_ui;
 mod check;
 mod cli;
+mod lint_vec3;
 mod console;
 mod curve_edit;
 mod dock;

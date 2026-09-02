@@ -140,6 +140,7 @@ the screen. `floptle help <VERB>` explains any one of them.
 [x] floptle vfx [PROJECT] --effect KEY [--at SECS] [--frames N] [--scene S] [--out DIR]
 [x] floptle inspect [PROJECT] [--scene S] [--select QUERY] [--json]
 [x] floptle check [PROJECT] [--json]
+[x] floptle lint [PROJECT] [--vec3] [--json]    # what to change before switching vec3
 [x] floptle exec <SCRIPT.lua> [PROJECT] [--json]
 [x] floptle api [QUERY] [--json]
 [x] floptle export <PROJ> <OUT> <PLATFORM> [--title T]

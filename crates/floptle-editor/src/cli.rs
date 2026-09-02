@@ -790,6 +790,43 @@ pub(crate) const VERBS: &[Verb] = &[
         legacy: &[],
     },
     Verb {
+        name: "lint",
+        summary: "report what a project would have to change to switch its vec3, and exit",
+        detail: "Scans every script for the two things that differ between `script_vec3: Exact` \
+                 and `Fast` (ADR-0028): a vec3 component being assigned, which raises in `fast` \
+                 because a native vector is immutable, and a `type()` asked about a vec3, which \
+                 answers \"vector\" there instead of \"userdata\" and so silently takes the \
+                 other branch. Everything else about the two is identical. This is a textual \
+                 scan and not a type checker: it finds the common shapes and says so rather \
+                 than implying it found them all.",
+        args: &[
+            Arg {
+                name: "PROJECT",
+                value: Value::Path,
+                required: false,
+                help: "the project directory (default: assets/)",
+            },
+            Arg {
+                name: "--vec3",
+                value: Value::Flag,
+                required: false,
+                help: "the vec3 migration checklist (currently the only lint, and the default)",
+            },
+            Arg {
+                name: "--json",
+                value: Value::Flag,
+                required: false,
+                help: "answer as JSON",
+            },
+        ],
+        needs_gpu: false,
+        writes_project: false,
+        exits: &[(1, "the project has something to change before switching")],
+        output: "one line per finding with the fix, then a count; with --json an object with \
+                 `ok`, `scanned`, `findings` and `complete`",
+        legacy: &[],
+    },
+    Verb {
         name: "serve",
         summary: "run a project as an authoritative dedicated server, until interrupted",
         detail: "The same server `floptle-runtime --server` runs — this is where to type it, \
@@ -1386,6 +1423,15 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 text(a, "select").as_deref(),
                 a.get_flag("json"),
             ))
+        }
+        Some(("lint", a)) => {
+            let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
+            // `--vec3` is accepted and is currently the only lint there is, so
+            // its absence means the same thing rather than nothing. When a
+            // second one arrives this becomes a choice; until then, refusing to
+            // run without a flag whose only value is the default would be
+            // ceremony.
+            Outcome::Exit(crate::lint_vec3::run(&project, a.get_flag("json")))
         }
         Some(("check", a)) => {
             let project = path(a, "PROJECT").unwrap_or_else(|| PathBuf::from("assets"));
