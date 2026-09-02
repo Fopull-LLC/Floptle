@@ -1663,6 +1663,57 @@ mod helper_tests {
         assert_eq!(sink.borrow()[1].source.as_ref().map(|(n, _)| n.as_str()), Some("elsewhere"));
     }
 
+    /// **The property card `floptle/0176` actually asked for: bytes per
+    /// operation, per mode, in the ordinary suite.**
+    ///
+    /// Pinning the PROPERTY rather than the implementation is the point — the
+    /// card's complaint was never "vec3 is a userdata", it was "every vec3 a
+    /// script builds is a heap object". `fast` must allocate nothing, and a
+    /// future change that quietly reintroduces an allocation has to fail here
+    /// rather than in somebody's frame graph.
+    ///
+    /// The collector is STOPPED across the measured loop. Leaving it running
+    /// lets an incremental collection eat the delta and produces numbers that
+    /// look like per-op differences and are noise — the same artefact the card
+    /// records having chased once already.
+    #[cfg(feature = "vm-luau")]
+    #[test]
+    fn fast_allocates_nothing_per_operation_and_exact_allocates() {
+        const OPS: usize = 2000;
+        let bytes_per_op = |mode: super::Vec3Mode| -> f64 {
+            let lua = lua_in(mode);
+            let kb: f64 = lua
+                .load(
+                    "collectgarbage('collect')\n\
+                     local before = collectgarbage('count')\n\
+                     local acc = vec3(0, 0, 0)\n\
+                     for i = 1, 2000 do\n\
+                       local v = vec3(i, i * 2, i * 3)\n\
+                       acc = acc + v * 0.5\n\
+                     end\n\
+                     local after = collectgarbage('count')\n\
+                     return after - before",
+                )
+                .eval()
+                .expect("measure");
+            kb * 1024.0 / OPS as f64
+        };
+
+        let fast = bytes_per_op(super::Vec3Mode::Fast);
+        assert!(
+            fast < 1.0,
+            "`fast` is supposed to put the vector IN the value: {fast:.1} bytes per op"
+        );
+
+        // And the contrast, so a measurement that silently stopped measuring
+        // cannot pass. A zero from both modes is a broken probe, not a win.
+        let exact = bytes_per_op(super::Vec3Mode::Exact);
+        assert!(
+            exact > 8.0,
+            "`exact` allocates a userdata per op and should show it: {exact:.1} bytes per op"
+        );
+    }
+
     /// A state with nowhere to report must not panic — the bare `Lua` in every
     /// probe and unit test is exactly that.
     #[cfg(feature = "vm-luau")]
