@@ -1154,6 +1154,9 @@ pub(crate) struct SceneMirror {
     /// Entities whose transform a handle wrote this frame (so we only flush those back —
     /// the current node still flushes via the value-table path).
     dirty: std::collections::HashSet<u32>,
+    /// `world.revision() - world.revision_of::<Transform>()` as of the last
+    /// FULL sync — see `ScriptHost::sync_scene`. `0` means never synced.
+    synced_non_transform_rev: u64,
 }
 
 /// Whether a `find*` call may return switched-off nodes.
@@ -4403,6 +4406,67 @@ end
             5.0,
             "a hook-less pass dropped a write made through a stashed node handle"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **When only transforms moved, the mirror is refreshed, not rebuilt** —
+    /// and the refresh is real: a handle reads the moved value.
+    ///
+    /// Three full rebuilds a frame were most of what a large scene cost the
+    /// script host outside the hooks. The guard is a count of rebuilds, and it
+    /// is watched in both directions with the rename test below.
+    #[test]
+    fn a_transform_only_change_refreshes_the_mirror_without_a_rebuild() {
+        let dir = std::env::temp_dir().join(format!("floptle_mirror_refresh_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "reader", "function update(node, dt) node.y = find('Other').x end\n");
+        let (mut world, e) = world_with_script("reader");
+        let other = world.spawn();
+        world.insert(other, Transform::IDENTITY);
+        world.insert(other, floptle_core::Name("Other".into()));
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        crate::host::FULL_SYNCS.with(|c| c.set(0));
+
+        // Physics-shaped change: a transform, through `get_mut`, nothing else.
+        world.get_mut::<Transform>(other).unwrap().translation.x = 7.0;
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        host.run_fixed(&mut world, 1.0 / 60.0, 1.0 / 60.0);
+        host.run_late(&mut world, 1.0 / 60.0, 1.0 / 60.0);
+        assert_eq!(
+            crate::host::FULL_SYNCS.with(|c| c.get()),
+            0,
+            "three passes over a transform-only change must not rebuild the mirror"
+        );
+        assert_eq!(
+            world.get::<Transform>(e).unwrap().translation.y,
+            7.0,
+            "the refresh did not carry the moved transform to a handle"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Anything that is not a transform forces a full rebuild** — here a
+    /// rename, the kind of change the refresh path cannot see and must never
+    /// be allowed to hide.
+    #[test]
+    fn a_rename_forces_a_full_rebuild_and_find_sees_it() {
+        let dir = std::env::temp_dir().join(format!("floptle_mirror_rename_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "seeker", "function update(node, dt) node.y = find('Renamed') and 1 or 0 end\n");
+        let (mut world, e) = world_with_script("seeker");
+        let other = world.spawn();
+        world.insert(other, Transform::IDENTITY);
+        world.insert(other, floptle_core::Name("Other".into()));
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.y, 0.0, "not renamed yet");
+        crate::host::FULL_SYNCS.with(|c| c.set(0));
+
+        world.get_mut::<floptle_core::Name>(other).unwrap().0 = "Renamed".into();
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        assert_eq!(crate::host::FULL_SYNCS.with(|c| c.get()), 1, "a rename must rebuild the mirror once");
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.y, 1.0, "find() did not see the new name");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

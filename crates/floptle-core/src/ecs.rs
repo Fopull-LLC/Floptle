@@ -50,6 +50,9 @@ trait AnyColumn: Any {
 /// finding rows. Rows stay dense and unordered; only the way in changed.
 struct Column<T> {
     rows: Vec<(Entity, T)>,
+    /// How many times THIS column was handed out mutably — the per-type half
+    /// of [`World::revision`]. See [`World::revision_of`].
+    revision: u64,
     /// Entity index → row. Keyed by `index` alone, NOT the generation, because
     /// that is what row lookup has always matched on: a stale handle to a
     /// reused slot finds the new occupant, and every caller above this already
@@ -59,7 +62,7 @@ struct Column<T> {
 
 impl<T> Column<T> {
     fn new() -> Self {
-        Self { rows: Vec::new(), at: HashMap::new() }
+        Self { rows: Vec::new(), at: HashMap::new(), revision: 0 }
     }
     fn position(&self, e: Entity) -> Option<usize> {
         self.at.get(&e.index).copied()
@@ -152,6 +155,21 @@ impl World {
     /// question, not to answer it.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// The part of [`revision`](Self::revision) attributable to mutable access
+    /// to `T` alone — `get_mut` and `query_mut` of that type. Zero for a type
+    /// that has never been stored.
+    ///
+    /// Exists so a cache can tell "only transforms moved" from "something else
+    /// might have": `revision() - revision_of::<Transform>()` is unchanged
+    /// across a physics tick and changes on any spawn, despawn, attach, detach
+    /// or mutable access to any OTHER type. Structural operations (`insert`,
+    /// `remove`, `spawn`, `despawn`) deliberately count against the global
+    /// number only, so they always read as "something else" — the direction
+    /// that is safe to be wrong in.
+    pub fn revision_of<T: 'static>(&self) -> u64 {
+        self.column::<T>().map_or(0, |c| c.revision)
     }
 
     /// Number of live entities.
@@ -265,6 +283,7 @@ impl World {
     pub fn get_mut<T: 'static>(&mut self, e: Entity) -> Option<&mut T> {
         self.revision += 1;
         let col = self.column_mut::<T>();
+        col.revision += 1;
         col.position(e).map(|i| &mut col.rows[i].1)
     }
 
@@ -276,13 +295,55 @@ impl World {
     /// Mutable iteration over a single component type.
     pub fn query_mut<T: 'static>(&mut self) -> impl Iterator<Item = (Entity, &mut T)> {
         self.revision += 1;
-        self.column_mut::<T>().rows.iter_mut().map(|(e, v)| (*e, v))
+        let col = self.column_mut::<T>();
+        col.revision += 1;
+        col.rows.iter_mut().map(|(e, v)| (*e, v))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **`revision() - revision_of::<T>()` moves for everything except mutable
+    /// access to `T`.** That difference is what lets the script mirror skip a
+    /// full rebuild between passes when only transforms moved, so both halves
+    /// are pinned: a transform write leaves it alone, and a rename, an attach,
+    /// a spawn and a despawn each move it.
+    #[test]
+    fn the_non_type_revision_ignores_that_type_and_nothing_else() {
+        struct Pos(f32);
+        struct Label;
+        let mut w = World::new();
+        let e = w.spawn();
+        w.insert(e, Pos(0.0));
+        w.insert(e, Label);
+        let other = |w: &World| w.revision() - w.revision_of::<Pos>();
+
+        let base = other(&w);
+        if let Some(p) = w.get_mut::<Pos>(e) {
+            p.0 = 1.0;
+        }
+        for (_, p) in w.query_mut::<Pos>() {
+            p.0 += 1.0;
+        }
+        assert_eq!(other(&w), base, "mutable access to the type itself must not move it");
+
+        let _ = w.get_mut::<Label>(e);
+        assert_ne!(other(&w), base, "mutable access to another type must");
+        let base = other(&w);
+        w.insert(e, Pos(5.0));
+        assert_ne!(other(&w), base, "an attach — even of the type — is structural");
+        let base = other(&w);
+        let e2 = w.spawn();
+        assert_ne!(other(&w), base, "a spawn is structural");
+        let base = other(&w);
+        w.despawn(e2);
+        assert_ne!(other(&w), base, "a despawn is structural");
+        let base = other(&w);
+        w.remove::<Label>(e);
+        assert_ne!(other(&w), base, "a detach is structural");
+    }
 
     #[derive(Debug, PartialEq)]
     struct Name(&'static str);

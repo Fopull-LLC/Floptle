@@ -226,6 +226,9 @@ thread_local! {
     /// How many times a `params` table was built from its seed — the guard on
     /// the fingerprint. Test-only; the number means nothing outside one.
     pub(crate) static PARAMS_REBUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// How many times the scene mirror was rebuilt from scratch rather than
+    /// refreshed — the guard on the revision test in `sync_scene`.
+    pub(crate) static FULL_SYNCS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 impl ScriptHost {
@@ -4864,6 +4867,33 @@ impl ScriptHost {
     /// Rebuild the scene-graph mirror the Lua handles read/write, from the live ECS.
     fn sync_scene(&self, world: &World) {
         let mut s = self.scene.borrow_mut();
+        // The mirror is rebuilt three times a frame — before the frame, tick
+        // and late passes — and between two of those, in the ordinary case,
+        // the only thing that changed is where things are: physics moved
+        // bodies, a script moved its node. Everything else here (names,
+        // parents, scripts, tags, components…) is exactly as it was, and
+        // rebuilding it is mostly allocation: on a 376-node scene the full
+        // sync cost 1.2 ms, three times over.
+        //
+        // The world says which case this is. `revision()` counts every
+        // mutation; `revision_of::<Transform>()` counts mutable access to
+        // transforms alone; their difference moves on anything ELSE — a spawn,
+        // a despawn, an attach, a rename, a material edit, a script's queued
+        // writes landing. Unchanged difference means transforms-only, and
+        // transforms-only means the cheap path. The world is deliberately
+        // conservative in what it counts (a `get_mut` that wrote nothing still
+        // counts), so this can only ever do too much work, never too little.
+        let non_transform_rev = world.revision() - world.revision_of::<Transform>();
+        if non_transform_rev == s.synced_non_transform_rev {
+            for (e, tr) in world.query::<Transform>() {
+                s.transforms.insert(e.index(), *tr);
+            }
+            s.dirty.clear();
+            return;
+        }
+        #[cfg(test)]
+        FULL_SYNCS.with(|c| c.set(c.get() + 1));
+        s.synced_non_transform_rev = non_transform_rev;
         s.order.clear();
         s.names.clear();
         s.by_name.clear();
