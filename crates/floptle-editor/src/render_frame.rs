@@ -10265,6 +10265,18 @@ impl Editor {
         ) {
             // Everything below is the draw. If the tuple above does not match,
             // the `else` at the end of it says so — see there.
+            // ⏱ `floptle shot --timing`: one mark before each pass, so the
+            // headless render answers "which pass is slow" the way the window
+            // does. A label names the region that FOLLOWS it (see `GpuTimer`).
+            macro_rules! headless_mark {
+                ($label:expr) => {
+                    if self.gpu_timing_headless {
+                        if let Some(t) = self.gpu_timer.as_mut() {
+                            t.mark(gpu, $label);
+                        }
+                    }
+                };
+            }
             // The opaque depth prepass, HERE as well as on the window path.
             // Contact shadows, `surfaceGap`, screen-space reflections and lamp
             // shadows all read it, and without it every one of them silently
@@ -10282,6 +10294,7 @@ impl Editor {
             );
             if let Some(dtex) = opts.depth_tex.filter(|_| wants_depth || rm_draw) {
                 let hist = history_bind.as_ref().map(|(v, s)| (v, s));
+                headless_mark!("depth prepass");
                 prepass_and_bind(
                     gpu, raster, raymarch, globals, &instances, &flsl_draws, &skin_draws,
                     dtex, hist,
@@ -10301,6 +10314,7 @@ impl Editor {
                 raymarch.upload_globals(gpu, rm);
                 Some(clear.map(|c| c as f64))
             };
+            headless_mark!("opaque + lighting");
             raster.draw_scene_with(
                 gpu, color, depth, globals, &instances, &flsl_draws, &skin_draws,
                 raster_clear, Some(raymarch.field_bind()),
@@ -10312,6 +10326,7 @@ impl Editor {
             if let Some(q) = palette {
                 raster.quantize_palette(gpu, color, (size.0.max(1), size.1.max(1)), q);
             }
+            headless_mark!("2D lighting");
             raster.light2d_pass(
                 gpu,
                 color,
@@ -10348,6 +10363,7 @@ impl Editor {
                             Some((h.view(), h.sampler())),
                         );
                     }
+                    headless_mark!("glass");
                     raster.draw_transmissive(
                         gpu, color, depth, globals, &instances, &skin_draws,
                         Some(raymarch.field_bind()), &cuts, layer,
@@ -10368,6 +10384,7 @@ impl Editor {
                         ]
                     })
                     .collect();
+                headless_mark!("lines");
                 line_layer.draw(gpu, color, depth, view_proj, &verts);
             }
             // Script-drawn FILLED triangles (draw.tri/cone/disc — solid gizmos).
@@ -10389,6 +10406,7 @@ impl Editor {
                 tri_layer.draw(gpu, color, depth, view_proj, &verts);
             }
             if !vfx_batches.is_empty() {
+                headless_mark!("particles");
                 particles.draw(
                     gpu,
                     color,

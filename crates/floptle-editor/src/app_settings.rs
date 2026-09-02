@@ -76,6 +76,7 @@ impl crate::Editor {
             retro: self.project.retro,
             retro_height: self.project.retro_height,
             retro_integer_scale: self.project.retro_integer_scale,
+            fullscreen: self.window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
         };
         self.script_host.set_app_info(info);
     }
@@ -103,9 +104,43 @@ impl crate::Editor {
         if let Some(on) = req.retro_integer_scale {
             self.project.retro_integer_scale = on;
         }
+        if let Some(on) = req.fullscreen {
+            self.app_set_fullscreen(on);
+        }
         if req.quit {
             self.app_quit();
         }
+    }
+
+    /// Cover the screen, or stop — `app.setFullscreen`, and the F11 /
+    /// Alt+Enter a build answers on its own.
+    ///
+    /// Only the game's own window does this. In the editor the window is the
+    /// EDITOR's, and a game under test taking it over would be the same
+    /// surprise as `app.quit()` closing it — so, like `quit`, it does the
+    /// honest thing for the host it is in and says so in the Console once.
+    pub(crate) fn app_set_fullscreen(&mut self, on: bool) {
+        if !self.player_mode {
+            if !self.fullscreen_explained {
+                self.fullscreen_explained = true;
+                self.console.push(
+                    floptle_script::LogLevel::Debug,
+                    format!(
+                        "app.setFullscreen({on}) — in an exported build this {} the game's \
+                         window; in the editor the window is the editor's, so it is left \
+                         alone. app.fullscreen() answers the real state either way.",
+                        if on { "fills the screen with" } else { "windows" }
+                    ),
+                    None,
+                );
+            }
+            return;
+        }
+        let Some(window) = self.window.as_ref() else { return };
+        // Borderless on the current monitor: no mode switch, no resolution
+        // change, the thing every game means by the word. `None` picks the
+        // monitor the window is on.
+        window.set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
     }
 
     /// End the game — see the module docs for why this is three different things.

@@ -1727,6 +1727,15 @@ struct Editor {
     /// Is the ⏱ Frame panel open? Nothing is submitted for timing while it is
     /// shut, so a profiler that nobody is reading costs nothing at all.
     gpu_timing_open: bool,
+    /// `floptle shot --timing`: mark the passes of the OFFSCREEN render
+    /// (`render_world_into`) so a headless shot can report per-pass GPU cost.
+    /// Separate from `gpu_timing_open`, which drives the windowed frame's
+    /// panel: the offscreen path also runs INSIDE a windowed frame (a docked
+    /// Game view, a render target), and marking it there would split the
+    /// window's regions into pieces the panel was not written to show.
+    gpu_timing_headless: bool,
+    /// `app.setFullscreen` under the editor has explained itself once.
+    fullscreen_explained: bool,
     retro: Option<Retro>,
     /// Post-processing stack (bloom + vignette), full frame res.
     post: Option<floptle_render::PostStack>,
@@ -2697,6 +2706,7 @@ struct Editor {
     /// Modifier key state (tracked from key events).
     ctrl: bool,
     shift: bool,
+    alt: bool,
     /// Undo/redo history of whole-scene snapshots.
     history: History,
     /// Copied nodes (Ctrl+C), re-spawned by Ctrl+V.
@@ -3699,6 +3709,7 @@ impl ApplicationHandler for Editor {
             WindowEvent::ModifiersChanged(mods) => {
                 self.ctrl = mods.state().control_key();
                 self.shift = mods.state().shift_key();
+                self.alt = mods.state().alt_key();
                 self.input.boost = self.shift;
             }
             // LOSING FOCUS RELEASES EVERYTHING.
@@ -3718,6 +3729,7 @@ impl ApplicationHandler for Editor {
             WindowEvent::Focused(false) => {
                 self.ctrl = false;
                 self.shift = false;
+                self.alt = false;
                 // Publish the releases rather than dropping them: a running game polling
                 // `input.released("w")` must see the edge, and one polling `input.key("w")`
                 // must stop seeing it held. Silently clearing would stick a script's
@@ -3941,6 +3953,18 @@ impl ApplicationHandler for Editor {
                             // multiplayer menu instead, and pause is editor-only.
                             KeyCode::F1 if self.player_mode => {
                                 self.show_net_panel = !self.show_net_panel;
+                            }
+                            // F11, and Alt+Enter: the two spellings of
+                            // "fullscreen" a player will try without reading
+                            // anything. A build answers both itself, so a game
+                            // has it even when its menu forgot.
+                            KeyCode::F11 if self.player_mode => {
+                                let on = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
+                                self.app_set_fullscreen(!on);
+                            }
+                            KeyCode::Enter if self.player_mode && self.alt => {
+                                let on = self.window.as_ref().is_some_and(|w| w.fullscreen().is_some());
+                                self.app_set_fullscreen(!on);
                             }
                             KeyCode::F1 => self.toggle_play(),
                             KeyCode::F2 if self.player_mode => {}

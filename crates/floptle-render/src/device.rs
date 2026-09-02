@@ -330,7 +330,11 @@ impl Gpu {
         .expect("no GPU adapter (headless)");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("floptle-device-headless"),
-            required_features: wgpu::Features::empty(),
+            // The same ask the window makes: timestamp queries when the adapter
+            // has them, so `floptle shot --timing` can name a pass. An
+            // intersection with what the adapter offers, so it cannot refuse a
+            // device that lacks them — see `timing_features`.
+            required_features: timing_features(&adapter),
             required_limits: wgpu::Limits::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::Performance,

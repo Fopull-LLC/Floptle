@@ -4011,6 +4011,7 @@ this page; `app.*` is the rest.
 | `app.retro()` / `app.setRetro(on)` | the retro presentation — compositing small and upscaling |
 | `app.retroHeight()` / `app.setRetroHeight(px)` | the height it composites at: this engine's "resolution" |
 | `app.retroIntegerScale()` / `app.setRetroIntegerScale(on)` | upscale by a whole number and letterbox, instead of stretching |
+| `app.fullscreen()` / `app.setFullscreen(on)` | cover the screen (borderless, no mode switch), or go back to a window |
 
 ### What `app.quit()` does depends on where the game is running
 
@@ -4024,6 +4025,18 @@ There is one honest answer per host, and they are different things:
   unsaved work with it. A line in the Console says which of the two happened.
 * **Under `floptle run`** the run ends where it stands, and the report says it
   stopped early rather than claiming it ran the whole span.
+
+### Fullscreen is answered by the build even if your menu forgets
+
+**F11** and **Alt+Enter** toggle it in every exported build, with no code on
+your part — they are the two spellings of "fullscreen" a player will try
+without reading anything. `app.fullscreen()` reports the real state, so a Video
+tab that shows the setting stays right after the player used the key instead
+of the menu.
+
+In the editor `app.setFullscreen` leaves the window alone — it is the editor's
+window, not the game's — and says so once in the Console, the same way
+`app.quit()` is honest about where it is running.
 
 ### A setting you change is for this session only
 

@@ -88,6 +88,7 @@ pub(crate) fn run(
     size: (u32, u32),
     out: &Path,
     json: bool,
+    timing: bool,
 ) -> i32 {
     if !root.join("project.ron").is_file() {
         eprintln!("{} is not a project directory (no project.ron)", root.display());
@@ -143,6 +144,15 @@ pub(crate) fn run(
         ..Default::default()
     };
     ed.attach_gpu(gpu);
+    // `--timing` on a device with no timestamp queries is a request that
+    // cannot be met, and saying so beats a PNG with no numbers beside it.
+    if timing && ed.gpu_timer.is_none() {
+        eprintln!(
+            "this device has no GPU timestamp queries, so --timing has nothing to measure; \
+             the picture is still rendered"
+        );
+    }
+    ed.gpu_timing_headless = timing && ed.gpu_timer.is_some();
     ed.open_project(root.to_path_buf());
     if let Some(s) = scene {
         let Some(path) = crate::inspect::resolve_scene(root, s) else {
@@ -221,6 +231,17 @@ pub(crate) fn run(
         return 1;
     }
 
+    // Per-pass GPU cost, when asked. Absent — not zeroed — when it was not: a
+    // `gpu_ms: 0` would read as "free", which is the wrong answer in exactly
+    // the shape the `perf` API exists to refuse.
+    let gpu_timing: Option<(f32, Vec<(String, f32)>)> = if ed.gpu_timing_headless {
+        ed.gpu_timer.as_mut().map(|t| {
+            t.poll();
+            (t.total_ms(), t.spans().iter().map(|s| (s.label.clone(), s.ms)).collect())
+        })
+    } else {
+        None
+    };
     if json {
         println!(
             "{}",
@@ -230,10 +251,23 @@ pub(crate) fn run(
                 "width": w,
                 "height": h,
                 "camera": ed.world.get::<floptle_core::Name>(e).map(|n| n.0.clone()),
+                "timing": gpu_timing.as_ref().map(|(total, passes)| serde_json::json!({
+                    "gpu_ms": total,
+                    "passes": passes
+                        .iter()
+                        .map(|(l, ms)| serde_json::json!({ "label": l, "ms": ms }))
+                        .collect::<Vec<_>>(),
+                })),
             })
         );
     } else {
         println!("wrote {} ({w}x{h})", out.display());
+        if let Some((total, passes)) = &gpu_timing {
+            println!("gpu {total:.2} ms across {} passes at {w}x{h}:", passes.len());
+            for (label, ms) in passes {
+                println!("  {label:<20} {ms:7.3} ms");
+            }
+        }
     }
     0
 }
@@ -294,6 +328,15 @@ pub(crate) fn render_frame_pixels(
         None => (own_depth_view, depth.clone()),
     };
 
+    // ⏱ Open the timing frame. The marks themselves are inside
+    // `render_world_into` and below, one per pass; `end` closes the last region
+    // before the readback, whose device wait is what lands the numbers.
+    if ed.gpu_timing_headless
+        && let Some(t) = ed.gpu_timer.as_mut()
+    {
+        t.poll();
+        t.begin();
+    }
     // The depth TEXTURE is handed over, not just its view: that is what lets the
     // opaque prepass run, and without it contact shadows, shoreline foam,
     // screen-space reflections and lamp shadows all quietly draw nothing. A
@@ -344,7 +387,17 @@ pub(crate) fn render_frame_pixels(
         Some(r) => r.color_view().clone(),
         None => color_view.clone(),
     };
+    if ed.gpu_timing_headless
+        && let Some(t) = ed.gpu_timer.as_mut()
+    {
+        t.mark(gpu, "post");
+    }
     post.run_with(gpu, &look, Some(&ssao), &composite, ed.post_shaders.as_ref());
+    if ed.gpu_timing_headless
+        && let Some(t) = ed.gpu_timer.as_mut()
+    {
+        t.mark(gpu, "retro upscale");
+    }
     // …and the chunky upscale, the way the game presents it.
     if let Some(r) = &retro {
         let dest = [w as f32, h as f32];
@@ -355,6 +408,13 @@ pub(crate) fn render_frame_pixels(
         }
     }
 
+    if ed.gpu_timing_headless
+        && let Some(t) = ed.gpu_timer.as_mut()
+    {
+        t.end(gpu);
+    }
+    // The readback waits on the device, which is also what lands the timing
+    // query's own readback — `run` polls it after this returns.
     Some(readback(gpu, &color, w, h))
 }
 

@@ -136,7 +136,7 @@ the screen. `floptle help <VERB>` explains any one of them.
 [x] floptle open [PROJECT]                     # the bare invocation, said out loud
 [x] floptle play [PROJECT]
 [x] floptle run [PROJECT] [--scene S] [--frames N | --seconds T] [--json]
-[x] floptle shot [PROJECT] [--scene S] [--camera NAME] [--size WxH] [--out FILE]
+[x] floptle shot [PROJECT] [--scene S] [--camera NAME] [--size WxH] [--out FILE] [--timing]
 [x] floptle vfx [PROJECT] --effect KEY [--at SECS] [--frames N] [--scene S] [--out DIR]
 [x] floptle inspect [PROJECT] [--scene S] [--select QUERY] [--json]
 [x] floptle check [PROJECT] [--json]

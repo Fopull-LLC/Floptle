@@ -500,11 +500,21 @@ pub(crate) const VERBS: &[Verb] = &[
                 required: false,
                 help: "answer as JSON",
             },
+            Arg {
+                name: "--timing",
+                value: Value::Flag,
+                required: false,
+                help: "also report what each render pass cost on the GPU, in milliseconds — \
+                       the per-pass split the editor's ⏱ panel shows, without a window. Needs \
+                       a device with timestamp queries, and says so when there is none",
+            },
         ],
         needs_gpu: true,
         writes_project: true,
         exits: &[(1, "the scene has no camera, or the file could not be written")],
-        output: "a PNG at --out; the path on stdout, or an object with --json",
+        output: "a PNG at --out; the path on stdout, then one line per GPU pass under \
+                 --timing; with --json an object with `ok`, `path`, `width`, `height`, \
+                 `camera` and, under --timing, `timing` (`gpu_ms` and `passes`)",
         legacy: &[],
     },
     Verb {
@@ -1246,6 +1256,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 size,
                 &out,
                 a.get_flag("json"),
+                a.get_flag("timing"),
             ))
         }
         Some(("vfx", a)) => {

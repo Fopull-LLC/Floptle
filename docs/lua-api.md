@@ -14,7 +14,7 @@ each group, and meant to be searched.
 
 ## Contents
 
-- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 127
+- [script basics — lifecycle, params, log](#script-basics--lifecycle-params-log) — 129
 - [node — transform & body fields](#node--transform--body-fields) — 36
 - [node — methods & handles](#node--methods--handles) — 26
 - [vectors, directions & easing](#vectors-directions--easing) — 49
@@ -146,6 +146,10 @@ agent:teleport(point) — put it AND its node somewhere without walking there, a
 
 The settings a game offers the person playing it, and the one thing every main menu needs: quit. app.quit(), app.title(), app.version(), and the video settings — app.vsync/setVsync, app.retro/setRetro, app.retroHeight/setRetroHeight, app.retroIntegerScale/setRetroIntegerScale. A setting you change here is for THIS SESSION: it lives in project.ron, the file that ships to every player, so Stop puts it back — persist the player's choice yourself with save.*, the same rule access.* follows. Window resolution and fullscreen are NOT here yet; that is one question (windowing) waiting to be answered properly. See docs/scripting.md §30.
 
+### `app.fullscreen`
+
+app.fullscreen() → whether the game's window covers the screen. The real state, not the last thing asked for — so a Video tab shows what the player sees, including after F11 or Alt+Enter, which a build answers on its own.
+
 ### `app.quit`
 
 app.quit() — end the game. What that means depends on where it is running, and they are genuinely different things: an EXPORTED BUILD closes (your save.* data is flushed first, since somebody quitting from a settings menu expects the setting they just changed to have been kept); the EDITOR stops Play and says so in the Console, deliberately NOT a process exit — an editor that closed because a game under test called quit would take your unsaved work with it; `floptle run` ends the run where it stands and reports that it stopped early.
@@ -161,6 +165,10 @@ app.retroHeight() → the internal height the game composites at, in pixels. In 
 ### `app.retroIntegerScale`
 
 app.retroIntegerScale() → whether the retro composite is upscaled by a WHOLE number and letterboxed rather than stretched to fill.
+
+### `app.setFullscreen`
+
+app.setFullscreen(true) — cover the screen (borderless, on the monitor the window is on; no mode switch), or false to go back to a window. In an EXPORTED BUILD it applies this frame. In the EDITOR the window is the editor's, so it is left alone and the Console says so once — the same honesty app.quit() has about where it is running. For this session only; persist it with save.*.
 
 ### `app.setRetro`
 

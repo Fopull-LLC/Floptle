@@ -96,6 +96,9 @@ pub struct AppInfo {
     pub retro_height: u32,
     /// Upscale by a whole number and letterbox, rather than stretching.
     pub retro_integer_scale: bool,
+    /// Whether the game's window currently covers the screen. Always `false`
+    /// where there is no window (`floptle run`).
+    pub fullscreen: bool,
 }
 
 /// What a script asked the driver to change or do this frame.
@@ -113,6 +116,9 @@ pub struct AppRequests {
     pub retro: Option<bool>,
     pub retro_height: Option<u32>,
     pub retro_integer_scale: Option<bool>,
+    /// Cover the screen (borderless, on the monitor the window is on), or
+    /// go back to a window.
+    pub fullscreen: Option<bool>,
 }
 
 impl AppRequests {
@@ -124,6 +130,7 @@ impl AppRequests {
             && self.retro.is_none()
             && self.retro_height.is_none()
             && self.retro_integer_scale.is_none()
+            && self.fullscreen.is_none()
     }
 }
 
@@ -253,6 +260,29 @@ pub fn install(lua: &Lua, info: &SharedAppInfo, req: &SharedAppRequests) -> mlua
             })?,
         )?;
     }
+    // Fullscreen. The one Video setting every player looks for first, and the
+    // one a settings menu could not offer until now — a reviewer said so, in
+    // public, about a game whose menu had everything else.
+    {
+        let i = info.clone();
+        t.set("fullscreen", lua.create_function(move |_, ()| Ok(i.borrow().fullscreen))?)?;
+    }
+    {
+        let r = req.clone();
+        let i = info.clone();
+        t.set(
+            "setFullscreen",
+            lua.create_function(move |_, on: bool| {
+                r.borrow_mut().fullscreen = Some(on);
+                // Answered optimistically, the way the other setters are: the
+                // driver applies it this frame, and a menu that reads the
+                // setting back on the same frame it clicked should see its own
+                // click.
+                i.borrow_mut().fullscreen = on;
+                Ok(())
+            })?,
+        )?;
+    }
 
     lua.globals().set("app", t)?;
     Ok(())
@@ -284,6 +314,31 @@ mod tests {
 
     /// The driver skips its whole apply path when nothing was asked for, which
     /// is every frame but the one somebody clicks in.
+    /// **`app.setFullscreen` reaches the driver, and the getter answers the
+    /// click on the same frame.** The plumbing half of the feature — the window
+    /// half needs a window, which no test has. A menu that reads the setting
+    /// back on the frame it clicked must see its own click, or its toggle
+    /// flickers back for a frame.
+    #[test]
+    fn set_fullscreen_queues_a_request_and_answers_immediately() {
+        let lua = Lua::new();
+        let info: SharedAppInfo = Rc::new(RefCell::new(AppInfo::default()));
+        let req: SharedAppRequests = Rc::new(RefCell::new(AppRequests::default()));
+        install(&lua, &info, &req).unwrap();
+        let before: bool = lua.load("return app.fullscreen()").eval().unwrap();
+        assert!(!before, "a fresh info block is windowed");
+        assert!(req.borrow().is_empty(), "reading is not asking");
+
+        let after: bool = lua.load("app.setFullscreen(true) return app.fullscreen()").eval().unwrap();
+        assert!(after, "the getter must reflect the click on the same frame");
+        assert_eq!(req.borrow().fullscreen, Some(true), "the driver was not asked");
+        assert!(!req.borrow().is_empty(), "a fullscreen request must not read as an empty frame");
+
+        let back: bool = lua.load("app.setFullscreen(false) return app.fullscreen()").eval().unwrap();
+        assert!(!back);
+        assert_eq!(req.borrow().fullscreen, Some(false));
+    }
+
     #[test]
     fn an_untouched_frame_asks_for_nothing() {
         let mut r = AppRequests::default();

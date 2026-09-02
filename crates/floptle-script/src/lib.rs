@@ -3294,6 +3294,7 @@ end
             retro: true,
             retro_height: 240,
             retro_integer_scale: false,
+            fullscreen: false,
         });
         host.run(&mut world, &dir, 0.1, 0.1);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
@@ -3488,6 +3489,7 @@ end
             retro: true,
             retro_height: 240,
             retro_integer_scale: false,
+            fullscreen: false,
         });
         host.run(&mut world, &dir, 0.1, 0.1);
         assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
