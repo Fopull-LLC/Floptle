@@ -2383,6 +2383,37 @@ pub struct SteamProjectSettings {
     pub app_id: u32,
 }
 
+/// Which `vec3` a project's scripts get (ADR-0028, Phase 3).
+///
+/// The engine's world coordinates are genuinely f64 —
+/// [`TransformDoc::translation`] is `[f64; 3]` — and a solar-system-scale game
+/// needs every bit of that. Luau's native vectors are f32x3, immutable, and
+/// cost no allocation and no collector time at all. Neither is the right
+/// answer for every project, so it is a project's choice rather than the
+/// engine's.
+///
+/// **This is a compatibility boundary, so it is written down rather than
+/// inferred.** A project that predates the setting is pinned to
+/// [`Exact`](Self::Exact) the first time it is loaded and the value is saved
+/// back, so the choice appears in `project.ron` as a fact instead of staying a
+/// default that a later release could change underneath a shipped game. Only a
+/// NEW project starts at [`Fast`](Self::Fast).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScriptVec3Doc {
+    /// Today's vector: 64-bit components in a userdata, and mutable.
+    ///
+    /// The default for every project that existed before the setting did.
+    #[default]
+    Exact,
+    /// Luau's native vector: 32-bit components, immutable, no allocation.
+    ///
+    /// f32 holds about 7 significant digits, so a coordinate past ~131 km from
+    /// the origin (2^17 at metre units) can no longer resolve a centimetre.
+    /// A game that lives inside that radius pays nothing for the speed; one
+    /// that does not wants [`Exact`](Self::Exact).
+    Fast,
+}
+
 /// Project-wide render settings — the PS1/PS2-style knobs that apply to every
 /// scene. Saved to `project.ron`, edited in the editor's Project Settings.
 ///
@@ -2517,6 +2548,18 @@ pub struct ProjectConfigDoc {
     /// code nobody is going to edit.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub ui_font: String,
+    /// Which `vec3` this project's scripts get — see [`ScriptVec3Doc`].
+    ///
+    /// `None` means the file predates the setting. That is a THIRD state, not
+    /// a synonym for the default: it is resolved to
+    /// [`Exact`](ScriptVec3Doc::Exact) and written back, by
+    /// [`ProjectConfigDoc::pin_script_vec3`], so an existing project's choice
+    /// stops being implicit the first time it is saved. Read it through
+    /// [`ProjectConfigDoc::script_vec3_resolved`] and never as a bare
+    /// `unwrap_or_default` — the point of the option is that somebody has to
+    /// decide what a missing value means, once, here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_vec3: Option<ScriptVec3Doc>,
     /// The project-wide audio mixer graph (tracks, effects, routing). Edited
     /// in the Mixer tab; every scene plays through it.
     #[serde(default)]
@@ -2578,6 +2621,7 @@ impl ProjectConfigDoc {
             no_collide: Vec::new(),
             sorting_layers: Vec::new(),
             ui_font: String::new(),
+            script_vec3: None,
             mixer: floptle_audio::MixerDesc::default(),
             bloom: false,
             bloom_threshold: default_bloom_threshold(),
@@ -2591,6 +2635,36 @@ impl ProjectConfigDoc {
     /// A higher-resolution PS2-ish look.
     pub fn ps2() -> Self {
         Self { retro_height: 480, ..Self::ps1() }
+    }
+
+    /// Which `vec3` this project's scripts actually get.
+    ///
+    /// The one place a missing [`script_vec3`](Self::script_vec3) is turned
+    /// into an answer, so every reader gets the same one.
+    pub fn script_vec3_resolved(&self) -> ScriptVec3Doc {
+        self.script_vec3.unwrap_or(ScriptVec3Doc::Exact)
+    }
+
+    /// Pin an existing project's `vec3` choice so it stops being implicit.
+    ///
+    /// Called on a config that came out of a `project.ron` that **exists**:
+    /// the absence of the field there means the project predates the setting,
+    /// and such a project keeps today's vector. Writing the answer down is the
+    /// whole compatibility contract — a value that stayed absent would be a
+    /// default, and a default is something a later release is entitled to
+    /// change under a game that has already shipped.
+    ///
+    /// Deliberately NOT called when the file is missing: no file means no
+    /// project yet, and a new one starts at [`ScriptVec3Doc::Fast`].
+    ///
+    /// Returns whether it changed anything, so a caller that wants to persist
+    /// the pin immediately can tell.
+    pub fn pin_script_vec3(&mut self) -> bool {
+        if self.script_vec3.is_none() {
+            self.script_vec3 = Some(ScriptVec3Doc::Exact);
+            return true;
+        }
+        false
     }
 
     /// The jitter grid that lands one cell on one **pixel row** of this
@@ -3248,11 +3322,20 @@ pub fn save_material(name: &str, mat: &MaterialDoc, dir: &Path) -> Result<(), Sc
 }
 
 /// Load the project-wide render config, or the default if the file is missing.
+///
+/// A config that came from a file that EXISTS gets its `vec3` choice pinned
+/// ([`ProjectConfigDoc::pin_script_vec3`]) — the file predating the setting is
+/// what "no field" means there, and such a project keeps today's vector. A
+/// missing or unparseable file yields the plain default instead, because
+/// neither is a project whose scripts anybody has written yet.
 pub fn load_project(path: &Path) -> ProjectConfigDoc {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| ron::from_str(&t).ok())
-        .unwrap_or_default()
+    match try_load_project(path) {
+        Ok(Some(mut cfg)) => {
+            cfg.pin_script_vec3();
+            cfg
+        }
+        Ok(None) | Err(_) => ProjectConfigDoc::default(),
+    }
 }
 
 /// Load the project config distinguishing the three cases: `Ok(None)` = the file is
@@ -3843,6 +3926,82 @@ pub fn to_doc(name: impl Into<String>, world: &World) -> SceneDoc {
 
 #[cfg(test)]
 mod tests {
+
+    /// **A project that predates the setting keeps today's vector, and the
+    /// answer gets WRITTEN DOWN.**
+    ///
+    /// The compatibility contract in ADR-0028 is that nothing changes silently.
+    /// Leaving the field absent would satisfy the first half — such a project
+    /// resolves to `Exact` either way — and quietly fail the second: an absent
+    /// value is a default, and a later release is entitled to change a default.
+    /// Pinning it turns the choice into a fact in the file.
+    #[test]
+    fn an_existing_project_without_the_field_is_pinned_to_exact() {
+        let dir = std::env::temp_dir().join(format!("floptle_vec3_pin_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("project.ron");
+        // A project.ron with no `script_vec3` — i.e. every project shipped so far.
+        std::fs::write(&path, "(retro: true, retro_height: 240)").unwrap();
+
+        let cfg = super::load_project(&path);
+        assert_eq!(cfg.script_vec3_resolved(), super::ScriptVec3Doc::Exact);
+        assert_eq!(
+            cfg.script_vec3,
+            Some(super::ScriptVec3Doc::Exact),
+            "loading pins the choice, so the next save records it"
+        );
+
+        // And it survives the round trip it was pinned for.
+        super::save_project(&cfg, &path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("script_vec3"), "the pin never reached the file: {text}");
+        assert_eq!(super::load_project(&path).script_vec3, Some(super::ScriptVec3Doc::Exact));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A MISSING project.ron is not an existing project**, so it must not be
+    /// pinned — that is the seam a new project needs to start at `Fast`.
+    #[test]
+    fn a_missing_project_file_is_left_unpinned() {
+        let path = std::env::temp_dir().join(format!("floptle_vec3_absent_{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let cfg = super::load_project(&path);
+        assert_eq!(cfg.script_vec3, None, "nothing to be compatible with yet");
+        // It still READS as exact, so no caller has to handle the absence.
+        assert_eq!(cfg.script_vec3_resolved(), super::ScriptVec3Doc::Exact);
+    }
+
+    /// An explicit choice is carried through the file unchanged — in
+    /// particular `Fast` is never "helpfully" pinned back to `Exact`.
+    #[test]
+    fn an_explicit_fast_survives_a_round_trip() {
+        let dir = std::env::temp_dir().join(format!("floptle_vec3_fast_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("project.ron");
+        let cfg = ProjectConfigDoc {
+            script_vec3: Some(super::ScriptVec3Doc::Fast),
+            ..Default::default()
+        };
+        super::save_project(&cfg, &path).unwrap();
+        let back = super::load_project(&path);
+        assert_eq!(back.script_vec3, Some(super::ScriptVec3Doc::Fast));
+        assert_eq!(back.script_vec3_resolved(), super::ScriptVec3Doc::Fast);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `pin_script_vec3` reports whether it changed anything, and is
+    /// idempotent — a caller that persists on `true` must not rewrite the file
+    /// on every open.
+    #[test]
+    fn pinning_is_idempotent_and_reports_honestly() {
+        let mut cfg = ProjectConfigDoc { script_vec3: None, ..Default::default() };
+        assert!(cfg.pin_script_vec3(), "the first pin changes it");
+        assert!(!cfg.pin_script_vec3(), "the second must not");
+        let mut chosen =
+            ProjectConfigDoc { script_vec3: Some(super::ScriptVec3Doc::Fast), ..Default::default() };
+        assert!(!chosen.pin_script_vec3(), "an explicit choice is never overwritten");
+        assert_eq!(chosen.script_vec3, Some(super::ScriptVec3Doc::Fast));
+    }
 
     /// **Pinning a retro width has to change the FRAMING, not just the target.**
     ///
