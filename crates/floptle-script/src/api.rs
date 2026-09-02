@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use floptle_core::math::{EulerRot, Quat, Vec3};
 use floptle_core::{Entity, Matter, ParticleSystem, RigidBody, World};
-use mlua::{Lua, Table, Value};
+use mlua::{IntoLua, Lua, Table, Value};
 
 use crate::env::{as_num, new_component_handle, new_node_handle, new_script_handle};
 use crate::{AnimCmd, AnimInfo, Shared, VfxCmd};
@@ -2885,9 +2885,7 @@ fn new_tilemap_handle(
             let e: u32 = this.raw_get("__id")?;
             let s = sw.borrow();
             match world_of_cell(&s, e, x, y) {
-                Some(p) => Ok(Value::UserData(
-                    lua.create_userdata(crate::math_api::LuaVec3(p))?,
-                )),
+                Some(p) => Ok(crate::math_api::LuaVec3(p).into_lua(lua)?),
                 None => Ok(Value::Nil),
             }
         })?,
@@ -3341,14 +3339,10 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     this.raw_get::<f64>("y"),
                     this.raw_get::<f64>("z"),
                 ) {
-                    return Ok(Value::UserData(lua.create_userdata(
-                        crate::math_api::LuaVec3(glam::DVec3::new(x, y, z)),
-                    )?));
+                    return crate::math_api::LuaVec3(glam::DVec3::new(x, y, z)).into_lua(lua);
                 }
                 if let Some(tr) = scene.borrow().transforms.get(&e) {
-                    return Ok(Value::UserData(
-                        lua.create_userdata(crate::math_api::LuaVec3(tr.translation))?,
-                    ));
+                    return crate::math_api::LuaVec3(tr.translation).into_lua(lua);
                 }
                 return Ok(Value::Nil);
             }
@@ -3378,9 +3372,9 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                     "tickX" => Value::Number(p[0]),
                     "tickY" => Value::Number(p[1]),
                     "tickZ" => Value::Number(p[2]),
-                    _ => Value::UserData(lua.create_userdata(crate::math_api::LuaVec3(
+                    _ => crate::math_api::LuaVec3(
                         glam::DVec3::new(p[0], p[1], p[2]),
-                    ))?),
+                    ).into_lua(lua)?,
                 });
             }
             // Transform reads.
@@ -3403,9 +3397,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         "worldX" => Value::Number(w.x),
                         "worldY" => Value::Number(w.y),
                         "worldZ" => Value::Number(w.z),
-                        _ => Value::UserData(
-                            lua.create_userdata(crate::math_api::LuaVec3(w))?,
-                        ),
+                        _ => crate::math_api::LuaVec3(w).into_lua(lua)?,
                     });
                 }
                 if let Some(tr) = s.transforms.get(&e) {
@@ -3422,13 +3414,11 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         // non-uniform case (`node.scale` stays the uniform
                         // shortcut it has always been).
                         "size" => {
-                            return Ok(Value::UserData(lua.create_userdata(
-                                crate::math_api::LuaVec3(glam::DVec3::new(
+                            return crate::math_api::LuaVec3(glam::DVec3::new(
                                     tr.scale.x as f64,
                                     tr.scale.y as f64,
                                     tr.scale.z as f64,
-                                )),
-                            )?));
+                                )).into_lua(lua);
                         }
                         "yaw" | "pitch" | "roll" => {
                             let (y, p, r) = tr.rotation.to_euler(EulerRot::YXZ);
@@ -3618,25 +3608,21 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         .copied()
                         .or_else(|| bodies.borrow().get(&e).map(|b| b.vel));
                     return Ok(match vel {
-                        Some(v) => Value::UserData(lua.create_userdata(
-                            crate::math_api::LuaVec3(glam::DVec3::new(
+                        Some(v) => crate::math_api::LuaVec3(glam::DVec3::new(
                                 v[0] as f64,
                                 v[1] as f64,
                                 v[2] as f64,
-                            )),
-                        )?),
+                            )).into_lua(lua)?,
                         None => Value::Nil,
                     });
                 }
                 "up" => {
                     return Ok(match bodies.borrow().get(&e) {
-                        Some(b) => Value::UserData(lua.create_userdata(
-                            crate::math_api::LuaVec3(glam::DVec3::new(
+                        Some(b) => crate::math_api::LuaVec3(glam::DVec3::new(
                                 b.up[0] as f64,
                                 b.up[1] as f64,
                                 b.up[2] as f64,
-                            )),
-                        )?),
+                            )).into_lua(lua)?,
                         None => Value::Nil,
                     });
                 }
@@ -3650,13 +3636,11 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                         if key == "groundNormal" { b.ground_normal } else { b.wall_normal }
                     });
                     return Ok(match n {
-                        Some(v) => Value::UserData(lua.create_userdata(
-                            crate::math_api::LuaVec3(glam::DVec3::new(
+                        Some(v) => crate::math_api::LuaVec3(glam::DVec3::new(
                                 v[0] as f64,
                                 v[1] as f64,
                                 v[2] as f64,
-                            )),
-                        )?),
+                            )).into_lua(lua)?,
                         None => Value::Nil,
                     });
                 }
@@ -3672,9 +3656,9 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                                 "right" => r * glam::Vec3::X,
                                 _ => r * glam::Vec3::Y,
                             };
-                            Value::UserData(lua.create_userdata(crate::math_api::LuaVec3(
+                            crate::math_api::LuaVec3(
                                 glam::DVec3::new(v.x as f64, v.y as f64, v.z as f64),
-                            ))?)
+                            ).into_lua(lua)?
                         }
                         None => Value::Nil,
                     });
@@ -6032,7 +6016,7 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
             } else {
                 w.mul_transform(&floptle_core::Transform::from_translation(v)).translation
             };
-            Ok(Value::UserData(lua.create_userdata(crate::math_api::LuaVec3(p))?))
+            crate::math_api::LuaVec3(p).into_lua(lua)
         })?;
         let to_world = f.clone();
         methods.set(
@@ -6088,9 +6072,9 @@ pub(crate) fn install_handle_api(lua: &Lua, shared: &Shared) -> mlua::Result<()>
                 lua.create_function(move |lua, this: Table| {
                     let e: u32 = this.raw_get("__id")?;
                     let r = world_transform_of(&scene.borrow(), e).rotation * axis;
-                    Ok(Value::UserData(lua.create_userdata(crate::math_api::LuaVec3(
+                    crate::math_api::LuaVec3(
                         glam::DVec3::new(r.x as f64, r.y as f64, r.z as f64),
-                    ))?))
+                    ).into_lua(lua)
                 })?,
             )?;
         }

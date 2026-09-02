@@ -206,6 +206,21 @@ pub fn run(args: ServerArgs) -> i32 {
         floptle_core::math::DVec3::ZERO,
     );
     let mut host = floptle_script::ScriptHost::new();
+    // The same `vec3` backing the clients run. This is not merely tidiness: the
+    // two modes carry different precision (f64 against f32), and a server
+    // simulating in one while its clients simulate in the other is a rollback
+    // divergence that presents as rubber-banding rather than as a settings
+    // mismatch. See ADR-0028 Phase 3.
+    {
+        let cfg = floptle_scene::load_project(&root.join("project.ron"));
+        let mode = match cfg.script_vec3_resolved() {
+            floptle_scene::ScriptVec3Doc::Exact => floptle_script::Vec3Mode::Exact,
+            floptle_scene::ScriptVec3Doc::Fast => floptle_script::Vec3Mode::Fast,
+        };
+        if let Err(e) = host.set_vec3_mode(mode) {
+            eprintln!("  {e}");
+        }
+    }
     // A dedicated server IS a running session, so `http.*` is live here — and
     // this is the one place it's unambiguously the right tool: the AUTHORITY
     // talking to your web API is exactly how a client stops needing to.

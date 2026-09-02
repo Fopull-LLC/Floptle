@@ -257,7 +257,28 @@ mod math_api;
 /// that is not this one — the editor's package environment is the other — and a
 /// public function that returns a private type leaves that host unable to read
 /// its own answers.
-pub use math_api::LuaVec3;
+pub use math_api::{ExactVec3, LuaVec3, Vec3Mode};
+
+/// Read a 3-vector out of any Lua value this engine treats as one: a `vec3` in
+/// EITHER backing, a `vec2` (z = 0), a node handle, or a `{x=, y=, z=}` table.
+///
+/// **The public read path, and the reason it exists is a bug it now prevents.**
+/// A `vec3` used to be exactly one Rust type in a userdata, so a caller outside
+/// this crate could `borrow::<LuaVec3>()` and be right. With two backings that
+/// is no longer true, and the failure is silent in the worst way:
+/// `AnyUserData::borrow` is bounded on `'static` and not on `UserData`, so a
+/// borrow of the wrong type still COMPILES and merely never matches. Ask here
+/// instead.
+pub fn vec3_of(v: &mlua::Value) -> Option<glam::DVec3> {
+    math_api::vec3_of(v)
+}
+
+/// Choose a state's vec3 backing. Call before anything else populates it —
+/// `fast` installs methods on the vector type's metatable, which is global to
+/// the state.
+pub fn set_vec3_mode(lua: &mlua::Lua, mode: Vec3Mode) -> mlua::Result<()> {
+    math_api::set_mode_checked(lua, mode)
+}
 pub mod nav_api;
 pub mod access_api;
 mod net_api;

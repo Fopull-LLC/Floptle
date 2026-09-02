@@ -21,8 +21,15 @@
 //! The route that works is step 2b, and it needs no `unsafe` and no raw FFI:
 //! take the metatable from Rust, `set_readonly(false)`, wrap `__index` with a
 //! methods table that falls back to Luau's own function, and re-lock it.
-//! Wrapping rather than replacing is the load-bearing part — that fallback is
-//! what keeps `.x`/`.y`/`.z` working.
+//!
+//! **Why the fallback is kept — corrected.** The first reading of this probe
+//! concluded that the fallback is what resolves `.x`/`.y`/`.z`. It is not: the
+//! VM resolves components itself, ahead of any metatable, and they keep working
+//! with `__index` deleted outright (step 2c measures exactly that). What the
+//! fallback actually preserves is the RAISE on an unknown key — drop it and a
+//! misspelled component reads as a silent `nil`. That is still a good reason to
+//! wrap rather than replace, but it is a different one, and the guard for it is
+//! the `a misspelled component` entry in `math_api`'s divergence list.
 //!
 //! Run: `cargo run -p floptle-script --example vec3_probe`
 //!
@@ -79,6 +86,9 @@ fn main() {
     println!("\n2b. from Rust: unlock, WRAP, re-lock");
     say("methods + fields + arithmetic", attach_from_rust(&lua));
 
+    println!("\n2c. what the fallback is really for: delete __index entirely");
+    say("components / unknown key", without_index(&lua));
+
     println!("\n3. a Rust-built Vector crossing into Lua");
     say(
         "Value::Vector -> Lua",
@@ -101,6 +111,27 @@ fn say(label: &str, r: mlua::Result<String>) {
     }
 }
 
+/// Remove the metatable's `__index` altogether and see what actually stops
+/// working. Run last, because it leaves the state without one.
+///
+/// This is the step that corrected the probe's first conclusion: components
+/// still read, and it is the unknown-key ERROR that is lost.
+#[cfg(feature = "vm-luau")]
+fn without_index(lua: &mlua::Lua) -> mlua::Result<String> {
+    let mt: mlua::Table = lua.load("return getmetatable(vector.create(1,2,3))").eval()?;
+    mt.set_readonly(false);
+    mt.set("__index", mlua::Value::Nil)?;
+    mt.set_readonly(true);
+    lua.load(
+        "local v = vector.create(3, 4, 0)\n\
+         local okx, x = pcall(function() return v.x end)\n\
+         local okn, n = pcall(function() return v.nope end)\n\
+         return ('.x=%s(%s)  .nope=%s(%s)'):format(\n\
+           tostring(okx), tostring(x), tostring(okn), tostring(n))",
+    )
+    .eval()
+}
+
 /// The route Phase 3 will actually take, in miniature: one method, installed
 /// over Luau's own `__index` rather than in place of it.
 #[cfg(feature = "vm-luau")]
@@ -109,9 +140,10 @@ fn attach_from_rust(lua: &mlua::Lua) -> mlua::Result<String> {
     println!("  {:<34} {}", "metatable is_readonly", mt.is_readonly());
     mt.set_readonly(false);
 
-    // Luau's own `__index` resolves `.x`/`.y`/`.z`. Keep it as the fallback:
-    // REPLACING it rather than wrapping it is how you ship a `fast` vec3 whose
-    // components have quietly stopped being readable.
+    // Keep Luau's own `__index` as the fallback. Not for the components — step
+    // 2c shows the VM resolves those without any metatable at all — but for the
+    // unknown-key raise: replace this outright and `v.nope` answers nil instead
+    // of saying so.
     let previous: Option<mlua::Function> = match mt.get::<mlua::Value>("__index")? {
         mlua::Value::Function(f) => Some(f),
         _ => None,

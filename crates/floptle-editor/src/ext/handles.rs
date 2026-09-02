@@ -148,14 +148,19 @@ pub(crate) fn paint(painter: &egui::Painter, items: &[Painted], ppp: f32) {
 /// Pull a world position out of a Lua value: `vec3(...)`, `{x=,y=,z=}` or
 /// `{1,2,3}`. Three spellings because all three are what somebody writes.
 pub(crate) fn vec3_of(v: &Value) -> mlua::Result<[f64; 3]> {
-    // `nav.*` answers in the scripting runtime's own vector, which is userdata
-    // rather than a table. Without this arm, `handles.dot(nav.nearest(p))` —
-    // the first thing anybody does with a navmesh — raises, and the message
-    // blames the caller for passing something that is in fact a position.
-    if let Value::UserData(ud) = v
-        && let Ok(p) = ud.borrow::<floptle_script::LuaVec3>()
-    {
-        return Ok([p.0.x, p.0.y, p.0.z]);
+    // `nav.*` answers in the scripting runtime's own vector. Without this arm,
+    // `handles.dot(nav.nearest(p))` — the first thing anybody does with a
+    // navmesh — raises, and the message blames the caller for passing something
+    // that is in fact a position.
+    //
+    // Asked of `floptle_script` rather than by borrowing a concrete userdata
+    // type: a vec3 has TWO backings now (ADR-0028 Phase 3), and only one of
+    // them is userdata at all. A `borrow::<LuaVec3>()` here would still
+    // compile — `AnyUserData::borrow` is bounded on `'static`, not on
+    // `UserData` — and would simply stop matching, which is this function's
+    // original bug returning by a new route.
+    if let Some(p) = floptle_script::vec3_of(v) {
+        return Ok([p.x, p.y, p.z]);
     }
     let Value::Table(t) = v else {
         return Err(mlua::Error::runtime("expected a position — vec3(x, y, z) or {x=, y=, z=}"));

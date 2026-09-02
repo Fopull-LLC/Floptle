@@ -600,10 +600,36 @@ impl Editor {
     /// absent from unparseable); this is the call site using it. Absent stays
     /// quiet — a project without a `project.ron` is a project with defaults, and
     /// that is a real state, not a fault.
+    /// Point the script host at this project's `vec3` backing.
+    ///
+    /// Loud on refusal rather than silent: `fast` needs Luau's native vectors,
+    /// so an escape-hatch (`vm-luajit`) build cannot honour it. Such a project
+    /// still opens and still runs — in `exact`, which is what its scripts were
+    /// written against anyway — but the Console says so, because a project
+    /// whose stated setting is being ignored should never have to be guessed at.
+    pub(crate) fn apply_script_vec3_mode(&mut self) {
+        let mode = match self.project.script_vec3_resolved() {
+            floptle_scene::ScriptVec3Doc::Exact => floptle_script::Vec3Mode::Exact,
+            floptle_scene::ScriptVec3Doc::Fast => floptle_script::Vec3Mode::Fast,
+        };
+        if let Err(e) = self.script_host.set_vec3_mode(mode) {
+            self.console.push(floptle_script::LogLevel::Warn, e, None);
+        }
+    }
+
     pub(crate) fn read_project_config(&mut self) -> floptle_scene::ProjectConfigDoc {
         let path = self.project_cfg_path();
         match floptle_scene::try_load_project(&path) {
-            Ok(Some(cfg)) => cfg,
+            Ok(Some(mut cfg)) => {
+                // A project.ron that EXISTS but predates `script_vec3` gets its
+                // vec3 choice pinned, exactly as `load_project` does — this
+                // call site reads the file itself (to tell "absent" from
+                // "unparseable"), so it has to carry the same rule or opening
+                // a project through the editor would leave the choice implicit
+                // while opening it any other way wrote it down.
+                cfg.pin_script_vec3();
+                cfg
+            }
             Ok(None) => Default::default(),
             Err(e) => {
                 self.console.push(
@@ -1316,6 +1342,7 @@ impl Editor {
         // reasonable response is to bake again, every single session.
         self.adopt_scene_bakes();
         self.project = self.read_project_config();
+        self.apply_script_vec3_mode();
         // The action map belongs to the project, so it reloads with it —
         // otherwise the new project's scripts would resolve against the old
         // project's actions.

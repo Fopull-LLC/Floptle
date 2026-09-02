@@ -100,20 +100,17 @@ pub enum AssemblyCmd {
     Teleport { root: u32, pos: [f64; 3] },
 }
 
-/// A `vec3(...)`-ish argument: the `vec3()` value itself (a userdata) or any
-/// table with `x`/`y`/`z` fields. Rejecting the actual `vec3()` type here was
-/// the bug that silently killed EVERY scripted thrust/torque/teleport call.
+/// A `vec3(...)`-ish argument: the `vec3()` value itself, in either backing, or
+/// any table with `x`/`y`/`z` fields. Rejecting the actual `vec3()` type here
+/// was the bug that silently killed EVERY scripted thrust/torque/teleport call.
+///
+/// It went through the shared reader after that bug returned by a second route:
+/// a private copy of "is this a vector" borrowed one concrete userdata type,
+/// and `fast` mode's vectors are not userdata at all (ADR-0028 Phase 3). Ask
+/// [`crate::math_api::vec3_of`] — it is the ONE place that knows every spelling.
 fn v3(v: &Value, what: &str) -> mlua::Result<[f64; 3]> {
-    if let Value::UserData(ud) = v
-        && let Ok(u) = ud.borrow::<crate::math_api::LuaVec3>()
-    {
-        return Ok([u.0.x, u.0.y, u.0.z]);
-    }
-    if let Value::Table(t) = v {
-        let (x, y, z) = (t.get::<f64>("x"), t.get::<f64>("y"), t.get::<f64>("z"));
-        if let (Ok(x), Ok(y), Ok(z)) = (x, y, z) {
-            return Ok([x, y, z]);
-        }
+    if let Some(p) = crate::math_api::vec3_of(v) {
+        return Ok([p.x, p.y, p.z]);
     }
     Err(mlua::Error::runtime(format!("{what}: expected a vec3 (or a table with x, y, z)")))
 }

@@ -3540,6 +3540,7 @@ impl ApplicationHandler for Editor {
             self.check_autosave(); // offer crash recovery if an autosave is newer
         }
         self.project = self.read_project_config();
+        self.apply_script_vec3_mode();
         // The action map, on the SAME boot path an exported game takes — the
         // File ⏵ Open route loads it too, but a launched build never goes
         // through that, so without this every shipped game would start with no

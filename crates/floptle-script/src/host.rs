@@ -2100,6 +2100,19 @@ impl ScriptHost {
         }
     }
 
+    /// Choose which `vec3` this host's scripts get — a project's
+    /// `script_vec3` setting (ADR-0028, Phase 3).
+    ///
+    /// Called when a project is opened, before its scripts run. Answering `Err`
+    /// rather than quietly falling back is the point: `fast` needs Luau's
+    /// native vectors and does not exist on a `vm-luajit` build, and a project
+    /// that asked for it and silently got `exact` would be a behaviour
+    /// difference nobody was told about. The caller is expected to surface the
+    /// message and carry on in `exact`, which is what the state is left in.
+    pub fn set_vec3_mode(&self, mode: crate::Vec3Mode) -> Result<(), String> {
+        crate::math_api::set_mode_checked(&self.lua, mode).map_err(|e| e.to_string())
+    }
+
     /// Points the `steam.*` bridge at a real backend — called (at most once,
     /// before any script runs) only when the caller has decided this session
     /// IS the game: `floptle run --steam`, an exported/served build, never

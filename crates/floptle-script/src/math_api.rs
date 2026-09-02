@@ -8,23 +8,336 @@
 //! so `distance(node, target)` just works. LuaJIT-friendly: components are
 //! plain doubles, ops allocate one small userdata — fine at gameplay call rates.
 
-use mlua::{Lua, MetaMethod, Table, UserData, UserDataFields, UserDataMethods, Value};
+use mlua::{IntoLua, Lua, MetaMethod, Table, UserData, UserDataFields, UserDataMethods, Value};
 
-/// A 3-component vector (f64 — matches the engine's world coordinates).
+/// Which `vec3` a Lua state hands to scripts (ADR-0028, Phase 3).
+///
+/// Per **state**, held as mlua app data, and deliberately not a thread-local:
+/// the editor runs a second Lua state for package extensions on the same
+/// thread as the game's, and a mode that leaked between them would make an
+/// extension's vectors depend on which project happened to be open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Vec3Mode {
+    /// f64 components in a userdata, mutable — every project up to now.
+    #[default]
+    Exact,
+    /// Luau's native vector: f32 components, immutable, no allocation.
+    Fast,
+}
+
+/// This state's vec3 mode, defaulting to [`Vec3Mode::Exact`].
+///
+/// A state that was never told is `Exact`, which is the safe direction: the
+/// cost of guessing wrong that way is speed, and the other way is precision.
+pub(crate) fn mode(lua: &Lua) -> Vec3Mode {
+    lua.app_data_ref::<Vec3Mode>().map(|m| *m).unwrap_or_default()
+}
+
+/// Choose the vec3 backing for a state, refusing what this build cannot do.
+///
+/// `Fast` needs Luau's native vectors, so it is not merely slower under
+/// `vm-luajit` — it does not exist there. That returns an error rather than
+/// quietly downgrading: a project that asked for `fast` and got `exact` without
+/// being told would be a silent behaviour difference across a build flag, and
+/// the caller is expected to say so and carry on in `exact`.
+pub(crate) fn set_mode_checked(lua: &Lua, m: Vec3Mode) -> mlua::Result<()> {
+    match m {
+        Vec3Mode::Exact => {
+            lua.set_app_data(Vec3Mode::Exact);
+            Ok(())
+        }
+        #[cfg(feature = "vm-luau")]
+        Vec3Mode::Fast => {
+            lua.set_app_data(Vec3Mode::Fast);
+            // The editor keeps ONE host across project opens, so this can be
+            // called more than once on the same state. Installing twice would
+            // wrap the wrapper — every field read paying for another Rust
+            // closure, forever — so it happens once and the marker says so.
+            if lua.app_data_ref::<FastInstalled>().is_none() {
+                install_fast_vec3(lua)?;
+                lua.set_app_data(FastInstalled);
+            }
+            Ok(())
+        }
+        #[cfg(not(feature = "vm-luau"))]
+        Vec3Mode::Fast => Err(mlua::Error::runtime(
+            "this project's script_vec3 is `fast`, which needs Luau's native vectors, and this \
+             build embeds LuaJIT. Running in `exact` instead — the scripts behave as they \
+             always have, only slower than the project asked for.",
+        )),
+    }
+}
+
+/// Marker: this state's vector metatable has already been extended.
+///
+/// Switching back to `exact` deliberately leaves it in place. Nothing produces
+/// a native vector in that mode, so the methods are unreachable rather than
+/// wrong, and tearing a metatable back down is a good deal more dangerous than
+/// leaving a few functions nobody can reach.
+#[cfg(feature = "vm-luau")]
+struct FastInstalled;
+
+/// Teach Luau's native vector the engine's `vec3` surface.
+///
+/// The route is not the obvious one and `examples/vec3_probe.rs` is the
+/// evidence: `Lua::set_type_metatable` cannot reach the vector type (its
+/// `LuaType` bound is private and unimplemented for `Vector`), and the
+/// metatable Luau already installs is readonly, so doing this from Lua raises.
+/// From Rust it can be unlocked, extended and re-locked.
+///
+/// **`__index` WRAPS Luau's own rather than replacing it.** That function is
+/// what resolves `.x`, `.y` and `.z`; drop it and every component read on every
+/// vector in the project returns nil, with nothing raised and nothing logged.
+#[cfg(feature = "vm-luau")]
+fn install_fast_vec3(lua: &Lua) -> mlua::Result<()> {
+    let mt: Table = lua.load("return getmetatable(vector.create(0, 0, 0))").eval()?;
+    let was_readonly = mt.is_readonly();
+    mt.set_readonly(false);
+
+    let previous = match mt.get::<Value>("__index")? {
+        Value::Function(f) => Some(f),
+        _ => None,
+    };
+    let methods = fast_methods(lua)?;
+    mt.set(
+        "__index",
+        lua.create_function(move |_, (this, key): (Value, Value)| {
+            if let Value::String(ref k) = key {
+                let found: Value = methods.get(k.to_str()?.to_owned())?;
+                if found != Value::Nil {
+                    return Ok(found);
+                }
+            }
+            match previous {
+                Some(ref f) => f.call((this, key)),
+                None => Ok(Value::Nil),
+            }
+        })?,
+    )?;
+
+    // Parity with `exact`'s `__tostring`. Luau's own prints `1, 2, 3`, and a
+    // `print(v)` that changes shape with a project setting is a difference
+    // somebody debugs rather than reads about.
+    mt.set(
+        "__tostring",
+        lua.create_function(|_, v: mlua::Vector| {
+            Ok(format!("vec3({}, {}, {})", f64::from(v.x()), f64::from(v.y()), f64::from(v.z())))
+        })?,
+    )?;
+
+    // The one genuinely breaking semantic, made loud. A native vector is
+    // immutable, so `v.x = 1` cannot work; without this it fails as Luau's own
+    // "attempt to index vector", which names neither the cause nor the cure.
+    mt.set(
+        "__newindex",
+        lua.create_function(|_, (_, key, _): (Value, Value, Value)| {
+            let k = match &key {
+                Value::String(s) => s.to_str().map(|s| s.to_owned()).unwrap_or_default(),
+                other => other.to_string().unwrap_or_default(),
+            };
+            let helper = match k.as_str() {
+                "x" => Some("withX"),
+                "y" => Some("withY"),
+                "z" => Some("withZ"),
+                _ => None,
+            };
+            Err::<(), _>(mlua::Error::runtime(match helper {
+                Some(h) => format!(
+                    "this project's vec3 is `fast`, and a fast vector cannot be changed in \
+                     place. Write `v = v:{h}(n)` instead of `v.{k} = n` — it answers a new \
+                     vector and leaves the old one alone. (Project Settings -> Scripting \
+                     picks the vec3; `exact` still allows the assignment.)"
+                ),
+                None => format!("a vec3 has no field `{k}` to set"),
+            }))
+        })?,
+    )?;
+
+    if was_readonly {
+        mt.set_readonly(true);
+    }
+    Ok(())
+}
+
+/// The `fast` method surface — the same names, arities and answers as
+/// [`ExactVec3`]'s, so the documented surface does not depend on the setting.
+///
+/// Arguments go through [`vec3_of`], so a method still accepts a `vec3` in
+/// either backing, a `vec2`, a node handle or an `{x=, y=, z=}` table, exactly
+/// as `exact` does.
+#[cfg(feature = "vm-luau")]
+fn fast_methods(lua: &Lua) -> mlua::Result<Table> {
+    fn d(v: mlua::Vector) -> glam::DVec3 {
+        glam::DVec3::new(v.x().into(), v.y().into(), v.z().into())
+    }
+    fn arg(name: &'static str, v: &Value) -> mlua::Result<glam::DVec3> {
+        vec3_of(v).ok_or_else(|| mlua::Error::runtime(format!("{name} takes a vector")))
+    }
+    let t = lua.create_table()?;
+    t.set("length", lua.create_function(|_, v: mlua::Vector| Ok(d(v).length()))?)?;
+    t.set("magnitude", lua.create_function(|_, v: mlua::Vector| Ok(d(v).length()))?)?;
+    t.set("lengthSquared", lua.create_function(|_, v: mlua::Vector| Ok(d(v).length_squared()))?)?;
+    t.set(
+        "normalized",
+        lua.create_function(|_, v: mlua::Vector| {
+            Ok(LuaVec3(d(v).try_normalize().unwrap_or(glam::DVec3::ZERO)))
+        })?,
+    )?;
+    t.set(
+        "dot",
+        lua.create_function(|_, (v, o): (mlua::Vector, Value)| Ok(d(v).dot(arg("dot", &o)?)))?,
+    )?;
+    t.set(
+        "cross",
+        lua.create_function(|_, (v, o): (mlua::Vector, Value)| {
+            Ok(LuaVec3(d(v).cross(arg("cross", &o)?)))
+        })?,
+    )?;
+    t.set(
+        "lerp",
+        lua.create_function(|_, (v, o, s): (mlua::Vector, Value, f64)| {
+            Ok(LuaVec3(d(v).lerp(arg("lerp", &o)?, s)))
+        })?,
+    )?;
+    t.set(
+        "distance",
+        lua.create_function(|_, (v, o): (mlua::Vector, Value)| {
+            Ok(d(v).distance(arg("distance", &o)?))
+        })?,
+    )?;
+    t.set(
+        "flatten",
+        lua.create_function(|_, (v, up): (mlua::Vector, Option<Value>)| {
+            let up = match up {
+                Some(u) => arg("flatten", &u)?,
+                None => glam::DVec3::Y,
+            };
+            Ok(LuaVec3(flatten(d(v), up)))
+        })?,
+    )?;
+    t.set(
+        "withX",
+        lua.create_function(|_, (v, n): (mlua::Vector, f64)| {
+            Ok(LuaVec3(glam::DVec3::new(n, d(v).y, d(v).z)))
+        })?,
+    )?;
+    t.set(
+        "withY",
+        lua.create_function(|_, (v, n): (mlua::Vector, f64)| {
+            Ok(LuaVec3(glam::DVec3::new(d(v).x, n, d(v).z)))
+        })?,
+    )?;
+    t.set(
+        "withZ",
+        lua.create_function(|_, (v, n): (mlua::Vector, f64)| {
+            Ok(LuaVec3(glam::DVec3::new(d(v).x, d(v).y, n)))
+        })?,
+    )?;
+    t.set(
+        "rotatedY",
+        lua.create_function(|_, (v, rad): (mlua::Vector, f64)| {
+            let v = d(v);
+            let (s, c) = rad.sin_cos();
+            Ok(LuaVec3(glam::DVec3::new(v.x * c + v.z * s, v.y, -v.x * s + v.z * c)))
+        })?,
+    )?;
+    t.set(
+        "rotatedAround",
+        lua.create_function(|_, (v, axis, rad): (mlua::Vector, Value, f64)| {
+            let v = d(v);
+            let a = arg("rotatedAround", &axis)?;
+            let Some(a) = a.try_normalize() else { return Ok(LuaVec3(v)) };
+            let (s, c) = rad.sin_cos();
+            Ok(LuaVec3(v * c + a.cross(v) * s + a * a.dot(v) * (1.0 - c)))
+        })?,
+    )?;
+    t.set(
+        "towards",
+        lua.create_function(|_, (v, o, md): (mlua::Vector, Value, f64)| {
+            Ok(LuaVec3(towards(d(v), arg("towards", &o)?, md)))
+        })?,
+    )?;
+    t.set(
+        "angleTo",
+        lua.create_function(|_, (v, o): (mlua::Vector, Value)| {
+            match (d(v).try_normalize(), arg("angleTo", &o)?.try_normalize()) {
+                (Some(a), Some(b)) => Ok(a.dot(b).clamp(-1.0, 1.0).acos()),
+                _ => Ok(0.0),
+            }
+        })?,
+    )?;
+    Ok(t)
+}
+
+/// A 3-component vector as it crosses the Rust/Lua boundary (f64 — matches the
+/// engine's world coordinates).
+///
+/// **This is a conversion type, not the value Lua sees.** Which of the two
+/// backings a script actually gets is decided per state by [`Vec3Mode`], and
+/// [`LuaVec3`]'s `IntoLua` is the single place that decision is applied — so
+/// every one of the several hundred call sites that answers `Ok(LuaVec3(v))`
+/// keeps working and none of them has to know the mode.
+///
+/// It cannot itself be the userdata: mlua carries a blanket
+/// `impl<T: UserData> IntoLua for T`, so a type that is `UserData` has its
+/// conversion already chosen and cannot dispatch. [`ExactVec3`] is the
+/// userdata; this is the value that decides what to become.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LuaVec3(pub glam::DVec3);
+
+/// The `exact` backing: f64 in a userdata, with the methods and operators.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExactVec3(pub glam::DVec3);
+
+impl mlua::IntoLua for LuaVec3 {
+    fn into_lua(self, lua: &Lua) -> mlua::Result<Value> {
+        match mode(lua) {
+            Vec3Mode::Exact => Ok(Value::UserData(lua.create_userdata(ExactVec3(self.0))?)),
+            #[cfg(feature = "vm-luau")]
+            Vec3Mode::Fast => Ok(Value::Vector(mlua::Vector::new(
+                self.0.x as f32,
+                self.0.y as f32,
+                self.0.z as f32,
+            ))),
+            // No native vector exists to build. Unreachable in practice —
+            // `set_mode` refuses `Fast` on this build — but stated rather than
+            // silently downgraded, because a vec3 that quietly changed backing
+            // is the failure this phase is written to avoid.
+            #[cfg(not(feature = "vm-luau"))]
+            Vec3Mode::Fast => Ok(Value::UserData(lua.create_userdata(ExactVec3(self.0))?)),
+        }
+    }
+}
+
+impl mlua::FromLua for LuaVec3 {
+    fn from_lua(v: Value, _: &Lua) -> mlua::Result<Self> {
+        vec3_of(&v).map(LuaVec3).ok_or_else(|| {
+            mlua::Error::runtime(format!(
+                "expected a vector — vec3(x, y, z) or {{x=, y=, z=}}, got {}",
+                v.type_name()
+            ))
+        })
+    }
+}
 
 /// A 2-component vector (UI/screen math).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LuaVec2(pub glam::DVec2);
 
-/// Read a 3-vector out of a Lua value: a `vec3`, a `vec2` (z = 0), or any
-/// table with numeric `x`/`y`(/`z`) fields — which includes NODE HANDLES, so
-/// vector APIs accept nodes directly.
+/// Read a 3-vector out of a Lua value: a `vec3` in EITHER backing, a `vec2`
+/// (z = 0), or any table with numeric `x`/`y`(/`z`) fields — which includes
+/// NODE HANDLES, so vector APIs accept nodes directly.
+///
+/// The single read path, which is why `fast` mode did not need several hundred
+/// call sites edited: a native vector arrives here like anything else.
 pub(crate) fn vec3_of(v: &Value) -> Option<glam::DVec3> {
     match v {
+        #[cfg(feature = "vm-luau")]
+        Value::Vector(v) => {
+            Some(glam::DVec3::new(v.x().into(), v.y().into(), v.z().into()))
+        }
         Value::UserData(ud) => {
-            if let Ok(v3) = ud.borrow::<LuaVec3>() {
+            if let Ok(v3) = ud.borrow::<ExactVec3>() {
                 return Some(v3.0);
             }
             if let Ok(v2) = ud.borrow::<LuaVec2>() {
@@ -50,7 +363,7 @@ fn num_of(v: &Value) -> Option<f64> {
     }
 }
 
-impl UserData for LuaVec3 {
+impl UserData for ExactVec3 {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("x", |_, v| Ok(v.0.x));
         fields.add_field_method_get("y", |_, v| Ok(v.0.y));
@@ -824,7 +1137,7 @@ fn install_direction_helpers(lua: &Lua) -> mlua::Result<()> {
             match (vec3_of(&a), vec3_of(&b)) {
                 (Some(a), Some(b)) => {
                     let t = if rate <= 0.0 { 1.0 } else { 1.0 - (-rate * dt).exp() };
-                    Ok(Value::UserData(lua.create_userdata(LuaVec3(a + (b - a) * t))?))
+                    Ok(LuaVec3(a + (b - a) * t).into_lua(lua)?)
                 }
                 _ => Err(mlua::Error::RuntimeError(
                     "ease(a, b, rate, dt) takes two numbers or two vectors".into(),
@@ -869,12 +1182,8 @@ fn install_direction_helpers(lua: &Lua) -> mlua::Result<()> {
                         let (y, vy) = step(c.y, t.y, v.y);
                         let (z, vz) = step(c.z, t.z, v.z);
                         Ok((
-                            Value::UserData(
-                                lua.create_userdata(LuaVec3(glam::DVec3::new(x, y, z)))?,
-                            ),
-                            Value::UserData(
-                                lua.create_userdata(LuaVec3(glam::DVec3::new(vx, vy, vz)))?,
-                            ),
+                            LuaVec3(glam::DVec3::new(x, y, z)).into_lua(lua)?,
+                            LuaVec3(glam::DVec3::new(vx, vy, vz)).into_lua(lua)?,
                         ))
                     }
                     _ => Err(mlua::Error::RuntimeError(
@@ -1064,6 +1373,190 @@ mod helper_tests {
         let lua = Lua::new();
         super::install(&lua).expect("install");
         lua
+    }
+
+    /// A state in the given vec3 mode, with `vec3` installed.
+    fn lua_in(mode: super::Vec3Mode) -> Lua {
+        let lua = Lua::new();
+        super::set_mode_checked(&lua, mode).expect("mode is available on this build");
+        super::install(&lua).expect("install");
+        lua
+    }
+
+    /// Every question the two backings must answer identically.
+    ///
+    /// One script, run in both modes, compared answer for answer. Written as a
+    /// SHARED corpus rather than two test bodies on purpose: the promise Phase 3
+    /// makes is that the documented surface does not depend on the setting, and
+    /// two separately-maintained lists of assertions is exactly how that promise
+    /// rots — one gains a case, the other does not, and the difference is
+    /// invisible until somebody flips a project over.
+    ///
+    /// Tolerances are `fast`'s, not a fudge: it is f32, so ~7 significant
+    /// digits is the whole point of the mode rather than a defect in it.
+    const PARITY: &[(&str, &str)] = &[
+        ("is a value", "return vec3(1,2,3) ~= nil and 'ok' or 'nil'"),
+        ("components", "local v = vec3(1,2,3) return ('%.4f %.4f %.4f'):format(v.x, v.y, v.z)"),
+        ("add", "local v = vec3(1,2,3) + vec3(4,5,6) return ('%.4f %.4f %.4f'):format(v.x,v.y,v.z)"),
+        ("sub", "local v = vec3(4,5,6) - vec3(1,2,3) return ('%.4f %.4f %.4f'):format(v.x,v.y,v.z)"),
+        ("mul scalar", "local v = vec3(1,2,3) * 2 return ('%.4f %.4f %.4f'):format(v.x,v.y,v.z)"),
+        ("div scalar", "local v = vec3(2,4,6) / 2 return ('%.4f %.4f %.4f'):format(v.x,v.y,v.z)"),
+        ("negate", "local v = -vec3(1,2,3) return ('%.4f %.4f %.4f'):format(v.x,v.y,v.z)"),
+        ("equality", "return tostring(vec3(1,2,3) == vec3(1,2,3))"),
+        ("length", "return ('%.4f'):format(vec3(3,4,0):length())"),
+        ("magnitude", "return ('%.4f'):format(vec3(3,4,0):magnitude())"),
+        ("lengthSquared", "return ('%.4f'):format(vec3(3,4,0):lengthSquared())"),
+        ("normalized", "local v = vec3(3,4,0):normalized() return ('%.4f %.4f'):format(v.x,v.y)"),
+        ("dot", "return ('%.4f'):format(vec3(1,2,3):dot(vec3(4,5,6)))"),
+        ("cross", "local v = vec3(1,0,0):cross(vec3(0,1,0)) return ('%.4f %.4f %.4f'):format(v.x,v.y,v.z)"),
+        ("lerp", "local v = vec3(0,0,0):lerp(vec3(10,20,30), 0.5) return ('%.4f %.4f %.4f'):format(v.x,v.y,v.z)"),
+        ("distance", "return ('%.4f'):format(vec3(0,0,0):distance(vec3(3,4,0)))"),
+        ("flatten", "local v = vec3(1,5,0):flatten(vec3(0,1,0)) return ('%.4f %.4f'):format(v.x,v.y)"),
+        ("withX", "local v = vec3(1,2,3):withX(9) return ('%.4f %.4f %.4f'):format(v.x,v.y,v.z)"),
+        ("withY", "local v = vec3(1,2,3):withY(9) return ('%.4f %.4f %.4f'):format(v.x,v.y,v.z)"),
+        ("withZ", "local v = vec3(1,2,3):withZ(9) return ('%.4f %.4f %.4f'):format(v.x,v.y,v.z)"),
+        ("rotatedY", "local v = vec3(1,0,0):rotatedY(math.pi/2) return ('%.3f %.3f'):format(v.x,v.z)"),
+        ("rotatedAround", "local v = vec3(1,0,0):rotatedAround(vec3(0,1,0), math.pi/2) return ('%.3f %.3f'):format(v.x,v.z)"),
+        ("towards", "local v = vec3(0,0,0):towards(vec3(10,0,0), 3) return ('%.4f'):format(v.x)"),
+        ("angleTo", "return ('%.4f'):format(vec3(1,0,0):angleTo(vec3(0,1,0)))"),
+        ("tostring", "return tostring(vec3(1,2,3))"),
+        // A method's argument accepts every spelling in BOTH modes.
+        ("arg as table", "return ('%.4f'):format(vec3(0,0,0):distance({x=3,y=4,z=0}))"),
+        ("arg as vec3", "return ('%.4f'):format(vec3(0,0,0):distance(vec3(3,4,0)))"),
+        // Constructor forms.
+        ("ctor splat", "local v = vec3(2) return ('%.4f %.4f %.4f'):format(v.x,v.y,v.z)"),
+        ("ctor zero", "local v = vec3() return ('%.4f %.4f %.4f'):format(v.x,v.y,v.z)"),
+        ("ctor copy", "local v = vec3(vec3(1,2,3)) return ('%.4f %.4f %.4f'):format(v.x,v.y,v.z)"),
+        ("ctor from table", "local v = vec3({x=1,y=2,z=3}) return ('%.4f %.4f %.4f'):format(v.x,v.y,v.z)"),
+        ("distance global", "return ('%.4f'):format(distance(vec3(0,0,0), vec3(3,4,0)))"),
+    ];
+
+    /// Where the two backings genuinely differ, with the direction asserted.
+    ///
+    /// A difference that is merely *known* rots into a difference that is
+    /// unnoticed, so each one is pinned here as "exact says A, fast says B" and
+    /// goes red if either side moves. Same discipline as `tests/vm_dialect.rs`
+    /// applies to the two VMs.
+    const DIVERGENT: &[(&str, &str, &str, &str)] = &[
+        // **A misspelled component.** `exact` is a userdata whose unknown
+        // fields read as nil; `fast` inherits Luau's own raise, because its
+        // `__index` falls back to the VM's rather than answering nil itself.
+        //
+        // This is also the case that corrected a wrong assumption about WHY
+        // that fallback is kept. It is not that the fallback resolves `.x` —
+        // the VM does that natively, ahead of any metatable, and components
+        // keep working with `__index` deleted outright. It is this: drop the
+        // fallback and `fast` would answer nil too, matching `exact` by making
+        // the stricter mode worse.
+        //
+        // `fast` is left strict deliberately. Raising is the better behaviour,
+        // and the mode is opt-in, so nothing that exists today is affected;
+        // teaching `exact` to raise would change a shipped project's behaviour,
+        // which is the one thing this phase must not do.
+        (
+            "a misspelled component",
+            "return tostring(pcall(function() return vec3(1,2,3).nope end))",
+            "true",  // exact: reads as nil
+            "false", // fast: raises
+        ),
+    ];
+
+    /// **The two backings answer the same questions the same way.**
+    ///
+    /// On the `vm-luajit` escape hatch there is no second backing to compare
+    /// against, so the same corpus is used the only way it still means
+    /// something: every case is run against `exact` and required to produce an
+    /// answer. That is deliberately not a skip — a corpus that compiles out
+    /// stops being maintained, and this one is the definition of the surface.
+    #[test]
+    fn exact_and_fast_agree_on_the_documented_surface() {
+        let exact = lua_in(super::Vec3Mode::Exact);
+
+        #[cfg(not(feature = "vm-luau"))]
+        {
+            // No `fast` here — but the surface itself must still hold up, and
+            // the expected `exact` answers in the divergence list must still be
+            // the ones this VM gives.
+            for (name, src) in PARITY {
+                let r: mlua::Result<String> = exact.load(*src).eval();
+                assert!(r.is_ok(), "`{name}` does not even run in exact: {r:?}");
+            }
+            for (name, src, want_exact, _) in DIVERGENT {
+                let e: String = exact.load(*src).eval().expect(name);
+                assert_eq!(&e, want_exact, "exact changed on `{name}`");
+            }
+        }
+
+        #[cfg(feature = "vm-luau")]
+        {
+            let fast = lua_in(super::Vec3Mode::Fast);
+            let mut disagreed = Vec::new();
+            for (name, src) in PARITY {
+                let e: mlua::Result<String> = exact.load(*src).eval();
+                let f: mlua::Result<String> = fast.load(*src).eval();
+                match (e, f) {
+                    (Ok(a), Ok(b)) if a == b => {}
+                    (a, b) => disagreed.push(format!(
+                        "  {name}: exact={:?} fast={:?}",
+                        a.map_err(|e| e.to_string()),
+                        b.map_err(|e| e.to_string())
+                    )),
+                }
+            }
+            assert!(
+                disagreed.is_empty(),
+                "the vec3 surface differs between modes:\n{}",
+                disagreed.join("\n")
+            );
+
+            // And the differences that ARE real are still the ones expected.
+            for (name, src, want_exact, want_fast) in DIVERGENT {
+                let e: String = exact.load(*src).eval().expect(name);
+                let f: String = fast.load(*src).eval().expect(name);
+                assert_eq!(&e, want_exact, "exact changed on `{name}`");
+                assert_eq!(&f, want_fast, "fast changed on `{name}`");
+                assert_ne!(e, f, "`{name}` is listed as divergent but no longer diverges");
+            }
+        }
+    }
+
+    /// **`fast` really is Luau's native vector**, not a userdata wearing its
+    /// name — otherwise the whole point of the mode is missing and every test
+    /// above would still pass.
+    #[cfg(feature = "vm-luau")]
+    #[test]
+    fn fast_is_the_native_vector_and_exact_is_not() {
+        let fast = lua_in(super::Vec3Mode::Fast);
+        let t: String = fast.load("return type(vec3(1,2,3))").eval().unwrap();
+        assert_eq!(t, "vector", "fast mode must hand out the VM's own vector");
+
+        let exact = lua_in(super::Vec3Mode::Exact);
+        let t: String = exact.load("return type(vec3(1,2,3))").eval().unwrap();
+        assert_eq!(t, "userdata", "exact mode must keep the f64 userdata");
+    }
+
+    /// **A fast vector cannot be mutated, and says what to do instead.**
+    ///
+    /// The one genuinely breaking semantic of the mode, so the message is part
+    /// of the contract: it has to name the replacement, or somebody reads
+    /// "attempt to index vector" and concludes the vector is broken.
+    #[cfg(feature = "vm-luau")]
+    #[test]
+    fn mutating_a_fast_vector_names_the_helper_that_replaces_it() {
+        let fast = lua_in(super::Vec3Mode::Fast);
+        for (component, helper) in [("x", "withX"), ("y", "withY"), ("z", "withZ")] {
+            let src = format!("local v = vec3(1,2,3) v.{component} = 9");
+            let err = fast.load(&src).exec().expect_err("a fast vector is immutable").to_string();
+            assert!(err.contains(helper), "the fix is not named for .{component}: {err}");
+        }
+        // …and the same assignment in `exact` still works, because that is the
+        // whole reason the two modes exist.
+        let exact = lua_in(super::Vec3Mode::Exact);
+        let got: String = exact
+            .load("local v = vec3(1,2,3) v.x = 9 return ('%.1f'):format(v.x)")
+            .eval()
+            .expect("exact stays mutable");
+        assert_eq!(got, "9.0");
     }
 
     /// The arithmetic helpers, including the edge cases the hand-written
