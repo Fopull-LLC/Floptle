@@ -2110,6 +2110,17 @@ impl ScriptHost {
     /// difference nobody was told about. The caller is expected to surface the
     /// message and carry on in `exact`, which is what the state is left in.
     pub fn set_vec3_mode(&self, mode: crate::Vec3Mode) -> Result<(), String> {
+        // Somewhere for the precision guardrail to report. Installed here
+        // rather than inside `math_api` because this is where the Console feed
+        // lives; a state without one simply never warns, which is what makes
+        // the bare `Lua` states in tests and probes usable.
+        #[cfg(feature = "vm-luau")]
+        if mode == crate::Vec3Mode::Fast {
+            self.lua.set_app_data(crate::math_api::PrecisionWatch {
+                sink: self.logs.clone(),
+                warned: Default::default(),
+            });
+        }
         crate::math_api::set_mode_checked(&self.lua, mode).map_err(|e| e.to_string())
     }
 

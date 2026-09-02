@@ -68,6 +68,63 @@ pub(crate) fn set_mode_checked(lua: &Lua, m: Vec3Mode) -> mlua::Result<()> {
     }
 }
 
+/// Where `fast` stops being able to resolve a centimetre.
+///
+/// f32 carries a 24-bit mantissa, so one unit in the last place at 2^17 is
+/// 2^17 / 2^23 = 1/64 — about 1.6 cm at metre scale. Past here a position is
+/// being rounded by more than the size of the things standing on it, and the
+/// symptom is jitter that no amount of reading the movement code explains.
+#[cfg(feature = "vm-luau")]
+pub(crate) const FAST_PRECISION_LIMIT: f64 = 131_072.0; // 2^17
+
+#[cfg(feature = "vm-luau")]
+fn far_from_origin(v: glam::DVec3) -> bool {
+    v.x.abs() > FAST_PRECISION_LIMIT
+        || v.y.abs() > FAST_PRECISION_LIMIT
+        || v.z.abs() > FAST_PRECISION_LIMIT
+}
+
+/// Where a `fast`-mode precision warning goes, and what has already been said.
+///
+/// Installed by the host, so a state nobody wired one into simply never warns
+/// rather than having to invent somewhere to write. Keyed by SCRIPT: a game
+/// that is genuinely far from the origin would otherwise emit this once per
+/// vector per frame, and a warning at that rate is noise somebody turns off.
+#[cfg(feature = "vm-luau")]
+pub(crate) struct PrecisionWatch {
+    pub sink: std::rc::Rc<std::cell::RefCell<Vec<crate::ScriptLog>>>,
+    pub warned: std::cell::RefCell<std::collections::HashSet<String>>,
+}
+
+/// Say — once per script — that this project's vec3 cannot hold where it is.
+#[cfg(feature = "vm-luau")]
+#[cold]
+fn warn_precision(lua: &Lua, v: glam::DVec3) {
+    let Some(watch) = lua.app_data_ref::<PrecisionWatch>() else { return };
+    let (name, line) = match lua.inspect_stack(1) {
+        Some(d) => (
+            d.source()
+                .source
+                .as_ref()
+                .map(|c| c.trim_start_matches(['@', '=']).to_string())
+                .unwrap_or_else(|| "?".into()),
+            d.curr_line().max(0) as u32,
+        ),
+        None => ("?".to_string(), 0),
+    };
+    if !watch.warned.borrow_mut().insert(name.clone()) {
+        return;
+    }
+    let farthest = v.x.abs().max(v.y.abs()).max(v.z.abs());
+    watch.sink.borrow_mut().push(crate::ScriptLog {
+        level: crate::LogLevel::Warn,
+        msg: format!(
+            "{name}.lua built a vec3 at {farthest:.0} units from the origin, and this project's              script_vec3 is `fast` — 32-bit components, which past {FAST_PRECISION_LIMIT:.0}              cannot resolve a centimetre. Expect positions to jitter and small movements to be              swallowed. Either keep play inside that radius (a floating origin), or set              script_vec3 to `exact` in Project Settings. Said once per script."
+        ),
+        source: Some((name, line)),
+    });
+}
+
 /// Marker: this state's vector metatable has already been extended.
 ///
 /// Switching back to `exact` deliberately leaves it in place. Nothing produces
@@ -294,11 +351,22 @@ impl mlua::IntoLua for LuaVec3 {
         match mode(lua) {
             Vec3Mode::Exact => Ok(Value::UserData(lua.create_userdata(ExactVec3(self.0))?)),
             #[cfg(feature = "vm-luau")]
-            Vec3Mode::Fast => Ok(Value::Vector(mlua::Vector::new(
-                self.0.x as f32,
-                self.0.y as f32,
-                self.0.z as f32,
-            ))),
+            Vec3Mode::Fast => {
+                // Three compares on the way past, and nothing else unless one
+                // trips. This is the most-travelled conversion in the engine —
+                // a game builds thousands of vectors a frame — so the guardrail
+                // has to be free when it is not firing, which means the LOOKUP
+                // for where to report lives behind the test rather than in
+                // front of it.
+                if far_from_origin(self.0) {
+                    warn_precision(lua, self.0);
+                }
+                Ok(Value::Vector(mlua::Vector::new(
+                    self.0.x as f32,
+                    self.0.y as f32,
+                    self.0.z as f32,
+                )))
+            }
             // No native vector exists to build. Unreachable in practice —
             // `set_mode` refuses `Fast` on this build — but stated rather than
             // silently downgraded, because a vec3 that quietly changed backing
@@ -1533,6 +1601,76 @@ mod helper_tests {
         let exact = lua_in(super::Vec3Mode::Exact);
         let t: String = exact.load("return type(vec3(1,2,3))").eval().unwrap();
         assert_eq!(t, "userdata", "exact mode must keep the f64 userdata");
+    }
+
+    /// **`fast` says so when a project outgrows f32**, once per script.
+    ///
+    /// The mode's whole trade is precision for speed, and the failure mode when
+    /// somebody gets it wrong is not an error — it is jitter, and movement code
+    /// that reads as correct because it is. So the engine says which setting is
+    /// responsible before anybody goes looking in the wrong file.
+    ///
+    /// Chunk names are set explicitly here because "once per script" is keyed on
+    /// them: two `load` calls of the same text are two different scripts to the
+    /// VM, which is right, and would otherwise make this test's own scaffolding
+    /// look like a bug in the throttle.
+    #[cfg(feature = "vm-luau")]
+    #[test]
+    fn fast_warns_once_per_script_when_a_position_outgrows_f32() {
+        use std::{cell::RefCell, rc::Rc};
+        let lua = lua_in(super::Vec3Mode::Fast);
+        let sink: Rc<RefCell<Vec<crate::ScriptLog>>> = Rc::new(RefCell::new(Vec::new()));
+        lua.set_app_data(super::PrecisionWatch {
+            sink: sink.clone(),
+            warned: Default::default(),
+        });
+        let run = |src: &str, name: &str| {
+            lua.load(src).set_name(format!("={name}")).exec().unwrap();
+        };
+
+        // Inside the radius: nothing to say.
+        run("local v = vec3(1000, 0, 0) return v.x", "near");
+        assert!(sink.borrow().is_empty(), "warned about a fine position: {:?}", sink.borrow());
+
+        // Past it: one warning, naming the setting and both ways out.
+        run("local v = vec3(500000, 0, 0) return v.x", "far");
+        assert_eq!(sink.borrow().len(), 1, "expected one warning: {:?}", sink.borrow());
+        let first = sink.borrow()[0].clone();
+        for want in ["script_vec3", "fast", "exact"] {
+            assert!(first.msg.contains(want), "the warning omits `{want}`: {}", first.msg);
+        }
+        assert!(
+            matches!(first.level, crate::LogLevel::Warn),
+            "a precision loss is a warning, not a debug line"
+        );
+        assert_eq!(
+            first.source.as_ref().map(|(n, _)| n.as_str()),
+            Some("far"),
+            "the warning must name the script that built the vector"
+        );
+
+        // Said ONCE for that script. A game genuinely out there would otherwise
+        // emit this per vector per frame, which is a warning somebody turns off.
+        for _ in 0..50 {
+            run("local v = vec3(500000, 0, 0) return v.x", "far");
+        }
+        assert_eq!(sink.borrow().len(), 1, "the warning repeated: {}", sink.borrow().len());
+
+        // …but a DIFFERENT script gets told too. Per script, not per state:
+        // whoever is reading the Console is looking at one file at a time.
+        run("local v = vec3(500000, 0, 0) return v.x", "elsewhere");
+        assert_eq!(sink.borrow().len(), 2, "a second script was never warned");
+        assert_eq!(sink.borrow()[1].source.as_ref().map(|(n, _)| n.as_str()), Some("elsewhere"));
+    }
+
+    /// A state with nowhere to report must not panic — the bare `Lua` in every
+    /// probe and unit test is exactly that.
+    #[cfg(feature = "vm-luau")]
+    #[test]
+    fn a_far_vector_without_a_watch_is_silent_rather_than_fatal() {
+        let lua = lua_in(super::Vec3Mode::Fast);
+        let x: f64 = lua.load("local v = vec3(500000, 0, 0) return v.x").eval().unwrap();
+        assert!(x > 0.0);
     }
 
     /// **A fast vector cannot be mutated, and says what to do instead.**
