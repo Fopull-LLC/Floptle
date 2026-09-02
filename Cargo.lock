@@ -2848,6 +2848,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "luau0-src"
+version = "0.12.3+luau663"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76ae337c644bbf86a8d8e9ce3ee023311833d41741baf5e51acc31b37843aba1"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "mach2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2907,6 +2916,7 @@ dependencies = [
  "bstr",
  "either",
  "erased-serde",
+ "libloading",
  "mlua-sys",
  "num-traits",
  "parking_lot",
@@ -2926,6 +2936,7 @@ dependencies = [
  "cfg-if",
  "lua-src",
  "luajit-src",
+ "luau0-src",
  "pkg-config",
 ]
 
