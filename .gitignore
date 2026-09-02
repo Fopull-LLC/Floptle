@@ -117,3 +117,8 @@ builds.zip
 # the convention; these are the rest.
 /*.png
 !/docs/**/*.png
+
+# The two release binaries and per-run JSON that scripts/scene-bench.sh builds
+# to compare script VMs. Each binary is the whole editor; the numbers that
+# matter out of a run are recorded in the plan doc by hand, not committed here.
+/.bench/

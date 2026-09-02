@@ -101,8 +101,38 @@ clap = { version = "4.5", default-features = false, features = [
 [profile.dev]
 opt-level = 1          # keep the editor usably fast even in debug builds
 
+# **Debug info is the build cache**, and on a workspace this shape it is nearly
+# all of it: one `examples/` binary measured 478 MB of which essentially every
+# byte was DWARF, and `target/debug/examples` alone reached 61 GB. Two settings
+# cut that without giving up anything this project actually uses.
+#
+# `line-tables-only` keeps what a panic, a backtrace and a `#[track_caller]`
+# report need — file and line — and drops the type and variable descriptions a
+# stepping debugger wants. This engine is debugged with `print`, the probe
+# binaries, and rendering a PNG and looking at it; nobody here steps through
+# frames in gdb. If you need to, `RUSTFLAGS="-Cdebuginfo=2" cargo build` for one
+# build, or comment this line out.
+#
+# `split-debuginfo = "unpacked"` is the bigger win and costs nothing at all: it
+# leaves debug info in the `.o` files the compiler already wrote instead of
+# copying it into every linked binary. With dozens of examples and test binaries
+# all linking the same dependencies, the default was storing that information
+# once per binary. It also makes linking faster.
+#
+# NOT affected by either: DWARF **unwinding** (`.eh_frame`), which is how mlua
+# turns a Rust callback's `Err` into a Lua error — see the `panic = "abort"`
+# note on the release profile below. That is the panic strategy, not the debug
+# level. `floptle-script`'s `examples/error_path.rs` is the guard, and it was
+# run against this change.
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
 [profile.dev.package."*"]
 opt-level = 3          # always optimize dependencies (renderer/math heavy)
+# No debug info for third-party code. A backtrace through wgpu or winit gives
+# symbol names either way; what is dropped is file/line *inside* dependencies,
+# which is not where this project's bugs are and is not worth tens of gigabytes.
+debug = false
 
 [profile.release]
 opt-level = 3
