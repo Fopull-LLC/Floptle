@@ -2,7 +2,7 @@
 //! script) sandbox instances, the per-frame update (mirror the scene, call
 //! `start`/`update`, apply node writes), and log/error capture.
 
-use crate::{seed_fingerprint, Hooks};
+use crate::{seed_fingerprint, source_writes_params, Hooks};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -229,6 +229,9 @@ thread_local! {
     /// How many times the scene mirror was rebuilt from scratch rather than
     /// refreshed — the guard on the revision test in `sync_scene`.
     pub(crate) static FULL_SYNCS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// How many times a `params` table was scanned for writes — the guard on
+    /// the source flag. Test-only.
+    pub(crate) static PARAMS_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 impl ScriptHost {
@@ -5228,6 +5231,7 @@ impl ScriptHost {
                     self.drop_ui_listeners_of(&key);
                     self.setup_synced(&env, &key);
                     let hooks = Hooks::of(&env);
+                    let writes_params = source_writes_params(&src);
                     match self.lua.create_registry_value(env) {
                         Ok(reg) => {
                             self.instances.insert(
@@ -5239,6 +5243,7 @@ impl ScriptHost {
                                     seen: true,
                                     node: None,
                                     hooks,
+                                    writes_params,
                                     seed_fp: 0,
                                     params_dirty: false,
                                 },
@@ -5485,7 +5490,7 @@ impl ScriptHost {
         let key = (e.index(), name.to_string());
         let eid = e.index();
         let fp = seed_fingerprint(params, refs, strs);
-        let (first, env, mut node_slot, rebuild) = {
+        let (first, env, mut node_slot, rebuild, writes_params) = {
             let Some(inst) = self.instances.get_mut(&key) else { return false };
             // `fixedUpdate`/`lateUpdate` never run before `start` — a brand-new
             // instance waits for the next frame pass to start it first.
@@ -5524,7 +5529,7 @@ impl ScriptHost {
             let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return false };
             let rebuild = inst.seed_fp != fp || inst.params_dirty;
             // Taken out and put back, because `tick` borrows `self` while it runs.
-            (first, env, inst.node.take(), rebuild)
+            (first, env, inst.node.take(), rebuild, inst.writes_params)
         };
         if first {
             self.warn_unread_params(eid, name, params, strs, &env);
@@ -5600,9 +5605,11 @@ impl ScriptHost {
             }
         }
         match result {
-            // Only a hook that ran can have written into `params`; a pass whose
-            // hook turned out absent has nothing to scan.
-            Ok(()) if called => {
+            // Only a hook that ran can have written into `params`, and only a
+            // script whose source assigns into it at all; a pass whose hook
+            // turned out absent, or a script that never writes, has nothing to
+            // scan.
+            Ok(()) if called && writes_params => {
                 let wrote = self.collect_param_writes(&env, name, eid, params, strs);
                 if wrote && let Some(inst) = self.instances.get_mut(&key) {
                     inst.params_dirty = true;
@@ -5691,6 +5698,8 @@ impl ScriptHost {
         seeded: &[(String, f32)],
         seeded_strs: &[(String, String)],
     ) -> bool {
+        #[cfg(test)]
+        PARAMS_SCANS.with(|c| c.set(c.get() + 1));
         let before = self.param_writes.borrow().len();
         self.collect_param_writes_into(env, name, eid, seeded, seeded_strs);
         self.param_writes.borrow().len() != before

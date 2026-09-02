@@ -423,6 +423,18 @@ struct Instance {
     /// `env.params`, so the table is rebuilt when the seed changes rather than
     /// on every hook call. `0` means "never seeded" and forces a build.
     seed_fp: u64,
+    /// Whether this script's SOURCE ever assigns into `params` (`params.x =`,
+    /// `params["x"] =`, `params[k] =`). Read once when the chunk is built.
+    /// A script that never writes cannot have written, so the per-hook scan of
+    /// the whole `params` table — a `String` per key per call — is skipped for
+    /// it. Most scripts never write: three of Forgery's fifty-one do.
+    ///
+    /// A textual test, and conservative in the right direction: anything that
+    /// LOOKS like a write counts as one, and a script that reaches `params`
+    /// through an alias (`local p = params; p.x = 1`) is caught by the
+    /// `params` mention plus an assignment through it being impossible to rule
+    /// out — see [`source_writes_params`].
+    writes_params: bool,
     /// A script wrote into `params` during its last hook. The table is rebuilt
     /// from the seed on the next pass — the same reset the per-call rebuild
     /// always gave an undeclared, frame-local param — and declared params come
@@ -452,6 +464,54 @@ impl Hooks {
             late: has(&["lateUpdate", "onLateUpdate"]),
         }
     }
+}
+
+/// Does this source text assign into `params`?
+///
+/// Conservative: a write through an alias cannot be seen textually, so a
+/// script that binds `params` to a local (`= params`) or passes it along
+/// (`(params`, `, params`) is treated as a writer. A false "writes" costs the
+/// old per-hook scan; a false "does not" would lose a write silently, which is
+/// the outcome this must not have.
+fn source_writes_params(src: &str) -> bool {
+    let mut from = 0;
+    while let Some(i) = src[from..].find("params") {
+        let at = from + i;
+        from = at + "params".len();
+        // Not part of a longer identifier on either side.
+        if at > 0 && src.as_bytes()[at - 1].is_ascii_alphanumeric() {
+            continue;
+        }
+        let rest = src[from..].trim_start();
+        // `params.x = …` / `params["x"] = …` / `params[k] = …`
+        if let Some(r) = rest.strip_prefix('.').or_else(|| rest.strip_prefix('[')) {
+            let r = r.trim_start();
+            // skip the key: an identifier, or anything up to the closing `]`
+            let after_key = if rest.starts_with('[') {
+                match r.find(']') {
+                    Some(j) => r[j + 1..].trim_start(),
+                    None => continue,
+                }
+            } else {
+                r.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_').trim_start()
+            };
+            if after_key.starts_with('=') && !after_key.starts_with("==") {
+                return true;
+            }
+            continue;
+        }
+        // Escaped by alias or call: cannot be sure, so assume a write.
+        if rest.starts_with(',') || rest.starts_with(')') || rest.starts_with('}') {
+            return true;
+        }
+        if at > 0 {
+            let before = src[..at].trim_end();
+            if before.ends_with('=') || before.ends_with('(') || before.ends_with(',') || before.ends_with('{') {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Fingerprint the seed an instance's `params` table is built from.
@@ -4470,6 +4530,60 @@ end
         assert_eq!(crate::host::FULL_SYNCS.with(|c| c.get()), 1, "a rename must rebuild the mirror once");
         assert_eq!(world.get::<Transform>(e).unwrap().translation.y, 1.0, "find() did not see the new name");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The source decides whether `params` is scanned for writes.** A
+    /// script that never assigns into `params` is never scanned; one that does
+    /// is scanned after every hook, and its write still lands in the ECS.
+    #[test]
+    fn only_a_script_that_writes_params_is_scanned_for_writes() {
+        let dir = std::env::temp_dir().join(format!("floptle_pscan_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "reader", "defaults = { speed = 1 }\nfunction update(node, dt) node.y = params.speed end\n");
+        write_script(&dir, "writer", "defaults = { speed = 1 }\nfunction update(node, dt) params.speed = params.speed + 1 end\n");
+
+        let (mut world, e) = world_with_script("reader");
+        let mut host = ScriptHost::new();
+        crate::host::PARAMS_SCANS.with(|c| c.set(0));
+        for i in 0..5 {
+            host.run(&mut world, &dir, 1.0 / 60.0, i as f32 / 60.0);
+        }
+        assert_eq!(crate::host::PARAMS_SCANS.with(|c| c.get()), 0, "a reader was scanned");
+        assert_eq!(world.get::<Transform>(e).unwrap().translation.y, 1.0);
+
+        let (mut world, e) = world_with_script("writer");
+        let mut host = ScriptHost::new();
+        crate::host::PARAMS_SCANS.with(|c| c.set(0));
+        for i in 0..3 {
+            host.run(&mut world, &dir, 1.0 / 60.0, i as f32 / 60.0);
+        }
+        assert!(crate::host::PARAMS_SCANS.with(|c| c.get()) >= 3, "a writer must be scanned each hook");
+        let seeded = &world.get::<Scripts>(e).unwrap().0[0].params;
+        assert!(
+            seeded.iter().any(|(k, v)| k == "speed" && *v > 1.0),
+            "the write never reached the ECS: {seeded:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The textual test errs toward "writes": every way a script could reach
+    /// `params` without an obvious assignment counts, so a write can never be
+    /// missed; only the plainly read-only shapes are exempt.
+    #[test]
+    fn the_params_write_test_is_conservative() {
+        use crate::source_writes_params as w;
+        assert!(w("params.speed = 2"));
+        assert!(w("params[\"speed\"] = 2"));
+        assert!(w("params[k] = v"));
+        assert!(w("  params.x  =  1"));
+        assert!(w("local p = params\np.x = 1"), "an alias is a possible write");
+        assert!(w("tune(params)"), "handing it to a function is a possible write");
+        assert!(w("t = { params }"), "storing it is a possible write");
+        assert!(!w("node.y = params.speed"));
+        assert!(!w("if params.speed == 2 then end"));
+        assert!(!w("local s = params.speed * 2"));
+        assert!(!w("print(params.name)"), "a field read passed to a call is a read");
+        assert!(!w("myparams.x = 1"), "a longer identifier is not params");
     }
 
     /// Polling a key the host keeps says so, once, instead of reading `false`
