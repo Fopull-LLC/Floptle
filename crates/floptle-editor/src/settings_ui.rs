@@ -77,7 +77,9 @@ impl SettingsSection {
     fn keywords(self) -> &'static str {
         match self {
             SettingsSection::Game => "title name entry scene boot build export ships",
-            SettingsSection::Rendering => "retro pixel resolution matter sdf post bloom vignette",
+            SettingsSection::Rendering => {
+                "retro pixel resolution matter sdf post bloom vignette vec3 vector script fast exact"
+            }
             SettingsSection::Layers => "collision matrix physics raycast group mask",
             SettingsSection::Input => {
                 "action axis binding key keyboard mouse gamepad pad controller \
@@ -639,7 +641,7 @@ impl<'a> SettingsCtx<'a> {
                  VM's own 32-bit vector: it costs nothing to make and nothing to collect, \
                  which is most of what a vector-heavy game spends a frame on, but it cannot \
                  be assigned into (`v = v:withY(0)` instead of `v.y = 0`) and it stops \
-                 resolving a centimetre past ~131000 units from the origin.                  `floptle lint --vec3` lists what a project would have to change",
+                 resolving a centimetre past ~131000 units from the origin. `floptle lint --vec3` lists what a project would have to change",
             ),
             |ui| {
                 use floptle_scene::ScriptVec3Doc as V;

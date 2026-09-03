@@ -53,13 +53,15 @@ one that isn't there.
 
 ## The part that affects you today: the scripting engine
 
-Floptle scripts run on LuaJIT. **LuaJIT cannot run in a browser** — its
-interpreter is hand-written assembly, one version per processor architecture,
-and wasm is not one of them. This is not a gap somebody could fill in a
-weekend; there is no port to fund.
+Floptle scripts ran on LuaJIT until v0.84.0. **LuaJIT cannot run in a
+browser** — its interpreter is hand-written assembly, one version per processor
+architecture, and wasm is not one of them. This is not a gap somebody could fill
+in a weekend; there is no port to fund.
 
-So the engine changes Lua flavour: **Luau**, everywhere — desktop and web, one
-engine to test, one set of behaviour to document. It is the Lua dialect Roblox
+So the engine changed Lua flavour: **Luau**, everywhere — desktop and web, one
+engine to test, one set of behaviour to document. **This shipped in v0.84.0**;
+the rest of this section is the reasoning behind it, and what it means for your
+scripts. It is the Lua dialect Roblox
 built and maintains, it is closer to the Lua 5.1 your scripts are already
 written in than Lua 5.4 is, and it compiles to the browser with a stock
 toolchain.
@@ -185,9 +187,9 @@ In order, and each step is useful on its own:
 7. **Verification and release**: a browser screenshot probe in CI, then a
    version like any other.
 
-Steps 1–3 are worth doing whether or not the browser half ever ships. Step 4 is
-where the honest uncertainty is concentrated, and it is deliberately early
-enough to change the answer cheaply.
+**Steps 1–3 shipped in v0.84.0.** They were worth doing whether or not the
+browser half ever ships. Step 4 is where the honest uncertainty is concentrated,
+and it is deliberately early enough to change the answer cheaply.
 
 ---
 

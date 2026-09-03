@@ -612,9 +612,13 @@ impl Editor {
             floptle_scene::ScriptVec3Doc::Exact => floptle_script::Vec3Mode::Exact,
             floptle_scene::ScriptVec3Doc::Fast => floptle_script::Vec3Mode::Fast,
         };
+        // Called on open AND on every Play start (a project setting changed in
+        // the ⚙ tab lands on the next Play, as the row says), so the
+        // orientation line below is for a CHANGE of mode, not every press.
+        let was = self.script_host.vec3_mode();
         if let Err(e) = self.script_host.set_vec3_mode(mode) {
             self.console.push(floptle_script::LogLevel::Warn, e, None);
-        } else if mode == floptle_script::Vec3Mode::Fast {
+        } else if mode == floptle_script::Vec3Mode::Fast && was != mode {
             // The one line a developer needs to have read before the first
             // `v.x = n` raises at them: what they are on, and what to write
             // instead. Debug level — it is orientation, not a problem.
@@ -641,19 +645,44 @@ impl Editor {
                 // a project through the editor would leave the choice implicit
                 // while opening it any other way wrote it down.
                 if cfg.pin_script_vec3() {
-                    // Said once, the first time — a change written into
-                    // somebody's project file without a word is the kind of
-                    // thing that gets noticed a week later in a diff.
-                    self.console.push(
-                        floptle_script::LogLevel::Debug,
-                        "this project predates the vec3 setting, so it has been pinned to `exact` \
-                         in project.ron — the 64-bit, mutable vector it has always had; nothing \
-                         about its scripts changes. New projects start on `fast` (32-bit, \
-                         immutable, no allocation). Project Settings → Script vec3 switches it, \
-                         and `floptle lint --vec3` lists what switching would take."
-                            .into(),
-                        None,
-                    );
+                    // The pin is only a fact once it is IN the file, and the
+                    // editor is what owns project.ron — a headless verb reads a
+                    // project and must not rewrite it. Said once, the first
+                    // time: a change written into somebody's project file
+                    // without a word is the kind of thing that gets noticed a
+                    // week later in a diff.
+                    if self.window.is_some() {
+                        match floptle_scene::save_project(&cfg, &path) {
+                            Ok(()) => self.console.push(
+                                floptle_script::LogLevel::Debug,
+                                "this project predates the vec3 setting, so it has been pinned to \
+                                 `exact` in project.ron — the 64-bit, mutable vector it has always \
+                                 had; nothing about its scripts changes. New projects start on \
+                                 `fast` (32-bit, immutable, no allocation). Project Settings → \
+                                 Script vec3 switches it, and `floptle lint --vec3` lists what \
+                                 switching would take."
+                                    .into(),
+                                None,
+                            ),
+                            Err(e) => self.console.push(
+                                floptle_script::LogLevel::Warn,
+                                format!(
+                                    "this project predates the vec3 setting and runs the `exact` \
+                                     vec3, but that could not be recorded in project.ron: {e}"
+                                ),
+                                None,
+                            ),
+                        }
+                    } else {
+                        self.console.push(
+                            floptle_script::LogLevel::Debug,
+                            "this project predates the vec3 setting and runs the `exact` vec3 — \
+                             the 64-bit, mutable vector it has always had. Opening it in the \
+                             editor records that choice in project.ron."
+                                .into(),
+                            None,
+                        );
+                    }
                 }
                 cfg
             }
@@ -2573,5 +2602,35 @@ mod path_tests {
              `resolve_asset_path(&self.project_root, path)` instead.",
             bad.join("\n  ")
         );
+    }
+}
+
+#[cfg(test)]
+mod script_vec3_pin_tests {
+    use crate::Editor;
+
+    /// **A headless open reads a project and does not rewrite it.** The pin
+    /// (an existing project's `vec3` recorded as `exact`) is written by the
+    /// windowed editor, which owns project.ron; `floptle inspect`, `check` and
+    /// the rest declare `writes_project: false` and have to mean it. The
+    /// choice still RESOLVES to exact in memory either way.
+    #[test]
+    fn a_headless_open_resolves_the_pin_without_writing_the_file() {
+        let dir = std::env::temp_dir().join(format!("floptle_pin_headless_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("project.ron");
+        let text = "(retro: true, retro_height: 240)";
+        std::fs::write(&path, text).unwrap();
+
+        let mut ed = Editor { project_root: dir.clone(), ..Editor::default() };
+        assert!(ed.window.is_none(), "this test is the headless case");
+        let cfg = ed.read_project_config();
+        assert_eq!(cfg.script_vec3, Some(floptle_scene::ScriptVec3Doc::Exact));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            text,
+            "a headless open must leave project.ron exactly as it found it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -923,6 +923,10 @@ impl Editor {
             let mixer = self.project.mixer.clone();
             let root = self.project_root.clone();
             self.audio.start_play(&self.world, &root, &mixer);
+            // The project's `vec3` choice, applied HERE as well as on open: the
+            // ⚙ Settings row says "takes effect on the next Play", and this is
+            // what makes that sentence true rather than "on the next open".
+            self.apply_script_vec3_mode();
             self.playing = true;
             // `http.*` and `openUrl` come alive with the session and not before.
             self.script_host.set_playing(true);
@@ -1740,5 +1744,34 @@ mod water_streaming_tests {
             "the ball should be held up near the pool, not have fallen through it: {}",
             pos_of(&ed)
         );
+    }
+}
+
+// `fast` needs Luau, so on the `vm-luajit` escape hatch there is no second
+// mode to switch to and the whole module — import included — stays out.
+#[cfg(all(test, feature = "vm-luau"))]
+mod script_vec3_tests {
+    use crate::Editor;
+
+    /// **A `vec3` choice made in the ⚙ tab lands on the next Play.** The row
+    /// says so; without the apply at Play start it landed on the next OPEN,
+    /// and a setting that appears to do nothing is one somebody clicks twice.
+    #[test]
+    fn a_changed_script_vec3_setting_lands_on_the_next_play() {
+        use floptle_scene::ScriptVec3Doc as V;
+        use floptle_script::Vec3Mode as M;
+        let mut ed = Editor::default();
+        assert_eq!(ed.script_host.vec3_mode(), M::Exact, "a fresh host is exact");
+
+        ed.project.script_vec3 = Some(V::Fast);
+        ed.toggle_play();
+        assert!(ed.playing);
+        assert_eq!(ed.script_host.vec3_mode(), M::Fast, "the ⚙ row promises the next Play");
+        ed.toggle_play();
+
+        ed.project.script_vec3 = Some(V::Exact);
+        ed.toggle_play();
+        assert_eq!(ed.script_host.vec3_mode(), M::Exact, "…in both directions");
+        ed.toggle_play();
     }
 }

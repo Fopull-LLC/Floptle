@@ -96,6 +96,18 @@ fn pretty_value(v: &Value, depth: usize, seen: &mut Vec<*const std::ffi::c_void>
         Value::Thread(_) => "<thread>".into(),
         Value::LightUserData(_) => "<pointer>".into(),
         Value::UserData(_) => v.to_string().unwrap_or_else(|_| "<userdata>".into()),
+        // Luau's native vector — a `fast` vec3 (ADR-0028), written the way
+        // `exact`'s `__tostring` writes one so `print(v)` reads `vec3(1, 2, 3)`
+        // in both modes. Not `Value::to_string`: mlua formats a vector itself
+        // (`vector(1, 2, 3)`) rather than through the metatable, and not
+        // `<value>`, which is what this arm's absence printed.
+        #[cfg(feature = "vm-luau")]
+        Value::Vector(vec) => format!(
+            "vec3({}, {}, {})",
+            f64::from(vec.x()),
+            f64::from(vec.y()),
+            f64::from(vec.z())
+        ),
         Value::Error(e) => format!("<error: {e}>"),
         Value::Table(t) => {
             if depth >= MAX_DEPTH {
@@ -2169,6 +2181,12 @@ impl ScriptHost {
     /// that asked for it and silently got `exact` would be a behaviour
     /// difference nobody was told about. The caller is expected to surface the
     /// message and carry on in `exact`, which is what the state is left in.
+    /// Which `vec3` this host's scripts currently get — see
+    /// [`set_vec3_mode`](Self::set_vec3_mode).
+    pub fn vec3_mode(&self) -> crate::Vec3Mode {
+        crate::math_api::mode(&self.lua)
+    }
+
     pub fn set_vec3_mode(&self, mode: crate::Vec3Mode) -> Result<(), String> {
         // Somewhere for the precision guardrail to report. Installed here
         // rather than inside `math_api` because this is where the Console feed
@@ -5527,7 +5545,15 @@ impl ScriptHost {
     ) -> bool {
         let key = (e.index(), name.to_string());
         let eid = e.index();
-        let fp = seed_fingerprint(params, refs, strs);
+        // The seed the table is built from — and, for a script with reference
+        // params, the shape of the scene too. A ref resolves BY NAME against the
+        // live scene, so a target that spawns, despawns or is renamed mid-play
+        // must rebind although the wire itself never changed. The mirror
+        // already knows when the scene's structure last moved (the revision
+        // `sync_scene` rebuilt at); folding it in rebuilds the table exactly
+        // then, and a script with no refs never pays for it.
+        let structure = if refs.is_empty() { 0 } else { self.scene.borrow().synced_non_transform_rev };
+        let fp = seed_fingerprint(params, refs, strs, structure);
         let (first, env, mut node_slot, rebuild, writes_params) = {
             let Some(inst) = self.instances.get_mut(&key) else { return false };
             // `fixedUpdate`/`lateUpdate` never run before `start` — a brand-new

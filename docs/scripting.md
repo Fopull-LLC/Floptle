@@ -2935,7 +2935,7 @@ fields — vectors, tables, nodes — so there's never a conversion dance.
 
 ### Two vectors, and which one your project uses
 
-Project Settings has a **Scripting → vec3** choice, saved to `project.ron` as
+Project Settings has a **Script vec3** choice (search the ⚙ tab for `vec3`), saved to `project.ron` as
 `script_vec3`. It changes what a `vec3` is made of, and nothing else about
 what you write.
 

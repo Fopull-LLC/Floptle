@@ -270,29 +270,32 @@ pub(crate) fn run(root: &Path, json: bool) -> i32 {
     };
 
     if json {
-        let items: Vec<String> = findings
+        // Through serde, like every other verb: a `{:?}` of a String is not
+        // JSON — a non-ASCII character in a flagged line comes out as
+        // `\u{e9}`, which no parser accepts.
+        let items: Vec<serde_json::Value> = findings
             .iter()
             .map(|f| {
-                format!(
-                    "{{\"file\":{:?},\"line\":{},\"kind\":{:?},\"what\":{:?},\"fix\":{:?},\"text\":{:?}}}",
-                    rel(&f.file),
-                    f.line,
-                    match f.kind {
+                serde_json::json!({
+                    "file": rel(&f.file),
+                    "line": f.line,
+                    "kind": match f.kind {
                         Kind::Mutation => "mutation",
                         Kind::TypeCheck => "type_check",
                     },
-                    f.kind.what(),
-                    f.kind.fix(),
-                    f.text
-                )
+                    "what": f.kind.what(),
+                    "fix": f.kind.fix(),
+                    "text": f.text,
+                })
             })
             .collect();
-        println!(
-            "{{\"ok\":{},\"scanned\":{},\"findings\":[{}],\"complete\":false}}",
-            findings.is_empty(),
-            files.len(),
-            items.join(",")
-        );
+        let doc = serde_json::json!({
+            "ok": findings.is_empty(),
+            "scanned": files.len(),
+            "findings": items,
+            "complete": false,
+        });
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
     } else {
         for f in &findings {
             println!("{}:{}: {} — {}", rel(&f.file), f.line, f.kind.what(), f.kind.fix());

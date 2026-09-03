@@ -119,7 +119,7 @@ fn warn_precision(lua: &Lua, v: glam::DVec3) {
     watch.sink.borrow_mut().push(crate::ScriptLog {
         level: crate::LogLevel::Warn,
         msg: format!(
-            "{name}.lua built a vec3 at {farthest:.0} units from the origin, and this project's              script_vec3 is `fast` — 32-bit components, which past {FAST_PRECISION_LIMIT:.0}              cannot resolve a centimetre. Expect positions to jitter and small movements to be              swallowed. Either keep play inside that radius (a floating origin), or set              script_vec3 to `exact` in Project Settings. Said once per script."
+            "{name}.lua built a vec3 at {farthest:.0} units from the origin, and this project's script_vec3 is `fast` — 32-bit components, which past {FAST_PRECISION_LIMIT:.0} cannot resolve a centimetre. Expect positions to jitter and small movements to be swallowed. Either keep play inside that radius (a floating origin), or set script_vec3 to `exact` in Project Settings. Said once per script."
         ),
         source: Some((name, line)),
     });

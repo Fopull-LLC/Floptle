@@ -516,10 +516,20 @@ fn source_writes_params(src: &str) -> bool {
 
 /// Fingerprint the seed an instance's `params` table is built from.
 ///
-/// `0` is reserved for "never built", so a real hash of zero is nudged.
-fn seed_fingerprint(params: &[(String, f32)], refs: &[(String, String)], strs: &[(String, String)]) -> u64 {
+/// `structure` is the scene's structural revision as of the last full mirror
+/// sync — passed as `0` by a script with no reference params, and folded in
+/// for one that has them, because a ref is resolved by NAME and has to follow
+/// a target that appears or is renamed mid-play. `0` is reserved for "never
+/// built", so a real hash of zero is nudged.
+fn seed_fingerprint(
+    params: &[(String, f32)],
+    refs: &[(String, String)],
+    strs: &[(String, String)],
+    structure: u64,
+) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::hash::DefaultHasher::new();
+    structure.hash(&mut h);
     for (k, v) in params {
         k.hash(&mut h);
         v.to_bits().hash(&mut h);
@@ -6430,6 +6440,91 @@ end
         assert_eq!(world.get::<Transform>(turret).unwrap().translation.y, 5.0);
         // missing == nil (1) + speed (2): the sentinel never leaks as a string.
         assert_eq!(world.get::<Transform>(driver).unwrap().translation.x, 3.0);
+    }
+
+    /// **A reference param follows the scene, not the wire.** `params.target`
+    /// is resolved BY NAME, so a target that does not exist yet at the first
+    /// frame must appear in `params` when it spawns, and vanish when it is
+    /// renamed away — without the Inspector touching the wire. The per-hook
+    /// rebuild of `params` used to give this for free; the fingerprinted
+    /// rebuild has to earn it, and this is where it is watched.
+    #[test]
+    fn noderef_param_rebinds_when_the_target_appears_or_is_renamed_mid_play() {
+        let dir = std::env::temp_dir().join(format!("floptle_noderef_live_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "seeker",
+            "defaults = { target = noderef() }\n\
+             function update(node, dt) node.x = params.target and 1 or 0 end\n",
+        );
+        let mut world = World::default();
+        let driver = world.spawn();
+        world.insert(driver, Transform::IDENTITY);
+        world.insert(
+            driver,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "seeker".into(),
+                enabled: true,
+                params: vec![],
+                refs: vec![("target".into(), "Turret".into())],
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        assert_eq!(world.get::<Transform>(driver).unwrap().translation.x, 0.0, "no Turret yet");
+
+        // The target spawns mid-play, the way a streamed level or a prefab does.
+        let turret = world.spawn();
+        world.insert(turret, Transform::IDENTITY);
+        world.insert(turret, floptle_core::Name("Turret".into()));
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        assert_eq!(
+            world.get::<Transform>(driver).unwrap().translation.x,
+            1.0,
+            "a target that spawned after the first frame never reached params"
+        );
+
+        // …and a rename takes it away again.
+        world.get_mut::<floptle_core::Name>(turret).unwrap().0 = "Decoy".into();
+        host.run(&mut world, &dir, 1.0 / 60.0, 2.0 / 60.0);
+        assert_eq!(
+            world.get::<Transform>(driver).unwrap().translation.x,
+            0.0,
+            "a renamed target stayed bound under its old name"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **`print(v)` reads the same in both vec3 modes.** A `fast` vector is the
+    /// VM's own value type, which the deep printer did not know and rendered
+    /// as `<value>` — bare, and inside every table it was printed in.
+    #[cfg(feature = "vm-luau")]
+    #[test]
+    fn a_fast_vec3_prints_as_a_vec3_and_not_as_a_value() {
+        let dir = std::env::temp_dir().join(format!("floptle_fast_print_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "printer",
+            "function update(node, dt)\n\
+               print(vec3(1, 2, 3))\n\
+               print({ p = vec3(4, 5, 6) })\n\
+             end\n",
+        );
+        let (mut world, _e) = world_with_script("printer");
+        let mut host = ScriptHost::new();
+        host.set_vec3_mode(crate::Vec3Mode::Fast).expect("fast is available on this build");
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let logs = host.drain_logs();
+        let msgs: Vec<&str> = logs.iter().map(|l| l.msg.as_str()).collect();
+        assert!(msgs.iter().any(|m| m.contains("vec3(1, 2, 3)")), "bare vector: {msgs:?}");
+        assert!(msgs.iter().any(|m| m.contains("vec3(4, 5, 6)")), "vector in a table: {msgs:?}");
+        assert!(!msgs.iter().any(|m| m.contains("<value>")), "printed as <value>: {msgs:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
