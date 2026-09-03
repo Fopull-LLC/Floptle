@@ -2122,6 +2122,44 @@ impl ScriptHost {
         }
     }
 
+    /// How many bytes of Lua heap are in use right now.
+    ///
+    /// A level, not a total: the collector's work is invisible in it. To learn
+    /// what a frame ALLOCATES, stop the collector across a window and take the
+    /// difference — see [`gc_stop`](Self::gc_stop).
+    pub fn lua_used_memory(&self) -> usize {
+        self.lua.used_memory()
+    }
+
+    /// Collect everything reachable, now. Two passes, because one leaves
+    /// finalised objects behind.
+    pub fn gc_collect(&self) {
+        let _ = self.lua.gc_collect();
+        let _ = self.lua.gc_collect();
+    }
+
+    /// Stop the collector, and start it again.
+    ///
+    /// **This is a measurement instrument, not a tuning knob.** Allocation per
+    /// frame cannot be read off [`lua_used_memory`](Self::lua_used_memory)
+    /// while the collector runs: an incremental step inside the window frees
+    /// part of what the window allocated, and the difference then reads far
+    /// below the truth — `floptle/0176` records chasing exactly that artefact,
+    /// and a hand-rolled Lua harness in a real project under-reported by 60x
+    /// against this. Stop it, run a fixed number of frames, take the
+    /// difference, start it again.
+    ///
+    /// The heap grows unchecked while it is stopped, so keep the window short
+    /// and never leave it off for a session somebody is playing.
+    pub fn gc_stop(&self) {
+        self.lua.gc_stop();
+    }
+
+    /// The other half of [`gc_stop`](Self::gc_stop).
+    pub fn gc_restart(&self) {
+        self.lua.gc_restart();
+    }
+
     /// Choose which `vec3` this host's scripts get — a project's
     /// `script_vec3` setting (ADR-0028, Phase 3).
     ///

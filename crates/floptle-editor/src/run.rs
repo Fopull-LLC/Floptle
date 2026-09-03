@@ -74,6 +74,41 @@ use crate::console::ConsoleState;
 
 /// The fixed step. The engine's gameplay tick is 60 Hz and a script's `update`
 /// runs once per frame, so one step per tick is the cadence that makes
+/// Where in a run the `--alloc` window sits.
+///
+/// Not the first frames: opening a project builds the world, and a frame that
+/// is building is not the frame anybody is asking about. Not the last, either,
+/// so the collector is running normally again before the run ends.
+struct AllocWindow {
+    start: u32,
+    end: u32,
+    at: std::cell::Cell<usize>,
+}
+
+impl AllocWindow {
+    /// The shortest span with room for a warm-up, a window and a tail.
+    ///
+    /// Below this there is nowhere to put a window that measures a settled
+    /// frame, and a window of one or two frames measures noise. Refusing is
+    /// the point: a number that quietly described the opening frames of a run
+    /// would be worse than no number.
+    const MIN_SPAN: u32 = 12;
+
+    fn plan(asked: u32) -> Option<Self> {
+        if asked < Self::MIN_SPAN {
+            return None;
+        }
+        let start = asked / 4;
+        let end = start + asked / 2;
+        debug_assert!(start >= 1 && end > start && end < asked);
+        Some(Self { start, end, at: std::cell::Cell::new(0) })
+    }
+
+    fn frames(&self) -> u32 {
+        self.end - self.start
+    }
+}
+
 /// `--frames` and `--seconds` mean the same thing at the same rate.
 const DT: f32 = 1.0 / 60.0;
 
@@ -190,6 +225,7 @@ pub(crate) fn run(
     json: bool,
     steam: bool,
     timing: bool,
+    alloc: bool,
 ) -> i32 {
     if !root.join("project.ron").is_file() {
         eprintln!("{} is not a project directory (no project.ron)", root.display());
@@ -254,7 +290,39 @@ pub(crate) fn run(
     // Allocated up front, before the first step, so the loop never grows a Vec
     // inside the region it is timing.
     let mut clock = timing.then(|| Timing::new(asked));
-    for _ in 0..asked {
+    // `--alloc`: how much Lua heap a frame makes. Measured across a window in
+    // the middle of the run — after the opening frames, which allocate the
+    // world rather than a steady frame — with the collector STOPPED, because
+    // it cannot be measured with the collector running (see
+    // `ScriptHost::gc_stop`).
+    let window = alloc.then(|| AllocWindow::plan(asked)).flatten();
+    if alloc && window.is_none() {
+        eprintln!(
+            "--alloc needs at least {} steps to measure a settled frame; this run is {asked}, \
+             so no allocation figure is reported",
+            AllocWindow::MIN_SPAN
+        );
+    }
+    let mut allocated: Option<f64> = None;
+    for step in 0..asked {
+        if let Some(w) = &window {
+            if step == w.start {
+                ed.script_host.gc_collect();
+                ed.script_host.gc_stop();
+            } else if step == w.end {
+                let grew = ed
+                    .script_host
+                    .lua_used_memory()
+                    .saturating_sub(w.at.get());
+                allocated = Some(grew as f64 / w.frames() as f64);
+                ed.script_host.gc_restart();
+                ed.script_host.gc_collect();
+            }
+            // Sampled AFTER the collect+stop above, on the same step.
+            if step == w.start {
+                w.at.set(ed.script_host.lua_used_memory());
+            }
+        }
         // The clock BEFORE the step, so the step can be asked afterwards whether
         // it was a frame of the game or a frame of the loading hold.
         let was = ed.play_t;
@@ -315,7 +383,15 @@ pub(crate) fn run(
     ed.drain_script_logs();
 
     let simulated = (ed.play_t - t0).max(0.0);
-    report(&opened, &ed.console, steps, asked, simulated, clock.as_ref(), json)
+    report(
+        &opened,
+        &ed.console,
+        steps,
+        asked,
+        simulated,
+        Measured { clock: clock.as_ref(), allocated },
+        json,
+    )
 }
 
 /// The one line a run ends with.
@@ -397,15 +473,25 @@ fn level_str(l: floptle_script::LogLevel) -> &'static str {
 /// Print what happened. Returns the exit code: 1 if anything raised, in either
 /// phase — a scene that could not be wired is as much a failure as a script
 /// that threw, and a caller checking one exit code has to hear about both.
+/// What a run MEASURED, as opposed to what it did — each half present only
+/// when it was asked for, so "not measured" and "measured as zero" stay
+/// different things all the way to the report.
+struct Measured<'a> {
+    clock: Option<&'a Timing>,
+    /// Bytes of Lua heap a frame allocates (`--alloc`).
+    allocated: Option<f64>,
+}
+
 fn report(
     opened: &[crate::console::ConsoleEntry],
     console: &ConsoleState,
     steps: u32,
     asked: u32,
     simulated: f32,
-    clock: Option<&Timing>,
+    measured: Measured<'_>,
     json: bool,
 ) -> i32 {
+    let Measured { clock, allocated } = measured;
     use floptle_script::LogLevel;
     let all = || opened.iter().map(|e| ("open", e)).chain(console.entries.iter().map(|e| ("play", e)));
     let errors = all().filter(|(_, e)| e.level == LogLevel::Error).count();
@@ -471,6 +557,15 @@ fn report(
                 "max_ms": pct(&sorted, 1.0),
             });
         }
+        // Absent, not zero, when it was not asked for — the rule the timing
+        // block follows: a `bytes_per_frame: 0` reads as "allocates nothing",
+        // which is a claim, and the wrong one.
+        if let Some(a) = allocated {
+            doc["alloc"] = serde_json::json!({
+                "bytes_per_frame": a,
+                "kb_per_frame": a / 1024.0,
+            });
+        }
         println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         return i32::from(errors > 0);
     }
@@ -501,7 +596,45 @@ fn report(
     if let Some(c) = clock {
         println!("{}", timing_line(c));
     }
+    if let Some(a) = allocated {
+        println!(
+            "scripts allocate {:.1} KB per frame of Lua heap — measured with the collector \
+             stopped, which is the only way it CAN be measured (with it running, a collection \
+             inside the window eats part of what the window allocated)",
+            a / 1024.0
+        );
+    }
     i32::from(errors > 0)
+}
+
+#[cfg(test)]
+mod alloc_window_tests {
+    use super::AllocWindow;
+
+    /// **The window sits inside the run, after the opening frames, and spans
+    /// more than nothing.** Off by one at either end and the measurement
+    /// either never closes — reporting nothing, silently — or describes the
+    /// frames that build the world rather than the frames that play it.
+    #[test]
+    fn the_window_is_inside_the_run_and_never_empty() {
+        for asked in AllocWindow::MIN_SPAN..4000 {
+            let w = AllocWindow::plan(asked).expect("a long enough run plans a window");
+            assert!(w.start >= 1, "{asked}: window starts at {} — no warm-up", w.start);
+            assert!(w.end > w.start, "{asked}: window is empty ({}..{})", w.start, w.end);
+            assert!(w.end < asked, "{asked}: window closes at {}, past the last step", w.end);
+            assert!(w.frames() >= 1);
+        }
+    }
+
+    /// A run too short to measure says so rather than reporting a number about
+    /// the frames that were still opening the project.
+    #[test]
+    fn too_short_a_run_refuses_rather_than_guessing() {
+        for asked in 0..AllocWindow::MIN_SPAN {
+            assert!(AllocWindow::plan(asked).is_none(), "{asked} steps should refuse");
+        }
+        assert!(AllocWindow::plan(AllocWindow::MIN_SPAN).is_some());
+    }
 }
 
 #[cfg(test)]

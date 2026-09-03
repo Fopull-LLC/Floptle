@@ -665,6 +665,17 @@ pub(crate) const VERBS: &[Verb] = &[
                 help: "answer as JSON",
             },
             Arg {
+                name: "--alloc",
+                value: Value::Flag,
+                required: false,
+                help: "also report how much Lua heap a frame allocates. Measured across a \
+                       window in the middle of the run with the collector STOPPED — which is \
+                       the only way it can be measured, and means the heap grows unchecked \
+                       across that window, so a --timing figure from the SAME run is not \
+                       representative. Needs a span of at least 12 steps, and says so when \
+                       it does not have one",
+            },
+            Arg {
                 name: "--timing",
                 value: Value::Flag,
                 required: false,
@@ -690,7 +701,7 @@ pub(crate) const VERBS: &[Verb] = &[
         exits: &[(1, "something raised while opening or playing")],
         output: "one line per log entry, then a summary; with --json an object with \
                  `ok`, `steps`, `errors`, `warnings` and `log`, plus `timing` under \
-                 --timing",
+                 --timing and `alloc` under --alloc",
         legacy: &[],
     },
     Verb {
@@ -1376,6 +1387,7 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 a.get_flag("json"),
                 a.get_flag("steam"),
                 a.get_flag("timing"),
+                a.get_flag("alloc"),
             ))
         }
         Some(("serve", a)) => {
