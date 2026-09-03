@@ -1667,6 +1667,15 @@ fn migrate_project(path: &Path, stamp: &str) -> i32 {
     match floptle_scene::try_load_project(&cfg_path) {
         Ok(Some(mut cfg)) => {
             cfg.engine_version = Some(stamp.to_string());
+            // An existing project keeps the vector it has always had, WRITTEN
+            // DOWN: the windowed editor pins this on open, and a project
+            // upgraded from the command line alone never opens there. Left
+            // implicit, it is a default a later release may change under a
+            // shipped game — which is the one thing the setting exists to
+            // prevent. An explicit choice is never overwritten.
+            if cfg.pin_script_vec3() {
+                println!("pinned script_vec3 to exact — the vector this project has always had");
+            }
             let _ = floptle_scene::save_project(&cfg, &cfg_path);
         }
         Ok(None) => {} // no project.ron — leave it that way.
@@ -4628,3 +4637,37 @@ mod cli_tests {
     }
 }
 
+
+#[cfg(test)]
+mod migrate_tests {
+    /// **`floptle migrate` records an existing project's `vec3` choice.** The
+    /// windowed editor pins it on open; a project upgraded from the command
+    /// line alone never opened in the editor, and left unpinned it carries the
+    /// implicit default the release notes warn a later release may change.
+    /// The Forgery migration to 0.84.0 had to write the line by hand.
+    #[test]
+    fn migrate_pins_an_existing_projects_vec3_and_keeps_an_explicit_one() {
+        let dir = std::env::temp_dir().join(format!("floptle_migrate_pin_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        let cfg = dir.join("project.ron");
+        std::fs::write(&cfg, "(retro: true, retro_height: 240)").unwrap();
+        assert_eq!(super::migrate_project(&dir, "0.84.0"), 0);
+        let back = floptle_scene::load_project(&cfg);
+        assert_eq!(back.engine_version.as_deref(), Some("0.84.0"));
+        assert!(
+            std::fs::read_to_string(&cfg).unwrap().contains("script_vec3: Some(Exact)"),
+            "migrate must write the pin, not leave the default implicit"
+        );
+
+        // An explicit `fast` is a choice, and migrate must not overwrite it.
+        let chosen = floptle_scene::ProjectConfigDoc {
+            script_vec3: Some(floptle_scene::ScriptVec3Doc::Fast),
+            ..Default::default()
+        };
+        floptle_scene::save_project(&chosen, &cfg).unwrap();
+        assert_eq!(super::migrate_project(&dir, "0.84.1"), 0);
+        assert_eq!(floptle_scene::load_project(&cfg).script_vec3, Some(floptle_scene::ScriptVec3Doc::Fast));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

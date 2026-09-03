@@ -447,6 +447,19 @@ pub(crate) fn make_portable(shipped: &Path, project_root: &Path) -> Portability 
 }
 
 /// Quoted absolute-looking paths in a text file (`"/x/y"`, `"C:\x"`).
+/// Could this absolute string be a file the exporting machine resolved?
+///
+/// Either its last segment carries an extension (`tree.glb`, `hit.wav`) or the
+/// path is really there. A route like `/api/v1.2/session` has a dot in the
+/// MIDDLE and none at the end, and points at nothing on disk.
+fn looks_like_a_file(abs: &str) -> bool {
+    let last = abs.rsplit(['/', '\\']).next().unwrap_or("");
+    let has_ext = last
+        .rsplit_once('.')
+        .is_some_and(|(stem, ext)| !stem.is_empty() && !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric()));
+    has_ext || Path::new(abs).exists()
+}
+
 fn absolute_refs(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for chunk in text.split('"').skip(1).step_by(2) {
@@ -454,8 +467,18 @@ fn absolute_refs(text: &str) -> Vec<String> {
             || (chunk.len() > 2
                 && chunk.as_bytes()[1] == b':'
                 && matches!(chunk.as_bytes()[2], b'\\' | b'/'));
-        // A bare "/" or a URL is not an asset reference.
-        if is_abs && chunk.len() > 1 && !chunk.contains("://") && !out.contains(&chunk.to_string()) {
+        // A bare "/" or a URL is not an asset reference. Nor is an HTTP
+        // endpoint path — `"/api/login"` is shaped exactly like an absolute
+        // Unix path and was reported as a foreign asset on every export of a
+        // game with a login script. What separates a reference from a route:
+        // an asset either names a FILE (has an extension on its last segment)
+        // or exists on this machine, which a route never does.
+        if is_abs
+            && chunk.len() > 1
+            && !chunk.contains("://")
+            && looks_like_a_file(chunk)
+            && !out.contains(&chunk.to_string())
+        {
             out.push(chunk.to_string());
         }
     }
@@ -1186,7 +1209,8 @@ mod tests {
         .unwrap();
         std::fs::write(
             proj.join("stage.ron"),
-            "(mesh: \"/elsewhere/on/disk/tree.glb\", url: \"https://example.com/x\")",
+            "(mesh: \"/elsewhere/on/disk/tree.glb\", url: \"https://example.com/x\", \
+             endpoint: \"/api/login\", version: \"/api/v1.2/session\")",
         )
         .unwrap();
         let out = temp("out-abs");
@@ -1202,6 +1226,12 @@ mod tests {
         assert!(msg.contains("OUTSIDE the project"), "foreign refs are reported: {msg}");
         assert!(msg.contains("/elsewhere/on/disk/tree.glb"), "and named: {msg}");
         assert!(!msg.contains("https://example.com"), "a URL is not an asset path: {msg}");
+        // An HTTP endpoint path looks like an absolute Unix path and is not one:
+        // nothing on this machine is at `/api/login`, and it names no file.
+        // A real game's `web_login.lua` was reported as four foreign refs on
+        // every export because of exactly this.
+        assert!(!msg.contains("/api/login"), "an endpoint path is not an asset path: {msg}");
+        assert!(!msg.contains("/api/v1.2/session"), "nor is one with a dot mid-path: {msg}");
 
         for d in [&proj, &out] {
             let _ = std::fs::remove_dir_all(d);
