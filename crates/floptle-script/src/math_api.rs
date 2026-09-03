@@ -25,6 +25,11 @@ pub enum Vec3Mode {
     Fast,
 }
 
+/// A run-wide seed (`floptle run --seed`): the stream the no-seed `rng()` form
+/// draws its seeds from instead of the clock, so a run reproduces. Set by
+/// `ScriptHost::set_seed`; absent on an ordinary session.
+pub(crate) struct RunSeed(pub(crate) floptle_core::noise::Rng);
+
 /// This state's vec3 mode, defaulting to [`Vec3Mode::Exact`].
 ///
 /// A state that was never told is `Exact`, which is the safe direction: the
@@ -900,12 +905,18 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     // every machine. r:next() [0,1), r:range(a,b), r:int(a,b) inclusive,
     // r:pick(list). NO seed = seeded from the clock — a fresh stream every
     // call (procgen "surprise me" rolls); print/store r.seed to reproduce.
+    // Under a run seed (`ScriptHost::set_seed`, `floptle run --seed`) the
+    // no-seed form draws its seed from that stream instead, so the run
+    // reproduces while every call still gets a stream of its own.
     // (`math.random` stays for throwaway randomness; THIS is for gameplay
     // that must reproduce — loot, procgen, anything a server might replay.)
     lua.globals().set(
         "rng",
         lua.create_function(|lua, seed: Option<f64>| {
             let seed = seed.map(|s| s as u32).unwrap_or_else(|| {
+                if let Some(mut run) = lua.app_data_mut::<RunSeed>() {
+                    return run.0.next_u32();
+                }
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.subsec_nanos() ^ d.as_secs() as u32)

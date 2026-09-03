@@ -210,23 +210,30 @@ fn pct(sorted: &[f32], p: f32) -> f32 {
     sorted[rank.clamp(1, sorted.len()) - 1]
 }
 
-/// Run `root` for `span`. Returns the process exit code. `steam` is
-/// `--steam`: the explicit opt-in that lets this verb talk to a real Steam
-/// client (Spacewar 480 if the project sets no app id) — off by default, so
-/// an ordinary run (CI included) never tries to reach one.
+/// The verb's flags, as one value. Each is described on its command-line
+/// flag in `cli.rs`; the short of it:
 ///
-/// `timing` is `--timing`: collect a real-milliseconds sample per step and
-/// report the distribution. It does not change what the run does or how far it
-/// goes — see the module docs.
-pub(crate) fn run(
-    root: &Path,
-    scene: Option<&str>,
-    span: Span,
-    json: bool,
-    steam: bool,
-    timing: bool,
-    alloc: bool,
-) -> i32 {
+/// * `steam` (`--steam`) is the explicit opt-in that lets this verb talk to a
+///   real Steam client (Spacewar 480 if the project sets no app id) — off by
+///   default, so an ordinary run (CI included) never tries to reach one.
+/// * `timing` (`--timing`) collects a real-milliseconds sample per step and
+///   reports the distribution. It does not change what the run does or how far
+///   it goes — see the module docs.
+/// * `alloc` (`--alloc`) measures Lua-heap allocation per frame, in total and
+///   per script, with the collector stopped across a mid-run window.
+/// * `seed` (`--seed`) pins the game's randomness so two runs are the same run.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Options {
+    pub(crate) json: bool,
+    pub(crate) steam: bool,
+    pub(crate) timing: bool,
+    pub(crate) alloc: bool,
+    pub(crate) seed: Option<u32>,
+}
+
+/// Run `root` for `span`. Returns the process exit code.
+pub(crate) fn run(root: &Path, scene: Option<&str>, span: Span, opts: Options) -> i32 {
+    let Options { json, steam, timing, alloc, seed } = opts;
     if !root.join("project.ron").is_file() {
         eprintln!("{} is not a project directory (no project.ron)", root.display());
         return 2;
@@ -241,6 +248,14 @@ pub(crate) fn run(
         ..Default::default()
     };
     ed.open_project(root.to_path_buf());
+    // `--seed`: pin `math.random` and the no-seed `rng()` form before the first
+    // script runs, so two runs of a game that re-randomises its cast per run
+    // are the same game — the only condition under which their `--timing` or
+    // `--alloc` figures can be compared. The Lua state is built once per
+    // editor and survives Play, so setting it here reaches the whole run.
+    if let Some(seed) = seed {
+        ed.script_host.set_seed(seed);
+    }
     // Resolved from the project's OWN project.ron, not whatever `ed` cached
     // while opening — `open_project` doesn't hand the config back, and this
     // is a small file, cheap to read again.
@@ -304,17 +319,29 @@ pub(crate) fn run(
         );
     }
     let mut allocated: Option<f64> = None;
+    // …and which scripts made it: bytes per frame per script kind, from the
+    // same window, sampled around each hook call while the collector is off.
+    let mut by_script: Vec<(String, f64)> = Vec::new();
     for step in 0..asked {
         if let Some(w) = &window {
             if step == w.start {
                 ed.script_host.gc_collect();
                 ed.script_host.gc_stop();
+                ed.script_host.track_alloc(true);
             } else if step == w.end {
                 let grew = ed
                     .script_host
                     .lua_used_memory()
                     .saturating_sub(w.at.get());
-                allocated = Some(grew as f64 / w.frames() as f64);
+                let frames = w.frames() as f64;
+                allocated = Some(grew as f64 / frames);
+                by_script = ed
+                    .script_host
+                    .alloc_by_script()
+                    .into_iter()
+                    .map(|(kind, bytes)| (kind, bytes as f64 / frames))
+                    .collect();
+                ed.script_host.track_alloc(false);
                 ed.script_host.gc_restart();
                 ed.script_host.gc_collect();
             }
@@ -389,7 +416,7 @@ pub(crate) fn run(
         steps,
         asked,
         simulated,
-        Measured { clock: clock.as_ref(), allocated },
+        Measured { clock: clock.as_ref(), allocated, by_script: &by_script, seed },
         json,
     )
 }
@@ -480,7 +507,17 @@ struct Measured<'a> {
     clock: Option<&'a Timing>,
     /// Bytes of Lua heap a frame allocates (`--alloc`).
     allocated: Option<f64>,
+    /// …and how much of that each script kind allocated inside its hook calls,
+    /// bytes per frame, largest first. Empty when `--alloc` was not asked for
+    /// or nothing was attributed.
+    by_script: &'a [(String, f64)],
+    /// `--seed`, when given — echoed so a report says which run it describes.
+    seed: Option<u32>,
 }
+
+/// How many scripts the text report names under `--alloc`. The JSON carries
+/// them all; a person wants the ones that matter and a count of the rest.
+const ALLOC_LINES: usize = 8;
 
 fn report(
     opened: &[crate::console::ConsoleEntry],
@@ -491,7 +528,7 @@ fn report(
     measured: Measured<'_>,
     json: bool,
 ) -> i32 {
-    let Measured { clock, allocated } = measured;
+    let Measured { clock, allocated, by_script, seed } = measured;
     use floptle_script::LogLevel;
     let all = || opened.iter().map(|e| ("open", e)).chain(console.entries.iter().map(|e| ("play", e)));
     let errors = all().filter(|(_, e)| e.level == LogLevel::Error).count();
@@ -561,10 +598,29 @@ fn report(
         // block follows: a `bytes_per_frame: 0` reads as "allocates nothing",
         // which is a claim, and the wrong one.
         if let Some(a) = allocated {
+            let attributed: f64 = by_script.iter().map(|(_, b)| b).sum();
             doc["alloc"] = serde_json::json!({
                 "bytes_per_frame": a,
                 "kb_per_frame": a / 1024.0,
+                // Per script kind, largest first — what the total is made of.
+                // What no hook call accounts for (the scene mirror, UI, the
+                // host's own bookkeeping) is the difference, given as a number
+                // rather than left to be worked out.
+                "by_script": by_script
+                    .iter()
+                    .map(|(kind, b)| serde_json::json!({
+                        "script": kind,
+                        "bytes_per_frame": b,
+                        "kb_per_frame": b / 1024.0,
+                    }))
+                    .collect::<Vec<_>>(),
+                "unattributed_bytes_per_frame": (a - attributed).max(0.0),
             });
+        }
+        // Present only when a seed was given: absent means "this run drew its
+        // randomness from the clock", which a comparison must know.
+        if let Some(seed) = seed {
+            doc["seed"] = serde_json::json!(seed);
         }
         println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
         return i32::from(errors > 0);
@@ -603,13 +659,75 @@ fn report(
              inside the window eats part of what the window allocated)",
             a / 1024.0
         );
+        for line in alloc_lines(a, by_script) {
+            println!("{line}");
+        }
+    }
+    if let Some(seed) = seed {
+        println!("seeded with {seed}: math.random and rng() are pinned, so this run repeats");
     }
     i32::from(errors > 0)
+}
+
+/// The per-script lines under the `--alloc` total: the largest few, a count of
+/// the rest, and what no script hook accounts for.
+///
+/// Its own function so a test can read what it says. Names are script kinds —
+/// what the author calls them — and the figures are per frame like the total,
+/// so the column can be read against it directly.
+fn alloc_lines(total: f64, by_script: &[(String, f64)]) -> Vec<String> {
+    let mut out = Vec::new();
+    if by_script.is_empty() {
+        return out;
+    }
+    let width = by_script.iter().take(ALLOC_LINES).map(|(k, _)| k.len()).max().unwrap_or(0);
+    let width = width.max("(outside any script hook)".len());
+    for (kind, b) in by_script.iter().take(ALLOC_LINES) {
+        out.push(format!("  {kind:<width$}  {:>7.1} KB/frame", b / 1024.0));
+    }
+    if by_script.len() > ALLOC_LINES {
+        let rest: f64 = by_script.iter().skip(ALLOC_LINES).map(|(_, b)| b).sum();
+        out.push(format!(
+            "  {:<width$}  {:>7.1} KB/frame",
+            format!("({} more scripts)", by_script.len() - ALLOC_LINES),
+            rest / 1024.0
+        ));
+    }
+    let attributed: f64 = by_script.iter().map(|(_, b)| b).sum();
+    let outside = (total - attributed).max(0.0);
+    out.push(format!("  {:<width$}  {:>7.1} KB/frame", "(outside any script hook)", outside / 1024.0));
+    out.push(
+        "  per-script figures are sampled around each hook call; the heap counter moves in \
+         16 KB pages, so read them over the whole window rather than frame by frame"
+            .to_string(),
+    );
+    out
 }
 
 #[cfg(test)]
 mod alloc_window_tests {
     use super::AllocWindow;
+
+    /// **The per-script lines add up to the total.** The largest few are named,
+    /// the rest are counted, and what no hook accounts for is a number — so a
+    /// reader can see where a total that a vector change barely moved is coming
+    /// from, without doing the subtraction.
+    #[test]
+    fn the_alloc_lines_name_the_largest_and_account_for_the_rest() {
+        let by: Vec<(String, f64)> = (0..10)
+            .map(|i| (format!("script{i}"), (10 - i) as f64 * 1024.0))
+            .collect();
+        // 55 KB across the scripts, 5 KB outside any hook.
+        let lines = super::alloc_lines(60.0 * 1024.0, &by);
+        assert!(lines[0].starts_with("  script0"), "{lines:?}");
+        assert!(lines[0].contains("10.0 KB/frame"), "{lines:?}");
+        assert_eq!(lines.len(), super::ALLOC_LINES + 3, "{lines:?}");
+        let more = &lines[super::ALLOC_LINES];
+        assert!(more.contains("(2 more scripts)") && more.contains("3.0 KB/frame"), "{more}");
+        let outside = &lines[super::ALLOC_LINES + 1];
+        assert!(outside.contains("outside any script hook") && outside.contains("5.0 KB/frame"), "{outside}");
+        assert!(super::alloc_lines(1.0, &[]).is_empty(), "nothing attributed prints no lines");
+    }
 
     /// **The window sits inside the run, after the opening frames, and spans
     /// more than nothing.** Off by one at either end and the measurement

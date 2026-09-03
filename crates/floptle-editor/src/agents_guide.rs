@@ -52,6 +52,8 @@ floptle api node:setSprite                 # what a call does, before you write 
 ```sh
 floptle run --frames 120           # play it headlessly; reports what raised, and where
 floptle run --frames 600 --timing   # …and what the steps cost: p50/p95/p99, in real ms
+floptle run --frames 600 --alloc    # …and what a frame allocates, and which scripts allocate it
+floptle run --frames 600 --timing --seed 7   # the SAME run twice: rng() and math.random pinned
 floptle shot --out look.png        # one frame through the active camera, as a PNG
 floptle vfx --effect Sparks        # a particle effect, across its own timeline, as PNGs
 ```

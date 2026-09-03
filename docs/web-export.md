@@ -121,7 +121,9 @@ So it becomes a project setting, and both answers stay supported:
 - **`exact`** — vectors as they are today. 64-bit, writable, correct at any
   distance from the origin.
 - **`fast`** — Luau native vectors. Immutable, 32-bit, no allocation and no
-  garbage collector pause. Roughly 18× faster on vector-heavy scripts.
+  garbage collector pause. Roughly 18× faster on a vector-only micro-benchmark;
+  a whole game moves far less, because vectors are one allocator among many —
+  `floptle run --alloc` measures yours, script by script.
 
 **New projects start on `fast`. Every existing project is pinned to `exact` the
 first time it opens, and stays there until you change it yourself.** Nothing

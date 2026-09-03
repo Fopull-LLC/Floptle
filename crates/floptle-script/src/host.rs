@@ -2014,6 +2014,8 @@ impl ScriptHost {
             lua,
             extra_script_dirs: Vec::new(),
             sources: HashMap::new(),
+            alloc_by_kind: RefCell::new(HashMap::new()),
+            alloc_track: std::cell::Cell::new(false),
             instances: HashMap::new(),
             errors: Vec::new(),
             logs,
@@ -2170,6 +2172,53 @@ impl ScriptHost {
     /// The other half of [`gc_stop`](Self::gc_stop).
     pub fn gc_restart(&self) {
         self.lua.gc_restart();
+    }
+
+    /// Pin every source of randomness a script can reach: `math.random`, and
+    /// the no-seed `rng()` form, which otherwise draws its seed from the clock.
+    ///
+    /// What `floptle run --seed` calls before the first script runs. A game
+    /// that re-randomises its cast and loot per run moves its own frame time
+    /// more than most optimisations do, so two runs of it cannot be compared
+    /// until they are the same run — and asking the author to edit their game
+    /// to make it so is the wrong place to put that work. Each `rng()` call
+    /// still gets a stream of its own: the seed pins the RUN, it does not make
+    /// every stream alike (which would change the game rather than fix it).
+    pub fn set_seed(&self, seed: u32) {
+        self.lua
+            .set_app_data(crate::math_api::RunSeed(floptle_core::noise::Rng::new(seed)));
+        if let Ok(math) = self.lua.globals().get::<Table>("math")
+            && let Ok(f) = math.get::<mlua::Function>("randomseed")
+        {
+            let _ = f.call::<()>(seed);
+        }
+    }
+
+    /// Attribute Lua-heap allocation to the script that made it, while on.
+    ///
+    /// Meaningful only with the collector stopped ([`gc_stop`](Self::gc_stop)):
+    /// exactly then, the heap's growth across a hook call IS what the call
+    /// allocated — the script's own tables and strings, and the work the engine
+    /// did on its behalf inside the call (its `params` rebuild, its node
+    /// handle). `floptle run --alloc` turns it on for its measurement window;
+    /// the per-script figures then say where a total that a vector change
+    /// barely moved is actually coming from.
+    ///
+    /// Both edges clear the readout: a stale figure from before a fix looks
+    /// exactly like a fix that did not work.
+    pub fn track_alloc(&self, on: bool) {
+        self.alloc_track.set(on);
+        self.alloc_by_kind.borrow_mut().clear();
+    }
+
+    /// Bytes of Lua heap allocated inside each script kind's hook calls since
+    /// [`track_alloc`](Self::track_alloc) was turned on — largest first, names
+    /// as the author says them (`planet_walker`, not an entity id).
+    pub fn alloc_by_script(&self) -> Vec<(String, u64)> {
+        let mut out: Vec<(String, u64)> =
+            self.alloc_by_kind.borrow().iter().map(|(k, b)| (k.clone(), *b)).collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        out
     }
 
     /// Choose which `vec3` this host's scripts get — a project's
@@ -4499,10 +4548,20 @@ impl ScriptHost {
                     // is the whole question and a game author says `planet_walker`,
                     // not entity 4173.
                     let span = self.profile.borrow().enabled().then(floptle_core::profile::Span::new);
+                    // Heap size before the call, only while somebody is
+                    // attributing allocation (`track_alloc`) — a counter read,
+                    // but two per instance per pass is still not free.
+                    let heap0 = self.alloc_track.get().then(|| self.lua.used_memory());
                     let called = self.tick_instance(
                         *e, &inst.kind, &inst.params, &inst.refs, &inst.strs, &mut tr, dt, time,
                         pass,
                     );
+                    if let Some(heap0) = heap0 {
+                        let grew = self.lua.used_memory().saturating_sub(heap0) as u64;
+                        if grew > 0 {
+                            *self.alloc_by_kind.borrow_mut().entry(inst.kind.clone()).or_default() += grew;
+                        }
+                    }
                     // **Only a script that actually ran gets charged for the
                     // time.** This is wall clock, so whatever the machine did
                     // during the span lands on whoever was inside it — and a
@@ -5578,6 +5637,14 @@ impl ScriptHost {
                 Pass::Fixed => inst.hooks.fixed,
                 Pass::Late => inst.hooks.late,
             };
+            // The two first-pass warnings are about the SCENE's wiring — a
+            // param stored on the node that the script never declares, a
+            // global that shadows a handle key — and have nothing to do with
+            // which hooks this pass wants. They used to live in the full setup
+            // below, so a `fixedUpdate`-only script, whose first Frame pass is
+            // hook-less, consumed `first` on the fast path and was never
+            // warned. The env is resolved here on that one pass only.
+            let first_env = if first { self.lua.registry_value::<Table>(&inst.env).ok() } else { None };
             if !wants {
                 let body = self.bodies.borrow().get(&eid).copied();
                 let mut slot = inst.node.take();
@@ -5588,9 +5655,19 @@ impl ScriptHost {
                 if let Err(err) = r {
                     self.fail(name, format!("{name}: {err}"));
                 }
+                if let Some(env) = first_env.as_ref() {
+                    self.warn_unread_params(eid, name, params, strs, env);
+                    self.warn_shadowed_handle_keys(name, env);
+                }
                 return false;
             }
-            let Ok(env) = self.lua.registry_value::<Table>(&inst.env) else { return false };
+            let env = match first_env {
+                Some(env) => env,
+                None => match self.lua.registry_value::<Table>(&inst.env) {
+                    Ok(env) => env,
+                    Err(_) => return false,
+                },
+            };
             let rebuild = inst.seed_fp != fp || inst.params_dirty;
             // Taken out and put back, because `tick` borrows `self` while it runs.
             (first, env, inst.node.take(), rebuild, inst.writes_params)
@@ -6021,6 +6098,8 @@ impl ScriptHost {
             mtime: None,
             error: None,
             path: path.to_path_buf(),
+            text: None,
+            reads: 0,
         });
         // A script can move between package folders and the project's own
         // (the project wins — see `resolve`), so the path is refreshed rather
@@ -6033,6 +6112,8 @@ impl ScriptHost {
             entry.mtime = mtime;
             entry.generation += 1;
             entry.error = None;
+            // A quoted line must come from the file that is running.
+            entry.text = None;
         }
         Some(entry.generation)
     }
@@ -6084,15 +6165,37 @@ impl ScriptHost {
     ///
     /// Every step is allowed to fail into "leave the message alone": no line
     /// number, no such script, an unreadable file, a line past the end.
-    fn explain_runtime(&self, name: &str, msg: String) -> String {
+    ///
+    /// The file is read ONCE per version: a script raising in `update` raises
+    /// every frame on every instance, and this used to read the file per error
+    /// (sixty nodes on one broken script: 180 reads a frame). The text lives on
+    /// the [`Source`] and goes when its mtime changes, so a quote is never from
+    /// a file that is no longer the one running.
+    fn explain_runtime(&mut self, name: &str, msg: String) -> String {
         let line = error_line(&msg);
         if line == 0 {
             return msg;
         }
-        let Some(src) = self.sources.get(name) else { return msg };
-        let Ok(text) = std::fs::read_to_string(&src.path) else { return msg };
+        let Some(src) = self.sources.get_mut(name) else { return msg };
+        let text = match &src.text {
+            Some(text) => text.clone(),
+            None => {
+                src.reads += 1;
+                let Ok(text) = std::fs::read_to_string(&src.path) else { return msg };
+                let text: Rc<str> = text.into();
+                src.text = Some(text.clone());
+                text
+            }
+        };
         let line_text = text.lines().nth(line as usize - 1);
         crate::runtime_error::explain(&msg, line_text)
+    }
+
+    /// How many times `name`'s file has been read to quote a line — the guard
+    /// on the per-source text cache counts this.
+    #[cfg(test)]
+    pub(crate) fn source_reads(&self, name: &str) -> u32 {
+        self.sources.get(name).map_or(0, |s| s.reads)
     }
 
     /// Warn a script that is one edit from unloadable.

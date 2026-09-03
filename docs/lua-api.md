@@ -1123,7 +1123,7 @@ vec2:normalized() — a unit-length copy, pointing the same way. Zero stays zero
 
 ### `vec3`
 
-vec3(x, y, z) — a 3-vector VALUE with real operators: a + b, a - b, v * 2, -v, a == b. Methods: :length() (:magnitude()), :lengthSquared(), :normalized(), :dot(o), :cross(o), :lerp(o, t), :distance(o), :flatten(up), :withX/:withY/:withZ(n), :rotatedY(rad), :rotatedAround(axis, rad), :towards(o, maxDelta), :angleTo(o). vec3() = zero, vec3(s) = splat, vec3(other) = copy. Anything that takes a vector also takes a {x=,y=,z=} table or a node handle. A project chooses which vec3 this is — `exact` (64-bit, mutable; every project made before the setting) or `fast` (32-bit, immutable, no allocation; new projects) — in Project Settings → Script vec3. The surface above is identical in both; the two differences are that `fast` cannot be assigned into (use :withX/:withY/:withZ) and `type(v)` answers "vector" there rather than "userdata". `floptle lint --vec3` lists what a project would change to switch.
+vec3(x, y, z) — a 3-vector VALUE with real operators: a + b, a - b, v * 2, -v, a == b. Methods: :length() (:magnitude()), :lengthSquared(), :normalized(), :dot(o), :cross(o), :lerp(o, t), :distance(o), :flatten(up), :withX/:withY/:withZ(n), :rotatedY(rad), :rotatedAround(axis, rad), :towards(o, maxDelta), :angleTo(o). vec3() = zero, vec3(s) = splat, vec3(other) = copy. Anything that takes a vector also takes a {x=,y=,z=} table or a node handle. A project chooses which vec3 this is — `exact` (64-bit, mutable; every project made before the setting) or `fast` (32-bit, immutable, no allocation; new projects) — in Project Settings → Scripting → Script vec3. The surface above is identical in both; the two differences are that `fast` cannot be assigned into (use :withX/:withY/:withZ) and `type(v)` answers "vector" there rather than "userdata". `floptle lint --vec3` lists what a project would change to switch.
 
 ```lua
 local v = vec3(1, 0, 0) * 5 + vec3(0, 2, 0)   -- real operators
@@ -1132,7 +1132,7 @@ log(v:length(), v:normalized(), v:dot(node.forward))
 
 ### `vec3.x`
 
-The vector's X. Vectors are values, not handles: nothing you do to one reaches whatever it came from. Whether you can WRITE it depends on the project's vec3 (Project Settings → Script vec3): under `exact` (every project made before the setting existed) `v.x = 5` changes that vector; under `fast` (new projects) a vector cannot be assigned into and `v.x = 5` raises, naming the fix — `v = v:withX(5)`, which works on both. Nodes are unaffected either way: `node.x = 5` moves the node.
+The vector's X. Vectors are values, not handles: nothing you do to one reaches whatever it came from. Whether you can WRITE it depends on the project's vec3 (Project Settings → Scripting → Script vec3): under `exact` (every project made before the setting existed) `v.x = 5` changes that vector; under `fast` (new projects) a vector cannot be assigned into and `v.x = 5` raises, naming the fix — `v = v:withX(5)`, which works on both. Nodes are unaffected either way: `node.x = 5` moves the node.
 
 ### `vec3.y`
 

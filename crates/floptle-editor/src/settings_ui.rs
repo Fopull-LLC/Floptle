@@ -19,6 +19,7 @@ use crate::responsive::{check, fit, fit_here, para, slider};
 pub(crate) enum SettingsSection {
     #[default]
     Game,
+    Scripting,
     Rendering,
     Layers,
     Input,
@@ -28,6 +29,7 @@ pub(crate) enum SettingsSection {
 impl SettingsSection {
     pub(crate) const ALL: &'static [SettingsSection] = &[
         SettingsSection::Game,
+        SettingsSection::Scripting,
         SettingsSection::Rendering,
         SettingsSection::Layers,
         SettingsSection::Input,
@@ -37,6 +39,7 @@ impl SettingsSection {
     fn title(self) -> &'static str {
         match self {
             SettingsSection::Game => "Game",
+            SettingsSection::Scripting => "Scripting",
             SettingsSection::Rendering => "Rendering",
             SettingsSection::Layers => "Layers",
             SettingsSection::Input => "Input",
@@ -47,6 +50,8 @@ impl SettingsSection {
     fn icon(self) -> &'static str {
         match self {
             SettingsSection::Game => icons::PLAY,
+            // A function, which is what a script is made of.
+            SettingsSection::Scripting => "ƒ",
             SettingsSection::Rendering => icons::SHADERS,
             SettingsSection::Layers => icons::MAP,
             SettingsSection::Input => icons::KEYBOARD,
@@ -59,6 +64,7 @@ impl SettingsSection {
     fn blurb(self) -> &'static str {
         match self {
             SettingsSection::Game => "What a build ships as.",
+            SettingsSection::Scripting => "How this project's scripts run — in the editor and in every build.",
             SettingsSection::Rendering => "Applies to every scene in the project.",
             SettingsSection::Layers => "Collision and query groups.",
             SettingsSection::Input => {
@@ -77,9 +83,10 @@ impl SettingsSection {
     fn keywords(self) -> &'static str {
         match self {
             SettingsSection::Game => "title name entry scene boot build export ships",
-            SettingsSection::Rendering => {
-                "retro pixel resolution matter sdf post bloom vignette vec3 vector script fast exact"
+            SettingsSection::Scripting => {
+                "vec3 vector script scripts lua luau fast exact precision allocation"
             }
+            SettingsSection::Rendering => "retro pixel resolution matter sdf post bloom vignette",
             SettingsSection::Layers => "collision matrix physics raycast group mask",
             SettingsSection::Input => {
                 "action axis binding key keyboard mouse gamepad pad controller \
@@ -281,6 +288,7 @@ impl<'a> SettingsCtx<'a> {
             heading(ui, selected);
             match selected {
                 SettingsSection::Game => self.settings_game(ui, project, out),
+                SettingsSection::Scripting => self.settings_scripting(ui, project, out),
                 SettingsSection::Rendering => self.settings_rendering(ui, project, out),
                 SettingsSection::Layers => self.settings_layers(ui, project, out),
                 SettingsSection::Input => self.settings_input(ui, &query, out),
@@ -540,6 +548,60 @@ impl<'a> SettingsCtx<'a> {
     }
 
     // --- Rendering ------------------------------------------------------
+    fn settings_scripting(&mut self, ui: &mut egui::Ui, project: &mut floptle_scene::ProjectConfigDoc, out: &mut SettingsOut) {
+        // A home of its own: this used to sit under Rendering, whose blurb is
+        // about how scenes draw, and was findable only by search. Anything else
+        // about how scripts run (which VM, hot reload) belongs here too.
+        row(
+            ui,
+            "Script vec3",
+            Some(
+                "what a `vec3` is made of in this project's scripts. `exact` is 64-bit and \
+                 can be changed in place — every project made before this setting existed is \
+                 pinned to it, and stays that way until you change it here. `fast` is the \
+                 VM's own 32-bit vector: it costs nothing to make and nothing to collect, \
+                 but it cannot be assigned into (`v = v:withY(0)` instead of `v.y = 0`) and \
+                 it stops resolving a centimetre past ~131000 units from the origin. How much \
+                 it saves depends on how much of a frame's allocation is vectors — on one \
+                 shipped game that was 2% — so `floptle run --alloc` first, which says what \
+                 each script allocates; `floptle lint --vec3` lists what a project would \
+                 have to change",
+            ),
+            |ui| {
+                use floptle_scene::ScriptVec3Doc as V;
+                let mut v = project.script_vec3_resolved();
+                egui::ComboBox::from_id_salt("project-script-vec3")
+                    .width(fit_here(ui, 220.0))
+                    .selected_text(match v {
+                        V::Exact => "exact",
+                        V::Fast => "fast",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut v, V::Exact, "exact").on_hover_text(
+                            "64-bit, mutable — today's vector, and what every existing \
+                             project uses. Choose it for a world bigger than ~131000 units, \
+                             or one that keeps real distances in script",
+                        );
+                        ui.selectable_value(&mut v, V::Fast, "fast").on_hover_text(
+                            "32-bit, immutable, no allocation. For a game that lives near \
+                             its origin — and `floptle run --alloc` says how much of a frame \
+                             is vectors before you expect a speed-up. Run `floptle lint \
+                             --vec3` before switching an existing project",
+                        );
+                    });
+                if Some(v) != project.script_vec3 {
+                    project.script_vec3 = Some(v);
+                    out.save_project = true;
+                }
+                // Said in the row rather than in a toast that goes away: a Lua
+                // state picks its backing when it is BUILT, so this lands on
+                // the next Play. A setting that appears to do nothing while you
+                // are looking at it is one somebody clicks twice.
+                ui.weak("takes effect on the next Play");
+            },
+        );
+    }
+
     fn settings_rendering(&mut self, ui: &mut egui::Ui, project: &mut floptle_scene::ProjectConfigDoc, out: &mut SettingsOut) {
 
         // Frame pacing, above the look settings: it is the one here that can
@@ -629,50 +691,6 @@ impl<'a> SettingsCtx<'a> {
                     project.probe_detail = d;
                     out.save_project = true;
                 }
-            },
-        );
-        row(
-            ui,
-            "Script vec3",
-            Some(
-                "what a `vec3` is made of in this project's scripts. `exact` is 64-bit and \
-                 can be changed in place — every project made before this setting existed is \
-                 pinned to it, and stays that way until you change it here. `fast` is the \
-                 VM's own 32-bit vector: it costs nothing to make and nothing to collect, \
-                 which is most of what a vector-heavy game spends a frame on, but it cannot \
-                 be assigned into (`v = v:withY(0)` instead of `v.y = 0`) and it stops \
-                 resolving a centimetre past ~131000 units from the origin. `floptle lint --vec3` lists what a project would have to change",
-            ),
-            |ui| {
-                use floptle_scene::ScriptVec3Doc as V;
-                let mut v = project.script_vec3_resolved();
-                egui::ComboBox::from_id_salt("project-script-vec3")
-                    .width(fit_here(ui, 220.0))
-                    .selected_text(match v {
-                        V::Exact => "exact",
-                        V::Fast => "fast",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut v, V::Exact, "exact").on_hover_text(
-                            "64-bit, mutable — today's vector, and what every existing \
-                             project uses. Choose it for a world bigger than ~131000 units, \
-                             or one that keeps real distances in script",
-                        );
-                        ui.selectable_value(&mut v, V::Fast, "fast").on_hover_text(
-                            "32-bit, immutable, no allocation. Faster for a game that lives \
-                             near its origin. Run `floptle lint --vec3` before switching an \
-                             existing project",
-                        );
-                    });
-                if Some(v) != project.script_vec3 {
-                    project.script_vec3 = Some(v);
-                    out.save_project = true;
-                }
-                // Said in the row rather than in a toast that goes away: a Lua
-                // state picks its backing when it is BUILT, so this lands on
-                // the next Play. A setting that appears to do nothing while you
-                // are looking at it is one somebody clicks twice.
-                ui.weak("takes effect on the next Play");
             },
         );
         row(ui, "Retro", Some("render at a low resolution and upscale"), |ui| {
@@ -1214,6 +1232,9 @@ mod tests {
             ("jump", SettingsSection::Input),
             ("retro", SettingsSection::Rendering),
             ("pixel", SettingsSection::Rendering),
+            ("vec3", SettingsSection::Scripting),
+            ("lua", SettingsSection::Scripting),
+            ("script", SettingsSection::Scripting),
             ("collision", SettingsSection::Layers),
             ("raycast", SettingsSection::Layers),
             ("title", SettingsSection::Game),

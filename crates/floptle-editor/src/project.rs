@@ -627,7 +627,7 @@ impl Editor {
                 "scripts run the `fast` vec3: 32-bit, immutable, no allocation. A vector cannot be \
                  assigned into — write `v = v:withX(n)` rather than `v.x = n` (it works on both \
                  vec3s), and `type(v)` answers \"vector\". Nodes (`node.x = n`) are unchanged. \
-                 Project Settings → Script vec3 picks `exact` for a world past ~131 km."
+                 Project Settings → Scripting → Script vec3 picks `exact` for a world past ~131 km."
                     .into(),
                 None,
             );

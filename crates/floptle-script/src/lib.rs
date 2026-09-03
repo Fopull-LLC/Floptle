@@ -394,6 +394,15 @@ struct Source {
     /// a single frame — resolves itself, because a changed mtime bumps the
     /// generation and clears the cached error.
     path: PathBuf,
+    /// The file's text, read the first time an error needs a line quoted and
+    /// kept until the file changes (the same mtime bump that resets
+    /// `generation` drops it). Only a script that has RAISED is resident: a
+    /// script raising in `update` raises every frame, on every instance, and
+    /// reading the file per error was one read per instance per pass.
+    text: Option<std::rc::Rc<str>>,
+    /// How many times the file has been read for a quote — what the guard on
+    /// the above counts.
+    reads: u32,
 }
 
 /// A live `(node, script)` environment — the Lua table the script's functions
@@ -893,6 +902,10 @@ pub struct ScriptHost {
     /// session, so a param carried on eighteen instances of the same script is
     /// ONE Console line rather than eighteen (`floptle/0068`).
     param_warned: std::collections::HashSet<(String, String)>,
+    /// Bytes of Lua heap allocated inside each script kind's hook calls while
+    /// `alloc_track` is on — see [`ScriptHost::track_alloc`].
+    alloc_by_kind: RefCell<HashMap<String, u64>>,
+    alloc_track: std::cell::Cell<bool>,
     /// `(script kind, key)` combos already reported as shadowing a `findScript`
     /// handle's own key (`floptle/0085`) — one line per script per session, not
     /// one per instance.
@@ -9449,4 +9462,218 @@ end
             "the teleport written through the stashed handle must reach the transform"
         );
     }
+
+    /// **A script with no frame hook still gets its params warnings.** The
+    /// hook-less fast path (0.84.0) returns before the full setup, and the two
+    /// `first`-only warnings lived inside the full setup — so a `fixedUpdate`-
+    /// only controller consumed its first pass on the fast path and a tunable
+    /// nobody reads went silent. The warning is about the SCENE's wiring, not
+    /// about any hook, so it must fire whichever hooks the script has.
+    #[test]
+    fn a_fixed_update_only_script_is_warned_about_a_param_it_never_reads() {
+        let dir = std::env::temp_dir().join(format!("floptle_fixed_only_params_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "mover",
+            "defaults = { speed = 1 }\n\
+             function fixedUpdate(node, dt) node.x = node.x + params.speed * dt end\n",
+        );
+        let mut world = World::default();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY);
+        world.insert(
+            e,
+            Scripts(vec![floptle_core::ScriptInst {
+                kind: "mover".into(),
+                enabled: true,
+                params: vec![("speed".into(), 2.0), ("stale".into(), 3.0)],
+                refs: Vec::new(),
+                strs: Vec::new(),
+            }]),
+        );
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        host.run_fixed(&mut world, 1.0 / 60.0, 0.0);
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0 / 60.0);
+        host.run_fixed(&mut world, 1.0 / 60.0, 1.0 / 60.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        let logs = host.drain_logs();
+        let msgs: Vec<&str> = logs.iter().map(|l| l.msg.as_str()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("stale") && m.contains("never read")),
+            "no unread-params warning for a fixedUpdate-only script: {msgs:?}"
+        );
+        assert!(
+            !msgs.iter().any(|m| m.contains("speed") && m.contains("never read")),
+            "a param the script declares was reported unread: {msgs:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A vec3 that cannot cross the wire is refused as a vec3.** Both
+    /// backings used to fall through to the VM's type name — "userdata can't
+    /// replicate" for `exact`, "vector can't replicate" for `fast` — neither of
+    /// which names the thing the author wrote or what to send instead. A plain
+    /// `{x=, y=, z=}` table is what to send, and it still crosses.
+    #[test]
+    fn a_vec3_that_cannot_replicate_is_named_and_the_fix_is_too() {
+        // Both backings where the build has both; `fast` is Luau-only.
+        let modes: &[Vec3Mode] =
+            if cfg!(feature = "vm-luau") { &[Vec3Mode::Exact, Vec3Mode::Fast] } else { &[Vec3Mode::Exact] };
+        for &mode in modes {
+            let lua = mlua::Lua::new();
+            crate::math_api::install(&lua).unwrap();
+            crate::math_api::set_mode_checked(&lua, mode).unwrap();
+            let v: mlua::Value = lua.load("return vec3(1, 2, 3)").eval().unwrap();
+            let err = crate::net_api::lua_to_netvalue(&v, 0).expect_err("a vec3 is not a wire value");
+            assert!(err.contains("vec3"), "{mode:?}: the refusal does not say vec3: {err}");
+            assert!(err.contains("x, y, z"), "{mode:?}: the refusal does not name the fix: {err}");
+            let t: mlua::Value = lua.load("return { x = 1, y = 2, z = 3 }").eval().unwrap();
+            assert!(crate::net_api::lua_to_netvalue(&t, 0).is_ok(), "{mode:?}: the fix itself was refused");
+        }
+    }
+
+    /// **A script that raises every frame reads its source once.** The runtime
+    /// error rewriter quotes the offending line from the file, and it read the
+    /// file per error — one read per instance per pass, sixty nodes on one
+    /// broken script being 180 reads a frame. The text is kept with the source
+    /// and dropped when the file changes (the mtime bump that already resets
+    /// the generation), so the quoted line is never stale either.
+    #[test]
+    fn a_script_that_raises_every_frame_reads_its_source_once() {
+        let dir = std::env::temp_dir().join(format!("floptle_source_once_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(&dir, "faulty", "function update(node, dt)\n  node.postion.x = 1\nend\n");
+        let (mut world, _e) = world_with_script("faulty");
+        let mut host = ScriptHost::new();
+        for i in 0..5 {
+            host.run(&mut world, &dir, 1.0 / 60.0, i as f32 / 60.0);
+        }
+        assert!(
+            host.errors().iter().any(|e| e.contains("node.postion")),
+            "the rewrite stopped quoting the line: {:?}",
+            host.errors()
+        );
+        let reads = host.source_reads("faulty");
+        assert_eq!(reads, 1, "five identical errors read the file {reads} times");
+
+        // The file changes: the cached text must go with the old generation, so
+        // the quoted line is the NEW line.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_script(&dir, "faulty", "function update(node, dt)\n  local a = 1\n  node.psotion.x = a\nend\n");
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+        let f = std::fs::File::open(dir.join("faulty.lua")).unwrap();
+        f.set_modified(later).unwrap();
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0);
+        assert!(
+            host.errors().iter().any(|e| e.contains("node.psotion")),
+            "the quoted line came from the OLD file: {:?}",
+            host.errors()
+        );
+        assert_eq!(host.source_reads("faulty"), 2, "the new version was not read exactly once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A seeded host rolls the same numbers every run.** `floptle run --seed`
+    /// exists so two runs of a game that re-randomises its cast are comparable;
+    /// it has to reach both `math.random` and the no-seed `rng()` form (which
+    /// otherwise draws from the clock), and consecutive `rng()` calls must still
+    /// be DIFFERENT streams — a seed that made every `rng()` the same stream
+    /// would change the game rather than pin it.
+    #[test]
+    fn a_seeded_host_rolls_the_same_numbers_every_run() {
+        let dir = std::env::temp_dir().join(format!("floptle_seeded_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "roller",
+            "function update(node, dt)\n\
+               local a, b = rng(), rng()\n\
+               print(a:next(), b:next(), math.random(), a.seed, b.seed)\n\
+             end\n",
+        );
+        let roll = |seed: Option<u32>| -> Vec<String> {
+            let (mut world, _e) = world_with_script("roller");
+            let mut host = ScriptHost::new();
+            if let Some(s) = seed {
+                host.set_seed(s);
+            }
+            for i in 0..3 {
+                host.run(&mut world, &dir, 1.0 / 60.0, i as f32 / 60.0);
+            }
+            assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+            host.drain_logs().into_iter().map(|l| l.msg).collect()
+        };
+        let first = roll(Some(7));
+        assert_eq!(first.len(), 3, "{first:?}");
+        assert_eq!(first, roll(Some(7)), "two runs with one seed disagreed");
+        assert_ne!(first, roll(Some(8)), "two different seeds rolled the same run");
+        // Every `rng()` in the run is its own stream: five seeds across the run,
+        // no two alike.
+        let seeds: Vec<&str> = first.iter().flat_map(|l| l.split_whitespace().skip(3)).collect();
+        let mut uniq = seeds.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), seeds.len(), "seeded rng() streams repeated: {first:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Allocation is attributed to the script that made it.** `--alloc` gave
+    /// a total; a game whose vector was 2% of its per-frame allocation had no
+    /// way to see where the other 98% came from. Sampled around each hook call
+    /// while the collector is stopped, which is the only time the difference in
+    /// heap size means "what this hook allocated".
+    #[test]
+    fn allocation_is_attributed_to_the_script_that_made_it() {
+        let dir = std::env::temp_dir().join(format!("floptle_alloc_by_script_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        write_script(
+            &dir,
+            "hog",
+            "function update(node, dt)\n  local t = {}\n  for i = 1, 2000 do t[i] = { i } end\nend\n",
+        );
+        write_script(&dir, "lean", "local n = 0\nfunction update(node, dt)\n  n = n + dt\nend\n");
+        let mut world = World::default();
+        for kind in ["hog", "lean"] {
+            let e = world.spawn();
+            world.insert(e, Transform::IDENTITY);
+            world.insert(
+                e,
+                Scripts(vec![floptle_core::ScriptInst {
+                    kind: kind.into(),
+                    enabled: true,
+                    params: vec![],
+                    refs: Vec::new(),
+                    strs: Vec::new(),
+                }]),
+            );
+        }
+        let mut host = ScriptHost::new();
+        host.run(&mut world, &dir, 1.0 / 60.0, 0.0);
+        assert!(host.errors().is_empty(), "errors: {:?}", host.errors());
+        host.gc_collect();
+        host.gc_stop();
+        host.track_alloc(true);
+        for i in 1..=10 {
+            host.run(&mut world, &dir, 1.0 / 60.0, i as f32 / 60.0);
+        }
+        let by = host.alloc_by_script();
+        host.track_alloc(false);
+        host.gc_restart();
+        let of = |k: &str| by.iter().find(|(n, _)| n == k).map(|(_, b)| *b).unwrap_or(0);
+        let (hog, lean) = (of("hog"), of("lean"));
+        // 2000 one-element tables a frame for ten frames, each at least 16
+        // bytes. Luau's heap counter moves in 16 KB allocator pages, so the
+        // lean script may be charged a page or two that happened to fill on
+        // its watch — the bar is "far below", not "nothing".
+        assert!(hog > 10 * 2000 * 16, "hog allocated {hog} bytes over ten frames: {by:?}");
+        assert!(lean < hog / 10, "lean ({lean}) is not far below hog ({hog}): {by:?}");
+        assert_eq!(by.first().map(|(n, _)| n.as_str()), Some("hog"), "not sorted largest first: {by:?}");
+        // Off means off: nothing accrues, and the readout is empty again.
+        host.run(&mut world, &dir, 1.0 / 60.0, 1.0);
+        assert!(host.alloc_by_script().is_empty(), "tracking kept accruing after being turned off");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

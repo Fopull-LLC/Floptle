@@ -316,6 +316,17 @@ pub(crate) fn lua_to_netvalue_max(
             format!("value nests deeper than {max_depth} levels (or is cyclic)")
         });
     }
+    // A vector in EITHER backing — `exact`'s userdata, `fast`'s native vector
+    // — is refused by the name the author wrote, with the fix. The fall-through
+    // arms below would say "userdata" and "vector", and neither is the word
+    // `vec3`, nor says what to send instead. Tables are excluded from the check
+    // because `vec3_of` reads `{x=, y=, z=}` tables too, and that table is
+    // exactly the wire shape being recommended.
+    if !matches!(v, Value::Table(_)) && crate::math_api::vec3_of(v).is_some() {
+        return Err("a vec3 can't replicate as a value — send its x, y, z (or a `{x=, y=, z=}` \
+                    table)"
+            .into());
+    }
     match v {
         Value::Nil => Ok(NetValue::Nil),
         Value::Boolean(b) => Ok(NetValue::Bool(*b)),

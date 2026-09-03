@@ -2935,7 +2935,7 @@ fields — vectors, tables, nodes — so there's never a conversion dance.
 
 ### Two vectors, and which one your project uses
 
-Project Settings has a **Script vec3** choice (search the ⚙ tab for `vec3`), saved to `project.ron` as
+Project Settings has a **Script vec3** choice (⚙ tab → **Scripting**), saved to `project.ron` as
 `script_vec3`. It changes what a `vec3` is made of, and nothing else about
 what you write.
 
@@ -2951,8 +2951,11 @@ what you write.
 start at `fast`. Nothing changes under a game that has already shipped.
 
 `fast` is Luau's own vector type, which is why it costs nothing to make and
-nothing to collect — the two things a vector-heavy game spends its frame on.
-The price is precision: past about 131 000 units from the origin, 32-bit
+nothing to collect. How much that saves depends on how much of a frame's
+allocation is vectors, and the answer is often less than it feels: on one
+shipped game, switching moved per-frame allocation by 2%. `floptle run --alloc`
+says what each script allocates — measure before switching for speed. The
+price is precision: past about 131 000 units from the origin, 32-bit
 components can no longer resolve a centimetre, and positions start to jitter.
 If a project crosses that line the engine says so in the Console, once per
 script, naming the setting — you will not have to work it out from the
@@ -3745,12 +3748,15 @@ Two consequences worth knowing before you go optimising:
   least as likely to be a collection as a slow script — look for one that is
   high *consistently*, or that moves when you change the script.
 
-If the collector is what you are chasing, the biggest source of it in most games
-is **vectors**: every `vec3` a script builds is an object, so `a + b`,
-`v:normalized()`, `node.pos` and `node.worldPos` each allocate. Scalar reads
-(`node.x`, `v:length()`, `v:dot(o)`) allocate nothing at all, so a hot loop that
-works in components rather than vectors produces no garbage — that is usually the
-biggest single win available to a game script today.
+If the collector is what you are chasing, start with
+`floptle run --frames 600 --alloc`: it says how much Lua heap a frame allocates
+and which scripts it comes from. Vectors are one source — under `exact` every
+`vec3` a script builds is an object, so `a + b`, `v:normalized()`, `node.pos`
+and `node.worldPos` each allocate, while scalar reads (`node.x`, `v:length()`,
+`v:dot(o)`) allocate nothing — but they are not always the biggest one: on one
+shipped game they were 2% of the frame's allocation, and the rest was tables
+and strings the scripts built themselves. Let the readout name the script
+before rewriting anything.
 
 ### Counts
 

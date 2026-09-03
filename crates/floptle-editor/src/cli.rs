@@ -659,6 +659,16 @@ pub(crate) const VERBS: &[Verb] = &[
                 help: "how much simulated time to run, instead of --frames",
             },
             Arg {
+                name: "--seed",
+                value: Value::Text,
+                required: false,
+                help: "pin the game's randomness — math.random and the no-seed rng() form — \
+                       to this whole number, so two runs are the same run. Without it a game \
+                       that re-randomises its cast or loot moves its own --timing and --alloc \
+                       figures more than most changes do, and an A/B between two engine \
+                       settings is noise",
+            },
+            Arg {
                 name: "--json",
                 value: Value::Flag,
                 required: false,
@@ -668,12 +678,12 @@ pub(crate) const VERBS: &[Verb] = &[
                 name: "--alloc",
                 value: Value::Flag,
                 required: false,
-                help: "also report how much Lua heap a frame allocates. Measured across a \
-                       window in the middle of the run with the collector STOPPED — which is \
-                       the only way it can be measured, and means the heap grows unchecked \
-                       across that window, so a --timing figure from the SAME run is not \
-                       representative. Needs a span of at least 12 steps, and says so when \
-                       it does not have one",
+                help: "also report how much Lua heap a frame allocates, and which scripts \
+                       allocate it. Measured across a window in the middle of the run with \
+                       the collector STOPPED — which is the only way it can be measured, and \
+                       means the heap grows unchecked across that window, so a --timing \
+                       figure from the SAME run is not representative. Needs a span of at \
+                       least 12 steps, and says so when it does not have one",
             },
             Arg {
                 name: "--timing",
@@ -701,7 +711,8 @@ pub(crate) const VERBS: &[Verb] = &[
         exits: &[(1, "something raised while opening or playing")],
         output: "one line per log entry, then a summary; with --json an object with \
                  `ok`, `steps`, `errors`, `warnings` and `log`, plus `timing` under \
-                 --timing and `alloc` under --alloc",
+                 --timing, `alloc` (with a per-script `by_script` list) under --alloc, and \
+                 `seed` under --seed",
         legacy: &[],
     },
     Verb {
@@ -1380,14 +1391,27 @@ fn run(m: &clap::ArgMatches) -> Outcome {
                 // sit through after every edit.
                 (None, None) => crate::run::Span::Frames(120),
             };
+            let seed = match text(a, "seed") {
+                None => None,
+                Some(v) => match v.trim().parse::<u32>() {
+                    Ok(n) => Some(n),
+                    Err(_) => {
+                        eprintln!("--seed wants a whole number from 0 to 4294967295, not {v:?}");
+                        return Outcome::Exit(2);
+                    }
+                },
+            };
             Outcome::Exit(crate::run::run(
                 &project,
                 text(a, "scene").as_deref(),
                 span,
-                a.get_flag("json"),
-                a.get_flag("steam"),
-                a.get_flag("timing"),
-                a.get_flag("alloc"),
+                crate::run::Options {
+                    json: a.get_flag("json"),
+                    steam: a.get_flag("steam"),
+                    timing: a.get_flag("timing"),
+                    alloc: a.get_flag("alloc"),
+                    seed,
+                },
             ))
         }
         Some(("serve", a)) => {

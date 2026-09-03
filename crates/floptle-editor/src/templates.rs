@@ -274,6 +274,16 @@ mod tests {
                 else {
                     continue;
                 };
+                // Under BOTH vectors. A new project is `fast`, so a template
+                // exercised only in `exact` (the host's default) would be tested
+                // under the one mode no new project has — and `v.x = n` in a
+                // template raises only in `fast`.
+                let modes: &[floptle_script::Vec3Mode] = if cfg!(feature = "vm-luau") {
+                    &[floptle_script::Vec3Mode::Exact, floptle_script::Vec3Mode::Fast]
+                } else {
+                    &[floptle_script::Vec3Mode::Exact]
+                };
+                for &mode in modes {
                 let mut world = World::default();
                 let e = world.spawn();
                 world.insert(e, Transform::IDENTITY);
@@ -292,6 +302,7 @@ mod tests {
                 );
 
                 let mut host = floptle_script::ScriptHost::new();
+                host.set_vec3_mode(mode).expect("this build offers the mode");
                 // What the physics step would publish: standing on flat ground,
                 // moving, with a real up. Without it `node.vel` is nil and every
                 // controller is testing something other than itself.
@@ -314,10 +325,11 @@ mod tests {
                 }
                 assert!(
                     host.errors().is_empty(),
-                    "{} / {kind}.lua raised: {:?}",
+                    "{} / {kind}.lua raised under {mode:?}: {:?}",
                     t.name,
                     host.errors()
                 );
+                }
             }
             let _ = std::fs::remove_dir_all(&dir);
         }

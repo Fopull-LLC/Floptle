@@ -106,8 +106,10 @@ fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-/// The identifier ending at `end` (exclusive), if the character before it is
-/// not part of a longer path like `a.b`.
+/// The identifier ending at `end` (exclusive), if it is a bare name and not
+/// the last segment of a path: in `enemy.pos.x = 1` the owner of `.x` is
+/// `enemy.pos`, a node field that stays writable in both modes, and a local
+/// called `pos` elsewhere in the file must not make it a finding.
 fn ident_ending_at(s: &str, end: usize) -> Option<&str> {
     let bytes = s.as_bytes();
     let mut start = end;
@@ -117,7 +119,67 @@ fn ident_ending_at(s: &str, end: usize) -> Option<&str> {
     if start == end {
         return None;
     }
+    if start > 0 && matches!(bytes[start - 1], b'.' | b':') {
+        return None;
+    }
     Some(&s[start..end])
+}
+
+/// Byte offsets of every ASSIGNMENT `=` on a line — not the `=` of `==`,
+/// `~=`, `<=` or `>=`. All of them, because `if a == b then v = vec3() end`
+/// binds `v` at its second `=`, and a scan that took the first and stopped
+/// missed every binding that shared a line with a comparison.
+fn assignment_eqs(line: &str) -> Vec<usize> {
+    let b = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'=' {
+            if b.get(i + 1) == Some(&b'=') {
+                i += 2;
+                continue;
+            }
+            if i > 0 && matches!(b[i - 1], b'~' | b'<' | b'>') {
+                i += 1;
+                continue;
+            }
+            out.push(i);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The bare names an assignment's left-hand side binds: the part of `lhs`
+/// after the statement it shares the line with (`;`, or a `then`/`do`/`else`
+/// as a whole word), less a leading `local`, split on commas. Anything that is
+/// not a plain identifier — `t.pos`, `a[1]` — binds no local and is dropped.
+fn names_on_the_left(lhs: &str) -> Vec<String> {
+    let mut stmt = lhs.rsplit(';').next().unwrap_or(lhs);
+    for kw in ["then", "do", "else"] {
+        let mut cut = None;
+        for (i, _) in stmt.match_indices(kw) {
+            let before = stmt[..i].chars().next_back().is_none_or(|c| !is_ident_char(c));
+            let after = stmt[i + kw.len()..].chars().next().is_none_or(|c| !is_ident_char(c));
+            if before && after {
+                cut = Some(i + kw.len());
+            }
+        }
+        if let Some(c) = cut {
+            stmt = &stmt[c..];
+        }
+    }
+    let stmt = stmt.trim();
+    let stmt = stmt.strip_prefix("local ").unwrap_or(stmt);
+    stmt.split(',')
+        .map(str::trim)
+        .filter(|n| {
+            !n.is_empty()
+                && n.chars().all(is_ident_char)
+                && !n.starts_with(|c: char| c.is_ascii_digit())
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 /// Names this file binds to a vector.
@@ -125,25 +187,18 @@ fn vector_locals(src: &str) -> Vec<String> {
     let mut names = Vec::new();
     for raw in src.lines() {
         let line = strip_comment(raw);
-        let Some(eq) = line.find('=') else { continue };
-        // Skip comparisons: `==`, `~=`, `<=`, `>=`.
-        if line[eq..].starts_with("==") {
-            continue;
-        }
-        if eq > 0 && matches!(&line[eq - 1..eq], "~" | "<" | ">" | "=") {
-            continue;
-        }
-        let (lhs, rhs) = line.split_at(eq);
-        if !VEC_SOURCES.iter().any(|p| rhs.contains(p)) {
-            continue;
-        }
-        // `local a, b = ...` binds both; take every bare name on the left.
-        let lhs = lhs.trim().strip_prefix("local ").unwrap_or(lhs.trim());
-        for part in lhs.split(',') {
-            let name = part.trim();
-            if !name.is_empty() && name.chars().all(is_ident_char) && !name.starts_with(|c: char| c.is_ascii_digit()) {
-                names.push(name.to_string());
+        let eqs = assignment_eqs(line);
+        for (i, &eq) in eqs.iter().enumerate() {
+            // The right-hand side runs to the next assignment on the line, or
+            // to the next statement — `x = 1; v = vec3()` must not make `x` a
+            // vector.
+            let rhs_end = eqs.get(i + 1).copied().unwrap_or(line.len());
+            let rhs = &line[eq + 1..rhs_end];
+            let rhs = rhs.split(';').next().unwrap_or(rhs);
+            if !VEC_SOURCES.iter().any(|p| rhs.contains(p)) {
+                continue;
             }
+            names.extend(names_on_the_left(&line[..eq]));
         }
     }
     names.sort();
@@ -389,6 +444,44 @@ mod tests {
         let hits = scan_str("local p = node.pos\np.y = 0\n");
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].kind, Kind::Mutation);
+    }
+
+    /// **A binding that shares its line with a comparison is still a binding.**
+    /// `if a == b then v = vec3() end` used to register nothing — the scan took
+    /// the line's first `=`, found it was `==`, and gave up on the line — so the
+    /// `v.x = 1` below it was never a finding. A miss here raises in `fast`
+    /// rather than passing, but this shape is everyday game code.
+    #[test]
+    fn a_binding_after_a_comparison_on_the_same_line_is_tracked() {
+        let hits = scan_str(
+            "local a, b = 1, 2\n\
+             if a == b then v = vec3() end\n\
+             for i = 1, 3 do w = node.pos end\n\
+             x = 1; u = vec3(1, 2, 3)\n\
+             v.x = 1\n\
+             w.y = 2\n\
+             u.z = 3\n\
+             x.x = 4\n",
+        );
+        let lines: Vec<u32> = hits.iter().map(|h| h.line).collect();
+        assert_eq!(lines, vec![5, 6, 7], "{hits:?}");
+    }
+
+    /// **A field that shares a local's name is a field.** `enemy.pos.x = 1`
+    /// writes a node field, mutable in both modes, and a `local pos = vec3(…)`
+    /// elsewhere in the file must not turn it into a finding — that is the
+    /// expensive kind of false positive, sending somebody to rewrite code that
+    /// works.
+    #[test]
+    fn a_field_named_like_a_vector_local_is_not_a_finding() {
+        let hits = scan_str(
+            "local pos = vec3(1, 2, 3)\n\
+             enemy.pos.x = 1\n\
+             self:target().pos.y = 2\n\
+             pos.z = 3\n",
+        );
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].line, 4);
     }
 
     /// `v.xs = 1` is a different field, and `typeof` is not `type`.
