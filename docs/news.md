@@ -1,5 +1,21 @@
 ## Just shipped
 
+**v0.84.2** — **a performance patch, and a large one.** Every scripted node was
+costing the engine about 4.5 KB of memory a frame before your script did
+anything at all: the `node` table each hook is handed was being read back the
+slow way, ten fields at a time, three passes a frame. It now costs 375 bytes, so
+`floptle run --alloc` finally reports your scripts rather than the engine's — on
+the first-person game these numbers come from, 478 KB a frame became 48. Asking
+a mesh collider how far a point is from its surface used to search a fixed block
+of 125 cells however close the answer was; it now stops as soon as it can prove
+nothing else is nearer, for the same answers and about a fifth of the work.
+Together those took that game's frame from 6.4-7.6 ms to 3.5-3.7. The **⏱**
+panel and `perf.ms("scripts")` were timing only the hooks and none of the work
+to reach them, which is how the first of those hid for a release — `scripts` is
+the whole pass now, `perf.ms("mirror")` is the scene sync inside it, and the
+buckets account for 99% of a scripted step where they accounted for 34%. Nothing
+to do on upgrade.
+
 **v0.84.1** — **the clean-up behind the new Lua.** `floptle run --alloc` now
 lists which scripts a frame's allocation comes from, largest first, with what
 falls outside any hook as its own line — because a shipped game that switched
