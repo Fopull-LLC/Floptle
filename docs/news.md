@@ -1,5 +1,24 @@
 ## Just shipped
 
+**v0.84.0 "Half The Time"** — **the performance release.** A game reported at
+10–15 fps on a 2017 laptop was not waiting on its graphics card: the picture
+cost under two milliseconds, and the rest of the frame was the engine getting
+ready to run scripts. A script now pays only for the hooks it defines, `params`
+is built when it changes rather than on every call, the scene mirror your
+handles read from is refreshed rather than rebuilt when only positions moved,
+and mesh colliders have a size so they stop being offered to every body every
+tick — a level of sixty scripted nodes went from 12.5 ms of CPU a frame to
+6.4. **F11** and **Alt+Enter** toggle fullscreen in every exported build with no
+code on your part, and `app.setFullscreen` / `app.fullscreen()` give a Video
+tab the real state. Underneath, scripts run on **Luau** now instead of LuaJIT:
+the 60-upvalue ceiling is gone, a runtime error names the typo and quotes the
+line, and `goto` no longer compiles. With it comes a choice of vector — **Script
+vec3** in ⚙ Project Settings: `exact` (64-bit, mutable, every project that
+exists today) or `fast` (32-bit, immutable, no allocation, new projects), with
+`floptle lint --vec3` listing what a switch would take. And three flags answer
+"where does the frame go" without a window: `floptle run --timing`, `floptle
+run --alloc` and `floptle shot --timing`.
+
 **v0.83.0 "Ship It Whole"** — **an exported game now contains everything it
 renders.** A script that swaps a model at runtime — `node.model = "…"`, the
 ordinary way to make one pickup node serve every item in a game — worked in the
